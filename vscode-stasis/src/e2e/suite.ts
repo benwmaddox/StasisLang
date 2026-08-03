@@ -370,6 +370,28 @@ export async function run(): Promise<void> {
     "Go to Symbol in Workspace receives compiler-owned symbols through LSP",
   );
 
+  const importProbe = new vscode.WorkspaceEdit();
+  importProbe.insert(
+    sourceUri,
+    new vscode.Position(0, 0),
+    'import "unused.stasis";\nimport "helper.stasis";\nimport "helper.stasis";\n',
+  );
+  assert.equal(await vscode.workspace.applyEdit(importProbe), true, "adds an organize-imports probe");
+  const organizeActions = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+    "vscode.executeCodeActionProvider",
+    sourceUri,
+    new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0)),
+    vscode.CodeActionKind.SourceOrganizeImports.value,
+  );
+  const organize = organizeActions?.find(
+    (action): action is vscode.CodeAction =>
+      "edit" in action && action.kind?.value === vscode.CodeActionKind.SourceOrganizeImports.value,
+  );
+  assert.ok(organize?.edit, "standard LSP code actions expose Organize Stasis imports");
+  assert.equal(await vscode.workspace.applyEdit(organize.edit), true, "applies the LSP organize-imports edit");
+  assert.equal(document.getText().includes("import \""), false, "unused and duplicate imports are removed");
+  assert.equal(await document.save(), true, "saves the organized source");
+
   await waitFor("Test Explorer discovery", () => api.testFiles().some((uri) => uri.endsWith("editor.test.stasis")));
   const testUri = api.testFiles().find((uri) => uri.endsWith("editor.test.stasis"));
   assert.ok(testUri, "Test Explorer discovers the packaged fixture test");

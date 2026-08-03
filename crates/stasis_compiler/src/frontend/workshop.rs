@@ -1056,6 +1056,43 @@ pub struct WorkshopSemanticEditPlan {
     pub reload: WorkshopReloadClassification,
 }
 
+pub fn organize_workshop_imports(
+    files: &[WorkshopSourceFile],
+    file_path: &str,
+) -> Result<Option<WorkshopSemanticFileChange>, String> {
+    let before = files
+        .iter()
+        .find(|file| file.path == file_path)
+        .ok_or_else(|| format!("organize-imports file is not loaded: {file_path}"))?;
+    let mut after = files.to_vec();
+    prune_unused_workshop_imports(&mut after, &BTreeSet::from([file_path.to_string()]))?;
+
+    let file_index = after
+        .iter()
+        .position(|file| file.path == file_path)
+        .expect("organize-imports file remains loaded");
+    let rendered = render_imports(parse_workshop_import_paths(&after[file_index].source)?);
+    let import_item = workshop_source_items(&after)?
+        .into_iter()
+        .find(|item| item.file == file_path && item.kind == WorkshopSourceItemKind::Imports)
+        .ok_or_else(|| format!("imports item not found for {file_path}"))?;
+    if import_item.source != rendered {
+        replace_source_item(&mut after, &import_item, &rendered)?;
+    }
+
+    let after = &after[file_index];
+    if after.source == before.source {
+        return Ok(None);
+    }
+    Ok(Some(WorkshopSemanticFileChange {
+        file: file_path.to_string(),
+        before_source: before.source.clone(),
+        after_source: after.source.clone(),
+        before_hash: workshop_source_hash(&before.source),
+        after_hash: workshop_source_hash(&after.source),
+    }))
+}
+
 const fn semantic_edit_schema_version() -> u32 {
     2
 }
@@ -5010,6 +5047,40 @@ function tick(): i32 {
         };
         let (after, _) = plan_workshop_semantic_edits(&files, &batch).expect("update main");
         assert!(after[0].source.contains("import \"game.stasis\";"));
+    }
+
+    #[test]
+    fn organize_imports_sorts_deduplicates_and_prunes_unused_modules() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: "import \"unused.stasis\";\nimport \"used.stasis\";\nimport \"used.stasis\";\nfunction main(): i32 { return helper(); }\n"
+                    .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/used.stasis".to_string(),
+                source: "function helper(): i32 { return 3; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/unused.stasis".to_string(),
+                source: "function unrelated(): i32 { return 4; }\n".to_string(),
+            },
+        ];
+        let change = organize_workshop_imports(&files, "src/main.stasis")
+            .expect("organize imports")
+            .expect("source change");
+        assert_eq!(
+            change.after_source,
+            "import \"used.stasis\";\nfunction main(): i32 { return helper(); }\n"
+        );
+        assert_eq!(
+            change.before_hash,
+            workshop_source_hash(&change.before_source)
+        );
+        assert_eq!(
+            change.after_hash,
+            workshop_source_hash(&change.after_source)
+        );
     }
 
     #[test]

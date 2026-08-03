@@ -110,6 +110,9 @@ pub enum LiveCommand {
         file: String,
         offset: usize,
     },
+    OrganizeImports {
+        file: String,
+    },
     RenamePreview {
         file: String,
         offset: usize,
@@ -1202,6 +1205,9 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
                 .parse::<usize>()
                 .map_err(|error| format!("invalid byte offset: {error}"))?,
         }),
+        ":organize-imports" | ":organize" => ready(LiveCommand::OrganizeImports {
+            file: required_arg(&args, 1, "file")?.to_string(),
+        }),
         ":rename" => ready(LiveCommand::RenamePreview {
             file: required_arg(&args, 1, "file")?.to_string(),
             offset: required_arg(&args, 2, "byte offset")?
@@ -2165,6 +2171,19 @@ mod tests {
             panic!("expected diagnostics request");
         };
         assert_eq!(diagnostics.command, LiveCommand::Diagnostics);
+
+        let TerminalInput::Request(organize) = terminal
+            .feed_line(":organize-imports src/game.stasis")
+            .expect("organize imports")
+        else {
+            panic!("expected organize-imports request");
+        };
+        assert_eq!(
+            organize.command,
+            LiveCommand::OrganizeImports {
+                file: "src/game.stasis".into(),
+            }
+        );
 
         let TerminalInput::Request(validation) = terminal
             .feed_line(":validate Render.command1_h eq 144 --frames 2")

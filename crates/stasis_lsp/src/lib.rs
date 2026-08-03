@@ -15,23 +15,26 @@ use lsp_types::notification::{
     Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, PrepareRenameRequest,
-    References, Rename, Request as _, SignatureHelpRequest, WorkspaceSymbolRequest,
+    CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
+    PrepareRenameRequest, References, Rename, Request as _, SignatureHelpRequest,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CompletionItemKind, CompletionList, CompletionOptions, CompletionParams, CompletionResponse,
-    CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentChanges, DocumentSymbol,
-    DocumentSymbolParams, DocumentSymbolResponse, Documentation, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InsertTextFormat, Location, MarkupContent, MarkupKind,
-    OneOf, OptionalVersionedTextDocumentIdentifier, ParameterInformation, ParameterLabel,
-    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, ReferenceParams,
-    RenameOptions, RenameParams, SaveOptions, ServerCapabilities, ServerInfo, SignatureHelpOptions,
-    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
-    TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CompletionItemKind, CompletionList, CompletionOptions,
+    CompletionParams, CompletionResponse, CompletionTextEdit, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentChanges, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, InsertTextFormat, Location,
+    MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
+    ParameterInformation, ParameterLabel, PositionEncodingKind, PrepareRenameResponse,
+    PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams, SaveOptions,
+    ServerCapabilities, ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation,
+    SymbolKind, TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -115,6 +118,11 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
             workspace_symbol_provider: Some(OneOf::Left(true)),
             rename_provider: Some(OneOf::Right(RenameOptions {
                 prepare_provider: Some(true),
+                work_done_progress_options: Default::default(),
+            })),
+            code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+                code_action_kinds: Some(vec![CodeActionKind::SOURCE_ORGANIZE_IMPORTS]),
+                resolve_provider: Some(false),
                 work_done_progress_options: Default::default(),
             })),
             ..ServerCapabilities::default()
@@ -292,6 +300,15 @@ impl LanguageServer {
                     .extract(Rename::METHOD)
                     .map_err(|error| format!("invalid rename request: {error}"))?;
                 match self.rename(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            CodeActionRequest::METHOD => {
+                let (id, params): (_, CodeActionParams) = request
+                    .extract(CodeActionRequest::METHOD)
+                    .map_err(|error| format!("invalid code-action request: {error}"))?;
+                match self.code_actions(params) {
                     Ok(result) => Response::new_ok(id, result),
                     Err(error) => internal_error(id, error),
                 }
@@ -595,9 +612,48 @@ impl LanguageServer {
     fn rename(&mut self, params: RenameParams) -> Result<Option<WorkspaceEdit>, String> {
         let (path, _, byte_offset) = self.document_position(params.text_document_position)?;
         let plan = self.service.rename(&path, byte_offset, &params.new_name)?;
+        Ok(Some(self.workspace_edit(plan.edits)?))
+    }
+
+    fn code_actions(
+        &mut self,
+        params: CodeActionParams,
+    ) -> Result<Option<Vec<CodeActionOrCommand>>, String> {
+        let path = path_text(&uri_path(&params.text_document.uri)?);
+        let requested_kinds = params
+            .context
+            .only
+            .unwrap_or_default()
+            .into_iter()
+            .map(|kind| kind.as_str().to_string())
+            .collect::<Vec<_>>();
+        let actions = self
+            .service
+            .code_actions(&path, &requested_kinds)?
+            .into_iter()
+            .map(|action| {
+                Ok(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: action.title,
+                    kind: Some(CodeActionKind::from(action.kind)),
+                    diagnostics: None,
+                    edit: Some(self.workspace_edit(action.edits)?),
+                    command: None,
+                    is_preferred: Some(action.preferred),
+                    disabled: None,
+                    data: None,
+                }))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((!actions.is_empty()).then_some(actions))
+    }
+
+    fn workspace_edit(
+        &self,
+        edits: Vec<stasis_language_service::RenameEdit>,
+    ) -> Result<WorkspaceEdit, String> {
         let snapshot = self.service.snapshot();
         let mut by_path = BTreeMap::<String, Vec<stasis_language_service::RenameEdit>>::new();
-        for edit in plan.edits {
+        for edit in edits {
             by_path.entry(edit.path.clone()).or_default().push(edit);
         }
         let mut document_edits = Vec::new();
@@ -637,11 +693,11 @@ impl LanguageServer {
                 edits,
             });
         }
-        Ok(Some(WorkspaceEdit {
+        Ok(WorkspaceEdit {
             changes: None,
             document_changes: Some(DocumentChanges::Edits(document_edits)),
             change_annotations: None,
-        }))
+        })
     }
 
     fn lsp_location(&self, location: LanguageLocation) -> Result<Location, String> {
@@ -1116,6 +1172,71 @@ mod tests {
             .expect_err("backpressure error")
             .message
             .contains("limited to 64 concurrent operations"));
+    }
+
+    #[test]
+    fn standard_code_action_returns_versioned_organize_imports_edit() {
+        let (mut server, uri, main_path) = test_server("organize-imports");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "import \"unused.stasis\";\nimport \"helper.stasis\";\nimport \"helper.stasis\";\nfunction main(): i32 { return helper(); }\n";
+        server.service.set_disk_document(&main_path, source);
+        let source_directory = uri_path(&uri)
+            .expect("main path")
+            .parent()
+            .expect("source directory")
+            .to_path_buf();
+        server.service.set_disk_document(
+            path_text(&source_directory.join("helper.stasis")),
+            "function helper(): i32 { return 1; }\n",
+        );
+        server.service.set_disk_document(
+            path_text(&source_directory.join("unused.stasis")),
+            "function unrelated(): i32 { return 2; }\n",
+        );
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(92),
+                    CodeActionRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 0}
+                        },
+                        "context": {
+                            "diagnostics": [],
+                            "only": ["source.organizeImports"]
+                        }
+                    }),
+                ),
+            )
+            .expect("organize-imports request");
+        let actions: Option<Vec<CodeActionOrCommand>> = serde_json::from_value(
+            receive_response(&client_connection, 92)
+                .response_result
+                .expect("code-action result"),
+        )
+        .expect("code-action response");
+        let CodeActionOrCommand::CodeAction(action) = &actions.expect("actions")[0] else {
+            panic!("expected code action");
+        };
+        assert_eq!(action.kind, Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS));
+        let Some(DocumentChanges::Edits(edits)) = action
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.document_changes.as_ref())
+        else {
+            panic!("expected document edit");
+        };
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].text_document.version, None);
+        assert!(matches!(
+            &edits[0].edits[0],
+            OneOf::Left(edit)
+                if edit.new_text == "import \"helper.stasis\";\nfunction main(): i32 { return helper(); }\n"
+        ));
     }
 
     #[test]

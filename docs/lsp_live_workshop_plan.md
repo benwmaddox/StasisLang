@@ -231,8 +231,13 @@ Each slice is independently testable and removes the host-specific path it repla
 
 ### Slice 6: code intelligence depth
 
-Add code actions, organize imports, semantic tokens, inlay hints, improved completion resolve,
-call hierarchy, and type hierarchy. Every capability consumes the same snapshot and symbol IDs.
+- [x] Add a standard compiler-validated Organize Imports code action that sorts, deduplicates, and
+  prunes unused modules; expose the same no-write preview through the TUI.
+- [ ] Add structured compiler diagnostic quick fixes and safe refactor actions without matching
+  human diagnostic strings or introducing a second parser.
+- [ ] Add semantic tokens and inlay hints from compiler-owned identities and inferred types.
+- [ ] Add completion resolve/detail, expected-type refinements, and remaining import insertion.
+- [ ] Add call hierarchy and type hierarchy from compiler-owned graphs and symbol IDs.
 
 ### Slice 7: debugging and editing polish
 
@@ -409,3 +414,20 @@ while standard completion and hover consume the same server-owned cache. This pr
 edit preview/apply can move behind the broker without adding another extension-side compiler or
 runtime client. External attach remains a distinct runtime transport problem because stdio has no
 discoverable or authenticated endpoint.
+
+### Compiler-validated organize-imports implementation
+
+- Good: reusing the compiler's import graph made sorting, duplicate removal, and unused-module
+  pruning one deterministic operation shared by LSP and TUI, and candidate compilation prevented
+  unsafe workspace edits.
+- Bad: the existing semantic-edit cleanup compared normalized import sets, so it intentionally did
+  not expose textual normalization as an editor operation.
+- Adjustment: expose narrow compiler-owned transformation plans from the canonical parser/index,
+  then map those plans to versioned LSP edits rather than reconstructing source structure in the
+  editor or language-service transport.
+
+Theory gained: a safe source action is a compiler transformation plan plus candidate validation,
+not a diagnostic-message heuristic. The compiler and language-service tests prove that import
+organization can repair duplicate/unused imports while broken unrelated source yields no action.
+This predicts that quick fixes should originate as structured compiler diagnostics with explicit
+edit plans instead of matching rendered error text.

@@ -10,6 +10,7 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 - compiler-aware hover and signature help;
 - compiler-backed LSP **Go to Definition**, **Find All References**, Outline, breadcrumbs, and
   workspace symbol search;
+- compiler-validated **Organize Imports** through standard LSP code actions;
 - `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;
@@ -91,7 +92,8 @@ development locations. Linux runs need a display such as `xvfb-run`; GitHub CI s
 The extension starts one persistent `stasis lsp --stdio` server per Stasis workspace. Language and
 runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
 share them. Formatting still uses its migration adapter until its LSP operation lands in a later
-slice. Diagnostics, hover, signature help, completion, navigation, symbols, and rename use the
+slice. Diagnostics, hover, signature help, completion, navigation, symbols, rename, and import
+organization use the
 persistent language server. The same server launches and controls the Live Workshop through bounded
 custom LSP requests, owns runtime observations, and composes compatible live values and indexed
 collection fields into standard hover and completion responses. The extension does not spawn or

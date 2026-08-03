@@ -654,6 +654,7 @@ impl LiveWorkspace {
             LiveCommand::Diagnostics => self.language_diagnostics(),
             LiveCommand::Hover { file, offset } => self.language_hover(&file, offset, tick, jit),
             LiveCommand::Definition { file, offset } => self.language_definition(&file, offset),
+            LiveCommand::OrganizeImports { file } => self.language_organize_imports(&file),
             LiveCommand::RenamePreview {
                 file,
                 offset,
@@ -1054,6 +1055,32 @@ impl LiveWorkspace {
                     "documentation": hover.documentation,
                     "live_value": hover.live_value,
                 }
+            }),
+        ))
+    }
+
+    fn language_organize_imports(&mut self, file: &str) -> Result<(&'static str, Value), String> {
+        self.sync_language_service();
+        let request_path = self.config.project_root.join(file);
+        let actions = self.language_service.code_actions(
+            &request_path.to_string_lossy(),
+            &["source.organizeImports".to_string()],
+        )?;
+        Ok((
+            "code_actions",
+            json!({
+                "file": file,
+                "actions": actions.into_iter().map(|action| json!({
+                    "title": action.title,
+                    "kind": action.kind,
+                    "preferred": action.preferred,
+                    "edits": action.edits.into_iter().map(|edit| json!({
+                        "file": edit.path,
+                        "start": edit.range.start,
+                        "end": edit.range.end,
+                        "new_text": edit.new_text,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
             }),
         ))
     }
@@ -2363,7 +2390,8 @@ fn help_data() -> Value {
             ":symbols [query] [--file PATH ... --kind KIND --owner OWNER --page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
             ":references SYMBOL [--limit N]", ":diagnostics",
-            ":hover FILE OFFSET", ":definition FILE OFFSET", ":rename FILE OFFSET NEW_NAME",
+            ":hover FILE OFFSET", ":definition FILE OFFSET", ":organize-imports FILE",
+            ":rename FILE OFFSET NEW_NAME",
             ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
             ":ai PROMPT | :ai status | :ai cancel (interactive TUI; installed Codex subscription)",
@@ -2397,6 +2425,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":diagnostics",
         ":hover",
         ":definition",
+        ":organize-imports",
         ":rename",
         ":validate",
         ":edit",

@@ -10,10 +10,11 @@ use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, plan_workshop_rename, prepare_workshop_rename,
-    workshop_completion_items, workshop_reachable_files, workshop_source_items, workshop_symbols,
-    WorkshopCompletionItem, WorkshopCompletionScope, WorkshopSourceFile, WorkshopSourceItem,
-    WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
+    find_workshop_references, organize_workshop_imports, plan_workshop_rename,
+    prepare_workshop_rename, workshop_completion_items, workshop_reachable_files,
+    workshop_source_items, workshop_symbols, WorkshopCompletionItem, WorkshopCompletionScope,
+    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol,
+    WorkshopSymbolKind,
 };
 pub use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
@@ -547,6 +548,14 @@ pub struct RenamePlan {
     pub edits: Vec<RenameEdit>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageCodeAction {
+    pub title: String,
+    pub kind: String,
+    pub preferred: bool,
+    pub edits: Vec<RenameEdit>,
+}
+
 struct LanguageIndex {
     revision: WorkspaceRevision,
     files: Vec<WorkshopSourceFile>,
@@ -1028,6 +1037,53 @@ impl LanguageService {
             owner: plan.owner,
             edits,
         })
+    }
+
+    pub fn code_actions(
+        &mut self,
+        path: &str,
+        requested_kinds: &[String],
+    ) -> Result<Vec<LanguageCodeAction>, String> {
+        let organize_requested = requested_kinds.is_empty()
+            || requested_kinds
+                .iter()
+                .any(|kind| "source.organizeImports".starts_with(kind));
+        if !organize_requested {
+            return Ok(Vec::new());
+        }
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let project_root = self.project_root.clone();
+        let files = match self.current_language_index() {
+            Ok(index) => index.files.clone(),
+            Err(_) => return Ok(Vec::new()),
+        };
+        let Some(change) = organize_workshop_imports(&files, &relative)? else {
+            return Ok(Vec::new());
+        };
+        let mut candidate = files;
+        let candidate_file = candidate
+            .iter_mut()
+            .find(|file| file.path == change.file)
+            .expect("organized file remains in language index");
+        candidate_file.source = change.after_source.clone();
+        let mut validator = Compiler::new();
+        validator.set_project_root(project_root.clone())?;
+        for file in candidate {
+            validator.upsert_file(file.path, file.source);
+        }
+        if validator.check().is_err() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![LanguageCodeAction {
+            title: "Organize Stasis imports".to_string(),
+            kind: "source.organizeImports".to_string(),
+            preferred: true,
+            edits: vec![RenameEdit {
+                path: absolute_source_path(&project_root, &change.file),
+                range: 0..change.before_source.len(),
+                new_text: change.after_source,
+            }],
+        }])
     }
 
     fn symbol_references(
@@ -2127,6 +2183,46 @@ function main(): i32 {
             helper.additional_text_edits[0].text,
             "import \"helper.stasis\";\n"
         );
+    }
+
+    #[test]
+    fn organize_imports_code_action_is_current_compiler_validated_edit() {
+        let root = std::env::temp_dir().join("stasis-language-service-organize-imports");
+        let main_path = root.join("src/main.stasis");
+        let main_text = main_path.to_string_lossy().replace('\\', "/");
+        let source = "import \"unused.stasis\";\nimport \"helper.stasis\";\nimport \"helper.stasis\";\nfunction main(): i32 { return helper(); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(main_text.clone(), source);
+        service.set_disk_document(
+            root.join("src/helper.stasis").to_string_lossy(),
+            "function helper(): i32 { return 1; }\n",
+        );
+        service.set_disk_document(
+            root.join("src/unused.stasis").to_string_lossy(),
+            "function unrelated(): i32 { return 2; }\n",
+        );
+
+        let actions = service
+            .code_actions(&main_text, &["source.organizeImports".to_string()])
+            .expect("code actions");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "source.organizeImports");
+        assert!(actions[0].preferred);
+        assert_eq!(actions[0].edits[0].range, 0..source.len());
+        assert_eq!(
+            actions[0].edits[0].new_text,
+            "import \"helper.stasis\";\nfunction main(): i32 { return helper(); }\n"
+        );
+
+        service.open_document(
+            main_text.clone(),
+            1,
+            format!("{source}function unfinished(): i32 {{"),
+        );
+        assert!(service
+            .code_actions(&main_text, &["source.organizeImports".to_string()])
+            .expect("safe broken-source actions")
+            .is_empty());
     }
 
     #[test]

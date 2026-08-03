@@ -1920,6 +1920,7 @@ fn format_live_response(response: &LiveResponse) -> String {
         "diagnostics" => format_live_diagnostics(data),
         "hover" => format_live_hover(data),
         "definition" => format_live_definition(data),
+        "code_actions" => format_live_code_actions(data),
         "rename_preview" => format!(
             "rename {} -> {} ({} validated edit(s))",
             string_field(data, "old_name", "symbol"),
@@ -2051,6 +2052,30 @@ fn format_live_definition(data: &Value) -> String {
                 string_field(location, "file", "source"),
                 location.get("start").and_then(Value::as_u64).unwrap_or(0),
                 location.get("end").and_then(Value::as_u64).unwrap_or(0)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_code_actions(data: &Value) -> String {
+    let Some(actions) = data.get("actions").and_then(Value::as_array) else {
+        return "code actions unavailable".to_string();
+    };
+    if actions.is_empty() {
+        return "no safe code actions available".to_string();
+    }
+    actions
+        .iter()
+        .map(|action| {
+            let edits = action
+                .get("edits")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            format!(
+                "{} ({} edit(s), preview only)",
+                string_field(action, "title", "code action"),
+                edits
             )
         })
         .collect::<Vec<_>>()
@@ -4461,6 +4486,20 @@ mod tests {
         assert_eq!(
             format_live_response(&rename),
             "rename score -> points (2 validated edit(s))"
+        );
+
+        let organize = LiveResponse::success(
+            12,
+            43,
+            "code_actions",
+            json!({"actions": [{
+                "title": "Organize Stasis imports",
+                "edits": [{"file": "src/main.stasis"}]
+            }]}),
+        );
+        assert_eq!(
+            format_live_response(&organize),
+            "Organize Stasis imports (1 edit(s), preview only)"
         );
     }
 
