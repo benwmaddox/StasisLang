@@ -8,6 +8,8 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 - compiler-backed LSP completion with signatures, documentation, snippets, typed local/member
   ranking, and safe import edits;
 - compiler-aware hover and signature help;
+- compiler-backed **Go to Definition** and **Find All References**;
+- `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;
 - typed live inspection and watches in the **Stasis > Live Values** sidebar.
@@ -43,6 +45,21 @@ Watch updates are emitted between deterministic ticks. The extension never evalu
 
 Set `stasis.live.entry` only when a project needs an entry other than the one in `stasis.json`.
 
+## Navigation and tests
+
+**Go to Definition** and **Find All References** call the installed compiler's
+`symbol references` command and translate its UTF-8 source spans into VS Code locations. Functions,
+structs, tests, and typed struct fields have definition locations. Indexed receivers such as
+`state.enemies[0].speed` resolve to the declaring field and expose their reads and writes.
+
+While a play session is active, completion uses the persistent live compiler and runtime layout.
+It resolves locals, members, and concrete indexed state paths such as
+`state.enemies[0].{hp,speed}` without guessing types in the extension.
+
+The Test Explorer discovers `.test.stasis` files under the manifest's `tests` directory. Each file
+is one isolated Test Explorer item and runs through `stasis --json test <file>`, so editor and CLI
+test behavior stay identical.
+
 ## Development
 
 On Windows, build, test, package, and install the local extension with:
@@ -73,4 +90,6 @@ development locations. Linux runs need a display such as `xvfb-run`; GitHub CI s
 The extension starts one persistent `stasis lsp --stdio` server per Stasis workspace. Language and
 runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
 share them. Formatting still uses its migration adapter until its LSP operation lands in a later
-slice; completion, hover, signature help, and diagnostics use the persistent language server.
+slice. Diagnostics, hover, signature help, and normal completion use the persistent language server;
+an active Workshop session currently adds runtime-only indexed collection fields through its live
+completion overlay until that data is composed by the language server.

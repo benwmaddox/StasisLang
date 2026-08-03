@@ -56,8 +56,14 @@ async function main(): Promise<void> {
   const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), "stasis-vscode-e2e-"));
   const extensionsDir = path.join(profileRoot, "extensions");
   const userDataDir = path.join(profileRoot, "user-data");
+  const userSettingsDir = path.join(userDataDir, "User");
   const fixtureWorkspace = path.join(profileRoot, "workspace");
   fs.cpSync(path.join(extensionRoot, "test", "fixture"), fixtureWorkspace, { recursive: true });
+  fs.mkdirSync(userSettingsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userSettingsDir, "settings.json"),
+    `${JSON.stringify({ "stasis.executablePath": executable }, null, 2)}\n`,
+  );
   const screenshot = process.env.STASIS_E2E_SCREENSHOT
     ? path.resolve(process.env.STASIS_E2E_SCREENSHOT)
     : path.join(profileRoot, "live-frame.png");

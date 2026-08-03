@@ -32,7 +32,11 @@ class ReleaseProvenanceTests(unittest.TestCase):
             runtime = b"official renderer\n"
             expected = hashlib.sha256(runtime).hexdigest()
             common_shell = b"common\n"
-            android_shell = b"android\n"
+            android_shell = (
+                b"@STASIS_APP_NAME@ @STASIS_PACKAGE_ID@ "
+                b"@STASIS_JNI_PACKAGE@ @STASIS_ANDROID_ORIENTATION@ "
+                b"@STASIS_ANDROID_VERSION_CODE@ @STASIS_ANDROID_VERSION_NAME@\n"
+            )
             manifest = {
                 "schema": "stasis.release_provenance.v1",
                 "release_tag": "v1.0.0",
@@ -54,9 +58,22 @@ class ReleaseProvenanceTests(unittest.TestCase):
             (release / "mobile/shells/common/main.c").write_bytes(common_shell)
             (release / "mobile/shells/android/main.c").write_bytes(android_shell)
             (package / "common/main.c").write_bytes(common_shell)
-            (package / "android/main.c").write_bytes(android_shell)
+            (package / "android/main.c").write_bytes(
+                b"Demo App com.example.demo com_example_demo sensorPortrait 7 2.1.0\n"
+            )
             (package / "stasis_mobile_package.json").write_text(
-                json.dumps({"target": "android-arm64", "name": "demo"}), encoding="utf-8"
+                json.dumps(
+                    {
+                        "target": "android-arm64",
+                        "name": "demo",
+                        "app_name": "Demo App",
+                        "package_id": "com.example.demo",
+                        "android_orientation": "sensorPortrait",
+                        "android_version_code": "7",
+                        "android_version_name": "2.1.0",
+                    }
+                ),
+                encoding="utf-8",
             )
             (package / "common/stasis_package_provenance.h").write_bytes(
                 ("#ifndef STASIS_PACKAGE_PROVENANCE_H\n"

@@ -178,8 +178,9 @@ Each slice is independently testable and removes the host-specific path it repla
 - [x] Add documentation, signatures, inferred/declared types, expected-type ranking, snippets, and
   auto-import edits.
 - [x] Add standard LSP completion, hover, and signature help from the same typed snapshot.
-- [x] Switch the TUI completion/details query to the shared snapshot operation and delete the VSIX
-  per-request CLI/live completion provider.
+- [x] Switch the TUI completion/details query to the shared snapshot operation and make the LSP the
+  default VSIX completion provider. Keep the newly landed live-session provider temporarily for
+  runtime-only indexed collection fields until Slice 5 composes live data into LSP responses.
 - [x] Measure warm local p95 latency and cover the standard operations in the packaged VSIX.
 
 ### Slice 3: navigation and symbols

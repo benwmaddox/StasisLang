@@ -1153,7 +1153,9 @@ pub fn find_workshop_references(
     }
     let limit = limit.clamp(1, 256);
     let items = workshop_source_items(files)?;
-    let mut references = Vec::new();
+    let mut references = field_definition_reference(files, &segments, &items)?
+        .into_iter()
+        .collect::<Vec<_>>();
     for file in files {
         let tokens = lex(&file.source)?;
         for start_index in 0..tokens.len() {
@@ -1228,14 +1230,141 @@ fn reference_match_end(
             return None;
         }
         if index + 1 < segments.len() {
-            let dot = *tokens.get(cursor + 1)?;
+            cursor += 1;
+            if tokens
+                .get(cursor)
+                .is_some_and(|token| token_text(source, *token) == "[")
+            {
+                let mut depth = 0usize;
+                while let Some(token) = tokens.get(cursor).copied() {
+                    match token_text(source, token) {
+                        "[" => depth += 1,
+                        "]" => {
+                            depth = depth.checked_sub(1)?;
+                            if depth == 0 {
+                                cursor += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    cursor += 1;
+                }
+                if depth != 0 {
+                    return None;
+                }
+            }
+            let dot = *tokens.get(cursor)?;
             if dot.kind != TokenKind::Other || token_text(source, dot) != "." {
                 return None;
             }
-            cursor += 2;
+            cursor += 1;
         }
     }
     Some(cursor)
+}
+
+fn field_definition_reference(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    items: &[WorkshopSourceItem],
+) -> Result<Option<WorkshopReference>, String> {
+    if segments.len() < 2 {
+        return Ok(None);
+    }
+    let mut layouts = Vec::new();
+    for file in files {
+        layouts.push((file, source_workshop_items(&file.source)?.layout));
+    }
+    let mut type_name = layouts.iter().find_map(|(_, layout)| {
+        layout
+            .globals
+            .iter()
+            .find(|global| global.name == segments[0])
+            .map(|global| global.type_name.clone())
+    });
+    if type_name.is_none()
+        && layouts.iter().any(|(_, layout)| {
+            layout
+                .structs
+                .iter()
+                .any(|definition| definition.name == segments[0])
+        })
+    {
+        type_name = Some(segments[0].to_string());
+    }
+    let mut owner = None;
+    for field_name in &segments[1..] {
+        let Some(current) = type_name.as_deref().map(workshop_base_type) else {
+            return Ok(None);
+        };
+        let field = layouts.iter().find_map(|(_, layout)| {
+            layout
+                .structs
+                .iter()
+                .find(|definition| definition.name == current)
+                .and_then(|definition| {
+                    definition
+                        .fields
+                        .iter()
+                        .find(|field| field.name == *field_name)
+                        .map(|field| (definition.name.clone(), field.type_name.clone()))
+                })
+        });
+        let Some((field_owner, field_type)) = field else {
+            return Ok(None);
+        };
+        owner = Some(field_owner);
+        type_name = Some(field_type);
+    }
+    let Some(owner) = owner else {
+        return Ok(None);
+    };
+    let field_name = segments.last().copied().unwrap_or_default();
+    let Some(item) = items
+        .iter()
+        .find(|item| item.kind == WorkshopSourceItemKind::Struct && item.name == owner)
+    else {
+        return Ok(None);
+    };
+    let Some(file) = files.iter().find(|file| file.path == item.file) else {
+        return Ok(None);
+    };
+    let tokens = lex(&file.source)?;
+    let Some(span) = item.source_spans.first() else {
+        return Ok(None);
+    };
+    let Some(token) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (token.start >= span.start as usize
+            && token.end <= span.end as usize
+            && token.kind == TokenKind::Identifier
+            && token_text(&file.source, *token) == field_name
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind == TokenKind::Colon))
+        .then_some(*token)
+    }) else {
+        return Ok(None);
+    };
+    Ok(Some(WorkshopReference {
+        symbol: segments.join("."),
+        kind: WorkshopReferenceKind::Definition,
+        file: file.path.clone(),
+        source_span: WorkshopSourceSpan {
+            start: u32::try_from(token.start)
+                .map_err(|_| "field definition start exceeds u32".to_string())?,
+            end: u32::try_from(token.end)
+                .map_err(|_| "field definition end exceeds u32".to_string())?,
+        },
+        containing_kind: item.kind,
+        containing_name: item.name.clone(),
+        containing_signature: item.signature.clone(),
+        containing_source_hash: item.source_hash.clone(),
+    }))
+}
+
+fn workshop_base_type(type_name: &str) -> &str {
+    type_name.split('[').next().unwrap_or(type_name).trim()
 }
 
 fn classify_workshop_reference(
@@ -4132,6 +4261,27 @@ mod workshop_contract_tests {
         }));
         assert!(references.iter().any(|reference| {
             reference.kind == WorkshopReferenceKind::Read && reference.containing_name == "current"
+        }));
+    }
+
+    #[test]
+    fn references_resolve_indexed_struct_field_definition_and_use() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "struct Enemy { speed: i32; }\nstruct State { enemies: Enemy[2]; }\nglobal state: State;\nfunction main(): void { state.enemies[0].speed = 2; }\n"
+                .to_string(),
+        }];
+
+        let references =
+            find_workshop_references(&files, "state.enemies.speed", 16).expect("references");
+
+        assert_eq!(references.len(), 2);
+        assert!(references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Definition
+                && reference.containing_name == "Enemy"
+        }));
+        assert!(references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Write && reference.containing_name == "main"
         }));
     }
 

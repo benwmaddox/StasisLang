@@ -118,6 +118,13 @@ struct CompletionPreparation {
 struct CompletionSnapshot {
     index: CompletionIndex,
     language: LanguageCompletionSnapshot,
+    indexed_collections: Vec<IndexedCollectionCompletion>,
+}
+
+#[derive(Clone)]
+struct IndexedCollectionCompletion {
+    path: String,
+    fields: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +169,7 @@ pub(crate) struct LiveWorkspace {
     source_items: Vec<WorkshopSourceItem>,
     completion_items: Vec<WorkshopCompletionItem>,
     source_files: Vec<WorkshopSourceFile>,
+    indexed_collections: Vec<IndexedCollectionCompletion>,
     completion_snapshot: Arc<CompletionSnapshot>,
     scratch: ScratchWorkspace,
     watches: BTreeMap<String, Option<Value>>,
@@ -210,6 +218,7 @@ impl LiveWorkspace {
             source_items: Vec::new(),
             completion_items: Vec::new(),
             source_files: Vec::new(),
+            indexed_collections: Vec::new(),
             completion_snapshot: Arc::new(CompletionSnapshot::default()),
             scratch: ScratchWorkspace::default(),
             watches: BTreeMap::new(),
@@ -1021,13 +1030,16 @@ impl LiveWorkspace {
         let worker = std::thread::Builder::new()
             .name(format!("stasis-live-completion-{request_id}"))
             .spawn(move || {
-                let query = snapshot.language.query_with_index(
-                    snapshot.index.clone(),
+                let mut index = snapshot.index.clone();
+                extend_indexed_collection_completion(
+                    &mut index,
+                    &snapshot.indexed_collections,
                     &buffer,
                     cursor,
-                    limit,
-                    &context,
                 );
+                let query = snapshot
+                    .language
+                    .query_with_index(index, &buffer, cursor, limit, &context);
                 let _ = sender.send(query);
             })
             .map_err(|error| format!("failed starting live completion analysis: {error}"))?;
@@ -1372,12 +1384,26 @@ impl LiveWorkspace {
             scope: None,
         }));
         self.completion.replace(items);
+        self.indexed_collections = jit
+            .state_layout()
+            .collections
+            .into_iter()
+            .map(|collection| IndexedCollectionCompletion {
+                path: collection.path,
+                fields: collection
+                    .fields
+                    .into_iter()
+                    .map(|field| (field.field, field.type_name))
+                    .collect(),
+            })
+            .collect();
         self.completion_snapshot = Arc::new(CompletionSnapshot {
             index: self.completion.clone(),
             language: LanguageCompletionSnapshot::new(
                 self.source_items.clone(),
                 self.source_files.clone(),
             ),
+            indexed_collections: self.indexed_collections.clone(),
         });
     }
 
@@ -1389,13 +1415,11 @@ impl LiveWorkspace {
         limit: usize,
         context: &stasis_runner::live::CompletionContext,
     ) -> stasis_runner::live::CompletionQuery {
-        self.completion_snapshot.language.query_with_index(
-            self.completion.clone(),
-            buffer,
-            cursor,
-            limit,
-            context,
-        )
+        let mut index = self.completion.clone();
+        extend_indexed_collection_completion(&mut index, &self.indexed_collections, buffer, cursor);
+        self.completion_snapshot
+            .language
+            .query_with_index(index, buffer, cursor, limit, context)
     }
 }
 
@@ -1407,6 +1431,69 @@ fn is_static_type_field(item: &WorkshopCompletionItem) -> bool {
                 .strip_prefix(owner)
                 .is_some_and(|suffix| suffix.starts_with('.'))
         })
+}
+
+fn extend_indexed_collection_completion(
+    index: &mut CompletionIndex,
+    indexed_collections: &[IndexedCollectionCompletion],
+    buffer: &str,
+    cursor: usize,
+) {
+    if let Some((collection_path, receiver)) = indexed_completion_receiver(buffer, cursor) {
+        if let Some(collection) = indexed_collections
+            .iter()
+            .find(|collection| collection.path == collection_path)
+        {
+            index.extend(
+                collection
+                    .fields
+                    .iter()
+                    .map(|(field, type_name)| CompletionItem {
+                        text: format!("{receiver}{field}"),
+                        kind: "field".to_string(),
+                        detail: format!(
+                            "{type_name} via indexed state collection {collection_path}"
+                        ),
+                        type_name: Some(type_name.clone()),
+                        source: Some("runtime state layout".to_string()),
+                        selector: None,
+                        scope: None,
+                    }),
+            );
+        }
+    }
+}
+
+fn indexed_completion_receiver<'a>(buffer: &'a str, cursor: usize) -> Option<(&'a str, &'a str)> {
+    let cursor = cursor.min(buffer.len());
+    let prefix = buffer.get(..cursor)?;
+    let field_separator = prefix.rfind("].")?;
+    let indexed_path = prefix.get(..field_separator + 1)?;
+    let open = indexed_path.rfind('[')?;
+    let index_text = indexed_path.get(open + 1..indexed_path.len() - 1)?;
+    if index_text.is_empty() || !index_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let path_prefix = indexed_path.get(..open)?;
+    let path_start = path_prefix
+        .char_indices()
+        .rev()
+        .find(|(_, character)| {
+            !(character.is_ascii_alphanumeric() || *character == '_' || *character == '.')
+        })
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let collection_path = path_prefix.get(path_start..)?;
+    let receiver = prefix.get(path_start..field_separator + 2)?;
+    if collection_path.split('.').any(|segment| {
+        let mut bytes = segment.bytes();
+        !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }) {
+        return None;
+    }
+    Some((collection_path, receiver))
 }
 
 fn live_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
@@ -4230,6 +4317,21 @@ mod tests {
         assert_eq!(
             workspace.completion.query("player.h", 8, 10).items[0].text,
             "player.hp"
+        );
+        let indexed_buffer = "game.enemies[0].";
+        let indexed_query = workspace.completion_query(
+            indexed_buffer,
+            indexed_buffer.len(),
+            10,
+            &CompletionContext::default(),
+        );
+        assert!(
+            indexed_query
+                .items
+                .iter()
+                .any(|item| item.text == "game.enemies[0].hp"),
+            "indexed collection completion should use runtime layout fields: {:?}",
+            indexed_query.items
         );
 
         let tick = workspace
