@@ -568,13 +568,13 @@ impl Compiler {
                     })
                     .flatten()
                     .unwrap_or_default();
-                self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-                    path: file.path.clone(),
+                self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                    file.path.clone(),
                     start,
                     end,
                     symbol,
-                    message: message.clone(),
-                });
+                    message.clone(),
+                ));
             }
             return Err(CompileError::Frontend(message));
         }
@@ -593,13 +593,13 @@ impl Compiler {
                 Ok(indexed) => indexed,
                 Err(message) => {
                     let file = &self.files[file_id];
-                    self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-                        path: file.path.clone(),
-                        start: 0,
-                        end: file.content.len(),
-                        symbol: String::new(),
-                        message: message.clone(),
-                    });
+                    self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                        file.path.clone(),
+                        0,
+                        file.content.len(),
+                        "",
+                        message.clone(),
+                    ));
                     return Err(CompileError::Frontend(message));
                 }
             };
@@ -690,13 +690,13 @@ impl Compiler {
                         let base = self.functions[caller_index].source_range.start as usize;
                         let message =
                             module_call_resolution_message(error, &dependency.name, caller_path);
-                        self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-                            path: caller_path.clone(),
-                            start: base + relative_span.start as usize,
-                            end: base + relative_span.end as usize,
-                            symbol: dependency.name.clone(),
-                            message: message.clone(),
-                        });
+                        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                            caller_path.clone(),
+                            base + relative_span.start as usize,
+                            base + relative_span.end as usize,
+                            dependency.name.clone(),
+                            message.clone(),
+                        ));
                         return Err(CompileError::Frontend(message));
                     }
                 };
@@ -804,13 +804,13 @@ impl Compiler {
                 let statements = match parse_simple_statements_from_block(body, &mut self.types) {
                     Ok(statements) => statements,
                     Err(message) => {
-                        self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-                            path: file.path.clone(),
-                            start: function.source_range.start as usize,
-                            end: function.source_range.end as usize,
-                            symbol: function.name.clone(),
-                            message: message.clone(),
-                        });
+                        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                            file.path.clone(),
+                            function.source_range.start as usize,
+                            function.source_range.end as usize,
+                            function.name.clone(),
+                            message.clone(),
+                        ));
                         return Err(CompileError::Backend(message));
                     }
                 };
@@ -961,13 +961,13 @@ impl Compiler {
         let Some(file) = self.files.get(function.file_id as usize) else {
             return;
         };
-        self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-            path: file.path.clone(),
-            start: function.source_range.start as usize,
-            end: function.source_range.end as usize,
-            symbol: function.name.clone(),
-            message: message.to_string(),
-        });
+        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+            file.path.clone(),
+            function.source_range.start as usize,
+            function.source_range.end as usize,
+            function.name.clone(),
+            message,
+        ));
     }
 
     fn capture_previous_hashes(&self) -> HashMap<SymbolId, PreviousFunctionHashes> {

@@ -21,6 +21,7 @@ pub use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
 };
 use stasis_compiler::identity::canonical_source_path;
+use stasis_compiler::SourceDiagnosticEdit;
 pub use stasis_runner::live::{
     CompletionContext, CompletionIndex, CompletionItem, CompletionQuery, CompletionScope,
     LiveSymbolTarget,
@@ -319,6 +320,7 @@ pub struct Diagnostic {
     pub range: Range<usize>,
     pub severity: DiagnosticSeverity,
     pub source: &'static str,
+    pub code: String,
     pub message: String,
 }
 
@@ -571,6 +573,7 @@ pub struct LanguageCodeAction {
     pub title: String,
     pub kind: String,
     pub preferred: bool,
+    pub diagnostic_code: Option<String>,
     pub edits: Vec<RenameEdit>,
 }
 
@@ -799,6 +802,9 @@ impl LanguageService {
                         .unwrap_or(0..0),
                     severity: DiagnosticSeverity::Error,
                     source: "stasis",
+                    code: diagnostic
+                        .map(|diagnostic| diagnostic.code.as_str().to_string())
+                        .unwrap_or_else(|| "stasis.generic".to_string()),
                     message: diagnostic
                         .map(|diagnostic| diagnostic.message.clone())
                         .unwrap_or_else(|| format!("{error:?}")),
@@ -1147,21 +1153,29 @@ impl LanguageService {
         path: &str,
         requested_kinds: &[String],
     ) -> Result<Vec<LanguageCodeAction>, String> {
+        let quick_fix_requested = requested_kinds.is_empty()
+            || requested_kinds
+                .iter()
+                .any(|kind| "quickfix".starts_with(kind));
         let organize_requested = requested_kinds.is_empty()
             || requested_kinds
                 .iter()
                 .any(|kind| "source.organizeImports".starts_with(kind));
+        let mut actions = Vec::new();
+        if quick_fix_requested {
+            actions.extend(self.diagnostic_quick_fixes(path)?);
+        }
         if !organize_requested {
-            return Ok(Vec::new());
+            return Ok(actions);
         }
         let relative = canonical_source_path(Some(&self.project_root), path)?;
         let project_root = self.project_root.clone();
         let files = match self.current_language_index() {
             Ok(index) => index.files.clone(),
-            Err(_) => return Ok(Vec::new()),
+            Err(_) => return Ok(actions),
         };
         let Some(change) = organize_workshop_imports(&files, &relative)? else {
-            return Ok(Vec::new());
+            return Ok(actions);
         };
         let mut candidate = files;
         let candidate_file = candidate
@@ -1175,18 +1189,79 @@ impl LanguageService {
             validator.upsert_file(file.path, file.source);
         }
         if validator.check().is_err() {
-            return Ok(Vec::new());
+            return Ok(actions);
         }
-        Ok(vec![LanguageCodeAction {
+        actions.push(LanguageCodeAction {
             title: "Organize Stasis imports".to_string(),
             kind: "source.organizeImports".to_string(),
             preferred: true,
+            diagnostic_code: None,
             edits: vec![RenameEdit {
                 path: absolute_source_path(&project_root, &change.file),
                 range: 0..change.before_source.len(),
                 new_text: change.after_source,
             }],
-        }])
+        });
+        Ok(actions)
+    }
+
+    fn diagnostic_quick_fixes(&mut self, path: &str) -> Result<Vec<LanguageCodeAction>, String> {
+        let report = self.diagnostics();
+        let Some(published) = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.path == path)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(diagnostic) = self.compiler.last_source_diagnostic().cloned() else {
+            return Ok(Vec::new());
+        };
+        if published.code != diagnostic.code.as_str() || diagnostic.fixes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let snapshot = self.documents.snapshot();
+        let project_root = self.project_root.clone();
+        let files = snapshot
+            .documents()
+            .map(|(path, document)| {
+                Ok(WorkshopSourceFile {
+                    path: canonical_source_path(Some(&project_root), path)?,
+                    source: document.text.to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut actions = Vec::new();
+        for fix in diagnostic.fixes {
+            let Some(candidate) = apply_diagnostic_fix(&files, &fix.edits) else {
+                continue;
+            };
+            let mut validator = Compiler::new();
+            validator.set_project_root(project_root.clone())?;
+            for file in &candidate {
+                validator.upsert_file(file.path.clone(), file.source.clone());
+            }
+            if validator.check().is_err() {
+                continue;
+            }
+            actions.push(LanguageCodeAction {
+                title: fix.title,
+                kind: "quickfix".to_string(),
+                preferred: true,
+                diagnostic_code: Some(diagnostic.code.as_str().to_string()),
+                edits: fix
+                    .edits
+                    .into_iter()
+                    .map(|edit| RenameEdit {
+                        path: absolute_source_path(&project_root, &edit.path),
+                        range: edit.start..edit.end,
+                        new_text: edit.new_text,
+                    })
+                    .collect(),
+            });
+        }
+        Ok(actions)
     }
 
     pub fn semantic_tokens(&mut self, path: &str) -> Result<Vec<LanguageSemanticToken>, String> {
@@ -1528,6 +1603,38 @@ fn matching_workshop_completion<'a>(
             && item.type_name == ranked.type_name
             && item.scope.as_ref().map(shared_completion_scope) == ranked.scope
     })
+}
+
+fn apply_diagnostic_fix(
+    files: &[WorkshopSourceFile],
+    edits: &[SourceDiagnosticEdit],
+) -> Option<Vec<WorkshopSourceFile>> {
+    let mut candidate = files.to_vec();
+    let mut by_path = BTreeMap::<&str, Vec<&SourceDiagnosticEdit>>::new();
+    for edit in edits {
+        by_path.entry(&edit.path).or_default().push(edit);
+    }
+    for (path, mut edits) in by_path {
+        let file = candidate.iter_mut().find(|file| file.path == path)?;
+        edits.sort_by_key(|edit| (edit.start, edit.end));
+        for pair in edits.windows(2) {
+            if pair[0].end > pair[1].start {
+                return None;
+            }
+        }
+        for edit in edits.into_iter().rev() {
+            if edit.start > edit.end
+                || edit.end > file.source.len()
+                || !file.source.is_char_boundary(edit.start)
+                || !file.source.is_char_boundary(edit.end)
+            {
+                return None;
+            }
+            file.source
+                .replace_range(edit.start..edit.end, &edit.new_text);
+        }
+    }
+    Some(candidate)
 }
 
 fn completion_insert_text(item: &WorkshopCompletionItem) -> (String, bool) {
@@ -2577,6 +2684,65 @@ function main(): i32 {
             .code_actions(&main_text, &["source.organizeImports".to_string()])
             .expect("safe broken-source actions")
             .is_empty());
+    }
+
+    #[test]
+    fn structured_import_quick_fixes_are_compiler_validated() {
+        let root = std::env::temp_dir().join("stasis-language-service-quick-fixes");
+        let main_path = root.join("src/main.stasis");
+        let main_text = main_path.to_string_lossy().replace('\\', "/");
+        let source = "import \"missing.stasis\";\nfunction main(): i32 { return 0; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(main_text.clone(), source);
+
+        let report = service.diagnostics();
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].code, "stasis.missingModule");
+        let actions = service
+            .code_actions(&main_text, &["quickfix".to_string()])
+            .expect("quick fixes");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "quickfix");
+        assert_eq!(
+            actions[0].diagnostic_code.as_deref(),
+            Some("stasis.missingModule")
+        );
+        assert_eq!(
+            &source[actions[0].edits[0].range.clone()],
+            "import \"missing.stasis\";\n"
+        );
+        assert!(actions[0].edits[0].new_text.is_empty());
+    }
+
+    #[test]
+    fn duplicate_import_quick_fix_preserves_the_compiling_import() {
+        let root = std::env::temp_dir().join("stasis-language-service-duplicate-import-fix");
+        let main_path = root.join("src/main.stasis");
+        let main_text = main_path.to_string_lossy().replace('\\', "/");
+        let source = "import \"helper.stasis\";\nimport \"helper.stasis\";\nfunction main(): i32 { return helper(); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(main_text.clone(), source);
+        service.set_disk_document(
+            root.join("src/helper.stasis").to_string_lossy(),
+            "function helper(): i32 { return 1; }\n",
+        );
+
+        let actions = service
+            .code_actions(&main_text, &["quickfix".to_string()])
+            .expect("duplicate import quick fix");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].diagnostic_code.as_deref(),
+            Some("stasis.duplicateImportAlias")
+        );
+        assert_eq!(
+            &source[actions[0].edits[0].range.clone()],
+            "import \"helper.stasis\";\n"
+        );
+        assert_eq!(
+            actions[0].edits[0].range.start,
+            source.rfind("import").unwrap()
+        );
     }
 
     #[test]

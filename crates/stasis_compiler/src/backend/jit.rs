@@ -673,22 +673,21 @@ impl JitProcess {
             Err(error) => {
                 self.last_failed_source_diagnostic =
                     self.compiler.last_source_diagnostic().cloned().or_else(|| {
-                        self.compiler
-                            .files()
-                            .first()
-                            .map(|file| crate::SourceDiagnostic {
-                                path: file.path.clone(),
-                                start: 0,
-                                end: file.content.len(),
-                                symbol: String::new(),
-                                message: match &error {
+                        self.compiler.files().first().map(|file| {
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                0,
+                                file.content.len(),
+                                "",
+                                match &error {
                                     crate::compiler::CompileError::Frontend(message)
                                     | crate::compiler::CompileError::Backend(message)
                                     | crate::compiler::CompileError::Invariant(message) => {
                                         message.clone()
                                     }
                                 },
-                            })
+                            )
+                        })
                     });
                 self.restore_active_compiler_with_pending_sources();
                 Err(error)

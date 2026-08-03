@@ -11,7 +11,8 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 - compiler-aware hover and signature help;
 - compiler-backed LSP **Go to Definition**, **Find All References**, Outline, breadcrumbs, and
   workspace symbol search;
-- compiler-validated **Organize Imports** through standard LSP code actions;
+- compiler-validated **Quick Fixes** for structured import diagnostics and **Organize Imports**
+  through standard LSP code actions;
 - compiler-aware semantic highlighting and inlay hints for inferred local types and resolved call
   parameter names;
 - `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;

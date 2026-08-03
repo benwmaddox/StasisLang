@@ -543,6 +543,38 @@ pub fn load_workshop_edit_workspace(
     Ok(files)
 }
 
+pub fn load_workshop_source_workspace(
+    project_root: &Path,
+    entry_file: &Path,
+) -> Result<Vec<WorkshopSourceFile>, String> {
+    let mut files = Vec::new();
+    let mut known = BTreeSet::new();
+    let entry = if entry_file.is_absolute() {
+        entry_file.to_path_buf()
+    } else {
+        project_root.join(entry_file)
+    };
+    if entry.is_file() {
+        let relative = normalize_workshop_project_path(project_root, &entry);
+        known.insert(relative.clone());
+        files.push(WorkshopSourceFile {
+            path: relative,
+            source: fs::read_to_string(&entry)
+                .map_err(|error| format!("failed reading {}: {error}", entry.display()))?,
+        });
+    }
+    for directory in ["src", "tests"] {
+        collect_workshop_source_files(
+            project_root,
+            &project_root.join(directory),
+            &mut known,
+            &mut files,
+        )?;
+    }
+    files.sort_by_key(|file| file.path.clone());
+    Ok(files)
+}
+
 pub fn workshop_reachable_files(
     files: &[WorkshopSourceFile],
     entry_file: &Path,
@@ -4592,6 +4624,10 @@ mod project_loader_tests {
         let error = load_workshop_project(&root, Path::new("src/main.stasis"))
             .expect_err("expected missing import failure");
         assert!(error.contains("missing.stasis"));
+        let current = load_workshop_source_workspace(&root, Path::new("src/main.stasis"))
+            .expect("raw source workspace remains available for editor recovery");
+        assert_eq!(current.len(), 1);
+        assert!(current[0].source.contains("missing.stasis"));
         fs::remove_dir_all(&root).ok();
     }
 }

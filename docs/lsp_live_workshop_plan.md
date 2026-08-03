@@ -233,8 +233,10 @@ Each slice is independently testable and removes the host-specific path it repla
 
 - [x] Add a standard compiler-validated Organize Imports code action that sorts, deduplicates, and
   prunes unused modules; expose the same no-write preview through the TUI.
-- [ ] Add structured compiler diagnostic quick fixes and safe refactor actions without matching
-  human diagnostic strings or introducing a second parser.
+- [x] Add structured compiler diagnostic codes and compiler-authored quick fixes without matching
+  rendered error strings or introducing a second parser. Validate every candidate by recompiling
+  the current workspace; ship unresolved/duplicate-import fixes alongside the existing validated
+  rename and Organize Imports refactors, with preview-only `:quick-fixes FILE` TUI access.
 - [x] Add semantic tokens from compiler-owned identities, including globals, fields, parameters,
   locals, types, functions, methods, enums, and constants. During broken edits, publish only tokens
   whose source spans remain byte-identical in unchanged last-good regions.
@@ -487,3 +489,19 @@ completion edits cannot. The stale-source test proves the retained last-good cat
 resolve documentation during an incomplete function while withholding auto-import edits; the LSP
 protocol test proves current items resolve through the standard request. This predicts code-action
 resolve should use the same split between stable semantic explanation and revision-exact mutation.
+
+### Structured quick-fix implementation
+
+- Good: attaching codes and edit candidates where the module graph detects the error kept
+  diagnostics, fixes, and source spans under one compiler-owned contract; LSP and TUI only project
+  that contract.
+- Bad: the TUI language service was synchronized from the accepted runtime snapshot, hiding the
+  current broken disk source precisely when diagnostics and fixes were needed.
+- Adjustment: keep runtime execution on the last accepted snapshot, but synchronize read-only TUI
+  language queries from the current raw source workspace and normalize editor paths at the boundary.
+
+Theory gained: safe recovery separates executable truth from editing truth. The live runner may
+continue with accepted code while diagnostics and quick-fix previews analyze newer broken files.
+Compiler-authored fix identity plus full candidate recompilation proves mutation safety without
+parsing diagnostic prose. This predicts debugger source mapping must likewise identify whether a
+frame belongs to accepted executable source or newer editor text.

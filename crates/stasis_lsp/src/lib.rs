@@ -28,7 +28,7 @@ use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintKind,
     InlayHintLabel, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
-    InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf,
+    InsertTextFormat, Location, MarkupContent, MarkupKind, NumberOrString, OneOf,
     OptionalVersionedTextDocumentIdentifier, ParameterInformation, ParameterLabel,
     PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, ReferenceParams,
     RenameOptions, RenameParams, SaveOptions, SemanticToken, SemanticTokenModifier,
@@ -133,7 +133,10 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
                 work_done_progress_options: Default::default(),
             })),
             code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-                code_action_kinds: Some(vec![CodeActionKind::SOURCE_ORGANIZE_IMPORTS]),
+                code_action_kinds: Some(vec![
+                    CodeActionKind::QUICKFIX,
+                    CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+                ]),
                 resolve_provider: Some(false),
                 work_done_progress_options: Default::default(),
             })),
@@ -716,6 +719,7 @@ impl LanguageServer {
         params: CodeActionParams,
     ) -> Result<Option<Vec<CodeActionOrCommand>>, String> {
         let path = path_text(&uri_path(&params.text_document.uri)?);
+        let request_diagnostics = params.context.diagnostics;
         let requested_kinds = params
             .context
             .only
@@ -728,18 +732,35 @@ impl LanguageServer {
             .code_actions(&path, &requested_kinds)?
             .into_iter()
             .map(|action| {
-                Ok(CodeActionOrCommand::CodeAction(CodeAction {
+                let diagnostics = action.diagnostic_code.as_ref().map(|code| {
+                    request_diagnostics
+                        .iter()
+                        .filter(|diagnostic| {
+                            diagnostic.code.as_ref() == Some(&NumberOrString::String(code.clone()))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                });
+                if action.diagnostic_code.is_some()
+                    && diagnostics.as_ref().is_none_or(Vec::is_empty)
+                {
+                    return Ok(None);
+                }
+                Ok(Some(CodeActionOrCommand::CodeAction(CodeAction {
                     title: action.title,
                     kind: Some(CodeActionKind::from(action.kind)),
-                    diagnostics: None,
+                    diagnostics: diagnostics.filter(|diagnostics| !diagnostics.is_empty()),
                     edit: Some(self.workspace_edit(action.edits)?),
                     command: None,
                     is_preferred: Some(action.preferred),
                     disabled: None,
                     data: None,
-                }))
+                })))
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         Ok((!actions.is_empty()).then_some(actions))
     }
 
@@ -1026,7 +1047,7 @@ impl LanguageServer {
                         }
                         DiagnosticSeverity::Hint => lsp_types::DiagnosticSeverity::HINT,
                     }),
-                    code: None,
+                    code: Some(NumberOrString::String(diagnostic.code)),
                     code_description: None,
                     source: Some(diagnostic.source.to_string()),
                     message: diagnostic.message,
@@ -1494,6 +1515,74 @@ mod tests {
             &edits[0].edits[0],
             OneOf::Left(edit)
                 if edit.new_text == "import \"helper.stasis\";\nfunction main(): i32 { return helper(); }\n"
+        ));
+    }
+
+    #[test]
+    fn standard_quick_fix_is_linked_to_structured_diagnostic() {
+        let (mut server, uri, main_path) = test_server("missing-import-quick-fix");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "import \"missing.stasis\";\nfunction main(): i32 { return 0; }\n";
+        server.service.open_document(main_path.clone(), 7, source);
+        server
+            .publish_diagnostics(&server_connection)
+            .expect("publish structured diagnostic");
+        let Message::Notification(notification) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("diagnostic notification")
+        else {
+            panic!("expected diagnostic notification");
+        };
+        let published: PublishDiagnosticsParams =
+            serde_json::from_value(notification.params).expect("published diagnostics");
+        assert_eq!(
+            published.diagnostics[0].code,
+            Some(NumberOrString::String("stasis.missingModule".to_string()))
+        );
+        let diagnostic = published.diagnostics[0].clone();
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(93),
+                    CodeActionRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 0, "character": 7},
+                            "end": {"line": 0, "character": 23}
+                        },
+                        "context": {
+                            "diagnostics": [diagnostic],
+                            "only": ["quickfix"]
+                        }
+                    }),
+                ),
+            )
+            .expect("quick-fix request");
+        let actions: Option<Vec<CodeActionOrCommand>> = serde_json::from_value(
+            receive_response(&client_connection, 93)
+                .response_result
+                .expect("code-action result"),
+        )
+        .expect("code-action response");
+        let CodeActionOrCommand::CodeAction(action) = &actions.expect("actions")[0] else {
+            panic!("expected code action");
+        };
+        assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
+        assert_eq!(action.diagnostics.as_ref().map(Vec::len), Some(1));
+        let Some(DocumentChanges::Edits(edits)) = action
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.document_changes.as_ref())
+        else {
+            panic!("expected document edit");
+        };
+        assert_eq!(edits[0].text_document.version, Some(7));
+        assert!(matches!(
+            &edits[0].edits[0],
+            OneOf::Left(edit) if edit.new_text.is_empty()
         ));
     }
 

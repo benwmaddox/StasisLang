@@ -113,6 +113,9 @@ pub enum LiveCommand {
     OrganizeImports {
         file: String,
     },
+    QuickFixes {
+        file: String,
+    },
     InlayHints {
         file: String,
     },
@@ -1211,6 +1214,9 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":organize-imports" | ":organize" => ready(LiveCommand::OrganizeImports {
             file: required_arg(&args, 1, "file")?.to_string(),
         }),
+        ":quick-fixes" | ":fixes" => ready(LiveCommand::QuickFixes {
+            file: required_arg(&args, 1, "file")?.to_string(),
+        }),
         ":inlay-hints" | ":inlays" => ready(LiveCommand::InlayHints {
             file: required_arg(&args, 1, "file")?.to_string(),
         }),
@@ -2187,6 +2193,19 @@ mod tests {
         assert_eq!(
             organize.command,
             LiveCommand::OrganizeImports {
+                file: "src/game.stasis".into(),
+            }
+        );
+
+        let TerminalInput::Request(fixes) = terminal
+            .feed_line(":quick-fixes src/game.stasis")
+            .expect("quick fixes")
+        else {
+            panic!("expected quick-fixes request");
+        };
+        assert_eq!(
+            fixes.command,
+            LiveCommand::QuickFixes {
                 file: "src/game.stasis".into(),
             }
         );

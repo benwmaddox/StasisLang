@@ -220,6 +220,56 @@ export async function run(): Promise<void> {
     () => vscode.languages.getDiagnostics(sourceUri).length === 0,
   );
 
+  const missingImport = 'import "missing.stasis";\n';
+  const introduceMissingImport = new vscode.WorkspaceEdit();
+  introduceMissingImport.insert(sourceUri, new vscode.Position(0, 0), missingImport);
+  assert.equal(
+    await vscode.workspace.applyEdit(introduceMissingImport),
+    true,
+    "VS Code applies an unresolved import probe",
+  );
+  await waitFor("structured missing-module diagnostic", () =>
+    vscode.languages
+      .getDiagnostics(sourceUri)
+      .some((diagnostic) => diagnostic.code === "stasis.missingModule"),
+  );
+  const quickFixes = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+    "vscode.executeCodeActionProvider",
+    sourceUri,
+    new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, missingImport.length - 1)),
+    vscode.CodeActionKind.QuickFix.value,
+  );
+  const removeMissingImport = quickFixes?.find(
+    (action): action is vscode.CodeAction =>
+      "edit" in action &&
+      action.kind?.value === vscode.CodeActionKind.QuickFix.value &&
+      action.title === "Remove unresolved import 'missing'",
+  );
+  if (!removeMissingImport?.edit) {
+    throw new Error(
+      `the packaged LSP did not return the structured import quick fix: ${JSON.stringify(
+        quickFixes?.map((action) => ({
+          title: "title" in action ? action.title : undefined,
+          kind: "kind" in action ? action.kind?.value : undefined,
+          diagnostics:
+            "diagnostics" in action
+              ? action.diagnostics?.map((diagnostic) => diagnostic.code)
+              : undefined,
+          edit: "edit" in action && action.edit !== undefined,
+        })),
+      )}`,
+    );
+  }
+  assert.equal(
+    await vscode.workspace.applyEdit(removeMissingImport.edit),
+    true,
+    "VS Code applies the compiler-validated quick fix",
+  );
+  await waitFor(
+    "quick fix clears the missing-module diagnostic",
+    () => vscode.languages.getDiagnostics(sourceUri).length === 0,
+  );
+
   const tickLineNumber = document
     .getText()
     .split(/\r?\n/)

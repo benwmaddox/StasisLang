@@ -4,12 +4,13 @@ use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
-    workshop_completion_items, workshop_direct_import_files, workshop_reachable_files,
-    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, ExpectedReload, WorkshopCompletionItem, WorkshopSemanticEdit,
-    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
-    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    find_workshop_symbols, load_workshop_edit_workspace, load_workshop_source_workspace,
+    plan_workshop_semantic_edits, workshop_completion_items, workshop_direct_import_files,
+    workshop_reachable_files, workshop_source_hash, workshop_source_items,
+    write_workshop_semantic_plan, write_workshop_semantic_receipt, ExpectedReload,
+    WorkshopCompletionItem, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_language_service::{
     DiagnosticSeverity as LanguageDiagnosticSeverity, LanguageCompletionSnapshot,
@@ -655,6 +656,7 @@ impl LiveWorkspace {
             LiveCommand::Hover { file, offset } => self.language_hover(&file, offset, tick, jit),
             LiveCommand::Definition { file, offset } => self.language_definition(&file, offset),
             LiveCommand::OrganizeImports { file } => self.language_organize_imports(&file),
+            LiveCommand::QuickFixes { file } => self.language_quick_fixes(&file),
             LiveCommand::InlayHints { file } => self.language_inlay_hints(&file),
             LiveCommand::RenamePreview {
                 file,
@@ -906,21 +908,21 @@ impl LiveWorkspace {
         }
     }
 
-    fn sync_language_service(&mut self) {
-        let desired = self
-            .source_files
-            .iter()
-            .map(|file| {
-                (
-                    self.config
-                        .project_root
-                        .join(&file.path)
-                        .to_string_lossy()
-                        .to_string(),
-                    file.source.clone(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+    fn sync_language_service(&mut self) -> Result<(), String> {
+        let desired =
+            load_workshop_source_workspace(&self.config.project_root, &self.config.entry)?
+                .into_iter()
+                .map(|file| {
+                    (
+                        self.config
+                            .project_root
+                            .join(&file.path)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        file.source.clone(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
         let desired_paths = desired.keys().cloned().collect::<BTreeSet<_>>();
         for path in self.language_paths.difference(&desired_paths) {
             self.language_service.remove_disk_document(path);
@@ -941,10 +943,19 @@ impl LiveWorkspace {
             self.language_service.set_disk_document(path, source);
         }
         self.language_paths = desired_paths;
+        Ok(())
+    }
+
+    fn language_document_path(&self, file: &str) -> String {
+        self.config
+            .project_root
+            .join(file)
+            .to_string_lossy()
+            .replace('\\', "/")
     }
 
     fn language_diagnostics(&mut self) -> Result<(&'static str, Value), String> {
-        self.sync_language_service();
+        self.sync_language_service()?;
         let report = self.language_service.diagnostics();
         Ok((
             "diagnostics",
@@ -960,6 +971,7 @@ impl LiveWorkspace {
                         LanguageDiagnosticSeverity::Information => "information",
                         LanguageDiagnosticSeverity::Hint => "hint",
                     },
+                    "code": diagnostic.code,
                     "source": diagnostic.source,
                     "message": diagnostic.message,
                 })).collect::<Vec<_>>()
@@ -972,11 +984,9 @@ impl LiveWorkspace {
         file: &str,
         offset: usize,
     ) -> Result<(&'static str, Value), String> {
-        self.sync_language_service();
-        let request_path = self.config.project_root.join(file);
-        let locations = self
-            .language_service
-            .definition(&request_path.to_string_lossy(), offset)?;
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let locations = self.language_service.definition(&request_path, offset)?;
         Ok((
             "definition",
             json!({
@@ -998,9 +1008,8 @@ impl LiveWorkspace {
         tick: u64,
         jit: &JitProcess,
     ) -> Result<(&'static str, Value), String> {
-        self.sync_language_service();
-        let request_path = self.config.project_root.join(file);
-        let request_path = request_path.to_string_lossy().to_string();
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
         let Some(static_hover) = self.language_service.hover(&request_path, offset)? else {
             return Ok((
                 "hover",
@@ -1061,12 +1070,23 @@ impl LiveWorkspace {
     }
 
     fn language_organize_imports(&mut self, file: &str) -> Result<(&'static str, Value), String> {
-        self.sync_language_service();
-        let request_path = self.config.project_root.join(file);
-        let actions = self.language_service.code_actions(
-            &request_path.to_string_lossy(),
-            &["source.organizeImports".to_string()],
-        )?;
+        self.language_code_actions(file, "source.organizeImports")
+    }
+
+    fn language_quick_fixes(&mut self, file: &str) -> Result<(&'static str, Value), String> {
+        self.language_code_actions(file, "quickfix")
+    }
+
+    fn language_code_actions(
+        &mut self,
+        file: &str,
+        requested_kind: &str,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let actions = self
+            .language_service
+            .code_actions(&request_path, &[requested_kind.to_string()])?;
         Ok((
             "code_actions",
             json!({
@@ -1075,6 +1095,7 @@ impl LiveWorkspace {
                     "title": action.title,
                     "kind": action.kind,
                     "preferred": action.preferred,
+                    "diagnostic_code": action.diagnostic_code,
                     "edits": action.edits.into_iter().map(|edit| json!({
                         "file": edit.path,
                         "start": edit.range.start,
@@ -1087,11 +1108,9 @@ impl LiveWorkspace {
     }
 
     fn language_inlay_hints(&mut self, file: &str) -> Result<(&'static str, Value), String> {
-        self.sync_language_service();
-        let request_path = self.config.project_root.join(file);
-        let hints = self
-            .language_service
-            .inlay_hints(&request_path.to_string_lossy())?;
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let hints = self.language_service.inlay_hints(&request_path)?;
         Ok((
             "inlay_hints",
             json!({
@@ -1116,11 +1135,11 @@ impl LiveWorkspace {
         offset: usize,
         new_name: &str,
     ) -> Result<(&'static str, Value), String> {
-        self.sync_language_service();
-        let request_path = self.config.project_root.join(file);
-        let plan =
-            self.language_service
-                .rename(&request_path.to_string_lossy(), offset, new_name)?;
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let plan = self
+            .language_service
+            .rename(&request_path, offset, new_name)?;
         let edits = plan
             .edits
             .iter()
@@ -2416,6 +2435,7 @@ fn help_data() -> Value {
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
             ":references SYMBOL [--limit N]", ":diagnostics",
             ":hover FILE OFFSET", ":definition FILE OFFSET", ":organize-imports FILE",
+            ":quick-fixes FILE",
             ":inlay-hints FILE",
             ":rename FILE OFFSET NEW_NAME",
             ":validate PATH OP VALUE [--frames N]",
@@ -2452,6 +2472,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":hover",
         ":definition",
         ":organize-imports",
+        ":quick-fixes",
         ":inlay-hints",
         ":rename",
         ":validate",
@@ -3269,6 +3290,49 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&source_path).expect("source after preview"),
             before
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tui_quick_fix_preview_uses_structured_language_service_actions() {
+        let (root, config) = project();
+        let source_path = root.join("src/main.stasis");
+        let before = fs::read_to_string(&source_path).expect("source before quick fix");
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let broken = format!("import \"missing.stasis\";\n{before}");
+        fs::write(&source_path, &broken).expect("source with missing import");
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                401,
+                LiveCommand::QuickFixes {
+                    file: "src/main.stasis".into(),
+                },
+            ),
+        );
+
+        assert!(response.ok, "quick-fix response: {response:?}");
+        let actions = response.data.expect("quick-fix data")["actions"]
+            .as_array()
+            .expect("quick-fix actions")
+            .clone();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["kind"], "quickfix");
+        assert_eq!(actions[0]["diagnostic_code"], "stasis.missingModule");
+        assert_eq!(actions[0]["edits"][0]["new_text"], "");
+        assert_eq!(
+            fs::read_to_string(&source_path).expect("source after quick-fix preview"),
+            broken
         );
         fs::remove_dir_all(root).ok();
     }
