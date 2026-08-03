@@ -3,3 +3,6 @@ name = "stasis_language_service"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+stasis_compiler = { path = "../stasis_compiler" }

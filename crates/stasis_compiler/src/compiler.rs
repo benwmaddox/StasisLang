@@ -481,6 +481,22 @@ impl Compiler {
     }
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
+        self.index_pass_with_scope(false)
+    }
+
+    pub fn check(&mut self) -> CompileResult<IndexPassResult> {
+        let index = self.index_pass_with_scope(true)?;
+        let functions = self.functions.clone();
+        for function in functions {
+            if let Err(error) = self.lower_function_to_hir(&function) {
+                self.record_function_diagnostic(&function, compile_error_message(&error));
+                return Err(error);
+            }
+        }
+        Ok(index)
+    }
+
+    fn index_pass_with_scope(&mut self, analyze_all: bool) -> CompileResult<IndexPassResult> {
         self.last_source_diagnostic = None;
         if let Some(error) = self.pending_path_error.take() {
             return Err(CompileError::Frontend(error));
@@ -705,10 +721,14 @@ impl Compiler {
         }
 
         self.parsed_statements = vec![Vec::new(); self.functions.len()];
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
-            &self.functions,
-            &self.analysis_required_roots,
-        );
+        let reachable = if analyze_all {
+            self.functions.iter().map(|function| function.id).collect()
+        } else {
+            crate::backend::reachability::compute_reachable_function_ids(
+                &self.functions,
+                &self.analysis_required_roots,
+            )
+        };
         self.prepare_statement_artifacts(&reachable.iter().copied().collect::<Vec<_>>())?;
 
         self.propagate_dirty_from_signature_changes(&signature_changed_ids);
@@ -778,8 +798,19 @@ impl Compiler {
                             function.name
                         ))
                     })?;
-                let statements = parse_simple_statements_from_block(body, &mut self.types)
-                    .map_err(CompileError::Backend)?;
+                let statements = match parse_simple_statements_from_block(body, &mut self.types) {
+                    Ok(statements) => statements,
+                    Err(message) => {
+                        self.last_source_diagnostic = Some(crate::SourceDiagnostic {
+                            path: file.path.clone(),
+                            start: function.source_range.start as usize,
+                            end: function.source_range.end as usize,
+                            symbol: function.name.clone(),
+                            message: message.clone(),
+                        });
+                        return Err(CompileError::Backend(message));
+                    }
+                };
                 let mut validated = statements.clone();
                 if let Err(message) = qualify_module_calls(
                     &mut validated,
@@ -1865,6 +1896,28 @@ function unreachable(): i32 { while (true) { return 1; } }
                 .collect::<Vec<_>>(),
             vec!["main"]
         );
+    }
+
+    #[test]
+    fn check_reports_errors_in_functions_unreachable_from_runtime_roots() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unreachable(): i32 { while (true) { return 1; } }
+"#,
+        );
+
+        compiler
+            .check()
+            .expect_err("full check must analyze dead code");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured unreachable-function diagnostic");
+        assert_eq!(diagnostic.path, "dead.stasis");
+        assert_eq!(diagnostic.symbol, "unreachable");
+        assert!(diagnostic.message.contains("while"));
     }
 
     #[test]

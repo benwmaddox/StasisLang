@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::Arc;
+
+use stasis_compiler::compiler::Compiler;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WorkspaceRevision(u64);
@@ -280,6 +283,134 @@ impl WorkspaceDocuments {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub path: String,
+    pub range: Range<usize>,
+    pub severity: DiagnosticSeverity,
+    pub source: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticReport {
+    pub revision: WorkspaceRevision,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+pub struct LanguageService {
+    documents: WorkspaceDocuments,
+    compiler: Compiler,
+    project_root: String,
+}
+
+impl LanguageService {
+    pub fn new(project_root: impl Into<String>) -> Result<Self, String> {
+        let project_root = project_root.into().replace('\\', "/");
+        let mut compiler = Compiler::new();
+        compiler.set_project_root(project_root.clone())?;
+        Ok(Self {
+            documents: WorkspaceDocuments::default(),
+            compiler,
+            project_root,
+        })
+    }
+
+    pub fn snapshot(&self) -> WorkspaceSnapshot {
+        self.documents.snapshot()
+    }
+
+    pub fn set_disk_document(&mut self, path: impl Into<String>, text: impl Into<String>) {
+        self.documents.set_disk_document(path, text);
+    }
+
+    pub fn remove_disk_document(&mut self, path: &str) {
+        self.documents.remove_disk_document(path);
+    }
+
+    pub fn open_document(
+        &mut self,
+        path: impl Into<String>,
+        version: i64,
+        text: impl Into<String>,
+    ) {
+        self.documents.open_document(path, version, text);
+    }
+
+    pub fn change_document(
+        &mut self,
+        path: &str,
+        version: i64,
+        changes: &[TextChange],
+    ) -> Result<(), DocumentChangeError> {
+        self.documents.change_document(path, version, changes)
+    }
+
+    pub fn close_document(&mut self, path: &str) {
+        self.documents.close_document(path);
+    }
+
+    pub fn diagnostics(&mut self) -> DiagnosticReport {
+        let snapshot = self.documents.snapshot();
+        let paths = snapshot
+            .documents()
+            .map(|(path, _)| path.to_string())
+            .collect::<BTreeSet<_>>();
+        self.compiler.retain_files(&paths);
+        for (path, document) in snapshot.documents() {
+            self.compiler.upsert_file(path, document.text.to_string());
+        }
+
+        let diagnostics = match self.compiler.check() {
+            Ok(_) => Vec::new(),
+            Err(error) => {
+                let diagnostic = self.compiler.last_source_diagnostic();
+                let path = diagnostic
+                    .map(|diagnostic| self.snapshot_path(&paths, &diagnostic.path))
+                    .or_else(|| paths.first().cloned())
+                    .unwrap_or_default();
+                vec![Diagnostic {
+                    path,
+                    range: diagnostic
+                        .map(|diagnostic| diagnostic.start..diagnostic.end)
+                        .unwrap_or(0..0),
+                    severity: DiagnosticSeverity::Error,
+                    source: "stasis",
+                    message: diagnostic
+                        .map(|diagnostic| diagnostic.message.clone())
+                        .unwrap_or_else(|| format!("{error:?}")),
+                }]
+            }
+        };
+        DiagnosticReport {
+            revision: snapshot.revision(),
+            diagnostics,
+        }
+    }
+
+    fn snapshot_path(&self, paths: &BTreeSet<String>, compiler_path: &str) -> String {
+        if paths.contains(compiler_path) {
+            return compiler_path.to_string();
+        }
+        let absolute = Path::new(&self.project_root)
+            .join(compiler_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        paths
+            .get(&absolute)
+            .cloned()
+            .unwrap_or_else(|| compiler_path.to_string())
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DocumentChangeError {
     NotOpen(String),
@@ -496,5 +627,64 @@ mod tests {
             Err(DocumentChangeError::InvalidRange { .. })
         ));
         assert_eq!(workspace.snapshot().revision(), revision);
+    }
+
+    #[test]
+    fn diagnostics_follow_dirty_overlay_revisions_and_clear_on_close() {
+        let root = std::env::temp_dir().join("stasis-language-service-diagnostics");
+        let root_text = root.to_string_lossy().replace('\\', "/");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let mut service = LanguageService::new(root_text).expect("language service");
+        service.set_disk_document(path_text.clone(), "function main(): i32 { return 0; }\n");
+        assert!(service.diagnostics().diagnostics.is_empty());
+
+        service.open_document(
+            path_text.clone(),
+            1,
+            "function main(): i32 { return 0; }\nfunction broken(): i32 { while (true) { return 1; } }\n",
+        );
+        let dirty_revision = service.snapshot().revision();
+        let dirty = service.diagnostics();
+        assert_eq!(dirty.revision, dirty_revision);
+        assert_eq!(dirty.diagnostics.len(), 1);
+        assert_eq!(dirty.diagnostics[0].severity, DiagnosticSeverity::Error);
+        assert_eq!(dirty.diagnostics[0].source, "stasis");
+        assert_eq!(dirty.diagnostics[0].path, path_text);
+        assert!(dirty.diagnostics[0].message.contains("while"));
+        assert_eq!(
+            &service
+                .snapshot()
+                .document(&path_text)
+                .expect("dirty document")
+                .text[dirty.diagnostics[0].range.clone()],
+            "{ while (true) { return 1; } }"
+        );
+
+        service.close_document(&path_text);
+        let restored = service.diagnostics();
+        assert!(restored.revision > dirty.revision);
+        assert!(restored.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn vscode_fixture_is_clean_under_full_workspace_check() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vscode-stasis/test/fixture")
+            .canonicalize()
+            .expect("VS Code fixture root");
+        let path = root.join("src/main.stasis");
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(
+            path.to_string_lossy(),
+            include_str!("../../../vscode-stasis/test/fixture/src/main.stasis"),
+        );
+
+        let report = service.diagnostics();
+        assert!(
+            report.diagnostics.is_empty(),
+            "fixture diagnostics: {:?}",
+            report.diagnostics
+        );
     }
 }

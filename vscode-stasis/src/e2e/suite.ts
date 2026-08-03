@@ -160,6 +160,55 @@ export async function run(): Promise<void> {
   const sourceUri = vscode.Uri.file(path.join(folder.uri.fsPath, "src", "main.stasis"));
   const document = await vscode.workspace.openTextDocument(sourceUri);
   await vscode.window.showTextDocument(document);
+  assert.equal(document.languageId, "stasis", "the fixture opens as a Stasis document");
+
+  const validLength = document.getText().length;
+  const invalidSuffix = "\nfunction lsp_diagnostic_probe(): i32 { while (true) { return 1; } }\n";
+  const introduceDiagnostic = new vscode.WorkspaceEdit();
+  introduceDiagnostic.insert(sourceUri, document.positionAt(validLength), invalidSuffix);
+  assert.equal(
+    await vscode.workspace.applyEdit(introduceDiagnostic),
+    true,
+    "VS Code applies an unsaved diagnostic probe",
+  );
+  try {
+    await waitFor("LSP compiler diagnostic", () =>
+      vscode.languages
+        .getDiagnostics(sourceUri)
+        .some((diagnostic) => diagnostic.source === "stasis" && diagnostic.message.includes("while")),
+    );
+  } catch (error) {
+    const observed = vscode.languages.getDiagnostics(sourceUri).map((diagnostic) => ({
+      message: diagnostic.message,
+      source: diagnostic.source,
+      severity: diagnostic.severity,
+      range: diagnostic.range,
+    }));
+    throw new Error(`${String(error)} Observed diagnostics: ${JSON.stringify(observed)}`);
+  }
+  const compilerDiagnostic = vscode.languages
+    .getDiagnostics(sourceUri)
+    .find((diagnostic) => diagnostic.source === "stasis" && diagnostic.message.includes("while"));
+  assert.equal(compilerDiagnostic?.severity, vscode.DiagnosticSeverity.Error);
+  assert.ok(
+    compilerDiagnostic && !compilerDiagnostic.range.isEmpty,
+    "the compiler diagnostic has a source range",
+  );
+
+  const repairDiagnostic = new vscode.WorkspaceEdit();
+  repairDiagnostic.delete(
+    sourceUri,
+    new vscode.Range(document.positionAt(validLength), document.positionAt(document.getText().length)),
+  );
+  assert.equal(
+    await vscode.workspace.applyEdit(repairDiagnostic),
+    true,
+    "VS Code repairs the unsaved diagnostic probe",
+  );
+  await waitFor(
+    "cleared LSP compiler diagnostic",
+    () => vscode.languages.getDiagnostics(sourceUri).length === 0,
+  );
 
   const tickLineNumber = document
     .getText()

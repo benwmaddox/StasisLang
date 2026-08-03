@@ -8,6 +8,36 @@ import {
   runTests,
 } from "@vscode/test-electron";
 
+function diagnosticLogs(root: string): string {
+  if (!fs.existsSync(root)) {
+    return "";
+  }
+  const pending = [root];
+  const logs: string[] = [];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (entry.isFile() && entry.name.endsWith(".log")) {
+        const content = fs.readFileSync(entryPath, "utf8");
+        if (entryPath.includes("stasislang.stasis")) {
+          logs.push(`\n--- ${entryPath} ---\n${content.slice(-32_768)}`);
+          continue;
+        }
+        const relevantLines = content
+          .split(/\r?\n/)
+          .filter((line) => /LSP did|language server ready|stasis language server|publishDiagnostics/i.test(line));
+        if (relevantLines.length > 0) {
+          logs.push(`\n--- ${entryPath} ---\n${relevantLines.slice(-200).join("\n")}`);
+        }
+      }
+    }
+  }
+  return logs.join("");
+}
+
 async function main(): Promise<void> {
   const extensionRoot = path.resolve(__dirname, "..");
   const repositoryRoot = path.resolve(extensionRoot, "..");
@@ -91,6 +121,9 @@ async function main(): Promise<void> {
         "--skip-release-notes",
       ],
     });
+  } catch (error) {
+    console.error(diagnosticLogs(userDataDir));
+    throw error;
   } finally {
     fs.rmSync(profileRoot, { recursive: true, force: true });
   }

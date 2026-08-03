@@ -3,6 +3,7 @@
 The Stasis extension keeps the editor on the same compiler and runtime contracts as the command-line toolchain. It provides:
 
 - Stasis syntax highlighting and editor indentation;
+- continuous compiler diagnostics through a standard Language Server Protocol client;
 - canonical document formatting through `stasis format --stdin`;
 - compiler-backed project completion, with richer local/member completion while a play session is active;
 - a graphical hot-swap play session using the manifest entry;
@@ -67,4 +68,7 @@ It requires a built `stasis` executable and graphics runtime. Set
 `STASIS_E2E_EXECUTABLE` and `STASIS_RUNTIME_LIBRARY_PATH` when they are not in their standard
 development locations. Linux runs need a display such as `xvfb-run`; GitHub CI supplies one.
 
-The extension is intentionally a thin CLI client. Language or runtime semantics belong in Stasis, where the terminal UI, editor, tests, and packaged games can share them.
+The extension starts one persistent `stasis lsp --stdio` server per Stasis workspace. Language and
+runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
+share them. Formatting and completion still use their migration adapters until their shared LSP
+operations land in the next slices.

@@ -93,6 +93,136 @@ fn json_stderr(output: &Output) -> Value {
     serde_json::from_slice(&output.stderr).expect("single JSON stderr object")
 }
 
+fn lsp_frame(message: Value) -> String {
+    let body = message.to_string();
+    format!("Content-Length: {}\r\n\r\n{body}", body.len())
+}
+
+fn lsp_messages(bytes: &[u8]) -> Vec<Value> {
+    let mut remaining = bytes;
+    let mut messages = Vec::new();
+    while !remaining.is_empty() {
+        let header_end = remaining
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("LSP header terminator");
+        let header = std::str::from_utf8(&remaining[..header_end]).expect("LSP header UTF-8");
+        let length = header
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .expect("Content-Length header")
+            .parse::<usize>()
+            .expect("Content-Length value");
+        let body_start = header_end + 4;
+        let body_end = body_start + length;
+        messages.push(
+            serde_json::from_slice(&remaining[body_start..body_end]).expect("LSP JSON message"),
+        );
+        remaining = &remaining[body_end..];
+    }
+    messages
+}
+
+fn file_uri(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+#[test]
+fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
+    let project = temp_dir("lsp_diagnostics");
+    fs::create_dir_all(project.join("src")).expect("create LSP fixture");
+    fs::write(
+        project.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"lsp_fixture","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("write LSP manifest");
+    let source_path = project.join("src/main.stasis");
+    fs::write(&source_path, "function main(): i32 { return 0; }\n").expect("write LSP source");
+    let uri = file_uri(&source_path);
+    let input = [
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri.clone(),
+                    "languageId": "stasis",
+                    "version": 1,
+                    "text": "function main(): i32 { return 0; }\nfunction broken(): i32 { while (true) { return 1; } }\n"
+                }
+            }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{
+                    "text": "function main(): i32 { return 0; }\nfunction fixed(): i32 { return 1; }\n"
+                }]
+            }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "shutdown",
+            "params": null
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": null
+        })),
+    ]
+    .concat();
+
+    let output = stasis_with_stdin(&["lsp", "--stdio"], &project, &input);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages = lsp_messages(&output.stdout);
+    assert_eq!(messages[0]["id"], 1);
+    assert_eq!(
+        messages[0]["result"]["capabilities"]["positionEncoding"],
+        "utf-16"
+    );
+    let diagnostics = messages
+        .iter()
+        .filter(|message| message["method"] == "textDocument/publishDiagnostics")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0]["params"]["version"], 1);
+    assert_eq!(diagnostics[0]["params"]["diagnostics"][0]["severity"], 1);
+    assert!(diagnostics[0]["params"]["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("while"));
+    assert_eq!(diagnostics[1]["params"]["version"], 2);
+    assert_eq!(diagnostics[1]["params"]["diagnostics"], json!([]));
+    assert_eq!(messages.last().unwrap()["id"], 2);
+    fs::remove_dir_all(project).ok();
+}
+
 #[test]
 fn project_commands_emit_stable_json_from_nested_directories() {
     let parent = temp_dir("success");

@@ -116,6 +116,7 @@ const COMMANDS: &[&str] = &[
     "ai",
     "validate",
     "run",
+    "lsp",
     "tui",
     "build",
     "package",
@@ -230,6 +231,12 @@ enum ToolchainCommand {
         /// Explicitly select the headless runtime (currently the default).
         #[arg(long)]
         headless: bool,
+    },
+    /// Run the persistent Stasis language server.
+    Lsp {
+        /// Communicate with the editor over standard input and output.
+        #[arg(long)]
+        stdio: bool,
     },
     /// Run one graphical entry with hot swap and the live-workspace TUI.
     Tui {
@@ -719,6 +726,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Validate { .. } => "validate",
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
+        ToolchainCommand::Lsp { .. } => "lsp",
         ToolchainCommand::Tui { .. } => "tui",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
@@ -837,6 +845,15 @@ fn execute(
                         run_workspace_watch(&workspace)
                     } else {
                         run_workspace(&workspace, headless)
+                    }
+                }
+                ToolchainCommand::Lsp { stdio } => {
+                    if json_output {
+                        Err("--json cannot be combined with lsp; LSP owns stdout".to_string())
+                    } else {
+                        let _ = stdio;
+                        stasis_lsp::run_stdio(&workspace.root)?;
+                        Ok(CommandResult::success(String::new(), json!({})))
                     }
                 }
                 ToolchainCommand::Tui {

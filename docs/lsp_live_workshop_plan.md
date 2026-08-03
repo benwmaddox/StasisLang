@@ -162,13 +162,13 @@ Each slice is independently testable and removes the host-specific path it repla
 
 ### Slice 1: persistent diagnostics vertical
 
-1. Add `stasis_language_service` with versioned document overlays and structured diagnostics.
-2. Add `stasis lsp --stdio` with initialize/shutdown, incremental synchronization, cancellation,
+- [x] Add `stasis_language_service` with versioned document overlays and structured diagnostics.
+- [x] Add `stasis lsp --stdio` with initialize/shutdown, incremental synchronization, cancellation,
    and diagnostic publication.
-3. Convert the VSIX to `vscode-languageclient` and display diagnostics through the standard client.
-4. Add protocol tests, overlay revision tests, UTF-8/UTF-16 range tests, malformed-file tests, and
+- [x] Convert the VSIX to `vscode-languageclient` and display diagnostics through the standard client.
+- [x] Add protocol tests, overlay revision tests, UTF-8/UTF-16 range tests, malformed-file tests, and
    a VSIX end-to-end test that observes a Problems entry and its removal after a fix.
-5. Run a representative `.stasis` program through compiler-to-Cranelift executable verification so
+- [x] Run a representative `.stasis` program through compiler-to-Cranelift executable verification so
    the diagnostic path is proven to share the real compiler pipeline.
 
 ### Slice 2: shared completion, hover, and signature help
@@ -255,3 +255,19 @@ without consulting the runner.
   share one revisioned snapshot or cancellation model.
 - Adjustment: extract transport-independent snapshot operations first, and delete each host-local
   analysis path as soon as its service-backed replacement passes end-to-end verification.
+
+### Persistent diagnostics implementation
+
+- Good: the executable transcript and packaged VSIX test proved that dirty UTF-16 editor changes
+  reach the real compiler and that repaired buffers clear standard diagnostics without disturbing
+  the existing live Workshop path.
+- Bad: Windows file URIs and workspace roots arrived with different drive-letter casing, which the
+  compiler correctly treated as distinct case-sensitive source identities.
+- Adjustment: canonicalize real filesystem paths at the LSP transport boundary and keep canonical
+  compiler identity independent of editor URI normalization.
+
+Theory gained: editor paths are transport identifiers, while compiler paths are semantic identity.
+The packaged test exposed the distinction through Windows drive normalization, and canonicalizing
+only at the LSP boundary restored one stable source identity. This predicts that every future LSP
+workspace edit and navigation location must pass through the same boundary conversion rather than
+constructing compiler paths from URI strings directly.

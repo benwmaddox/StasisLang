@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import {
+  LanguageClient,
+  LanguageClientOptions,
+  ServerOptions,
+  Trace,
+} from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
 import {
   byteOffsetToStringOffset,
@@ -405,6 +411,120 @@ class LiveController implements vscode.Disposable {
   }
 }
 
+class StasisLanguageClients implements vscode.Disposable {
+  private readonly clients = new Map<string, LanguageClient>();
+  private readonly subscriptions: vscode.Disposable[];
+
+  constructor(private readonly output: vscode.LogOutputChannel) {
+    this.subscriptions = [
+      vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+        for (const folder of event.removed) {
+          void this.stopFolder(folder);
+        }
+        for (const folder of event.added) {
+          if (fs.existsSync(path.join(folder.uri.fsPath, "stasis.json"))) {
+            void this.startFolder(folder);
+          }
+        }
+      }),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration("stasis.executablePath")) {
+          void this.restart();
+        }
+      }),
+    ];
+  }
+
+  async start(): Promise<void> {
+    const folders = (vscode.workspace.workspaceFolders ?? []).filter((folder) =>
+      fs.existsSync(path.join(folder.uri.fsPath, "stasis.json")),
+    );
+    await Promise.all(folders.map((folder) => this.startFolder(folder)));
+  }
+
+  dispose(): void {
+    for (const subscription of this.subscriptions) {
+      subscription.dispose();
+    }
+    for (const client of this.clients.values()) {
+      void client.stop();
+    }
+    this.clients.clear();
+  }
+
+  private async restart(): Promise<void> {
+    const clients = [...this.clients.values()];
+    this.clients.clear();
+    await Promise.all(clients.map((client) => client.stop()));
+    await this.start();
+  }
+
+  private async startFolder(folder: vscode.WorkspaceFolder): Promise<void> {
+    const root = folder.uri.fsPath;
+    if (this.clients.has(root)) {
+      return;
+    }
+    const serverOptions: ServerOptions = {
+      command: executablePath(),
+      args: ["--workspace", root, "lsp", "--stdio"],
+      options: {
+        cwd: root,
+      },
+    };
+    const clientOptions: LanguageClientOptions = {
+      documentSelector: [
+        {
+          language: "stasis",
+          scheme: "file",
+        },
+      ],
+      workspaceFolder: folder,
+      outputChannel: this.output,
+      traceOutputChannel: this.output,
+      middleware: {
+        didOpen: (document, next) => {
+          const owned = vscode.workspace.getWorkspaceFolder(document.uri)?.index === folder.index;
+          this.output.info(`LSP didOpen ${document.uri.toString()} owned=${owned}`);
+          return owned ? next(document) : Promise.resolve();
+        },
+        didChange: (event, next) => {
+          const owned = vscode.workspace.getWorkspaceFolder(event.document.uri)?.index === folder.index;
+          this.output.info(`LSP didChange ${event.document.uri.toString()} owned=${owned}`);
+          return owned ? next(event) : Promise.resolve();
+        },
+        didClose: (document, next) =>
+          vscode.workspace.getWorkspaceFolder(document.uri)?.index === folder.index
+            ? next(document)
+            : Promise.resolve(),
+      },
+    };
+    const client = new LanguageClient(
+      `stasis-${folder.index}`,
+      `Stasis (${folder.name})`,
+      serverOptions,
+      clientOptions,
+    );
+    this.clients.set(root, client);
+    try {
+      await client.start();
+      await client.setTrace(Trace.Verbose);
+      this.output.appendLine(`Language server ready: ${root}`);
+    } catch (error) {
+      this.clients.delete(root);
+      throw error;
+    }
+  }
+
+  private async stopFolder(folder: vscode.WorkspaceFolder): Promise<void> {
+    const client = this.clients.get(folder.uri.fsPath);
+    if (!client) {
+      return;
+    }
+    this.clients.delete(folder.uri.fsPath);
+    await client.stop();
+  }
+}
+
 async function askForPath(prompt: string): Promise<string | undefined> {
   return vscode.window.showInputBox({
     prompt,
@@ -421,8 +541,9 @@ async function showCommandError(action: () => Promise<void>): Promise<void> {
   }
 }
 
-export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
-  const output = vscode.window.createOutputChannel("Stasis");
+export async function activate(context: vscode.ExtensionContext): Promise<StasisExtensionApi> {
+  const output = vscode.window.createOutputChannel("Stasis", { log: true });
+  const languageClients = new StasisLanguageClients(output);
   const values = new LiveValuesProvider();
   const controller = new LiveController(values, output);
   const command = (name: string, action: (...args: unknown[]) => Promise<void>) =>
@@ -430,6 +551,7 @@ export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
 
   context.subscriptions.push(
     output,
+    languageClients,
     controller,
     vscode.window.registerTreeDataProvider("stasis.liveValues", values),
     vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_SELECTOR, new StasisFormatter()),
@@ -471,6 +593,8 @@ export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
     command("stasis.refreshLiveValues", async () => controller.requireSession().refresh()),
     command("stasis.showOutput", async () => output.show(true)),
   );
+
+  await languageClients.start();
 
   return {
     state: () => controller.state,
