@@ -12,9 +12,9 @@ use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, organize_workshop_imports, plan_workshop_rename,
     prepare_workshop_rename, workshop_completion_items, workshop_reachable_files,
-    workshop_source_items, workshop_symbols, WorkshopCompletionItem, WorkshopCompletionScope,
-    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol,
-    WorkshopSymbolKind,
+    workshop_semantic_tokens, workshop_source_items, workshop_symbols, WorkshopCompletionItem,
+    WorkshopCompletionScope, WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind,
+    WorkshopSymbol, WorkshopSymbolKind,
 };
 pub use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
@@ -556,6 +556,12 @@ pub struct LanguageCodeAction {
     pub edits: Vec<RenameEdit>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageSemanticToken {
+    pub range: Range<usize>,
+    pub kind: String,
+}
+
 struct LanguageIndex {
     revision: WorkspaceRevision,
     files: Vec<WorkshopSourceFile>,
@@ -1086,6 +1092,31 @@ impl LanguageService {
         }])
     }
 
+    pub fn semantic_tokens(&mut self, path: &str) -> Result<Vec<LanguageSemanticToken>, String> {
+        let snapshot = self.documents.snapshot();
+        let current = snapshot
+            .document(path)
+            .ok_or_else(|| format!("semantic-token document is not indexed: '{path}'"))?
+            .text
+            .clone();
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let index = self.language_index()?;
+        let indexed = index
+            .files
+            .iter()
+            .find(|file| file.path == relative)
+            .ok_or_else(|| format!("semantic-token file is not indexed: '{relative}'"))?;
+        let tokens = workshop_semantic_tokens(&index.files, &relative)?;
+        Ok(remap_semantic_tokens(
+            &indexed.source,
+            &current,
+            tokens.into_iter().map(|token| LanguageSemanticToken {
+                range: token.source_span.start as usize..token.source_span.end as usize,
+                kind: token.kind,
+            }),
+        ))
+    }
+
     fn symbol_references(
         &mut self,
         path: &str,
@@ -1225,6 +1256,55 @@ impl LanguageService {
             .cloned()
             .unwrap_or_else(|| compiler_path.to_string())
     }
+}
+
+fn remap_semantic_tokens(
+    indexed: &str,
+    current: &str,
+    tokens: impl IntoIterator<Item = LanguageSemanticToken>,
+) -> Vec<LanguageSemanticToken> {
+    if indexed == current {
+        return tokens.into_iter().collect();
+    }
+    let mut prefix = indexed
+        .bytes()
+        .zip(current.bytes())
+        .take_while(|(left, right)| left == right)
+        .count();
+    while !indexed.is_char_boundary(prefix) || !current.is_char_boundary(prefix) {
+        prefix = prefix.saturating_sub(1);
+    }
+    let maximum_suffix = indexed.len().min(current.len()).saturating_sub(prefix);
+    let mut suffix = indexed
+        .as_bytes()
+        .iter()
+        .rev()
+        .zip(current.as_bytes().iter().rev())
+        .take(maximum_suffix)
+        .take_while(|(left, right)| left == right)
+        .count();
+    while !indexed.is_char_boundary(indexed.len() - suffix)
+        || !current.is_char_boundary(current.len() - suffix)
+    {
+        suffix = suffix.saturating_sub(1);
+    }
+    let indexed_suffix_start = indexed.len() - suffix;
+    let shift = current.len() as isize - indexed.len() as isize;
+    tokens
+        .into_iter()
+        .filter_map(|mut token| {
+            let indexed_range = token.range.clone();
+            if token.range.end <= prefix {
+                // The prefix has identical byte positions.
+            } else if token.range.start >= indexed_suffix_start {
+                token.range = token.range.start.checked_add_signed(shift)?
+                    ..token.range.end.checked_add_signed(shift)?;
+            } else {
+                return None;
+            }
+            (indexed.get(indexed_range) == current.get(token.range.clone())).then_some(token)
+        })
+        .collect()
 }
 
 fn shared_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
@@ -2127,6 +2207,31 @@ function main(): i32 {
     }
 
     #[test]
+    fn semantic_tokens_recover_only_unchanged_regions_of_broken_source() {
+        let (mut service, path, source) = intelligence_service();
+        let warm = service
+            .semantic_tokens(&path)
+            .expect("warm semantic tokens");
+        assert!(warm.iter().any(|token| token.kind == "function"));
+        assert!(warm.iter().any(|token| token.kind == "field"));
+
+        let broken = source.replace("foe.hp = 3;", "foe.");
+        service.open_document(path.clone(), 1, broken.clone());
+        let recovered = service
+            .semantic_tokens(&path)
+            .expect("recovered semantic tokens");
+        assert!(recovered
+            .iter()
+            .all(|token| broken.get(token.range.clone()).is_some()));
+        assert!(recovered.iter().any(|token| {
+            token.kind == "function" && broken.get(token.range.clone()) == Some("spawn_enemy")
+        }));
+        assert!(recovered.iter().any(|token| {
+            token.kind == "field" && broken.get(token.range.clone()) == Some("hp")
+        }));
+    }
+
+    #[test]
     fn incomplete_call_keeps_global_receiver_field_completion() {
         let root = std::env::temp_dir().join("stasis-language-service-recovery-completion");
         let path = root.join("src/main.stasis");
@@ -2464,10 +2569,14 @@ function main(): i32 {
         service
             .signature_help(&path, signature_offset)
             .expect("warm signature");
+        service
+            .semantic_tokens(&path)
+            .expect("warm semantic tokens");
 
         let mut completion_micros = Vec::new();
         let mut hover_micros = Vec::new();
         let mut signature_micros = Vec::new();
+        let mut semantic_token_micros = Vec::new();
         for _ in 0..50 {
             let started = Instant::now();
             service
@@ -2484,19 +2593,29 @@ function main(): i32 {
                 .signature_help(&path, signature_offset)
                 .expect("signature");
             signature_micros.push(started.elapsed().as_micros());
+
+            let started = Instant::now();
+            service.semantic_tokens(&path).expect("semantic tokens");
+            semantic_token_micros.push(started.elapsed().as_micros());
         }
         completion_micros.sort_unstable();
         hover_micros.sort_unstable();
         signature_micros.sort_unstable();
+        semantic_token_micros.sort_unstable();
         let p95 = |samples: &[u128]| samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
         let completion_p95 = p95(&completion_micros);
         let hover_p95 = p95(&hover_micros);
         let signature_p95 = p95(&signature_micros);
+        let semantic_token_p95 = p95(&semantic_token_micros);
         eprintln!(
-            "warm p95: completion={completion_p95}us hover={hover_p95}us signature={signature_p95}us"
+            "warm p95: completion={completion_p95}us hover={hover_p95}us signature={signature_p95}us semantic_tokens={semantic_token_p95}us"
         );
         assert!(completion_p95 < 20_000, "completion p95 {completion_p95}us");
         assert!(hover_p95 < 30_000, "hover p95 {hover_p95}us");
         assert!(signature_p95 < 30_000, "signature p95 {signature_p95}us");
+        assert!(
+            semantic_token_p95 < 30_000,
+            "semantic tokens p95 {semantic_token_p95}us"
+        );
     }
 }

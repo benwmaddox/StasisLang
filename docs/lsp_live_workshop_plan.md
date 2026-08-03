@@ -235,7 +235,10 @@ Each slice is independently testable and removes the host-specific path it repla
   prunes unused modules; expose the same no-write preview through the TUI.
 - [ ] Add structured compiler diagnostic quick fixes and safe refactor actions without matching
   human diagnostic strings or introducing a second parser.
-- [ ] Add semantic tokens and inlay hints from compiler-owned identities and inferred types.
+- [x] Add semantic tokens from compiler-owned identities, including globals, fields, parameters,
+  locals, types, functions, methods, enums, and constants. During broken edits, publish only tokens
+  whose source spans remain byte-identical in unchanged last-good regions.
+- [ ] Add inlay hints from compiler-owned inferred types and call signatures.
 - [ ] Add completion resolve/detail, expected-type refinements, and remaining import insertion.
 - [ ] Add call hierarchy and type hierarchy from compiler-owned graphs and symbol IDs.
 
@@ -431,3 +434,19 @@ not a diagnostic-message heuristic. The compiler and language-service tests prov
 organization can repair duplicate/unused imports while broken unrelated source yields no action.
 This predicts that quick fixes should originate as structured compiler diagnostics with explicit
 edit plans instead of matching rendered error text.
+
+### Compiler-bound semantic highlighting implementation
+
+- Good: the validated-rename binding resolver already distinguished structs, functions, globals,
+  fields, parameters, and shadowed locals, so semantic highlighting gained exact ownership without
+  another parser or editor-side classifier.
+- Bad: a last-good semantic index contains correct identities but obsolete byte offsets inside the
+  active edit, so publishing the whole stale token stream would visibly miscolor unrelated text.
+- Adjustment: retain last-good read-only intelligence, but remap only the byte-identical prefix and
+  suffix around a broken edit and discard every token that intersects the changed region.
+
+Theory gained: a stale semantic identity can remain valid while its source coordinate is invalid.
+The incomplete-function recovery test proves that exact unchanged regions can safely retain
+compiler-aware coloring while the edited region falls back to lexical highlighting. This predicts
+that inlay hints and hierarchy selection ranges can use the same unchanged-region recovery rule,
+while edit-producing actions must still require a current compiler snapshot.

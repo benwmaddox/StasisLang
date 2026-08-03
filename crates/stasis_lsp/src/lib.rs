@@ -16,8 +16,8 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
-    PrepareRenameRequest, References, Rename, Request as _, SignatureHelpRequest,
-    WorkspaceSymbolRequest,
+    PrepareRenameRequest, References, Rename, Request as _, SemanticTokensFullRequest,
+    SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
@@ -30,11 +30,13 @@ use lsp_types::{
     MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
     ParameterInformation, ParameterLabel, PositionEncodingKind, PrepareRenameResponse,
     PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams, SaveOptions,
-    ServerCapabilities, ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation,
-    SymbolKind, TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, ServerCapabilities, ServerInfo, SignatureHelpOptions,
+    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+    TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -125,6 +127,15 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
                 resolve_provider: Some(false),
                 work_done_progress_options: Default::default(),
             })),
+            semantic_tokens_provider: Some(
+                SemanticTokensOptions {
+                    work_done_progress_options: Default::default(),
+                    legend: semantic_tokens_legend(),
+                    range: Some(false),
+                    full: Some(SemanticTokensFullOptions::Bool(true)),
+                }
+                .into(),
+            ),
             ..ServerCapabilities::default()
         },
         server_info: Some(ServerInfo {
@@ -309,6 +320,15 @@ impl LanguageServer {
                     .extract(CodeActionRequest::METHOD)
                     .map_err(|error| format!("invalid code-action request: {error}"))?;
                 match self.code_actions(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            SemanticTokensFullRequest::METHOD => {
+                let (id, params): (_, SemanticTokensParams) = request
+                    .extract(SemanticTokensFullRequest::METHOD)
+                    .map_err(|error| format!("invalid semantic-tokens request: {error}"))?;
+                match self.semantic_tokens(params) {
                     Ok(result) => Response::new_ok(id, result),
                     Err(error) => internal_error(id, error),
                 }
@@ -645,6 +665,55 @@ impl LanguageServer {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok((!actions.is_empty()).then_some(actions))
+    }
+
+    fn semantic_tokens(
+        &mut self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>, String> {
+        let path = path_text(&uri_path(&params.text_document.uri)?);
+        let document = self
+            .service
+            .snapshot()
+            .document(&path)
+            .cloned()
+            .ok_or_else(|| format!("semantic-token document is not indexed: '{path}'"))?;
+        let mut tokens = self.service.semantic_tokens(&path)?;
+        tokens.sort_by_key(|token| (token.range.start, token.range.end));
+        let mut previous_line = 0u32;
+        let mut previous_start = 0u32;
+        let mut data = Vec::with_capacity(tokens.len());
+        for token in tokens {
+            let start = document
+                .position(token.range.start)
+                .map_err(|error| error.to_string())?;
+            let end = document
+                .position(token.range.end)
+                .map_err(|error| error.to_string())?;
+            if start.line != end.line {
+                continue;
+            }
+            let (token_type, token_modifiers_bitset) = semantic_token_style(&token.kind);
+            let delta_line = start.line - previous_line;
+            let delta_start = if delta_line == 0 {
+                start.utf16_character - previous_start
+            } else {
+                start.utf16_character
+            };
+            data.push(SemanticToken {
+                delta_line,
+                delta_start,
+                length: end.utf16_character - start.utf16_character,
+                token_type,
+                token_modifiers_bitset,
+            });
+            previous_line = start.line;
+            previous_start = start.utf16_character;
+        }
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
     }
 
     fn workspace_edit(
@@ -1018,6 +1087,42 @@ fn lsp_position(position: Position) -> lsp_types::Position {
     lsp_types::Position::new(position.line, position.utf16_character)
 }
 
+fn semantic_tokens_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![
+            SemanticTokenType::STRUCT,
+            SemanticTokenType::ENUM,
+            SemanticTokenType::ENUM_MEMBER,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::METHOD,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::PROPERTY,
+            SemanticTokenType::PARAMETER,
+            SemanticTokenType::TYPE,
+        ],
+        token_modifiers: vec![
+            SemanticTokenModifier::READONLY,
+            SemanticTokenModifier::STATIC,
+        ],
+    }
+}
+
+fn semantic_token_style(kind: &str) -> (u32, u32) {
+    match kind {
+        "struct" => (0, 0),
+        "enum" => (1, 0),
+        "enum_variant" => (2, 1),
+        "function" | "test" => (3, 0),
+        "method" => (4, 0),
+        "global" => (5, 1 << 1),
+        "constant" => (5, (1 << 0) | (1 << 1)),
+        "local" => (5, 0),
+        "field" | "state_path" => (6, 0),
+        "parameter" => (7, 0),
+        _ => (8, 0),
+    }
+}
+
 fn absolute_path(path: &Path) -> Result<PathBuf, String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -1237,6 +1342,47 @@ mod tests {
             OneOf::Left(edit)
                 if edit.new_text == "import \"helper.stasis\";\nfunction main(): i32 { return helper(); }\n"
         ));
+    }
+
+    #[test]
+    fn standard_semantic_tokens_distinguish_compiler_bound_symbols() {
+        let (mut server, uri, main_path) = test_server("semantic-tokens");
+        let (server_connection, client_connection) = Connection::memory();
+        server.service.set_disk_document(
+            &main_path,
+            "struct State { x: i32; }\nglobal state: State;\nfunction read(value: State): i32 { let local: State = value; state.x = local.x; return state.x; }\nfunction main(): i32 { return read(state); }\n",
+        );
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(93),
+                    SemanticTokensFullRequest::METHOD.to_string(),
+                    serde_json::json!({"textDocument": {"uri": uri}}),
+                ),
+            )
+            .expect("semantic-token request");
+        let response: Option<SemanticTokensResult> = serde_json::from_value(
+            receive_response(&client_connection, 93)
+                .response_result
+                .expect("semantic-token result"),
+        )
+        .expect("semantic-token response");
+        let SemanticTokensResult::Tokens(tokens) = response.expect("semantic tokens") else {
+            panic!("expected full semantic tokens");
+        };
+        assert!(tokens.data.iter().any(|token| token.token_type == 0));
+        assert!(tokens.data.iter().any(|token| token.token_type == 3));
+        assert!(tokens
+            .data
+            .iter()
+            .any(|token| token.token_type == 5 && token.token_modifiers_bitset == 0));
+        assert!(tokens
+            .data
+            .iter()
+            .any(|token| token.token_type == 5 && token.token_modifiers_bitset == 1 << 1));
+        assert!(tokens.data.iter().any(|token| token.token_type == 6));
+        assert!(tokens.data.iter().any(|token| token.token_type == 7));
     }
 
     #[test]

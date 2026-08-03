@@ -1014,6 +1014,13 @@ pub struct WorkshopCompletionScope {
     pub visible_to: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopSemanticToken {
+    pub text: String,
+    pub kind: String,
+    pub source_span: WorkshopSourceSpan,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkshopSemanticEditOperation {
@@ -1393,6 +1400,10 @@ fn rename_symbol_at(source: &str, byte_offset: usize) -> Result<(Token, String),
                 && byte_offset <= token.end
         })
         .ok_or_else(|| "no renameable Stasis identifier at position".to_string())?;
+    Ok((token, semantic_path_for_token(source, token)?))
+}
+
+fn semantic_path_for_token(source: &str, token: Token) -> Result<String, String> {
     let line_start = source[..token.start]
         .rfind('\n')
         .map_or(0, |index| index + 1);
@@ -1429,7 +1440,45 @@ fn rename_symbol_at(source: &str, byte_offset: usize) -> Result<(Token, String),
     {
         return Err("rename target is not a semantic identifier path".to_string());
     }
-    Ok((token, path))
+    Ok(path)
+}
+
+pub fn workshop_semantic_tokens(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+) -> Result<Vec<WorkshopSemanticToken>, String> {
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("semantic-token file is not indexed: {request_file}"))?;
+    let catalog = workshop_completion_items(files)?;
+    let tokens = lex(&file.source)?;
+    let mut semantic_tokens = Vec::new();
+    for token in tokens
+        .into_iter()
+        .filter(|token| token.kind == TokenKind::Identifier)
+    {
+        let Ok(semantic_path) = semantic_path_for_token(&file.source, token) else {
+            continue;
+        };
+        let Ok(target) =
+            resolve_workshop_rename_target(files, &catalog, file, token, &semantic_path)
+        else {
+            continue;
+        };
+        semantic_tokens.push(WorkshopSemanticToken {
+            text: token_text(&file.source, token).to_string(),
+            kind: target.kind,
+            source_span: WorkshopSourceSpan {
+                start: u32::try_from(token.start)
+                    .map_err(|_| "semantic token start exceeds u32".to_string())?,
+                end: u32::try_from(token.end)
+                    .map_err(|_| "semantic token end exceeds u32".to_string())?,
+            },
+        });
+    }
+    Ok(semantic_tokens)
 }
 
 fn resolve_workshop_rename_target(
@@ -4821,6 +4870,29 @@ mod workshop_contract_tests {
             }],
             source,
         )
+    }
+
+    #[test]
+    fn semantic_tokens_use_compiler_bindings_for_state_fields_and_scopes() {
+        let (files, source) = rename_fixture();
+        let tokens = workshop_semantic_tokens(&files, "src/main.stasis").expect("semantic tokens");
+        let token_at = |needle: &str, within: usize| {
+            let offset = source.find(needle).expect("semantic token use") + within;
+            tokens
+                .iter()
+                .find(|token| {
+                    token.source_span.start as usize <= offset
+                        && offset <= token.source_span.end as usize
+                })
+                .unwrap_or_else(|| panic!("missing semantic token for {needle}"))
+        };
+        assert_eq!(token_at("global state", 8).kind, "global");
+        assert_eq!(token_at("state.x", 1).kind, "global");
+        assert_eq!(token_at("state.x", 7).kind, "field");
+        assert_eq!(token_at("amount; state", 2).kind, "parameter");
+        assert_eq!(token_at("value + amount", 2).kind, "local");
+        assert_eq!(token_at("helper(3)", 2).kind, "function");
+        assert_eq!(token_at("State;", 2).kind, "struct");
     }
 
     #[test]
