@@ -11,7 +11,9 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
     WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
-use stasis_language_service::{LanguageCompletionSnapshot, LanguageNavigationSnapshot};
+use stasis_language_service::{
+    LanguageCompletionSnapshot, LanguageNavigationSnapshot, LanguageService,
+};
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
     CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
@@ -591,6 +593,11 @@ impl LiveWorkspace {
                         .references(&symbol, limit)?,
                 }),
             )),
+            LiveCommand::RenamePreview {
+                file,
+                offset,
+                new_name,
+            } => self.rename_preview(&file, offset, &new_name),
             LiveCommand::Validate {
                 requirement,
                 frames,
@@ -834,6 +841,51 @@ impl LiveWorkspace {
             Ok((kind, data)) => LiveResponse::success(request_id, tick, kind, data),
             Err(error) => LiveResponse::failure(request_id, tick, error),
         }
+    }
+
+    fn rename_preview(
+        &self,
+        file: &str,
+        offset: usize,
+        new_name: &str,
+    ) -> Result<(&'static str, Value), String> {
+        let root = self.config.project_root.to_string_lossy().to_string();
+        let mut service = LanguageService::new(root)?;
+        for source_file in &self.source_files {
+            service.set_disk_document(
+                self.config
+                    .project_root
+                    .join(&source_file.path)
+                    .to_string_lossy(),
+                source_file.source.clone(),
+            );
+        }
+        let request_path = self.config.project_root.join(file);
+        let plan = service.rename(&request_path.to_string_lossy(), offset, new_name)?;
+        let edits = plan
+            .edits
+            .iter()
+            .map(|edit| {
+                json!({
+                    "file": edit.path,
+                    "start": edit.range.start,
+                    "end": edit.range.end,
+                    "new_text": edit.new_text,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok((
+            "rename_preview",
+            json!({
+                "validated": true,
+                "revision": plan.revision.get(),
+                "old_name": plan.old_name,
+                "new_name": plan.new_name,
+                "kind": plan.kind,
+                "owner": plan.owner,
+                "edits": edits,
+            }),
+        ))
     }
 
     fn load_files(&self) -> Result<Vec<WorkshopSourceFile>, String> {
@@ -2103,7 +2155,8 @@ fn help_data() -> Value {
             ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
             ":symbols [query] [--file PATH ... --kind KIND --owner OWNER --page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
-            ":references SYMBOL [--limit N]", ":validate PATH OP VALUE [--frames N]",
+            ":references SYMBOL [--limit N]", ":rename FILE OFFSET NEW_NAME",
+            ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
             ":ai PROMPT | :ai status | :ai cancel (interactive TUI; installed Codex subscription)",
             ":complete BUFFER", ":palette [QUERY]",
@@ -2133,6 +2186,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":find",
         ":read",
         ":references",
+        ":rename",
         ":validate",
         ":edit",
         ":ai",
@@ -2888,6 +2942,49 @@ mod tests {
         assert!(references
             .iter()
             .all(|reference| reference.get("source").is_none()));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rename_preview_is_compiler_validated_and_does_not_write_sources() {
+        let (root, config) = project();
+        let source_path = root.join("src/main.stasis");
+        let before = fs::read_to_string(&source_path).expect("source before preview");
+        let offset = before.find("score +=").expect("score use") + 2;
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                40,
+                LiveCommand::RenamePreview {
+                    file: "src/main.stasis".into(),
+                    offset,
+                    new_name: "points".into(),
+                },
+            ),
+        );
+
+        assert!(response.ok, "rename response: {response:?}");
+        let data = response.data.expect("rename preview data");
+        assert_eq!(data["validated"], true);
+        assert_eq!(data["old_name"], "score");
+        assert_eq!(data["new_name"], "points");
+        assert!(data["edits"]
+            .as_array()
+            .is_some_and(|edits| edits.len() == 3));
+        assert_eq!(
+            fs::read_to_string(&source_path).expect("source after preview"),
+            before
+        );
         fs::remove_dir_all(root).ok();
     }
 

@@ -10,10 +10,10 @@ use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, workshop_completion_items, workshop_reachable_files,
-    workshop_source_items, workshop_symbols, WorkshopCompletionItem, WorkshopCompletionScope,
-    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol,
-    WorkshopSymbolKind,
+    find_workshop_references, plan_workshop_rename, prepare_workshop_rename,
+    workshop_completion_items, workshop_reachable_files, workshop_source_items, workshop_symbols,
+    WorkshopCompletionItem, WorkshopCompletionScope, WorkshopSourceFile, WorkshopSourceItem,
+    WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
 };
 pub use stasis_compiler::frontend::workshop::{WorkshopReference, WorkshopReferenceKind};
 use stasis_compiler::identity::canonical_source_path;
@@ -404,6 +404,31 @@ pub struct LanguageSymbol {
     pub location: LanguageLocation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenamePreparation {
+    pub range: Range<usize>,
+    pub placeholder: String,
+    pub kind: String,
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameEdit {
+    pub path: String,
+    pub range: Range<usize>,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenamePlan {
+    pub revision: WorkspaceRevision,
+    pub old_name: String,
+    pub new_name: String,
+    pub kind: String,
+    pub owner: Option<String>,
+    pub edits: Vec<RenameEdit>,
+}
+
 struct LanguageIndex {
     revision: WorkspaceRevision,
     files: Vec<WorkshopSourceFile>,
@@ -487,6 +512,7 @@ pub struct LanguageService {
     compiler: Compiler,
     project_root: String,
     language_index: Option<LanguageIndex>,
+    language_index_error: Option<(WorkspaceRevision, String)>,
 }
 
 impl LanguageService {
@@ -499,6 +525,7 @@ impl LanguageService {
             compiler,
             project_root,
             language_index: None,
+            language_index_error: None,
         })
     }
 
@@ -778,6 +805,69 @@ impl LanguageService {
             .collect())
     }
 
+    pub fn prepare_rename(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+    ) -> Result<RenamePreparation, String> {
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let files = self.current_language_index()?.files.clone();
+        let prepared = prepare_workshop_rename(&files, &relative, byte_offset)?;
+        Ok(RenamePreparation {
+            range: prepared.request_span.start as usize..prepared.request_span.end as usize,
+            placeholder: prepared.name,
+            kind: prepared.kind,
+            owner: prepared.owner,
+        })
+    }
+
+    pub fn rename(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+        new_name: &str,
+    ) -> Result<RenamePlan, String> {
+        let snapshot = self.documents.snapshot();
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let files = self.current_language_index()?.files.clone();
+        let (after, plan) = plan_workshop_rename(&files, &relative, byte_offset, new_name)?;
+        let mut validator = Compiler::new();
+        validator.set_project_root(self.project_root.clone())?;
+        for file in &after {
+            validator.upsert_file(file.path.clone(), file.source.clone());
+        }
+        if let Err(error) = validator.check() {
+            let detail = validator
+                .last_source_diagnostic()
+                .map(|diagnostic| {
+                    format!(
+                        "{}:{}..{}: {}",
+                        diagnostic.path, diagnostic.start, diagnostic.end, diagnostic.message
+                    )
+                })
+                .unwrap_or_else(|| format!("{error:?}"));
+            return Err(format!("rename would not compile: {detail}"));
+        }
+        let mut edits = plan
+            .edits
+            .into_iter()
+            .map(|edit| RenameEdit {
+                path: absolute_source_path(&self.project_root, &edit.file),
+                range: edit.source_span.start as usize..edit.source_span.end as usize,
+                new_text: edit.new_text,
+            })
+            .collect::<Vec<_>>();
+        edits.sort_by_key(|edit| (edit.path.clone(), edit.range.start, edit.range.end));
+        Ok(RenamePlan {
+            revision: snapshot.revision(),
+            old_name: plan.old_name,
+            new_name: plan.new_name,
+            kind: plan.kind,
+            owner: plan.owner,
+            edits,
+        })
+    }
+
     fn symbol_references(
         &mut self,
         path: &str,
@@ -808,11 +898,16 @@ impl LanguageService {
 
     fn language_index(&mut self) -> Result<&LanguageIndex, String> {
         let snapshot = self.documents.snapshot();
-        if self
+        let revision = snapshot.revision();
+        let needs_rebuild = self
             .language_index
             .as_ref()
-            .is_none_or(|index| index.revision != snapshot.revision())
-        {
+            .is_none_or(|index| index.revision != revision)
+            && self
+                .language_index_error
+                .as_ref()
+                .is_none_or(|(failed_revision, _)| *failed_revision != revision);
+        if needs_rebuild {
             let files = snapshot
                 .documents()
                 .map(|(path, document)| {
@@ -822,27 +917,52 @@ impl LanguageService {
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            let source_items = workshop_source_items(&files)?;
-            let symbols = workshop_symbols(&files)?;
-            let workshop_items = workshop_completion_items(&files)?;
-            let completion_items = workshop_items
-                .iter()
-                .map(shared_completion_item)
-                .collect::<Vec<_>>();
-            let mut completion = CompletionIndex::default();
-            completion.replace(completion_items.clone());
-            self.language_index = Some(LanguageIndex {
-                revision: snapshot.revision(),
-                files,
-                source_items,
-                completion,
-                workshop_items,
-                symbols,
-            });
+            let rebuilt = (|| {
+                let source_items = workshop_source_items(&files)?;
+                let symbols = workshop_symbols(&files)?;
+                let workshop_items = workshop_completion_items(&files)?;
+                let completion_items = workshop_items
+                    .iter()
+                    .map(shared_completion_item)
+                    .collect::<Vec<_>>();
+                let mut completion = CompletionIndex::default();
+                completion.replace(completion_items);
+                Ok::<_, String>(LanguageIndex {
+                    revision,
+                    files,
+                    source_items,
+                    completion,
+                    workshop_items,
+                    symbols,
+                })
+            })();
+            match rebuilt {
+                Ok(index) => {
+                    self.language_index = Some(index);
+                    self.language_index_error = None;
+                }
+                Err(error) => self.language_index_error = Some((revision, error)),
+            }
         }
-        self.language_index
+        if let Some(index) = self.language_index.as_ref() {
+            return Ok(index);
+        }
+        Err(self
+            .language_index_error
             .as_ref()
-            .ok_or_else(|| "language index was not published".to_string())
+            .map(|(_, error)| format!("language index is unavailable: {error}"))
+            .unwrap_or_else(|| "language index was not published".to_string()))
+    }
+
+    fn current_language_index(&mut self) -> Result<&LanguageIndex, String> {
+        let revision = self.documents.snapshot().revision();
+        let index = self.language_index()?;
+        if index.revision != revision {
+            return Err(
+                "rename is unavailable until the current source can be indexed safely".to_string(),
+            );
+        }
+        Ok(index)
     }
 
     fn query_context(
@@ -1729,6 +1849,63 @@ function main(): i32 {
     }
 
     #[test]
+    fn broken_dirty_source_uses_last_good_index_for_read_only_queries() {
+        let (mut service, path, source) = intelligence_service();
+        let call = source.find("spawn_enemy(1").expect("call") + 2;
+        assert_eq!(
+            service
+                .definition(&path, call)
+                .expect("warm definition")
+                .len(),
+            1
+        );
+
+        let broken = format!("{source}\nfunction unfinished(): i32 {{");
+        service.open_document(path.clone(), 1, broken);
+        let definitions = service
+            .definition(&path, call)
+            .expect("last-good definition during syntax error");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(&source[definitions[0].range.clone()], "spawn_enemy");
+        assert!(service
+            .completion(&path, call, 64)
+            .expect("last-good completion during syntax error")
+            .items
+            .iter()
+            .any(|item| item.text == "spawn_enemy"));
+        assert!(service.prepare_rename(&path, call).is_err());
+        assert_eq!(service.diagnostics().diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn incomplete_call_keeps_global_receiver_field_completion() {
+        let root = std::env::temp_dir().join("stasis-language-service-recovery-completion");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let good = "struct State { x: i32; }\nglobal state: State;\nfunction a(value: i32): i32 { return value; }\nfunction b(): i32 { return a(state.x); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), good);
+        let warm_cursor = good.find("state.x").expect("warm receiver") + "state.".len();
+        assert!(service
+            .completion(&path_text, warm_cursor, 64)
+            .expect("warm completion")
+            .items
+            .iter()
+            .any(|item| item.text == "state.x"));
+
+        for broken in [
+            "struct State { x: i32; }\nglobal state: State;\nfunction a(value: i32): i32 { return value; }\nfunction b(): i32 { a(state.",
+            "struct State { x: i32; }\nglobal state: State;\nfunction a(value: i32): i32 { return value; }\nfunction b(): i32 { a(state.\n}\n",
+        ] {
+            service.open_document(path_text.clone(), 1, broken);
+            let completion = service
+                .completion(&path_text, broken.find("state.").unwrap() + "state.".len(), 64)
+                .expect("recovered field completion");
+            assert!(completion.items.iter().any(|item| item.text == "state.x"));
+        }
+    }
+
+    #[test]
     fn completion_adds_import_for_unreachable_workspace_symbol() {
         let root = std::env::temp_dir().join("stasis-language-service-auto-import");
         let main_path = root.join("src/main.stasis");
@@ -1870,6 +2047,33 @@ function main(): i32 {
         assert_eq!(field.len(), 1);
         assert_eq!(&source[field[0].range.clone()], "x");
         assert_eq!(source[..field[0].range.start].matches('\n').count(), 0);
+    }
+
+    #[test]
+    fn rename_is_revisioned_and_compiler_validated() {
+        let (mut service, path, source) = intelligence_service();
+        let call = source.find("spawn_enemy(1").expect("call") + 2;
+        let prepared = service.prepare_rename(&path, call).expect("prepare rename");
+        assert_eq!(prepared.placeholder, "spawn_enemy");
+        assert_eq!(&source[prepared.range], "spawn_enemy");
+
+        let revision = service.snapshot().revision();
+        let plan = service
+            .rename(&path, call, "create_enemy")
+            .expect("validated rename");
+        assert_eq!(plan.revision, revision);
+        assert_eq!(plan.kind, "function");
+        assert_eq!(plan.edits.len(), 2);
+        assert!(plan.edits.iter().all(|edit| {
+            edit.path == path
+                && &source[edit.range.clone()] == "spawn_enemy"
+                && edit.new_text == "create_enemy"
+        }));
+
+        let collision = service
+            .rename(&path, call, "main")
+            .expect_err("rename collision");
+        assert!(collision.contains("collide"), "{collision}");
     }
 
     #[test]

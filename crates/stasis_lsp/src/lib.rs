@@ -10,21 +10,23 @@ use lsp_types::notification::{
     Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, References, Request as _,
-    SignatureHelpRequest, WorkspaceSymbolRequest,
+    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, PrepareRenameRequest,
+    References, Rename, Request as _, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CompletionItemKind, CompletionList, CompletionOptions, CompletionParams, CompletionResponse,
     CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, ParameterInformation,
-    ParameterLabel, PositionEncodingKind, PublishDiagnosticsParams, ReferenceParams, SaveOptions,
-    ServerCapabilities, ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation,
-    SymbolKind, TextDocumentContentChangeEvent, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentChanges, DocumentSymbol,
+    DocumentSymbolParams, DocumentSymbolResponse, Documentation, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InsertTextFormat, Location, MarkupContent, MarkupKind,
+    OneOf, OptionalVersionedTextDocumentIdentifier, ParameterInformation, ParameterLabel,
+    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, ReferenceParams,
+    RenameOptions, RenameParams, SaveOptions, ServerCapabilities, ServerInfo, SignatureHelpOptions,
+    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+    TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use stasis_language_service::{
     DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageLocation,
@@ -85,6 +87,10 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
             references_provider: Some(OneOf::Left(true)),
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
+            rename_provider: Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: Default::default(),
+            })),
             ..ServerCapabilities::default()
         },
         server_info: Some(ServerInfo {
@@ -211,6 +217,24 @@ impl LanguageServer {
                     .extract(WorkspaceSymbolRequest::METHOD)
                     .map_err(|error| format!("invalid workspace-symbol request: {error}"))?;
                 match self.workspace_symbols(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            PrepareRenameRequest::METHOD => {
+                let (id, params): (_, TextDocumentPositionParams) = request
+                    .extract(PrepareRenameRequest::METHOD)
+                    .map_err(|error| format!("invalid prepare-rename request: {error}"))?;
+                match self.prepare_rename(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            Rename::METHOD => {
+                let (id, params): (_, RenameParams) = request
+                    .extract(Rename::METHOD)
+                    .map_err(|error| format!("invalid rename request: {error}"))?;
+                match self.rename(params) {
                     Ok(result) => Response::new_ok(id, result),
                     Err(error) => internal_error(id, error),
                 }
@@ -415,6 +439,76 @@ impl LanguageServer {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok((!symbols.is_empty()).then_some(WorkspaceSymbolResponse::Flat(symbols)))
+    }
+
+    fn prepare_rename(
+        &mut self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>, String> {
+        let (path, document, byte_offset) = self.document_position(params)?;
+        let prepared = self.service.prepare_rename(&path, byte_offset)?;
+        let start = document
+            .position(prepared.range.start)
+            .map_err(|error| error.to_string())?;
+        let end = document
+            .position(prepared.range.end)
+            .map_err(|error| error.to_string())?;
+        Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+            range: lsp_types::Range::new(lsp_position(start), lsp_position(end)),
+            placeholder: prepared.placeholder,
+        }))
+    }
+
+    fn rename(&mut self, params: RenameParams) -> Result<Option<WorkspaceEdit>, String> {
+        let (path, _, byte_offset) = self.document_position(params.text_document_position)?;
+        let plan = self.service.rename(&path, byte_offset, &params.new_name)?;
+        let snapshot = self.service.snapshot();
+        let mut by_path = BTreeMap::<String, Vec<stasis_language_service::RenameEdit>>::new();
+        for edit in plan.edits {
+            by_path.entry(edit.path.clone()).or_default().push(edit);
+        }
+        let mut document_edits = Vec::new();
+        for (path, edits) in by_path {
+            let document = snapshot
+                .document(&path)
+                .ok_or_else(|| format!("rename target is not indexed: '{path}'"))?;
+            let uri = self
+                .uri_by_path
+                .get(&path)
+                .cloned()
+                .unwrap_or(path_uri(Path::new(&path))?);
+            let edits = edits
+                .into_iter()
+                .map(|edit| {
+                    let start = document
+                        .position(edit.range.start)
+                        .map_err(|error| error.to_string())?;
+                    let end = document
+                        .position(edit.range.end)
+                        .map_err(|error| error.to_string())?;
+                    Ok(OneOf::Left(TextEdit {
+                        range: lsp_types::Range::new(lsp_position(start), lsp_position(end)),
+                        new_text: edit.new_text,
+                    }))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            document_edits.push(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri,
+                    version: document
+                        .version
+                        .map(i32::try_from)
+                        .transpose()
+                        .map_err(|_| format!("document version is out of range for '{path}'"))?,
+                },
+                edits,
+            });
+        }
+        Ok(Some(WorkspaceEdit {
+            changes: None,
+            document_changes: Some(DocumentChanges::Edits(document_edits)),
+            change_annotations: None,
+        }))
     }
 
     fn lsp_location(&self, location: LanguageLocation) -> Result<Location, String> {
@@ -1188,6 +1282,64 @@ mod tests {
         };
         assert_eq!(workspace_symbols.len(), 1);
         assert_eq!(workspace_symbols[0].name, "spawn_enemy");
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(17),
+                    PrepareRenameRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": function_position
+                    }),
+                ),
+            )
+            .expect("prepare rename request");
+        let prepared: Option<PrepareRenameResponse> = serde_json::from_value(
+            receive_response(&client_connection, 17)
+                .response_result
+                .expect("prepare rename result"),
+        )
+        .expect("prepare rename response");
+        assert!(matches!(
+            prepared,
+            Some(PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. })
+                if placeholder == "spawn_enemy"
+        ));
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(18),
+                    Rename::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": function_position,
+                        "newName": "create_enemy"
+                    }),
+                ),
+            )
+            .expect("rename request");
+        let edit: Option<WorkspaceEdit> = serde_json::from_value(
+            receive_response(&client_connection, 18)
+                .response_result
+                .expect("rename result"),
+        )
+        .expect("rename response");
+        let Some(DocumentChanges::Edits(document_edits)) =
+            edit.expect("workspace edit").document_changes
+        else {
+            panic!("expected versioned document edits");
+        };
+        assert_eq!(document_edits.len(), 1);
+        assert_eq!(document_edits[0].text_document.version, Some(1));
+        assert_eq!(document_edits[0].edits.len(), 2);
+        assert!(document_edits[0]
+            .edits
+            .iter()
+            .all(|edit| { matches!(edit, OneOf::Left(edit) if edit.new_text == "create_enemy") }));
     }
 
     #[cfg(windows)]

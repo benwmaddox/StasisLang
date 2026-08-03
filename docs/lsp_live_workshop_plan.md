@@ -197,10 +197,17 @@ Each slice is independently testable and removes the host-specific path it repla
 
 ### Slice 4: compiler-validated rename
 
-Implement prepare-rename and rename preview for locals, parameters, fields, globals, functions,
-structs, and other supported types. Resolve identities semantically, produce versioned workspace
-edits, reject collisions or stale documents, and compile the complete proposed overlay before
-returning edits. The TUI shows the same preview; applying remains host-controlled and atomic.
+- [x] Implement prepare-rename and rename preview for locals, parameters, fields, globals,
+  functions, structs, and other supported types from compiler-owned identity and scope records.
+- [x] Produce versioned workspace edits, reject collisions or stale documents, and compile the
+  complete proposed overlay before returning edits.
+- [x] Expose standard LSP prepare-rename/rename and the same non-mutating validated preview in the
+  live TUI protocol.
+- [x] Preserve the last known good semantic index for read-only completion, hover, signature, and
+  navigation while the current dirty source is malformed. Current-source diagnostics continue,
+  but edit-producing refactors pause until the current revision indexes safely.
+- [x] Cover every supported rename identity, collisions, executable behavior, standard VS Code
+  rename, TUI no-write preview, and incomplete `a(state.` receiver completion.
 
 ### Slice 5: Live Workshop composition
 
@@ -317,3 +324,22 @@ grouped globals item is useful for transactional replacement, but navigation req
 identifier token plus its canonical symbol identity. The global receiver/owned-field regression
 proves the distinction and predicts that rename should plan edits from exact reference identities,
 then validate/apply them through the grouped transactional edit model.
+
+### Compiler-validated rename and error recovery implementation
+
+- Good: completion scopes and exact reference aliases supplied enough compiler-owned identity to
+  plan one validated rename transaction for globals, fields, structs, functions, parameters, and
+  shadowed locals across both LSP and TUI surfaces.
+- Bad: rebuilding the semantic index eagerly meant one half-written function could temporarily
+  remove read-only intelligence for otherwise valid code, and grouped edit records alone were too
+  coarse for identifier-sized workspace edits.
+- Adjustment: retain a revision-tagged last known good index for read-only queries, require a
+  current index for any edit-producing operation, and publish durable exact binding identities in
+  future compiler index work instead of reconstructing them from completion scopes.
+
+Theory gained: editor recovery needs two simultaneous truths: the current dirty text owns the
+cursor and diagnostics, while the last successfully indexed snapshot can safely answer read-only
+semantic questions. The incomplete `a(state.` regressions show that current lexical receiver text
+can query last-good global type data, while the stale-index rename rejection shows why edits must
+not cross that boundary. This predicts that future code actions and formatting may use recoverable
+current syntax, but semantic refactors must remain revision-exact and transactionally validated.

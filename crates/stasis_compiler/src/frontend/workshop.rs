@@ -961,6 +961,31 @@ pub struct WorkshopReference {
     pub containing_source_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopRenameEdit {
+    pub file: String,
+    pub source_span: WorkshopSourceSpan,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopRenamePlan {
+    pub old_name: String,
+    pub new_name: String,
+    pub kind: String,
+    pub owner: Option<String>,
+    pub request_span: WorkshopSourceSpan,
+    pub edits: Vec<WorkshopRenameEdit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopRenamePreparation {
+    pub name: String,
+    pub kind: String,
+    pub owner: Option<String>,
+    pub request_span: WorkshopSourceSpan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopCompletionItem {
     pub text: String,
@@ -1216,6 +1241,391 @@ pub fn find_workshop_references(
         }
     }
     Ok(references)
+}
+
+pub fn plan_workshop_rename(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    byte_offset: usize,
+    new_name: &str,
+) -> Result<(Vec<WorkshopSourceFile>, WorkshopRenamePlan), String> {
+    if !is_workshop_identifier(new_name) {
+        return Err("rename target must be an ASCII Stasis identifier".to_string());
+    }
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("rename file is not indexed: {request_file}"))?;
+    let (request_token, semantic_path) = rename_symbol_at(&file.source, byte_offset)?;
+    let old_name = token_text(&file.source, request_token).to_string();
+    if old_name == new_name {
+        return Err("rename target already has the requested name".to_string());
+    }
+    let catalog = workshop_completion_items(files)?;
+    let target =
+        resolve_workshop_rename_target(files, &catalog, file, request_token, &semantic_path)?;
+    reject_workshop_rename_collision(&catalog, &target, new_name)?;
+    let mut references = rename_target_references(files, &catalog, &target)?;
+    references.insert((file.path.clone(), request_token.start, request_token.end));
+    let edits = references
+        .into_iter()
+        .map(|(file, start, end)| {
+            Ok(WorkshopRenameEdit {
+                file,
+                source_span: WorkshopSourceSpan {
+                    start: u32::try_from(start)
+                        .map_err(|_| "rename edit start exceeds u32".to_string())?,
+                    end: u32::try_from(end)
+                        .map_err(|_| "rename edit end exceeds u32".to_string())?,
+                },
+                new_text: new_name.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if edits.is_empty() {
+        return Err("rename target has no compiler-owned source locations".to_string());
+    }
+    let plan = WorkshopRenamePlan {
+        old_name,
+        new_name: new_name.to_string(),
+        kind: target.kind,
+        owner: target.owner,
+        request_span: WorkshopSourceSpan {
+            start: u32::try_from(request_token.start)
+                .map_err(|_| "rename request start exceeds u32".to_string())?,
+            end: u32::try_from(request_token.end)
+                .map_err(|_| "rename request end exceeds u32".to_string())?,
+        },
+        edits,
+    };
+    let mut after = files.to_vec();
+    apply_workshop_rename_edits(&mut after, &plan)?;
+    build_workshop_symbol_tree(&after)?;
+    workshop_completion_items(&after)?;
+    Ok((after, plan))
+}
+
+pub fn prepare_workshop_rename(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    byte_offset: usize,
+) -> Result<WorkshopRenamePreparation, String> {
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("rename file is not indexed: {request_file}"))?;
+    let (request_token, semantic_path) = rename_symbol_at(&file.source, byte_offset)?;
+    let catalog = workshop_completion_items(files)?;
+    let target =
+        resolve_workshop_rename_target(files, &catalog, file, request_token, &semantic_path)?;
+    Ok(WorkshopRenamePreparation {
+        name: token_text(&file.source, request_token).to_string(),
+        kind: target.kind,
+        owner: target.owner,
+        request_span: WorkshopSourceSpan {
+            start: u32::try_from(request_token.start)
+                .map_err(|_| "rename request start exceeds u32".to_string())?,
+            end: u32::try_from(request_token.end)
+                .map_err(|_| "rename request end exceeds u32".to_string())?,
+        },
+    })
+}
+
+#[derive(Clone)]
+struct WorkshopRenameTarget {
+    kind: String,
+    name: String,
+    owner: Option<String>,
+    file: String,
+    scope: Option<WorkshopCompletionScope>,
+}
+
+fn rename_symbol_at(source: &str, byte_offset: usize) -> Result<(Token, String), String> {
+    if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
+        return Err(format!("rename offset {byte_offset} is invalid"));
+    }
+    let tokens = lex(source)?;
+    let token = tokens
+        .iter()
+        .copied()
+        .find(|token| {
+            token.kind == TokenKind::Identifier
+                && token.start <= byte_offset
+                && byte_offset <= token.end
+        })
+        .ok_or_else(|| "no renameable Stasis identifier at position".to_string())?;
+    let line_start = source[..token.start]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let prefix = &source[line_start..token.end];
+    let mut start = prefix.len();
+    let mut bracket_depth = 0usize;
+    for (index, character) in prefix.char_indices().rev() {
+        match character {
+            ']' => bracket_depth = bracket_depth.saturating_add(1),
+            '[' if bracket_depth > 0 => bracket_depth -= 1,
+            _ if bracket_depth > 0 => {}
+            character
+                if character.is_ascii_alphanumeric() || character == '_' || character == '.' => {}
+            _ => {
+                start = index + character.len_utf8();
+                break;
+            }
+        }
+        start = index;
+    }
+    let mut path = String::new();
+    bracket_depth = 0;
+    for character in prefix[start..].chars() {
+        match character {
+            '[' => bracket_depth = bracket_depth.saturating_add(1),
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            _ if bracket_depth > 0 => {}
+            _ => path.push(character),
+        }
+    }
+    if path
+        .split('.')
+        .any(|segment| !is_workshop_identifier(segment))
+    {
+        return Err("rename target is not a semantic identifier path".to_string());
+    }
+    Ok((token, path))
+}
+
+fn resolve_workshop_rename_target(
+    files: &[WorkshopSourceFile],
+    catalog: &[WorkshopCompletionItem],
+    file: &WorkshopSourceFile,
+    token: Token,
+    semantic_path: &str,
+) -> Result<WorkshopRenameTarget, String> {
+    let token_name = token_text(&file.source, token);
+    let mut candidates = catalog
+        .iter()
+        .filter(|item| {
+            (item.text == semantic_path || item.text == token_name)
+                && rename_completion_visible(files, item, file, token)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|item| {
+        let scope = item.scope.as_ref();
+        (
+            usize::from(scope.is_none()),
+            scope
+                .map(|scope| scope.visible_to.saturating_sub(scope.visible_from))
+                .unwrap_or(usize::MAX),
+            std::cmp::Reverse(scope.map(|scope| scope.visible_from).unwrap_or(0)),
+            item.kind.clone(),
+        )
+    });
+    let primary = candidates
+        .first()
+        .copied()
+        .ok_or_else(|| format!("compiler could not resolve rename target '{semantic_path}'"))?;
+    Ok(WorkshopRenameTarget {
+        kind: primary.kind.clone(),
+        name: token_name.to_string(),
+        owner: primary.owner.clone(),
+        file: file.path.clone(),
+        scope: primary.scope.clone(),
+    })
+}
+
+fn rename_completion_visible(
+    files: &[WorkshopSourceFile],
+    item: &WorkshopCompletionItem,
+    file: &WorkshopSourceFile,
+    token: Token,
+) -> bool {
+    let Some(scope) = item.scope.as_ref() else {
+        return true;
+    };
+    if scope.file != file.path {
+        return false;
+    }
+    if scope.visible_from <= token.start && token.end <= scope.visible_to {
+        return true;
+    }
+    if item.kind == "local" && token.end == scope.visible_from {
+        return true;
+    }
+    if item.kind == "parameter" {
+        return files
+            .iter()
+            .find(|source| source.path == scope.file)
+            .and_then(|source| parse_top_level_functions(&source.source).ok())
+            .is_some_and(|functions| {
+                functions.into_iter().any(|function| {
+                    function.name == scope.owner
+                        && function.signature_range.start <= token.start
+                        && token.end <= function.signature_range.end
+                })
+            });
+    }
+    false
+}
+
+fn reject_workshop_rename_collision(
+    catalog: &[WorkshopCompletionItem],
+    target: &WorkshopRenameTarget,
+    new_name: &str,
+) -> Result<(), String> {
+    let collision = catalog.iter().any(|item| {
+        item.text == new_name
+            && match target.kind.as_str() {
+                "local" | "parameter" => {
+                    matches!(item.kind.as_str(), "local" | "parameter")
+                        && item.file == target.file
+                        && item.scope.as_ref().zip(target.scope.as_ref()).is_some_and(
+                            |(left, right)| {
+                                left.owner == right.owner
+                                    && left.visible_from < right.visible_to
+                                    && right.visible_from < left.visible_to
+                            },
+                        )
+                }
+                "field" | "state_path" => {
+                    matches!(item.kind.as_str(), "field" | "state_path")
+                        && item.owner == target.owner
+                }
+                _ => item.scope.is_none(),
+            }
+    });
+    if collision {
+        Err(format!(
+            "rename would collide with existing symbol '{new_name}'"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn rename_target_references(
+    files: &[WorkshopSourceFile],
+    catalog: &[WorkshopCompletionItem],
+    target: &WorkshopRenameTarget,
+) -> Result<BTreeSet<(String, usize, usize)>, String> {
+    if matches!(target.kind.as_str(), "local" | "parameter") {
+        return scoped_binding_references(files, catalog, target);
+    }
+    let mut paths = BTreeSet::new();
+    if matches!(target.kind.as_str(), "field" | "state_path") {
+        for item in catalog.iter().filter(|item| {
+            matches!(item.kind.as_str(), "field" | "state_path")
+                && item.owner == target.owner
+                && item.text.rsplit('.').next() == Some(target.name.as_str())
+                && item.text.contains('.')
+        }) {
+            paths.insert(item.text.clone());
+        }
+        if let Some(owner) = &target.owner {
+            paths.insert(format!("{owner}.{}", target.name));
+        }
+    } else {
+        paths.insert(target.name.clone());
+    }
+    let mut locations = BTreeSet::new();
+    for path in paths {
+        let references = find_workshop_references(files, &path, 256)?;
+        if references.len() == 256 {
+            return Err(format!(
+                "rename target '{path}' exceeds the 255-reference safety limit"
+            ));
+        }
+        for reference in references {
+            let end = reference.source_span.end as usize;
+            let start = end.saturating_sub(target.name.len());
+            locations.insert((reference.file, start, end));
+        }
+    }
+    Ok(locations)
+}
+
+fn scoped_binding_references(
+    files: &[WorkshopSourceFile],
+    catalog: &[WorkshopCompletionItem],
+    target: &WorkshopRenameTarget,
+) -> Result<BTreeSet<(String, usize, usize)>, String> {
+    let scope = target
+        .scope
+        .as_ref()
+        .ok_or_else(|| "scoped rename target has no compiler scope".to_string())?;
+    let file = files
+        .iter()
+        .find(|file| file.path == scope.file)
+        .ok_or_else(|| format!("rename scope file is missing: {}", scope.file))?;
+    let shadowed = catalog
+        .iter()
+        .filter(|item| {
+            item.text == target.name
+                && matches!(item.kind.as_str(), "local" | "parameter")
+                && item.file == scope.file
+        })
+        .filter_map(|item| item.scope.as_ref())
+        .filter(|other| {
+            scope.visible_from < other.visible_from && other.visible_to <= scope.visible_to
+        })
+        .map(|other| other.visible_from..other.visible_to)
+        .collect::<Vec<_>>();
+    let tokens = lex(&file.source)?;
+    let functions = (target.kind == "parameter")
+        .then(|| parse_top_level_functions(&file.source))
+        .transpose()?
+        .unwrap_or_default();
+    let mut locations = BTreeSet::new();
+    for token in tokens {
+        if token.kind != TokenKind::Identifier || token_text(&file.source, token) != target.name {
+            continue;
+        }
+        let is_local_definition = target.kind == "local" && token.end == scope.visible_from;
+        let is_parameter_definition = target.kind == "parameter"
+            && token.end <= scope.visible_from
+            && functions.iter().any(|function| {
+                function.name == scope.owner
+                    && function.signature_range.start <= token.start
+                    && token.end <= function.signature_range.end
+            });
+        let is_visible_use = scope.visible_from <= token.start
+            && token.end <= scope.visible_to
+            && !shadowed
+                .iter()
+                .any(|range| range.start <= token.start && token.end <= range.end);
+        if is_local_definition || is_parameter_definition || is_visible_use {
+            locations.insert((file.path.clone(), token.start, token.end));
+        }
+    }
+    Ok(locations)
+}
+
+fn apply_workshop_rename_edits(
+    files: &mut [WorkshopSourceFile],
+    plan: &WorkshopRenamePlan,
+) -> Result<(), String> {
+    let mut by_file = BTreeMap::<String, Vec<&WorkshopRenameEdit>>::new();
+    for edit in &plan.edits {
+        by_file.entry(edit.file.clone()).or_default().push(edit);
+    }
+    for (path, mut edits) in by_file {
+        let file = files
+            .iter_mut()
+            .find(|file| file.path == path)
+            .ok_or_else(|| format!("rename edit file is missing: {path}"))?;
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.source_span.start));
+        for edit in edits {
+            let range = edit.source_span.start as usize..edit.source_span.end as usize;
+            if file.source.get(range.clone()) != Some(plan.old_name.as_str()) {
+                return Err(format!(
+                    "rename source changed at {}:{}..{}",
+                    path, range.start, range.end
+                ));
+            }
+            file.source.replace_range(range, &edit.new_text);
+        }
+    }
+    Ok(())
 }
 
 fn global_definition_reference(
@@ -4363,6 +4773,69 @@ mod workshop_contract_tests {
                 .count(),
             1
         );
+    }
+
+    fn rename_fixture() -> (Vec<WorkshopSourceFile>, String) {
+        let source = "struct State { x: i32; y: i32; }\nglobal state: State;\nfunction helper(amount: i32): i32 { let value: i32 = amount; state.x = value; return value + amount; }\nfunction read(other: State): i32 { return other.x; }\nfunction other(): i32 { let value: i32 = 9; return value; }\nfunction main(): i32 { state.y = helper(3); return read(state); }\n".to_string();
+        (
+            vec![WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: source.clone(),
+            }],
+            source,
+        )
+    }
+
+    #[test]
+    fn rename_plan_covers_declarations_references_and_scoped_bindings() {
+        let cases = [
+            ("helper(3)", 2usize, "assist", "function", 2usize),
+            ("state.y =", 2, "world", "global", 3),
+            ("State;", 2, "World", "struct", 3),
+            ("other.x", 7, "speed", "field", 3),
+            ("amount; state", 2, "delta", "parameter", 3),
+            ("value + amount", 2, "total", "local", 3),
+        ];
+        for (needle, within, new_name, expected_kind, minimum_edits) in cases {
+            let (files, source) = rename_fixture();
+            let offset = source.find(needle).expect("rename use") + within;
+            let (after, plan) = plan_workshop_rename(&files, "src/main.stasis", offset, new_name)
+                .unwrap_or_else(|error| panic!("rename {needle} failed: {error}"));
+            assert_eq!(plan.kind, expected_kind, "{needle}");
+            assert!(plan.edits.len() >= minimum_edits, "{needle}: {plan:?}");
+            assert!(!after[0].source.contains(match expected_kind {
+                "function" => "helper(3)",
+                "global" => "state.y",
+                "struct" => "State;",
+                "field" => ".x",
+                "parameter" => "amount; state",
+                "local" => "value + amount",
+                _ => unreachable!(),
+            }));
+            let mut process = crate::backend::jit::JitProcess::new();
+            process.upsert_file(after[0].path.clone(), after[0].source.clone());
+            process.compile().unwrap_or_else(|error| {
+                panic!("renamed {expected_kind} did not compile: {error:?}")
+            });
+            assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(3));
+        }
+    }
+
+    #[test]
+    fn rename_plan_rejects_collisions_and_preserves_same_named_other_scope() {
+        let (files, source) = rename_fixture();
+        let field = source.find("other.x").expect("field") + "other.".len();
+        let error = plan_workshop_rename(&files, "src/main.stasis", field, "y")
+            .expect_err("field collision");
+        assert!(error.contains("collide"), "{error}");
+
+        let local = source.find("value + amount").expect("local") + 2;
+        let (after, plan) =
+            plan_workshop_rename(&files, "src/main.stasis", local, "total").expect("local rename");
+        assert_eq!(plan.edits.len(), 3);
+        assert!(after[0]
+            .source
+            .contains("function other(): i32 { let value: i32 = 9; return value; }"));
     }
 
     #[test]

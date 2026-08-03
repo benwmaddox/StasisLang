@@ -302,6 +302,20 @@ export async function run(): Promise<void> {
     references && references.length >= 2,
     "Find All References includes the function declaration and call",
   );
+  const renameEdit = await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
+    "vscode.executeDocumentRenameProvider",
+    sourceUri,
+    callPosition,
+    "update_game",
+  );
+  const renameEntries = renameEdit?.entries() ?? [];
+  const renameTextEdits = renameEntries.flatMap(([, edits]) => edits);
+  assert.ok(renameEntries.some(([uri]) => uri.fsPath === sourceUri.fsPath));
+  assert.ok(renameTextEdits.length >= 2, "standard LSP rename covers declaration and calls");
+  assert.ok(
+    renameTextEdits.every((edit) => edit.newText === "update_game"),
+    "standard LSP rename returns compiler-validated replacement text",
+  );
 
   const speedLineNumber = document
     .getText()

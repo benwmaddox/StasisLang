@@ -101,6 +101,11 @@ pub enum LiveCommand {
         #[serde(default = "default_reference_limit")]
         limit: usize,
     },
+    RenamePreview {
+        file: String,
+        offset: usize,
+        new_name: String,
+    },
     Validate {
         requirement: LiveValidationRequirement,
         #[serde(default)]
@@ -1149,6 +1154,13 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
                 .map(|value| value as usize)
                 .unwrap_or_else(default_reference_limit),
         }),
+        ":rename" => ready(LiveCommand::RenamePreview {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+            new_name: required_arg(&args, 3, "new name")?.to_string(),
+        }),
         ":validate" => ready(LiveCommand::Validate {
             requirement: LiveValidationRequirement {
                 path: required_arg(&args, 1, "state path")?.to_string(),
@@ -2040,7 +2052,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_exposes_reference_and_runtime_validation_commands() {
+    fn terminal_exposes_navigation_rename_and_runtime_validation_commands() {
         let mut terminal = TerminalBuffer::new();
         let TerminalInput::Request(references) = terminal
             .feed_line(":references GameState.player_y --limit 24")
@@ -2053,6 +2065,21 @@ mod tests {
             LiveCommand::References {
                 symbol: "GameState.player_y".into(),
                 limit: 24,
+            }
+        );
+
+        let TerminalInput::Request(rename) = terminal
+            .feed_line(":rename src/game.stasis 42 player_speed")
+            .expect("rename preview")
+        else {
+            panic!("expected rename request");
+        };
+        assert_eq!(
+            rename.command,
+            LiveCommand::RenamePreview {
+                file: "src/game.stasis".into(),
+                offset: 42,
+                new_name: "player_speed".into(),
             }
         );
 
