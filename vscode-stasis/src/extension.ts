@@ -201,22 +201,6 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-class StasisFormatter implements vscode.DocumentFormattingEditProvider {
-  async provideDocumentFormattingEdits(
-    document: vscode.TextDocument,
-    _options: vscode.FormattingOptions,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.TextEdit[]> {
-    const cwd = findWorkspaceRoot(document) ?? path.dirname(document.uri.fsPath);
-    const output = await runStasis(["format", "--stdin"], cwd, document.getText(), token);
-    const end = document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end;
-    if (output.stdout === document.getText()) {
-      return [];
-    }
-    return [vscode.TextEdit.replace(new vscode.Range(new vscode.Position(0, 0), end), output.stdout)];
-  }
-}
-
 class LiveValueItem extends vscode.TreeItem {
   constructor(readonly liveValue: LiveValue) {
     super(liveValue.path, vscode.TreeItemCollapsibleState.None);
@@ -524,7 +508,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     controller,
     tests,
     vscode.window.registerTreeDataProvider("stasis.liveValues", values),
-    vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_SELECTOR, new StasisFormatter()),
     command("stasis.startPlaySession", async () => controller.start()),
     command("stasis.stopPlaySession", async () => controller.stop()),
     command("stasis.pausePlaySession", async () => {

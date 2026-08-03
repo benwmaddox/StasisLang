@@ -1091,6 +1091,95 @@ pub struct WorkshopTypeHierarchyEdge {
     pub component_symbol_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopFoldingRange {
+    pub source_span: WorkshopSourceSpan,
+}
+
+pub fn workshop_folding_ranges(source: &str) -> Result<Vec<WorkshopFoldingRange>, String> {
+    let mut ranges = workshop_delimiter_ranges(source)?
+        .into_iter()
+        .filter(|(delimiter, _)| *delimiter == '{')
+        .map(|(_, range)| {
+            Ok(WorkshopFoldingRange {
+                source_span: span_from_range(range)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    ranges.sort_by_key(|range| (range.source_span.start, range.source_span.end));
+    Ok(ranges)
+}
+
+pub fn workshop_selection_ranges(
+    source: &str,
+    byte_offset: usize,
+) -> Result<Vec<WorkshopSourceSpan>, String> {
+    if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
+        return Err(format!("selection offset {byte_offset} is invalid"));
+    }
+    let tokens = lex(source)?;
+    let mut ranges = tokens
+        .iter()
+        .filter(|token| token.kind != TokenKind::Eof)
+        .filter(|token| token.start <= byte_offset && byte_offset < token.end)
+        .map(|token| token.start..token.end)
+        .collect::<Vec<_>>();
+    ranges.extend(
+        workshop_delimiter_ranges(source)?
+            .into_iter()
+            .map(|(_, range)| range)
+            .filter(|range| range.start <= byte_offset && byte_offset <= range.end),
+    );
+    ranges.push(0..source.len());
+    ranges.sort_by_key(|range| (range.end.saturating_sub(range.start), range.start));
+    ranges.dedup();
+    let mut nested = Vec::<Range<usize>>::new();
+    for range in ranges {
+        if nested.last().is_none_or(|child| {
+            range.start <= child.start && child.end <= range.end && *child != range
+        }) {
+            nested.push(range);
+        }
+    }
+    nested
+        .into_iter()
+        .map(span_from_range)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn workshop_delimiter_ranges(source: &str) -> Result<Vec<(char, Range<usize>)>, String> {
+    let tokens = lex(source)?;
+    let mut stack = Vec::<(char, usize)>::new();
+    let mut ranges = Vec::new();
+    for token in tokens {
+        let text = token_text(source, token);
+        let character = match token.kind {
+            TokenKind::LBrace => Some('{'),
+            TokenKind::LParen => Some('('),
+            TokenKind::Other if text == "[" => Some('['),
+            _ => None,
+        };
+        if let Some(character) = character {
+            stack.push((character, token.start));
+            continue;
+        }
+        let expected = match token.kind {
+            TokenKind::RBrace => Some('{'),
+            TokenKind::RParen => Some('('),
+            TokenKind::Other if text == "]" => Some('['),
+            _ => None,
+        };
+        let Some(expected) = expected else {
+            continue;
+        };
+        if stack.last().is_some_and(|(open, _)| *open == expected) {
+            let (_, start) = stack.pop().expect("matching delimiter remains on stack");
+            ranges.push((expected, start..token.end));
+        }
+    }
+    Ok(ranges)
+}
+
 pub fn workshop_call_hierarchy(
     files: &[WorkshopSourceFile],
 ) -> Result<(Vec<WorkshopHierarchyItem>, Vec<WorkshopCallHierarchyEdge>), String> {
@@ -1563,6 +1652,33 @@ pub fn prepare_workshop_rename(
                 .map_err(|_| "rename request end exceeds u32".to_string())?,
         },
     })
+}
+
+pub fn workshop_linked_edit_ranges(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    byte_offset: usize,
+) -> Result<Option<Vec<WorkshopSourceSpan>>, String> {
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("linked-edit file is not indexed: {request_file}"))?;
+    let (request_token, semantic_path) = rename_symbol_at(&file.source, byte_offset)?;
+    let catalog = workshop_completion_items(files)?;
+    let target =
+        resolve_workshop_rename_target(files, &catalog, file, request_token, &semantic_path)?;
+    if !matches!(target.kind.as_str(), "local" | "parameter") {
+        return Ok(None);
+    }
+    let mut references = rename_target_references(files, &catalog, &target)?;
+    references.insert((file.path.clone(), request_token.start, request_token.end));
+    let ranges = references
+        .into_iter()
+        .filter(|(path, _, _)| normalize_project_path_text(path) == normalized_file)
+        .map(|(_, start, end)| span_from_range(start..end))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((ranges.len() > 1).then_some(ranges))
 }
 
 #[derive(Clone)]
@@ -6041,5 +6157,54 @@ function tick(): i32 {
             edge.container_symbol_id == enemy.symbol_id
                 && edge.component_symbol_id == position.symbol_id
         }));
+    }
+
+    #[test]
+    fn folding_and_selection_ranges_recover_around_incomplete_delimiters() {
+        let source = "function a(): i32 { if (true) { return 1; } }\nfunction b(): i32 { a(state.";
+        let folds = workshop_folding_ranges(source).expect("folding ranges");
+        assert_eq!(folds.len(), 2);
+        assert!(folds.iter().all(|range| {
+            &source[range.source_span.start as usize..range.source_span.end as usize]
+                != "{ a(state."
+        }));
+
+        let offset = source.find("return 1").expect("return") + 2;
+        let selections = workshop_selection_ranges(source, offset).expect("selection ranges");
+        assert_eq!(
+            &source[selections[0].start as usize..selections[0].end as usize],
+            "return"
+        );
+        assert!(selections
+            .windows(2)
+            .all(|pair| { pair[1].start <= pair[0].start && pair[0].end <= pair[1].end }));
+        assert_eq!(
+            selections.last().expect("file selection").end as usize,
+            source.len()
+        );
+    }
+
+    #[test]
+    fn linked_edits_are_limited_to_compiler_scoped_bindings() {
+        let source = "global score: i32;\nfunction add(value: i32): i32 { let copy: i32 = value; copy += value; return copy; }\n";
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+        let copy_offset = source.find("copy: i32").expect("copy") + 1;
+        let ranges = workshop_linked_edit_ranges(&files, "src/main.stasis", copy_offset)
+            .expect("linked local")
+            .expect("local ranges");
+        assert_eq!(ranges.len(), 3);
+        assert!(ranges
+            .iter()
+            .all(|range| { &source[range.start as usize..range.end as usize] == "copy" }));
+
+        let global_offset = source.find("score").expect("score") + 1;
+        assert!(
+            workshop_linked_edit_ranges(&files, "src/main.stasis", global_offset)
+                .expect("global linked edit")
+                .is_none()
+        );
     }
 }

@@ -4,7 +4,7 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 
 - Stasis syntax highlighting and editor indentation;
 - continuous compiler diagnostics through a standard Language Server Protocol client;
-- canonical document formatting through `stasis format --stdin`;
+- canonical document, range, and on-type formatting through the standard LSP;
 - compiler-backed LSP completion with signatures, documentation, snippets, expected-type-aware
   local/member ranking, and revision-safe auto-import edits loaded through standard completion
   resolve;
@@ -17,6 +17,8 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
   parameter names;
 - standard incoming/outgoing call hierarchy and struct-composition hierarchy (`contains` and
   `contained by`; Stasis does not model inheritance);
+- tolerant folding and nested selection ranges, compiler-scoped linked editing, and bracket-aware
+  function snippets;
 - `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;
@@ -97,10 +99,10 @@ development locations. Linux runs need a display such as `xvfb-run`; GitHub CI s
 
 The extension starts one persistent `stasis lsp --stdio` server per Stasis workspace. Language and
 runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
-share them. Formatting still uses its migration adapter until its LSP operation lands in a later
-slice. Diagnostics, hover, signature help, completion, navigation, symbols, rename, and import
-organization, semantic highlighting, inlay hints, and call/type hierarchy use the
-persistent language server. The same server launches and controls the Live Workshop through bounded
-custom LSP requests, owns runtime observations, and composes compatible live values and indexed
-collection fields into standard hover and completion responses. The extension does not spawn or
+share them. Formatting, diagnostics, hover, signature help, completion, navigation, symbols,
+rename, import organization, semantic highlighting, inlay hints, hierarchy, folding, selection,
+and linked editing use the persistent language server. The same server launches and controls the
+Live Workshop through bounded custom LSP requests, owns runtime observations, and composes
+compatible live values and indexed collection fields into standard hover and completion responses.
+The extension does not spawn or
 parse a parallel live JSON process.

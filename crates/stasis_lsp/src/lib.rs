@@ -16,9 +16,10 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
-    CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
-    InlayHintRequest, PrepareRenameRequest, References, Rename, Request as _,
-    ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest, TypeHierarchyPrepare,
+    CodeActionRequest, Completion, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
+    GotoDefinition, HoverRequest, InlayHintRequest, LinkedEditingRange, OnTypeFormatting,
+    PrepareRenameRequest, RangeFormatting, References, Rename, Request as _, ResolveCompletionItem,
+    SelectionRangeRequest, SemanticTokensFullRequest, SignatureHelpRequest, TypeHierarchyPrepare,
     TypeHierarchySubtypes, TypeHierarchySupertypes, WorkspaceSymbolRequest,
 };
 use lsp_types::{
@@ -28,18 +29,22 @@ use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability, CompletionItemKind,
     CompletionList, CompletionOptions, CompletionParams, CompletionResponse, CompletionTextEdit,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentChanges, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions, InlayHintParams,
-    InlayHintServerCapabilities, InsertTextFormat, Location, MarkupContent, MarkupKind,
+    DidSaveTextDocumentParams, DocumentChanges, DocumentFormattingParams,
+    DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams, DocumentRangeFormattingParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation, FoldingRange,
+    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions,
+    InlayHintParams, InlayHintServerCapabilities, InsertTextFormat, LinkedEditingRangeParams,
+    LinkedEditingRangeServerCapabilities, LinkedEditingRanges, Location, MarkupContent, MarkupKind,
     NumberOrString, OneOf, OptionalVersionedTextDocumentIdentifier, ParameterInformation,
     ParameterLabel, PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams,
-    ReferenceParams, RenameOptions, RenameParams, SaveOptions, SemanticToken,
-    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    ServerCapabilities, ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation,
-    SymbolKind, TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentPositionParams,
+    ReferenceParams, RenameOptions, RenameParams, SaveOptions, SelectionRange,
+    SelectionRangeParams, SelectionRangeProviderCapability, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult, ServerCapabilities,
+    ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
     TextDocumentSyncSaveOptions, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
     TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri, WorkspaceEdit,
@@ -139,6 +144,15 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
             definition_provider: Some(OneOf::Left(true)),
             references_provider: Some(OneOf::Left(true)),
             call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+            folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+            selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+            linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(true)),
+            document_formatting_provider: Some(OneOf::Left(true)),
+            document_range_formatting_provider: Some(OneOf::Left(true)),
+            document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                first_trigger_character: ";".to_string(),
+                more_trigger_character: Some(vec!["}".to_string()]),
+            }),
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
             rename_provider: Some(OneOf::Right(RenameOptions {
@@ -370,6 +384,60 @@ impl LanguageServer {
                     .extract(TypeHierarchySubtypes::METHOD)
                     .map_err(|error| format!("invalid type subtypes request: {error}"))?;
                 match self.type_subtypes(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            FoldingRangeRequest::METHOD => {
+                let (id, params): (_, FoldingRangeParams) = request
+                    .extract(FoldingRangeRequest::METHOD)
+                    .map_err(|error| format!("invalid folding-range request: {error}"))?;
+                match self.folding_ranges(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            SelectionRangeRequest::METHOD => {
+                let (id, params): (_, SelectionRangeParams) = request
+                    .extract(SelectionRangeRequest::METHOD)
+                    .map_err(|error| format!("invalid selection-range request: {error}"))?;
+                match self.selection_ranges(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            LinkedEditingRange::METHOD => {
+                let (id, params): (_, LinkedEditingRangeParams) = request
+                    .extract(LinkedEditingRange::METHOD)
+                    .map_err(|error| format!("invalid linked-editing request: {error}"))?;
+                match self.linked_edit_ranges(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            Formatting::METHOD => {
+                let (id, params): (_, DocumentFormattingParams) = request
+                    .extract(Formatting::METHOD)
+                    .map_err(|error| format!("invalid document-formatting request: {error}"))?;
+                match self.format_document(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            RangeFormatting::METHOD => {
+                let (id, params): (_, DocumentRangeFormattingParams) = request
+                    .extract(RangeFormatting::METHOD)
+                    .map_err(|error| format!("invalid range-formatting request: {error}"))?;
+                match self.format_range(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            OnTypeFormatting::METHOD => {
+                let (id, params): (_, DocumentOnTypeFormattingParams) = request
+                    .extract(OnTypeFormatting::METHOD)
+                    .map_err(|error| format!("invalid on-type-formatting request: {error}"))?;
+                match self.format_on_type(params) {
                     Ok(result) => Response::new_ok(id, result),
                     Err(error) => internal_error(id, error),
                 }
@@ -821,6 +889,176 @@ impl LanguageServer {
             .map(|item| self.lsp_type_hierarchy_item(item))
             .collect::<Result<Vec<_>, _>>()?;
         Ok((!items.is_empty()).then_some(items))
+    }
+
+    fn folding_ranges(
+        &mut self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>, String> {
+        let path = path_text(&uri_path(&params.text_document.uri)?);
+        let document = self
+            .service
+            .snapshot()
+            .document(&path)
+            .cloned()
+            .ok_or_else(|| format!("folding document is not indexed: '{path}'"))?;
+        let ranges = self
+            .service
+            .folding_ranges(&path)?
+            .into_iter()
+            .filter_map(|range| {
+                let start = document.position(range.range.start).ok()?;
+                let end = document.position(range.range.end).ok()?;
+                let end_line = end.line.saturating_sub(1);
+                (start.line < end_line).then_some(FoldingRange {
+                    start_line: start.line,
+                    start_character: Some(start.utf16_character),
+                    end_line,
+                    end_character: None,
+                    kind: None,
+                    collapsed_text: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok((!ranges.is_empty()).then_some(ranges))
+    }
+
+    fn selection_ranges(
+        &mut self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>, String> {
+        let path = path_text(&uri_path(&params.text_document.uri)?);
+        let document = self
+            .service
+            .snapshot()
+            .document(&path)
+            .cloned()
+            .ok_or_else(|| format!("selection document is not indexed: '{path}'"))?;
+        let offsets = params
+            .positions
+            .into_iter()
+            .map(|position| {
+                document
+                    .byte_offset(Position {
+                        line: position.line,
+                        utf16_character: position.character,
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let selections = self
+            .service
+            .selection_ranges(&path, &offsets)?
+            .into_iter()
+            .map(|ranges| lsp_selection_range(&document, ranges))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(selections))
+    }
+
+    fn linked_edit_ranges(
+        &mut self,
+        params: LinkedEditingRangeParams,
+    ) -> Result<Option<LinkedEditingRanges>, String> {
+        let (path, document, byte_offset) =
+            self.document_position(params.text_document_position_params)?;
+        let Some(ranges) = self.service.linked_edit_ranges(&path, byte_offset)? else {
+            return Ok(None);
+        };
+        let ranges = ranges
+            .into_iter()
+            .map(|range| {
+                let start = document
+                    .position(range.start)
+                    .map_err(|error| error.to_string())?;
+                let end = document
+                    .position(range.end)
+                    .map_err(|error| error.to_string())?;
+                Ok(lsp_types::Range::new(
+                    lsp_position(start),
+                    lsp_position(end),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Some(LinkedEditingRanges {
+            ranges,
+            word_pattern: Some("[A-Za-z_][A-Za-z0-9_]*".to_string()),
+        }))
+    }
+
+    fn format_document(
+        &mut self,
+        params: DocumentFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>, String> {
+        let path = path_text(&uri_path(&params.text_document.uri)?);
+        let edits = self.service.format_document(&path)?;
+        self.lsp_text_edits(&path, edits)
+    }
+
+    fn format_range(
+        &mut self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>, String> {
+        let path = path_text(&uri_path(&params.text_document.uri)?);
+        let document = self
+            .service
+            .snapshot()
+            .document(&path)
+            .cloned()
+            .ok_or_else(|| format!("range-format document is not indexed: '{path}'"))?;
+        let start = document
+            .byte_offset(Position {
+                line: params.range.start.line,
+                utf16_character: params.range.start.character,
+            })
+            .map_err(|error| error.to_string())?;
+        let end = document
+            .byte_offset(Position {
+                line: params.range.end.line,
+                utf16_character: params.range.end.character,
+            })
+            .map_err(|error| error.to_string())?;
+        let edits = self.service.format_range(&path, start..end)?;
+        self.lsp_text_edits(&path, edits)
+    }
+
+    fn format_on_type(
+        &mut self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>, String> {
+        let (path, _, byte_offset) = self.document_position(params.text_document_position)?;
+        let edits = self
+            .service
+            .format_on_type(&path, byte_offset, &params.ch)?;
+        self.lsp_text_edits(&path, edits)
+    }
+
+    fn lsp_text_edits(
+        &self,
+        path: &str,
+        edits: Vec<stasis_language_service::LanguageTextEdit>,
+    ) -> Result<Option<Vec<TextEdit>>, String> {
+        let document = self
+            .service
+            .snapshot()
+            .document(path)
+            .cloned()
+            .ok_or_else(|| format!("format target is not indexed: '{path}'"))?;
+        let edits = edits
+            .into_iter()
+            .map(|edit| {
+                let start = document
+                    .position(edit.range.start)
+                    .map_err(|error| error.to_string())?;
+                let end = document
+                    .position(edit.range.end)
+                    .map_err(|error| error.to_string())?;
+                Ok(TextEdit {
+                    range: lsp_types::Range::new(lsp_position(start), lsp_position(end)),
+                    new_text: edit.new_text,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((!edits.is_empty()).then_some(edits))
     }
 
     fn document_symbols(
@@ -1515,6 +1753,28 @@ fn lsp_position(position: Position) -> lsp_types::Position {
     lsp_types::Position::new(position.line, position.utf16_character)
 }
 
+fn lsp_selection_range(
+    document: &Document,
+    ranges: Vec<std::ops::Range<usize>>,
+) -> Result<SelectionRange, String> {
+    let mut parent = None;
+    for range in ranges.into_iter().rev() {
+        let start = document
+            .position(range.start)
+            .map_err(|error| error.to_string())?;
+        let end = document
+            .position(range.end)
+            .map_err(|error| error.to_string())?;
+        parent = Some(Box::new(SelectionRange {
+            range: lsp_types::Range::new(lsp_position(start), lsp_position(end)),
+            parent,
+        }));
+    }
+    parent
+        .map(|selection| *selection)
+        .ok_or_else(|| "selection range chain is empty".to_string())
+}
+
 fn semantic_tokens_legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
@@ -2133,11 +2393,11 @@ mod tests {
             .find(|item| item.label == "spawn_enemy")
             .expect("function completion")
             .clone();
-        assert_eq!(function.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        assert_eq!(function.insert_text_format, None);
         let Some(CompletionTextEdit::Edit(edit)) = function.text_edit.as_ref() else {
             panic!("expected completion text edit");
         };
-        assert_eq!(edit.new_text, "spawn_enemy(${1:count}, ${2:health})");
+        assert_eq!(edit.new_text, "spawn_enemy");
         assert!(function.documentation.is_none());
         assert!(function.data.is_some());
 
@@ -2414,6 +2674,63 @@ mod tests {
             .edits
             .iter()
             .all(|edit| { matches!(edit, OneOf::Left(edit) if edit.new_text == "create_enemy") }));
+
+        let partial = source.replace("spawn_enemy(1, health);", "spawn_e");
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidChangeTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri, "version": 2 },
+                        "contentChanges": [{ "text": partial }]
+                    }),
+                ),
+            )
+            .expect("didChange to partial call");
+        let partial_offset = partial.rfind("spawn_e").expect("partial call") + "spawn_e".len();
+        let partial_position = lsp_position(
+            server
+                .service
+                .snapshot()
+                .document(&path_text(&uri_path(&uri).expect("path")))
+                .expect("partial document")
+                .position(partial_offset)
+                .expect("partial position"),
+        );
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(20),
+                    Completion::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": partial_position
+                    }),
+                ),
+            )
+            .expect("partial completion request");
+        let completion: Option<CompletionResponse> = serde_json::from_value(
+            receive_response(&client_connection, 20)
+                .response_result
+                .expect("partial completion result"),
+        )
+        .expect("partial completion response");
+        let CompletionResponse::List(completion) = completion.expect("partial completion list")
+        else {
+            panic!("expected partial completion list");
+        };
+        let function = completion
+            .items
+            .iter()
+            .find(|item| item.label == "spawn_enemy")
+            .expect("partial function completion");
+        assert_eq!(function.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        let Some(CompletionTextEdit::Edit(edit)) = function.text_edit.as_ref() else {
+            panic!("expected partial completion text edit");
+        };
+        assert_eq!(edit.new_text, "spawn_enemy(${1:count}, ${2:health})");
     }
 
     #[test]
@@ -2516,6 +2833,194 @@ mod tests {
         )
         .expect("components response");
         assert_eq!(components.expect("components")[0].name, "Position");
+    }
+
+    #[test]
+    fn standard_folding_and_selection_ranges_tolerate_incomplete_source() {
+        let (mut server, uri, _) = test_server("folding-selection");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "function a(): i32 {\n    if (true) {\n        return 1;\n    }\n}\nfunction b(): i32 {\n    a(state.";
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri, "languageId": "stasis", "version": 1, "text": source }
+                    }),
+                ),
+            )
+            .expect("didOpen");
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(40),
+                    FoldingRangeRequest::METHOD.to_string(),
+                    serde_json::json!({ "textDocument": { "uri": uri } }),
+                ),
+            )
+            .expect("folding request");
+        let folds: Option<Vec<FoldingRange>> = serde_json::from_value(
+            receive_response(&client_connection, 40)
+                .response_result
+                .expect("folding result"),
+        )
+        .expect("folding response");
+        let folds = folds.expect("folds");
+        assert_eq!(folds.len(), 2);
+        assert_eq!((folds[0].start_line, folds[0].end_line), (0, 3));
+        assert_eq!((folds[1].start_line, folds[1].end_line), (1, 2));
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(41),
+                    SelectionRangeRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "positions": [{ "line": 2, "character": 10 }]
+                    }),
+                ),
+            )
+            .expect("selection request");
+        let selections: Option<Vec<SelectionRange>> = serde_json::from_value(
+            receive_response(&client_connection, 41)
+                .response_result
+                .expect("selection result"),
+        )
+        .expect("selection response");
+        let selection = &selections.expect("selections")[0];
+        assert_eq!(selection.range.start.line, 2);
+        assert!(selection.parent.is_some());
+    }
+
+    #[test]
+    fn standard_linked_editing_is_scoped_and_pauses_on_broken_source() {
+        let (mut server, uri, _) = test_server("linked-edit");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "function main(): i32 { let copy: i32 = 1; copy += 1; return copy; }\n";
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri, "languageId": "stasis", "version": 1, "text": source }
+                    }),
+                ),
+            )
+            .expect("didOpen");
+        let copy_character =
+            u32::try_from(source.find("copy: i32").expect("copy") + 1).expect("copy character");
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(42),
+                    LinkedEditingRange::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": 0, "character": copy_character }
+                    }),
+                ),
+            )
+            .expect("linked-edit request");
+        let linked: Option<LinkedEditingRanges> = serde_json::from_value(
+            receive_response(&client_connection, 42)
+                .response_result
+                .expect("linked-edit result"),
+        )
+        .expect("linked-edit response");
+        assert_eq!(linked.expect("linked edits").ranges.len(), 3);
+    }
+
+    #[test]
+    fn standard_document_range_and_on_type_formatting_use_shared_formatter() {
+        let (mut server, uri, _) = test_server("formatting");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "function main(): i32 {\r\nreturn 0;\r\n}\r\n";
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri, "languageId": "stasis", "version": 1, "text": source }
+                    }),
+                ),
+            )
+            .expect("didOpen");
+
+        let options = serde_json::json!({ "tabSize": 4, "insertSpaces": true });
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(43),
+                    Formatting::METHOD.to_string(),
+                    serde_json::json!({ "textDocument": { "uri": uri }, "options": options }),
+                ),
+            )
+            .expect("document formatting request");
+        let document: Option<Vec<TextEdit>> = serde_json::from_value(
+            receive_response(&client_connection, 43)
+                .response_result
+                .expect("document formatting result"),
+        )
+        .expect("document formatting response");
+        let document = document.expect("document edits");
+        assert_eq!(document.len(), 1);
+        assert_eq!(document[0].new_text, "    ");
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(44),
+                    RangeFormatting::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "range": {
+                            "start": { "line": 0, "character": 0 },
+                            "end": { "line": 3, "character": 0 }
+                        },
+                        "options": options
+                    }),
+                ),
+            )
+            .expect("range formatting request");
+        let range: Option<Vec<TextEdit>> = serde_json::from_value(
+            receive_response(&client_connection, 44)
+                .response_result
+                .expect("range formatting result"),
+        )
+        .expect("range formatting response");
+        assert_eq!(range.expect("range edits"), document);
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(45),
+                    OnTypeFormatting::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": 2, "character": 1 },
+                        "ch": "}",
+                        "options": options
+                    }),
+                ),
+            )
+            .expect("on-type formatting request");
+        let on_type: Option<Vec<TextEdit>> = serde_json::from_value(
+            receive_response(&client_connection, 45)
+                .response_result
+                .expect("on-type formatting result"),
+        )
+        .expect("on-type formatting response");
+        assert_eq!(on_type.expect("on-type edits"), document);
     }
 
     #[cfg(windows)]

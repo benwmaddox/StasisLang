@@ -253,9 +253,14 @@ Each slice is independently testable and removes the host-specific path it repla
 
 ### Slice 7: debugging and editing polish
 
-Add a Debug Adapter Protocol implementation backed by real runtime pause/stack/scope support, then
-folding, selection ranges, linked editing, range/on-type formatting, and bracket-aware snippets.
-Debugger work must expose real lexical frames before live locals or watches are claimed.
+- [ ] Add a Debug Adapter Protocol implementation backed by real runtime pause/stack/scope support.
+  Debugger work must expose real lexical frames before live locals or watches are claimed.
+- [x] Add tolerant compiler-owned folding and nested selection ranges over the current buffer.
+- [x] Add compiler-scoped linked editing for locals and parameters, paused on stale semantic state.
+- [x] Route document, range, and on-type formatting through the standard LSP and the compiler-owned
+  canonical formatter; remove the VSIX's direct formatter provider.
+- [x] Suppress function-call snippet brackets when an opening parenthesis already follows the
+  completion replacement, while retaining parameter snippets for a bare function name.
 
 ## Validation
 
@@ -524,3 +529,19 @@ search over editor text. The compiler call-edge test and incomplete-function rec
 last-good identities remain useful while call ranges inside changed text must disappear. This
 predicts that debugger frames can reuse accepted function IDs, but source highlighting must still be
 mapped against the exact accepted-source revision.
+
+### Standard editing polish implementation
+
+- Good: the canonical lexer could supply delimiter structure for folding and selection even when a
+  trailing function was incomplete, and moving the existing formatter into the compiler crate let
+  CLI and LSP formatting share one token-preserving implementation.
+- Bad: the first formatter move retained app-era crate-qualified imports, and a full call snippet
+  duplicated parentheses when completion happened inside an already written call.
+- Adjustment: test ownership moves from the destination crate immediately, and derive snippet
+  delimiters from current text following the replacement range before emitting an edit.
+
+Theory gained: tolerant structural editing needs current lexical truth, while scope-linked edits
+need revision-exact semantic truth. The incomplete folding test proves matched earlier blocks remain
+usable without inventing a close delimiter for the broken block; the linked-edit test proves a
+stale binding identity must not produce edits. This predicts debugger source stops may use accepted
+semantic identities only when their source revision is explicitly mapped to the current editor.

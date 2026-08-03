@@ -13,6 +13,7 @@ use stasis_assets::{
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
+use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
@@ -38,8 +39,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-
-use crate::toolchain_formatter::format_source;
 
 mod live_tui;
 

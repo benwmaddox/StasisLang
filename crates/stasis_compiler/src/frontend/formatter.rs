@@ -1,5 +1,5 @@
 const INDENT_WIDTH: usize = 4;
-pub(crate) const LINE_WIDTH: usize = 160;
+pub const LINE_WIDTH: usize = 160;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
@@ -139,7 +139,7 @@ impl Writer {
     }
 }
 
-pub(crate) fn format_source(source: &str) -> Result<String, String> {
+pub fn format_source(source: &str) -> Result<String, String> {
     let tokens = canonicalize_enum_commas(&scan(source)?)?;
     let formatted = windows_line_endings(&render(&tokens)?);
     let formatted_tokens = scan(&formatted)?;
@@ -165,10 +165,10 @@ fn windows_line_endings(source: &str) -> String {
 
 fn compiler_tokens_without_enum_commas(
     source: &str,
-) -> Result<Vec<(stasis_compiler::frontend::lexer::TokenKind, &str)>, String> {
-    use stasis_compiler::frontend::lexer::TokenKind as CompilerTokenKind;
+) -> Result<Vec<(super::lexer::TokenKind, &str)>, String> {
+    use super::lexer::TokenKind as CompilerTokenKind;
 
-    let tokens = stasis_compiler::frontend::lexer::lex(source)?;
+    let tokens = super::lexer::lex(source)?;
     let mut normalized = Vec::new();
     let mut brace_depth = 0usize;
     let mut pending_enum = false;

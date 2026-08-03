@@ -7,12 +7,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use stasis_compiler::compiler::Compiler;
+use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, organize_workshop_imports, plan_workshop_rename,
     prepare_workshop_rename, workshop_call_hierarchy, workshop_completion_items,
-    workshop_inlay_hints, workshop_inlay_hints_from_local_types, workshop_reachable_files,
+    workshop_folding_ranges, workshop_inlay_hints, workshop_inlay_hints_from_local_types,
+    workshop_linked_edit_ranges, workshop_reachable_files, workshop_selection_ranges,
     workshop_semantic_tokens, workshop_source_items, workshop_symbols, workshop_type_hierarchy,
     WorkshopCallHierarchyEdge, WorkshopCompletionItem, WorkshopCompletionScope,
     WorkshopHierarchyItem, WorkshopInlayHint, WorkshopInlayHintKind, WorkshopSourceFile,
@@ -599,6 +601,17 @@ pub struct LanguageInlayHint {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageFoldingRange {
+    pub range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageTextEdit {
+    pub range: Range<usize>,
+    pub new_text: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LanguageHierarchyKind {
     Function,
@@ -900,7 +913,8 @@ impl LanguageService {
                         resolve_data: None,
                     });
                 };
-                let (insert_text, snippet) = completion_insert_text(catalog);
+                let (insert_text, snippet) =
+                    completion_insert_text(catalog, &source, query.replacement_end);
                 Some(LanguageCompletionItem {
                     text: ranked.text.clone(),
                     kind: ranked.kind.clone(),
@@ -1590,6 +1604,61 @@ impl LanguageService {
             .collect())
     }
 
+    pub fn folding_ranges(&self, path: &str) -> Result<Vec<LanguageFoldingRange>, String> {
+        let snapshot = self.documents.snapshot();
+        let document = snapshot
+            .document(path)
+            .ok_or_else(|| format!("folding document is not indexed: '{path}'"))?;
+        Ok(workshop_folding_ranges(&document.text)?
+            .into_iter()
+            .map(|range| LanguageFoldingRange {
+                range: range.source_span.start as usize..range.source_span.end as usize,
+            })
+            .collect())
+    }
+
+    pub fn selection_ranges(
+        &self,
+        path: &str,
+        byte_offsets: &[usize],
+    ) -> Result<Vec<Vec<Range<usize>>>, String> {
+        let snapshot = self.documents.snapshot();
+        let document = snapshot
+            .document(path)
+            .ok_or_else(|| format!("selection document is not indexed: '{path}'"))?;
+        byte_offsets
+            .iter()
+            .map(|offset| {
+                workshop_selection_ranges(&document.text, *offset).map(|ranges| {
+                    ranges
+                        .into_iter()
+                        .map(|range| range.start as usize..range.end as usize)
+                        .collect()
+                })
+            })
+            .collect()
+    }
+
+    pub fn linked_edit_ranges(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+    ) -> Result<Option<Vec<Range<usize>>>, String> {
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let files = match self.current_language_index() {
+            Ok(index) => index.files.clone(),
+            Err(_) => return Ok(None),
+        };
+        Ok(
+            workshop_linked_edit_ranges(&files, &relative, byte_offset)?.map(|ranges| {
+                ranges
+                    .into_iter()
+                    .map(|range| range.start as usize..range.end as usize)
+                    .collect()
+            }),
+        )
+    }
+
     fn symbol_references(
         &mut self,
         path: &str,
@@ -1767,6 +1836,54 @@ impl LanguageService {
         })
     }
 
+    pub fn format_document(&self, path: &str) -> Result<Vec<LanguageTextEdit>, String> {
+        let snapshot = self.documents.snapshot();
+        let document = snapshot
+            .document(path)
+            .ok_or_else(|| format!("format document is not indexed: '{path}'"))?;
+        let formatted = format_source(&document.text)?;
+        Ok(minimal_text_edit(&document.text, &formatted)
+            .into_iter()
+            .collect())
+    }
+
+    pub fn format_range(
+        &self,
+        path: &str,
+        requested: Range<usize>,
+    ) -> Result<Vec<LanguageTextEdit>, String> {
+        let edits = self.format_document(path)?;
+        Ok(edits
+            .into_iter()
+            .filter(|edit| requested.start <= edit.range.start && edit.range.end <= requested.end)
+            .collect())
+    }
+
+    pub fn format_on_type(
+        &self,
+        path: &str,
+        byte_offset: usize,
+        typed: &str,
+    ) -> Result<Vec<LanguageTextEdit>, String> {
+        if !matches!(typed, ";" | "}") {
+            return Ok(Vec::new());
+        }
+        let snapshot = self.documents.snapshot();
+        let document = snapshot
+            .document(path)
+            .ok_or_else(|| format!("on-type format document is not indexed: '{path}'"))?;
+        let selections = workshop_selection_ranges(&document.text, byte_offset)?;
+        let Some(block) = selections.into_iter().find(|range| {
+            document
+                .text
+                .get(range.start as usize..range.end as usize)
+                .is_some_and(|text| text.starts_with('{') && text.ends_with('}'))
+        }) else {
+            return Ok(Vec::new());
+        };
+        self.format_range(path, block.start as usize..block.end as usize)
+    }
+
     fn snapshot_path(&self, paths: &BTreeSet<String>, compiler_path: &str) -> String {
         if paths.contains(compiler_path) {
             return compiler_path.to_string();
@@ -1795,6 +1912,38 @@ fn remap_semantic_tokens(
             Some(token)
         })
         .collect()
+}
+
+fn minimal_text_edit(current: &str, formatted: &str) -> Option<LanguageTextEdit> {
+    if current == formatted {
+        return None;
+    }
+    let mut prefix = current
+        .bytes()
+        .zip(formatted.bytes())
+        .take_while(|(left, right)| left == right)
+        .count();
+    while !current.is_char_boundary(prefix) || !formatted.is_char_boundary(prefix) {
+        prefix = prefix.saturating_sub(1);
+    }
+    let maximum_suffix = current.len().min(formatted.len()).saturating_sub(prefix);
+    let mut suffix = current
+        .as_bytes()
+        .iter()
+        .rev()
+        .zip(formatted.as_bytes().iter().rev())
+        .take(maximum_suffix)
+        .take_while(|(left, right)| left == right)
+        .count();
+    while !current.is_char_boundary(current.len() - suffix)
+        || !formatted.is_char_boundary(formatted.len() - suffix)
+    {
+        suffix = suffix.saturating_sub(1);
+    }
+    Some(LanguageTextEdit {
+        range: prefix..current.len() - suffix,
+        new_text: formatted[prefix..formatted.len() - suffix].to_string(),
+    })
 }
 
 struct UnchangedRegions {
@@ -1916,8 +2065,20 @@ fn apply_diagnostic_fix(
     Some(candidate)
 }
 
-fn completion_insert_text(item: &WorkshopCompletionItem) -> (String, bool) {
+fn completion_insert_text(
+    item: &WorkshopCompletionItem,
+    source: &str,
+    replacement_end: usize,
+) -> (String, bool) {
     if !matches!(item.kind.as_str(), "function" | "method" | "test") {
+        return (item.text.clone(), false);
+    }
+    let follows_existing_call = source.get(replacement_end..).is_some_and(|suffix| {
+        let suffix = suffix
+            .trim_start_matches(|character: char| character == '_' || character.is_alphanumeric());
+        suffix.trim_start().starts_with('(')
+    });
+    if follows_existing_call {
         return (item.text.clone(), false);
     }
     let Some(signature) = item.signature.as_deref() else {
@@ -2801,8 +2962,8 @@ function main(): i32 {
             .iter()
             .find(|item| item.text == "spawn_enemy")
             .expect("function completion item");
-        assert_eq!(function.insert_text, "spawn_enemy(${1:count}, ${2:health})");
-        assert!(function.snippet);
+        assert_eq!(function.insert_text, "spawn_enemy");
+        assert!(!function.snippet);
         assert!(function.documentation.is_none());
         let resolution = service
             .resolve_completion(&path, function.resolve_data.expect("resolve data"))
@@ -2812,6 +2973,20 @@ function main(): i32 {
             resolution.documentation.as_deref(),
             Some("Creates an enemy with explicit health.")
         );
+
+        let snippet_source = source.replace("spawn_enemy(1, foe.hp);", "spawn_e");
+        let snippet_cursor = snippet_source.rfind("spawn_e").expect("partial call") + 7;
+        service.open_document(path.clone(), 1, snippet_source);
+        let snippet = service
+            .completion(&path, snippet_cursor, 64)
+            .expect("snippet completion");
+        let function = snippet
+            .items
+            .iter()
+            .find(|item| item.text == "spawn_enemy")
+            .expect("snippet function item");
+        assert_eq!(function.insert_text, "spawn_enemy(${1:count}, ${2:health})");
+        assert!(function.snippet);
     }
 
     #[test]
@@ -3446,5 +3621,87 @@ function main(): i32 {
             .expect("containers");
         assert_eq!(containers.len(), 1);
         assert_eq!(containers[0].name, "Enemy");
+    }
+
+    #[test]
+    fn folding_and_selection_use_current_incomplete_overlay() {
+        let root = std::env::temp_dir().join("stasis-language-service-selection");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "function a(): i32 { if (true) { return 1; } }\nfunction b(): i32 { a(state.";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("service");
+        service.set_disk_document(path_text.clone(), source);
+        let folds = service.folding_ranges(&path_text).expect("folds");
+        assert_eq!(folds.len(), 2);
+        let offset = source.find("return 1").expect("return") + 2;
+        let selections = service
+            .selection_ranges(&path_text, &[offset])
+            .expect("selections");
+        assert_eq!(&source[selections[0][0].clone()], "return");
+        assert_eq!(
+            selections[0].last().expect("file range"),
+            &(0..source.len())
+        );
+    }
+
+    #[test]
+    fn linked_edits_use_current_compiler_scopes() {
+        let root = std::env::temp_dir().join("stasis-language-service-linked-edit");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "function add(value: i32): i32 { let copy: i32 = value; copy += value; return copy; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("service");
+        service.set_disk_document(path_text.clone(), source);
+        let offset = source.find("copy: i32").expect("copy") + 1;
+        let ranges = service
+            .linked_edit_ranges(&path_text, offset)
+            .expect("linked edits")
+            .expect("ranges");
+        assert_eq!(ranges.len(), 3);
+
+        service.open_document(
+            path_text.clone(),
+            1,
+            format!("{source}function broken() {{"),
+        );
+        assert!(service
+            .linked_edit_ranges(&path_text, offset)
+            .expect("broken linked edit")
+            .is_none());
+    }
+
+    #[test]
+    fn document_range_and_on_type_formatting_share_canonical_formatter() {
+        let root = std::env::temp_dir().join("stasis-language-service-formatting");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "function main(): i32 {\r\nreturn 0;\r\n}\r\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("service");
+        service.set_disk_document(path_text.clone(), source);
+        let document = service
+            .format_document(&path_text)
+            .expect("document format");
+        assert_eq!(document.len(), 1);
+        let edit = &document[0];
+        let mut applied = source.to_string();
+        applied.replace_range(edit.range.clone(), &edit.new_text);
+        assert_eq!(applied, format_source(source).expect("canonical format"));
+        assert_eq!(
+            service
+                .format_range(&path_text, 0..source.len())
+                .expect("range format"),
+            document
+        );
+        let close = source.rfind('}').expect("close") + 1;
+        assert_eq!(
+            service
+                .format_on_type(&path_text, close, "}")
+                .expect("on-type format"),
+            document
+        );
+        assert!(service
+            .format_on_type(&path_text, close, ",")
+            .expect("unregistered type")
+            .is_empty());
     }
 }
