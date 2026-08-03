@@ -3,8 +3,6 @@ use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess, JitScalarValue
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
-use stasis_compiler::frontend::lexer::{lex, TokenKind};
-use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_completion_items, workshop_direct_import_files,
@@ -14,6 +12,7 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
     WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+use stasis_language_service::LanguageCompletionSnapshot;
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
     CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
@@ -118,8 +117,7 @@ struct CompletionPreparation {
 #[derive(Clone, Default)]
 struct CompletionSnapshot {
     index: CompletionIndex,
-    source_items: Vec<WorkshopSourceItem>,
-    source_files: Vec<WorkshopSourceFile>,
+    language: LanguageCompletionSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -1023,10 +1021,8 @@ impl LiveWorkspace {
         let worker = std::thread::Builder::new()
             .name(format!("stasis-live-completion-{request_id}"))
             .spawn(move || {
-                let query = completion_query_from_snapshot(
+                let query = snapshot.language.query_with_index(
                     snapshot.index.clone(),
-                    &snapshot.source_items,
-                    &snapshot.source_files,
                     &buffer,
                     cursor,
                     limit,
@@ -1378,8 +1374,10 @@ impl LiveWorkspace {
         self.completion.replace(items);
         self.completion_snapshot = Arc::new(CompletionSnapshot {
             index: self.completion.clone(),
-            source_items: self.source_items.clone(),
-            source_files: self.source_files.clone(),
+            language: LanguageCompletionSnapshot::new(
+                self.source_items.clone(),
+                self.source_files.clone(),
+            ),
         });
     }
 
@@ -1391,10 +1389,8 @@ impl LiveWorkspace {
         limit: usize,
         context: &stasis_runner::live::CompletionContext,
     ) -> stasis_runner::live::CompletionQuery {
-        completion_query_from_snapshot(
+        self.completion_snapshot.language.query_with_index(
             self.completion.clone(),
-            &self.source_items,
-            &self.source_files,
             buffer,
             cursor,
             limit,
@@ -1411,149 +1407,6 @@ fn is_static_type_field(item: &WorkshopCompletionItem) -> bool {
                 .strip_prefix(owner)
                 .is_some_and(|suffix| suffix.starts_with('.'))
         })
-}
-
-fn completion_query_from_snapshot(
-    mut index: CompletionIndex,
-    source_items: &[WorkshopSourceItem],
-    source_files: &[WorkshopSourceFile],
-    buffer: &str,
-    cursor: usize,
-    limit: usize,
-    context: &CompletionContext,
-) -> CompletionQuery {
-    let mut effective_context = context.clone();
-    if effective_context.expected_type.is_none() {
-        effective_context.expected_type =
-            completion_expected_type(buffer, cursor).unwrap_or_default();
-    }
-    let overlay = if effective_context.owner.is_none() {
-        overlay_document_completion_items(
-            source_items,
-            source_files,
-            buffer,
-            cursor,
-            &mut effective_context,
-        )
-    } else {
-        overlay_completion_items(source_items, source_files, buffer, &effective_context)
-    };
-    if let Some(items) = overlay {
-        index.retain(|item| !completion_item_belongs_to_context(item, &effective_context));
-        index.extend(items.into_iter().map(|item| live_completion_item(&item)));
-    }
-    index.query_with_context(buffer, cursor, limit, &effective_context)
-}
-
-fn overlay_document_completion_items(
-    source_items: &[WorkshopSourceItem],
-    source_files: &[WorkshopSourceFile],
-    buffer: &str,
-    cursor: usize,
-    context: &mut CompletionContext,
-) -> Option<Vec<WorkshopCompletionItem>> {
-    let file = context.file.as_deref()?;
-    let mut files = source_files.to_vec();
-    let mut cursor = cursor.min(buffer.len());
-    while !buffer.is_char_boundary(cursor) {
-        cursor = cursor.saturating_sub(1);
-    }
-    let source_index = files.iter().position(|source| source.path == file)?;
-    files[source_index].source = buffer.to_string();
-    let owner = workshop_source_items(&files)
-        .ok()?
-        .into_iter()
-        .filter(|item| item.kind == WorkshopSourceItemKind::Function && item.file == file)
-        .filter_map(|item| {
-            let span = item.source_spans.first()?;
-            let start = span.start as usize;
-            let end = span.end as usize;
-            (start <= cursor && cursor <= end).then_some((
-                end.saturating_sub(start),
-                start,
-                end,
-                item,
-            ))
-        })
-        .min_by_key(|(width, _, _, _)| *width);
-    let (_, dirty_start, _, dirty_owner) = owner?;
-    let accepted_owner = source_items
-        .iter()
-        .find(|item| {
-            item.kind == WorkshopSourceItemKind::Function
-                && item.file == file
-                && item.name == dirty_owner.name
-                && item.signature == dirty_owner.signature
-        })
-        .or_else(|| {
-            let mut matches = source_items.iter().filter(|item| {
-                item.kind == WorkshopSourceItemKind::Function
-                    && item.file == file
-                    && item.name == dirty_owner.name
-            });
-            let first = matches.next()?;
-            matches.next().is_none().then_some(first)
-        })?;
-    let accepted_start = accepted_owner.source_spans.first()?.start as usize;
-    let definition = buffer.get(dirty_start..cursor)?;
-    context.owner = Some(accepted_owner.name.clone());
-    context.owner_signature = Some(accepted_owner.signature.clone());
-    context.source_offset = Some(accepted_start.saturating_add(definition.len()));
-    overlay_completion_items(source_items, source_files, definition, context)
-}
-
-fn overlay_completion_items(
-    source_items: &[WorkshopSourceItem],
-    source_files: &[WorkshopSourceFile],
-    buffer: &str,
-    context: &CompletionContext,
-) -> Option<Vec<WorkshopCompletionItem>> {
-    let file = context.file.as_deref()?;
-    let owner = context.owner.as_deref()?;
-    let item = source_items.iter().find(|item| {
-        item.file == file
-            && item.name == owner
-            && context
-                .owner_signature
-                .as_deref()
-                .is_none_or(|signature| item.signature == signature)
-    })?;
-    let span = item.source_spans.first()?;
-    let mut files = source_files.to_vec();
-    let source_file = files.iter_mut().find(|source| source.path == file)?;
-    let start = span.start as usize;
-    let end = span.end as usize;
-    if start > end || end > source_file.source.len() {
-        return None;
-    }
-    let overlay = balanced_definition(buffer)?;
-    source_file.source.replace_range(start..end, &overlay);
-    let mut items = workshop_completion_items(&files).ok()?;
-    for completion in &mut items {
-        if let Some(scope) = completion
-            .scope
-            .as_mut()
-            .filter(|scope| scope.owner == owner && scope.file == file)
-        {
-            scope.owner_signature = context.owner_signature.clone();
-        }
-    }
-    Some(items)
-}
-
-fn completion_item_belongs_to_context(
-    item: &CompletionItem,
-    context: &stasis_runner::live::CompletionContext,
-) -> bool {
-    let Some(scope) = item.scope.as_ref() else {
-        return false;
-    };
-    scope.owner == context.owner.as_deref().unwrap_or_default()
-        && scope.file == context.file.as_deref().unwrap_or_default()
-        && context
-            .owner_signature
-            .as_deref()
-            .is_none_or(|signature| scope.owner_signature.as_deref() == Some(signature))
 }
 
 fn live_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
@@ -1579,23 +1432,6 @@ fn live_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
             visible_to: scope.visible_to,
         }),
     }
-}
-
-fn balanced_definition(source: &str) -> Option<String> {
-    let tokens = lex(source).ok()?;
-    let mut depth = 0usize;
-    for token in tokens {
-        match token.kind {
-            TokenKind::LBrace => depth = depth.saturating_add(1),
-            TokenKind::RBrace => depth = depth.checked_sub(1)?,
-            _ => {}
-        }
-    }
-    let mut balanced = source.to_string();
-    for _ in 0..depth {
-        balanced.push('}');
-    }
-    Some(balanced)
 }
 
 fn paged_completion_query(
@@ -4328,13 +4164,6 @@ mod tests {
         };
         let query = workspace.completion_query(buffer, buffer.len(), 10, &context);
         assert_eq!(query.items[0].text, "local_speed");
-        assert_eq!(
-            balanced_definition(buffer)
-                .expect("balanced")
-                .matches('}')
-                .count(),
-            1
-        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -4359,29 +4188,19 @@ mod tests {
             expected_type: None,
         };
 
-        let mut inferred = context.clone();
-        let overlay = overlay_document_completion_items(
-            &workspace.source_items,
-            &workspace.source_files,
-            &source,
-            cursor,
-            &mut inferred,
-        )
-        .expect("document overlay");
-        assert_eq!(inferred.owner.as_deref(), Some("tick"));
-        let local = overlay
+        let query = workspace.completion_query(&source, cursor, 10, &context);
+        let local = query
+            .items
             .iter()
             .find(|item| item.text == "local_speed")
             .expect("dirty local completion");
         let scope = local.scope.as_ref().expect("dirty local scope");
         assert_eq!(scope.owner, "tick");
-        assert_eq!(scope.owner_signature, inferred.owner_signature);
+        assert_eq!(scope.owner_signature.as_deref(), Some("tick(): i32"));
         assert!(
             scope.visible_from <= cursor && cursor <= scope.visible_to,
             "{scope:?}"
         );
-
-        let query = workspace.completion_query(&source, cursor, 10, &context);
 
         assert_eq!(query.items[0].text, "local_speed");
         assert_eq!(query.replacement_end, cursor);

@@ -227,7 +227,44 @@ export async function run(): Promise<void> {
   );
   assert.ok(
     completions?.items.some((item) => item.label === "tick"),
-    "compiler-backed completion returns the fixture function",
+    "standard LSP completion returns the fixture function",
+  );
+
+  const scoreUseOffset = document.getText().indexOf("score += 1");
+  assert.notEqual(scoreUseOffset, -1, "the fixture contains a typed score use");
+  const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+    "vscode.executeHoverProvider",
+    sourceUri,
+    document.positionAt(scoreUseOffset + 2),
+  );
+  const hoverText = hovers
+    ?.flatMap((hover) => hover.contents)
+    .map((content) => (typeof content === "string" ? content : content.value))
+    .join("\n");
+  assert.match(hoverText ?? "", /score: i32/, "standard LSP hover reports the global type");
+
+  const signatureCall = "add_score(1, 2)";
+  const signatureOffset = document.getText().indexOf(signatureCall);
+  assert.notEqual(signatureOffset, -1, "the fixture contains a signature-help call");
+  const signatureHelp = await vscode.commands.executeCommand<vscode.SignatureHelp>(
+    "vscode.executeSignatureHelpProvider",
+    sourceUri,
+    document.positionAt(signatureOffset + "add_score(1, ".length),
+    ",",
+  );
+  assert.equal(signatureHelp?.activeParameter, 1, "signature help selects the second parameter");
+  assert.equal(
+    signatureHelp?.signatures[0]?.label,
+    "add_score(amount: i32, bonus: i32): i32",
+    "signature help returns compiler-owned parameter names and types",
+  );
+  const signatureDocumentation = signatureHelp?.signatures[0]?.documentation;
+  assert.match(
+    typeof signatureDocumentation === "string"
+      ? signatureDocumentation
+      : signatureDocumentation?.value ?? "",
+    /Adds two score components/,
+    "signature help includes source documentation",
   );
 
   try {

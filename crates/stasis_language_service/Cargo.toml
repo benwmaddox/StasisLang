@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 stasis_compiler = { path = "../stasis_compiler" }
+stasis_runner = { path = "../stasis_runner" }

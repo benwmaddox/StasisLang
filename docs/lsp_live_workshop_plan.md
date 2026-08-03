@@ -10,7 +10,7 @@ same Rust language-service operations directly instead of maintaining editor-spe
 The target experience is continuous diagnostics, compiler-aware navigation and refactoring, and
 low-latency type and live-value inspection without starting a compiler process for every request.
 
-## Current state
+## Baseline before implementation
 
 The useful substrate already exists, but it is split across hosts:
 
@@ -173,10 +173,14 @@ Each slice is independently testable and removes the host-specific path it repla
 
 ### Slice 2: shared completion, hover, and signature help
 
-Move the accepted completion index and ranking behind the language service. Add documentation,
-signatures, inferred/declared types, expected-type ranking, snippets, and import edits. Add hover
-and signature help from the same typed snapshot. Switch the TUI completion/details panes to the
-service and delete the VSIX per-request CLI completion path.
+- [x] Move accepted completion, dirty-overlay scope inference, and ranking behind the language
+  service's immutable completion snapshot operation.
+- [x] Add documentation, signatures, inferred/declared types, expected-type ranking, snippets, and
+  auto-import edits.
+- [x] Add standard LSP completion, hover, and signature help from the same typed snapshot.
+- [x] Switch the TUI completion/details query to the shared snapshot operation and delete the VSIX
+  per-request CLI/live completion provider.
+- [x] Measure warm local p95 latency and cover the standard operations in the packaged VSIX.
 
 ### Slice 3: navigation and symbols
 
@@ -271,3 +275,20 @@ The packaged test exposed the distinction through Windows drive normalization, a
 only at the LSP boundary restored one stable source identity. This predicts that every future LSP
 workspace edit and navigation location must pass through the same boundary conversion rather than
 constructing compiler paths from URI strings directly.
+
+### Shared completion, hover, and signature implementation
+
+- Good: one immutable completion-snapshot query now handles dirty full documents and TUI definition
+  overlays while allowing the live host to merge runtime commands, state paths, and scratch cells.
+- Bad: completion models and deterministic ranking originated in `stasis_runner`, so extracting the
+  shared operation exposed a historical ownership inversion even though no second ranking path was
+  added.
+- Adjustment: keep transport-neutral query orchestration in `stasis_language_service`; move the
+  remaining generic completion models/ranker out of the live protocol when the custom live broker
+  replaces that protocol's editor-facing completion command.
+
+Theory gained: the stable reusable unit is not merely a symbol catalog; it is catalog plus lexical
+scope, accepted source spans, dirty overlay, expected type, and deterministic ranking at one
+workspace revision. The TUI overlay tests and VSIX requests now exercise that same unit. This
+predicts that rename preview and navigation should consume a similarly immutable symbol/reference
+snapshot while host-only runtime values remain optional enrichment.

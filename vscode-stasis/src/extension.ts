@@ -10,12 +10,9 @@ import {
 } from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
 import {
-  byteOffsetToStringOffset,
-  CompilerCompletion,
   displayRuntimeValue,
   LiveResponse,
   LiveValue,
-  stringOffsetToByteOffset,
 } from "./protocol";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
@@ -108,46 +105,6 @@ function runStasis(
   });
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function completionKind(kind: string): vscode.CompletionItemKind {
-  switch (kind.toLowerCase()) {
-    case "function":
-    case "method":
-      return vscode.CompletionItemKind.Function;
-    case "struct":
-    case "enum":
-    case "type":
-      return vscode.CompletionItemKind.Struct;
-    case "field":
-      return vscode.CompletionItemKind.Field;
-    case "local":
-    case "parameter":
-    case "global":
-      return vscode.CompletionItemKind.Variable;
-    case "keyword":
-    case "command":
-      return vscode.CompletionItemKind.Keyword;
-    case "constant":
-      return vscode.CompletionItemKind.Constant;
-    default:
-      return vscode.CompletionItemKind.Text;
-  }
-}
-
-function compilerCompletionItem(item: CompilerCompletion, rank: number): vscode.CompletionItem {
-  const result = new vscode.CompletionItem(item.text, completionKind(item.kind));
-  result.insertText = item.text;
-  result.detail = item.detail ?? item.type_name ?? item.kind;
-  result.filterText = item.text;
-  result.sortText = rank.toString().padStart(6, "0");
-  return result;
-}
-
 class StasisFormatter implements vscode.DocumentFormattingEditProvider {
   async provideDocumentFormattingEdits(
     document: vscode.TextDocument,
@@ -161,111 +118,6 @@ class StasisFormatter implements vscode.DocumentFormattingEditProvider {
       return [];
     }
     return [vscode.TextEdit.replace(new vscode.Range(new vscode.Position(0, 0), end), output.stdout)];
-  }
-}
-
-class StasisCompletionProvider implements vscode.CompletionItemProvider {
-  constructor(private readonly controller: LiveController) {}
-
-  async provideCompletionItems(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.CompletionList> {
-    const root = findWorkspaceRoot(document);
-    if (!root || token.isCancellationRequested) {
-      return new vscode.CompletionList();
-    }
-    const limit = Math.max(1, Math.min(200, configuration().get<number>("completion.limit", 64)));
-    const session = this.controller.sessionFor(root);
-    if (session && session.state !== "stopped") {
-      const source = document.getText();
-      const stringOffset = document.offsetAt(position);
-      const response = await session.request("complete", {
-        buffer: source,
-        cursor: stringOffsetToByteOffset(source, stringOffset),
-        limit,
-        context: {
-          file: path.relative(root, document.uri.fsPath).replaceAll("\\", "/"),
-          source_offset: stringOffsetToByteOffset(source, stringOffset),
-        },
-      });
-      if (token.isCancellationRequested) {
-        return new vscode.CompletionList();
-      }
-      return this.liveCompletionList(document, source, response);
-    }
-
-    const word = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_.]*/);
-    const query = word ? document.getText(word) : "";
-    const args = [
-      "--json",
-      "--workspace",
-      root,
-      "symbol",
-      "list",
-      "--limit",
-      String(limit),
-    ];
-    if (query.length > 0) {
-      args.push("--query", query);
-    }
-    const output = await runStasis(args, root, undefined, token);
-    const envelope = asRecord(JSON.parse(output.stdout) as unknown);
-    const result = asRecord(envelope?.result);
-    const items = Array.isArray(result?.items) ? result.items : [];
-    return new vscode.CompletionList(
-      items.flatMap((value, rank) => {
-        const item = asRecord(value);
-        if (!item || typeof item.name !== "string" || typeof item.kind !== "string") {
-          return [];
-        }
-        return [
-          compilerCompletionItem(
-            {
-              text: item.name,
-              kind: item.kind,
-              detail: typeof item.signature === "string" ? item.signature : undefined,
-            },
-            rank,
-          ),
-        ];
-      }),
-      Number(result?.total ?? items.length) > items.length,
-    );
-  }
-
-  private liveCompletionList(
-    document: vscode.TextDocument,
-    source: string,
-    response: LiveResponse,
-  ): vscode.CompletionList {
-    const data = asRecord(response.data);
-    const values = Array.isArray(data?.items) ? data.items : [];
-    const start = typeof data?.replacement_start === "number" ? data.replacement_start : 0;
-    const end = typeof data?.replacement_end === "number" ? data.replacement_end : start;
-    const range = new vscode.Range(
-      document.positionAt(byteOffsetToStringOffset(source, start)),
-      document.positionAt(byteOffsetToStringOffset(source, end)),
-    );
-    const items = values.flatMap((value, rank) => {
-      const item = asRecord(value);
-      if (!item || typeof item.text !== "string" || typeof item.kind !== "string") {
-        return [];
-      }
-      const completion = compilerCompletionItem(
-        {
-          text: item.text,
-          kind: item.kind,
-          detail: typeof item.detail === "string" ? item.detail : undefined,
-          type_name: typeof item.type_name === "string" ? item.type_name : undefined,
-        },
-        rank,
-      );
-      completion.range = range;
-      return [completion];
-    });
-    return new vscode.CompletionList(items, response.truncated === true || data?.truncated === true);
   }
 }
 
@@ -321,10 +173,6 @@ class LiveController implements vscode.Disposable {
     this.status.command = "stasis.startPlaySession";
     this.updateState("stopped");
     this.status.show();
-  }
-
-  sessionFor(root: string): LiveSession | undefined {
-    return this.current?.root === root ? this.current : undefined;
   }
 
   get state(): LiveSessionState {
@@ -428,7 +276,10 @@ class StasisLanguageClients implements vscode.Disposable {
         }
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
-        if (event.affectsConfiguration("stasis.executablePath")) {
+        if (
+          event.affectsConfiguration("stasis.executablePath") ||
+          event.affectsConfiguration("stasis.completion.limit")
+        ) {
           void this.restart();
         }
       }),
@@ -479,17 +330,21 @@ class StasisLanguageClients implements vscode.Disposable {
         },
       ],
       workspaceFolder: folder,
+      initializationOptions: {
+        completionLimit: Math.max(
+          1,
+          Math.min(256, vscode.workspace.getConfiguration("stasis", folder.uri).get<number>("completion.limit", 64)),
+        ),
+      },
       outputChannel: this.output,
       traceOutputChannel: this.output,
       middleware: {
         didOpen: (document, next) => {
           const owned = vscode.workspace.getWorkspaceFolder(document.uri)?.index === folder.index;
-          this.output.info(`LSP didOpen ${document.uri.toString()} owned=${owned}`);
           return owned ? next(document) : Promise.resolve();
         },
         didChange: (event, next) => {
           const owned = vscode.workspace.getWorkspaceFolder(event.document.uri)?.index === folder.index;
-          this.output.info(`LSP didChange ${event.document.uri.toString()} owned=${owned}`);
           return owned ? next(event) : Promise.resolve();
         },
         didClose: (document, next) =>
@@ -555,11 +410,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     controller,
     vscode.window.registerTreeDataProvider("stasis.liveValues", values),
     vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_SELECTOR, new StasisFormatter()),
-    vscode.languages.registerCompletionItemProvider(
-      LANGUAGE_SELECTOR,
-      new StasisCompletionProvider(controller),
-      ".",
-    ),
     command("stasis.startPlaySession", async () => controller.start()),
     command("stasis.stopPlaySession", async () => controller.stop()),
     command("stasis.pausePlaySession", async () => {

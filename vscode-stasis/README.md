@@ -5,7 +5,9 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 - Stasis syntax highlighting and editor indentation;
 - continuous compiler diagnostics through a standard Language Server Protocol client;
 - canonical document formatting through `stasis format --stdin`;
-- compiler-backed project completion, with richer local/member completion while a play session is active;
+- compiler-backed LSP completion with signatures, documentation, snippets, typed local/member
+  ranking, and safe import edits;
+- compiler-aware hover and signature help;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;
 - typed live inspection and watches in the **Stasis > Live Values** sidebar.
@@ -70,5 +72,5 @@ development locations. Linux runs need a display such as `xvfb-run`; GitHub CI s
 
 The extension starts one persistent `stasis lsp --stdio` server per Stasis workspace. Language and
 runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
-share them. Formatting and completion still use their migration adapters until their shared LSP
-operations land in the next slices.
+share them. Formatting still uses its migration adapter until its LSP operation lands in a later
+slice; completion, hover, signature help, and diagnostics use the persistent language server.

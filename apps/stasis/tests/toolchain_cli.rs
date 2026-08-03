@@ -144,6 +144,7 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
     let source_path = project.join("src/main.stasis");
     fs::write(&source_path, "function main(): i32 { return 0; }\n").expect("write LSP source");
     let uri = file_uri(&source_path);
+    let fixed_source = "// Adds two values.\nfunction add_score(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { return add_score(1, 2); }\n";
     let input = [
         lsp_frame(json!({
             "jsonrpc": "2.0",
@@ -172,10 +173,37 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
             "jsonrpc": "2.0",
             "method": "textDocument/didChange",
             "params": {
-                "textDocument": { "uri": uri, "version": 2 },
+                "textDocument": { "uri": uri.clone(), "version": 2 },
                 "contentChanges": [{
-                    "text": "function main(): i32 { return 0; }\nfunction fixed(): i32 { return 1; }\n"
+                    "text": fixed_source
                 }]
+            }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri.clone() },
+                "position": { "line": 2, "character": 35 }
+            }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri.clone() },
+                "position": { "line": 2, "character": 32 }
+            }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/signatureHelp",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 2, "character": 43 }
             }
         })),
         lsp_frame(json!({
@@ -206,6 +234,9 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         messages[0]["result"]["capabilities"]["positionEncoding"],
         "utf-16"
     );
+    assert_eq!(messages[0]["result"]["capabilities"]["hoverProvider"], true);
+    assert!(messages[0]["result"]["capabilities"]["completionProvider"].is_object());
+    assert!(messages[0]["result"]["capabilities"]["signatureHelpProvider"].is_object());
     let diagnostics = messages
         .iter()
         .filter(|message| message["method"] == "textDocument/publishDiagnostics")
@@ -219,6 +250,30 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         .contains("while"));
     assert_eq!(diagnostics[1]["params"]["version"], 2);
     assert_eq!(diagnostics[1]["params"]["diagnostics"], json!([]));
+    let completion = messages
+        .iter()
+        .find(|message| message["id"] == 3)
+        .expect("completion response");
+    assert!(completion["result"]["items"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["label"] == "add_score")));
+    let hover = messages
+        .iter()
+        .find(|message| message["id"] == 4)
+        .expect("hover response");
+    assert!(hover["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Adds two values"));
+    let signature = messages
+        .iter()
+        .find(|message| message["id"] == 5)
+        .expect("signature response");
+    assert_eq!(signature["result"]["activeParameter"], 1);
+    assert_eq!(
+        signature["result"]["signatures"][0]["label"],
+        "add_score(amount: i32, bonus: i32): i32"
+    );
     assert_eq!(messages.last().unwrap()["id"], 2);
     fs::remove_dir_all(project).ok();
 }

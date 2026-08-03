@@ -4,20 +4,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lsp_server::{Connection, Message, Notification, Response};
+use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
     Notification as _, PublishDiagnostics,
 };
+use lsp_types::request::{Completion, HoverRequest, Request as _, SignatureHelpRequest};
 use lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, InitializeParams, InitializeResult, PositionEncodingKind,
-    PublishDiagnosticsParams, SaveOptions, ServerCapabilities, ServerInfo,
-    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    CompletionItemKind, CompletionList, CompletionOptions, CompletionParams, CompletionResponse,
+    CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, Documentation, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InsertTextFormat,
+    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, PositionEncodingKind,
+    PublishDiagnosticsParams, SaveOptions, ServerCapabilities, ServerInfo, SignatureHelpOptions,
+    SignatureHelpParams, TextDocumentContentChangeEvent, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, Uri,
 };
 use stasis_language_service::{
-    DiagnosticSeverity, Document, LanguageService, Position, TextChange,
+    DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageService, Position,
+    SignatureHelp as SharedSignatureHelp, TextChange,
 };
 use url::Url;
 
@@ -34,8 +40,16 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
     let (initialize_id, initialize_params) = connection
         .initialize_start()
         .map_err(|error| format!("LSP initialization failed: {error}"))?;
-    let _: InitializeParams = serde_json::from_value(initialize_params)
+    let initialize_params: InitializeParams = serde_json::from_value(initialize_params)
         .map_err(|error| format!("invalid LSP initialize parameters: {error}"))?;
+    let completion_limit = initialize_params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("completionLimit"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or(64)
+        .clamp(1, 256);
     let initialize_result = InitializeResult {
         capabilities: ServerCapabilities {
             position_encoding: Some(PositionEncodingKind::UTF16),
@@ -50,6 +64,17 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
                     })),
                 },
             )),
+            completion_provider: Some(CompletionOptions {
+                trigger_characters: Some(vec![".".to_string()]),
+                resolve_provider: Some(false),
+                ..CompletionOptions::default()
+            }),
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            signature_help_provider: Some(SignatureHelpOptions {
+                trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                retrigger_characters: Some(vec![",".to_string()]),
+                work_done_progress_options: Default::default(),
+            }),
             ..ServerCapabilities::default()
         },
         server_info: Some(ServerInfo {
@@ -65,7 +90,7 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
         )
         .map_err(|error| format!("LSP initialization failed: {error}"))?;
 
-    let mut server = LanguageServer::new(project_root)?;
+    let mut server = LanguageServer::new(project_root, completion_limit)?;
     server.publish_diagnostics(&connection)?;
     for message in &connection.receiver {
         match message {
@@ -76,14 +101,7 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
                 {
                     break;
                 }
-                connection
-                    .sender
-                    .send(Message::Response(Response::new_err(
-                        request.id,
-                        lsp_server::ErrorCode::MethodNotFound as i32,
-                        format!("unsupported LSP request '{}'", request.method),
-                    )))
-                    .map_err(|error| format!("failed sending LSP response: {error}"))?;
+                server.handle_request(&connection, request)?;
             }
             Message::Notification(notification) => {
                 server.handle_notification(&connection, notification)?;
@@ -98,10 +116,11 @@ struct LanguageServer {
     service: LanguageService,
     uri_by_path: BTreeMap<String, Uri>,
     published_paths: BTreeSet<String>,
+    completion_limit: usize,
 }
 
 impl LanguageServer {
-    fn new(project_root: &Path) -> Result<Self, String> {
+    fn new(project_root: &Path, completion_limit: usize) -> Result<Self, String> {
         let project_root = absolute_path(project_root)?;
         let mut service = LanguageService::new(path_text(&project_root))?;
         let mut uri_by_path = BTreeMap::new();
@@ -117,7 +136,49 @@ impl LanguageServer {
             service,
             uri_by_path,
             published_paths: BTreeSet::new(),
+            completion_limit,
         })
+    }
+
+    fn handle_request(&mut self, connection: &Connection, request: Request) -> Result<(), String> {
+        let response = match request.method.as_str() {
+            Completion::METHOD => {
+                let (id, params): (_, CompletionParams) = request
+                    .extract(Completion::METHOD)
+                    .map_err(|error| format!("invalid completion request: {error}"))?;
+                match self.completion(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            HoverRequest::METHOD => {
+                let (id, params): (_, HoverParams) = request
+                    .extract(HoverRequest::METHOD)
+                    .map_err(|error| format!("invalid hover request: {error}"))?;
+                match self.hover(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            SignatureHelpRequest::METHOD => {
+                let (id, params): (_, SignatureHelpParams) = request
+                    .extract(SignatureHelpRequest::METHOD)
+                    .map_err(|error| format!("invalid signature-help request: {error}"))?;
+                match self.signature_help(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            _ => Response::new_err(
+                request.id,
+                lsp_server::ErrorCode::MethodNotFound as i32,
+                format!("unsupported LSP request '{}'", request.method),
+            ),
+        };
+        connection
+            .sender
+            .send(Message::Response(response))
+            .map_err(|error| format!("failed sending LSP response: {error}"))
     }
 
     fn handle_notification(
@@ -180,6 +241,91 @@ impl LanguageServer {
             }
             _ => Ok(()),
         }
+    }
+
+    fn completion(
+        &mut self,
+        params: CompletionParams,
+    ) -> Result<Option<CompletionResponse>, String> {
+        let (path, document, byte_offset) =
+            self.document_position(params.text_document_position)?;
+        let completion = self
+            .service
+            .completion(&path, byte_offset, self.completion_limit)?;
+        let start = document
+            .position(completion.replacement_start)
+            .map_err(|error| error.to_string())?;
+        let end = document
+            .position(completion.replacement_end)
+            .map_err(|error| error.to_string())?;
+        let range = lsp_types::Range::new(lsp_position(start), lsp_position(end));
+        let items = completion
+            .items
+            .iter()
+            .enumerate()
+            .map(|(rank, item)| lsp_completion_item(item, range, rank, &path, &document))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(CompletionResponse::List(CompletionList {
+            is_incomplete: completion.truncated,
+            items,
+        })))
+    }
+
+    fn hover(&mut self, params: HoverParams) -> Result<Option<Hover>, String> {
+        let (path, document, byte_offset) =
+            self.document_position(params.text_document_position_params)?;
+        let Some(hover) = self.service.hover(&path, byte_offset)? else {
+            return Ok(None);
+        };
+        let start = document
+            .position(hover.range.start)
+            .map_err(|error| error.to_string())?;
+        let end = document
+            .position(hover.range.end)
+            .map_err(|error| error.to_string())?;
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: hover_markdown(&hover),
+            }),
+            range: Some(lsp_types::Range::new(
+                lsp_position(start),
+                lsp_position(end),
+            )),
+        }))
+    }
+
+    fn signature_help(
+        &mut self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<lsp_types::SignatureHelp>, String> {
+        let (path, _, byte_offset) =
+            self.document_position(params.text_document_position_params)?;
+        Ok(self
+            .service
+            .signature_help(&path, byte_offset)?
+            .map(lsp_signature_help))
+    }
+
+    fn document_position(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<(String, Document, usize), String> {
+        let path = uri_path(&params.text_document.uri)?;
+        let key = path_text(&path);
+        let document = self
+            .service
+            .snapshot()
+            .document(&key)
+            .cloned()
+            .ok_or_else(|| format!("LSP document is not indexed: '{key}'"))?;
+        let byte_offset = document
+            .byte_offset(Position {
+                line: params.position.line,
+                utf16_character: params.position.character,
+            })
+            .map_err(|error| error.to_string())?;
+        Ok((key, document, byte_offset))
     }
 
     fn text_changes(
@@ -303,6 +449,129 @@ fn overlay_after_change(document: &Document, change: &TextChange) -> Result<Docu
         .ok_or_else(|| "incremental LSP overlay disappeared".to_string())
 }
 
+fn internal_error(id: lsp_server::RequestId, message: String) -> Response {
+    Response::new_err(id, lsp_server::ErrorCode::InternalError as i32, message)
+}
+
+fn lsp_completion_item(
+    item: &LanguageCompletionItem,
+    range: lsp_types::Range,
+    rank: usize,
+    path: &str,
+    document: &Document,
+) -> Result<lsp_types::CompletionItem, String> {
+    let additional_text_edits = item
+        .additional_text_edits
+        .iter()
+        .map(|edit| {
+            if edit.path != path {
+                return Err(format!(
+                    "completion edit targets '{}' instead of request document '{path}'",
+                    edit.path
+                ));
+            }
+            let start = document
+                .position(edit.range.start)
+                .map_err(|error| error.to_string())?;
+            let end = document
+                .position(edit.range.end)
+                .map_err(|error| error.to_string())?;
+            Ok(TextEdit {
+                range: lsp_types::Range::new(lsp_position(start), lsp_position(end)),
+                new_text: edit.text.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(lsp_types::CompletionItem {
+        label: item.text.clone(),
+        kind: Some(completion_kind(&item.kind)),
+        detail: Some(item.detail.clone()),
+        documentation: item.documentation.clone().map(|value| {
+            Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            })
+        }),
+        sort_text: Some(format!("{rank:06}")),
+        filter_text: Some(item.text.clone()),
+        insert_text_format: item.snippet.then_some(InsertTextFormat::SNIPPET),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range,
+            new_text: item.insert_text.clone(),
+        })),
+        additional_text_edits: (!additional_text_edits.is_empty()).then_some(additional_text_edits),
+        ..lsp_types::CompletionItem::default()
+    })
+}
+
+fn completion_kind(kind: &str) -> CompletionItemKind {
+    match kind {
+        "function" | "test" => CompletionItemKind::FUNCTION,
+        "method" => CompletionItemKind::METHOD,
+        "struct" | "type" => CompletionItemKind::STRUCT,
+        "enum" => CompletionItemKind::ENUM,
+        "enum_variant" => CompletionItemKind::ENUM_MEMBER,
+        "field" | "state_path" => CompletionItemKind::FIELD,
+        "parameter" => CompletionItemKind::VARIABLE,
+        "local" | "global" => CompletionItemKind::VARIABLE,
+        "constant" => CompletionItemKind::CONSTANT,
+        "keyword" | "command" => CompletionItemKind::KEYWORD,
+        _ => CompletionItemKind::TEXT,
+    }
+}
+
+fn hover_markdown(hover: &HoverInfo) -> String {
+    let mut sections = Vec::new();
+    if !hover.signatures.is_empty() {
+        sections.push(format!("```stasis\n{}\n```", hover.signatures.join("\n")));
+    } else if let Some(type_name) = &hover.type_name {
+        sections.push(format!("```stasis\n{}: {type_name}\n```", hover.symbol));
+    } else {
+        sections.push(format!("```stasis\n{}\n```", hover.symbol));
+    }
+    let mut facts = vec![format!("**Kind:** {}", hover.kind)];
+    if let Some(owner) = &hover.owner {
+        facts.push(format!("**Owner:** `{owner}`"));
+    }
+    if let Some(type_name) = &hover.type_name {
+        facts.push(format!("**Type:** `{type_name}`"));
+    }
+    if let Some(value) = &hover.live_value {
+        facts.push(format!("**Live value:** `{value}`"));
+    }
+    sections.push(facts.join("  \n"));
+    if let Some(documentation) = &hover.documentation {
+        sections.push(documentation.clone());
+    }
+    sections.join("\n\n")
+}
+
+fn lsp_signature_help(help: SharedSignatureHelp) -> lsp_types::SignatureHelp {
+    lsp_types::SignatureHelp {
+        signatures: help
+            .signatures
+            .into_iter()
+            .map(|signature| lsp_types::SignatureInformation {
+                label: signature.label,
+                documentation: signature.documentation.map(Documentation::String),
+                parameters: Some(
+                    signature
+                        .parameters
+                        .into_iter()
+                        .map(|parameter| ParameterInformation {
+                            label: ParameterLabel::Simple(parameter.label),
+                            documentation: parameter.documentation.map(Documentation::String),
+                        })
+                        .collect(),
+                ),
+                active_parameter: None,
+            })
+            .collect(),
+        active_signature: u32::try_from(help.active_signature).ok(),
+        active_parameter: u32::try_from(help.active_parameter).ok(),
+    }
+}
+
 fn lsp_position(position: Position) -> lsp_types::Position {
     lsp_types::Position::new(position.line, position.utf16_character)
 }
@@ -375,6 +644,7 @@ fn stasis_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_server::RequestId;
     use std::time::Duration;
 
     fn test_server(name: &str) -> (LanguageServer, Uri, String) {
@@ -388,10 +658,24 @@ mod tests {
                 service,
                 uri_by_path: BTreeMap::new(),
                 published_paths: BTreeSet::new(),
+                completion_limit: 64,
             },
             uri,
             key,
         )
+    }
+
+    fn receive_response(connection: &Connection, id: i32) -> Response {
+        loop {
+            let message = connection
+                .receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("LSP response");
+            if let Message::Response(response) = message {
+                assert_eq!(response.id, RequestId::from(id));
+                return response;
+            }
+        }
     }
 
     #[test]
@@ -523,6 +807,144 @@ mod tests {
         let saved = snapshot.document(&key).expect("saved disk document");
         assert_eq!(saved.version, None);
         assert_eq!(&*saved.text, text);
+    }
+
+    #[test]
+    fn standard_requests_return_completion_hover_and_signature_help() {
+        let (mut server, uri, _) = test_server("intelligence");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "// Creates an enemy.\nfunction spawn_enemy(count: i32, health: i32): i32 { return health; }\nfunction main(): i32 { let health: i32 = 2; return spawn_enemy(1, health); }\n";
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "stasis",
+                            "version": 1,
+                            "text": source
+                        }
+                    }),
+                ),
+            )
+            .expect("didOpen");
+
+        let completion_offset = source.rfind("spawn_enemy(1").expect("function use") + 5;
+        let completion_position = lsp_position(
+            server
+                .service
+                .snapshot()
+                .document(&path_text(&uri_path(&uri).expect("path")))
+                .expect("document")
+                .position(completion_offset)
+                .expect("position"),
+        );
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(10),
+                    Completion::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": completion_position
+                    }),
+                ),
+            )
+            .expect("completion request");
+        let response = receive_response(&client_connection, 10);
+        let completion: Option<CompletionResponse> =
+            serde_json::from_value(response.response_result.expect("completion result"))
+                .expect("completion response");
+        let CompletionResponse::List(completion) = completion.expect("completion list") else {
+            panic!("expected completion list");
+        };
+        let function = completion
+            .items
+            .iter()
+            .find(|item| item.label == "spawn_enemy")
+            .expect("function completion");
+        assert_eq!(function.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        let Some(CompletionTextEdit::Edit(edit)) = function.text_edit.as_ref() else {
+            panic!("expected completion text edit");
+        };
+        assert_eq!(edit.new_text, "spawn_enemy(${1:count}, ${2:health})");
+        assert!(matches!(
+            function.documentation.as_ref(),
+            Some(Documentation::MarkupContent(content)) if content.value.contains("Creates an enemy")
+        ));
+
+        let function_offset = source.rfind("spawn_enemy(1").expect("function use") + 2;
+        let function_position = lsp_position(
+            server
+                .service
+                .snapshot()
+                .document(&path_text(&uri_path(&uri).expect("path")))
+                .expect("document")
+                .position(function_offset)
+                .expect("position"),
+        );
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(11),
+                    HoverRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": function_position
+                    }),
+                ),
+            )
+            .expect("hover request");
+        let response = receive_response(&client_connection, 11);
+        let hover: Option<Hover> =
+            serde_json::from_value(response.response_result.expect("hover result"))
+                .expect("hover response");
+        let HoverContents::Markup(contents) = hover.expect("hover").contents else {
+            panic!("expected markdown hover");
+        };
+        assert!(contents
+            .value
+            .contains("spawn_enemy(count: i32, health: i32): i32"));
+        assert!(contents.value.contains("Creates an enemy."));
+
+        let signature_offset =
+            source.rfind("spawn_enemy(1, health").expect("call") + "spawn_enemy(1, ".len();
+        let signature_position = lsp_position(
+            server
+                .service
+                .snapshot()
+                .document(&path_text(&uri_path(&uri).expect("path")))
+                .expect("document")
+                .position(signature_offset)
+                .expect("position"),
+        );
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(12),
+                    SignatureHelpRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": signature_position
+                    }),
+                ),
+            )
+            .expect("signature request");
+        let response = receive_response(&client_connection, 12);
+        let help: Option<lsp_types::SignatureHelp> =
+            serde_json::from_value(response.response_result.expect("signature result"))
+                .expect("signature response");
+        let help = help.expect("signature help");
+        assert_eq!(help.active_parameter, Some(1));
+        assert_eq!(
+            help.signatures[0].label,
+            "spawn_enemy(count: i32, health: i32): i32"
+        );
     }
 
     #[cfg(windows)]

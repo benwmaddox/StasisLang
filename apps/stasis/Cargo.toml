@@ -8,6 +8,7 @@ license.workspace = true
 stasis_runner = { path = "../../crates/stasis_runner" }
 stasis_jit = { path = "../../crates/stasis_jit" }
 stasis_lsp = { path = "../../crates/stasis_lsp" }
+stasis_language_service = { path = "../../crates/stasis_language_service" }
 stasis_compiler = { path = "../../crates/stasis_compiler" }
 notify.workspace = true
 clap.workspace = true

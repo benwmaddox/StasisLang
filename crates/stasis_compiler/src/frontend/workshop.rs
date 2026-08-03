@@ -1598,7 +1598,7 @@ pub fn workshop_completion_items(
                     "{signature} via {} {}: {} [{method_file}]",
                     binding.kind, binding.name, binding.type_name
                 );
-                let item = match binding.scope.clone() {
+                let mut item = match binding.scope.clone() {
                     Some(scope) => scoped_completion_catalog_item(
                         &text,
                         "method",
@@ -1616,6 +1616,7 @@ pub fn workshop_completion_items(
                         Some(binding.type_name.clone()),
                     ),
                 };
+                item.signature = Some(signature.clone());
                 items.push(item);
             }
         }
