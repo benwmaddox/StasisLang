@@ -253,8 +253,12 @@ Each slice is independently testable and removes the host-specific path it repla
 
 ### Slice 7: debugging and editing polish
 
-- [ ] Add a Debug Adapter Protocol implementation backed by real runtime pause/stack/scope support.
-  Debugger work must expose real lexical frames before live locals or watches are claimed.
+- [x] Add a Debug Adapter Protocol implementation backed by instrumented Cranelift JIT statement
+  sites and a blocking runtime rendezvous. Expose source breakpoints, pause, continue, step in/over/
+  out, real nested lexical frames, current-scope locals, typed globals, and watch evaluation through
+  `stasis dap --stdio`; launch it through VS Code's standard debug adapter factory. Keep normal JIT
+  and all AOT output uninstrumented, and capture program stdout as DAP output events so protocol
+  framing remains valid.
 - [x] Add tolerant compiler-owned folding and nested selection ranges over the current buffer.
 - [x] Add compiler-scoped linked editing for locals and parameters, paused on stale semantic state.
 - [x] Route document, range, and on-type formatting through the standard LSP and the compiler-owned
@@ -545,3 +549,21 @@ need revision-exact semantic truth. The incomplete folding test proves matched e
 usable without inventing a close delimiter for the broken block; the linked-edit test proves a
 stale binding identity must not produce edits. This predicts debugger source stops may use accepted
 semantic identities only when their source revision is explicitly mapped to the current editor.
+
+### Standard DAP debugging implementation
+
+- Good: adding statement-site metadata to the existing HIR/lowering path made source breakpoints and
+  lexical values properties of the code that actually executes, while a separate protocol thread
+  could inspect and resume a JIT thread blocked at the exact statement.
+- Bad: the first protocol startup sent `initialized` before `launch` had compiled metadata, allowing
+  an editor to race `setBreakpoints` against an unavailable program; retained frame values also
+  needed an explicit per-statement clear to avoid presenting out-of-scope locals.
+- Adjustment: publish debugger readiness only after accepted executable metadata exists, and treat
+  every statement stop as a fresh lexical-value snapshot rather than an accumulating frame map.
+
+Theory gained: a truthful debugger is an execution rendezvous keyed by accepted function identity
+and compiler-emitted statement identity, not a source scanner layered over a paused tick loop. The
+real-JIT test proves a `main -> helper` call exposes both frames and only the locals live at each
+statement; the packaged VSIX test proves the same stop supports VS Code breakpoints, globals,
+watches, and stepping. This predicts hot-swap debugging must either retain the stopped generation's
+metadata until resume or explicitly invalidate the stop before accepting a new generation.

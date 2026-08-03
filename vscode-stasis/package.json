@@ -13,7 +13,8 @@
     "vscode": "^1.96.0"
   },
   "activationEvents": [
-    "workspaceContains:stasis.json"
+    "workspaceContains:stasis.json",
+    "onDebug:stasis"
   ],
   "categories": [
     "Programming Languages",
@@ -45,6 +46,34 @@
         "language": "stasis",
         "scopeName": "source.stasis",
         "path": "./syntaxes/stasis.tmLanguage.json"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "stasis",
+        "label": "Stasis",
+        "languages": [
+          "stasis"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false,
+                "description": "Stop at the first executable Stasis statement."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "stasis",
+            "request": "launch",
+            "name": "Debug Stasis",
+            "stopOnEntry": false
+          }
+        ]
       }
     ],
     "commands": [

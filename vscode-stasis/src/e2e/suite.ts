@@ -110,6 +110,26 @@ function applyTextEdits(document: vscode.TextDocument, edits: readonly vscode.Te
   return text;
 }
 
+async function waitForDebugStack(
+  session: vscode.DebugSession,
+  timeoutMs = 30_000,
+): Promise<{ stackFrames: Array<{ id: number; name: string; line: number }> }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const stack = await session.customRequest("stackTrace", { threadId: 1 });
+      if (Array.isArray(stack?.stackFrames) && stack.stackFrames.length > 0) {
+        return stack as { stackFrames: Array<{ id: number; name: string; line: number }> };
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for a stopped Stasis debug stack: ${String(lastError)}`);
+}
+
 export async function run(): Promise<void> {
   const executable = process.env.STASIS_E2E_EXECUTABLE;
   const screenshot = process.env.STASIS_E2E_SCREENSHOT;
@@ -466,6 +486,86 @@ export async function run(): Promise<void> {
   const testEnvelope = JSON.parse(testResult.stdout) as { ok?: boolean; result?: { tests_passed?: number } };
   assert.equal(testEnvelope.ok, true, "Test Explorer executes the test through the Stasis CLI");
   assert.equal(testEnvelope.result?.tests_passed, 1, "the discovered fixture test passes");
+
+  const debugLine = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("score += 1"));
+  assert.notEqual(debugLine, -1, "the fixture contains an executable debugger statement");
+  const breakpoint = new vscode.SourceBreakpoint(
+    new vscode.Location(sourceUri, new vscode.Position(debugLine, 0)),
+  );
+  vscode.debug.addBreakpoints([breakpoint]);
+  try {
+    assert.equal(
+      await vscode.debug.startDebugging(folder, {
+        type: "stasis",
+        request: "launch",
+        name: "Stasis packaged DAP test",
+      }),
+      true,
+      "VS Code starts the packaged Stasis debug adapter",
+    );
+    await waitFor(
+      "active Stasis debug session",
+      () => vscode.debug.activeDebugSession?.type === "stasis",
+    );
+    const debugSession = vscode.debug.activeDebugSession;
+    if (!debugSession) {
+      throw new Error("The Stasis debug session did not become active.");
+    }
+    const firstStack = await waitForDebugStack(debugSession);
+    assert.deepEqual(
+      firstStack.stackFrames.slice(0, 2).map((frame) => frame.name),
+      ["tick", "main"],
+      "the packaged DAP exposes real nested JIT stack frames",
+    );
+    assert.equal(
+      firstStack.stackFrames[0]?.line,
+      debugLine + 1,
+      "the breakpoint resolves to the compiler-owned source statement",
+    );
+    const scopes = (await debugSession.customRequest("scopes", {
+      frameId: firstStack.stackFrames[0]!.id,
+    })) as { scopes: Array<{ name: string; variablesReference: number }> };
+    const globals = scopes.scopes.find((scope) => scope.name === "Globals");
+    assert.ok(globals, "the packaged DAP exposes a Globals scope");
+    const globalVariables = (await debugSession.customRequest("variables", {
+      variablesReference: globals.variablesReference,
+    })) as { variables: Array<{ name: string; value: string; type?: string }> };
+    assert.ok(
+      globalVariables.variables.some(
+        (variable) => variable.name === "score" && variable.value === "1" && variable.type === "i32",
+      ),
+      "the packaged DAP reads the stopped runtime's real global state",
+    );
+    const watchedBefore = (await debugSession.customRequest("evaluate", {
+      expression: "score",
+      frameId: firstStack.stackFrames[0]!.id,
+      context: "watch",
+    })) as { result: string; type?: string };
+    assert.deepEqual(
+      { result: watchedBefore.result, type: watchedBefore.type },
+      { result: "1", type: "i32" },
+      "DAP watches evaluate compiler-typed state expressions",
+    );
+    await debugSession.customRequest("next", { threadId: 1 });
+    const steppedStack = await waitForDebugStack(debugSession);
+    assert.equal(steppedStack.stackFrames[0]?.name, "tick", "Step Over remains in the tick frame");
+    const watchedAfter = (await debugSession.customRequest("evaluate", {
+      expression: "score",
+      frameId: steppedStack.stackFrames[0]!.id,
+      context: "watch",
+    })) as { result: string; type?: string };
+    assert.equal(watchedAfter.result, "2", "Step Over executes exactly the selected Stasis statement");
+    await vscode.debug.stopDebugging(debugSession);
+    await waitFor("terminated Stasis debug session", () => vscode.debug.activeDebugSession !== debugSession);
+  } finally {
+    vscode.debug.removeBreakpoints([breakpoint]);
+    if (vscode.debug.activeDebugSession?.type === "stasis") {
+      await vscode.debug.stopDebugging(vscode.debug.activeDebugSession);
+    }
+  }
 
   try {
     await api.start();

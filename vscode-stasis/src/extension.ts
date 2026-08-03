@@ -473,6 +473,46 @@ class StasisLanguageClients implements vscode.Disposable {
   }
 }
 
+class StasisDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
+  createDebugAdapterDescriptor(
+    session: vscode.DebugSession,
+    executable: vscode.DebugAdapterExecutable | undefined,
+  ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+    if (executable) {
+      return executable;
+    }
+    const root = session.workspaceFolder?.uri.fsPath ?? findWorkspaceRoot();
+    if (!root) {
+      throw new Error("Open a folder containing stasis.json before debugging Stasis.");
+    }
+    return new vscode.DebugAdapterExecutable(
+      executablePath(),
+      ["--workspace", root, "dap", "--stdio"],
+      { cwd: root },
+    );
+  }
+}
+
+class StasisDebugConfigurationProvider implements vscode.DebugConfigurationProvider {
+  resolveDebugConfiguration(
+    folder: vscode.WorkspaceFolder | undefined,
+    config: vscode.DebugConfiguration,
+  ): vscode.ProviderResult<vscode.DebugConfiguration> {
+    const root = folder?.uri.fsPath ?? findWorkspaceRoot(vscode.window.activeTextEditor?.document);
+    if (!root) {
+      void vscode.window.showErrorMessage("Stasis: open a folder containing stasis.json before debugging.");
+      return undefined;
+    }
+    return {
+      ...config,
+      type: "stasis",
+      request: config.request ?? "launch",
+      name: config.name ?? "Debug Stasis",
+      stopOnEntry: config.stopOnEntry ?? false,
+    };
+  }
+}
+
 async function askForPath(prompt: string): Promise<string | undefined> {
   return vscode.window.showInputBox({
     prompt,
@@ -499,6 +539,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     (root) => languageClients.clientForRoot(root),
   );
   const tests = new StasisTests(output);
+  const debugFactory = new StasisDebugAdapterFactory();
+  const debugConfiguration = new StasisDebugConfigurationProvider();
   const command = (name: string, action: (...args: unknown[]) => Promise<void>) =>
     vscode.commands.registerCommand(name, (...args: unknown[]) => showCommandError(() => action(...args)));
 
@@ -507,6 +549,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     languageClients,
     controller,
     tests,
+    vscode.debug.registerDebugAdapterDescriptorFactory("stasis", debugFactory),
+    vscode.debug.registerDebugConfigurationProvider("stasis", debugConfiguration),
     vscode.window.registerTreeDataProvider("stasis.liveValues", values),
     command("stasis.startPlaySession", async () => controller.start()),
     command("stasis.stopPlaySession", async () => controller.stop()),

@@ -1,6 +1,6 @@
 use crate::backend::emit::{
-    AssignTarget, CompileAnalysisCache, DirectStorageBinding, DirectStorageBindings,
-    RuntimeHelperLinkage, SimpleCondition, SimpleExpr, SimpleStmt,
+    debug_variable_slot, AssignTarget, CompileAnalysisCache, DirectStorageBinding,
+    DirectStorageBindings, RuntimeHelperLinkage, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReasonChain,
@@ -17,7 +17,7 @@ use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
     TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
-use crate::ir::hir::FunctionHIR;
+use crate::ir::hir::{DebugStatement, FunctionHIR};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Module};
@@ -339,6 +339,95 @@ fn collect_function_lowering_references(
     references
 }
 
+fn debug_function_metadata(
+    function: &FunctionMeta,
+    hir: &FunctionHIR,
+    file: &str,
+) -> Result<JitDebugFunctionMetadata, String> {
+    fn collect_sites(
+        function_start: u32,
+        statements: &[DebugStatement],
+        out: &mut Vec<JitDebugSite>,
+    ) -> Result<(), String> {
+        for statement in statements {
+            let source_offset = function_start
+                .checked_add(statement.source_offset)
+                .ok_or_else(|| "debug site source offset overflow".to_string())?;
+            out.push(JitDebugSite {
+                site_id: statement.source_offset,
+                source_offset,
+            });
+            collect_sites(function_start, &statement.children, out)?;
+        }
+        Ok(())
+    }
+
+    fn collect_names(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
+        for statement in statements {
+            match statement {
+                SimpleStmt::Let { name, .. } => {
+                    out.insert(name.clone());
+                }
+                SimpleStmt::If {
+                    then_statements,
+                    else_statements,
+                    ..
+                } => {
+                    collect_names(then_statements, out);
+                    if let Some(else_statements) = else_statements {
+                        collect_names(else_statements, out);
+                    }
+                }
+                SimpleStmt::For {
+                    init,
+                    step,
+                    body_statements,
+                    ..
+                } => {
+                    collect_names(std::slice::from_ref(init.as_ref()), out);
+                    collect_names(std::slice::from_ref(step.as_ref()), out);
+                    collect_names(body_statements, out);
+                }
+                SimpleStmt::Foreach {
+                    body_statements, ..
+                } => collect_names(body_statements, out),
+                _ => {}
+            }
+        }
+    }
+
+    let mut sites = Vec::new();
+    collect_sites(
+        function.source_range.start,
+        &hir.debug_statements,
+        &mut sites,
+    )?;
+    sites.sort_by_key(|site| site.source_offset);
+    let mut names = function
+        .param_names
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    collect_names(&hir.statements, &mut names);
+    let mut variables = BTreeMap::new();
+    for name in names {
+        let slot = debug_variable_slot(&name);
+        if let Some(existing) = variables.insert(slot, name.clone()) {
+            return Err(format!(
+                "debug variable slot collision between '{existing}' and '{name}'"
+            ));
+        }
+    }
+    Ok(JitDebugFunctionMetadata {
+        function_id: function.id,
+        name: function.name.clone(),
+        file: file.to_string(),
+        source_range: function.source_range.clone(),
+        sites,
+        variables,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum JitScalarValue {
@@ -376,6 +465,22 @@ pub struct JitArtifact {
     pub clif: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitDebugSite {
+    pub site_id: u32,
+    pub source_offset: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitDebugFunctionMetadata {
+    pub function_id: FunctionId,
+    pub name: String,
+    pub file: String,
+    pub source_range: std::ops::Range<u32>,
+    pub sites: Vec<JitDebugSite>,
+    pub variables: BTreeMap<u32, String>,
+}
+
 pub struct JitProcess {
     compiler: Compiler,
     active_compiler: Option<Compiler>,
@@ -396,6 +501,8 @@ pub struct JitProcess {
     last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
     required_emit_roots: Vec<String>,
     local_runtime_helper_trampolines: bool,
+    debug_instrumentation: bool,
+    debug_metadata: BTreeMap<FunctionId, JitDebugFunctionMetadata>,
     #[cfg(test)]
     _test_guard: Option<MutexGuard<'static, ()>>,
 }
@@ -503,9 +610,22 @@ impl JitProcess {
             last_failed_source_diagnostic: None,
             required_emit_roots: Vec::new(),
             local_runtime_helper_trampolines: false,
+            debug_instrumentation: false,
+            debug_metadata: BTreeMap::new(),
             #[cfg(test)]
             _test_guard,
         }
+    }
+
+    pub fn set_debug_instrumentation(&mut self, enabled: bool) -> Result<(), String> {
+        if self.program_snapshot.is_some() || self.active_program_snapshot.is_some() {
+            return Err(
+                "JIT debug instrumentation must be configured before the first compilation"
+                    .to_string(),
+            );
+        }
+        self.debug_instrumentation = enabled;
+        Ok(())
     }
 
     pub fn staged_candidate(&self) -> Self {
@@ -538,6 +658,8 @@ impl JitProcess {
             .compiler
             .set_analysis_required_roots(&candidate.required_emit_roots);
         candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
+        candidate.debug_instrumentation = self.debug_instrumentation;
+        candidate.debug_metadata = self.debug_metadata.clone();
         candidate
     }
 
@@ -561,6 +683,10 @@ impl JitProcess {
 
     pub fn function_data_flow_summaries(&self) -> &[crate::data_flow::FunctionDataFlowSummary] {
         self.compiler.function_data_flow_summaries()
+    }
+
+    pub fn debug_metadata(&self) -> &BTreeMap<FunctionId, JitDebugFunctionMetadata> {
+        &self.debug_metadata
     }
 
     pub fn tick_budget_us(&self) -> Result<Option<u64>, String> {
@@ -838,6 +964,16 @@ impl JitProcess {
         .map_err(crate::compiler::CompileError::Backend)?;
         let plan_micros = elapsed_micros(plan_started);
         let emit_function_ids = patch_plan.re_jit_ids.clone();
+        let source_paths = self
+            .compiler
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        let mut staged_debug_metadata = self.debug_metadata.clone();
+        for function_id in &emit_function_ids {
+            staged_debug_metadata.remove(function_id);
+        }
         let previous_artifacts_by_key: BTreeMap<FunctionKey, JitArtifact> = self
             .artifacts
             .iter()
@@ -863,6 +999,7 @@ impl JitProcess {
             retained_symbols.insert(format!("jit_fn_{current_id}"), artifact.code_ptr as usize);
         }
         let local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
+        let debug_instrumentation = self.debug_instrumentation;
         let mut staged_module = if emit_function_ids.is_empty() {
             None
         } else {
@@ -877,6 +1014,13 @@ impl JitProcess {
         let emit = self.compiler.emit_pass_for_ids_with(
             &emit_function_ids,
             &mut |meta, hir, lowered_types| {
+                if debug_instrumentation {
+                    let file = source_paths.get(meta.file_id as usize).ok_or_else(|| {
+                        format!("debug metadata file {} is missing", meta.file_id)
+                    })?;
+                    staged_debug_metadata
+                        .insert(meta.id, debug_function_metadata(meta, hir, file)?);
+                }
                 let symbol = format!("jit_fn_{}", meta.id);
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
@@ -899,6 +1043,7 @@ impl JitProcess {
                         &analysis.extern_symbol_addresses,
                         &direct_storage,
                         local_runtime_helper_trampolines,
+                        debug_instrumentation,
                         &mut defined_runtime_helper_trampolines,
                     )
                 }));
@@ -1018,6 +1163,11 @@ impl JitProcess {
                 Ok(artifact)
             })
             .collect::<CompileResult<Vec<_>>>()?;
+        let staged_function_ids = staged_artifacts
+            .iter()
+            .map(|artifact| artifact.function_id)
+            .collect::<BTreeSet<_>>();
+        staged_debug_metadata.retain(|function_id, _| staged_function_ids.contains(function_id));
         let layout_hash = u64::from_le_bytes(
             snapshot.layout_digest()[..8]
                 .try_into()
@@ -1127,6 +1277,7 @@ impl JitProcess {
         self.accepted_program = Some(accepted_program);
         self.accepted_lowering_references = lowering_references;
         self.accepted_lowering_contracts = lowering_contracts;
+        self.debug_metadata = staged_debug_metadata;
         self.staged_string_literals = staged_string_literals;
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
@@ -2894,6 +3045,12 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
         stasis_jit_global_f64_array_store,
         stasis_jit_global_f64_array_ptr,
         stasis_jit_reject_code_swap,
+        stasis_jit_debug_frame_enter,
+        stasis_jit_debug_frame_leave,
+        stasis_jit_debug_statement,
+        stasis_jit_debug_values_begin,
+        stasis_jit_debug_value_i64,
+        stasis_jit_debug_value_f64,
     );
     out
 }
@@ -2934,6 +3091,7 @@ fn compile_function_into_jit_module(
     extern_symbol_addresses: &ExternSymbolAddressMap,
     direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
+    debug_instrumentation: bool,
     defined_runtime_helper_trampolines: &mut BTreeSet<String>,
 ) -> Result<(JITModule, cranelift_module::FuncId, String, usize), String> {
     let runtime_helper_addresses = local_runtime_helper_trampolines.then(|| {
@@ -2967,6 +3125,7 @@ fn compile_function_into_jit_module(
         named_struct_field_types,
         Some(direct_storage),
         Some(defined_runtime_helper_trampolines),
+        debug_instrumentation,
         |_| Ok(()),
         move |_, function| {
             *clif_capture.borrow_mut() = function.display().to_string();
@@ -5566,6 +5725,95 @@ mod tests {
         assert_eq!(report.index.parsed_functions, 1);
         assert_eq!(report.emit.emitted_functions, 1);
         assert!(process.artifacts()[0].code_ptr != 0);
+    }
+
+    #[test]
+    fn instrumented_jit_stops_with_nested_frames_and_current_lexical_values() {
+        let mut process = JitProcess::new();
+        process
+            .set_debug_instrumentation(true)
+            .expect("enable instrumentation");
+        process.upsert_file(
+            "src/main.stasis",
+            "function helper(value: i32): i32 {\n    let doubled: i32 = value * 2;\n    return doubled;\n}\nfunction main(): i32 {\n    let base: i32 = 3;\n    return helper(base);\n}\n",
+        );
+        process.compile().expect("instrumented compile");
+        let helper = process
+            .debug_metadata()
+            .values()
+            .find(|metadata| metadata.name == "helper")
+            .cloned()
+            .expect("helper debug metadata");
+        let main = process
+            .debug_metadata()
+            .values()
+            .find(|metadata| metadata.name == "main")
+            .cloned()
+            .expect("main debug metadata");
+        assert_eq!(helper.sites.len(), 2);
+        let first_site = helper.sites[0].site_id;
+        let second_site = helper.sites[1].site_id;
+        stasis_dynload::enable_jit_debugger([(helper.function_id, first_site)]);
+
+        let controller = std::thread::spawn(move || {
+            let first =
+                stasis_dynload::wait_for_jit_debug_stop(0, std::time::Duration::from_secs(2))
+                    .expect("first JIT stop");
+            assert_eq!(
+                (first.function_id, first.site_id),
+                (helper.function_id, first_site)
+            );
+            assert_eq!(
+                first
+                    .frames
+                    .iter()
+                    .map(|frame| frame.function_id)
+                    .collect::<Vec<_>>(),
+                vec![main.function_id, helper.function_id]
+            );
+            assert_eq!(
+                first.frames[0].values.get(&debug_variable_slot("base")),
+                Some(&stasis_dynload::JitDebugValue::I64 {
+                    type_tag: i32::from(TYPE_ID_I32),
+                    value: 3,
+                })
+            );
+            assert_eq!(
+                first.frames[1].values.get(&debug_variable_slot("value")),
+                Some(&stasis_dynload::JitDebugValue::I64 {
+                    type_tag: i32::from(TYPE_ID_I32),
+                    value: 3,
+                })
+            );
+
+            stasis_dynload::resume_jit_debugger(stasis_dynload::JitDebugResume::StepOver)
+                .expect("step helper");
+            let second = stasis_dynload::wait_for_jit_debug_stop(
+                first.sequence,
+                std::time::Duration::from_secs(2),
+            )
+            .expect("second JIT stop");
+            assert_eq!(
+                (second.function_id, second.site_id),
+                (helper.function_id, second_site)
+            );
+            assert_eq!(
+                second.frames[1].values.get(&debug_variable_slot("doubled")),
+                Some(&stasis_dynload::JitDebugValue::I64 {
+                    type_tag: i32::from(TYPE_ID_I32),
+                    value: 6,
+                })
+            );
+            stasis_dynload::resume_jit_debugger(stasis_dynload::JitDebugResume::Continue)
+                .expect("continue JIT");
+        });
+
+        let result = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute instrumented main");
+        assert_eq!(result, 6);
+        controller.join().expect("debug controller");
+        stasis_dynload::disable_jit_debugger();
     }
 
     #[test]

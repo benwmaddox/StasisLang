@@ -40,6 +40,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod dap;
 mod live_tui;
 
 const MANIFEST_NAME: &str = "stasis.json";
@@ -116,6 +117,7 @@ const COMMANDS: &[&str] = &[
     "validate",
     "run",
     "lsp",
+    "dap",
     "tui",
     "build",
     "package",
@@ -233,6 +235,12 @@ enum ToolchainCommand {
     },
     /// Run the persistent Stasis language server.
     Lsp {
+        /// Communicate with the editor over standard input and output.
+        #[arg(long)]
+        stdio: bool,
+    },
+    /// Run the Stasis debug adapter over the Debug Adapter Protocol.
+    Dap {
         /// Communicate with the editor over standard input and output.
         #[arg(long)]
         stdio: bool,
@@ -726,6 +734,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
         ToolchainCommand::Lsp { .. } => "lsp",
+        ToolchainCommand::Dap { .. } => "dap",
         ToolchainCommand::Tui { .. } => "tui",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
@@ -852,6 +861,15 @@ fn execute(
                     } else {
                         let _ = stdio;
                         stasis_lsp::run_stdio(&workspace.root)?;
+                        Ok(CommandResult::success(String::new(), json!({})))
+                    }
+                }
+                ToolchainCommand::Dap { stdio } => {
+                    if json_output {
+                        Err("--json cannot be combined with dap; DAP owns stdout".to_string())
+                    } else {
+                        let _ = stdio;
+                        dap::run(&workspace)?;
                         Ok(CommandResult::success(String::new(), json!({})))
                     }
                 }
@@ -1290,12 +1308,20 @@ fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
 }
 
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
+    compile_workspace_jit_with_debug(workspace, false)
+}
+
+fn compile_workspace_jit_with_debug(
+    workspace: &Workspace,
+    debug_instrumentation: bool,
+) -> Result<JitProcess, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
     validate_workspace_destination(workspace, "entry", &entry)?;
     let files =
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    jit.set_debug_instrumentation(debug_instrumentation)?;
     jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&runtime_analysis_roots());
     let mut sources = BTreeMap::new();

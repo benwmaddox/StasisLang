@@ -1118,6 +1118,7 @@ fn compile_function_to_object_bytes(
         named_struct_field_types,
         Some(direct_storage),
         None,
+        false,
         |statement| record_string_literals_in_stmt(statement, string_literals),
         |_meta, _func| {
             #[cfg(test)]

@@ -3,7 +3,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::backend::emit::{
-    parse_simple_statements_from_block, SimpleCondition, SimpleExpr, SimpleStmt,
+    parse_simple_statements_with_debug, ParsedSimpleStatements, SimpleCondition, SimpleExpr,
+    SimpleStmt,
 };
 use crate::data_flow::{
     build_function_data_flow_summaries, compiler_local_types, CompilerLocalType,
@@ -13,7 +14,7 @@ use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
-use crate::ir::hir::{Block, FunctionHIR};
+use crate::ir::hir::{Block, DebugStatement, FunctionHIR};
 
 pub type FunctionId = FnId;
 pub type FunctionStorageIndex = u32;
@@ -333,8 +334,9 @@ pub struct Compiler {
     deps: DependencyGraph,
     types: TypeTable,
     parsed_statements: Vec<Vec<SimpleStmt>>,
+    parsed_debug_statements: Vec<Vec<DebugStatement>>,
     parsed_statement_ids: BTreeSet<FunctionId>,
-    statement_cache: HashMap<StatementCacheKey, Vec<SimpleStmt>>,
+    statement_cache: HashMap<StatementCacheKey, ParsedSimpleStatements>,
     analysis_required_roots: Vec<String>,
     data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
     data_flow_context_fingerprint: u64,
@@ -589,6 +591,7 @@ impl Compiler {
         self.functions.clear();
         self.function_index_by_id.clear();
         self.parsed_statements.clear();
+        self.parsed_debug_statements.clear();
         self.parsed_statement_ids.clear();
         self.deps = DependencyGraph;
 
@@ -748,6 +751,7 @@ impl Compiler {
         }
 
         self.parsed_statements = vec![Vec::new(); self.functions.len()];
+        self.parsed_debug_statements = vec![Vec::new(); self.functions.len()];
         let reachable = if analyze_all {
             self.functions.iter().map(|function| function.id).collect()
         } else {
@@ -808,7 +812,7 @@ impl Compiler {
                 signature_hash: function.signature_hash,
                 body_hash: function.body_hash,
             };
-            let statements = if let Some(cached) = self.statement_cache.get(&key) {
+            let artifacts = if let Some(cached) = self.statement_cache.get(&key) {
                 cached.clone()
             } else {
                 changed_function_ids.insert(*function_id);
@@ -825,8 +829,8 @@ impl Compiler {
                             function.name
                         ))
                     })?;
-                let statements = match parse_simple_statements_from_block(body, &mut self.types) {
-                    Ok(statements) => statements,
+                let artifacts = match parse_simple_statements_with_debug(body, &mut self.types) {
+                    Ok(artifacts) => artifacts,
                     Err(message) => {
                         self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
                             file.path.clone(),
@@ -838,7 +842,7 @@ impl Compiler {
                         return Err(CompileError::Backend(message));
                     }
                 };
-                let mut validated = statements.clone();
+                let mut validated = artifacts.statements.clone();
                 if let Err(message) = qualify_module_calls(
                     &mut validated,
                     &file.path,
@@ -849,10 +853,12 @@ impl Compiler {
                 ) {
                     return Err(CompileError::Frontend(message));
                 }
-                statements
+                artifacts
             };
-            next_statement_cache.insert(key, statements.clone());
-            self.parsed_statements[function.storage_index as usize] = statements;
+            next_statement_cache.insert(key, artifacts.clone());
+            self.parsed_statements[function.storage_index as usize] = artifacts.statements;
+            self.parsed_debug_statements[function.storage_index as usize] =
+                artifacts.debug_statements;
             self.parsed_statement_ids.insert(*function_id);
         }
         self.statement_cache = next_statement_cache;
@@ -1064,6 +1070,16 @@ impl Compiler {
         Ok(FunctionHIR {
             blocks: vec![Block { source: body }],
             statements,
+            debug_statements: self
+                .parsed_debug_statements
+                .get(function.storage_index as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    CompileError::Invariant(format!(
+                        "function '{}' has no debug statement artifact",
+                        function.name
+                    ))
+                })?,
         })
     }
 
@@ -1353,12 +1369,39 @@ struct PreviousFunctionHashes {
 mod tests {
     use super::*;
 
+    fn flatten_debug_offsets(statements: &[DebugStatement], out: &mut Vec<usize>) {
+        for statement in statements {
+            out.push(statement.source_offset as usize);
+            flatten_debug_offsets(&statement.children, out);
+        }
+    }
+
     fn function_by_name<'a>(compiler: &'a Compiler, name: &str) -> &'a FunctionMeta {
         compiler
             .functions()
             .iter()
             .find(|function| function.name == name)
             .expect("missing function by name")
+    }
+
+    #[test]
+    fn canonical_statement_parser_retains_nested_debug_source_offsets() {
+        let source = "function main(): i32 {\n    let value: i32 = 1;\n    if (value > 0) {\n        value += 2;\n    }\n    return value;\n}\n";
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("src/main.stasis", source);
+        compiler.check().expect("compile source");
+        let function = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&function)
+            .expect("lower function");
+        let body = &hir.blocks[0].source;
+        let mut offsets = Vec::new();
+        flatten_debug_offsets(&hir.debug_statements, &mut offsets);
+        let starts = offsets
+            .into_iter()
+            .map(|offset| body[offset..].split_whitespace().next().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec!["let", "if", "value", "return"]);
     }
 
     #[test]
