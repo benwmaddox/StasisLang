@@ -153,9 +153,10 @@ individually readable declaration items.
 identifiers and compiler-lexes the editable project files for matching occurrences. Each result has
 an exact UTF-8 byte span and is classified as `definition`, `read`, `write`, or `call`, together with
 its containing declaration. Function, struct, and test declaration occurrences are classified as
-definitions. Qualified state/field paths return their executable reads and writes; their field
-declaration is not currently synthesized as a qualified definition. The VS Code extension projects
-this command directly: **Go to Definition** uses `definition` results, while **Find All References**
+definitions. Qualified typed field paths—including indexed receivers such as
+`state.enemies[0].speed` queried as `state.enemies.speed`—return the declaring struct field plus
+their executable reads and writes. The VS Code extension projects this command directly:
+**Go to Definition** uses `definition` results, while **Find All References**
 uses the full result set and honors VS Code's include-declaration request.
 
 ## Source formatting

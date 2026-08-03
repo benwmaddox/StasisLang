@@ -217,6 +217,30 @@ export async function run(): Promise<void> {
     "Find All References includes the function declaration and call",
   );
 
+  const speedLineNumber = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("state.enemies[0].speed"));
+  assert.notEqual(speedLineNumber, -1, "the fixture uses an indexed struct field");
+  const speedLine = document.lineAt(speedLineNumber);
+  const speedPosition = new vscode.Position(speedLineNumber, speedLine.text.indexOf("speed") + 1);
+  const fieldDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeDefinitionProvider",
+    sourceUri,
+    speedPosition,
+  );
+  assert.equal(fieldDefinitions?.length, 1, "Go to Definition resolves an indexed struct field");
+  assert.equal(fieldDefinitions?.[0]?.range.start.line, 10);
+  const fieldReferences = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeReferenceProvider",
+    sourceUri,
+    speedPosition,
+  );
+  assert.ok(
+    fieldReferences && fieldReferences.length >= 2,
+    "Find All References includes the indexed field declaration and write",
+  );
+
   await waitFor("Test Explorer discovery", () => api.testFiles().some((uri) => uri.endsWith("editor.test.stasis")));
   const testUri = api.testFiles().find((uri) => uri.endsWith("editor.test.stasis"));
   assert.ok(testUri, "Test Explorer discovers the packaged fixture test");

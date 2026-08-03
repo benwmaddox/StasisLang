@@ -46,8 +46,8 @@ Set `stasis.live.entry` only when a project needs an entry other than the one in
 
 **Go to Definition** and **Find All References** call the installed compiler's
 `symbol references` command and translate its UTF-8 source spans into VS Code locations. Functions,
-structs, and tests have definition locations. Qualified state and field paths expose their reads and
-writes; field declarations are not yet synthesized as qualified definitions by the compiler.
+structs, tests, and typed struct fields have definition locations. Indexed receivers such as
+`state.enemies[0].speed` resolve to the declaring field and expose their reads and writes.
 
 While a play session is active, completion uses the persistent live compiler and runtime layout.
 It resolves locals, members, and concrete indexed state paths such as

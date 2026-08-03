@@ -112,17 +112,15 @@ function runStasis(
 }
 
 function symbolAtPosition(document: vscode.TextDocument, position: vscode.Position): string | undefined {
-  const source = document.getText();
-  const offset = document.offsetAt(position);
-  const symbols = /[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*/g;
-  for (const match of source.matchAll(symbols)) {
-    const start = match.index;
-    const end = start + match[0].length;
-    if (start <= offset && offset <= end) {
-      return match[0];
-    }
+  const word = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
+  if (!word || word.start.line !== word.end.line) {
+    return undefined;
   }
-  return undefined;
+  const prefix = document.lineAt(position.line).text.slice(0, word.end.character);
+  const chain = prefix.match(
+    /[A-Za-z_][A-Za-z0-9_]*(?:(?:\s*\[[^\]\r\n]*\])?\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*$/,
+  )?.[0];
+  return chain?.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, "");
 }
 
 async function compilerReferences(
