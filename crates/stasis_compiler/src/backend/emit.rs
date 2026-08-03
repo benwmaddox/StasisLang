@@ -4523,7 +4523,9 @@ fn emit_debug_statement(
     function_id: FunctionId,
     site_id: u32,
     values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
     type_table: &TypeTable,
+    foreach_bindings: &ForeachBindingMap,
 ) -> Result<(), String> {
     builder.ins().call(debug.values_begin, &[]);
     let mut slots = HashMap::<u32, &str>::new();
@@ -4534,43 +4536,84 @@ fn emit_debug_statement(
                 "debug variable slot collision between '{existing}' and '{name}'"
             ));
         }
-        let slot_value = builder.ins().iconst(types::I32, i64::from(slot as i32));
-        let type_value = builder.ins().iconst(types::I32, i64::from(binding.type_id));
         let value = builder.use_var(binding.var);
-        match binding.type_id {
-            TYPE_ID_F32 => {
-                let value = builder.ins().fpromote(types::F64, value);
-                builder
-                    .ins()
-                    .call(debug.value_f64, &[slot_value, type_value, value]);
-            }
-            TYPE_ID_F64 => {
-                builder
-                    .ins()
-                    .call(debug.value_f64, &[slot_value, type_value, value]);
-            }
-            _ => {
-                let clif_type = clif_type_for_type_id(binding.type_id, type_table)?;
-                if clif_type != types::I32 {
-                    return Err(format!(
-                        "unsupported debug local type id {} for '{name}'",
-                        binding.type_id
-                    ));
-                }
-                let value = if binding.type_id == TYPE_ID_I32 {
-                    builder.ins().sextend(types::I64, value)
-                } else {
-                    builder.ins().uextend(types::I64, value)
-                };
-                builder
-                    .ins()
-                    .call(debug.value_i64, &[slot_value, type_value, value]);
-            }
+        emit_debug_value(
+            builder,
+            debug,
+            name,
+            slot,
+            binding.type_id,
+            value,
+            type_table,
+        )?;
+    }
+    for (name, binding) in foreach_bindings {
+        if binding.element_type.is_none() {
+            continue;
         }
+        let slot = debug_variable_slot(name);
+        if let Some(existing) = slots.insert(slot, name) {
+            return Err(format!(
+                "debug variable slot collision between '{existing}' and '{name}'"
+            ));
+        }
+        let value = emit_foreach_binding_load(builder, runtime_call_refs, type_table, binding, "")?;
+        emit_debug_value(
+            builder,
+            debug,
+            name,
+            slot,
+            value.type_id,
+            value.value,
+            type_table,
+        )?;
     }
     let function_id = builder.ins().iconst(types::I32, i64::from(function_id));
     let site_id = builder.ins().iconst(types::I32, i64::from(site_id as i32));
     builder.ins().call(debug.statement, &[function_id, site_id]);
+    Ok(())
+}
+
+fn emit_debug_value(
+    builder: &mut FunctionBuilder<'_>,
+    debug: &DebugRuntimeRefs,
+    name: &str,
+    slot: u32,
+    type_id: TypeId,
+    value: Value,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let slot_value = builder.ins().iconst(types::I32, i64::from(slot as i32));
+    let type_value = builder.ins().iconst(types::I32, i64::from(type_id));
+    match type_id {
+        TYPE_ID_F32 => {
+            let value = builder.ins().fpromote(types::F64, value);
+            builder
+                .ins()
+                .call(debug.value_f64, &[slot_value, type_value, value]);
+        }
+        TYPE_ID_F64 => {
+            builder
+                .ins()
+                .call(debug.value_f64, &[slot_value, type_value, value]);
+        }
+        _ => {
+            let clif_type = clif_type_for_type_id(type_id, type_table)?;
+            if clif_type != types::I32 {
+                return Err(format!(
+                    "unsupported debug value type id {type_id} for '{name}'"
+                ));
+            }
+            let value = if type_id == TYPE_ID_I32 {
+                builder.ins().sextend(types::I64, value)
+            } else {
+                builder.ins().uextend(types::I64, value)
+            };
+            builder
+                .ins()
+                .call(debug.value_i64, &[slot_value, type_value, value]);
+        }
+    }
     Ok(())
 }
 
@@ -4607,7 +4650,9 @@ pub(crate) fn emit_simple_statements(
                 function_id,
                 debug.source_offset,
                 values_by_name,
+                runtime_call_refs,
                 type_table,
+                foreach_bindings,
             )?;
         }
         match statement {

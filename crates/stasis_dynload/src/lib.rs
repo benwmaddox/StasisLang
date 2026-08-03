@@ -4456,6 +4456,9 @@ mod tests {
             stasis_jit_debug_frame_enter(2);
             stasis_jit_debug_value_f64(0, 2, 1.5);
             stasis_jit_debug_statement(2, 20);
+            stasis_jit_debug_frame_enter(3);
+            stasis_jit_debug_statement(3, 30);
+            stasis_jit_debug_frame_leave(3);
             stasis_jit_debug_statement(2, 21);
             stasis_jit_debug_frame_leave(2);
             stasis_jit_debug_statement(1, 11);
@@ -4480,16 +4483,23 @@ mod tests {
             })
         );
 
-        resume_jit_debugger(JitDebugResume::StepOver).expect("step over");
-        let second = wait_for_jit_debug_stop(first.sequence, Duration::from_secs(2))
-            .expect("step-over stop");
-        assert_eq!((second.function_id, second.site_id), (2, 21));
+        resume_jit_debugger(JitDebugResume::StepIn).expect("step in");
+        let second =
+            wait_for_jit_debug_stop(first.sequence, Duration::from_secs(2)).expect("step-in stop");
+        assert_eq!((second.function_id, second.site_id), (3, 30));
+        assert_eq!(second.frames.len(), 3);
 
         resume_jit_debugger(JitDebugResume::StepOut).expect("step out");
         let third = wait_for_jit_debug_stop(second.sequence, Duration::from_secs(2))
             .expect("step-out stop");
-        assert_eq!((third.function_id, third.site_id), (1, 11));
-        assert_eq!(third.frames.len(), 1);
+        assert_eq!((third.function_id, third.site_id), (2, 21));
+        assert_eq!(third.frames.len(), 2);
+
+        resume_jit_debugger(JitDebugResume::StepOut).expect("step out to caller");
+        let fourth = wait_for_jit_debug_stop(third.sequence, Duration::from_secs(2))
+            .expect("caller step-out stop");
+        assert_eq!((fourth.function_id, fourth.site_id), (1, 11));
+        assert_eq!(fourth.frames.len(), 1);
 
         resume_jit_debugger(JitDebugResume::Continue).expect("continue");
         worker.join().expect("debug worker");

@@ -389,8 +389,17 @@ fn debug_function_metadata(
                     collect_names(body_statements, out);
                 }
                 SimpleStmt::Foreach {
-                    body_statements, ..
-                } => collect_names(body_statements, out),
+                    item_name,
+                    index_name,
+                    body_statements,
+                    ..
+                } => {
+                    out.insert(item_name.clone());
+                    if let Some(index_name) = index_name {
+                        out.insert(index_name.clone());
+                    }
+                    collect_names(body_statements, out);
+                }
                 _ => {}
             }
         }
@@ -5812,6 +5821,77 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute instrumented main");
         assert_eq!(result, 6);
+        controller.join().expect("debug controller");
+        stasis_dynload::disable_jit_debugger();
+    }
+
+    #[test]
+    fn instrumented_jit_exposes_scalar_foreach_item_and_index() {
+        let source = "global values: i32[1];\nfunction main(): i32 {\n    values[0] = 7;\n    foreach (let value, index in values) {\n        let copied: i32 = value;\n    }\n    return 0;\n}\n";
+        let mut process = JitProcess::new();
+        process
+            .set_debug_instrumentation(true)
+            .expect("enable instrumentation");
+        process.upsert_file("src/main.stasis", source);
+        process.compile().expect("instrumented compile");
+        let main = process
+            .debug_metadata()
+            .values()
+            .find(|metadata| metadata.name == "main")
+            .cloned()
+            .expect("main debug metadata");
+        assert_eq!(
+            main.variables.get(&debug_variable_slot("value")),
+            Some(&"value".to_string())
+        );
+        assert_eq!(
+            main.variables.get(&debug_variable_slot("index")),
+            Some(&"index".to_string())
+        );
+        let copied_offset = u32::try_from(source.find("let copied").expect("copied statement"))
+            .expect("source offset fits u32");
+        let body_site = main
+            .sites
+            .iter()
+            .find(|site| site.source_offset == copied_offset)
+            .expect("foreach body debug site")
+            .site_id;
+        stasis_dynload::enable_jit_debugger([(main.function_id, body_site)]);
+
+        let expected_function_id = main.function_id;
+        let controller = std::thread::spawn(move || {
+            let stop =
+                stasis_dynload::wait_for_jit_debug_stop(0, std::time::Duration::from_secs(2))
+                    .expect("foreach body stop");
+            assert_eq!(
+                (stop.function_id, stop.site_id),
+                (expected_function_id, body_site)
+            );
+            let frame = stop.frames.last().expect("foreach frame");
+            assert_eq!(
+                frame.values.get(&debug_variable_slot("value")),
+                Some(&stasis_dynload::JitDebugValue::I64 {
+                    type_tag: i32::from(TYPE_ID_I32),
+                    value: 7,
+                })
+            );
+            assert_eq!(
+                frame.values.get(&debug_variable_slot("index")),
+                Some(&stasis_dynload::JitDebugValue::I64 {
+                    type_tag: i32::from(TYPE_ID_I32),
+                    value: 0,
+                })
+            );
+            stasis_dynload::resume_jit_debugger(stasis_dynload::JitDebugResume::Continue)
+                .expect("continue JIT");
+        });
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute instrumented main"),
+            0
+        );
         controller.join().expect("debug controller");
         stasis_dynload::disable_jit_debugger();
     }
