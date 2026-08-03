@@ -61,7 +61,7 @@ Raster dimensions use checked, bounded `ceil(logical_extent * raster_scale)`;
 the logical draw size remains unchanged.
 
 Desktop and packaged mobile builds perform this policy in
-`runtime/stasis_graphics.c`. Workshop and bundled Published previews receive
+`runtime/stasis_graphics.c`. Workshop and generated release apps receive
 the same logical/native/drawable metadata in reserved gfx_cmd v2 header slots,
 use the same aspect-fit viewport, and replace SVG/font/text textures when the
 density generation changes. Those metadata slots are host-populated and are

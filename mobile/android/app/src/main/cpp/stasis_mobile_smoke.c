@@ -12,18 +12,9 @@
 #include "stasis_render_contract.h"
 #include "stasis_mobile_aot_runtime.h"
 #include "stasis_platform_storage.h"
-#if STASIS_ANDROID_PUBLISHED_AOT
-#include "published_aot_symbols.h"
-#endif
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
-#define STASIS_RENDER_COMMAND_CAPACITY 8
-#define STASIS_RENDER_COMMAND_STRIDE 13
-#define STASIS_RENDER_FRAME_HEADER_SIZE 6
-#define STASIS_RENDER_FRAME_I32_CAPACITY \
-    (STASIS_RENDER_FRAME_HEADER_SIZE + STASIS_RENDER_COMMAND_CAPACITY * STASIS_RENDER_COMMAND_STRIDE)
-
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
 typedef char *(*stasis_android_bridge_run_tests_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
@@ -84,598 +75,7 @@ typedef struct CodexBridgeApi {
 } CodexBridgeApi;
 
 static CodexBridgeApi codex_bridge_api = {0};
-#if STASIS_ANDROID_PUBLISHED_AOT && !STASIS_RENDER_V2_DIRECT
-typedef struct PublishedRenderCommand {
-    int32_t kind;
-    int32_t x;
-    int32_t y;
-    int32_t w;
-    int32_t h;
-    int32_t color;
-    int32_t asset;
-    int32_t rotation_degrees;
-    int32_t alpha;
-    int32_t clip_x;
-    int32_t clip_y;
-    int32_t clip_w;
-    int32_t clip_h;
-} PublishedRenderCommand;
 
-typedef struct PublishedI32Global {
-    const char *path;
-    int32_t *value;
-    int32_t hash;
-} PublishedI32Global;
-
-static int32_t published_input_touch_x;
-static int32_t published_input_touch_y;
-static int32_t published_input_touch_active;
-static int32_t published_input_screen_w;
-static int32_t published_input_screen_h;
-static int32_t published_game_tick_count;
-static int32_t published_game_screen_w;
-static int32_t published_game_screen_h;
-static int32_t published_game_player_y;
-static int32_t published_game_ai_y;
-static int32_t published_game_ball_x;
-static int32_t published_game_ball_y;
-static int32_t published_game_ball_vx;
-static int32_t published_game_ball_vy;
-static int32_t published_game_ball_age_ticks;
-static int32_t published_game_enemy_paddle_speed_x100;
-static int32_t published_game_player_score;
-static int32_t published_game_ai_score;
-static int32_t published_render_command_count;
-static int32_t published_render_command_schema_version;
-static PublishedRenderCommand published_render_commands[STASIS_RENDER_COMMAND_CAPACITY];
-static int published_aot_globals_initialized;
-static int published_aot_main_ran;
-static int32_t published_runtime_tick_count;
-
-#define RENDER_GLOBALS(index) \
-    {"Render.command" #index "_kind", &published_render_commands[index].kind, 0}, \
-    {"Render.command" #index "_x", &published_render_commands[index].x, 0}, \
-    {"Render.command" #index "_y", &published_render_commands[index].y, 0}, \
-    {"Render.command" #index "_w", &published_render_commands[index].w, 0}, \
-    {"Render.command" #index "_h", &published_render_commands[index].h, 0}, \
-    {"Render.command" #index "_color", &published_render_commands[index].color, 0}, \
-    {"Render.command" #index "_asset", &published_render_commands[index].asset, 0}, \
-    {"Render.command" #index "_rotation_degrees", &published_render_commands[index].rotation_degrees, 0}, \
-    {"Render.command" #index "_alpha", &published_render_commands[index].alpha, 0}, \
-    {"Render.command" #index "_clip_x", &published_render_commands[index].clip_x, 0}, \
-    {"Render.command" #index "_clip_y", &published_render_commands[index].clip_y, 0}, \
-    {"Render.command" #index "_clip_w", &published_render_commands[index].clip_w, 0}, \
-    {"Render.command" #index "_clip_h", &published_render_commands[index].clip_h, 0}
-
-static PublishedI32Global published_i32_globals[] = {
-    {"Input.touch_x", &published_input_touch_x, 0},
-    {"Input.touch_y", &published_input_touch_y, 0},
-    {"Input.touch_active", &published_input_touch_active, 0},
-    {"Input.screen_w", &published_input_screen_w, 0},
-    {"Input.screen_h", &published_input_screen_h, 0},
-    {"GameState.tick_count", &published_game_tick_count, 0},
-    {"GameState.screen_w", &published_game_screen_w, 0},
-    {"GameState.screen_h", &published_game_screen_h, 0},
-    {"GameState.player_y", &published_game_player_y, 0},
-    {"GameState.ai_y", &published_game_ai_y, 0},
-    {"GameState.ball_x", &published_game_ball_x, 0},
-    {"GameState.ball_y", &published_game_ball_y, 0},
-    {"GameState.ball_vx", &published_game_ball_vx, 0},
-    {"GameState.ball_vy", &published_game_ball_vy, 0},
-    {"GameState.ball_age_ticks", &published_game_ball_age_ticks, 0},
-    {"GameState.enemy_paddle_speed_x100", &published_game_enemy_paddle_speed_x100, 0},
-    {"GameState.player_score", &published_game_player_score, 0},
-    {"GameState.ai_score", &published_game_ai_score, 0},
-    {"Render.command_count", &published_render_command_count, 0},
-    {"Render.command_schema_version", &published_render_command_schema_version, 0},
-    RENDER_GLOBALS(0),
-    RENDER_GLOBALS(1),
-    RENDER_GLOBALS(2),
-    RENDER_GLOBALS(3),
-    RENDER_GLOBALS(4),
-    RENDER_GLOBALS(5),
-    RENDER_GLOBALS(6),
-    RENDER_GLOBALS(7)
-};
-
-#undef RENDER_GLOBALS
-
-static int32_t stasis_published_hash_path(const char *path) {
-    uint32_t hash = 2166136261U;
-    const unsigned char *cursor = (const unsigned char *)path;
-    while (*cursor != '\0') {
-        hash ^= (uint32_t)(*cursor);
-        hash *= 16777619U;
-        cursor += 1;
-    }
-    return (int32_t)hash;
-}
-
-static void stasis_published_init_globals(void) {
-    if (published_aot_globals_initialized) {
-        return;
-    }
-    size_t count = sizeof(published_i32_globals) / sizeof(published_i32_globals[0]);
-    for (size_t index = 0; index < count; index += 1) {
-        published_i32_globals[index].hash = stasis_published_hash_path(published_i32_globals[index].path);
-    }
-    published_aot_globals_initialized = 1;
-}
-
-static int32_t *stasis_published_find_i32_global(int32_t path_hash) {
-    stasis_published_init_globals();
-    size_t count = sizeof(published_i32_globals) / sizeof(published_i32_globals[0]);
-    for (size_t index = 0; index < count; index += 1) {
-        if (published_i32_globals[index].hash == path_hash) {
-            return published_i32_globals[index].value;
-        }
-    }
-    return NULL;
-}
-
-int32_t stasis_jit_global_i32_load(int32_t path_hash) {
-    int32_t *value = stasis_published_find_i32_global(path_hash);
-    return value == NULL ? 0 : *value;
-}
-
-void stasis_jit_global_i32_store(int32_t path_hash, int32_t value) {
-    int32_t *target = stasis_published_find_i32_global(path_hash);
-    if (target != NULL) {
-        *target = value;
-    }
-}
-
-int64_t stasis_jit_lookup_code_ptr(int32_t fn_id_raw) {
-    (void)fn_id_raw;
-    return 0;
-}
-
-static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
-    if (out_len < STASIS_RENDER_FRAME_I32_CAPACITY) {
-        return;
-    }
-    memset(out, 0, sizeof(int32_t) * STASIS_RENDER_FRAME_I32_CAPACITY);
-    int32_t command_count = published_render_command_count;
-    if (command_count < 0) {
-        command_count = 0;
-    }
-    if (command_count > STASIS_RENDER_COMMAND_CAPACITY) {
-        command_count = STASIS_RENDER_COMMAND_CAPACITY;
-    }
-    out[0] = 0;
-    out[1] = published_runtime_tick_count;
-    out[2] = published_game_tick_count;
-    out[3] = 0;
-    out[4] = published_aot_main_ran ? 1 : 0;
-    out[5] = command_count;
-    for (int32_t index = 0; index < command_count; index += 1) {
-        int base = STASIS_RENDER_FRAME_HEADER_SIZE + index * STASIS_RENDER_COMMAND_STRIDE;
-        out[base] = published_render_commands[index].kind;
-        out[base + 1] = published_render_commands[index].x;
-        out[base + 2] = published_render_commands[index].y;
-        out[base + 3] = published_render_commands[index].w;
-        out[base + 4] = published_render_commands[index].h;
-        out[base + 5] = published_render_commands[index].color;
-        out[base + 6] = published_render_commands[index].asset;
-        out[base + 7] = published_render_commands[index].rotation_degrees;
-        out[base + 8] = published_render_command_schema_version >= 2
-                ? published_render_commands[index].alpha : 255;
-        if (published_render_command_schema_version >= 3) {
-            out[base + 9] = published_render_commands[index].clip_x;
-            out[base + 10] = published_render_commands[index].clip_y;
-            out[base + 11] = published_render_commands[index].clip_w;
-            out[base + 12] = published_render_commands[index].clip_h;
-        }
-    }
-}
-
-static int stasis_published_run_tick_frame(int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len) {
-    if (out_values == NULL || out_len < STASIS_RENDER_FRAME_I32_CAPACITY) {
-        return -1;
-    }
-    stasis_published_init_globals();
-    published_input_touch_x = touch_x;
-    published_input_touch_y = touch_y;
-    published_input_touch_active = touch_active;
-    published_input_screen_w = screen_w;
-    published_input_screen_h = screen_h;
-    if (!published_aot_main_ran) {
-        STASIS_AOT_MAIN();
-        published_aot_main_ran = 1;
-    }
-    STASIS_AOT_TICK();
-    STASIS_AOT_RENDER();
-    published_runtime_tick_count += 1;
-    stasis_published_pack_frame(out_values, out_len);
-    return 0;
-}
-
-static int stasis_published_run_tick_frame_v2(
-        int touch_x, int touch_y, int touch_active, int screen_w, int screen_h,
-        int32_t *out_i32, float *out_f32, uint8_t *out_u8) {
-    int32_t legacy[STASIS_RENDER_FRAME_I32_CAPACITY] = {0};
-    int status = stasis_published_run_tick_frame(
-            touch_x, touch_y, touch_active, screen_w, screen_h,
-            legacy, STASIS_RENDER_FRAME_I32_CAPACITY);
-    if (status != 0) return status;
-    (void)out_u8;
-    out_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V2_MAGIC;
-    out_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V2_VERSION;
-    out_i32[STASIS_RENDER_I_FLAGS] = STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT;
-    out_i32[STASIS_RENDER_I_LINE_COUNT] = 0;
-    out_i32[STASIS_RENDER_I_SPRITE_COUNT] = 0;
-    out_i32[STASIS_RENDER_I_TEXT_COUNT] = 0;
-    out_i32[STASIS_RENDER_I_TEXT_BYTES_USED] = 0;
-    out_f32[STASIS_RENDER_F_CLEAR_BASE + 0] = 15.0f / 255.0f;
-    out_f32[STASIS_RENDER_F_CLEAR_BASE + 1] = 20.0f / 255.0f;
-    out_f32[STASIS_RENDER_F_CLEAR_BASE + 2] = 28.0f / 255.0f;
-    out_f32[STASIS_RENDER_F_CLEAR_BASE + 3] = 1.0f;
-    int32_t command_count = stasis_render_clamp_count(
-            legacy[5], STASIS_RENDER_COMMAND_CAPACITY);
-    for (int32_t index = 0; index < command_count; index += 1) {
-        int32_t base = STASIS_RENDER_FRAME_HEADER_SIZE + index * STASIS_RENDER_COMMAND_STRIDE;
-        if (legacy[base] == 1) {
-            int32_t line = out_i32[STASIS_RENDER_I_LINE_COUNT];
-            if (line > STASIS_RENDER_MAX_LINES - 4) continue;
-            float x = (float)legacy[base + 1];
-            float y = (float)legacy[base + 2];
-            float right = x + (float)legacy[base + 3];
-            float bottom = y + (float)legacy[base + 4];
-            int32_t color = legacy[base + 5];
-            float r = (float)((color >> 16) & 255) / 255.0f;
-            float g = (float)((color >> 8) & 255) / 255.0f;
-            float b = (float)(color & 255) / 255.0f;
-            float a = (float)legacy[base + 8] / 255.0f;
-            const float points[16] = {
-                x, y, right, y, right, y, right, bottom,
-                right, bottom, x, bottom, x, bottom, x, y};
-            for (int edge = 0; edge < 4; edge += 1) {
-                int32_t line_base = STASIS_RENDER_F_LINE_BASE +
-                        (line + edge) * STASIS_RENDER_LINE_F32_STRIDE;
-                out_f32[line_base + 0] = points[edge * 4 + 0];
-                out_f32[line_base + 1] = points[edge * 4 + 1];
-                out_f32[line_base + 2] = points[edge * 4 + 2];
-                out_f32[line_base + 3] = points[edge * 4 + 3];
-                out_f32[line_base + 4] = r;
-                out_f32[line_base + 5] = g;
-                out_f32[line_base + 6] = b;
-                out_f32[line_base + 7] = a;
-            }
-            out_i32[STASIS_RENDER_I_LINE_COUNT] = line + 4;
-        } else if (legacy[base] == 2) {
-            int32_t sprite = out_i32[STASIS_RENDER_I_SPRITE_COUNT];
-            if (sprite >= STASIS_RENDER_MAX_SPRITES) continue;
-            int32_t sprite_i32_base = STASIS_RENDER_I_SPRITE_BASE +
-                    sprite * STASIS_RENDER_SPRITE_I32_STRIDE;
-            int32_t sprite_f32_base = STASIS_RENDER_F_SPRITE_BASE +
-                    sprite * STASIS_RENDER_SPRITE_F32_STRIDE;
-            out_i32[sprite_i32_base + 0] = legacy[base + 6];
-            out_i32[sprite_i32_base + 1] = legacy[base + 7];
-            out_i32[sprite_i32_base + 2] = legacy[base + 8];
-            out_f32[sprite_f32_base + 0] = (float)legacy[base + 1];
-            out_f32[sprite_f32_base + 1] = (float)legacy[base + 2];
-            out_f32[sprite_f32_base + 2] = (float)legacy[base + 3];
-            out_f32[sprite_f32_base + 3] = (float)legacy[base + 4];
-            out_i32[STASIS_RENDER_I_SPRITE_COUNT] = sprite + 1;
-        }
-    }
-    return 0;
-}
-#endif
-
-#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V2_DIRECT
-#define STASIS_PUBLISHED_MAX_FONTS 64
-#define STASIS_PUBLISHED_MAX_TEXT_RUNS 4096
-typedef struct PublishedFontResource { char path[256]; int32_t size; } PublishedFontResource;
-typedef struct PublishedTextResource { int32_t font; char text[1025]; float width; } PublishedTextResource;
-static PublishedFontResource published_fonts[STASIS_PUBLISHED_MAX_FONTS];
-static PublishedTextResource published_text_runs[STASIS_PUBLISHED_MAX_TEXT_RUNS];
-static int32_t published_font_count;
-static int32_t published_text_run_count;
-static char published_resource_error[256];
-
-extern int32_t stasis_published_sprite_handle_for_path(const char *path);
-
-int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) {
-    if (path == NULL || max_w <= 0 || max_h <= 0) {
-        snprintf(published_resource_error, sizeof(published_resource_error),
-                "sprite load rejected: invalid path or dimensions");
-        return 0;
-    }
-    int32_t handle = stasis_published_sprite_handle_for_path(path);
-    if (handle == 0) {
-        snprintf(published_resource_error, sizeof(published_resource_error),
-                "sprite is not declared in the packaged asset manifest: %.160s", path);
-    }
-    return handle;
-}
-void stasis_gfx_release_sprite(int handle) { (void)handle; }
-int stasis_gfx_dump_bmp(const char *path) { (void)path; return 0; }
-int stasis_gfx_dump_png(const char *path) { (void)path; return 0; }
-int stasis_gfx_poll_reload(int handle) { (void)handle; return 0; }
-
-int stasis_load_font(const char *path, int size) {
-    if (path == NULL || size <= 0) {
-        snprintf(published_resource_error, sizeof(published_resource_error),
-                "font load rejected: invalid path or size");
-        return 0;
-    }
-    for (int32_t index = 0; index < published_font_count; index += 1) {
-        if (published_fonts[index].size == size && strcmp(published_fonts[index].path, path) == 0) {
-            return index + 1;
-        }
-    }
-    if (published_font_count >= STASIS_PUBLISHED_MAX_FONTS || strlen(path) >= 256) {
-        snprintf(published_resource_error, sizeof(published_resource_error), "font registry full or path too long");
-        return 0;
-    }
-    PublishedFontResource *font = &published_fonts[published_font_count++];
-    snprintf(font->path, sizeof(font->path), "%s", path);
-    font->size = size;
-    return published_font_count;
-}
-
-float stasis_measure_text(int font, const char *text) {
-    if (font <= 0 || font > published_font_count || text == NULL) return 0.0f;
-    return (float)strlen(text) * (float)published_fonts[font - 1].size * 0.6f;
-}
-
-int stasis_gfx_cache_text(int font, const char *text) {
-    if (font <= 0 || font > published_font_count || text == NULL) {
-        snprintf(published_resource_error, sizeof(published_resource_error),
-                "cached text rejected: font handle was not loaded or text is null");
-        return 0;
-    }
-    for (int32_t index = 0; index < published_text_run_count; index += 1) {
-        if (published_text_runs[index].font == font && strcmp(published_text_runs[index].text, text) == 0) {
-            return index + 1;
-        }
-    }
-    if (published_text_run_count >= STASIS_PUBLISHED_MAX_TEXT_RUNS || strlen(text) >= 1025) {
-        snprintf(published_resource_error, sizeof(published_resource_error), "cached text registry full or text too long");
-        return 0;
-    }
-    PublishedTextResource *run = &published_text_runs[published_text_run_count++];
-    run->font = font;
-    snprintf(run->text, sizeof(run->text), "%s", text);
-    run->width = stasis_measure_text(font, text);
-    return published_text_run_count;
-}
-
-float stasis_gfx_measure_text_cached(int handle) {
-    return handle > 0 && handle <= published_text_run_count
-            ? published_text_runs[handle - 1].width : 0.0f;
-}
-
-float stasis_gfx_measure_text_cached_height(int handle) {
-    if (handle <= 0 || handle > published_text_run_count) return 0.0f;
-    int32_t font = published_text_runs[handle - 1].font;
-    return font > 0 && font <= published_font_count
-            ? (float)published_fonts[font - 1].size : 0.0f;
-}
-
-int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) {
-    (void)sample_rate; (void)channels; (void)target_latency_frames; return 0;
-}
-void stasis_audio_shutdown(void) {}
-int stasis_audio_is_available(void) { return 0; }
-int stasis_audio_get_sample_rate(void) { return 0; }
-int stasis_audio_get_channels(void) { return 0; }
-int stasis_audio_get_queued_frames(void) { return 0; }
-int stasis_audio_get_underruns(void) { return 0; }
-int stasis_audio_push_f32_interleaved(const float *samples, int frames) {
-    (void)samples; (void)frames; return 0;
-}
-void stasis_sleep_ms(int ms) {
-    if (ms <= 0) return;
-    struct timespec delay = { ms / 1000, (long)(ms % 1000) * 1000000L };
-    nanosleep(&delay, NULL);
-}
-int stasis_get_time_ms(void) {
-    struct timespec now;
-    return clock_gettime(CLOCK_MONOTONIC, &now) == 0
-            ? (int)(now.tv_sec * 1000 + now.tv_nsec / 1000000) : 0;
-}
-int stasis_get_time_us(void) {
-    struct timespec now;
-    return clock_gettime(CLOCK_MONOTONIC, &now) == 0
-            ? (int)(now.tv_sec * 1000000 + now.tv_nsec / 1000) : 0;
-}
-
-static int published_v2_initialized;
-static int32_t *published_v2_i32;
-static float *published_v2_f32;
-static uint8_t *published_v2_u8;
-extern int32_t host_i32[768];
-extern float host_f32[64];
-extern int32_t gfx_cmd_i32[STASIS_RENDER_I32_COUNT];
-extern float gfx_cmd_f32[STASIS_RENDER_F32_COUNT];
-extern uint8_t gfx_cmd_u8[STASIS_RENDER_U8_COUNT];
-#define published_host_i32 host_i32
-#define published_host_f32 host_f32
-static int32_t published_previous_touch_x;
-static int32_t published_previous_touch_y;
-static int32_t published_previous_touch_active;
-static int32_t published_has_previous_input;
-static StasisDisplayMetrics published_display_metrics;
-static int32_t published_display_generation;
-static int32_t published_density_generation;
-static float published_previous_raster_scale;
-
-static int32_t stasis_published_hash_path(const char *path) {
-    uint32_t hash = 2166136261U;
-    while (*path != '\0') {
-        hash ^= (uint8_t)*path++;
-        hash *= 16777619U;
-    }
-    return (int32_t)hash;
-}
-
-static void stasis_published_write_host_frame(
-        int touch_x, int touch_y, int touch_active, int screen_w, int screen_h) {
-    int logical_w = stasis_jit_global_i32_load(
-            stasis_published_hash_path("host_req_window_w_px"));
-    int logical_h = stasis_jit_global_i32_load(
-            stasis_published_hash_path("host_req_window_h_px"));
-    if (logical_w <= 0) logical_w = screen_w;
-    if (logical_h <= 0) logical_h = screen_h;
-    StasisDisplayViewport safe = {0.0f, 0.0f, (float)screen_w, (float)screen_h};
-    StasisDisplayMetrics next = stasis_display_metrics(
-            logical_w, logical_h, screen_w, screen_h, screen_w, screen_h, safe);
-    int32_t display_changed = published_display_generation == 0 ||
-            next.logical_w != published_display_metrics.logical_w ||
-            next.logical_h != published_display_metrics.logical_h ||
-            next.native_w != published_display_metrics.native_w ||
-            next.native_h != published_display_metrics.native_h;
-    if (display_changed) {
-        published_display_generation++;
-    }
-    if (published_density_generation == 0 ||
-            fabsf(next.raster_scale - published_previous_raster_scale) > 0.001f) {
-        published_density_generation++;
-        published_previous_raster_scale = next.raster_scale;
-    }
-    published_display_metrics = next;
-    float logical_touch_x = 0.0f;
-    float logical_touch_y = 0.0f;
-    stasis_display_native_to_logical_xy(
-            &published_display_metrics, (float)touch_x, (float)touch_y,
-            &logical_touch_x, &logical_touch_y);
-    logical_touch_x = stasis_display_clampf(logical_touch_x, 0.0f, (float)logical_w);
-    logical_touch_y = stasis_display_clampf(logical_touch_y, 0.0f, (float)logical_h);
-    float previous_logical_x = logical_touch_x;
-    float previous_logical_y = logical_touch_y;
-    if (published_has_previous_input) {
-        stasis_display_native_to_logical_xy(
-                &published_display_metrics,
-                (float)published_previous_touch_x, (float)published_previous_touch_y,
-                &previous_logical_x, &previous_logical_y);
-        previous_logical_x = stasis_display_clampf(
-                previous_logical_x, 0.0f, (float)logical_w);
-        previous_logical_y = stasis_display_clampf(
-                previous_logical_y, 0.0f, (float)logical_h);
-    }
-    int32_t was_down = published_has_previous_input && published_previous_touch_active != 0;
-    int32_t is_down = touch_active != 0;
-    published_host_i32[0] = stasis_get_time_ms();
-    published_host_i32[7] = 1;
-    published_host_i32[11] = display_changed;
-    published_host_i32[12] = screen_w;
-    published_host_i32[13] = screen_h;
-    published_host_i32[14] = 3;
-    published_host_i32[16] = 60;
-    published_host_i32[17] = 1;
-    published_host_i32[19] = stasis_get_time_us();
-    published_host_i32[22] = screen_w;
-    published_host_i32[23] = screen_h;
-    published_host_i32[24] = screen_w;
-    published_host_i32[25] = screen_h;
-    published_host_i32[30] = published_display_generation;
-    published_host_i32[31] = published_density_generation;
-    published_host_i32[544] = 0;
-    published_host_i32[545] = is_down;
-    published_host_i32[546] = is_down && !was_down;
-    published_host_i32[547] = !is_down && was_down;
-    published_host_f32[0] = logical_touch_x;
-    published_host_f32[1] = logical_touch_y;
-    published_host_f32[2] = logical_touch_x - previous_logical_x;
-    published_host_f32[3] = logical_touch_y - previous_logical_y;
-    published_host_f32[4] = logical_w > 0 ? logical_touch_x / (float)logical_w : 0.0f;
-    published_host_f32[5] = logical_h > 0 ? logical_touch_y / (float)logical_h : 0.0f;
-    published_host_f32[48] = published_display_metrics.content_scale;
-    published_host_f32[49] = published_display_metrics.raster_scale;
-    published_host_f32[50] = (float)logical_w;
-    published_host_f32[51] = (float)logical_h;
-    published_host_f32[52] = 0.0f;
-    published_host_f32[53] = 0.0f;
-    published_host_f32[54] = (float)logical_w;
-    published_host_f32[55] = (float)logical_h;
-    published_previous_touch_x = touch_x;
-    published_previous_touch_y = touch_y;
-    published_previous_touch_active = touch_active;
-    published_has_previous_input = 1;
-}
-
-static void stasis_published_copy_active_frame(
-        int32_t *out_i32, float *out_f32, uint8_t *out_u8) {
-    int32_t line_count = stasis_render_clamp_count(
-            gfx_cmd_i32[STASIS_RENDER_I_LINE_COUNT], STASIS_RENDER_MAX_LINES);
-    int32_t sprite_count = stasis_render_clamp_count(
-            gfx_cmd_i32[STASIS_RENDER_I_SPRITE_COUNT], STASIS_RENDER_MAX_SPRITES);
-    int32_t text_count = stasis_render_clamp_count(
-            gfx_cmd_i32[STASIS_RENDER_I_TEXT_COUNT], STASIS_RENDER_MAX_TEXT);
-    int32_t text_bytes = stasis_render_clamp_count(
-            gfx_cmd_i32[STASIS_RENDER_I_TEXT_BYTES_USED], STASIS_RENDER_U8_COUNT);
-    memcpy(out_i32, gfx_cmd_i32, STASIS_RENDER_I_SPRITE_BASE * sizeof(int32_t));
-    memcpy(out_i32 + STASIS_RENDER_I_SPRITE_BASE,
-            gfx_cmd_i32 + STASIS_RENDER_I_SPRITE_BASE,
-            (size_t)sprite_count * STASIS_RENDER_SPRITE_I32_STRIDE * sizeof(int32_t));
-    memcpy(out_i32 + STASIS_RENDER_I_TEXT_BASE,
-            gfx_cmd_i32 + STASIS_RENDER_I_TEXT_BASE,
-            (size_t)text_count * STASIS_RENDER_TEXT_I32_STRIDE * sizeof(int32_t));
-    memcpy(out_f32, gfx_cmd_f32,
-            (size_t)(STASIS_RENDER_F_LINE_BASE +
-                    line_count * STASIS_RENDER_LINE_F32_STRIDE) * sizeof(float));
-    memcpy(out_f32 + STASIS_RENDER_F_SPRITE_BASE,
-            gfx_cmd_f32 + STASIS_RENDER_F_SPRITE_BASE,
-            (size_t)sprite_count * STASIS_RENDER_SPRITE_F32_STRIDE * sizeof(float));
-    memcpy(out_f32 + STASIS_RENDER_F_TEXT_BASE,
-            gfx_cmd_f32 + STASIS_RENDER_F_TEXT_BASE,
-            (size_t)text_count * STASIS_RENDER_TEXT_F32_STRIDE * sizeof(float));
-    memcpy(out_u8, gfx_cmd_u8, (size_t)text_bytes);
-}
-
-static int stasis_published_run_tick_frame_v2(
-        int touch_x, int touch_y, int touch_active, int screen_w, int screen_h,
-        int32_t *out_i32, float *out_f32, uint8_t *out_u8) {
-    if (published_v2_initialized &&
-            (out_i32 != published_v2_i32 || out_f32 != published_v2_f32 || out_u8 != published_v2_u8)) {
-        published_v2_initialized = 0;
-        published_v2_i32 = NULL;
-        published_v2_f32 = NULL;
-        published_v2_u8 = NULL;
-        published_font_count = 0;
-        published_text_run_count = 0;
-        published_has_previous_input = 0;
-        memset(published_host_i32, 0, sizeof(published_host_i32));
-        memset(published_host_f32, 0, sizeof(published_host_f32));
-        memset(gfx_cmd_i32, 0, sizeof(gfx_cmd_i32));
-        memset(gfx_cmd_f32, 0, sizeof(gfx_cmd_f32));
-        memset(gfx_cmd_u8, 0, sizeof(gfx_cmd_u8));
-    }
-    if (!published_v2_initialized) {
-        published_resource_error[0] = '\0';
-        stasis_mobile_aot_reset();
-        STASIS_AOT_BIND_RUNTIME_GLOBALS();
-        published_v2_i32 = out_i32;
-        published_v2_f32 = out_f32;
-        published_v2_u8 = out_u8;
-        stasis_published_write_host_frame(touch_x, touch_y, touch_active, screen_w, screen_h);
-        if (STASIS_AOT_MAIN() != 0) return -1;
-        if (published_resource_error[0] != '\0') return -1;
-        published_v2_initialized = 1;
-    }
-    stasis_published_write_host_frame(touch_x, touch_y, touch_active, screen_w, screen_h);
-    if (STASIS_AOT_TICK() != 0 || STASIS_AOT_RENDER() != 0) return -1;
-    if (published_resource_error[0] != '\0') return -1;
-    published_host_i32[10] += 1;
-    if (!stasis_render_v2_is_valid(gfx_cmd_i32)) return -1;
-    stasis_published_copy_active_frame(out_i32, out_f32, out_u8);
-    out_i32[STASIS_RENDER_I_LOGICAL_W] = published_display_metrics.logical_w;
-    out_i32[STASIS_RENDER_I_LOGICAL_H] = published_display_metrics.logical_h;
-    out_i32[STASIS_RENDER_I_NATIVE_W] = published_display_metrics.native_w;
-    out_i32[STASIS_RENDER_I_NATIVE_H] = published_display_metrics.native_h;
-    out_i32[STASIS_RENDER_I_DRAWABLE_W] = published_display_metrics.drawable_w;
-    out_i32[STASIS_RENDER_I_DRAWABLE_H] = published_display_metrics.drawable_h;
-    out_i32[STASIS_RENDER_I_SAFE_X] = 0;
-    out_i32[STASIS_RENDER_I_SAFE_Y] = 0;
-    out_i32[STASIS_RENDER_I_SAFE_W] = published_display_metrics.logical_w;
-    out_i32[STASIS_RENDER_I_SAFE_H] = published_display_metrics.logical_h;
-    out_i32[STASIS_RENDER_I_DISPLAY_GENERATION] = published_display_generation;
-    out_i32[STASIS_RENDER_I_DENSITY_GENERATION] = published_density_generation;
-    return 0;
-}
-#endif
 static char *read_file_text(const char *path, long *size_out);
 
 static char *read_file_text(const char *path, long *size_out) {
@@ -820,11 +220,9 @@ Java_com_stasislang_workshop_MainActivity_nativeSetStorageRoot(
     if (bridge != NULL && bridge->set_storage_root != NULL) {
         configured = bridge->set_storage_root(root) && configured;
     }
-#if !STASIS_ANDROID_PUBLISHED_AOT
     else {
         configured = 0;
     }
-#endif
     (*env)->ReleaseStringUTFChars(env, storage_root, root);
     return configured;
 }
@@ -1134,28 +532,6 @@ JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeResolveCachedText(
         JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
     (void)activity_class;
-#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V2_DIRECT
-    (void)project_root;
-    if (handle <= 0 || handle > published_text_run_count) {
-        return (*env)->NewStringUTF(env,
-                "{\"status\":\"error\",\"error\":\"cached text handle was not loaded\"}");
-    }
-    PublishedTextResource *run = &published_text_runs[handle - 1];
-    PublishedFontResource *font = &published_fonts[run->font - 1];
-    const char *asset_path = strstr(font->path, "assets/");
-    if (asset_path == NULL) asset_path = font->path;
-    char escaped_text[(sizeof(run->text) - 1) * 6 + 1];
-    if (!stasis_mobile_json_escape(run->text, escaped_text, sizeof(escaped_text))) {
-        return (*env)->NewStringUTF(env,
-                "{\"status\":\"error\",\"error\":\"cached text could not be JSON encoded\"}");
-    }
-    char response[sizeof(escaped_text) + 1024];
-    snprintf(response, sizeof(response),
-            "{\"status\":\"ok\",\"handle\":%d,\"font\":%d,\"font_asset\":\"stasis_game/%s\",\"font_size\":%d,\"text\":\"%s\",\"measured_width\":%.3f}",
-            (int)handle, (int)run->font, asset_path, (int)font->size,
-            escaped_text, (double)run->width);
-    return (*env)->NewStringUTF(env, response);
-#else
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
         return (*env)->NewStringUTF(env,
@@ -1176,28 +552,12 @@ Java_com_stasislang_workshop_MainActivity_nativeResolveCachedText(
     jstring result = (*env)->NewStringUTF(env, message);
     bridge->free_string(message);
     return result;
-#endif
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeResolveFont(
         JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
     (void)activity_class;
-#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V2_DIRECT
-    (void)project_root;
-    if (handle <= 0 || handle > published_font_count) {
-        return (*env)->NewStringUTF(env,
-                "{\"status\":\"error\",\"error\":\"font handle was not loaded\"}");
-    }
-    PublishedFontResource *font = &published_fonts[handle - 1];
-    const char *asset_path = strstr(font->path, "assets/");
-    if (asset_path == NULL) asset_path = font->path;
-    char response[768];
-    snprintf(response, sizeof(response),
-            "{\"status\":\"ok\",\"handle\":%d,\"font_asset\":\"stasis_game/%s\",\"font_size\":%d}",
-            (int)handle, asset_path, (int)font->size);
-    return (*env)->NewStringUTF(env, response);
-#else
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
         return (*env)->NewStringUTF(env,
@@ -1218,7 +578,6 @@ Java_com_stasislang_workshop_MainActivity_nativeResolveFont(
     jstring result = (*env)->NewStringUTF(env, message);
     bridge->free_string(message);
     return result;
-#endif
 }
 
 JNIEXPORT jstring JNICALL
@@ -1298,14 +657,6 @@ Java_com_stasislang_workshop_MainActivity_nativeCodexCancelResponse(
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jclass activity_class, jstring project_root) {
     (void)activity_class;
-#if STASIS_ANDROID_PUBLISHED_AOT
-    (void)project_root;
-#if !STASIS_RENDER_V2_DIRECT
-    stasis_published_init_globals();
-#endif
-    return (*env)->NewStringUTF(env, "CompileReady: backend=cranelift-aot reload=PublishedAot files=0 functions=0 hash=0000000000000000 manifest=published_aot state=compiled status=0");
-#else
-
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
         return (*env)->NewStringUTF(env, "CompileError: unable to read project root");
@@ -1317,7 +668,6 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
     (*env)->ReleaseStringUTFChars(env, project_root, root);
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
     return (*env)->NewStringUTF(env, message);
-#endif
 }
 
 JNIEXPORT jstring JNICALL
@@ -1413,12 +763,6 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
         return -1;
     }
 
-#if STASIS_ANDROID_PUBLISHED_AOT
-    (void)project_root;
-    int status = stasis_published_run_tick_frame_v2(
-            (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h,
-            values_i32, values_f32, values_u8);
-#else
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
         values_i32[0] = -1;
@@ -1430,7 +774,6 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
             values_i32, STASIS_RENDER_I32_COUNT, values_f32, STASIS_RENDER_F32_COUNT,
             values_u8, STASIS_RENDER_U8_COUNT);
     (*env)->ReleaseStringUTFChars(env, project_root, root);
-#endif
     if (status != 0) {
         values_i32[0] = -1;
     } else {
@@ -1468,11 +811,6 @@ JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeLastFrameError(
         JNIEnv *env, jclass activity_class) {
     (void)activity_class;
-#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V2_DIRECT
-    const char *message = published_resource_error[0] == '\0'
-            ? "native preview frame failed" : published_resource_error;
-    return (*env)->NewStringUTF(env, message);
-#else
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->last_frame_error == NULL || bridge->free_string == NULL) {
         return (*env)->NewStringUTF(env, "native preview frame failed");
@@ -1484,7 +822,6 @@ Java_com_stasislang_workshop_MainActivity_nativeLastFrameError(
     jstring result = (*env)->NewStringUTF(env, message);
     bridge->free_string(message);
     return result;
-#endif
 }
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeInspectRuntimeState(

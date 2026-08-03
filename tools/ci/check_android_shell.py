@@ -7,10 +7,9 @@ REQUIRED_FILES = [
     "mobile/android/build.gradle",
     "mobile/android/build_rust_bridge.ps1",
     "mobile/android/rust_bridge_provenance.ps1",
-    "mobile/android/build_published.ps1",
+    "mobile/android/build_release.ps1",
     "mobile/android/validate_device.ps1",
     "mobile/android/app/build.gradle",
-    "mobile/android/games/pong.gradle",
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
@@ -54,8 +53,6 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiQueueRunPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiSessionCheckpointStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiResumePolicy.java",
-    "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
-    "mobile/android/app/src/published/java/com/stasislang/workshop/PublishedSpriteCatalog.java",
     "mobile/android/app/src/main/java/com/stasislang/workshop/StasisPreviewRenderer.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_android_sprite.c",
@@ -73,6 +70,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/AGENTS.md",
     "mobile/android/app/src/main/assets/workshop_sample/CLAUDE.md",
+    "mobile/android/app/src/main/assets/workshop_sample/stasis.json",
     "mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg",
     "mobile/android/app/src/main/assets/workshop_sample/assets/paddle.svg",
     "mobile/android/app/src/main/assets/workshop_sample/assets/center_line.svg",
@@ -110,7 +108,9 @@ REQUIRED_FILES = [
     "mobile/android/app/src/test/java/com/stasislang/workshop/WorkshopTemplateCatalogTest.java",
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
-    "tools/ci/check_android_published_apk.py",
+    "mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java",
+    "mobile/shells/android/app/src/main/cpp/stasis_android_assets.c",
+    "tools/ci/check_android_release_package.py",
     "tests/android/AiQueuePolicyTest.java",
     "tests/android/WorkshopProjectFormatPolicyTest.java",
 ]
@@ -150,7 +150,7 @@ def main() -> int:
     assert "Workshop Android Gradle build failed with exit code" in debug_script
     assert "Rust Android bridge build failed with exit code" in rust_bridge_script
     assert "rustup target discovery failed with exit code" in rust_bridge_script
-    published_script = read("mobile/android/build_published.ps1")
+    release_script = read("mobile/android/build_release.ps1")
     device_script = read("mobile/android/validate_device.ps1")
     android_gitignore = read("mobile/android/.gitignore")
     assert 'linkerVariable = "CARGO_TARGET_' in rust_bridge_script
@@ -169,12 +169,11 @@ def main() -> int:
     assert '"app\\src\\workshop\\jniLibs\\$abi"' in rust_bridge_script
     assert 'build_rust_bridge.ps1") -Release' in debug_script
     assert ":app:assembleWorkshopDebug" in debug_script
-    assert ":app:assemblePublishedRelease" in published_script
-    assert ":app:installPublishedDebug" in published_script
-    assert "ValidateAot" in published_script
-    assert "aot_engine_bundle_writes_manifest_and_required_entrypoints" in published_script
-    assert "check_android_published_apk.py" in published_script
-    assert "build_rust_bridge.ps1" not in published_script
+    assert "package-mobile" in release_script
+    assert ":app:bundleRelease" in release_script
+    assert ":app:installDebug" in release_script
+    assert "check_android_release_package.py" in release_script
+    assert "build_rust_bridge.ps1" not in release_script
     assert "app/src/*/jniLibs/" in android_gitignore
     assert "RequireDevice" in device_script
     assert "android_device_acceptance" in device_script
@@ -191,36 +190,18 @@ def main() -> int:
     assert "validate_device.ps1" in emulator_test_script
 
     app_gradle = read("mobile/android/app/build.gradle")
-    pong_descriptor = read("mobile/android/games/pong.gradle")
     assert "flavorDimensions 'mode'" in app_gradle
     assert "verifyWorkshopRustBridge" in app_gradle
     assert "stasis.allowDebugRustBridge" in app_gradle
     assert "rust_bridge_provenance.ps1" in app_gradle
     assert "workshop {" in app_gradle
-    assert "published {" in app_gradle
     assert "applicationId 'com.stasislang.workshop'" in app_gradle
-    assert "applicationId publishedGame.applicationId" in app_gradle
-    assert "manifestPlaceholders = [appLabel: publishedGame.label]" in app_gradle
-    assert "publishedGameDescriptorFile" in app_gradle
-    assert "STASIS_RUNTIME_ID" in app_gradle
-    assert "inputs.file(publishedGameDescriptorFile)" in app_gradle
-    assert "publishedGame.projectDirectory.absolutePath" in app_gradle
-    assert "applicationId: 'com.stasislang.pong'" in pong_descriptor
-    assert "label: 'Stasis Pong'" in pong_descriptor
-    assert "runtimeId: 'pong_aot'" in pong_descriptor
-    assert "entrySource: 'src/main.stasis'" in pong_descriptor
-    assert "assetManifest: 'assets/manifest.json'" in pong_descriptor
-    assert "STASIS_PUBLISHED_BUILD" in app_gradle
-    assert "abiFilters 'arm64-v8a'" in app_gradle
     assert "abiFilters 'arm64-v8a', 'x86_64'" in app_gradle
     assert "externalNativeBuild" in app_gradle
     assert "STASIS_ANDROID_SMOKE_ONLY=ON" in app_gradle
-    assert "generatePublishedAotBundle" in app_gradle
-    assert "STASIS_ANDROID_PUBLISHED_AOT=ON" in app_gradle
     assert "prepareWorkshopAssets" in app_gradle
     assert "workshop_sample/build/**" in app_gradle
     assert "exploration_sample/build/**" in app_gradle
-    assert "published.assets.setSrcDirs([publishedAotDir.map { it.dir('apk_assets') }.get().asFile])" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
     styles = read("mobile/android/app/src/main/res/values/styles.xml")
@@ -386,7 +367,7 @@ def main() -> int:
     assert "run_compile_check(project" in host_agent
     assert "build_followup_request(shared_context" in host_agent
     assert "source_file_path(project" in host_agent
-    assert "MAX_TOOL_CALLS_PER_BATCH = 12" in host_agent
+    assert "MAX_TOOL_CALLS_PER_BATCH = 50" in host_agent
     assert 'DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")' in host_comparison
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "private static native int nativeRunFrameInto(String projectRoot" in activity
@@ -397,9 +378,8 @@ def main() -> int:
     assert '"workshop_sample/"' in template_catalog
     assert "activeWorkshopTemplate" in activity
     assert "createWorkshopView" in activity
-    assert "BuildConfig.STASIS_PUBLISHED_BUILD" in activity
-    assert "installGameStatusOverlay(root, false)" in activity
     assert "installGameStatusOverlay(root, true)" in activity
+    assert "BuildConfig.STASIS_PUBLISHED_BUILD" not in activity
     assert "toggleBenchmarkHudFromPreview" in activity
     assert "MotionEvent.ACTION_POINTER_DOWN" in activity
     assert "event.getPointerCount() >= 3" in activity
@@ -410,7 +390,7 @@ def main() -> int:
     assert "onDrawFrame" in preview_renderer
     assert "drawFrame" in preview_renderer
     draw_loop = preview_renderer.split("private void drawFrame()", 1)[1].split(
-        "private void drawLines", 1
+        "\n    }\n", 1
     )[0]
     assert "new " not in draw_loop
     assert "allocate" not in draw_loop
@@ -1040,7 +1020,7 @@ def main() -> int:
     assert "compile.setText(\"Compile\")" not in activity
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
-    assert "private static final int MAX_AI_AGENT_TURNS = 25" in activity
+    assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
     assert '.put("response_model", apiResponse.model)' in activity
     assert '.put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)' in activity
     assert '.put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable' in activity
@@ -1178,7 +1158,7 @@ def main() -> int:
     assert "test `name`(): bool" in activity
     assert "read-only inspection batches do not rerun tests" in activity
     assert "Use on_code_swap() only for post-hot-swap migration" in activity
-    assert "MAX_AI_TOOL_CALLS_PER_BATCH = 12" in activity
+    assert "MAX_AI_TOOL_CALLS_PER_BATCH = 50" in activity
     assert "MAX_AI_READ_ONLY_BATCHES = 2" in activity
     assert "retainedToolObservations" in activity
     assert "read_only_batch_not_executed" in activity
@@ -1366,33 +1346,28 @@ def main() -> int:
     assert "ResetRequired: struct or layout source changed" in activity
     assert "setContentView(status)" not in activity
 
-    published_activity = read("mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java")
-    published_sprites = read("mobile/android/app/src/published/java/com/stasislang/workshop/PublishedSpriteCatalog.java")
-    assert "System.loadLibrary(\"stasis_mobile_smoke\")" in published_activity
-    assert "nativeCompileProject(String projectRoot)" in published_activity
-    assert "nativeRunFrameInto(String projectRoot" in published_activity
-    assert "https://api.openai.com" not in published_activity
-    assert "SharedPreferences" not in published_activity
-    assert "createAiControls" not in published_activity
-    assert "Manual Symbols and Source" not in published_activity
-    assert "GameSurfaceView" in published_activity
-    assert "GLSurfaceView" in published_activity
-    assert "new StasisPreviewRenderer(" in published_activity
-    assert "onDrawFrame" not in published_activity
-    assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
-    assert "event.getPointerCount() >= 3" in published_activity
-    assert "PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID" in published_activity
-    assert "PublishedSpriteCatalog" in published_activity
+    release_activity = read("mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java")
+    release_bridge = read("mobile/shells/android/app/src/main/cpp/stasis_android_assets.c")
+    assert "System.loadLibrary(\"SDL2\")" in release_activity
+    assert "System.loadLibrary(\"SDL2_image\")" in release_activity
+    assert "System.loadLibrary(\"main\")" in release_activity
+    assert "https://api.openai.com" not in release_activity
+    assert "SharedPreferences" not in release_activity
+    assert "event.getPointerCount() >= 3" in release_activity
+    assert "nativeReadPerformanceMetrics" in release_activity
+    assert "nativeReadRuntimeError" in release_activity
+    assert "tick avg=" in release_activity
+    assert "render avg=" in release_activity
+    assert "setOnApplyWindowInsetsListener" in release_activity
+    assert "getDisplayCutout" in release_activity
+    assert "verifyAssetManifest(staging)" in release_activity
+    assert 'MessageDigest.getInstance("SHA-256")' in release_activity
+    assert "MAX_MANIFEST_ASSETS = 4096" in release_activity
+    assert "MAX_TOTAL_ASSET_BYTES" in release_activity
+    assert "stasis_host_get_latest_performance_metrics" in release_bridge
+    assert "stasis_host_copy_runtime_error" in release_bridge
     assert "drawSprites" in preview_renderer
-    assert "nativeDecodeSvgSpriteBytes" in published_activity
-    assert 'MANIFEST = ROOT + "assets/manifest.json"' in published_sprites
-    assert "MessageDigest.getInstance(\"SHA-256\")" in published_sprites
-    assert "implements StasisPreviewRenderer.TextureProvider" in published_sprites
-    assert "textureFor(int handle)" in published_sprites
-    assert "SparseIntArray textures" in published_sprites
-    assert "SparseBooleanArray failedHandles" in published_sprites
     assert '"com.stasislang.pong"' in device_script
-    assert "ensureBundledProject" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
     assert "WorkshopReload" in workshop
     assert "WorkshopCompilePlan" not in workshop
@@ -1421,10 +1396,6 @@ def main() -> int:
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
     assert "bytes_i32 < (jlong)(STASIS_RENDER_I32_COUNT * sizeof(int32_t))" in native
     assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2")' in native
-    assert "#define STASIS_RENDER_COMMAND_STRIDE 13" in native
-    assert '"Render.command_schema_version"' in native
-    assert '"Render.command" #index "_rotation_degrees"' in native
-    assert '"Render.command" #index "_alpha"' in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
     assert "scan_stasis_files" not in native
     assert "analyze_stasis_file" not in native
@@ -1435,7 +1406,6 @@ def main() -> int:
     assert "STASIS_RUNTIME_STATE_RELATIVE_PATH" in native
     assert "CompiledStub" not in native
     assert "write_function_artifact" not in native
-    assert "CompileReady: backend=cranelift-aot" in native
     assert "RuntimeStateReady" in native
     assert "read_runtime_tick_count" in native
     assert "write_runtime_tick_count" in native
@@ -1449,8 +1419,6 @@ def main() -> int:
     assert "PreviousManifest" not in native
     assert "read_previous_compile_manifest" not in native
     assert "classify_reload" not in native
-    assert '"GameState.ball_age_ticks", &published_game_ball_age_ticks' in native
-    assert '"GameState.enemy_paddle_speed_x100", &published_game_enemy_paddle_speed_x100' in native
     assert "WorkshopReload::InitialCompile" in bridge
     assert "WorkshopReload::NoChange" in bridge
     assert "WorkshopReload::FastReload" in bridge
@@ -1459,11 +1427,13 @@ def main() -> int:
     assert "Stasis Android native smoke loaded" in native
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
-    assert "add_library(stasis_mobile_smoke SHARED stasis_mobile_smoke.c stasis_android_sprite.c)" in cmake
+    assert "add_library(stasis_mobile_smoke SHARED" in cmake
+    assert "stasis_mobile_smoke.c" in cmake
+    assert "stasis_android_sprite.c" in cmake
     assert "../../../../../../runtime" in cmake
     assert "find_library(math_lib m)" in cmake
-    assert "STASIS_ANDROID_PUBLISHED_AOT" in cmake
-    assert "published_aot_objects.cmake" in cmake
+    assert "STASIS_ANDROID_PUBLISHED_AOT" not in cmake
+    assert "published_aot_objects.cmake" not in cmake
     assert "find_library(dl_lib dl)" in cmake
     assert "${dl_lib}" in cmake
 
@@ -1488,6 +1458,10 @@ def main() -> int:
     assert '"id": "ball"' in pong_manifest
     assert '"id": "paddle"' in pong_manifest
     assert '"id": "center_line"' in pong_manifest
+    pong_project = read("mobile/android/app/src/main/assets/workshop_sample/stasis.json")
+    assert '"application_id": "com.stasislang.pong"' in pong_project
+    assert '"label": "Stasis Pong"' in pong_project
+    assert '"orientation": "sensorLandscape"' in pong_project
     preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
     assert "function on_code_swap(): void { pong_game_on_code_swap(); pong_host_render(); }" in preview_adapter
     assert '"encoding": "svg"' in pong_manifest

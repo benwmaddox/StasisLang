@@ -1,5 +1,5 @@
 param(
-    [switch]$Published,
+    [switch]$Release,
     [switch]$Install,
     [switch]$Lifecycle,
     [switch]$RequireDevice,
@@ -10,10 +10,11 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
-$variant = if ($Published) { "published" } else { "workshop" }
-$package = if ($Published) { "com.stasislang.pong" } else { "com.stasislang.workshop" }
-$apk = if ($Published) {
-    Join-Path $scriptRoot "app\build\outputs\apk\published\debug\app-published-debug.apk"
+$variant = if ($Release) { "release" } else { "workshop" }
+$package = if ($Release) { "com.stasislang.pong" } else { "com.stasislang.workshop" }
+$activity = if ($Release) { "com.stasislang.game.MainActivity" } else { "com.stasislang.workshop.MainActivity" }
+$apk = if ($Release) {
+    Join-Path $scriptRoot "app\src\main\assets\workshop_sample\build\android-release\android\app\build\outputs\apk\debug\app-debug.apk"
 } else {
     Join-Path $scriptRoot "app\build\outputs\apk\workshop\debug\app-workshop-debug.apk"
 }
@@ -47,7 +48,7 @@ $deviceLines = & $adb devices -l
 $connectedDevices = @($deviceLines | Where-Object { $_ -match '^(\S+)\s+device(?:\s|$)' })
 $deviceLine = if ($Serial) {
     $connectedDevices | Where-Object { $_ -match "^$([regex]::Escape($Serial))\s" } | Select-Object -First 1
-} elseif (-not $Published) {
+} elseif (-not $Release) {
     $connectedDevices | Sort-Object { if ($_ -match '^emulator-') { 0 } else { 1 } } | Select-Object -First 1
 } else {
     $connectedDevices | Select-Object -First 1
@@ -76,7 +77,7 @@ try {
     $model = (Invoke-Adb @("shell", "getprop", "ro.product.model") | Select-Object -First 1).Trim()
     $sdk = (Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") | Select-Object -First 1).Trim()
     $abis = (Invoke-Adb @("shell", "getprop", "ro.product.cpu.abilist") | Select-Object -First 1).Trim()
-    $requiredAbiPattern = if ($Published) { 'arm64-v8a' } else { 'arm64-v8a|x86_64' }
+    $requiredAbiPattern = if ($Release) { 'arm64-v8a' } else { 'arm64-v8a|x86_64' }
     if ($abis -notmatch $requiredAbiPattern) { throw "attached device does not support a packaged ABI: $abis" }
 
     if ($Install) {
@@ -86,7 +87,7 @@ try {
 
     Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Adb @("shell", "am", "force-stop", $package) | Out-Null
-    $launchOutput = Invoke-Adb @("shell", "am", "start", "-W", "-n", "$package/com.stasislang.workshop.MainActivity")
+    $launchOutput = Invoke-Adb @("shell", "am", "start", "-W", "-n", "$package/$activity")
     Start-Sleep -Seconds 2
     $appPid = (Invoke-Adb @("shell", "pidof", $package) | Select-Object -First 1).Trim()
     if (-not $appPid) { throw "Android package did not remain running after launch: $package" }
@@ -103,11 +104,11 @@ try {
         Start-Sleep -Seconds 2
         Invoke-Adb @("shell", "input", "keyevent", "KEYCODE_HOME") | Out-Null
         Start-Sleep -Seconds 1
-        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$package/com.stasislang.workshop.MainActivity") | Out-Null
+        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$package/$activity") | Out-Null
         Start-Sleep -Seconds 2
         Invoke-Adb @("shell", "settings", "put", "system", "user_rotation", "0") | Out-Null
         Start-Sleep -Seconds 2
-        Invoke-Adb @("shell", "am", "start", "-S", "-W", "-n", "$package/com.stasislang.workshop.MainActivity") | Out-Null
+        Invoke-Adb @("shell", "am", "start", "-S", "-W", "-n", "$package/$activity") | Out-Null
         Start-Sleep -Seconds 2
         $appPid = (Invoke-Adb @("shell", "pidof", $package) | Select-Object -First 1).Trim()
         if (-not $appPid) { throw "Android package did not survive lifecycle acceptance: $package" }

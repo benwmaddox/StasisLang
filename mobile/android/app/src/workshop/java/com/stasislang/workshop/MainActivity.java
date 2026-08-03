@@ -750,12 +750,6 @@ public final class MainActivity extends Activity {
 
         installVoiceChangeControls(root);
 
-        if (BuildConfig.STASIS_PUBLISHED_BUILD) {
-            installGameStatusOverlay(root, false);
-            startGameLoop();
-            return root;
-        }
-
         installGameStatusOverlay(root, true);
         installAiGameProgressOverlay(root);
         installBlockingErrorPanel(root);
@@ -11808,8 +11802,7 @@ public final class MainActivity extends Activity {
             touchX = Math.round(event.getX());
             touchY = Math.round(event.getY());
             int action = event.getActionMasked();
-            if (BuildConfig.STASIS_PUBLISHED_BUILD && action == MotionEvent.ACTION_POINTER_DOWN
-                    && event.getPointerCount() >= 3) {
+            if (action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() >= 3) {
                 activity.toggleBenchmarkHudFromPreview();
             }
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;

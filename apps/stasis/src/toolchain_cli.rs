@@ -499,6 +499,17 @@ struct ProjectManifest {
     entry: String,
     tests: String,
     output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    android: Option<AndroidProjectManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct AndroidProjectManifest {
+    application_id: String,
+    label: String,
+    orientation: String,
+    version_code: u32,
+    version_name: String,
 }
 
 impl ProjectManifest {
@@ -509,6 +520,7 @@ impl ProjectManifest {
             entry: "src/main.stasis".to_string(),
             tests: "tests".to_string(),
             output: "build".to_string(),
+            android: None,
         }
     }
 
@@ -527,8 +539,56 @@ impl ProjectManifest {
         ] {
             validate_relative_path(field, Path::new(value))?;
         }
+        if let Some(android) = &self.android {
+            validate_android_application_id(&android.application_id)?;
+            if android.label.trim().is_empty()
+                || android.label != android.label.trim()
+                || !android.label.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_' | b'-' | b'.')
+                })
+            {
+                return Err(
+                    "android label must use letters, numbers, spaces, _, -, or .".to_string(),
+                );
+            }
+            if !matches!(
+                android.orientation.as_str(),
+                "unspecified" | "sensorLandscape" | "sensorPortrait"
+            ) {
+                return Err(
+                    "android orientation must be unspecified, sensorLandscape, or sensorPortrait"
+                        .to_string(),
+                );
+            }
+            if android.version_code == 0 {
+                return Err("android version_code must be positive".to_string());
+            }
+            if android.version_name.is_empty()
+                || !android.version_name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')
+                })
+            {
+                return Err("android version_name is invalid".to_string());
+            }
+        }
         Ok(())
     }
+}
+
+fn validate_android_application_id(value: &str) -> Result<(), String> {
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.len() < 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part.as_bytes()[0].is_ascii_alphabetic()
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+    {
+        return Err(format!("invalid android application_id: {value}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -2767,13 +2827,39 @@ fn assemble_mobile_shell(
         PackageTarget::IosArm64 => staging_root.join("ios/StasisMobile/stasis_game"),
         PackageTarget::Desktop => unreachable!(),
     };
-    let package_id = mobile_package_id(&workspace.manifest.name);
+    let android_manifest = if matches!(target, PackageTarget::AndroidArm64) {
+        workspace.manifest.android.as_ref()
+    } else {
+        None
+    };
+    let package_id = android_manifest
+        .map(|manifest| manifest.application_id.clone())
+        .unwrap_or_else(|| mobile_package_id(&workspace.manifest.name));
+    let app_name = android_manifest
+        .map(|manifest| manifest.label.as_str())
+        .unwrap_or(workspace.manifest.name.as_str());
+    let android_orientation = android_manifest
+        .map(|manifest| manifest.orientation.as_str())
+        .unwrap_or("sensorLandscape");
+    let android_version_code = android_manifest
+        .map(|manifest| manifest.version_code)
+        .unwrap_or(1)
+        .to_string();
+    let android_version_name = android_manifest
+        .map(|manifest| manifest.version_name.as_str())
+        .unwrap_or("1.0");
     let jni_package = package_id.replace('.', "_");
     let replacements = [
-        ("@STASIS_APP_NAME@", workspace.manifest.name.as_str()),
+        ("@STASIS_APP_NAME@", app_name),
         ("@STASIS_PACKAGE_ID@", package_id.as_str()),
         ("@STASIS_JNI_PACKAGE@", jni_package.as_str()),
         ("@STASIS_ASSET_BASE@", "."),
+        ("@STASIS_ANDROID_ORIENTATION@", android_orientation),
+        (
+            "@STASIS_ANDROID_VERSION_CODE@",
+            android_version_code.as_str(),
+        ),
+        ("@STASIS_ANDROID_VERSION_NAME@", android_version_name),
     ];
     replace_shell_tokens(&common_destination, &replacements)?;
     replace_shell_tokens(&platform_destination, &replacements)?;
@@ -4799,7 +4885,16 @@ mod tests {
         .expect("write iOS asset manifest");
         let workspace = Workspace {
             root: root.clone(),
-            manifest: ProjectManifest::new("mobile_smoke".to_string()),
+            manifest: ProjectManifest {
+                android: Some(AndroidProjectManifest {
+                    application_id: "com.example.mobile".to_string(),
+                    label: "Mobile Smoke".to_string(),
+                    orientation: "sensorPortrait".to_string(),
+                    version_code: 7,
+                    version_name: "2.1.0".to_string(),
+                }),
+                ..ProjectManifest::new("mobile_smoke".to_string())
+            },
         };
 
         let android = root.join("android-package");
@@ -4819,6 +4914,16 @@ mod tests {
         assert!(android_cmake.contains("stasis_mobile_runtime"));
         assert!(android_cmake.contains("STASIS_AOT_OBJECTS"));
         assert!(!android_cmake.contains("stasis_dynload"));
+        let android_gradle = fs::read_to_string(android.join("android/app/build.gradle"))
+            .expect("read Android Gradle");
+        assert!(android_gradle.contains("applicationId 'com.example.mobile'"));
+        assert!(android_gradle.contains("versionCode 7"));
+        assert!(android_gradle.contains("versionName '2.1.0'"));
+        let android_manifest =
+            fs::read_to_string(android.join("android/app/src/main/AndroidManifest.xml"))
+                .expect("read Android manifest");
+        assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
+        assert!(android_manifest.contains("android:screenOrientation=\"sensorPortrait\""));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
             .expect("read shared mobile main");
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
@@ -4852,13 +4957,22 @@ mod tests {
         .expect("read Android activity");
         assert!(java.contains(".stasis_game.staging"));
         assert!(java.contains("new File(root, \".\")"));
+        assert!(java.contains("event.getPointerCount() >= 3"));
+        assert!(java.contains("nativeReadPerformanceMetrics"));
+        assert!(java.contains("nativeReadRuntimeError"));
+        assert!(java.contains("tick avg="));
+        assert!(java.contains("verifyAssetManifest(staging)"));
+        assert!(java.contains("setOnApplyWindowInsetsListener"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
                 .expect("read Android asset bridge");
-        assert!(
-            jni.contains("Java_com_stasislang_gamemobilex5fsmoke_MainActivity_nativeSetAssetRoot")
-        );
+        assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeSetAssetRoot"));
+        assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeReadPerformanceMetrics"));
+        assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeReadRuntimeError"));
         assert!(!jni.contains("@STASIS_"));
+        let runtime_source = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.c"))
+            .expect("read shared mobile runtime source");
+        assert!(runtime_source.contains("stasis_host_set_performance_metrics"));
 
         let ios = root.join("ios-package");
         fs::create_dir_all(&ios).expect("create iOS staging");
@@ -4898,6 +5012,35 @@ mod tests {
             ..ProjectManifest::new("demo".to_string())
         };
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_validates_android_release_identity() {
+        let valid = ProjectManifest {
+            android: Some(AndroidProjectManifest {
+                application_id: "com.example.game".to_string(),
+                label: "Example Game".to_string(),
+                orientation: "unspecified".to_string(),
+                version_code: 1,
+                version_name: "1.0.0".to_string(),
+            }),
+            ..ProjectManifest::new("example_game".to_string())
+        };
+        assert!(valid.validate().is_ok());
+
+        for application_id in ["game", "com.example.bad-name", "com.1game"] {
+            let mut invalid = valid.clone();
+            invalid.android.as_mut().unwrap().application_id = application_id.to_string();
+            assert!(invalid.validate().is_err(), "accepted {application_id}");
+        }
+
+        let mut invalid_label = valid.clone();
+        invalid_label.android.as_mut().unwrap().label = "Game & More".to_string();
+        assert!(invalid_label.validate().is_err());
+
+        let mut invalid_version = valid;
+        invalid_version.android.as_mut().unwrap().version_name = "1.0'debug".to_string();
+        assert!(invalid_version.validate().is_err());
     }
 
     #[test]
