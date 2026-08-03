@@ -297,8 +297,82 @@ jobs:
           path: dist/${{ matrix.archive }}.${{ matrix.ext }}
           if-no-files-found: error
 
-  release:
+  vscode_extension:
     needs: [detect, build]
+    if: needs.detect.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_E2E_VSCODE_VERSION: "1.96.0"
+      STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/vscode-nightly/stasis-nightly-linux-x64/bin/stasis
+      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/vscode-e2e-runtime/bin/libstasis_graphics.so
+      STASIS_E2E_SCREENSHOT: ${{ github.workspace }}/target/vscode-e2e/frame.png
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: vscode-stasis/package-lock.json
+
+      - name: Install graphics and display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libsdl2-dev libsdl2-image-dev xvfb
+
+      - name: Download Linux nightly toolchain
+        uses: actions/download-artifact@v8
+        with:
+          name: stasis-nightly-linux-x64
+          path: target/vscode-nightly
+
+      - name: Extract and probe nightly toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C target/vscode-nightly -xzf target/vscode-nightly/stasis-nightly-linux-x64.tar.gz
+          test -x "$STASIS_E2E_EXECUTABLE"
+          "$STASIS_E2E_EXECUTABLE" version
+
+      - name: Build native graphics runtime
+        run: |
+          cmake -S runtime -B target/vscode-e2e-runtime \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_SDL_ONLY=ON \
+            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_SYS=OFF
+          cmake --build target/vscode-e2e-runtime --config Release --target stasis_graphics
+          test -f "$STASIS_RUNTIME_LIBRARY_PATH"
+          "$STASIS_E2E_EXECUTABLE" probe-graphics-runtime
+
+      - name: Install extension dependencies
+        working-directory: vscode-stasis
+        run: npm ci
+
+      - name: Test extension protocols
+        working-directory: vscode-stasis
+        run: npm test
+
+      - name: Test installed VSIX in VS Code
+        working-directory: vscode-stasis
+        run: |
+          mkdir -p ../target/vscode-e2e
+          xvfb-run -a npm run test:e2e
+
+      - name: Upload VS Code extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: stasis-vscode-extension
+          path: vscode-stasis/.vsix/stasislang.stasis.vsix
+          if-no-files-found: error
+
+  release:
+    needs: [detect, build, vscode_extension]
     if: needs.detect.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:

@@ -8,6 +8,7 @@ global score: i32;
 
 function main(): i32 {
     score = 1;
+    tick();
     return 0;
 }
 

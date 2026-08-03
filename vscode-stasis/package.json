@@ -1,7 +1,7 @@
 {
   "name": "stasis",
   "displayName": "Stasis",
-  "description": "Stasis language support, formatting, completion, and live game inspection.",
+  "description": "Stasis language support, navigation, tests, formatting, completion, and live game inspection.",
   "version": "0.1.0",
   "publisher": "stasislang",
   "license": "SEE LICENSE IN LICENSE",
@@ -12,6 +12,9 @@
   "engines": {
     "vscode": "^1.96.0"
   },
+  "activationEvents": [
+    "workspaceContains:stasis.json"
+  ],
   "categories": [
     "Programming Languages",
     "Formatters",

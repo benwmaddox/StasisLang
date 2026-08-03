@@ -12,6 +12,8 @@ interface StasisExtensionApi {
   start(): Promise<void>;
   stop(): Promise<void>;
   request(type: string, fields?: Record<string, unknown>): Promise<LiveResponse>;
+  testFiles(): readonly string[];
+  runTestFile(uri: string): Promise<{ stdout: string; stderr: string }>;
 }
 
 type Rgba = readonly [number, number, number, number];
@@ -132,6 +134,12 @@ export async function run(): Promise<void> {
   }
   const api = await extension.activate();
 
+  const grammarPath = path.join(extension.extensionPath, "syntaxes", "stasis.tmLanguage.json");
+  assert.equal(fs.existsSync(grammarPath), true, "the installed VSIX contains its Stasis color grammar");
+  const grammar = fs.readFileSync(grammarPath, "utf8");
+  assert.match(grammar, /entity\.name\.function\.stasis/, "the color grammar scopes function names");
+  assert.match(grammar, /storage\.type\.builtin\.stasis/, "the color grammar scopes built-in types");
+
   const formatUri = vscode.Uri.file(path.join(folder.uri.fsPath, "format-input.stasis"));
   fs.writeFileSync(
     formatUri.fsPath,
@@ -180,6 +188,40 @@ export async function run(): Promise<void> {
     completions?.items.some((item) => item.label === "tick"),
     "compiler-backed completion returns the fixture function",
   );
+
+  const mainLineNumber = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("tick();"));
+  assert.notEqual(mainLineNumber, -1, "the fixture calls tick from main");
+  const mainLine = document.lineAt(mainLineNumber);
+  const callPosition = new vscode.Position(mainLineNumber, mainLine.text.indexOf("tick") + 1);
+  const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeDefinitionProvider",
+    sourceUri,
+    callPosition,
+  );
+  assert.equal(definitions?.length, 1, "Go to Definition resolves through compiler-owned spans");
+  assert.equal(definitions?.[0]?.uri.fsPath, sourceUri.fsPath);
+  assert.equal(definitions?.[0]?.range.start.line, tickLineNumber);
+
+  const references = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeReferenceProvider",
+    sourceUri,
+    completionPosition,
+  );
+  assert.ok(
+    references && references.length >= 2,
+    "Find All References includes the function declaration and call",
+  );
+
+  await waitFor("Test Explorer discovery", () => api.testFiles().some((uri) => uri.endsWith("editor.test.stasis")));
+  const testUri = api.testFiles().find((uri) => uri.endsWith("editor.test.stasis"));
+  assert.ok(testUri, "Test Explorer discovers the packaged fixture test");
+  const testResult = await api.runTestFile(testUri);
+  const testEnvelope = JSON.parse(testResult.stdout) as { ok?: boolean; result?: { tests_passed?: number } };
+  assert.equal(testEnvelope.ok, true, "Test Explorer executes the test through the Stasis CLI");
+  assert.equal(testEnvelope.result?.tests_passed, 1, "the discovered fixture test passes");
 
   try {
     await api.start();
