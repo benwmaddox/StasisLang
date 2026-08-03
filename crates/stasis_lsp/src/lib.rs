@@ -16,8 +16,8 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
-    PrepareRenameRequest, References, Rename, Request as _, SemanticTokensFullRequest,
-    SignatureHelpRequest, WorkspaceSymbolRequest,
+    InlayHintRequest, PrepareRenameRequest, References, Rename, Request as _,
+    SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
@@ -26,23 +26,25 @@ use lsp_types::{
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
     DocumentChanges, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, InsertTextFormat, Location,
-    MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
-    ParameterInformation, ParameterLabel, PositionEncodingKind, PrepareRenameResponse,
-    PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams, SaveOptions,
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, ServerCapabilities, ServerInfo, SignatureHelpOptions,
-    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
-    TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintKind,
+    InlayHintLabel, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
+    InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf,
+    OptionalVersionedTextDocumentIdentifier, ParameterInformation, ParameterLabel,
+    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, ReferenceParams,
+    RenameOptions, RenameParams, SaveOptions, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult, ServerCapabilities,
+    ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use stasis_language_service::{
-    DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageLocation,
-    LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
+    DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageInlayHintKind,
+    LanguageLocation, LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
     SignatureHelp as SharedSignatureHelp, TextChange,
 };
 use url::Url;
@@ -136,6 +138,12 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
                 }
                 .into(),
             ),
+            inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+                InlayHintOptions {
+                    work_done_progress_options: Default::default(),
+                    resolve_provider: Some(false),
+                },
+            ))),
             ..ServerCapabilities::default()
         },
         server_info: Some(ServerInfo {
@@ -329,6 +337,15 @@ impl LanguageServer {
                     .extract(SemanticTokensFullRequest::METHOD)
                     .map_err(|error| format!("invalid semantic-tokens request: {error}"))?;
                 match self.semantic_tokens(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            InlayHintRequest::METHOD => {
+                let (id, params): (_, InlayHintParams) = request
+                    .extract(InlayHintRequest::METHOD)
+                    .map_err(|error| format!("invalid inlay-hint request: {error}"))?;
+                match self.inlay_hints(params) {
                     Ok(result) => Response::new_ok(id, result),
                     Err(error) => internal_error(id, error),
                 }
@@ -714,6 +731,63 @@ impl LanguageServer {
             result_id: None,
             data,
         })))
+    }
+
+    fn inlay_hints(&mut self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>, String> {
+        let path = path_text(&uri_path(&params.text_document.uri)?);
+        let document = self
+            .service
+            .snapshot()
+            .document(&path)
+            .cloned()
+            .ok_or_else(|| format!("inlay-hint document is not indexed: '{path}'"))?;
+        let range_start = document
+            .byte_offset(Position {
+                line: params.range.start.line,
+                utf16_character: params.range.start.character,
+            })
+            .map_err(|error| error.to_string())?;
+        let range_end = document
+            .byte_offset(Position {
+                line: params.range.end.line,
+                utf16_character: params.range.end.character,
+            })
+            .map_err(|error| error.to_string())?;
+        let hints = self
+            .service
+            .inlay_hints(&path)?
+            .into_iter()
+            .filter(|hint| range_start <= hint.position && hint.position <= range_end)
+            .map(|hint| {
+                let kind = match hint.kind {
+                    LanguageInlayHintKind::Type => InlayHintKind::TYPE,
+                    LanguageInlayHintKind::Parameter => InlayHintKind::PARAMETER,
+                };
+                let position = document
+                    .position(hint.position)
+                    .map_err(|error| error.to_string())?;
+                Ok(InlayHint {
+                    position: lsp_position(position),
+                    label: InlayHintLabel::String(hint.label),
+                    kind: Some(kind),
+                    text_edits: None,
+                    tooltip: Some(
+                        match hint.kind {
+                            LanguageInlayHintKind::Type => "Inferred by the Stasis compiler",
+                            LanguageInlayHintKind::Parameter => {
+                                "Parameter from the compiler-resolved function signature"
+                            }
+                        }
+                        .to_string()
+                        .into(),
+                    ),
+                    padding_left: Some(false),
+                    padding_right: Some(hint.kind == LanguageInlayHintKind::Parameter),
+                    data: None,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((!hints.is_empty()).then_some(hints))
     }
 
     fn workspace_edit(
@@ -1383,6 +1457,51 @@ mod tests {
             .any(|token| token.token_type == 5 && token.token_modifiers_bitset == 1 << 1));
         assert!(tokens.data.iter().any(|token| token.token_type == 6));
         assert!(tokens.data.iter().any(|token| token.token_type == 7));
+    }
+
+    #[test]
+    fn standard_inlay_hints_return_inferred_types_and_parameter_names() {
+        let (mut server, uri, main_path) = test_server("inlay-hints");
+        let (server_connection, client_connection) = Connection::memory();
+        server.service.set_disk_document(
+            &main_path,
+            "function add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let total = add(1, 2); return total; }\n",
+        );
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(94),
+                    InlayHintRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 2, "character": 0}
+                        }
+                    }),
+                ),
+            )
+            .expect("inlay-hint request");
+        let hints: Option<Vec<InlayHint>> = serde_json::from_value(
+            receive_response(&client_connection, 94)
+                .response_result
+                .expect("inlay-hint result"),
+        )
+        .expect("inlay-hint response");
+        let hints = hints.expect("inlay hints");
+        assert!(hints.iter().any(|hint| {
+            hint.kind == Some(InlayHintKind::TYPE)
+                && matches!(&hint.label, InlayHintLabel::String(label) if label == ": i32")
+        }));
+        assert!(hints.iter().any(|hint| {
+            hint.kind == Some(InlayHintKind::PARAMETER)
+                && matches!(&hint.label, InlayHintLabel::String(label) if label == "amount:")
+        }));
+        assert!(hints.iter().any(|hint| {
+            hint.kind == Some(InlayHintKind::PARAMETER)
+                && matches!(&hint.label, InlayHintLabel::String(label) if label == "bonus:")
+        }));
     }
 
     #[test]

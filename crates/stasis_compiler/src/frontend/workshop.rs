@@ -1,11 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::compiler::source_workshop_items;
+use crate::compiler::{source_workshop_items, Compiler};
+use crate::data_flow::CompilerLocalType;
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
 use crate::identity::{
@@ -1021,6 +1022,20 @@ pub struct WorkshopSemanticToken {
     pub source_span: WorkshopSourceSpan,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkshopInlayHintKind {
+    Type,
+    Parameter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopInlayHint {
+    pub file: String,
+    pub source_span: WorkshopSourceSpan,
+    pub kind: WorkshopInlayHintKind,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkshopSemanticEditOperation {
@@ -1384,6 +1399,7 @@ struct WorkshopRenameTarget {
     owner: Option<String>,
     file: String,
     scope: Option<WorkshopCompletionScope>,
+    signature: Option<String>,
 }
 
 fn rename_symbol_at(source: &str, byte_offset: usize) -> Result<(Token, String), String> {
@@ -1481,6 +1497,184 @@ pub fn workshop_semantic_tokens(
     Ok(semantic_tokens)
 }
 
+pub fn workshop_inlay_hints(
+    files: &[WorkshopSourceFile],
+) -> Result<Vec<WorkshopInlayHint>, String> {
+    let mut compiler = Compiler::new();
+    for file in files {
+        compiler.upsert_file(file.path.clone(), file.source.clone());
+    }
+    let locals = compiler
+        .local_types()
+        .map_err(|error| format!("inlay type analysis failed: {error:?}"))?;
+    workshop_inlay_hints_from_local_types(files, &locals)
+}
+
+pub fn workshop_inlay_hints_from_local_types(
+    files: &[WorkshopSourceFile],
+    locals: &[CompilerLocalType],
+) -> Result<Vec<WorkshopInlayHint>, String> {
+    let mut inferred = BTreeMap::<(String, String, String), VecDeque<String>>::new();
+    for local in locals.iter().filter(|local| local.inferred) {
+        inferred
+            .entry((
+                local.file.clone(),
+                local.function.clone(),
+                local.name.clone(),
+            ))
+            .or_default()
+            .push_back(local.type_name.clone());
+    }
+
+    let catalog = workshop_completion_items(files)?;
+    let mut hints = Vec::new();
+    for file in files {
+        let functions = parse_top_level_functions(&file.source)?;
+        let tokens = lex(&file.source)?;
+        for function in &functions {
+            let mut cursor =
+                tokens.partition_point(|token| token.start < function.body_range.start);
+            while cursor + 2 < tokens.len() && tokens[cursor].start < function.body_range.end {
+                let token = tokens[cursor];
+                if token.kind == TokenKind::Identifier && token_text(&file.source, token) == "let" {
+                    let name = tokens[cursor + 1];
+                    let annotation = tokens[cursor + 2];
+                    if name.kind == TokenKind::Identifier && annotation.kind != TokenKind::Colon {
+                        let key = (
+                            file.path.clone(),
+                            function.name.clone(),
+                            token_text(&file.source, name).to_string(),
+                        );
+                        if let Some(type_name) =
+                            inferred.get_mut(&key).and_then(VecDeque::pop_front)
+                        {
+                            hints.push(WorkshopInlayHint {
+                                file: file.path.clone(),
+                                source_span: span_from_range(name.start..name.end)?,
+                                kind: WorkshopInlayHintKind::Type,
+                                label: format!(": {type_name}"),
+                            });
+                        }
+                    }
+                }
+                cursor += 1;
+            }
+        }
+
+        for (index, token) in tokens.iter().copied().enumerate() {
+            if token.kind != TokenKind::Identifier
+                || !tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.kind == TokenKind::LParen)
+                || functions.iter().any(|function| {
+                    function.name == token_text(&file.source, token)
+                        && function.signature_range.start <= token.start
+                        && token.end <= function.signature_range.end
+                })
+            {
+                continue;
+            }
+            let Ok(semantic_path) = semantic_path_for_token(&file.source, token) else {
+                continue;
+            };
+            let Ok(target) =
+                resolve_workshop_rename_target(files, &catalog, file, token, &semantic_path)
+            else {
+                continue;
+            };
+            if !matches!(target.kind.as_str(), "function" | "method") {
+                continue;
+            }
+            let Some(signature) = target.signature.as_deref() else {
+                continue;
+            };
+            let Some(arguments) = call_argument_spans(&file.source, &tokens, index + 1) else {
+                continue;
+            };
+            let mut parameters = signature_parameter_names(signature);
+            if target.kind == "method" && parameters.len() == arguments.len() + 1 {
+                parameters.remove(0);
+            }
+            for (argument, parameter) in arguments.into_iter().zip(parameters) {
+                if file.source[argument.clone()].trim() == parameter {
+                    continue;
+                }
+                hints.push(WorkshopInlayHint {
+                    file: file.path.clone(),
+                    source_span: span_from_range(argument)?,
+                    kind: WorkshopInlayHintKind::Parameter,
+                    label: format!("{parameter}:"),
+                });
+            }
+        }
+    }
+    hints.sort_by_key(|hint| (hint.file.clone(), hint.source_span.start, hint.kind as u8));
+    Ok(hints)
+}
+
+fn signature_parameter_names(signature: &str) -> Vec<String> {
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = signature[open + 1..]
+        .find(')')
+        .map(|index| open + 1 + index)
+    else {
+        return Vec::new();
+    };
+    signature[open + 1..close]
+        .split(',')
+        .filter_map(|parameter| parameter.split_once(':').map(|(name, _)| name.trim()))
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn call_argument_spans(
+    source: &str,
+    tokens: &[Token],
+    open_index: usize,
+) -> Option<Vec<Range<usize>>> {
+    let mut arguments = Vec::new();
+    let mut argument_start = None;
+    let mut argument_end = None;
+    let mut paren_depth = 1usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    for token in tokens.iter().copied().skip(open_index + 1) {
+        match token.kind {
+            TokenKind::LParen => paren_depth += 1,
+            TokenKind::RParen => {
+                paren_depth = paren_depth.checked_sub(1)?;
+                if paren_depth == 0 {
+                    if let (Some(start), Some(end)) = (argument_start, argument_end) {
+                        arguments.push(start..end);
+                    }
+                    return Some(arguments);
+                }
+            }
+            TokenKind::LBrace => brace_depth += 1,
+            TokenKind::RBrace => brace_depth = brace_depth.checked_sub(1)?,
+            TokenKind::Other if token_text(source, token) == "[" => bracket_depth += 1,
+            TokenKind::Other if token_text(source, token) == "]" => {
+                bracket_depth = bracket_depth.checked_sub(1)?;
+            }
+            TokenKind::Comma if paren_depth == 1 && bracket_depth == 0 && brace_depth == 0 => {
+                if let (Some(start), Some(end)) = (argument_start.take(), argument_end.take()) {
+                    arguments.push(start..end);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if paren_depth > 0 {
+            argument_start.get_or_insert(token.start);
+            argument_end = Some(token.end);
+        }
+    }
+    None
+}
+
 fn resolve_workshop_rename_target(
     files: &[WorkshopSourceFile],
     catalog: &[WorkshopCompletionItem],
@@ -1517,6 +1711,7 @@ fn resolve_workshop_rename_target(
         owner: primary.owner.clone(),
         file: file.path.clone(),
         scope: primary.scope.clone(),
+        signature: primary.signature.clone(),
     })
 }
 
@@ -4893,6 +5088,31 @@ mod workshop_contract_tests {
         assert_eq!(token_at("value + amount", 2).kind, "local");
         assert_eq!(token_at("helper(3)", 2).kind, "function");
         assert_eq!(token_at("State;", 2).kind, "struct");
+    }
+
+    #[test]
+    fn inlay_hints_use_inferred_types_and_bound_parameter_names() {
+        let source = "function add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let total = add(1, add(2, 3)); let amount = 4; return add(amount, 5); }\n";
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+        let hints = workshop_inlay_hints(&files).expect("inlay hints");
+        let rendered = hints
+            .iter()
+            .map(|hint| {
+                (
+                    &source[hint.source_span.start as usize..hint.source_span.end as usize],
+                    hint.kind,
+                    hint.label.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(rendered.contains(&("total", WorkshopInlayHintKind::Type, ": i32")));
+        assert!(rendered.contains(&("amount", WorkshopInlayHintKind::Type, ": i32")));
+        assert!(rendered.contains(&("1", WorkshopInlayHintKind::Parameter, "amount:")));
+        assert!(rendered.contains(&("5", WorkshopInlayHintKind::Parameter, "bonus:")));
+        assert!(!rendered.contains(&("amount", WorkshopInlayHintKind::Parameter, "amount:")));
     }
 
     #[test]

@@ -11,6 +11,8 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 - compiler-backed LSP **Go to Definition**, **Find All References**, Outline, breadcrumbs, and
   workspace symbol search;
 - compiler-validated **Organize Imports** through standard LSP code actions;
+- compiler-aware semantic highlighting and inlay hints for inferred local types and resolved call
+  parameter names;
 - `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;
@@ -49,9 +51,9 @@ Set `stasis.live.entry` only when a project needs an entry other than the one in
 
 ## Navigation and tests
 
-**Go to Definition** and **Find All References** call the installed compiler's
-`symbol references` command and translate its UTF-8 source spans into VS Code locations. Functions,
-structs, tests, and typed struct fields have definition locations. Indexed receivers such as
+**Go to Definition** and **Find All References** use standard LSP requests backed by the persistent
+compiler index. Functions, structs, tests, globals, and typed struct fields have definition
+locations. Indexed receivers such as
 `state.enemies[0].speed` resolve to the declaring field and expose their reads and writes.
 
 While a play session is active, completion uses the persistent live compiler and runtime layout.
@@ -93,7 +95,7 @@ The extension starts one persistent `stasis lsp --stdio` server per Stasis works
 runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
 share them. Formatting still uses its migration adapter until its LSP operation lands in a later
 slice. Diagnostics, hover, signature help, completion, navigation, symbols, rename, and import
-organization use the
+organization, semantic highlighting, and inlay hints use the
 persistent language server. The same server launches and controls the Live Workshop through bounded
 custom LSP requests, owns runtime observations, and composes compatible live values and indexed
 collection fields into standard hover and completion responses. The extension does not spawn or

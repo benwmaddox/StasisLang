@@ -31,7 +31,8 @@ function add_score(amount: i32, bonus: i32): i32 {
 }
 
 function lsp_signature_probe(): i32 {
-    return add_score(1, 2);
+    let result = add_score(1, 2);
+    return result;
 }
 
 function tick(): i32 {

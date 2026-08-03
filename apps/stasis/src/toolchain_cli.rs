@@ -1921,6 +1921,7 @@ fn format_live_response(response: &LiveResponse) -> String {
         "hover" => format_live_hover(data),
         "definition" => format_live_definition(data),
         "code_actions" => format_live_code_actions(data),
+        "inlay_hints" => format_live_inlay_hints(data),
         "rename_preview" => format!(
             "rename {} -> {} ({} validated edit(s))",
             string_field(data, "old_name", "symbol"),
@@ -2076,6 +2077,29 @@ fn format_live_code_actions(data: &Value) -> String {
                 "{} ({} edit(s), preview only)",
                 string_field(action, "title", "code action"),
                 edits
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_inlay_hints(data: &Value) -> String {
+    let Some(hints) = data.get("hints").and_then(Value::as_array) else {
+        return "inlay hints unavailable".to_string();
+    };
+    if hints.is_empty() {
+        return "no inlay hints".to_string();
+    }
+    hints
+        .iter()
+        .map(|hint| {
+            format!(
+                "{} @ {}:{}..{} {}",
+                string_field(hint, "kind", "hint"),
+                string_field(data, "file", "source"),
+                hint.get("start").and_then(Value::as_u64).unwrap_or(0),
+                hint.get("end").and_then(Value::as_u64).unwrap_or(0),
+                string_field(hint, "label", "")
             )
         })
         .collect::<Vec<_>>()
@@ -4500,6 +4524,25 @@ mod tests {
         assert_eq!(
             format_live_response(&organize),
             "Organize Stasis imports (1 edit(s), preview only)"
+        );
+
+        let inlays = LiveResponse::success(
+            13,
+            43,
+            "inlay_hints",
+            json!({
+                "file": "src/main.stasis",
+                "hints": [{
+                    "kind": "type",
+                    "start": 21,
+                    "end": 26,
+                    "label": ": i32"
+                }]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&inlays),
+            "type @ src/main.stasis:21..26 : i32"
         );
     }
 

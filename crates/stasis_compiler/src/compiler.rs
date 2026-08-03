@@ -5,7 +5,10 @@ use std::sync::Arc;
 use crate::backend::emit::{
     parse_simple_statements_from_block, SimpleCondition, SimpleExpr, SimpleStmt,
 };
-use crate::data_flow::{build_function_data_flow_summaries, FunctionDataFlowSummary};
+use crate::data_flow::{
+    build_function_data_flow_summaries, compiler_local_types, CompilerLocalType,
+    FunctionDataFlowSummary,
+};
 use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
@@ -911,6 +914,26 @@ impl Compiler {
 
     pub fn function_data_flow_summaries(&self) -> &[FunctionDataFlowSummary] {
         &self.data_flow_summaries
+    }
+
+    pub fn local_types(&mut self) -> CompileResult<Vec<CompilerLocalType>> {
+        self.check()?;
+        self.indexed_local_types()
+    }
+
+    pub fn indexed_local_types(&self) -> CompileResult<Vec<CompilerLocalType>> {
+        if self.parsed_statement_ids.len() != self.functions.len() {
+            return Err(CompileError::Invariant(
+                "local types require a completed all-functions compiler check".to_string(),
+            ));
+        }
+        compiler_local_types(
+            &self.files,
+            &self.functions,
+            &self.parsed_statements,
+            &self.types,
+        )
+        .map_err(CompileError::Backend)
     }
 
     pub(crate) fn data_flow_summaries_shared(&self) -> Arc<[FunctionDataFlowSummary]> {
@@ -2480,6 +2503,32 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
         compiler.index_pass().expect("body edit index");
         assert_eq!(compiler.statement_parse_count, 3);
         assert!(function_by_name(&compiler, "main").dirty);
+    }
+
+    #[test]
+    fn local_types_publish_compiler_inference_in_source_order() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "function main(): i32 { let sum = 0; let ready = true; let copy = sum; let exact: f32 = 1.0; return copy; }",
+        );
+        let locals = compiler.local_types().expect("compiler local types");
+        assert_eq!(
+            locals
+                .iter()
+                .map(|local| (
+                    local.name.as_str(),
+                    local.type_name.as_str(),
+                    local.inferred
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sum", "i32", true),
+                ("ready", "bool", true),
+                ("copy", "i32", true),
+                ("exact", "f32", false),
+            ]
+        );
     }
 
     #[test]

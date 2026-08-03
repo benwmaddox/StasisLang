@@ -13,8 +13,8 @@ use stasis_compiler::frontend::workshop::{
 };
 use stasis_language_service::{
     DiagnosticSeverity as LanguageDiagnosticSeverity, LanguageCompletionSnapshot,
-    LanguageNavigationSnapshot, LanguageService, LiveIndexedCollection as LanguageLiveCollection,
-    LiveObservation, LiveObservationBatch,
+    LanguageInlayHintKind, LanguageNavigationSnapshot, LanguageService,
+    LiveIndexedCollection as LanguageLiveCollection, LiveObservation, LiveObservationBatch,
 };
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
@@ -655,6 +655,7 @@ impl LiveWorkspace {
             LiveCommand::Hover { file, offset } => self.language_hover(&file, offset, tick, jit),
             LiveCommand::Definition { file, offset } => self.language_definition(&file, offset),
             LiveCommand::OrganizeImports { file } => self.language_organize_imports(&file),
+            LiveCommand::InlayHints { file } => self.language_inlay_hints(&file),
             LiveCommand::RenamePreview {
                 file,
                 offset,
@@ -1080,6 +1081,30 @@ impl LiveWorkspace {
                         "end": edit.range.end,
                         "new_text": edit.new_text,
                     })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            }),
+        ))
+    }
+
+    fn language_inlay_hints(&mut self, file: &str) -> Result<(&'static str, Value), String> {
+        self.sync_language_service();
+        let request_path = self.config.project_root.join(file);
+        let hints = self
+            .language_service
+            .inlay_hints(&request_path.to_string_lossy())?;
+        Ok((
+            "inlay_hints",
+            json!({
+                "file": file,
+                "hints": hints.into_iter().map(|hint| json!({
+                    "position": hint.position,
+                    "start": hint.anchor.start,
+                    "end": hint.anchor.end,
+                    "kind": match hint.kind {
+                        LanguageInlayHintKind::Type => "type",
+                        LanguageInlayHintKind::Parameter => "parameter",
+                    },
+                    "label": hint.label,
                 })).collect::<Vec<_>>(),
             }),
         ))
@@ -2391,6 +2416,7 @@ fn help_data() -> Value {
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
             ":references SYMBOL [--limit N]", ":diagnostics",
             ":hover FILE OFFSET", ":definition FILE OFFSET", ":organize-imports FILE",
+            ":inlay-hints FILE",
             ":rename FILE OFFSET NEW_NAME",
             ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
@@ -2426,6 +2452,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":hover",
         ":definition",
         ":organize-imports",
+        ":inlay-hints",
         ":rename",
         ":validate",
         ":edit",
@@ -3249,7 +3276,14 @@ mod tests {
     #[test]
     fn tui_language_queries_share_persistent_service_and_live_hover() {
         let (root, config) = project();
-        let source = fs::read_to_string(root.join("src/main.stasis")).expect("source");
+        let source_path = root.join("src/main.stasis");
+        let source = fs::read_to_string(&source_path)
+            .expect("source")
+            .replace(
+                "function main(): i32 { score = 1; return 0; }",
+                "function add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let initial = add(1, 2); score = initial; return 0; }",
+            );
+        fs::write(&source_path, &source).expect("source with inferred local");
         let offset = source.find("score +=").expect("score use") + 2;
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -3316,6 +3350,31 @@ mod tests {
         let start = locations[0]["start"].as_u64().expect("start") as usize;
         let end = locations[0]["end"].as_u64().expect("end") as usize;
         assert_eq!(&source[start..end], "score");
+
+        let inlays = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                44,
+                LiveCommand::InlayHints {
+                    file: "src/main.stasis".into(),
+                },
+            ),
+        );
+        assert!(inlays.ok, "inlay response: {inlays:?}");
+        let hints = inlays.data.expect("inlay data")["hints"]
+            .as_array()
+            .expect("hints")
+            .clone();
+        assert!(hints
+            .iter()
+            .any(|hint| hint["kind"] == "type" && hint["label"] == ": i32"));
+        assert!(hints
+            .iter()
+            .any(|hint| { hint["kind"] == "parameter" && hint["label"] == "amount:" }));
         fs::remove_dir_all(root).ok();
     }
 

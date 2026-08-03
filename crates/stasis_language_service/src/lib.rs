@@ -11,10 +11,11 @@ use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, organize_workshop_imports, plan_workshop_rename,
-    prepare_workshop_rename, workshop_completion_items, workshop_reachable_files,
-    workshop_semantic_tokens, workshop_source_items, workshop_symbols, WorkshopCompletionItem,
-    WorkshopCompletionScope, WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind,
-    WorkshopSymbol, WorkshopSymbolKind,
+    prepare_workshop_rename, workshop_completion_items, workshop_inlay_hints,
+    workshop_inlay_hints_from_local_types, workshop_reachable_files, workshop_semantic_tokens,
+    workshop_source_items, workshop_symbols, WorkshopCompletionItem, WorkshopCompletionScope,
+    WorkshopInlayHint, WorkshopInlayHintKind, WorkshopSourceFile, WorkshopSourceItem,
+    WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
 };
 pub use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
@@ -562,6 +563,20 @@ pub struct LanguageSemanticToken {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageInlayHintKind {
+    Type,
+    Parameter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageInlayHint {
+    pub position: usize,
+    pub anchor: Range<usize>,
+    pub kind: LanguageInlayHintKind,
+    pub label: String,
+}
+
 struct LanguageIndex {
     revision: WorkspaceRevision,
     files: Vec<WorkshopSourceFile>,
@@ -569,6 +584,12 @@ struct LanguageIndex {
     completion: CompletionIndex,
     workshop_items: Vec<WorkshopCompletionItem>,
     symbols: Vec<WorkshopSymbol>,
+}
+
+struct LanguageInlayIndex {
+    revision: WorkspaceRevision,
+    files: Vec<WorkshopSourceFile>,
+    hints: Vec<WorkshopInlayHint>,
 }
 
 #[derive(Clone, Default)]
@@ -646,6 +667,8 @@ pub struct LanguageService {
     project_root: String,
     language_index: Option<LanguageIndex>,
     language_index_error: Option<(WorkspaceRevision, String)>,
+    inlay_index: Option<LanguageInlayIndex>,
+    inlay_index_error: Option<(WorkspaceRevision, String)>,
     live: LiveSessionBroker,
 }
 
@@ -660,6 +683,8 @@ impl LanguageService {
             project_root,
             language_index: None,
             language_index_error: None,
+            inlay_index: None,
+            inlay_index_error: None,
             live: LiveSessionBroker::default(),
         })
     }
@@ -718,7 +743,32 @@ impl LanguageService {
         }
 
         let diagnostics = match self.compiler.check() {
-            Ok(_) => Vec::new(),
+            Ok(_) => {
+                let files = snapshot
+                    .documents()
+                    .filter_map(|(path, document)| {
+                        canonical_source_path(Some(&self.project_root), path)
+                            .ok()
+                            .map(|path| WorkshopSourceFile {
+                                path,
+                                source: document.text.to_string(),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                if files.len() == snapshot.documents().len() {
+                    if let Ok(locals) = self.compiler.indexed_local_types() {
+                        if let Ok(hints) = workshop_inlay_hints_from_local_types(&files, &locals) {
+                            self.inlay_index = Some(LanguageInlayIndex {
+                                revision: snapshot.revision(),
+                                files,
+                                hints,
+                            });
+                            self.inlay_index_error = None;
+                        }
+                    }
+                }
+                Vec::new()
+            }
             Err(error) => {
                 let diagnostic = self.compiler.last_source_diagnostic();
                 let path = diagnostic
@@ -1117,6 +1167,79 @@ impl LanguageService {
         ))
     }
 
+    pub fn inlay_hints(&mut self, path: &str) -> Result<Vec<LanguageInlayHint>, String> {
+        let snapshot = self.documents.snapshot();
+        let revision = snapshot.revision();
+        let current = snapshot
+            .document(path)
+            .ok_or_else(|| format!("inlay-hint document is not indexed: '{path}'"))?
+            .text
+            .clone();
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let needs_rebuild = self
+            .inlay_index
+            .as_ref()
+            .is_none_or(|index| index.revision != revision)
+            && self
+                .inlay_index_error
+                .as_ref()
+                .is_none_or(|(failed_revision, _)| *failed_revision != revision);
+        if needs_rebuild {
+            let files = snapshot
+                .documents()
+                .map(|(path, document)| {
+                    Ok(WorkshopSourceFile {
+                        path: canonical_source_path(Some(&self.project_root), path)?,
+                        source: document.text.to_string(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            match workshop_inlay_hints(&files) {
+                Ok(hints) => {
+                    self.inlay_index = Some(LanguageInlayIndex {
+                        revision,
+                        files,
+                        hints,
+                    });
+                    self.inlay_index_error = None;
+                }
+                Err(error) => self.inlay_index_error = Some((revision, error)),
+            }
+        }
+        let Some(index) = self.inlay_index.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let Some(indexed) = index.files.iter().find(|file| file.path == relative) else {
+            return Ok(Vec::new());
+        };
+        let regions = UnchangedRegions::new(&indexed.source, &current);
+        Ok(index
+            .hints
+            .iter()
+            .filter(|hint| hint.file == relative)
+            .filter_map(|hint| {
+                let anchor = regions.remap(
+                    &indexed.source,
+                    &current,
+                    hint.source_span.start as usize..hint.source_span.end as usize,
+                )?;
+                let kind = match hint.kind {
+                    WorkshopInlayHintKind::Type => LanguageInlayHintKind::Type,
+                    WorkshopInlayHintKind::Parameter => LanguageInlayHintKind::Parameter,
+                };
+                Some(LanguageInlayHint {
+                    position: match kind {
+                        LanguageInlayHintKind::Type => anchor.end,
+                        LanguageInlayHintKind::Parameter => anchor.start,
+                    },
+                    anchor,
+                    kind,
+                    label: hint.label.clone(),
+                })
+            })
+            .collect())
+    }
+
     fn symbol_references(
         &mut self,
         path: &str,
@@ -1263,48 +1386,69 @@ fn remap_semantic_tokens(
     current: &str,
     tokens: impl IntoIterator<Item = LanguageSemanticToken>,
 ) -> Vec<LanguageSemanticToken> {
-    if indexed == current {
-        return tokens.into_iter().collect();
-    }
-    let mut prefix = indexed
-        .bytes()
-        .zip(current.bytes())
-        .take_while(|(left, right)| left == right)
-        .count();
-    while !indexed.is_char_boundary(prefix) || !current.is_char_boundary(prefix) {
-        prefix = prefix.saturating_sub(1);
-    }
-    let maximum_suffix = indexed.len().min(current.len()).saturating_sub(prefix);
-    let mut suffix = indexed
-        .as_bytes()
-        .iter()
-        .rev()
-        .zip(current.as_bytes().iter().rev())
-        .take(maximum_suffix)
-        .take_while(|(left, right)| left == right)
-        .count();
-    while !indexed.is_char_boundary(indexed.len() - suffix)
-        || !current.is_char_boundary(current.len() - suffix)
-    {
-        suffix = suffix.saturating_sub(1);
-    }
-    let indexed_suffix_start = indexed.len() - suffix;
-    let shift = current.len() as isize - indexed.len() as isize;
+    let regions = UnchangedRegions::new(indexed, current);
     tokens
         .into_iter()
         .filter_map(|mut token| {
-            let indexed_range = token.range.clone();
-            if token.range.end <= prefix {
-                // The prefix has identical byte positions.
-            } else if token.range.start >= indexed_suffix_start {
-                token.range = token.range.start.checked_add_signed(shift)?
-                    ..token.range.end.checked_add_signed(shift)?;
-            } else {
-                return None;
-            }
-            (indexed.get(indexed_range) == current.get(token.range.clone())).then_some(token)
+            token.range = regions.remap(indexed, current, token.range)?;
+            Some(token)
         })
         .collect()
+}
+
+struct UnchangedRegions {
+    prefix: usize,
+    indexed_suffix_start: usize,
+    shift: isize,
+}
+
+impl UnchangedRegions {
+    fn new(indexed: &str, current: &str) -> Self {
+        let mut prefix = indexed
+            .bytes()
+            .zip(current.bytes())
+            .take_while(|(left, right)| left == right)
+            .count();
+        while !indexed.is_char_boundary(prefix) || !current.is_char_boundary(prefix) {
+            prefix = prefix.saturating_sub(1);
+        }
+        let maximum_suffix = indexed.len().min(current.len()).saturating_sub(prefix);
+        let mut suffix = indexed
+            .as_bytes()
+            .iter()
+            .rev()
+            .zip(current.as_bytes().iter().rev())
+            .take(maximum_suffix)
+            .take_while(|(left, right)| left == right)
+            .count();
+        while !indexed.is_char_boundary(indexed.len() - suffix)
+            || !current.is_char_boundary(current.len() - suffix)
+        {
+            suffix = suffix.saturating_sub(1);
+        }
+        Self {
+            prefix,
+            indexed_suffix_start: indexed.len() - suffix,
+            shift: current.len() as isize - indexed.len() as isize,
+        }
+    }
+
+    fn remap(
+        &self,
+        indexed: &str,
+        current: &str,
+        indexed_range: Range<usize>,
+    ) -> Option<Range<usize>> {
+        let current_range = if indexed_range.end <= self.prefix {
+            indexed_range.clone()
+        } else if indexed_range.start >= self.indexed_suffix_start {
+            indexed_range.start.checked_add_signed(self.shift)?
+                ..indexed_range.end.checked_add_signed(self.shift)?
+        } else {
+            return None;
+        };
+        (indexed.get(indexed_range) == current.get(current_range.clone())).then_some(current_range)
+    }
 }
 
 fn shared_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
@@ -2232,6 +2376,41 @@ function main(): i32 {
     }
 
     #[test]
+    fn inlay_hints_publish_inferred_types_parameters_and_last_good_recovery() {
+        let root = std::env::temp_dir().join("stasis-language-service-inlay-hints");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "function add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let total = add(1, 2); return total; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let warm = service.inlay_hints(&path_text).expect("inlay hints");
+        assert!(warm.iter().any(|hint| {
+            hint.kind == LanguageInlayHintKind::Type
+                && hint.label == ": i32"
+                && &source[hint.anchor.clone()] == "total"
+        }));
+        assert!(warm.iter().any(|hint| {
+            hint.kind == LanguageInlayHintKind::Parameter
+                && hint.label == "amount:"
+                && &source[hint.anchor.clone()] == "1"
+        }));
+
+        let broken = format!("function unfinished(): i32 {{\n{source}");
+        service.open_document(path_text.clone(), 1, broken.clone());
+        let recovered = service
+            .inlay_hints(&path_text)
+            .expect("last-good inlay hints");
+        assert!(recovered.iter().any(|hint| {
+            hint.kind == LanguageInlayHintKind::Type
+                && broken.get(hint.anchor.clone()) == Some("total")
+        }));
+        assert!(recovered.iter().any(|hint| {
+            hint.kind == LanguageInlayHintKind::Parameter
+                && broken.get(hint.anchor.clone()) == Some("1")
+        }));
+    }
+
+    #[test]
     fn incomplete_call_keeps_global_receiver_field_completion() {
         let root = std::env::temp_dir().join("stasis-language-service-recovery-completion");
         let path = root.join("src/main.stasis");
@@ -2572,11 +2751,13 @@ function main(): i32 {
         service
             .semantic_tokens(&path)
             .expect("warm semantic tokens");
+        service.inlay_hints(&path).expect("warm inlay hints");
 
         let mut completion_micros = Vec::new();
         let mut hover_micros = Vec::new();
         let mut signature_micros = Vec::new();
         let mut semantic_token_micros = Vec::new();
+        let mut inlay_hint_micros = Vec::new();
         for _ in 0..50 {
             let started = Instant::now();
             service
@@ -2597,18 +2778,24 @@ function main(): i32 {
             let started = Instant::now();
             service.semantic_tokens(&path).expect("semantic tokens");
             semantic_token_micros.push(started.elapsed().as_micros());
+
+            let started = Instant::now();
+            service.inlay_hints(&path).expect("inlay hints");
+            inlay_hint_micros.push(started.elapsed().as_micros());
         }
         completion_micros.sort_unstable();
         hover_micros.sort_unstable();
         signature_micros.sort_unstable();
         semantic_token_micros.sort_unstable();
+        inlay_hint_micros.sort_unstable();
         let p95 = |samples: &[u128]| samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
         let completion_p95 = p95(&completion_micros);
         let hover_p95 = p95(&hover_micros);
         let signature_p95 = p95(&signature_micros);
         let semantic_token_p95 = p95(&semantic_token_micros);
+        let inlay_hint_p95 = p95(&inlay_hint_micros);
         eprintln!(
-            "warm p95: completion={completion_p95}us hover={hover_p95}us signature={signature_p95}us semantic_tokens={semantic_token_p95}us"
+            "warm p95: completion={completion_p95}us hover={hover_p95}us signature={signature_p95}us semantic_tokens={semantic_token_p95}us inlay_hints={inlay_hint_p95}us"
         );
         assert!(completion_p95 < 20_000, "completion p95 {completion_p95}us");
         assert!(hover_p95 < 30_000, "hover p95 {hover_p95}us");
@@ -2616,6 +2803,10 @@ function main(): i32 {
         assert!(
             semantic_token_p95 < 30_000,
             "semantic tokens p95 {semantic_token_p95}us"
+        );
+        assert!(
+            inlay_hint_p95 < 30_000,
+            "inlay hints p95 {inlay_hint_p95}us"
         );
     }
 }

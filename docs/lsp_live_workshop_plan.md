@@ -238,7 +238,9 @@ Each slice is independently testable and removes the host-specific path it repla
 - [x] Add semantic tokens from compiler-owned identities, including globals, fields, parameters,
   locals, types, functions, methods, enums, and constants. During broken edits, publish only tokens
   whose source spans remain byte-identical in unchanged last-good regions.
-- [ ] Add inlay hints from compiler-owned inferred types and call signatures.
+- [x] Add standard LSP inlay hints from compiler-owned inferred local types and resolved call
+  signatures, expose the same read-only query as `:inlay-hints FILE` in the TUI, and recover only
+  byte-identical last-good hints outside broken edits.
 - [ ] Add completion resolve/detail, expected-type refinements, and remaining import insertion.
 - [ ] Add call hierarchy and type hierarchy from compiler-owned graphs and symbol IDs.
 
@@ -450,3 +452,20 @@ The incomplete-function recovery test proves that exact unchanged regions can sa
 compiler-aware coloring while the edited region falls back to lexical highlighting. This predicts
 that inlay hints and hierarchy selection ranges can use the same unchanged-region recovery rule,
 while edit-producing actions must still require a current compiler snapshot.
+
+### Compiler-owned inlay hints implementation
+
+- Good: recording inferred locals inside the existing data-flow walk exposed the compiler's real
+  type result without a literal guesser, while the existing resolved completion signatures supplied
+  parameter labels for direct and receiver-form calls.
+- Bad: the first implementation repeated a small control-flow traversal solely to collect inferred
+  locals, creating pressure for a second analysis path even though it called the same expression
+  typer.
+- Adjustment: instrumentation and editor metadata must be collected by the canonical semantic walk
+  itself; protocol layers may attach source spans but must not replay semantic control flow.
+
+Theory gained: an inlay hint is a projection of an accepted semantic fact onto a recoverable source
+anchor. Compiler tests prove inferred `let` types originate in the same data-flow walk used for
+checking, and packaged VSIX/TUI tests prove type and parameter projections share one cached service.
+This predicts that future live-value hints should join onto these static anchors only when runtime
+identity and source hashes match, exactly as live hover already does.

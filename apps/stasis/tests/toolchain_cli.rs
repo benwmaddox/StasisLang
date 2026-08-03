@@ -202,8 +202,20 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
             "id": 5,
             "method": "textDocument/signatureHelp",
             "params": {
-                "textDocument": { "uri": uri },
+                "textDocument": { "uri": uri.clone() },
                 "position": { "line": 2, "character": 43 }
+            }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "textDocument/inlayHint",
+            "params": {
+                "textDocument": { "uri": uri },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 3, "character": 0 }
+                }
             }
         })),
         lsp_frame(json!({
@@ -237,6 +249,7 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
     assert_eq!(messages[0]["result"]["capabilities"]["hoverProvider"], true);
     assert!(messages[0]["result"]["capabilities"]["completionProvider"].is_object());
     assert!(messages[0]["result"]["capabilities"]["signatureHelpProvider"].is_object());
+    assert!(messages[0]["result"]["capabilities"]["inlayHintProvider"].is_object());
     let diagnostics = messages
         .iter()
         .filter(|message| message["method"] == "textDocument/publishDiagnostics")
@@ -274,7 +287,17 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         signature["result"]["signatures"][0]["label"],
         "add_score(amount: i32, bonus: i32): i32"
     );
-    assert_eq!(messages.last().unwrap()["id"], 2);
+    let inlays = messages
+        .iter()
+        .find(|message| message["id"] == 6)
+        .expect("inlay-hint response");
+    assert!(inlays["result"].as_array().is_some_and(|hints| {
+        hints.iter().any(|hint| hint["label"] == "amount:")
+            && hints.iter().any(|hint| hint["label"] == "bonus:")
+    }));
+    assert!(messages
+        .iter()
+        .any(|message| message["id"] == 2 && message["result"].is_null()));
     fs::remove_dir_all(project).ok();
 }
 

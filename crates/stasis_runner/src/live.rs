@@ -113,6 +113,9 @@ pub enum LiveCommand {
     OrganizeImports {
         file: String,
     },
+    InlayHints {
+        file: String,
+    },
     RenamePreview {
         file: String,
         offset: usize,
@@ -1208,6 +1211,9 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":organize-imports" | ":organize" => ready(LiveCommand::OrganizeImports {
             file: required_arg(&args, 1, "file")?.to_string(),
         }),
+        ":inlay-hints" | ":inlays" => ready(LiveCommand::InlayHints {
+            file: required_arg(&args, 1, "file")?.to_string(),
+        }),
         ":rename" => ready(LiveCommand::RenamePreview {
             file: required_arg(&args, 1, "file")?.to_string(),
             offset: required_arg(&args, 2, "byte offset")?
@@ -2181,6 +2187,19 @@ mod tests {
         assert_eq!(
             organize.command,
             LiveCommand::OrganizeImports {
+                file: "src/game.stasis".into(),
+            }
+        );
+
+        let TerminalInput::Request(inlays) = terminal
+            .feed_line(":inlay-hints src/game.stasis")
+            .expect("inlay hints")
+        else {
+            panic!("expected inlay-hints request");
+        };
+        assert_eq!(
+            inlays.command,
+            LiveCommand::InlayHints {
                 file: "src/game.stasis".into(),
             }
         );

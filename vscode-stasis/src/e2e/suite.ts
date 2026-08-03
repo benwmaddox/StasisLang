@@ -276,6 +276,23 @@ export async function run(): Promise<void> {
     /Adds two score components/,
     "signature help includes source documentation",
   );
+  const inlayHints = await vscode.commands.executeCommand<vscode.InlayHint[]>(
+    "vscode.executeInlayHintProvider",
+    sourceUri,
+    new vscode.Range(new vscode.Position(0, 0), document.positionAt(document.getText().length)),
+  );
+  assert.ok(
+    inlayHints?.some(
+      (hint) => hint.kind === vscode.InlayHintKind.Type && hint.label === ": i32",
+    ),
+    "standard LSP inlay hints expose compiler-inferred local types",
+  );
+  assert.ok(
+    inlayHints?.some(
+      (hint) => hint.kind === vscode.InlayHintKind.Parameter && hint.label === "amount:",
+    ),
+    "standard LSP inlay hints expose compiler-resolved parameter names",
+  );
 
   const mainLineNumber = document
     .getText()
