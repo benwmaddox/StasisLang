@@ -25,7 +25,7 @@ preserve its EGL context and retains textures when that context survives. A late
 `onSurfaceCreated` callback is the authoritative signal that the context was lost.
 
 The native SDL runtime retains sprite paths, logical raster requests, decoded font
-bytes, font metrics, and cached text bytes/quads. Android Workshop and Published
+bytes, font metrics, and cached text bytes/quads. Android Workshop and release
 previews retain their project or packaged manifest, asset identities, content
 hashes, and font sources. Lost-context handles are discarded without calling a
 destructor in the invalid context. Resize-only invalidation deletes still-valid

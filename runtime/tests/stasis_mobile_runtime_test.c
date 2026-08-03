@@ -36,6 +36,10 @@ static int host_request_calls;
 static int32_t host_request_sequences[8];
 static int gfx_submit_calls;
 static int shutdown_calls;
+static uint64_t performance_counter;
+static int performance_metrics_calls;
+static uint64_t reported_tick_us;
+static uint64_t reported_render_us;
 static int32_t game_host_i32[768];
 static float game_host_f32[64];
 static int32_t game_gfx_cmd_i32[STASIS_RENDER_I32_COUNT];
@@ -114,6 +118,21 @@ void stasis_gfx_submit_u8(
 
 void stasis_shutdown(void) {
     shutdown_calls += 1;
+}
+
+uint64_t stasis_host_performance_counter(void) {
+    performance_counter += 10;
+    return performance_counter;
+}
+
+uint64_t stasis_host_performance_elapsed_us(uint64_t started, uint64_t finished) {
+    return finished - started;
+}
+
+void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us) {
+    performance_metrics_calls += 1;
+    reported_tick_us = tick_us;
+    reported_render_us = render_us;
 }
 
 int stasis_audio_init(int rate, int channels, int latency) { return rate + channels + latency; }
@@ -225,6 +244,10 @@ static void reset_fakes(void) {
     memset(host_request_sequences, 0, sizeof(host_request_sequences));
     gfx_submit_calls = 0;
     shutdown_calls = 0;
+    performance_counter = 0;
+    performance_metrics_calls = 0;
+    reported_tick_us = 0;
+    reported_render_us = 0;
     memset(game_host_i32, 0, sizeof(game_host_i32));
     memset(game_host_f32, 0, sizeof(game_host_f32));
     memset(game_gfx_cmd_i32, 0, sizeof(game_gfx_cmd_i32));
@@ -271,6 +294,9 @@ static void test_runs_mobile_lifecycle(void) {
     assert(gfx_submit_calls == 1);
     assert(begin_frame_calls == 1);
     assert(end_frame_calls == 1);
+    assert(performance_metrics_calls == 1);
+    assert(reported_tick_us == 10);
+    assert(reported_render_us == 10);
 
     stasis_mobile_runtime_set_paused(1);
     assert(mobile_set_paused_calls == 1);

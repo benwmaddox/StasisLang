@@ -14,7 +14,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Output "Stasis pre-commit: verifying Android Workshop JIT and Published AOT rendering"
+Write-Output "Stasis pre-commit: verifying Android Workshop JIT rendering"
 try {
     & $test -Headless
 } catch {

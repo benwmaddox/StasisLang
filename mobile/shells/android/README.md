@@ -13,3 +13,11 @@ Only `arm64-v8a` is built. The app links the AOT objects under `../aot`, the
 shared SDL-only Stasis runtime under `../runtime`, and bundled assets under
 `app/src/main/assets/stasis_game`. No Stasis compiler, JIT, watcher, dynamic
 game loader, or writable source is included.
+
+The Android activity adds one release diagnostic: a three-finger tap toggles a
+five-second rolling tick/render timing overlay with average, p50, p95, and
+60-fps frame-budget usage. It is hidden when the game starts. The same
+safe-inset-aware overlay layer presents startup/runtime resource failures, and
+startup verifies every packaged asset against its manifest SHA-256 before
+replacing the last validated app-private copy. Future candidates are recorded
+in `docs/android_release_shell_backlog.md`.
