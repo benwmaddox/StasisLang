@@ -6,8 +6,21 @@ global gfx_cmd_u8: u8[65536];
 
 global score: i32;
 
+struct Enemy {
+    hp: i32;
+    speed: i32;
+}
+
+struct State {
+    enemies: Enemy[2];
+}
+
+global state: State;
+
 function main(): i32 {
     score = 1;
+    state.enemies[0].hp = 7;
+    state.enemies[0].speed = 2;
     tick();
     return 0;
 }

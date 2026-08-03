@@ -49,6 +49,10 @@ Set `stasis.live.entry` only when a project needs an entry other than the one in
 structs, and tests have definition locations. Qualified state and field paths expose their reads and
 writes; field declarations are not yet synthesized as qualified definitions by the compiler.
 
+While a play session is active, completion uses the persistent live compiler and runtime layout.
+It resolves locals, members, and concrete indexed state paths such as
+`state.enemies[0].{hp,speed}` without guessing types in the extension.
+
 The Test Explorer discovers `.test.stasis` files under the manifest's `tests` directory. Each file
 is one isolated Test Explorer item and runs through `stasis --json test <file>`, so editor and CLI
 test behavior stay identical.

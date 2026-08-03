@@ -140,7 +140,9 @@ export async function run(): Promise<void> {
   assert.match(grammar, /entity\.name\.function\.stasis/, "the color grammar scopes function names");
   assert.match(grammar, /storage\.type\.builtin\.stasis/, "the color grammar scopes built-in types");
 
-  const formatUri = vscode.Uri.file(path.join(folder.uri.fsPath, "format-input.stasis"));
+  const formatUri = vscode.Uri.file(
+    path.join(folder.uri.fsPath, `format-input-${process.pid}.stasis`),
+  );
   fs.writeFileSync(
     formatUri.fsPath,
     "global value:i32;\nfunction sample():i32 {\nvalue += 1;\nreturn value;\n}\n",
@@ -228,6 +230,27 @@ export async function run(): Promise<void> {
     await waitFor("running live session", () => api.state() === "running");
     await api.request("pause");
     await waitFor("paused live session", () => api.state() === "paused");
+
+    const memberSource = document.getText();
+    const memberPrefix = "state.enemies[0].";
+    const memberOffset = memberSource.indexOf(memberPrefix);
+    assert.notEqual(memberOffset, -1, "the fixture contains an indexed state receiver");
+    const memberCompletions = await vscode.commands.executeCommand<vscode.CompletionList>(
+      "vscode.executeCompletionItemProvider",
+      sourceUri,
+      document.positionAt(memberOffset + memberPrefix.length),
+    );
+    const memberLabels = memberCompletions?.items.map((item) =>
+      typeof item.label === "string" ? item.label : item.label.label,
+    );
+    assert.ok(
+      memberLabels?.includes("state.enemies[0].hp"),
+      "live compiler completion resolves a field through an indexed state path",
+    );
+    assert.ok(
+      memberLabels?.includes("state.enemies[0].speed"),
+      "live compiler completion returns sibling fields for the indexed receiver",
+    );
 
     const before = inspectedI32(await api.request("inspect", { path: "score" }));
     await api.request("watch", { path: "score" });
