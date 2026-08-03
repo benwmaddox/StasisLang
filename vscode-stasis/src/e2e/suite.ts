@@ -12,6 +12,8 @@ interface StasisExtensionApi {
   start(): Promise<void>;
   stop(): Promise<void>;
   request(type: string, fields?: Record<string, unknown>): Promise<LiveResponse>;
+  testFiles(): readonly string[];
+  runTestFile(uri: string): Promise<{ stdout: string; stderr: string }>;
 }
 
 type Rgba = readonly [number, number, number, number];
@@ -132,7 +134,15 @@ export async function run(): Promise<void> {
   }
   const api = await extension.activate();
 
-  const formatUri = vscode.Uri.file(path.join(folder.uri.fsPath, "format-input.stasis"));
+  const grammarPath = path.join(extension.extensionPath, "syntaxes", "stasis.tmLanguage.json");
+  assert.equal(fs.existsSync(grammarPath), true, "the installed VSIX contains its Stasis color grammar");
+  const grammar = fs.readFileSync(grammarPath, "utf8");
+  assert.match(grammar, /entity\.name\.function\.stasis/, "the color grammar scopes function names");
+  assert.match(grammar, /storage\.type\.builtin\.stasis/, "the color grammar scopes built-in types");
+
+  const formatUri = vscode.Uri.file(
+    path.join(folder.uri.fsPath, `format-input-${process.pid}.stasis`),
+  );
   fs.writeFileSync(
     formatUri.fsPath,
     "global value:i32;\nfunction sample():i32 {\nvalue += 1;\nreturn value;\n}\n",
@@ -181,11 +191,90 @@ export async function run(): Promise<void> {
     "compiler-backed completion returns the fixture function",
   );
 
+  const mainLineNumber = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("tick();"));
+  assert.notEqual(mainLineNumber, -1, "the fixture calls tick from main");
+  const mainLine = document.lineAt(mainLineNumber);
+  const callPosition = new vscode.Position(mainLineNumber, mainLine.text.indexOf("tick") + 1);
+  const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeDefinitionProvider",
+    sourceUri,
+    callPosition,
+  );
+  assert.equal(definitions?.length, 1, "Go to Definition resolves through compiler-owned spans");
+  assert.equal(definitions?.[0]?.uri.fsPath, sourceUri.fsPath);
+  assert.equal(definitions?.[0]?.range.start.line, tickLineNumber);
+
+  const references = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeReferenceProvider",
+    sourceUri,
+    completionPosition,
+  );
+  assert.ok(
+    references && references.length >= 2,
+    "Find All References includes the function declaration and call",
+  );
+
+  const speedLineNumber = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("state.enemies[0].speed"));
+  assert.notEqual(speedLineNumber, -1, "the fixture uses an indexed struct field");
+  const speedLine = document.lineAt(speedLineNumber);
+  const speedPosition = new vscode.Position(speedLineNumber, speedLine.text.indexOf("speed") + 1);
+  const fieldDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeDefinitionProvider",
+    sourceUri,
+    speedPosition,
+  );
+  assert.equal(fieldDefinitions?.length, 1, "Go to Definition resolves an indexed struct field");
+  assert.equal(fieldDefinitions?.[0]?.range.start.line, 10);
+  const fieldReferences = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeReferenceProvider",
+    sourceUri,
+    speedPosition,
+  );
+  assert.ok(
+    fieldReferences && fieldReferences.length >= 2,
+    "Find All References includes the indexed field declaration and write",
+  );
+
+  await waitFor("Test Explorer discovery", () => api.testFiles().some((uri) => uri.endsWith("editor.test.stasis")));
+  const testUri = api.testFiles().find((uri) => uri.endsWith("editor.test.stasis"));
+  assert.ok(testUri, "Test Explorer discovers the packaged fixture test");
+  const testResult = await api.runTestFile(testUri);
+  const testEnvelope = JSON.parse(testResult.stdout) as { ok?: boolean; result?: { tests_passed?: number } };
+  assert.equal(testEnvelope.ok, true, "Test Explorer executes the test through the Stasis CLI");
+  assert.equal(testEnvelope.result?.tests_passed, 1, "the discovered fixture test passes");
+
   try {
     await api.start();
     await waitFor("running live session", () => api.state() === "running");
     await api.request("pause");
     await waitFor("paused live session", () => api.state() === "paused");
+
+    const memberSource = document.getText();
+    const memberPrefix = "state.enemies[0].";
+    const memberOffset = memberSource.indexOf(memberPrefix);
+    assert.notEqual(memberOffset, -1, "the fixture contains an indexed state receiver");
+    const memberCompletions = await vscode.commands.executeCommand<vscode.CompletionList>(
+      "vscode.executeCompletionItemProvider",
+      sourceUri,
+      document.positionAt(memberOffset + memberPrefix.length),
+    );
+    const memberLabels = memberCompletions?.items.map((item) =>
+      typeof item.label === "string" ? item.label : item.label.label,
+    );
+    assert.ok(
+      memberLabels?.includes("state.enemies[0].hp"),
+      "live compiler completion resolves a field through an indexed state path",
+    );
+    assert.ok(
+      memberLabels?.includes("state.enemies[0].speed"),
+      "live compiler completion returns sibling fields for the indexed receiver",
+    );
 
     const before = inspectedI32(await api.request("inspect", { path: "score" }));
     await api.request("watch", { path: "score" });

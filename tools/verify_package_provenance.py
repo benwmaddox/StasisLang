@@ -48,12 +48,18 @@ def verify_mobile_shells(
     if target not in ("android-arm64", "ios-arm64"):
         parser.error(f"unsupported mobile package target: {target!r}")
     platform = target.split("-", 1)[0]
-    package_id = mobile_package_id(receipt["name"])
+    package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
     replacements = {
-        "@STASIS_APP_NAME@": receipt["name"],
+        "@STASIS_APP_NAME@": receipt.get("app_name") or receipt["name"],
         "@STASIS_PACKAGE_ID@": package_id,
         "@STASIS_JNI_PACKAGE@": package_id.replace(".", "_"),
         "@STASIS_ASSET_BASE@": ".",
+        "@STASIS_ANDROID_ORIENTATION@": receipt.get("android_orientation")
+        or "sensorLandscape",
+        "@STASIS_ANDROID_VERSION_CODE@": str(
+            receipt.get("android_version_code") or "1"
+        ),
+        "@STASIS_ANDROID_VERSION_NAME@": receipt.get("android_version_name") or "1.0",
     }
     expected_paths = set()
     for source_group in ("common", platform):

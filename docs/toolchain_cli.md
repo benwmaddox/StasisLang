@@ -137,6 +137,28 @@ Add `--json` to receive one stable JSON result object. Usage errors exit 2, comm
 failures exit 1, and successful commands exit 0 except `run`, which preserves the guest's `i32`
 exit code. Guest program output may precede the final JSON object for `run`.
 
+### Symbol lookup and references
+
+`stasis --json symbol list` returns compact declaration items in deterministic source order. Its
+default scope is the manifest entry and that file's direct imports; use repeated `--file`, `--kind`,
+`--owner`, `--query`, `--page`, and `--limit` options to narrow or page the catalog.
+
+`symbol find NAME` and `symbol read NAME` select declaration items by exact semantic name, with
+optional kind, file, owner, and signature disambiguation. `find` returns metadata for every match;
+`read` requires exactly one match and also returns that declaration's source and source spans.
+Global declarations are currently represented by their editable `globals` group rather than as
+individually readable declaration items.
+
+`symbol references SYMBOL` has a different contract: it accepts one to eight dot-separated Stasis
+identifiers and compiler-lexes the editable project files for matching occurrences. Each result has
+an exact UTF-8 byte span and is classified as `definition`, `read`, `write`, or `call`, together with
+its containing declaration. Function, struct, and test declaration occurrences are classified as
+definitions. Qualified typed field paths—including indexed receivers such as
+`state.enemies[0].speed` queried as `state.enemies.speed`—return the declaring struct field plus
+their executable reads and writes. The VS Code extension projects this command directly:
+**Go to Definition** uses `definition` results, while **Find All References**
+uses the full result set and honors VS Code's include-declaration request.
+
 ## Source formatting
 
 `stasis fmt` is intentionally opinionated about layout while preserving program structure. It

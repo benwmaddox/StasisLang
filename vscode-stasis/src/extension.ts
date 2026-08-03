@@ -22,6 +22,15 @@ interface CommandOutput {
   stderr: string;
 }
 
+interface SourceReference {
+  file: string;
+  kind: string;
+  source_span: {
+    start: number;
+    end: number;
+  };
+}
+
 function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("stasis");
 }
@@ -100,6 +109,202 @@ function runStasis(
     child.once("close", () => cancellation?.dispose());
     child.stdin.end(input);
   });
+}
+
+function symbolAtPosition(document: vscode.TextDocument, position: vscode.Position): string | undefined {
+  const word = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
+  if (!word || word.start.line !== word.end.line) {
+    return undefined;
+  }
+  const prefix = document.lineAt(position.line).text.slice(0, word.end.character);
+  const chain = prefix.match(
+    /[A-Za-z_][A-Za-z0-9_]*(?:(?:\s*\[[^\]\r\n]*\])?\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*$/,
+  )?.[0];
+  return chain?.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, "");
+}
+
+async function compilerReferences(
+  document: vscode.TextDocument,
+  position: vscode.Position,
+  token: vscode.CancellationToken,
+): Promise<SourceReference[]> {
+  const root = findWorkspaceRoot(document);
+  const symbol = symbolAtPosition(document, position);
+  if (!root || !symbol || token.isCancellationRequested) {
+    return [];
+  }
+  const output = await runStasis(
+    ["--json", "--workspace", root, "symbol", "references", symbol, "--limit", "256"],
+    root,
+    undefined,
+    token,
+  );
+  const envelope = asRecord(JSON.parse(output.stdout) as unknown);
+  const result = asRecord(envelope?.result);
+  const references = Array.isArray(result?.references) ? result.references : [];
+  return references.flatMap((value) => {
+    const reference = asRecord(value);
+    const span = asRecord(reference?.source_span);
+    if (
+      typeof reference?.file !== "string" ||
+      typeof reference.kind !== "string" ||
+      typeof span?.start !== "number" ||
+      typeof span.end !== "number"
+    ) {
+      return [];
+    }
+    return [{
+      file: reference.file,
+      kind: reference.kind,
+      source_span: { start: span.start, end: span.end },
+    }];
+  });
+}
+
+async function referenceLocation(root: string, reference: SourceReference): Promise<vscode.Location> {
+  const uri = vscode.Uri.file(path.join(root, reference.file));
+  const document = await vscode.workspace.openTextDocument(uri);
+  const source = document.getText();
+  return new vscode.Location(
+    uri,
+    new vscode.Range(
+      document.positionAt(byteOffsetToStringOffset(source, reference.source_span.start)),
+      document.positionAt(byteOffsetToStringOffset(source, reference.source_span.end)),
+    ),
+  );
+}
+
+class StasisDefinitionProvider implements vscode.DefinitionProvider {
+  async provideDefinition(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.Location[]> {
+    const root = findWorkspaceRoot(document);
+    if (!root) {
+      return [];
+    }
+    const references = await compilerReferences(document, position, token);
+    return Promise.all(
+      references
+        .filter((reference) => reference.kind === "definition")
+        .map((reference) => referenceLocation(root, reference)),
+    );
+  }
+}
+
+class StasisReferenceProvider implements vscode.ReferenceProvider {
+  async provideReferences(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    context: vscode.ReferenceContext,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.Location[]> {
+    const root = findWorkspaceRoot(document);
+    if (!root) {
+      return [];
+    }
+    const references = await compilerReferences(document, position, token);
+    return Promise.all(
+      references
+        .filter((reference) => context.includeDeclaration || reference.kind !== "definition")
+        .map((reference) => referenceLocation(root, reference)),
+    );
+  }
+}
+
+class StasisTests implements vscode.Disposable {
+  private readonly controller = vscode.tests.createTestController("stasisTests", "Stasis Tests");
+  private readonly watcher = vscode.workspace.createFileSystemWatcher("**/*.test.stasis");
+  private readonly runProfile: vscode.TestRunProfile;
+
+  constructor(private readonly output: vscode.OutputChannel) {
+    this.controller.resolveHandler = async () => this.refresh();
+    this.runProfile = this.controller.createRunProfile(
+      "Run Stasis Tests",
+      vscode.TestRunProfileKind.Run,
+      async (request, token) => this.run(request, token),
+      true,
+    );
+    this.watcher.onDidCreate(() => void this.refresh());
+    this.watcher.onDidChange(() => void this.refresh());
+    this.watcher.onDidDelete(() => void this.refresh());
+  }
+
+  async refresh(): Promise<void> {
+    const items: vscode.TestItem[] = [];
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const manifestPath = path.join(folder.uri.fsPath, "stasis.json");
+      if (!fs.existsSync(manifestPath)) {
+        continue;
+      }
+      const manifest = asRecord(JSON.parse(fs.readFileSync(manifestPath, "utf8")) as unknown);
+      const testsDirectory = typeof manifest?.tests === "string" ? manifest.tests : "tests";
+      const pattern = new vscode.RelativePattern(folder, `${testsDirectory.replaceAll("\\", "/")}/**/*.test.stasis`);
+      const files = await vscode.workspace.findFiles(
+        pattern,
+        "**/{.git,.stasis-cache,node_modules,target,build,dist}/**",
+      );
+      for (const uri of files.sort((left, right) => left.fsPath.localeCompare(right.fsPath))) {
+        const label = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll("\\", "/");
+        items.push(this.controller.createTestItem(uri.toString(), label, uri));
+      }
+    }
+    this.controller.items.replace(items);
+  }
+
+  fileUris(): string[] {
+    const uris: string[] = [];
+    this.controller.items.forEach((item) => {
+      if (item.uri) {
+        uris.push(item.uri.toString());
+      }
+    });
+    return uris.sort();
+  }
+
+  async runFile(uri: vscode.Uri, token?: vscode.CancellationToken): Promise<CommandOutput> {
+    const document = await vscode.workspace.openTextDocument(uri);
+    const root = findWorkspaceRoot(document);
+    if (!root) {
+      throw new Error(`No Stasis workspace contains ${uri.fsPath}.`);
+    }
+    const relative = path.relative(root, uri.fsPath).replaceAll("\\", "/");
+    return runStasis(["--json", "--workspace", root, "test", relative], root, undefined, token);
+  }
+
+  dispose(): void {
+    this.runProfile.dispose();
+    this.watcher.dispose();
+    this.controller.dispose();
+  }
+
+  private async run(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
+    const run = this.controller.createTestRun(request);
+    const items: vscode.TestItem[] = [];
+    if (request.include) {
+      items.push(...request.include);
+    } else {
+      this.controller.items.forEach((item) => items.push(item));
+    }
+    for (const item of items) {
+      if (token.isCancellationRequested || !item.uri) {
+        run.skipped(item);
+        continue;
+      }
+      run.started(item);
+      try {
+        const result = await this.runFile(item.uri, token);
+        run.appendOutput(result.stdout.replaceAll("\n", "\r\n"), undefined, item);
+        run.passed(item);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.output.appendLine(`Test failed: ${item.label}: ${message}`);
+        run.failed(item, new vscode.TestMessage(message));
+      }
+    }
+    run.end();
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -425,14 +630,18 @@ export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
   const output = vscode.window.createOutputChannel("Stasis");
   const values = new LiveValuesProvider();
   const controller = new LiveController(values, output);
+  const tests = new StasisTests(output);
   const command = (name: string, action: (...args: unknown[]) => Promise<void>) =>
     vscode.commands.registerCommand(name, (...args: unknown[]) => showCommandError(() => action(...args)));
 
   context.subscriptions.push(
     output,
     controller,
+    tests,
     vscode.window.registerTreeDataProvider("stasis.liveValues", values),
     vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_SELECTOR, new StasisFormatter()),
+    vscode.languages.registerDefinitionProvider(LANGUAGE_SELECTOR, new StasisDefinitionProvider()),
+    vscode.languages.registerReferenceProvider(LANGUAGE_SELECTOR, new StasisReferenceProvider()),
     vscode.languages.registerCompletionItemProvider(
       LANGUAGE_SELECTOR,
       new StasisCompletionProvider(controller),
@@ -471,6 +680,7 @@ export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
     command("stasis.refreshLiveValues", async () => controller.requireSession().refresh()),
     command("stasis.showOutput", async () => output.show(true)),
   );
+  void tests.refresh();
 
   return {
     state: () => controller.state,
@@ -478,6 +688,8 @@ export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
     start: () => controller.start(),
     stop: () => controller.stop(),
     request: (type, fields = {}) => controller.requireSession().request(type, fields),
+    testFiles: () => tests.fileUris(),
+    runTestFile: (uri) => tests.runFile(vscode.Uri.parse(uri)),
   } satisfies StasisExtensionApi;
 }
 
@@ -487,6 +699,8 @@ export interface StasisExtensionApi {
   start(): Promise<void>;
   stop(): Promise<void>;
   request(type: string, fields?: Record<string, unknown>): Promise<LiveResponse>;
+  testFiles(): readonly string[];
+  runTestFile(uri: string): Promise<CommandOutput>;
 }
 
 export function deactivate(): void {}

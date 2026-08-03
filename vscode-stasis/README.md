@@ -5,6 +5,8 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 - Stasis syntax highlighting and editor indentation;
 - canonical document formatting through `stasis format --stdin`;
 - compiler-backed project completion, with richer local/member completion while a play session is active;
+- compiler-backed **Go to Definition** and **Find All References**;
+- `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;
 - typed live inspection and watches in the **Stasis > Live Values** sidebar.
@@ -39,6 +41,21 @@ enemies[?hp <= 0]
 Watch updates are emitted between deterministic ticks. The extension never evaluates game state independently; displayed values come from the running Stasis runtime.
 
 Set `stasis.live.entry` only when a project needs an entry other than the one in `stasis.json`.
+
+## Navigation and tests
+
+**Go to Definition** and **Find All References** call the installed compiler's
+`symbol references` command and translate its UTF-8 source spans into VS Code locations. Functions,
+structs, tests, and typed struct fields have definition locations. Indexed receivers such as
+`state.enemies[0].speed` resolve to the declaring field and expose their reads and writes.
+
+While a play session is active, completion uses the persistent live compiler and runtime layout.
+It resolves locals, members, and concrete indexed state paths such as
+`state.enemies[0].{hp,speed}` without guessing types in the extension.
+
+The Test Explorer discovers `.test.stasis` files under the manifest's `tests` directory. Each file
+is one isolated Test Explorer item and runs through `stasis --json test <file>`, so editor and CLI
+test behavior stay identical.
 
 ## Development
 
