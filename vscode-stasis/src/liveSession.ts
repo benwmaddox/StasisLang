@@ -4,6 +4,7 @@ import {
   isLiveResponse,
   JsonLineDecoder,
   LiveResponse,
+  LiveRuntimeIdentity,
   LiveValue,
 } from "./protocol";
 
@@ -31,6 +32,7 @@ export class LiveSession implements vscode.Disposable {
   private nextRequestId = 1;
   private disposed = false;
   private _state: LiveSessionState = "stopped";
+  private _runtimeIdentity: LiveRuntimeIdentity | undefined;
 
   readonly onDidChangeState = this.stateEmitter.event;
   readonly onDidChangeValues = this.valuesEmitter.event;
@@ -50,6 +52,10 @@ export class LiveSession implements vscode.Disposable {
     return [...this.valuesByPath.values()].sort((left, right) =>
       left.path.localeCompare(right.path),
     );
+  }
+
+  get runtimeIdentity(): LiveRuntimeIdentity | undefined {
+    return this._runtimeIdentity;
   }
 
   async start(): Promise<void> {
@@ -168,6 +174,9 @@ export class LiveSession implements vscode.Disposable {
   }
 
   private acceptResponse(response: LiveResponse): void {
+    if (response.runtime_identity) {
+      this._runtimeIdentity = response.runtime_identity;
+    }
     this.applyStateFromResponse(response);
     this.applyValueFromResponse(response);
     if (response.request_id === 0 || ["completion_preparing", "edit_preparing"].includes(response.kind)) {
@@ -259,6 +268,7 @@ export class LiveSession implements vscode.Disposable {
       return;
     }
     this.process = undefined;
+    this._runtimeIdentity = undefined;
     this.setState("stopped");
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);

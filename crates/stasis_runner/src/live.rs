@@ -320,6 +320,23 @@ pub struct LiveSymbolTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveRuntimeIdentity {
+    pub session_id: String,
+    pub generation: u64,
+    pub source_hashes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub indexed_collections: Vec<LiveIndexedCollection>,
+    #[serde(default = "default_true")]
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveIndexedCollection {
+    pub path: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveResponse {
     pub schema_version: u16,
     pub request_id: u64,
@@ -332,6 +349,8 @@ pub struct LiveResponse {
     pub error: Option<String>,
     #[serde(default)]
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_identity: Option<LiveRuntimeIdentity>,
 }
 
 impl LiveResponse {
@@ -345,6 +364,7 @@ impl LiveResponse {
             data: Some(data),
             error: None,
             truncated: false,
+            runtime_identity: None,
         }
     }
 
@@ -358,7 +378,13 @@ impl LiveResponse {
             data: None,
             error: Some(error.into()),
             truncated: false,
+            runtime_identity: None,
         }
+    }
+
+    pub fn with_runtime_identity(mut self, identity: LiveRuntimeIdentity) -> Self {
+        self.runtime_identity = Some(identity);
+        self
     }
 
     pub fn bounded(mut self, max_bytes: usize) -> Self {

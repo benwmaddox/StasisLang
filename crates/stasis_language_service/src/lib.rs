@@ -15,7 +15,9 @@ use stasis_compiler::frontend::workshop::{
     WorkshopCompletionItem, WorkshopCompletionScope, WorkshopSourceFile, WorkshopSourceItem,
     WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
 };
-pub use stasis_compiler::frontend::workshop::{WorkshopReference, WorkshopReferenceKind};
+pub use stasis_compiler::frontend::workshop::{
+    workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
+};
 use stasis_compiler::identity::canonical_source_path;
 pub use stasis_runner::live::{
     CompletionContext, CompletionIndex, CompletionItem, CompletionQuery, CompletionScope,
@@ -333,6 +335,122 @@ pub struct HoverInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveObservation {
+    pub path: String,
+    pub type_name: Option<String>,
+    pub value: String,
+    pub tick: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveObservationBatch {
+    pub session_id: String,
+    pub generation: u64,
+    pub source_hashes: BTreeMap<String, String>,
+    pub observations: Vec<LiveObservation>,
+    pub indexed_collections: Vec<LiveIndexedCollection>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveIndexedCollection {
+    pub path: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+pub struct LiveSessionBroker {
+    latest: Option<LiveObservationBatch>,
+}
+
+impl LiveSessionBroker {
+    pub fn publish(&mut self, mut batch: LiveObservationBatch) {
+        batch.observations.truncate(512);
+        self.latest = Some(batch);
+    }
+
+    pub fn clear(&mut self) {
+        self.latest = None;
+    }
+
+    fn compatible_value(
+        &self,
+        path: &str,
+        type_name: Option<&str>,
+        owner_file: &str,
+        owner_source: &str,
+    ) -> Option<String> {
+        let batch = self.latest.as_ref()?;
+        if !batch.complete {
+            return None;
+        }
+        let accepted_hash = batch.source_hashes.get(owner_file)?;
+        if accepted_hash != &workshop_source_hash(owner_source) {
+            return None;
+        }
+        batch
+            .observations
+            .iter()
+            .find(|observation| {
+                observation.path == path
+                    && observation
+                        .type_name
+                        .as_deref()
+                        .zip(type_name)
+                        .is_none_or(|(observed, indexed)| observed == indexed)
+            })
+            .map(|observation| format!("{} (tick {})", observation.value, observation.tick))
+    }
+
+    fn indexed_completion_items(
+        &self,
+        files: &[WorkshopSourceFile],
+        source: &str,
+        cursor: usize,
+    ) -> Vec<CompletionItem> {
+        let Some(batch) = self.latest.as_ref() else {
+            return Vec::new();
+        };
+        if !batch.complete {
+            return Vec::new();
+        }
+        if batch.source_hashes.is_empty()
+            || batch.source_hashes.iter().any(|(path, accepted_hash)| {
+                files
+                    .iter()
+                    .find(|file| file.path == *path)
+                    .is_none_or(|file| &workshop_source_hash(&file.source) != accepted_hash)
+            })
+        {
+            return Vec::new();
+        }
+        let Some((collection_path, receiver)) = indexed_completion_receiver(source, cursor) else {
+            return Vec::new();
+        };
+        let Some(collection) = batch
+            .indexed_collections
+            .iter()
+            .find(|collection| collection.path == collection_path)
+        else {
+            return Vec::new();
+        };
+        collection
+            .fields
+            .iter()
+            .map(|(field, type_name)| CompletionItem {
+                text: format!("{receiver}{field}"),
+                kind: "field".to_string(),
+                detail: format!("{type_name} via indexed state collection {collection_path}"),
+                type_name: Some(type_name.clone()),
+                source: Some("runtime state layout".to_string()),
+                selector: None,
+                scope: None,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionTextChange {
     pub path: String,
     pub range: Range<usize>,
@@ -513,6 +631,7 @@ pub struct LanguageService {
     project_root: String,
     language_index: Option<LanguageIndex>,
     language_index_error: Option<(WorkspaceRevision, String)>,
+    live: LiveSessionBroker,
 }
 
 impl LanguageService {
@@ -526,11 +645,20 @@ impl LanguageService {
             project_root,
             language_index: None,
             language_index_error: None,
+            live: LiveSessionBroker::default(),
         })
     }
 
     pub fn snapshot(&self) -> WorkspaceSnapshot {
         self.documents.snapshot()
+    }
+
+    pub fn publish_live_observations(&mut self, batch: LiveObservationBatch) {
+        self.live.publish(batch);
+    }
+
+    pub fn clear_live_observations(&mut self) {
+        self.live.clear();
     }
 
     pub fn set_disk_document(&mut self, path: impl Into<String>, text: impl Into<String>) {
@@ -618,11 +746,15 @@ impl LanguageService {
         }
         let relative = canonical_source_path(Some(&self.project_root), path)?;
         let context = self.query_context(&relative, byte_offset, &document.text)?;
+        let files = self.language_index()?.files.clone();
+        let live_items = self
+            .live
+            .indexed_completion_items(&files, &document.text, byte_offset);
         let source = document.text.clone();
         let index = self.language_index()?;
-        let query = index
-            .completion
-            .query_with_context(&source, byte_offset, limit, &context);
+        let mut completion_index = index.completion.clone();
+        completion_index.extend(live_items);
+        let query = completion_index.query_with_context(&source, byte_offset, limit, &context);
         let reachable = workshop_reachable_files(&index.files, Path::new(&relative))?
             .into_iter()
             .map(|file| file.path)
@@ -631,7 +763,20 @@ impl LanguageService {
             .items
             .iter()
             .filter_map(|ranked| {
-                let catalog = matching_workshop_completion(&index.workshop_items, ranked)?;
+                let Some(catalog) = matching_workshop_completion(&index.workshop_items, ranked)
+                else {
+                    return Some(LanguageCompletionItem {
+                        text: ranked.text.clone(),
+                        kind: ranked.kind.clone(),
+                        detail: ranked.detail.clone(),
+                        type_name: ranked.type_name.clone(),
+                        signature: None,
+                        documentation: None,
+                        insert_text: ranked.text.clone(),
+                        snippet: false,
+                        additional_text_edits: Vec::new(),
+                    });
+                };
                 let (insert_text, snippet) = completion_insert_text(catalog);
                 Some(LanguageCompletionItem {
                     text: ranked.text.clone(),
@@ -676,7 +821,7 @@ impl LanguageService {
             .filter(|item| item.text == symbol && workshop_completion_visible(item, &context))
             .collect::<Vec<_>>();
         matches.sort_by_key(|item| workshop_completion_specificity(item, &context));
-        let Some(primary) = matches.first().copied() else {
+        let Some(primary) = matches.first().map(|item| (*item).clone()) else {
             return Ok(None);
         };
         let mut signatures = matches
@@ -685,7 +830,24 @@ impl LanguageService {
             .collect::<Vec<_>>();
         signatures.sort();
         signatures.dedup();
-        let documentation = documentation_for_completion(index, primary);
+        let documentation = documentation_for_completion(index, &primary);
+        let live_owner = if matches!(primary.kind.as_str(), "global" | "field" | "state_path") {
+            index
+                .files
+                .iter()
+                .find(|file| file.path == primary.file)
+                .map(|file| (primary.file.clone(), file.source.clone()))
+        } else {
+            None
+        };
+        let live_value = live_owner.and_then(|(owner_file, owner_source)| {
+            self.live.compatible_value(
+                &symbol,
+                primary.type_name.as_deref(),
+                &owner_file,
+                &owner_source,
+            )
+        });
         Ok(Some(HoverInfo {
             range,
             symbol,
@@ -694,7 +856,7 @@ impl LanguageService {
             owner: primary.owner.clone(),
             signatures,
             documentation,
-            live_value: None,
+            live_value,
         }))
     }
 
@@ -1323,6 +1485,37 @@ fn leading_documentation(source: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     (!documentation.is_empty()).then_some(documentation)
+}
+
+fn indexed_completion_receiver(source: &str, cursor: usize) -> Option<(&str, &str)> {
+    let prefix = source.get(..cursor.min(source.len()))?;
+    let field_separator = prefix.rfind("].")?;
+    let indexed_path = prefix.get(..field_separator + 1)?;
+    let open = indexed_path.rfind('[')?;
+    let index_text = indexed_path.get(open + 1..indexed_path.len() - 1)?;
+    if index_text.is_empty() || !index_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let path_prefix = indexed_path.get(..open)?;
+    let path_start = path_prefix
+        .char_indices()
+        .rev()
+        .find(|(_, character)| {
+            !(character.is_ascii_alphanumeric() || *character == '_' || *character == '.')
+        })
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let collection_path = path_prefix.get(path_start..)?;
+    let receiver = prefix.get(path_start..field_separator + 2)?;
+    collection_path
+        .split('.')
+        .all(|segment| {
+            let mut bytes = segment.bytes();
+            bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+        .then_some((collection_path, receiver))
 }
 
 fn identifier_path_range(source: &str, byte_offset: usize) -> Option<Range<usize>> {
@@ -1962,6 +2155,91 @@ function main(): i32 {
             function.documentation.as_deref(),
             Some("Creates an enemy with explicit health.")
         );
+    }
+
+    #[test]
+    fn hover_uses_only_hash_and_type_compatible_live_observations() {
+        let root = std::env::temp_dir().join("stasis-language-service-live-hover");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "global score: i32;\nfunction main(): i32 { return score; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        service.publish_live_observations(LiveObservationBatch {
+            session_id: "test-session".into(),
+            generation: 4,
+            source_hashes: BTreeMap::from([(
+                "src/main.stasis".into(),
+                workshop_source_hash(source),
+            )]),
+            observations: vec![LiveObservation {
+                path: "score".into(),
+                type_name: Some("i32".into()),
+                value: "7".into(),
+                tick: 12,
+            }],
+            indexed_collections: Vec::new(),
+            complete: true,
+        });
+        let offset = source.rfind("score").expect("score use") + 2;
+        assert_eq!(
+            service
+                .hover(&path_text, offset)
+                .expect("compatible hover")
+                .and_then(|hover| hover.live_value),
+            Some("7 (tick 12)".into())
+        );
+
+        let changed = source.replace("return score", "return score + 0");
+        service.open_document(path_text.clone(), 1, changed.clone());
+        let changed_offset = changed.rfind("score").expect("changed score") + 2;
+        assert_eq!(
+            service
+                .hover(&path_text, changed_offset)
+                .expect("stale hover")
+                .and_then(|hover| hover.live_value),
+            None
+        );
+    }
+
+    #[test]
+    fn compatible_runtime_layout_completes_indexed_collection_fields() {
+        let root = std::env::temp_dir().join("stasis-language-service-indexed-live-completion");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct Enemy { hp: i32; speed: i32; }\nstruct State { enemies: Enemy[2]; }\nglobal state: State;\nfunction main(): i32 { return state.enemies[0].speed; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        service.publish_live_observations(LiveObservationBatch {
+            session_id: "indexed-session".into(),
+            generation: 1,
+            source_hashes: BTreeMap::from([(
+                "src/main.stasis".into(),
+                workshop_source_hash(source),
+            )]),
+            observations: Vec::new(),
+            indexed_collections: vec![LiveIndexedCollection {
+                path: "state.enemies".into(),
+                fields: BTreeMap::from([
+                    ("hp".into(), "i32".into()),
+                    ("speed".into(), "i32".into()),
+                ]),
+            }],
+            complete: true,
+        });
+        let cursor =
+            source.find("state.enemies[0].").expect("indexed receiver") + "state.enemies[0].".len();
+        let completion = service
+            .completion(&path_text, cursor, 64)
+            .expect("indexed completion");
+        assert!(completion
+            .items
+            .iter()
+            .any(|item| item.text == "state.enemies[0].hp"));
+        assert!(completion
+            .items
+            .iter()
+            .any(|item| item.text == "state.enemies[0].speed"));
     }
 
     #[test]

@@ -1394,6 +1394,7 @@ version = "0.1.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
+ "serde",
  "serde_json",
  "stasis_language_service",
  "url",

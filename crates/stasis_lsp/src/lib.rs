@@ -28,12 +28,51 @@ use lsp_types::{
     TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
     WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
+use serde::Deserialize;
 use stasis_language_service::{
     DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageLocation,
-    LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
-    SignatureHelp as SharedSignatureHelp, TextChange,
+    LanguageService, LanguageSymbol, LanguageSymbolKind, LiveIndexedCollection, LiveObservation,
+    LiveObservationBatch, Position, SignatureHelp as SharedSignatureHelp, TextChange,
 };
 use url::Url;
+
+const LIVE_OBSERVATIONS_METHOD: &str = "stasis/liveObservations";
+
+#[derive(Deserialize)]
+struct LiveRuntimeIdentityParams {
+    session_id: String,
+    generation: u64,
+    source_hashes: BTreeMap<String, String>,
+    #[serde(default)]
+    indexed_collections: Vec<LiveIndexedCollectionParams>,
+    #[serde(default)]
+    complete: bool,
+}
+
+#[derive(Deserialize)]
+struct LiveIndexedCollectionParams {
+    path: String,
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct LiveObservationParams {
+    path: String,
+    #[serde(default)]
+    type_name: Option<String>,
+    value: String,
+    tick: u64,
+}
+
+#[derive(Deserialize)]
+struct LiveObservationsParams {
+    #[serde(default)]
+    clear: bool,
+    #[serde(default)]
+    identity: Option<LiveRuntimeIdentityParams>,
+    #[serde(default)]
+    observations: Vec<LiveObservationParams>,
+}
 
 pub fn run_stdio(project_root: &Path) -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
@@ -257,6 +296,44 @@ impl LanguageServer {
         notification: Notification,
     ) -> Result<(), String> {
         match notification.method.as_str() {
+            LIVE_OBSERVATIONS_METHOD => {
+                let params: LiveObservationsParams = notification
+                    .extract(LIVE_OBSERVATIONS_METHOD)
+                    .map_err(|error| format!("invalid live-observations notification: {error}"))?;
+                if params.clear {
+                    self.service.clear_live_observations();
+                    return Ok(());
+                }
+                let identity = params
+                    .identity
+                    .ok_or_else(|| "live observations require runtime identity".to_string())?;
+                self.service
+                    .publish_live_observations(LiveObservationBatch {
+                        session_id: identity.session_id,
+                        generation: identity.generation,
+                        source_hashes: identity.source_hashes,
+                        indexed_collections: identity
+                            .indexed_collections
+                            .into_iter()
+                            .map(|collection| LiveIndexedCollection {
+                                path: collection.path,
+                                fields: collection.fields,
+                            })
+                            .collect(),
+                        complete: identity.complete,
+                        observations: params
+                            .observations
+                            .into_iter()
+                            .map(|observation| LiveObservation {
+                                path: observation.path,
+                                type_name: observation.type_name,
+                                value: observation.value,
+                                tick: observation.tick,
+                            })
+                            .collect(),
+                    });
+                Ok(())
+            }
             DidOpenTextDocument::METHOD => {
                 let params: DidOpenTextDocumentParams = notification
                     .extract(DidOpenTextDocument::METHOD)
@@ -898,6 +975,7 @@ fn stasis_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 mod tests {
     use super::*;
     use lsp_server::RequestId;
+    use stasis_language_service::workshop_source_hash;
     use std::time::Duration;
 
     fn test_server(name: &str) -> (LanguageServer, Uri, String) {
@@ -1066,7 +1144,7 @@ mod tests {
     fn standard_requests_return_completion_hover_and_signature_help() {
         let (mut server, uri, _) = test_server("intelligence");
         let (server_connection, client_connection) = Connection::memory();
-        let source = "// Creates an enemy.\nfunction spawn_enemy(count: i32, health: i32): i32 { return health; }\nfunction main(): i32 { let health: i32 = 2; return spawn_enemy(1, health); }\n";
+        let source = "global score: i32;\n// Creates an enemy.\nfunction spawn_enemy(count: i32, health: i32): i32 { return health; }\nfunction main(): i32 { let health: i32 = 2; score = health; return spawn_enemy(1, health); }\n";
         server
             .handle_notification(
                 &server_connection,
@@ -1083,6 +1161,28 @@ mod tests {
                 ),
             )
             .expect("didOpen");
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    LIVE_OBSERVATIONS_METHOD.to_string(),
+                    serde_json::json!({
+                        "identity": {
+                            "session_id": "test-live-session",
+                            "generation": 3,
+                            "complete": true,
+                            "source_hashes": { "src/main.stasis": workshop_source_hash(source) }
+                        },
+                        "observations": [{
+                            "path": "score",
+                            "type_name": "i32",
+                            "value": "2",
+                            "tick": 9
+                        }]
+                    }),
+                ),
+            )
+            .expect("live observations");
 
         let completion_offset = source.rfind("spawn_enemy(1").expect("function use") + 5;
         let completion_position = lsp_position(
@@ -1163,6 +1263,57 @@ mod tests {
             .value
             .contains("spawn_enemy(count: i32, health: i32): i32"));
         assert!(contents.value.contains("Creates an enemy."));
+
+        let score_offset = source.find("score =").expect("global use") + 2;
+        let score_position = lsp_position(
+            server
+                .service
+                .snapshot()
+                .document(&path_text(&uri_path(&uri).expect("path")))
+                .expect("document")
+                .position(score_offset)
+                .expect("position"),
+        );
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(19),
+                    HoverRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": score_position
+                    }),
+                ),
+            )
+            .expect("live hover request");
+        let live_hover: Option<Hover> = serde_json::from_value(
+            receive_response(&client_connection, 19)
+                .response_result
+                .expect("live hover result"),
+        )
+        .expect("live hover response");
+        let HoverContents::Markup(live_contents) = live_hover.expect("live hover").contents else {
+            panic!("expected live markdown hover");
+        };
+        assert!(live_contents.value.contains("Live value:** `2 (tick 9)`"));
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    LIVE_OBSERVATIONS_METHOD.to_string(),
+                    serde_json::json!({ "clear": true }),
+                ),
+            )
+            .expect("clear live observations");
+        assert_eq!(
+            server
+                .service
+                .hover(&path_text(&uri_path(&uri).expect("path")), score_offset)
+                .expect("static hover after live clear")
+                .and_then(|hover| hover.live_value),
+            None
+        );
 
         let signature_offset =
             source.rfind("spawn_enemy(1, health").expect("call") + "spawn_enemy(1, ".len();

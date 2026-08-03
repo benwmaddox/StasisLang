@@ -211,9 +211,19 @@ Each slice is independently testable and removes the host-specific path it repla
 
 ### Slice 5: Live Workshop composition
 
-Move launch/attach and live cache ownership behind `LiveSessionBroker`. Add revision handshakes,
-custom LSP methods, type/live hover composition, live watches, and tested edit preview/apply. Make
-the VS Code Live Workshop view a protocol client and preserve live JSON automation compatibility.
+- [x] Publish an accepted runtime identity on live responses: session, generation, source hashes,
+  and indexed collection layout.
+- [x] Add a bounded `LiveSessionBroker` cache and custom LSP observation notification. Compose live
+  hover values only when owning-file hashes and static types match the current semantic snapshot.
+- [x] Route runtime-only indexed collection completion through the standard LSP and remove the
+  VSIX's final direct completion provider/CLI fallback.
+- [ ] Move launch/attach, pause/step, watches, inspection, and cache ownership fully behind custom
+  LSP methods; the current VSIX live-session client is a compatibility bridge that forwards
+  revision-tagged observations.
+- [ ] Route the TUI's live observation/details view through the same broker handle while retaining
+  in-process transport and deterministic queues.
+- [ ] Move tested edit preview/apply and rollback status behind the broker and retain live JSON
+  automation as a versioned adapter.
 
 ### Slice 6: code intelligence depth
 
@@ -343,3 +353,21 @@ semantic questions. The incomplete `a(state.` regressions show that current lexi
 can query last-good global type data, while the stale-index rename rejection shows why edits must
 not cross that boundary. This predicts that future code actions and formatting may use recoverable
 current syntax, but semantic refactors must remain revision-exact and transactionally validated.
+
+### Live observation composition implementation
+
+- Good: adding accepted source hashes and runtime layout to every successful live response made
+  hover and indexed completion cheap cache joins, and allowed deletion of the VSIX's competing
+  completion provider without losing `state.enemies[0].speed` behavior.
+- Bad: the first compatibility check required every indexed file to appear in the runtime build;
+  test-only files are intentionally absent from runtime reachability, so the valid live layout was
+  initially rejected.
+- Adjustment: validate every accepted runtime input against the current semantic snapshot, but do
+  not require editor-only/test-only files to be runtime inputs. Continue requiring the exact owner
+  file hash for a displayed live value.
+
+Theory gained: runtime compatibility is a directed subset relation, not equality between project
+indexes. Every file that produced the accepted executable must still match, while additional test
+or editor-only files do not make that executable stale. The packaged indexed-completion and live
+hover tests support this mapping; it predicts that attach/debug handshakes must publish the same
+accepted-input set rather than a generic workspace revision number.

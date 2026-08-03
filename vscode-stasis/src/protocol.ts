@@ -7,6 +7,17 @@ export interface LiveResponse {
   data?: unknown;
   error?: string;
   truncated?: boolean;
+  runtime_identity?: LiveRuntimeIdentity;
+}
+export interface LiveRuntimeIdentity {
+  session_id: string;
+  generation: number;
+  source_hashes: Record<string, string>;
+  indexed_collections?: Array<{
+    path: string;
+    fields: Record<string, string>;
+  }>;
+  complete?: boolean;
 }
 
 export interface LiveValue {
@@ -16,13 +27,6 @@ export interface LiveValue {
   error?: string;
   tick: number;
   watched: boolean;
-}
-
-export interface CompilerCompletion {
-  text: string;
-  kind: string;
-  detail?: string;
-  type_name?: string;
 }
 
 export class JsonLineDecoder {
@@ -81,25 +85,4 @@ export function displayRuntimeValue(value: unknown): string {
   } catch {
     return "<value>";
   }
-}
-
-export function byteOffsetToStringOffset(text: string, byteOffset: number): number {
-  if (byteOffset <= 0) {
-    return 0;
-  }
-  let bytes = 0;
-  let stringOffset = 0;
-  for (const character of text) {
-    const width = Buffer.byteLength(character, "utf8");
-    if (bytes + width > byteOffset) {
-      break;
-    }
-    bytes += width;
-    stringOffset += character.length;
-  }
-  return stringOffset;
-}
-
-export function stringOffsetToByteOffset(text: string, stringOffset: number): number {
-  return Buffer.byteLength(text.slice(0, Math.max(0, stringOffset)), "utf8");
 }

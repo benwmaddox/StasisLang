@@ -388,14 +388,27 @@ export async function run(): Promise<void> {
     const memberPrefix = "state.enemies[0].";
     const memberOffset = memberSource.indexOf(memberPrefix);
     assert.notEqual(memberOffset, -1, "the fixture contains an indexed state receiver");
-    const memberCompletions = await vscode.commands.executeCommand<vscode.CompletionList>(
-      "vscode.executeCompletionItemProvider",
-      sourceUri,
-      document.positionAt(memberOffset + memberPrefix.length),
+    const liveStatus = await api.request("status");
+    assert.ok(
+      liveStatus.runtime_identity?.indexed_collections?.some(
+        (collection) => collection.path === "state.enemies" && "speed" in collection.fields,
+      ),
+      "live status publishes the accepted indexed collection layout",
     );
-    const memberLabels = memberCompletions?.items.map((item) =>
-      typeof item.label === "string" ? item.label : item.label.label,
-    );
+    let memberLabels: string[] | undefined;
+    for (let attempt = 0; attempt < 40 && !memberLabels?.includes("state.enemies[0].speed"); attempt += 1) {
+      const memberCompletions = await vscode.commands.executeCommand<vscode.CompletionList>(
+        "vscode.executeCompletionItemProvider",
+        sourceUri,
+        document.positionAt(memberOffset + memberPrefix.length),
+      );
+      memberLabels = memberCompletions?.items.map((item) =>
+        typeof item.label === "string" ? item.label : item.label.label,
+      );
+      if (!memberLabels?.includes("state.enemies[0].speed")) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
     assert.ok(
       memberLabels?.includes("state.enemies[0].hp"),
       "live compiler completion resolves a field through an indexed state path",
@@ -406,6 +419,26 @@ export async function run(): Promise<void> {
     );
 
     const before = inspectedI32(await api.request("inspect", { path: "score" }));
+    let liveHoverText = "";
+    for (let attempt = 0; attempt < 40 && !liveHoverText.includes("Live value:"); attempt += 1) {
+      const liveHovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        sourceUri,
+        document.positionAt(scoreUseOffset + 2),
+      );
+      liveHoverText = liveHovers
+        ?.flatMap((hover) => hover.contents)
+        .map((content) => (typeof content === "string" ? content : content.value))
+        .join("\n") ?? "";
+      if (!liveHoverText.includes("Live value:")) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    assert.match(
+      liveHoverText,
+      new RegExp(`Live value:\\*\\* .*${before} \\(tick \\d+\\)`),
+      "standard LSP hover composes a hash-compatible cached runtime value",
+    );
     await api.request("watch", { path: "score" });
     await api.request("step", { ticks: 1 });
     const after = inspectedI32(await api.request("inspect", { path: "score" }));

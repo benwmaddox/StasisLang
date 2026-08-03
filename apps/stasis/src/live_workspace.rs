@@ -16,8 +16,9 @@ use stasis_language_service::{
 };
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
-    CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
-    LiveResponseSendError, LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
+    CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveIndexedCollection,
+    LiveRequest, LiveResponse, LiveResponseSendError, LiveRuntimeIdentity, LiveSessionServer,
+    LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
@@ -183,6 +184,7 @@ pub(crate) struct LiveWorkspace {
     dropped_watch_events: u64,
     validation_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
     host_entry_revision: u64,
+    session_id: String,
 }
 
 impl Drop for LiveWorkspace {
@@ -207,6 +209,11 @@ impl LiveWorkspace {
         config: LiveRunConfig,
         jit: &JitProcess,
     ) -> Result<Self, String> {
+        let session_id = format!(
+            "{}:{}",
+            std::process::id(),
+            workshop_source_hash(&config.project_root.to_string_lossy())
+        );
         let mut workspace = Self {
             server,
             config,
@@ -233,6 +240,7 @@ impl LiveWorkspace {
             validation_snapshot: None,
             host_entry_revision: stasis_dynload::jit_host_entry_targets()
                 .map_or(0, |targets| targets.revision),
+            session_id,
         };
         workspace.refresh_completion(jit)?;
         Ok(workspace)
@@ -372,6 +380,11 @@ impl LiveWorkspace {
     }
 
     fn enqueue_response(&mut self, response: LiveResponse) {
+        let response = if response.ok && response.runtime_identity.is_none() {
+            response.with_runtime_identity(self.runtime_identity())
+        } else {
+            response
+        };
         match self.server.respond(response) {
             Ok(()) => {}
             Err(LiveResponseSendError::Full(response)) => {
@@ -379,6 +392,33 @@ impl LiveWorkspace {
             }
             Err(LiveResponseSendError::Disconnected) => self.quit = true,
         }
+    }
+
+    fn runtime_identity(&self) -> LiveRuntimeIdentity {
+        let mut identity = LiveRuntimeIdentity {
+            session_id: self.session_id.clone(),
+            generation: self.host_entry_revision,
+            source_hashes: self
+                .source_files
+                .iter()
+                .map(|file| (file.path.clone(), workshop_source_hash(&file.source)))
+                .collect(),
+            indexed_collections: self
+                .indexed_collections
+                .iter()
+                .map(|collection| LiveIndexedCollection {
+                    path: collection.path.clone(),
+                    fields: collection.fields.iter().cloned().collect(),
+                })
+                .collect(),
+            complete: true,
+        };
+        if serde_json::to_vec(&identity).is_ok_and(|encoded| encoded.len() > 32 * 1024) {
+            identity.source_hashes.clear();
+            identity.indexed_collections.clear();
+            identity.complete = false;
+        }
+        identity
     }
 
     pub(crate) fn should_run_tick(&self) -> bool {
@@ -420,14 +460,18 @@ impl LiveWorkspace {
     }
 
     pub(crate) fn publish_watches(&mut self, tick: u64, jit: &JitProcess) {
+        let runtime_identity = self.runtime_identity();
         if self.dropped_watch_events > 0 {
             let dropped = self.dropped_watch_events;
-            match self.server.respond(LiveResponse::success(
-                0,
-                tick,
-                "watch_backpressure",
-                json!({"dropped_events": dropped}),
-            )) {
+            match self.server.respond(
+                LiveResponse::success(
+                    0,
+                    tick,
+                    "watch_backpressure",
+                    json!({"dropped_events": dropped}),
+                )
+                .with_runtime_identity(runtime_identity.clone()),
+            ) {
                 Ok(()) => self.dropped_watch_events = 0,
                 Err(LiveResponseSendError::Full(_)) => return,
                 Err(LiveResponseSendError::Disconnected) => {
@@ -463,12 +507,15 @@ impl LiveWorkspace {
                         continue;
                     }
                     self.watches.insert(path.clone(), Some(value));
-                    match self.server.respond(LiveResponse::success(
-                        0,
-                        tick,
-                        "watch_error",
-                        json!({"path": path, "error": error}),
-                    )) {
+                    match self.server.respond(
+                        LiveResponse::success(
+                            0,
+                            tick,
+                            "watch_error",
+                            json!({"path": path, "error": error}),
+                        )
+                        .with_runtime_identity(runtime_identity.clone()),
+                    ) {
                         Ok(()) => {}
                         Err(LiveResponseSendError::Full(_)) => {
                             self.dropped_watch_events = self.dropped_watch_events.saturating_add(1);
@@ -487,12 +534,15 @@ impl LiveWorkspace {
             }
             self.watches.insert(path.clone(), Some(value.clone()));
             let observed = inspection_observed_value(&value);
-            match self.server.respond(LiveResponse::success(
-                0,
-                tick,
-                "watch",
-                json!({"path": path, "value": observed, "inspection": value}),
-            )) {
+            match self.server.respond(
+                LiveResponse::success(
+                    0,
+                    tick,
+                    "watch",
+                    json!({"path": path, "value": observed, "inspection": value}),
+                )
+                .with_runtime_identity(runtime_identity.clone()),
+            ) {
                 Ok(()) => {}
                 Err(LiveResponseSendError::Full(_)) => {
                     self.dropped_watch_events = self.dropped_watch_events.saturating_add(1);
@@ -2974,6 +3024,12 @@ mod tests {
         );
 
         assert!(response.ok, "rename response: {response:?}");
+        let identity = response
+            .runtime_identity
+            .as_ref()
+            .expect("accepted runtime identity");
+        assert!(identity.source_hashes.contains_key("src/main.stasis"));
+        assert_eq!(identity.generation, workspace.host_entry_revision);
         let data = response.data.expect("rename preview data");
         assert_eq!(data["validated"], true);
         assert_eq!(data["old_name"], "score");

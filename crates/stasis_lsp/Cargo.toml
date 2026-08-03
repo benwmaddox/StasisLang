@@ -8,5 +8,6 @@ license.workspace = true
 lsp-server = "0.10.0"
 lsp-types = "0.97.0"
 serde_json.workspace = true
+serde.workspace = true
 stasis_language_service = { path = "../stasis_language_service" }
 url = "2.5"
