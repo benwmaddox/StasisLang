@@ -1,8 +1,13 @@
 #![forbid(unsafe_code)]
 
+mod live_process;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
@@ -29,49 +34,31 @@ use lsp_types::{
     WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde::Deserialize;
+use serde_json::{Map, Value};
 use stasis_language_service::{
     DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageLocation,
-    LanguageService, LanguageSymbol, LanguageSymbolKind, LiveIndexedCollection, LiveObservation,
-    LiveObservationBatch, Position, SignatureHelp as SharedSignatureHelp, TextChange,
+    LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
+    SignatureHelp as SharedSignatureHelp, TextChange,
 };
 use url::Url;
 
-const LIVE_OBSERVATIONS_METHOD: &str = "stasis/liveObservations";
+use crate::live_process::{LiveCacheEvent, LiveCacheMailbox, LiveProcessBroker};
 
-#[derive(Deserialize)]
-struct LiveRuntimeIdentityParams {
-    session_id: String,
-    generation: u64,
-    source_hashes: BTreeMap<String, String>,
+const LIVE_START_METHOD: &str = "stasis/live/start";
+const LIVE_STOP_METHOD: &str = "stasis/live/stop";
+const LIVE_REQUEST_METHOD: &str = "stasis/live/request";
+const MAX_LIVE_REQUEST_WORKERS: usize = 64;
+
+#[derive(Default, Deserialize)]
+struct LiveStartParams {
     #[serde(default)]
-    indexed_collections: Vec<LiveIndexedCollectionParams>,
-    #[serde(default)]
-    complete: bool,
+    entry: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct LiveIndexedCollectionParams {
-    path: String,
-    fields: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct LiveObservationParams {
-    path: String,
-    #[serde(default)]
-    type_name: Option<String>,
-    value: String,
-    tick: u64,
-}
-
-#[derive(Deserialize)]
-struct LiveObservationsParams {
-    #[serde(default)]
-    clear: bool,
-    #[serde(default)]
-    identity: Option<LiveRuntimeIdentityParams>,
-    #[serde(default)]
-    observations: Vec<LiveObservationParams>,
+struct LiveRequestParams {
+    #[serde(flatten)]
+    fields: Map<String, Value>,
 }
 
 pub fn run_stdio(project_root: &Path) -> Result<(), String> {
@@ -145,7 +132,14 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
         )
         .map_err(|error| format!("LSP initialization failed: {error}"))?;
 
-    let mut server = LanguageServer::new(project_root, completion_limit)?;
+    let notification_sender = connection.sender.clone();
+    let notify = Arc::new(move |method: &str, params: Value| {
+        let _ = notification_sender.send(Message::Notification(Notification::new(
+            method.to_string(),
+            params,
+        )));
+    });
+    let mut server = LanguageServer::new(project_root, completion_limit, notify)?;
     server.publish_diagnostics(&connection)?;
     for message in &connection.receiver {
         match message {
@@ -172,10 +166,23 @@ struct LanguageServer {
     uri_by_path: BTreeMap<String, Uri>,
     published_paths: BTreeSet<String>,
     completion_limit: usize,
+    live_process: LiveProcessBroker,
+    live_cache_event: LiveCacheMailbox,
+    live_request_workers: Arc<AtomicUsize>,
+}
+
+impl Drop for LanguageServer {
+    fn drop(&mut self) {
+        self.live_process.shutdown();
+    }
 }
 
 impl LanguageServer {
-    fn new(project_root: &Path, completion_limit: usize) -> Result<Self, String> {
+    fn new(
+        project_root: &Path,
+        completion_limit: usize,
+        notify: Arc<dyn Fn(&str, Value) + Send + Sync>,
+    ) -> Result<Self, String> {
         let project_root = absolute_path(project_root)?;
         let mut service = LanguageService::new(path_text(&project_root))?;
         let mut uri_by_path = BTreeMap::new();
@@ -187,15 +194,26 @@ impl LanguageServer {
             uri_by_path.insert(key.clone(), path_uri(&path)?);
             service.set_disk_document(key, text);
         }
+        let (live_process, live_cache_event) = LiveProcessBroker::new(&project_root, notify)?;
         Ok(Self {
             service,
             uri_by_path,
             published_paths: BTreeSet::new(),
             completion_limit,
+            live_process,
+            live_cache_event,
+            live_request_workers: Arc::new(AtomicUsize::new(0)),
         })
     }
 
     fn handle_request(&mut self, connection: &Connection, request: Request) -> Result<(), String> {
+        self.drain_live_cache();
+        if matches!(
+            request.method.as_str(),
+            LIVE_START_METHOD | LIVE_STOP_METHOD | LIVE_REQUEST_METHOD
+        ) {
+            return self.handle_live_request(connection, request);
+        }
         let response = match request.method.as_str() {
             Completion::METHOD => {
                 let (id, params): (_, CompletionParams) = request
@@ -290,50 +308,88 @@ impl LanguageServer {
             .map_err(|error| format!("failed sending LSP response: {error}"))
     }
 
+    fn handle_live_request(&self, connection: &Connection, request: Request) -> Result<(), String> {
+        let sender = connection.sender.clone();
+        let broker = self.live_process.clone();
+        let (id, task): (_, Box<dyn FnOnce() -> Result<Value, String> + Send>) =
+            match request.method.as_str() {
+                LIVE_START_METHOD => {
+                    let (id, params): (_, LiveStartParams) = request
+                        .extract(LIVE_START_METHOD)
+                        .map_err(|error| format!("invalid live-start request: {error}"))?;
+                    let entry = params.entry;
+                    (id, Box::new(move || broker.start(entry.as_deref())))
+                }
+                LIVE_STOP_METHOD => {
+                    let (id, _): (_, Value) = request
+                        .extract(LIVE_STOP_METHOD)
+                        .map_err(|error| format!("invalid live-stop request: {error}"))?;
+                    (id, Box::new(move || broker.stop()))
+                }
+                LIVE_REQUEST_METHOD => {
+                    let (id, params): (_, LiveRequestParams) = request
+                        .extract(LIVE_REQUEST_METHOD)
+                        .map_err(|error| format!("invalid live request: {error}"))?;
+                    (id, Box::new(move || broker.request(params.fields)))
+                }
+                _ => unreachable!("custom live request was prefiltered"),
+            };
+        let workers = self.live_request_workers.clone();
+        if workers
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_LIVE_REQUEST_WORKERS).then_some(count + 1)
+            })
+            .is_err()
+        {
+            let response = internal_error(
+                id,
+                format!(
+                    "live requests are limited to {MAX_LIVE_REQUEST_WORKERS} concurrent operations"
+                ),
+            );
+            return connection
+                .sender
+                .send(Message::Response(response))
+                .map_err(|error| format!("failed sending live backpressure response: {error}"));
+        }
+        let worker_result = thread::Builder::new()
+            .name("stasis-lsp-live-request".to_string())
+            .spawn(move || {
+                let response = match task() {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                };
+                let _ = sender.send(Message::Response(response));
+                workers.fetch_sub(1, Ordering::AcqRel);
+            })
+            .map_err(|error| format!("failed starting live request worker: {error}"));
+        if let Err(error) = worker_result {
+            self.live_request_workers.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn drain_live_cache(&mut self) {
+        let event = self
+            .live_cache_event
+            .lock()
+            .ok()
+            .and_then(|mut mailbox| mailbox.take());
+        if let Some(event) = event {
+            match event {
+                LiveCacheEvent::Publish(batch) => self.service.publish_live_observations(batch),
+                LiveCacheEvent::Clear => self.service.clear_live_observations(),
+            }
+        }
+    }
+
     fn handle_notification(
         &mut self,
         connection: &Connection,
         notification: Notification,
     ) -> Result<(), String> {
         match notification.method.as_str() {
-            LIVE_OBSERVATIONS_METHOD => {
-                let params: LiveObservationsParams = notification
-                    .extract(LIVE_OBSERVATIONS_METHOD)
-                    .map_err(|error| format!("invalid live-observations notification: {error}"))?;
-                if params.clear {
-                    self.service.clear_live_observations();
-                    return Ok(());
-                }
-                let identity = params
-                    .identity
-                    .ok_or_else(|| "live observations require runtime identity".to_string())?;
-                self.service
-                    .publish_live_observations(LiveObservationBatch {
-                        session_id: identity.session_id,
-                        generation: identity.generation,
-                        source_hashes: identity.source_hashes,
-                        indexed_collections: identity
-                            .indexed_collections
-                            .into_iter()
-                            .map(|collection| LiveIndexedCollection {
-                                path: collection.path,
-                                fields: collection.fields,
-                            })
-                            .collect(),
-                        complete: identity.complete,
-                        observations: params
-                            .observations
-                            .into_iter()
-                            .map(|observation| LiveObservation {
-                                path: observation.path,
-                                type_name: observation.type_name,
-                                value: observation.value,
-                                tick: observation.tick,
-                            })
-                            .collect(),
-                    });
-                Ok(())
-            }
             DidOpenTextDocument::METHOD => {
                 let params: DidOpenTextDocumentParams = notification
                     .extract(DidOpenTextDocument::METHOD)
@@ -975,7 +1031,7 @@ fn stasis_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 mod tests {
     use super::*;
     use lsp_server::RequestId;
-    use stasis_language_service::workshop_source_hash;
+    use stasis_language_service::{workshop_source_hash, LiveObservation, LiveObservationBatch};
     use std::time::Duration;
 
     fn test_server(name: &str) -> (LanguageServer, Uri, String) {
@@ -984,12 +1040,17 @@ mod tests {
         let uri = path_uri(&path).expect("file URI");
         let key = path_text(&path);
         let service = LanguageService::new(path_text(&root)).expect("language service");
+        let (live_process, live_cache_event) =
+            LiveProcessBroker::new(&root, Arc::new(|_, _| {})).expect("live broker");
         (
             LanguageServer {
                 service,
                 uri_by_path: BTreeMap::new(),
                 published_paths: BTreeSet::new(),
                 completion_limit: 64,
+                live_process,
+                live_cache_event,
+                live_request_workers: Arc::new(AtomicUsize::new(0)),
             },
             uri,
             key,
@@ -1007,6 +1068,54 @@ mod tests {
                 return response;
             }
         }
+    }
+
+    #[test]
+    fn live_requests_are_dispatched_asynchronously_through_the_lsp_broker() {
+        let (mut server, _, _) = test_server("live-request-dispatch");
+        let (server_connection, client_connection) = Connection::memory();
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(90),
+                    LIVE_REQUEST_METHOD.to_string(),
+                    serde_json::json!({"type": "pause"}),
+                ),
+            )
+            .expect("dispatch live request");
+        let response = receive_response(&client_connection, 90);
+        assert_eq!(
+            response
+                .response_result
+                .expect_err("missing session error")
+                .message,
+            "no LSP-owned live Workshop session is running"
+        );
+    }
+
+    #[test]
+    fn live_request_workers_apply_backpressure_before_spawning() {
+        let (mut server, _, _) = test_server("live-request-backpressure");
+        let (server_connection, client_connection) = Connection::memory();
+        server
+            .live_request_workers
+            .store(MAX_LIVE_REQUEST_WORKERS, Ordering::Release);
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(91),
+                    LIVE_REQUEST_METHOD.to_string(),
+                    serde_json::json!({"type": "pause"}),
+                ),
+            )
+            .expect("bounded live request");
+        assert!(receive_response(&client_connection, 91)
+            .response_result
+            .expect_err("backpressure error")
+            .message
+            .contains("limited to 64 concurrent operations"));
     }
 
     #[test]
@@ -1162,27 +1271,23 @@ mod tests {
             )
             .expect("didOpen");
         server
-            .handle_notification(
-                &server_connection,
-                Notification::new(
-                    LIVE_OBSERVATIONS_METHOD.to_string(),
-                    serde_json::json!({
-                        "identity": {
-                            "session_id": "test-live-session",
-                            "generation": 3,
-                            "complete": true,
-                            "source_hashes": { "src/main.stasis": workshop_source_hash(source) }
-                        },
-                        "observations": [{
-                            "path": "score",
-                            "type_name": "i32",
-                            "value": "2",
-                            "tick": 9
-                        }]
-                    }),
-                ),
-            )
-            .expect("live observations");
+            .service
+            .publish_live_observations(LiveObservationBatch {
+                session_id: "test-live-session".to_string(),
+                generation: 3,
+                complete: true,
+                source_hashes: BTreeMap::from([(
+                    "src/main.stasis".to_string(),
+                    workshop_source_hash(source),
+                )]),
+                indexed_collections: Vec::new(),
+                observations: vec![LiveObservation {
+                    path: "score".to_string(),
+                    type_name: Some("i32".to_string()),
+                    value: "2".to_string(),
+                    tick: 9,
+                }],
+            });
 
         let completion_offset = source.rfind("spawn_enemy(1").expect("function use") + 5;
         let completion_position = lsp_position(
@@ -1297,15 +1402,7 @@ mod tests {
             panic!("expected live markdown hover");
         };
         assert!(live_contents.value.contains("Live value:** `2 (tick 9)`"));
-        server
-            .handle_notification(
-                &server_connection,
-                Notification::new(
-                    LIVE_OBSERVATIONS_METHOD.to_string(),
-                    serde_json::json!({ "clear": true }),
-                ),
-            )
-            .expect("clear live observations");
+        server.service.clear_live_observations();
         assert_eq!(
             server
                 .service

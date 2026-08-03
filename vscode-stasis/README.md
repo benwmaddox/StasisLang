@@ -91,6 +91,8 @@ development locations. Linux runs need a display such as `xvfb-run`; GitHub CI s
 The extension starts one persistent `stasis lsp --stdio` server per Stasis workspace. Language and
 runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
 share them. Formatting still uses its migration adapter until its LSP operation lands in a later
-slice. Diagnostics, hover, signature help, and normal completion use the persistent language server;
-an active Workshop session currently adds runtime-only indexed collection fields through its live
-completion overlay until that data is composed by the language server.
+slice. Diagnostics, hover, signature help, completion, navigation, symbols, and rename use the
+persistent language server. The same server launches and controls the Live Workshop through bounded
+custom LSP requests, owns runtime observations, and composes compatible live values and indexed
+collection fields into standard hover and completion responses. The extension does not spawn or
+parse a parallel live JSON process.

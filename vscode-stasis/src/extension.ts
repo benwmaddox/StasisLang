@@ -9,7 +9,7 @@ import {
   Trace,
 } from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
-import { displayRuntimeValue, LiveResponse, LiveRuntimeIdentity, LiveValue } from "./protocol";
+import { displayRuntimeValue, LiveResponse, LiveValue } from "./protocol";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
   { language: "stasis", scheme: "file" },
@@ -264,11 +264,7 @@ class LiveController implements vscode.Disposable {
   constructor(
     private readonly values: LiveValuesProvider,
     private readonly output: vscode.OutputChannel,
-    private readonly publishLiveObservations: (
-      root: string,
-      identity: LiveRuntimeIdentity | undefined,
-      values: readonly LiveValue[],
-    ) => void,
+    private readonly clientForRoot: (root: string) => LanguageClient | undefined,
   ) {
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
     this.status.command = "stasis.startPlaySession";
@@ -309,9 +305,13 @@ class LiveController implements vscode.Disposable {
     }
     this.current?.dispose();
     this.disposeSessionSubscriptions();
+    const client = this.clientForRoot(root);
+    if (!client) {
+      throw new Error(`The Stasis language server is not ready for ${root}.`);
+    }
     const session = new LiveSession(
       root,
-      executablePath(),
+      client,
       configuration().get<string>("live.entry", ""),
       this.output,
     );
@@ -319,11 +319,9 @@ class LiveController implements vscode.Disposable {
     this.sessionSubscriptions = [
       session.onDidChangeState((state) => {
         this.updateState(state);
-        this.publishLiveObservations(session.root, session.runtimeIdentity, session.values);
       }),
       session.onDidChangeValues((values) => {
         this.values.update(session.state, values);
-        this.publishLiveObservations(session.root, session.runtimeIdentity, values);
       }),
     ];
     this.updateState("starting");
@@ -356,9 +354,6 @@ class LiveController implements vscode.Disposable {
     void vscode.commands.executeCommand("setContext", "stasis.liveSessionActive", state !== "stopped");
     void vscode.commands.executeCommand("setContext", "stasis.liveSessionRunning", state === "running");
     void vscode.commands.executeCommand("setContext", "stasis.liveSessionPaused", state === "paused");
-    if (state === "stopped" && this.current) {
-      this.publishLiveObservations(this.current.root, undefined, []);
-    }
   }
 
   private disposeSessionSubscriptions(): void {
@@ -403,28 +398,8 @@ class StasisLanguageClients implements vscode.Disposable {
     await Promise.all(folders.map((folder) => this.startFolder(folder)));
   }
 
-  publishLiveObservations(
-    root: string,
-    identity: LiveRuntimeIdentity | undefined,
-    values: readonly LiveValue[],
-  ): void {
-    const client = this.clients.get(root);
-    if (!client) {
-      return;
-    }
-    if (!identity) {
-      void client.sendNotification("stasis/liveObservations", { clear: true });
-      return;
-    }
-    void client.sendNotification("stasis/liveObservations", {
-      identity,
-      observations: values.map((value) => ({
-        path: value.path,
-        type_name: value.staticType,
-        value: displayRuntimeValue(value.value),
-        tick: value.tick,
-      })),
-    });
+  clientForRoot(root: string): LanguageClient | undefined {
+    return this.clients.get(root);
   }
 
   dispose(): void {
@@ -537,8 +512,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
   const controller = new LiveController(
     values,
     output,
-    (root, identity, liveValues) =>
-      languageClients.publishLiveObservations(root, identity, liveValues),
+    (root) => languageClients.clientForRoot(root),
   );
   const tests = new StasisTests(output);
   const command = (name: string, action: (...args: unknown[]) => Promise<void>) =>

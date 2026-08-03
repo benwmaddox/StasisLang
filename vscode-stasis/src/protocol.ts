@@ -29,25 +29,6 @@ export interface LiveValue {
   watched: boolean;
 }
 
-export class JsonLineDecoder {
-  private buffered = "";
-
-  push(chunk: string): unknown[] {
-    this.buffered += chunk;
-    const lines = this.buffered.split(/\r?\n/);
-    this.buffered = lines.pop() ?? "";
-    return lines
-      .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as unknown);
-  }
-
-  finish(): unknown[] {
-    const tail = this.buffered.trim();
-    this.buffered = "";
-    return tail.length === 0 ? [] : [JSON.parse(tail) as unknown];
-  }
-}
-
 export function isLiveResponse(value: unknown): value is LiveResponse {
   if (typeof value !== "object" || value === null) {
     return false;

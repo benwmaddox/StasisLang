@@ -217,9 +217,11 @@ Each slice is independently testable and removes the host-specific path it repla
   hover values only when owning-file hashes and static types match the current semantic snapshot.
 - [x] Route runtime-only indexed collection completion through the standard LSP and remove the
   VSIX's final direct completion provider/CLI fallback.
-- [ ] Move launch/attach, pause/step, watches, inspection, and cache ownership fully behind custom
-  LSP methods; the current VSIX live-session client is a compatibility bridge that forwards
-  revision-tagged observations.
+- [x] Move LSP-launched session lifecycle, pause/resume/step, watches, inspection, event streaming,
+  and runtime cache ownership behind bounded asynchronous custom LSP methods. Delete the VSIX
+  child-process/JSONL compatibility bridge.
+- [ ] Add external-process attach after the runtime exposes an authenticated attachable IPC
+  endpoint; the existing live-stdio protocol is child-process-only and cannot safely attach.
 - [x] Route TUI diagnostics, hover/type/live values, definitions, completion, and rename preview
   through one persistent in-process `LanguageService` and its live-observation broker, retaining
   deterministic host-owned command queues and presentation.
@@ -387,3 +389,21 @@ the same revisioned Rust operations and live-observation broker while each retai
 queue and response format. The persistent-service test proves that static identity and runtime
 values compose in-process; this predicts that live edit preview and rollback can share broker
 state without routing TUI commands through JSON-RPC.
+
+### LSP-owned Live Workshop process implementation
+
+- Good: the packaged VSIX test exercised launch, pause, indexed completion, inspection, live hover,
+  watches, stepping, hot swap, resume, framebuffer capture, and stop after the extension's direct
+  child-process and JSONL decoder were deleted.
+- Bad: the old observation-forwarding bridge duplicated runtime values in TypeScript and made the
+  language server a passive cache recipient even though it owned the semantic side of the join.
+- Adjustment: keep long-running custom operations on bounded worker threads, keep runtime protocol
+  correlation and cache publication in one Rust broker, and leave the main LSP loop available for
+  ordinary language requests.
+
+Theory gained: process ownership and semantic cache ownership must meet on the server side of the
+LSP boundary. The end-to-end test proves that VS Code needs only custom requests and notifications
+while standard completion and hover consume the same server-owned cache. This predicts that tested
+edit preview/apply can move behind the broker without adding another extension-side compiler or
+runtime client. External attach remains a distinct runtime transport problem because stdio has no
+discoverable or authenticated endpoint.
