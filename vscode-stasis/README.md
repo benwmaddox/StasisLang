@@ -8,7 +8,8 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 - compiler-backed LSP completion with signatures, documentation, snippets, typed local/member
   ranking, and safe import edits;
 - compiler-aware hover and signature help;
-- compiler-backed **Go to Definition** and **Find All References**;
+- compiler-backed LSP **Go to Definition**, **Find All References**, Outline, breadcrumbs, and
+  workspace symbol search;
 - `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;

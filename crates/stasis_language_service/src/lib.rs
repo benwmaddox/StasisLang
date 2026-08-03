@@ -10,10 +10,12 @@ use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
-    workshop_completion_items, workshop_reachable_files, workshop_source_items,
-    WorkshopCompletionItem, WorkshopCompletionScope, WorkshopSourceFile, WorkshopSourceItem,
-    WorkshopSourceItemKind,
+    find_workshop_references, workshop_completion_items, workshop_reachable_files,
+    workshop_source_items, workshop_symbols, WorkshopCompletionItem, WorkshopCompletionScope,
+    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol,
+    WorkshopSymbolKind,
 };
+pub use stasis_compiler::frontend::workshop::{WorkshopReference, WorkshopReferenceKind};
 use stasis_compiler::identity::canonical_source_path;
 pub use stasis_runner::live::{
     CompletionContext, CompletionIndex, CompletionItem, CompletionQuery, CompletionScope,
@@ -378,12 +380,37 @@ pub struct SignatureHelp {
     pub active_parameter: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageLocation {
+    pub path: String,
+    pub range: Range<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageSymbolKind {
+    Struct,
+    Function,
+    Global,
+    Constant,
+    Test,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageSymbol {
+    pub name: String,
+    pub kind: LanguageSymbolKind,
+    pub detail: String,
+    pub container_name: Option<String>,
+    pub location: LanguageLocation,
+}
+
 struct LanguageIndex {
     revision: WorkspaceRevision,
     files: Vec<WorkshopSourceFile>,
     source_items: Vec<WorkshopSourceItem>,
     completion: CompletionIndex,
     workshop_items: Vec<WorkshopCompletionItem>,
+    symbols: Vec<WorkshopSymbol>,
 }
 
 #[derive(Clone, Default)]
@@ -437,6 +464,21 @@ impl LanguageCompletionSnapshot {
             index.extend(items.iter().map(shared_completion_item));
         }
         index.query_with_context(buffer, cursor, limit, &effective_context)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct LanguageNavigationSnapshot {
+    files: Vec<WorkshopSourceFile>,
+}
+
+impl LanguageNavigationSnapshot {
+    pub fn new(files: Vec<WorkshopSourceFile>) -> Self {
+        Self { files }
+    }
+
+    pub fn references(&self, symbol: &str, limit: usize) -> Result<Vec<WorkshopReference>, String> {
+        find_workshop_references(&self.files, symbol, limit)
     }
 }
 
@@ -673,6 +715,97 @@ impl LanguageService {
         }))
     }
 
+    pub fn definition(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+    ) -> Result<Vec<LanguageLocation>, String> {
+        Ok(self
+            .symbol_references(path, byte_offset)?
+            .into_iter()
+            .filter_map(|(kind, location)| {
+                (kind == WorkshopReferenceKind::Definition).then_some(location)
+            })
+            .collect())
+    }
+
+    pub fn references(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+        include_declaration: bool,
+    ) -> Result<Vec<LanguageLocation>, String> {
+        Ok(self
+            .symbol_references(path, byte_offset)?
+            .into_iter()
+            .filter_map(|(kind, location)| {
+                (include_declaration || kind != WorkshopReferenceKind::Definition)
+                    .then_some(location)
+            })
+            .collect())
+    }
+
+    pub fn document_symbols(&mut self, path: &str) -> Result<Vec<LanguageSymbol>, String> {
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let project_root = self.project_root.clone();
+        Ok(self
+            .language_index()?
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.file == relative)
+            .map(|symbol| language_symbol(&project_root, symbol))
+            .collect())
+    }
+
+    pub fn workspace_symbols(
+        &mut self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LanguageSymbol>, String> {
+        let query = query.to_ascii_lowercase();
+        let project_root = self.project_root.clone();
+        Ok(self
+            .language_index()?
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                query.is_empty()
+                    || symbol.name.to_ascii_lowercase().contains(&query)
+                    || symbol.signature.to_ascii_lowercase().contains(&query)
+            })
+            .take(limit.clamp(1, 256))
+            .map(|symbol| language_symbol(&project_root, symbol))
+            .collect())
+    }
+
+    fn symbol_references(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+    ) -> Result<Vec<(WorkshopReferenceKind, LanguageLocation)>, String> {
+        let snapshot = self.documents.snapshot();
+        let document = snapshot
+            .document(path)
+            .ok_or_else(|| format!("navigation document is not indexed: '{path}'"))?;
+        let symbol = reference_symbol_at(&document.text, byte_offset)
+            .ok_or_else(|| "no Stasis symbol at navigation position".to_string())?;
+        let project_root = self.project_root.clone();
+        let index = self.language_index()?;
+        Ok(find_workshop_references(&index.files, &symbol, 256)?
+            .into_iter()
+            .map(|reference| {
+                (
+                    reference.kind,
+                    LanguageLocation {
+                        path: absolute_source_path(&project_root, &reference.file),
+                        range: reference.source_span.start as usize
+                            ..reference.source_span.end as usize,
+                    },
+                )
+            })
+            .collect())
+    }
+
     fn language_index(&mut self) -> Result<&LanguageIndex, String> {
         let snapshot = self.documents.snapshot();
         if self
@@ -690,6 +823,7 @@ impl LanguageService {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             let source_items = workshop_source_items(&files)?;
+            let symbols = workshop_symbols(&files)?;
             let workshop_items = workshop_completion_items(&files)?;
             let completion_items = workshop_items
                 .iter()
@@ -703,6 +837,7 @@ impl LanguageService {
                 source_items,
                 completion,
                 workshop_items,
+                symbols,
             });
         }
         self.language_index
@@ -1099,6 +1234,84 @@ fn identifier_path_range(source: &str, byte_offset: usize) -> Option<Range<usize
         end = tokens[right_index].end;
     }
     Some(start..end)
+}
+
+fn reference_symbol_at(source: &str, byte_offset: usize) -> Option<String> {
+    if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
+        return None;
+    }
+    let tokens = lex(source).ok()?;
+    let token = tokens.iter().find(|token| {
+        token.kind == TokenKind::Identifier
+            && token.start <= byte_offset
+            && byte_offset <= token.end
+    })?;
+    let line_start = source[..token.start]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let prefix = &source[line_start..token.end];
+    let mut start = prefix.len();
+    let mut bracket_depth = 0usize;
+    for (index, character) in prefix.char_indices().rev() {
+        match character {
+            ']' => bracket_depth = bracket_depth.saturating_add(1),
+            '[' if bracket_depth > 0 => bracket_depth -= 1,
+            _ if bracket_depth > 0 => {}
+            character
+                if character.is_ascii_alphanumeric() || character == '_' || character == '.' => {}
+            _ => {
+                start = index + character.len_utf8();
+                break;
+            }
+        }
+        start = index;
+    }
+    let mut normalized = String::new();
+    bracket_depth = 0;
+    for character in prefix[start..].chars() {
+        match character {
+            '[' => bracket_depth = bracket_depth.saturating_add(1),
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            _ if bracket_depth > 0 || character.is_ascii_whitespace() => {}
+            _ => normalized.push(character),
+        }
+    }
+    normalized
+        .split('.')
+        .all(|segment| {
+            let mut bytes = segment.bytes();
+            bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+        .then_some(normalized)
+}
+
+fn absolute_source_path(project_root: &str, relative_path: &str) -> String {
+    Path::new(project_root)
+        .join(relative_path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn language_symbol(project_root: &str, symbol: &WorkshopSymbol) -> LanguageSymbol {
+    LanguageSymbol {
+        name: symbol.name.clone(),
+        kind: match symbol.kind {
+            WorkshopSymbolKind::Struct => LanguageSymbolKind::Struct,
+            WorkshopSymbolKind::Function => LanguageSymbolKind::Function,
+            WorkshopSymbolKind::Global => LanguageSymbolKind::Global,
+            WorkshopSymbolKind::Constant => LanguageSymbolKind::Constant,
+            WorkshopSymbolKind::Test => LanguageSymbolKind::Test,
+        },
+        detail: symbol.signature.clone(),
+        container_name: symbol.owner.clone(),
+        location: LanguageLocation {
+            path: absolute_source_path(project_root, &symbol.file),
+            range: symbol.source_span.start as usize..symbol.source_span.end as usize,
+        },
+    }
 }
 
 struct CallContext {
@@ -1593,6 +1806,70 @@ function main(): i32 {
             help.signatures[0].documentation.as_deref(),
             Some("Creates an enemy with explicit health.")
         );
+    }
+
+    #[test]
+    fn navigation_and_symbols_share_compiler_owned_spans() {
+        let (mut service, path, source) = intelligence_service();
+        let call = source.find("spawn_enemy(1").expect("function call") + 2;
+        let definitions = service.definition(&path, call).expect("definition");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].path, path);
+        assert_eq!(&source[definitions[0].range.clone()], "spawn_enemy");
+
+        let references = service.references(&path, call, true).expect("references");
+        assert!(references.len() >= 2);
+        assert!(references
+            .iter()
+            .all(|location| &source[location.range.clone()] == "spawn_enemy"));
+
+        let document = service.document_symbols(&path).expect("document symbols");
+        assert!(document
+            .iter()
+            .any(|symbol| { symbol.name == "Enemy" && symbol.kind == LanguageSymbolKind::Struct }));
+        assert!(document.iter().any(|symbol| {
+            symbol.name == "spawn_enemy" && symbol.kind == LanguageSymbolKind::Function
+        }));
+        let workspace = service
+            .workspace_symbols("spawn", 64)
+            .expect("workspace symbols");
+        assert_eq!(workspace.len(), 1);
+        assert_eq!(workspace[0].name, "spawn_enemy");
+    }
+
+    #[test]
+    fn indexed_reference_symbol_uses_semantic_field_path() {
+        let source = "state.enemies[0].speed = 4;";
+        let offset = source.find("speed").expect("speed") + 2;
+        assert_eq!(
+            reference_symbol_at(source, offset).as_deref(),
+            Some("state.enemies.speed")
+        );
+    }
+
+    #[test]
+    fn global_receiver_and_owned_field_navigate_to_distinct_definitions() {
+        let root = std::env::temp_dir().join("stasis-language-service-global-field-navigation");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct State { x: i32; }\nglobal state: State;\nfunction main(): i32 { state.x = 7; return state.x; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let use_start = source.find("state.x =").expect("global field use");
+
+        let global = service
+            .definition(&path_text, use_start + 2)
+            .expect("global definition");
+        assert_eq!(global.len(), 1);
+        assert_eq!(&source[global[0].range.clone()], "state");
+        assert_eq!(source[..global[0].range.start].matches('\n').count(), 1);
+
+        let field = service
+            .definition(&path_text, use_start + "state.".len())
+            .expect("field definition");
+        assert_eq!(field.len(), 1);
+        assert_eq!(&source[field[0].range.clone()], "x");
+        assert_eq!(source[..field[0].range.start].matches('\n').count(), 0);
     }
 
     #[test]

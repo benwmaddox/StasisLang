@@ -9,20 +9,26 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
     Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Completion, HoverRequest, Request as _, SignatureHelpRequest};
+use lsp_types::request::{
+    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, References, Request as _,
+    SignatureHelpRequest, WorkspaceSymbolRequest,
+};
 use lsp_types::{
     CompletionItemKind, CompletionList, CompletionOptions, CompletionParams, CompletionResponse,
     CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, Documentation, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InsertTextFormat,
-    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, PositionEncodingKind,
-    PublishDiagnosticsParams, SaveOptions, ServerCapabilities, ServerInfo, SignatureHelpOptions,
-    SignatureHelpParams, TextDocumentContentChangeEvent, TextDocumentPositionParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, ParameterInformation,
+    ParameterLabel, PositionEncodingKind, PublishDiagnosticsParams, ReferenceParams, SaveOptions,
+    ServerCapabilities, ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation,
+    SymbolKind, TextDocumentContentChangeEvent, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, TextEdit, Uri,
+    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use stasis_language_service::{
-    DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageService, Position,
+    DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageLocation,
+    LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
     SignatureHelp as SharedSignatureHelp, TextChange,
 };
 use url::Url;
@@ -75,6 +81,10 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
                 retrigger_characters: Some(vec![",".to_string()]),
                 work_done_progress_options: Default::default(),
             }),
+            definition_provider: Some(OneOf::Left(true)),
+            references_provider: Some(OneOf::Left(true)),
+            document_symbol_provider: Some(OneOf::Left(true)),
+            workspace_symbol_provider: Some(OneOf::Left(true)),
             ..ServerCapabilities::default()
         },
         server_info: Some(ServerInfo {
@@ -165,6 +175,42 @@ impl LanguageServer {
                     .extract(SignatureHelpRequest::METHOD)
                     .map_err(|error| format!("invalid signature-help request: {error}"))?;
                 match self.signature_help(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            GotoDefinition::METHOD => {
+                let (id, params): (_, GotoDefinitionParams) = request
+                    .extract(GotoDefinition::METHOD)
+                    .map_err(|error| format!("invalid definition request: {error}"))?;
+                match self.definition(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            References::METHOD => {
+                let (id, params): (_, ReferenceParams) = request
+                    .extract(References::METHOD)
+                    .map_err(|error| format!("invalid references request: {error}"))?;
+                match self.references(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            DocumentSymbolRequest::METHOD => {
+                let (id, params): (_, DocumentSymbolParams) = request
+                    .extract(DocumentSymbolRequest::METHOD)
+                    .map_err(|error| format!("invalid document-symbol request: {error}"))?;
+                match self.document_symbols(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            WorkspaceSymbolRequest::METHOD => {
+                let (id, params): (_, WorkspaceSymbolParams) = request
+                    .extract(WorkspaceSymbolRequest::METHOD)
+                    .map_err(|error| format!("invalid workspace-symbol request: {error}"))?;
+                match self.workspace_symbols(params) {
                     Ok(result) => Response::new_ok(id, result),
                     Err(error) => internal_error(id, error),
                 }
@@ -305,6 +351,109 @@ impl LanguageServer {
             .service
             .signature_help(&path, byte_offset)?
             .map(lsp_signature_help))
+    }
+
+    fn definition(
+        &mut self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>, String> {
+        let (path, _, byte_offset) =
+            self.document_position(params.text_document_position_params)?;
+        let locations = self
+            .service
+            .definition(&path, byte_offset)?
+            .into_iter()
+            .map(|location| self.lsp_location(location))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)))
+    }
+
+    fn references(&mut self, params: ReferenceParams) -> Result<Option<Vec<Location>>, String> {
+        let (path, _, byte_offset) = self.document_position(params.text_document_position)?;
+        let locations = self
+            .service
+            .references(&path, byte_offset, params.context.include_declaration)?
+            .into_iter()
+            .map(|location| self.lsp_location(location))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!locations.is_empty()).then_some(locations))
+    }
+
+    fn document_symbols(
+        &mut self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>, String> {
+        let path = path_text(&uri_path(&params.text_document.uri)?);
+        let symbols = self
+            .service
+            .document_symbols(&path)?
+            .into_iter()
+            .map(|symbol| self.lsp_document_symbol(symbol))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!symbols.is_empty()).then_some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    #[allow(deprecated)]
+    fn workspace_symbols(
+        &mut self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<WorkspaceSymbolResponse>, String> {
+        let symbols = self
+            .service
+            .workspace_symbols(&params.query, 256)?
+            .into_iter()
+            .map(|symbol| {
+                let location = self.lsp_location(symbol.location.clone())?;
+                Ok(SymbolInformation {
+                    name: symbol.name,
+                    kind: lsp_symbol_kind(symbol.kind),
+                    tags: None,
+                    deprecated: None,
+                    location,
+                    container_name: symbol.container_name,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((!symbols.is_empty()).then_some(WorkspaceSymbolResponse::Flat(symbols)))
+    }
+
+    fn lsp_location(&self, location: LanguageLocation) -> Result<Location, String> {
+        let document = self
+            .service
+            .snapshot()
+            .document(&location.path)
+            .cloned()
+            .ok_or_else(|| format!("navigation target is not indexed: '{}'", location.path))?;
+        let start = document
+            .position(location.range.start)
+            .map_err(|error| error.to_string())?;
+        let end = document
+            .position(location.range.end)
+            .map_err(|error| error.to_string())?;
+        let uri = self
+            .uri_by_path
+            .get(&location.path)
+            .cloned()
+            .unwrap_or(path_uri(Path::new(&location.path))?);
+        Ok(Location::new(
+            uri,
+            lsp_types::Range::new(lsp_position(start), lsp_position(end)),
+        ))
+    }
+
+    #[allow(deprecated)]
+    fn lsp_document_symbol(&self, symbol: LanguageSymbol) -> Result<DocumentSymbol, String> {
+        let location = self.lsp_location(symbol.location)?;
+        Ok(DocumentSymbol {
+            name: symbol.name,
+            detail: Some(symbol.detail),
+            kind: lsp_symbol_kind(symbol.kind),
+            tags: None,
+            deprecated: None,
+            range: location.range,
+            selection_range: location.range,
+            children: None,
+        })
     }
 
     fn document_position(
@@ -517,6 +666,16 @@ fn completion_kind(kind: &str) -> CompletionItemKind {
         "constant" => CompletionItemKind::CONSTANT,
         "keyword" | "command" => CompletionItemKind::KEYWORD,
         _ => CompletionItemKind::TEXT,
+    }
+}
+
+fn lsp_symbol_kind(kind: LanguageSymbolKind) -> SymbolKind {
+    match kind {
+        LanguageSymbolKind::Struct => SymbolKind::STRUCT,
+        LanguageSymbolKind::Function => SymbolKind::FUNCTION,
+        LanguageSymbolKind::Global => SymbolKind::VARIABLE,
+        LanguageSymbolKind::Constant => SymbolKind::CONSTANT,
+        LanguageSymbolKind::Test => SymbolKind::FUNCTION,
     }
 }
 
@@ -945,6 +1104,90 @@ mod tests {
             help.signatures[0].label,
             "spawn_enemy(count: i32, health: i32): i32"
         );
+
+        for (id, method, params) in [
+            (
+                13,
+                GotoDefinition::METHOD,
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": function_position
+                }),
+            ),
+            (
+                14,
+                References::METHOD,
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": function_position,
+                    "context": { "includeDeclaration": true }
+                }),
+            ),
+            (
+                15,
+                DocumentSymbolRequest::METHOD,
+                serde_json::json!({ "textDocument": { "uri": uri } }),
+            ),
+            (
+                16,
+                WorkspaceSymbolRequest::METHOD,
+                serde_json::json!({ "query": "spawn" }),
+            ),
+        ] {
+            server
+                .handle_request(
+                    &server_connection,
+                    Request::new(RequestId::from(id), method.to_string(), params),
+                )
+                .expect("navigation request");
+        }
+        let definition: Option<GotoDefinitionResponse> = serde_json::from_value(
+            receive_response(&client_connection, 13)
+                .response_result
+                .expect("definition result"),
+        )
+        .expect("definition response");
+        let GotoDefinitionResponse::Array(definitions) = definition.expect("definition") else {
+            panic!("expected definition locations");
+        };
+        assert_eq!(definitions.len(), 1);
+
+        let references: Option<Vec<Location>> = serde_json::from_value(
+            receive_response(&client_connection, 14)
+                .response_result
+                .expect("references result"),
+        )
+        .expect("references response");
+        assert!(references.expect("references").len() >= 2);
+
+        let document_symbols: Option<DocumentSymbolResponse> = serde_json::from_value(
+            receive_response(&client_connection, 15)
+                .response_result
+                .expect("document symbols result"),
+        )
+        .expect("document-symbol response");
+        let DocumentSymbolResponse::Nested(document_symbols) =
+            document_symbols.expect("document symbols")
+        else {
+            panic!("expected nested document symbols");
+        };
+        assert!(document_symbols
+            .iter()
+            .any(|symbol| symbol.name == "spawn_enemy"));
+
+        let workspace_symbols: Option<WorkspaceSymbolResponse> = serde_json::from_value(
+            receive_response(&client_connection, 16)
+                .response_result
+                .expect("workspace symbols result"),
+        )
+        .expect("workspace-symbol response");
+        let WorkspaceSymbolResponse::Flat(workspace_symbols) =
+            workspace_symbols.expect("workspace symbols")
+        else {
+            panic!("expected flat workspace symbols");
+        };
+        assert_eq!(workspace_symbols.len(), 1);
+        assert_eq!(workspace_symbols[0].name, "spawn_enemy");
     }
 
     #[cfg(windows)]

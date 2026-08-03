@@ -4,15 +4,14 @@ use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
-    plan_workshop_semantic_edits, workshop_completion_items, workshop_direct_import_files,
-    workshop_reachable_files, workshop_source_hash, workshop_source_items,
-    write_workshop_semantic_plan, write_workshop_semantic_receipt, ExpectedReload,
-    WorkshopCompletionItem, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
-    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
-    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
+    workshop_completion_items, workshop_direct_import_files, workshop_reachable_files,
+    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
+    write_workshop_semantic_receipt, ExpectedReload, WorkshopCompletionItem, WorkshopSemanticEdit,
+    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
+    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
-use stasis_language_service::LanguageCompletionSnapshot;
+use stasis_language_service::{LanguageCompletionSnapshot, LanguageNavigationSnapshot};
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
     CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
@@ -588,7 +587,8 @@ impl LiveWorkspace {
                 "references",
                 json!({
                     "symbol": symbol,
-                    "references": find_workshop_references(&self.source_files, &symbol, limit)?,
+                    "references": LanguageNavigationSnapshot::new(self.source_files.clone())
+                        .references(&symbol, limit)?,
                 }),
             )),
             LiveCommand::Validate {

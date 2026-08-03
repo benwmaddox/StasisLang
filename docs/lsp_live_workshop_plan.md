@@ -185,9 +185,15 @@ Each slice is independently testable and removes the host-specific path it repla
 
 ### Slice 3: navigation and symbols
 
-Ship definition, references, document symbols, and workspace symbols. Extract canonical symbol
-identity and reference data from the current workshop/live host into compiler/service APIs. Wire
-Outline, breadcrumbs, and workspace symbol search; update TUI read/reference commands.
+- [x] Publish definition and reference locations from compiler-owned reference records, including
+  cursor-sensitive global receivers, indexed field paths, and exact global declaration spans.
+- [x] Publish document and workspace symbols from canonical compiler symbol records for Outline,
+  breadcrumbs, and workspace symbol search.
+- [x] Expose standard LSP definition, references, document-symbol, and workspace-symbol requests.
+- [x] Remove the VSIX's per-request CLI Definition/References providers and switch the TUI
+  references command to the shared language-service navigation snapshot.
+- [x] Cover functions, indexed fields, global receivers, document symbols, and workspace symbols in
+  the packaged VSIX.
 
 ### Slice 4: compiler-validated rename
 
@@ -232,8 +238,10 @@ For every implementation slice:
 
 ## Migration and compatibility
 
-The existing VS Code providers remain only until their LSP equivalents pass end-to-end tests; they
-must not answer in parallel because competing completion or diagnostics sources create nondeterminism.
+Existing semantic VS Code providers remain only until their LSP equivalents pass end-to-end tests;
+they must not answer in parallel because competing semantic sources create nondeterminism. The
+temporary live completion overlay may add runtime-only indexed fields until Slice 5 moves that
+enrichment behind the LSP broker.
 The live schema-v1 JSON protocol and CLI commands remain supported adapters. New service types are
 not serialized directly: LSP, live JSON, Android JNI, and terminal presentation each own explicit
 versioned mappings.
@@ -293,3 +301,19 @@ scope, accepted source spans, dirty overlay, expected type, and deterministic ra
 workspace revision. The TUI overlay tests and VSIX requests now exercise that same unit. This
 predicts that rename preview and navigation should consume a similarly immutable symbol/reference
 snapshot while host-only runtime values remain optional enrichment.
+
+### Shared navigation and symbols implementation
+
+- Good: main's temporary CLI-backed Definition/References providers supplied concrete packaged
+  behavior that could be migrated request-for-request onto the standard LSP without weakening
+  indexed-field or cross-file semantics.
+- Bad: grouped global source items classified declarations as writes and exposed declaration-wide
+  spans, so a global receiver initially had no precise definition target.
+- Adjustment: compiler reference indexes must publish explicit exact definition records for every
+  declaration kind even when edit-oriented source items intentionally group multiple declarations.
+
+Theory gained: edit grouping and navigation identity are separate views of the same source. A
+grouped globals item is useful for transactional replacement, but navigation requires the exact
+identifier token plus its canonical symbol identity. The global receiver/owned-field regression
+proves the distinction and predicts that rename should plan edits from exact reference identities,
+then validate/apply them through the grouped transactional edit model.

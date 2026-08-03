@@ -28,15 +28,6 @@ interface CommandOutput {
   stderr: string;
 }
 
-interface SourceReference {
-  file: string;
-  kind: string;
-  source_span: {
-    start: number;
-    end: number;
-  };
-}
-
 function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("stasis");
 }
@@ -115,108 +106,6 @@ function runStasis(
     child.once("close", () => cancellation?.dispose());
     child.stdin.end(input);
   });
-}
-
-function symbolAtPosition(document: vscode.TextDocument, position: vscode.Position): string | undefined {
-  const word = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
-  if (!word || word.start.line !== word.end.line) {
-    return undefined;
-  }
-  const prefix = document.lineAt(position.line).text.slice(0, word.end.character);
-  const chain = prefix.match(
-    /[A-Za-z_][A-Za-z0-9_]*(?:(?:\s*\[[^\]\r\n]*\])?\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*$/,
-  )?.[0];
-  return chain?.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, "");
-}
-
-async function compilerReferences(
-  document: vscode.TextDocument,
-  position: vscode.Position,
-  token: vscode.CancellationToken,
-): Promise<SourceReference[]> {
-  const root = findWorkspaceRoot(document);
-  const symbol = symbolAtPosition(document, position);
-  if (!root || !symbol || token.isCancellationRequested) {
-    return [];
-  }
-  const output = await runStasis(
-    ["--json", "--workspace", root, "symbol", "references", symbol, "--limit", "256"],
-    root,
-    undefined,
-    token,
-  );
-  const envelope = asRecord(JSON.parse(output.stdout) as unknown);
-  const result = asRecord(envelope?.result);
-  const references = Array.isArray(result?.references) ? result.references : [];
-  return references.flatMap((value) => {
-    const reference = asRecord(value);
-    const span = asRecord(reference?.source_span);
-    if (
-      typeof reference?.file !== "string" ||
-      typeof reference.kind !== "string" ||
-      typeof span?.start !== "number" ||
-      typeof span.end !== "number"
-    ) {
-      return [];
-    }
-    return [{
-      file: reference.file,
-      kind: reference.kind,
-      source_span: { start: span.start, end: span.end },
-    }];
-  });
-}
-
-async function referenceLocation(root: string, reference: SourceReference): Promise<vscode.Location> {
-  const uri = vscode.Uri.file(path.join(root, reference.file));
-  const document = await vscode.workspace.openTextDocument(uri);
-  const source = document.getText();
-  return new vscode.Location(
-    uri,
-    new vscode.Range(
-      document.positionAt(byteOffsetToStringOffset(source, reference.source_span.start)),
-      document.positionAt(byteOffsetToStringOffset(source, reference.source_span.end)),
-    ),
-  );
-}
-
-class StasisDefinitionProvider implements vscode.DefinitionProvider {
-  async provideDefinition(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.Location[]> {
-    const root = findWorkspaceRoot(document);
-    if (!root) {
-      return [];
-    }
-    const references = await compilerReferences(document, position, token);
-    return Promise.all(
-      references
-        .filter((reference) => reference.kind === "definition")
-        .map((reference) => referenceLocation(root, reference)),
-    );
-  }
-}
-
-class StasisReferenceProvider implements vscode.ReferenceProvider {
-  async provideReferences(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    context: vscode.ReferenceContext,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.Location[]> {
-    const root = findWorkspaceRoot(document);
-    if (!root) {
-      return [];
-    }
-    const references = await compilerReferences(document, position, token);
-    return Promise.all(
-      references
-        .filter((reference) => context.includeDeclaration || reference.kind !== "definition")
-        .map((reference) => referenceLocation(root, reference)),
-    );
-  }
 }
 
 class StasisCompletionProvider implements vscode.CompletionItemProvider {
@@ -769,8 +658,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     tests,
     vscode.window.registerTreeDataProvider("stasis.liveValues", values),
     vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_SELECTOR, new StasisFormatter()),
-    vscode.languages.registerDefinitionProvider(LANGUAGE_SELECTOR, new StasisDefinitionProvider()),
-    vscode.languages.registerReferenceProvider(LANGUAGE_SELECTOR, new StasisReferenceProvider()),
     vscode.languages.registerCompletionItemProvider(
       LANGUAGE_SELECTOR,
       new StasisCompletionProvider(controller),

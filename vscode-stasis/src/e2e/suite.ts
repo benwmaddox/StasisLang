@@ -309,6 +309,18 @@ export async function run(): Promise<void> {
     .findIndex((line) => line.includes("state.enemies[0].speed"));
   assert.notEqual(speedLineNumber, -1, "the fixture uses an indexed struct field");
   const speedLine = document.lineAt(speedLineNumber);
+  const statePosition = new vscode.Position(speedLineNumber, speedLine.text.indexOf("state") + 2);
+  const stateDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeDefinitionProvider",
+    sourceUri,
+    statePosition,
+  );
+  const stateDeclarationLine = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("global state:"));
+  assert.equal(stateDefinitions?.length, 1, "Go to Definition resolves a global receiver");
+  assert.equal(stateDefinitions?.[0]?.range.start.line, stateDeclarationLine);
   const speedPosition = new vscode.Position(speedLineNumber, speedLine.text.indexOf("speed") + 1);
   const fieldDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
     "vscode.executeDefinitionProvider",
@@ -325,6 +337,23 @@ export async function run(): Promise<void> {
   assert.ok(
     fieldReferences && fieldReferences.length >= 2,
     "Find All References includes the indexed field declaration and write",
+  );
+
+  const documentSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+    "vscode.executeDocumentSymbolProvider",
+    sourceUri,
+  );
+  assert.ok(
+    documentSymbols?.some((symbol) => symbol.name === "tick"),
+    "Outline receives compiler-owned document symbols through LSP",
+  );
+  const workspaceSymbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+    "vscode.executeWorkspaceSymbolProvider",
+    "tick",
+  );
+  assert.ok(
+    workspaceSymbols?.some((symbol) => symbol.name === "tick"),
+    "Go to Symbol in Workspace receives compiler-owned symbols through LSP",
   );
 
   await waitFor("Test Explorer discovery", () => api.testFiles().some((uri) => uri.endsWith("editor.test.stasis")));

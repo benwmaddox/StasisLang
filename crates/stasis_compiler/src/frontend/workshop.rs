@@ -1153,9 +1153,11 @@ pub fn find_workshop_references(
     }
     let limit = limit.clamp(1, 256);
     let items = workshop_source_items(files)?;
-    let mut references = field_definition_reference(files, &segments, &items)?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let definition = match field_definition_reference(files, &segments, &items)? {
+        Some(reference) => Some(reference),
+        None => global_definition_reference(files, &segments, &items)?,
+    };
+    let mut references = definition.into_iter().collect::<Vec<_>>();
     for file in files {
         let tokens = lex(&file.source)?;
         for start_index in 0..tokens.len() {
@@ -1187,6 +1189,13 @@ pub fn find_workshop_references(
             };
             let kind =
                 classify_workshop_reference(&file.source, &tokens, end_index, item, symbol, start);
+            if references.iter().any(|reference| {
+                reference.file == file.path
+                    && reference.source_span.start as usize == start
+                    && reference.source_span.end as usize == end
+            }) {
+                continue;
+            }
             references.push(WorkshopReference {
                 symbol: symbol.to_string(),
                 kind,
@@ -1207,6 +1216,49 @@ pub fn find_workshop_references(
         }
     }
     Ok(references)
+}
+
+fn global_definition_reference(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    items: &[WorkshopSourceItem],
+) -> Result<Option<WorkshopReference>, String> {
+    let [name] = segments else {
+        return Ok(None);
+    };
+    for file in files {
+        let tokens = lex(&file.source)?;
+        let Some(name_token) = tokens.windows(2).find_map(|pair| {
+            (matches!(token_text(&file.source, pair[0]), "global" | "const")
+                && pair[1].kind == TokenKind::Identifier
+                && token_text(&file.source, pair[1]) == *name)
+                .then_some(pair[1])
+        }) else {
+            continue;
+        };
+        let Some(container) = items
+            .iter()
+            .find(|item| item.file == file.path && item.kind == WorkshopSourceItemKind::Globals)
+        else {
+            continue;
+        };
+        return Ok(Some(WorkshopReference {
+            symbol: name.to_string(),
+            kind: WorkshopReferenceKind::Definition,
+            file: file.path.clone(),
+            source_span: WorkshopSourceSpan {
+                start: u32::try_from(name_token.start)
+                    .map_err(|_| "global definition start exceeds u32".to_string())?,
+                end: u32::try_from(name_token.end)
+                    .map_err(|_| "global definition end exceeds u32".to_string())?,
+            },
+            containing_kind: container.kind,
+            containing_name: container.name.clone(),
+            containing_signature: container.signature.clone(),
+            containing_source_hash: container.source_hash.clone(),
+        }));
+    }
+    Ok(None)
 }
 
 fn is_workshop_identifier(value: &str) -> bool {
@@ -4283,6 +4335,34 @@ mod workshop_contract_tests {
         assert!(references.iter().any(|reference| {
             reference.kind == WorkshopReferenceKind::Write && reference.containing_name == "main"
         }));
+    }
+
+    #[test]
+    fn references_publish_exact_global_definition_without_duplicate_write() {
+        let source = "struct State { x: i32; }\nglobal state: State;\nfunction main(): void { state.x = 2; }\n";
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+
+        let references = find_workshop_references(&files, "state", 16).expect("references");
+        let definitions = references
+            .iter()
+            .filter(|reference| reference.kind == WorkshopReferenceKind::Definition)
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1);
+        let definition = definitions[0];
+        assert_eq!(
+            &source[definition.source_span.start as usize..definition.source_span.end as usize],
+            "state"
+        );
+        assert_eq!(
+            references
+                .iter()
+                .filter(|reference| reference.source_span == definition.source_span)
+                .count(),
+            1
+        );
     }
 
     #[test]
