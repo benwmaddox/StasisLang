@@ -9,13 +9,22 @@ function exploration_move_slot(slot: i32): void {
         World.destination_active[slot] = 0;
         return;
     }
-    let step_x: i32 = (dx * speed) / span;
-    let step_y: i32 = (dy * speed) / span;
-    if (step_x == 0 && dx > 0) { step_x = 1; }
-    if (step_x == 0 && dx < 0) { step_x = -1; }
-    if (step_y == 0 && dy > 0) { step_y = 1; }
-    if (step_y == 0 && dy < 0) { step_y = -1; }
-    World.position_x[slot] += step_x; World.position_y[slot] += step_y;
+    let step_x: i32 =(dx * speed) / span;
+    let step_y: i32 =(dy * speed) / span;
+    if (step_x == 0 && dx > 0) {
+        step_x = 1;
+    }
+    if (step_x == 0 && dx < 0) {
+        step_x = -1;
+    }
+    if (step_y == 0 && dy > 0) {
+        step_y = 1;
+    }
+    if (step_y == 0 && dy < 0) {
+        step_y = -1;
+    }
+    World.position_x[slot] += step_x;
+    World.position_y[slot] += step_y;
 }
 
 function exploration_movement_system(): void {
@@ -26,3 +35,5 @@ function exploration_movement_system(): void {
         }
     }
 }
+
+import "../input.stasis";

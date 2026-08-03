@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::frontend::lexer::{lex, TokenKind};
@@ -17,7 +16,15 @@ pub struct IndexedFunction {
     pub params: Vec<TypeId>,
     pub param_type_names: Vec<String>,
     pub return_type: TypeId,
-    pub dependency_name_hashes: Vec<u64>,
+    pub dependencies: Vec<IndexedCallDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedCallDependency {
+    pub qualifier: Option<String>,
+    pub qualifier_span: Option<Range<u32>>,
+    pub name: String,
+    pub name_span: Range<u32>,
 }
 
 /// Lightweight parser-owned declaration record for editor and CLI lookup.
@@ -63,7 +70,7 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
             .get(function.body_range.clone())
             .ok_or_else(|| "invalid function body range".to_string())?;
         let body_hash = hash_text(body_text);
-        let dependency_name_hashes = collect_dependency_hashes(body_text)?;
+        let dependencies = collect_dependencies(body_text)?;
         out.push(IndexedFunction {
             name: function.name,
             name_hash,
@@ -76,7 +83,7 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
             params,
             param_type_names,
             return_type,
-            dependency_name_hashes,
+            dependencies,
         });
     }
     Ok(out)
@@ -104,22 +111,54 @@ fn hash_signature(name_hash: u64, params: &[TypeId], return_type: TypeId) -> u64
     hash
 }
 
-fn collect_dependency_hashes(body_text: &str) -> Result<Vec<u64>, String> {
+fn collect_dependencies(body_text: &str) -> Result<Vec<IndexedCallDependency>, String> {
     let tokens = lex(body_text)?;
-    let mut hashes = BTreeSet::new();
-    for window in tokens.windows(2) {
-        let lhs = window[0];
-        let rhs = window[1];
-        if lhs.kind != TokenKind::Identifier || rhs.kind != TokenKind::LParen {
+    let mut dependencies = Vec::new();
+    for index in 0..tokens.len() {
+        let token = tokens[index];
+        if token.kind != TokenKind::Identifier {
             continue;
         }
-        let identifier = &body_text[lhs.start..lhs.end];
+        let identifier = &body_text[token.start..token.end];
         if is_call_keyword(identifier) {
             continue;
         }
-        hashes.insert(hash_text(identifier));
+        if tokens.get(index + 1).is_some_and(|next| {
+            next.kind == TokenKind::Other && &body_text[next.start..next.end] == "."
+        }) && tokens
+            .get(index + 2)
+            .is_some_and(|method| method.kind == TokenKind::Identifier)
+            && tokens
+                .get(index + 3)
+                .is_some_and(|paren| paren.kind == TokenKind::LParen)
+        {
+            let method = tokens[index + 2];
+            dependencies.push(IndexedCallDependency {
+                qualifier: Some(identifier.to_string()),
+                qualifier_span: Some(token.start as u32..token.end as u32),
+                name: body_text[method.start..method.end].to_string(),
+                name_span: method.start as u32..method.end as u32,
+            });
+            continue;
+        }
+        if tokens.get(index.wrapping_sub(1)).is_some_and(|previous| {
+            previous.kind == TokenKind::Other && &body_text[previous.start..previous.end] == "."
+        }) {
+            continue;
+        }
+        if tokens
+            .get(index + 1)
+            .is_some_and(|next| next.kind == TokenKind::LParen)
+        {
+            dependencies.push(IndexedCallDependency {
+                qualifier: None,
+                qualifier_span: None,
+                name: identifier.to_string(),
+                name_span: token.start as u32..token.end as u32,
+            });
+        }
     }
-    Ok(hashes.into_iter().collect())
+    Ok(dependencies)
 }
 
 fn is_call_keyword(identifier: &str) -> bool {
@@ -146,18 +185,30 @@ mod tests {
     }
 
     #[test]
-    fn collects_dependency_hashes_for_call_sites() {
+    fn collects_qualified_and_bare_dependencies_for_call_sites() {
         let mut types = TypeTable::new();
-        let source =
-            "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n";
+        let source = "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper() + math.value(); }\n";
         let indexed = index_file(source, &mut types).expect("index");
         let main = indexed
             .iter()
             .find(|function| function.name == "main")
             .expect("main function");
-        assert!(
-            main.dependency_name_hashes.contains(&hash_text("helper")),
-            "expected helper dependency hash"
+        assert_eq!(
+            main.dependencies,
+            vec![
+                IndexedCallDependency {
+                    qualifier: None,
+                    qualifier_span: None,
+                    name: "helper".to_string(),
+                    name_span: 9..15,
+                },
+                IndexedCallDependency {
+                    qualifier: Some("math".to_string()),
+                    qualifier_span: Some(20..24),
+                    name: "value".to_string(),
+                    name_span: 25..30,
+                },
+            ]
         );
     }
 }

@@ -1,1 +1,5 @@
-function main(): i32 { return helper() + 3; }
+import "helper.stasis";
+
+function main(): i32 {
+    return helper() + 3;
+}

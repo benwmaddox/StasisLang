@@ -2426,7 +2426,7 @@ mod tests {
         fs::create_dir_all(&temp_root).expect("create temp root");
         let main = temp_root.join("main.stasis");
         let data = temp_root.join("data.stasis");
-        let main_source = "function main(): i32 { return helper(); }\n";
+        let main_source = "import \"data.stasis\"; function main(): i32 { return helper(); }\n";
         let data_source = "global score: i32;\nfunction helper(): i32 { return score; }\n";
         fs::write(&main, main_source).expect("write main");
         fs::write(&data, data_source).expect("write data");

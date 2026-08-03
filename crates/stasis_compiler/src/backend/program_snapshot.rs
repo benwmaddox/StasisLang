@@ -14,6 +14,7 @@ use crate::backend::reachability::compute_reachable_function_ids;
 use crate::backend::state_layout::{build_state_layout, state_layout_digest, StateLayout};
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::data_flow::FunctionDataFlowSummary;
+use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeInfo, TypeTable};
 use crate::frontend::{
     lexer::{lex, TokenKind},
@@ -40,6 +41,7 @@ pub struct ProgramFunction {
     pub id: FunctionId,
     pub symbol_id: SymbolId,
     pub name: String,
+    pub module_alias: String,
     pub name_hash: u64,
     pub file_id: u32,
     pub source_range: Range<u32>,
@@ -59,6 +61,7 @@ impl From<&FunctionMeta> for ProgramFunction {
             id: function.id,
             symbol_id: function.symbol_id.clone(),
             name: function.name.clone(),
+            module_alias: function.module_alias.clone(),
             name_hash: function.name_hash,
             file_id: function.file_id,
             source_range: function.source_range.clone(),
@@ -86,6 +89,7 @@ pub struct ProgramCollectionMetadata {
 pub struct ProgramSnapshot {
     source_revision: u64,
     files: Vec<SourceFile>,
+    module_graph: ModuleGraph,
     functions: Vec<ProgramFunction>,
     accepted_diagnostics: Vec<crate::SourceDiagnostic>,
     reachable_function_ids: BTreeSet<FunctionId>,
@@ -107,6 +111,7 @@ impl ProgramSnapshot {
     pub(crate) fn build(
         source_revision: u64,
         files: &[SourceFile],
+        module_graph: &ModuleGraph,
         functions: &[FunctionMeta],
         types: &TypeTable,
         data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
@@ -133,6 +138,7 @@ impl ProgramSnapshot {
         Ok(Self {
             source_revision,
             files: files.to_vec(),
+            module_graph: module_graph.clone(),
             functions: functions.iter().map(ProgramFunction::from).collect(),
             accepted_diagnostics: Vec::new(),
             reachable_function_ids: compute_reachable_function_ids(functions, required_emit_roots),
@@ -154,6 +160,9 @@ impl ProgramSnapshot {
     }
     pub fn files(&self) -> &[SourceFile] {
         &self.files
+    }
+    pub fn module_graph(&self) -> &ModuleGraph {
+        &self.module_graph
     }
     pub fn functions(&self) -> &[ProgramFunction] {
         &self.functions
@@ -308,6 +317,7 @@ fn canonical_layout_digest_with_root(
     ProgramSnapshot::build(
         revision,
         compiler.files(),
+        compiler.module_graph(),
         compiler.functions(),
         &types,
         compiler.data_flow_summaries_shared(),
@@ -567,7 +577,7 @@ mod tests {
 
     #[test]
     fn multi_file_jit_and_aot_snapshots_match_semantic_metadata() {
-        let main = "global score: i32; global values: i32[2]; function main(): i32 { return helper() + score; }";
+        let main = "import \"helper.stasis\"; global score: i32; global values: i32[2]; function main(): i32 { return helper() + score; }";
         let helper = "function helper(): i32 { return values[0]; }";
         let mut jit = JitProcess::new();
         jit.upsert_file("main.stasis", main);

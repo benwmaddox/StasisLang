@@ -1883,7 +1883,8 @@ fn run_play_in_process_inner(
         )
     })?;
 
-    let mut watch_dependency_paths = collect_watch_dependency_paths(&root_path).ok();
+    let mut watch_dependency_paths =
+        Some(collect_watch_dependency_paths(&project_root, &root_path)?);
 
     // Allocate and register all global buffers used by HostFrame / gfx_cmd + window requests.
     let mut host_i32: Vec<i32> = vec![0; 768];
@@ -2079,9 +2080,7 @@ fn run_play_in_process_inner(
                                         println!("{report}");
                                     }
                                 }
-                                if let Ok(paths) = prepared.dependency_paths {
-                                    watch_dependency_paths = Some(paths);
-                                }
+                                watch_dependency_paths = Some(prepared.dependency_paths);
                                 if let Some(live) = live.as_mut() {
                                     live.refresh_after_external_edit(&jit);
                                 }
@@ -2104,6 +2103,7 @@ fn run_play_in_process_inner(
             match start_watch_patch_job(
                 requested_watch_revision,
                 jit.staged_candidate(),
+                project_root.clone(),
                 root_path.clone(),
                 root_path_str.clone(),
             ) {
@@ -2303,7 +2303,7 @@ struct PreparedWatchPatch {
     package: JitEnginePackage,
     compile_ms: u128,
     package_ms: u128,
-    dependency_paths: Result<BTreeSet<String>, String>,
+    dependency_paths: BTreeSet<String>,
 }
 
 struct WatchPatchJob {
@@ -2315,6 +2315,7 @@ struct WatchPatchJob {
 fn start_watch_patch_job(
     revision: u64,
     mut candidate: JitProcess,
+    project_root: PathBuf,
     root_path: PathBuf,
     root_path_str: String,
 ) -> Result<WatchPatchJob, String> {
@@ -2337,7 +2338,7 @@ fn start_watch_patch_job(
                     .build_engine_package(&EngineEntrypoints::runtime_default())
                     .map_err(|error| format!("build_engine_package failed: {error}"))?;
                 let package_ms = package_started.elapsed().as_millis();
-                let dependency_paths = collect_watch_dependency_paths(&root_path);
+                let dependency_paths = collect_watch_dependency_paths(&project_root, &root_path)?;
                 Ok(PreparedWatchPatch {
                     revision,
                     candidate,
@@ -2385,11 +2386,11 @@ pub fn run_with_real_backend(mut config: RunnerConfig) -> RunnerSummary {
         project_root = repository_root.to_path_buf();
     }
     let backend = IncrementalCompilerBackend::new_for_project_with_prepared_jit_swaps(
-        project_root,
+        project_root.clone(),
         prepared_tx,
     )
     .expect("runner compiler project root must be absolute");
-    run_with_backend_and_prepared_swaps(config, backend, Some(prepared_rx))
+    run_with_backend_and_prepared_swaps(config, backend, Some(prepared_rx), Some(project_root))
 }
 
 fn resolve_play_project_root(
@@ -2487,65 +2488,31 @@ fn normalize_watch_path_for_log(path: &Path) -> String {
     text.to_ascii_lowercase()
 }
 
-fn parse_watch_import_paths(source: &str) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("import ") {
-            continue;
-        }
-        let Some(first_quote) = trimmed.find('"') else {
-            continue;
-        };
-        let rest = &trimmed[first_quote + 1..];
-        let Some(second_quote_rel) = rest.find('"') else {
-            continue;
-        };
-        let candidate = &rest[..second_quote_rel];
-        let path = PathBuf::from(candidate);
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("stasis"))
-        {
-            out.push(path);
-        }
-    }
-    out
-}
-
-fn collect_watch_dependency_paths(root_source: &Path) -> Result<BTreeSet<String>, String> {
+fn collect_watch_dependency_paths(
+    project_root: &Path,
+    root_source: &Path,
+) -> Result<BTreeSet<String>, String> {
     if !root_source.exists() {
         return Err(format!(
             "watch root source does not exist: {}",
             root_source.display()
         ));
     }
-    let mut out: BTreeSet<String> = BTreeSet::new();
-    let mut queue: Vec<PathBuf> = vec![root_source.to_path_buf()];
-    let mut visited: BTreeSet<String> = BTreeSet::new();
-    while let Some(path) = queue.pop() {
-        let normalized = normalize_watch_path_for_log(&path);
-        if !visited.insert(normalized.clone()) {
-            continue;
-        }
-        out.insert(normalized.clone());
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        let parent = path.parent().unwrap_or(Path::new("."));
-        for import_path in parse_watch_import_paths(&source) {
-            let candidate = if import_path.is_absolute() {
-                import_path
-            } else {
-                parent.join(import_path)
-            };
-            let candidate_normalized = normalize_watch_path_for_log(&candidate);
-            out.insert(candidate_normalized.clone());
-            if candidate.exists() {
-                queue.push(candidate);
-            }
-        }
-    }
-    Ok(out)
+    let (graph, _) = stasis_compiler::frontend::module_graph::load_project_module_graph(
+        project_root,
+        root_source,
+    )
+    .map_err(|diagnostic| {
+        format!(
+            "{}:{}-{}: {}",
+            diagnostic.path, diagnostic.start, diagnostic.end, diagnostic.message
+        )
+    })?;
+    Ok(graph
+        .modules()
+        .keys()
+        .map(|path| normalize_watch_path_for_log(&project_root.join(path)))
+        .collect())
 }
 
 fn should_submit_watch_event(
@@ -2608,22 +2575,39 @@ fn resolve_initial_source_file(config: &RunnerConfig) -> Option<PathBuf> {
 }
 
 pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) -> RunnerSummary {
-    run_with_backend_and_prepared_swaps(config, backend, None)
+    run_with_backend_and_prepared_swaps(config, backend, None, None)
 }
 
 fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
     config: RunnerConfig,
     backend: B,
     prepared_jit_swap_rx: Option<std::sync::mpsc::Receiver<PreparedJitSwap>>,
+    compiler_project_root: Option<PathBuf>,
 ) -> RunnerSummary {
     let mut watcher = config
         .watch_directory
         .as_deref()
         .and_then(|dir| WatchService::start(dir).ok());
     let initial_source_file = resolve_initial_source_file(&config);
-    let mut watch_dependency_paths = initial_source_file
-        .as_deref()
-        .and_then(|source| collect_watch_dependency_paths(source).ok());
+    let watch_project_root = compiler_project_root.or_else(|| {
+        config
+            .watch_directory
+            .as_ref()
+            .filter(|path| path.is_dir())
+            .cloned()
+    });
+    let (mut watch_dependency_paths, initial_watch_error) = match (
+        watch_project_root.as_deref(),
+        initial_source_file.as_deref(),
+    ) {
+        (Some(project_root), Some(source)) => {
+            match collect_watch_dependency_paths(project_root, source) {
+                Ok(paths) => (Some(paths), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+        _ => (None, None),
+    };
     let window = config.window;
 
     let host_set_contract = match resolve_host_set_contract(&config) {
@@ -2677,8 +2661,8 @@ fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
     let mut swap_flash_peak_ticks: u32 = 0;
     let mut swap_flash_ticks_remaining: u32 = 0;
     let mut compile_successes: u32 = 0;
-    let mut compile_failures: u32 = 0;
-    let mut compile_diagnostics: Vec<String> = Vec::new();
+    let mut compile_failures: u32 = u32::from(initial_watch_error.is_some());
+    let mut compile_diagnostics: Vec<String> = initial_watch_error.into_iter().collect();
     let mut last_compile_duration_ms: Option<u64> = None;
     let mut last_commit_duration_ms: Option<u64> = None;
     let mut last_seen_compile_id: Option<RequestId> = None;
@@ -2741,9 +2725,16 @@ fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
                 }
             }
             if refresh_dependency_graph {
-                if let Some(root_source) = initial_source_file.as_deref() {
-                    if let Ok(next_graph) = collect_watch_dependency_paths(root_source) {
-                        watch_dependency_paths = Some(next_graph);
+                if let (Some(project_root), Some(root_source)) = (
+                    watch_project_root.as_deref(),
+                    initial_source_file.as_deref(),
+                ) {
+                    match collect_watch_dependency_paths(project_root, root_source) {
+                        Ok(next_graph) => watch_dependency_paths = Some(next_graph),
+                        Err(error) => {
+                            compile_failures = compile_failures.saturating_add(1);
+                            compile_diagnostics.push(error);
+                        }
                     }
                 }
             }
@@ -5301,6 +5292,7 @@ mod tests {
         let job = start_watch_patch_job(
             2,
             active.staged_candidate(),
+            root.clone(),
             source_path.clone(),
             source_path_text,
         )
@@ -7243,12 +7235,51 @@ mod tests {
         .expect("write dep");
         fs::write(&dep2, "function dep2(): i32 { return 1; }\n").expect("write dep2");
 
-        let graph = collect_watch_dependency_paths(&root).expect("dependency graph");
+        let graph = collect_watch_dependency_paths(&temp_root, &root).expect("dependency graph");
         assert!(graph.contains(&normalize_watch_path_for_log(&root)));
         assert!(graph.contains(&normalize_watch_path_for_log(&dep)));
         assert!(graph.contains(&normalize_watch_path_for_log(&dep2)));
 
         fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn watch_dependencies_use_the_compiler_project_root_for_nested_entries() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let project_root = std::env::temp_dir().join(format!("stasis_watch_project_root_{stamp}"));
+        let sample_dir = project_root.join("samples/brickout_revenge");
+        let stdlib_dir = project_root.join("src/stdlib");
+        fs::create_dir_all(&sample_dir).expect("sample directory");
+        fs::create_dir_all(&stdlib_dir).expect("stdlib directory");
+        let entry = sample_dir.join("main.stasis");
+        let dependency = stdlib_dir.join("score.stasis");
+        fs::write(
+            &entry,
+            "import \"../../src/stdlib/score.stasis\"; function main(): i32 { return score(); }",
+        )
+        .expect("entry source");
+        fs::write(&dependency, "function score(): i32 { return 18; }").expect("dependency source");
+
+        let watch_paths =
+            collect_watch_dependency_paths(&project_root, &entry).expect("watch dependency graph");
+        let (compiler_graph, _) =
+            stasis_compiler::frontend::module_graph::load_project_module_graph(
+                &project_root,
+                &entry,
+            )
+            .expect("compiler module graph");
+        let compiler_paths = compiler_graph
+            .modules()
+            .keys()
+            .map(|path| normalize_watch_path_for_log(&project_root.join(path)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(watch_paths, compiler_paths);
+        assert!(watch_paths.contains(&normalize_watch_path_for_log(&dependency)));
+
+        fs::remove_dir_all(&project_root).expect("fixture cleanup");
     }
 
     #[test]

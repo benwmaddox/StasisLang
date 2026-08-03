@@ -1,4 +1,3 @@
-import "../stdlib/graphics.stasis";
 import "../stdlib/stdlib.stasis";
 
 // Graphics command buffer (v2)
@@ -8,58 +7,95 @@ import "../stdlib/stdlib.stasis";
 // - Coordinates: logical top-left pixels from the HostFrame display contract.
 
 const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
+
 const GFX_CMD_VERSION: i32 = 2;
 
 // i32 header indices
 const GFX_I_MAGIC: i32 = 0;
+
 const GFX_I_VERSION: i32 = 1;
+
 const GFX_I_FLAGS: i32 = 2;
+
 const GFX_I_LINE_COUNT: i32 = 3;
+
 const GFX_I_SPRITE_COUNT: i32 = 4;
+
 const GFX_I_DROPPED_LINES: i32 = 5;
+
 const GFX_I_DROPPED_SPRITES: i32 = 6;
+
 const GFX_I_TEXT_COUNT: i32 = 7;
+
 const GFX_I_DROPPED_TEXT: i32 = 8;
+
 const GFX_I_TEXT_BYTES_USED: i32 = 9;
+
 // Host-populated display metadata. Guest frame construction leaves these
 // reserved slots untouched; they are not part of the command trace.
 const GFX_I_LOGICAL_W: i32 = 10;
+
 const GFX_I_LOGICAL_H: i32 = 11;
+
 const GFX_I_NATIVE_W: i32 = 12;
+
 const GFX_I_NATIVE_H: i32 = 13;
+
 const GFX_I_DRAWABLE_W: i32 = 14;
+
 const GFX_I_DRAWABLE_H: i32 = 15;
+
 const GFX_I_SAFE_X: i32 = 16;
+
 const GFX_I_SAFE_Y: i32 = 17;
+
 const GFX_I_SAFE_W: i32 = 18;
+
 const GFX_I_SAFE_H: i32 = 19;
+
 const GFX_I_DISPLAY_GENERATION: i32 = 20;
+
 const GFX_I_DENSITY_GENERATION: i32 = 21;
+
 const GFX_I_SPRITE_BASE: i32 = 32;
 
 // flags
 const GFX_FLAG_CLEAR: i32 = 1;
+
 const GFX_FLAG_PRESENT: i32 = 2;
 
 // capacities (must match runtime clamp in `stasis_gfx_submit`)
 const GFX_MAX_LINES: i32 = 10000;
+
 const GFX_LINE_STRIDE_F32: i32 = 8;
+
 const GFX_MAX_SPRITES: i32 = 4096;
+
 const GFX_SPRITE_STRIDE_I32: i32 = 3; // handle,rot_deg,a
+
 const GFX_SPRITE_STRIDE_F32: i32 = 4; // x,y,w,h
 
 const GFX_MAX_TEXT: i32 = 2048;
+
 const GFX_TEXT_STRIDE_I32: i32 = 3; // font, byte_offset, byte_len
+
 const GFX_TEXT_STRIDE_F32: i32 = 6; // x,y,r,g,b,a
+
 const GFX_TEXT_MAX_BYTES: i32 = 65536;
 
 // f32 layout
 const GFX_F_CLEAR_R: i32 = 0;
+
 const GFX_F_CLEAR_G: i32 = 1;
+
 const GFX_F_CLEAR_B: i32 = 2;
+
 const GFX_F_CLEAR_A: i32 = 3;
+
 const GFX_F_LINE_BASE: i32 = 4;
+
 const GFX_F_SPRITE_BASE: i32 = 80004;
+
 const GFX_F_TEXT_BASE: i32 = 96388;
 
 // NOTE: Array sizes must be integer literals in Stasis today.
@@ -69,7 +105,9 @@ const GFX_F_TEXT_BASE: i32 = 96388;
 const GFX_I_TEXT_BASE: i32 = 12320;
 
 global gfx_cmd_i32: i32[18464];
+
 global gfx_cmd_f32: f32[108676];
+
 global gfx_cmd_u8: u8[65536];
 
 // Begin a new frame, resetting all counts (typical immediate-mode usage).
@@ -173,7 +211,7 @@ function gfx_cmd_lines_from(lines: f32[], count: i32): void {
     let n: i32 = count;
     if (n > avail) {
         n = avail;
-        gfx_cmd_i32[GFX_I_DROPPED_LINES] = gfx_cmd_i32[GFX_I_DROPPED_LINES] + (count - n);
+        gfx_cmd_i32[GFX_I_DROPPED_LINES] = gfx_cmd_i32[GFX_I_DROPPED_LINES] +(count - n);
     }
     if (n <= 0) {
         return;
@@ -195,7 +233,7 @@ function gfx_cmd_sprites_from(cmd_i32: i32[], cmd_f32: f32[], count: i32): void 
     let n: i32 = count;
     if (n > avail) {
         n = avail;
-        gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] + (count - n);
+        gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] +(count - n);
     }
     if (n <= 0) {
         return;
@@ -234,11 +272,17 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
     }
 
     let byte_len: i32 = length_bytes(text);
-    if (byte_len < 0) { byte_len = 0; }
-    if (byte_len > 1024) { byte_len = 1024; } // hard cap per command to keep worst-case bounded
+    if (byte_len < 0) {
+        byte_len = 0;
+    }
+    if (byte_len > 1024) {
+        byte_len = 1024;
+    } // hard cap per command to keep worst-case bounded
 
     let used: i32 = gfx_cmd_i32[GFX_I_TEXT_BYTES_USED];
-    if (used < 0) { used = 0; }
+    if (used < 0) {
+        used = 0;
+    }
     if (used + byte_len + 1 > GFX_TEXT_MAX_BYTES) {
         gfx_cmd_i32[GFX_I_DROPPED_TEXT] = gfx_cmd_i32[GFX_I_DROPPED_TEXT] + 1;
         return;
@@ -294,46 +338,81 @@ function gfx_cmd_text_cached(font: i32, run_handle: i32, x: f32, y: f32, r: f32,
 }
 
 function gfx_cmd_set_line_count(count: i32): void {
-    if (count < 0) { count = 0; }
-    if (count > GFX_MAX_LINES) { count = GFX_MAX_LINES; }
+    if (count < 0) {
+        count = 0;
+    }
+    if (count > GFX_MAX_LINES) {
+        count = GFX_MAX_LINES;
+    }
     gfx_cmd_i32[GFX_I_LINE_COUNT] = count;
 }
 
 function gfx_cmd_set_sprite_count(count: i32): void {
-    if (count < 0) { count = 0; }
-    if (count > GFX_MAX_SPRITES) { count = GFX_MAX_SPRITES; }
+    if (count < 0) {
+        count = 0;
+    }
+    if (count > GFX_MAX_SPRITES) {
+        count = GFX_MAX_SPRITES;
+    }
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = count;
 }
 
 function gfx_cmd_set_text_count(count: i32): void {
-    if (count < 0) { count = 0; }
-    if (count > GFX_MAX_TEXT) { count = GFX_MAX_TEXT; }
+    if (count < 0) {
+        count = 0;
+    }
+    if (count > GFX_MAX_TEXT) {
+        count = GFX_MAX_TEXT;
+    }
     gfx_cmd_i32[GFX_I_TEXT_COUNT] = count;
 }
 
 function gfx_cmd_set_text_bytes_used(bytes_used: i32): void {
-    if (bytes_used < 0) { bytes_used = 0; }
-    if (bytes_used > GFX_TEXT_MAX_BYTES) { bytes_used = GFX_TEXT_MAX_BYTES; }
+    if (bytes_used < 0) {
+        bytes_used = 0;
+    }
+    if (bytes_used > GFX_TEXT_MAX_BYTES) {
+        bytes_used = GFX_TEXT_MAX_BYTES;
+    }
     gfx_cmd_i32[GFX_I_TEXT_BYTES_USED] = bytes_used;
 }
 
 function @inline gfx_cmd_submit(): void {
     gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
-    gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
 }
 
 function @inline gfx_cmd_submit_no_present(): void {
-    gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+    return;
 }
 
 function @inline gfx_cmd_mark_present(): void {
     gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
 }
 
-function @inline gfx_cmd_line_count(): i32 { return gfx_cmd_i32[GFX_I_LINE_COUNT]; }
-function @inline gfx_cmd_sprite_count(): i32 { return gfx_cmd_i32[GFX_I_SPRITE_COUNT]; }
-function @inline gfx_cmd_text_count(): i32 { return gfx_cmd_i32[GFX_I_TEXT_COUNT]; }
-function @inline gfx_cmd_dropped_lines(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_LINES]; }
-function @inline gfx_cmd_dropped_sprites(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_SPRITES]; }
-function @inline gfx_cmd_dropped_text(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_TEXT]; }
-function @inline gfx_cmd_text_bytes_used(): i32 { return gfx_cmd_i32[GFX_I_TEXT_BYTES_USED]; }
+function @inline gfx_cmd_line_count(): i32 {
+    return gfx_cmd_i32[GFX_I_LINE_COUNT];
+}
+
+function @inline gfx_cmd_sprite_count(): i32 {
+    return gfx_cmd_i32[GFX_I_SPRITE_COUNT];
+}
+
+function @inline gfx_cmd_text_count(): i32 {
+    return gfx_cmd_i32[GFX_I_TEXT_COUNT];
+}
+
+function @inline gfx_cmd_dropped_lines(): i32 {
+    return gfx_cmd_i32[GFX_I_DROPPED_LINES];
+}
+
+function @inline gfx_cmd_dropped_sprites(): i32 {
+    return gfx_cmd_i32[GFX_I_DROPPED_SPRITES];
+}
+
+function @inline gfx_cmd_dropped_text(): i32 {
+    return gfx_cmd_i32[GFX_I_DROPPED_TEXT];
+}
+
+function @inline gfx_cmd_text_bytes_used(): i32 {
+    return gfx_cmd_i32[GFX_I_TEXT_BYTES_USED];
+}

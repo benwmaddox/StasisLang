@@ -4315,7 +4315,11 @@ mod tests {
         fs::create_dir_all(&temp_root).expect("create temp root");
         let main = temp_root.join("main.stasis");
         let dependency = temp_root.join("dependency.stasis");
-        fs::write(&main, "function main(): i32 { return helper(); }\n").expect("write main");
+        fs::write(
+            &main,
+            "import \"dependency.stasis\"; function main(): i32 { return helper(); }\n",
+        )
+        .expect("write main");
         fs::write(
             &dependency,
             "\nfunction helper(): i32 { return missing(); }\n",
@@ -4556,7 +4560,11 @@ mod tests {
         fs::create_dir_all(&temp_root).expect("create temp root");
         let main = temp_root.join("main.stasis");
         let dependency = temp_root.join("dependency.stasis");
-        fs::write(&main, "function main(): i32 { return helper(); }\n").expect("write main");
+        fs::write(
+            &main,
+            "import \"dependency.stasis\"; function main(): i32 { return helper(); }\n",
+        )
+        .expect("write main");
         fs::write(&dependency, "\nfunction helper(): i32 { return 1; }\n")
             .expect("write dependency");
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -7936,32 +7944,6 @@ fn collect_stasis_files_recursive(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn parse_project_import_paths(source: &str) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("import ") {
-            continue;
-        }
-        let Some(first_quote) = trimmed.find('"') else {
-            continue;
-        };
-        let rest = &trimmed[first_quote + 1..];
-        let Some(second_quote_rel) = rest.find('"') else {
-            continue;
-        };
-        let candidate = &rest[..second_quote_rel];
-        let path = PathBuf::from(candidate);
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("stasis"))
-        {
-            out.push(path);
-        }
-    }
-    out
-}
-
 fn collect_stasis_files_for_self_host_project_with_entry(
     root: &Path,
     entry_file: Option<&Path>,
@@ -8001,30 +7983,16 @@ fn collect_stasis_files_for_self_host_project_with_entry(
         ));
     }
 
-    let mut queue: Vec<PathBuf> = vec![entry_canonical];
-    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
-    while let Some(path) = queue.pop() {
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        let parent = path.parent().unwrap_or(&root_canonical);
-        for import_path in parse_project_import_paths(&source) {
-            let candidate = parent.join(import_path);
-            if !candidate.exists() {
-                continue;
-            }
-            let canonical = candidate.canonicalize().map_err(|error| {
-                format!("failed to canonicalize {}: {error}", candidate.display())
-            })?;
-            if canonical.starts_with(&root_canonical) {
-                queue.push(canonical);
-            }
-        }
-    }
-
-    let mut files: Vec<PathBuf> = visited.into_iter().collect();
+    let (graph, _) = stasis_compiler::frontend::module_graph::load_project_module_graph(
+        &root_canonical,
+        &entry_canonical,
+    )
+    .map_err(|diagnostic| diagnostic.message)?;
+    let mut files: Vec<PathBuf> = graph
+        .modules()
+        .keys()
+        .map(|path| root_canonical.join(path))
+        .collect();
     files.sort();
     Ok(files)
 }
@@ -8316,7 +8284,7 @@ mod self_host_file_selection_tests {
         fs::create_dir_all(&root).expect("create root");
         fs::write(
             root.join("entry.stasis"),
-            "import \"./dep.stasis\";\nimport \"../../src/stdlib/stdlib.stasis\";\nfunction main(): i32 { return 0; }\n",
+            "import \"./dep.stasis\";\nfunction main(): i32 { return 0; }\n",
         )
         .expect("write entry");
         fs::write(

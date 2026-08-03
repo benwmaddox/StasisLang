@@ -1,10 +1,13 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::backend::emit::{parse_simple_statements_from_block, SimpleStmt};
+use crate::backend::emit::{
+    parse_simple_statements_from_block, SimpleCondition, SimpleExpr, SimpleStmt,
+};
 use crate::data_flow::{build_function_data_flow_summaries, FunctionDataFlowSummary};
-use crate::frontend::indexer::{hash_text, index_file};
+use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
+use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
 use crate::ir::hir::{Block, FunctionHIR};
@@ -27,6 +30,7 @@ pub struct FunctionMeta {
     /// Dense compiler-owned storage position. Never serialize or use as identity.
     pub storage_index: FunctionStorageIndex,
     pub name: String,
+    pub module_alias: String,
     pub name_hash: u64,
     pub file_id: u32,
     pub source_range: Range<u32>,
@@ -123,9 +127,63 @@ struct SymbolEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StatementCacheKey {
     path: String,
+    module_context_hash: u64,
     name_hash: u64,
     signature_hash: u64,
     body_hash: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ModuleResolutionIndex {
+    function_indices_by_name: HashMap<String, Vec<usize>>,
+    context_hash_by_path: BTreeMap<String, u64>,
+}
+
+impl ModuleResolutionIndex {
+    fn build(graph: &ModuleGraph, files: &[SourceFile], functions: &[FunctionMeta]) -> Self {
+        let mut function_indices_by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut signatures_by_path: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for (index, function) in functions.iter().enumerate() {
+            function_indices_by_name
+                .entry(function.name.clone())
+                .or_default()
+                .push(index);
+            let path = files[function.file_id as usize].path.as_str();
+            signatures_by_path.entry(path).or_default().push(format!(
+                "{path}|{}|{}|{}",
+                function.module_alias, function.name, function.signature_hash
+            ));
+        }
+
+        let context_hash_by_path = files
+            .iter()
+            .map(|file| {
+                let visible_paths = graph.dependency_closure(&file.path);
+                let mut context = visible_paths.iter().cloned().collect::<Vec<_>>();
+                for path in &visible_paths {
+                    if let Some(signatures) = signatures_by_path.get(path.as_str()) {
+                        context.extend(signatures.iter().cloned());
+                    }
+                }
+                (file.path.clone(), hash_text(&context.join("\n")))
+            })
+            .collect();
+
+        Self {
+            function_indices_by_name,
+            context_hash_by_path,
+        }
+    }
+
+    fn function_indices(&self, name: &str) -> &[usize] {
+        self.function_indices_by_name
+            .get(name)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn context_hash(&self, path: &str) -> Option<u64> {
+        self.context_hash_by_path.get(path).copied()
+    }
 }
 
 #[cfg(test)]
@@ -275,6 +333,10 @@ pub struct Compiler {
     last_source_diagnostic: Option<crate::SourceDiagnostic>,
     project_root: Option<String>,
     pending_path_error: Option<String>,
+    module_graph: ModuleGraph,
+    module_resolution: ModuleResolutionIndex,
+    entry_roots: BTreeSet<String>,
+    indexed_file_hashes: BTreeMap<String, u64>,
 }
 
 impl Compiler {
@@ -292,7 +354,12 @@ impl Compiler {
                     return;
                 }
             };
+        self.entry_roots.insert(normalized_path.clone());
         let content = content.into();
+        self.upsert_loaded_file(normalized_path, content);
+    }
+
+    fn upsert_loaded_file(&mut self, normalized_path: String, content: String) {
         let hash = hash_text(&content);
         if let Some(existing) = self
             .files
@@ -319,6 +386,7 @@ impl Compiler {
             })
             .collect();
         self.files.retain(|file| normalized.contains(&file.path));
+        self.entry_roots.retain(|path| normalized.contains(path));
     }
 
     pub fn set_project_root(&mut self, root: impl Into<String>) -> Result<(), String> {
@@ -341,6 +409,68 @@ impl Compiler {
         self.project_root.as_deref()
     }
 
+    pub fn module_graph(&self) -> &ModuleGraph {
+        &self.module_graph
+    }
+
+    pub fn refresh_module_graph(&mut self) -> CompileResult<()> {
+        if self.entry_roots.is_empty() {
+            self.module_graph = ModuleGraph::default();
+            return Ok(());
+        }
+        let available: BTreeMap<String, String> = self
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), file.content.clone()))
+            .collect();
+        let project_root = self.project_root.clone();
+        let mut confined_root = None;
+        let result = ModuleGraph::load(self.entry_roots.iter().cloned(), |path| {
+            if let Some(source) = available.get(path) {
+                return Ok(source.clone());
+            }
+            let root = project_root.as_deref().ok_or_else(|| {
+                format!("missing imported module '{path}': compiler project root is not set")
+            })?;
+            if confined_root.is_none() {
+                confined_root = Some(
+                    crate::frontend::module_graph::ConfinedProjectRoot::new(std::path::Path::new(
+                        root,
+                    ))
+                    .map_err(|message| format!("missing imported module '{path}': {message}"))?,
+                );
+            }
+            confined_root.as_ref().unwrap().read_source(path)
+        });
+        let (mut graph, loaded_sources) = match result {
+            Ok(result) => result,
+            Err(diagnostic) => {
+                let message = diagnostic.message.clone();
+                self.last_source_diagnostic = Some(diagnostic);
+                return Err(CompileError::Frontend(message));
+            }
+        };
+        let imported: BTreeSet<String> = graph
+            .modules()
+            .values()
+            .flat_map(|module| module.imports.iter().map(|import| import.target.clone()))
+            .collect();
+        let inferred_roots: BTreeSet<String> =
+            self.entry_roots.difference(&imported).cloned().collect();
+        if !inferred_roots.is_empty() {
+            self.entry_roots = inferred_roots;
+            graph.set_roots(self.entry_roots.clone());
+        }
+        let closure: BTreeSet<String> = graph.modules().keys().cloned().collect();
+        self.files.retain(|file| closure.contains(&file.path));
+        for (path, source) in loaded_sources {
+            self.upsert_loaded_file(path, source);
+        }
+        self.files.sort_by(|left, right| left.path.cmp(&right.path));
+        self.module_graph = graph;
+        Ok(())
+    }
+
     pub fn compile_with<F>(&mut self, mut emit_function: F) -> CompileResult<CompileReport>
     where
         F: FnMut(&FunctionMeta, &FunctionHIR, &TypeTable) -> Result<(), String>,
@@ -355,6 +485,18 @@ impl Compiler {
         if let Some(error) = self.pending_path_error.take() {
             return Err(CompileError::Frontend(error));
         }
+        self.refresh_module_graph()?;
+        let changed_paths: Vec<String> = self
+            .files
+            .iter()
+            .filter(|file| self.indexed_file_hashes.get(&file.path) != Some(&file.hash))
+            .map(|file| file.path.clone())
+            .collect();
+        let reverse_invalidated: BTreeSet<String> = changed_paths
+            .iter()
+            .flat_map(|path| self.module_graph.invalidation_closure(path))
+            .filter(|path| !changed_paths.contains(path))
+            .collect();
         let has_tick_budget_annotation = self
             .files
             .iter()
@@ -424,8 +566,7 @@ impl Compiler {
         self.parsed_statement_ids.clear();
         self.deps = DependencyGraph;
 
-        let mut dependency_hashes_by_function: Vec<Vec<u64>> = Vec::new();
-        let mut overload_ids_by_name_hash: HashMap<u64, Vec<(u64, FunctionId)>> = HashMap::new();
+        let mut dependencies_by_function: Vec<Vec<IndexedCallDependency>> = Vec::new();
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
@@ -471,18 +612,6 @@ impl Compiler {
                 self.function_index_by_id
                     .insert(function_id, storage_index as usize);
                 self.files[file_id].functions.push(function_id);
-                let overloads = overload_ids_by_name_hash
-                    .entry(indexed_function.name_hash)
-                    .or_default();
-                if let Some((_, existing_id)) = overloads
-                    .iter_mut()
-                    .find(|(signature_hash, _)| *signature_hash == indexed_function.signature_hash)
-                {
-                    *existing_id = function_id;
-                } else {
-                    overloads.push((indexed_function.signature_hash, function_id));
-                }
-
                 let previous = previous_hashes.get(&symbol_id).copied();
                 let signature_changed = previous
                     .is_none_or(|old| old.signature_hash != indexed_function.signature_hash);
@@ -492,12 +621,16 @@ impl Compiler {
                     signature_changed_ids.push(function_id);
                 }
 
-                dependency_hashes_by_function.push(indexed_function.dependency_name_hashes);
+                dependencies_by_function.push(indexed_function.dependencies);
                 self.functions.push(FunctionMeta {
                     id: function_id,
                     symbol_id,
                     storage_index,
                     name: indexed_function.name,
+                    module_alias: self
+                        .module_graph
+                        .module(&self.files[file_id].path)
+                        .map_or_else(String::new, |module| module.alias.clone()),
                     name_hash: indexed_function.name_hash,
                     file_id: file_id as u32,
                     source_range: indexed_function.source_range,
@@ -509,22 +642,57 @@ impl Compiler {
                     return_type: indexed_function.return_type,
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
-                    dirty: signature_changed || body_changed,
+                    dirty: signature_changed
+                        || body_changed
+                        || reverse_invalidated.contains(&self.files[file_id].path),
                 });
             }
         }
+        self.module_resolution =
+            ModuleResolutionIndex::build(&self.module_graph, &self.files, &self.functions);
 
         let mut unique_edges = BTreeSet::new();
-        for (caller_index, dependency_hashes) in
-            dependency_hashes_by_function.into_iter().enumerate()
-        {
+        for (caller_index, dependencies) in dependencies_by_function.into_iter().enumerate() {
             let caller = self.functions[caller_index].id;
-            for dependency_hash in dependency_hashes {
-                if let Some(callees) = overload_ids_by_name_hash.get(&dependency_hash) {
-                    for (_, callee) in callees {
-                        if caller != *callee {
-                            unique_edges.insert((caller, *callee));
-                        }
+            let caller_path = &self.files[self.functions[caller_index].file_id as usize].path;
+            for dependency in dependencies {
+                let resolution = match resolve_module_call(
+                    dependency.qualifier.as_deref(),
+                    &dependency.name,
+                    caller_path,
+                    &self.module_graph,
+                    &self.files,
+                    &self.functions,
+                    &self.module_resolution,
+                ) {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        let relative_span = dependency.name_span.clone();
+                        let base = self.functions[caller_index].source_range.start as usize;
+                        let message =
+                            module_call_resolution_message(error, &dependency.name, caller_path);
+                        self.last_source_diagnostic = Some(crate::SourceDiagnostic {
+                            path: caller_path.clone(),
+                            start: base + relative_span.start as usize,
+                            end: base + relative_span.end as usize,
+                            symbol: dependency.name.clone(),
+                            message: message.clone(),
+                        });
+                        return Err(CompileError::Frontend(message));
+                    }
+                };
+                let Some(module_alias) = resolution.module_alias else {
+                    continue;
+                };
+                for callee in self
+                    .module_resolution
+                    .function_indices(&dependency.name)
+                    .iter()
+                    .map(|index| &self.functions[*index])
+                    .filter(|function| function.module_alias == module_alias)
+                {
+                    if caller != callee.id {
+                        unique_edges.insert((caller, callee.id));
                     }
                 }
             }
@@ -549,6 +717,11 @@ impl Compiler {
             .iter()
             .filter(|function| function.dirty)
             .count();
+        self.indexed_file_hashes = self
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), file.hash))
+            .collect();
         Ok(IndexPassResult {
             parsed_functions: self.functions.len(),
             dirty_functions,
@@ -572,8 +745,18 @@ impl Compiler {
             let function_index = self.function_index(*function_id)?;
             let function = &self.functions[function_index];
             let file = &self.files[function.file_id as usize];
+            let module_context_hash =
+                self.module_resolution
+                    .context_hash(&file.path)
+                    .ok_or_else(|| {
+                        CompileError::Invariant(format!(
+                            "missing module resolution context for '{}'",
+                            file.path
+                        ))
+                    })?;
             let key = StatementCacheKey {
                 path: file.path.clone(),
+                module_context_hash,
                 name_hash: function.name_hash,
                 signature_hash: function.signature_hash,
                 body_hash: function.body_hash,
@@ -595,8 +778,20 @@ impl Compiler {
                             function.name
                         ))
                     })?;
-                parse_simple_statements_from_block(body, &mut self.types)
-                    .map_err(CompileError::Backend)?
+                let statements = parse_simple_statements_from_block(body, &mut self.types)
+                    .map_err(CompileError::Backend)?;
+                let mut validated = statements.clone();
+                if let Err(message) = qualify_module_calls(
+                    &mut validated,
+                    &file.path,
+                    &self.module_graph,
+                    &self.files,
+                    &self.functions,
+                    &self.module_resolution,
+                ) {
+                    return Err(CompileError::Frontend(message));
+                }
+                statements
             };
             next_statement_cache.insert(key, statements.clone());
             self.parsed_statements[function.storage_index as usize] = statements;
@@ -769,7 +964,7 @@ impl Compiler {
                 CompileError::Invariant("function body range out of bounds".to_string())
             })?
             .to_string();
-        let statements = self
+        let mut statements = self
             .parsed_statements
             .get(function.storage_index as usize)
             .cloned()
@@ -779,6 +974,15 @@ impl Compiler {
                     function.name
                 ))
             })?;
+        qualify_module_calls(
+            &mut statements,
+            &file.path,
+            &self.module_graph,
+            &self.files,
+            &self.functions,
+            &self.module_resolution,
+        )
+        .map_err(CompileError::Frontend)?;
         Ok(FunctionHIR {
             blocks: vec![Block { source: body }],
             statements,
@@ -791,6 +995,266 @@ impl Compiler {
             .copied()
             .ok_or_else(|| CompileError::Invariant(format!("unknown stable function id {id:08x}")))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleCallResolutionError {
+    Ambiguous,
+    Inaccessible,
+}
+
+struct ModuleCallResolution {
+    module_alias: Option<String>,
+    consume_qualifier: bool,
+}
+
+fn resolve_module_call(
+    qualifier: Option<&str>,
+    name: &str,
+    caller_path: &str,
+    graph: &ModuleGraph,
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    resolution: &ModuleResolutionIndex,
+) -> Result<ModuleCallResolution, ModuleCallResolutionError> {
+    if let Some(alias) = qualifier {
+        if graph.imported_alias_target(caller_path, alias).is_some() {
+            return Ok(ModuleCallResolution {
+                module_alias: Some(alias.to_string()),
+                consume_qualifier: true,
+            });
+        }
+    }
+
+    let candidates = resolution.function_indices(name);
+    let local_modules: BTreeSet<String> = candidates
+        .iter()
+        .filter_map(|index| {
+            let function = &functions[*index];
+            (files[function.file_id as usize].path == caller_path)
+                .then(|| function.module_alias.clone())
+        })
+        .collect();
+    let modules = if local_modules.is_empty() {
+        let mut imported_paths = graph.dependency_closure(caller_path);
+        imported_paths.remove(caller_path);
+        candidates
+            .iter()
+            .filter_map(|index| {
+                let function = &functions[*index];
+                imported_paths
+                    .contains(&files[function.file_id as usize].path)
+                    .then(|| function.module_alias.clone())
+            })
+            .collect::<BTreeSet<_>>()
+    } else {
+        local_modules
+    };
+    match modules.len() {
+        0 if qualifier.is_none() && !candidates.is_empty() => {
+            Err(ModuleCallResolutionError::Inaccessible)
+        }
+        0 => Ok(ModuleCallResolution {
+            module_alias: None,
+            consume_qualifier: false,
+        }),
+        1 => Ok(ModuleCallResolution {
+            module_alias: modules.into_iter().next(),
+            consume_qualifier: false,
+        }),
+        _ => Err(ModuleCallResolutionError::Ambiguous),
+    }
+}
+
+fn module_call_resolution_message(
+    error: ModuleCallResolutionError,
+    name: &str,
+    caller_path: &str,
+) -> String {
+    match error {
+        ModuleCallResolutionError::Ambiguous => format!(
+            "ambiguous unqualified call '{}'; qualify it as module.{}",
+            name, name
+        ),
+        ModuleCallResolutionError::Inaccessible => format!(
+            "unqualified call '{}' is not visible from '{}'; import its module",
+            name, caller_path
+        ),
+    }
+}
+
+fn qualify_module_calls(
+    statements: &mut [SimpleStmt],
+    caller_path: &str,
+    graph: &ModuleGraph,
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    resolution: &ModuleResolutionIndex,
+) -> Result<(), String> {
+    fn expression(
+        value: &mut SimpleExpr,
+        caller_path: &str,
+        graph: &ModuleGraph,
+        files: &[SourceFile],
+        functions: &[FunctionMeta],
+        resolution: &ModuleResolutionIndex,
+    ) -> Result<(), String> {
+        match value {
+            SimpleExpr::Condition(condition) => {
+                condition_value(condition, caller_path, graph, files, functions, resolution)
+            }
+            SimpleExpr::IndexedPath { index, .. } => {
+                expression(index, caller_path, graph, files, functions, resolution)
+            }
+            SimpleExpr::Call { target, args } => {
+                for argument in args.iter_mut() {
+                    expression(argument, caller_path, graph, files, functions, resolution)?;
+                }
+                let qualifier = args.first().and_then(|argument| match argument {
+                    SimpleExpr::Identifier(alias) => Some(alias.as_str()),
+                    _ => None,
+                });
+                match resolve_module_call(
+                    qualifier,
+                    target,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                ) {
+                    Ok(resolution) => {
+                        if let Some(alias) = resolution.module_alias {
+                            *target = format!("{alias}.{target}");
+                        }
+                        if resolution.consume_qualifier {
+                            args.remove(0);
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(module_call_resolution_message(error, target, caller_path)),
+                }
+            }
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, caller_path, graph, files, functions, resolution)?;
+                expression(rhs, caller_path, graph, files, functions, resolution)
+            }
+            SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::Identifier(_) => Ok(()),
+        }
+    }
+
+    fn condition_value(
+        condition: &mut SimpleCondition,
+        caller_path: &str,
+        graph: &ModuleGraph,
+        files: &[SourceFile],
+        functions: &[FunctionMeta],
+        resolution: &ModuleResolutionIndex,
+    ) -> Result<(), String> {
+        match condition {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                expression(lhs, caller_path, graph, files, functions, resolution)?;
+                expression(rhs, caller_path, graph, files, functions, resolution)
+            }
+            SimpleCondition::Expr(value) => {
+                expression(value, caller_path, graph, files, functions, resolution)
+            }
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                condition_value(lhs, caller_path, graph, files, functions, resolution)?;
+                condition_value(rhs, caller_path, graph, files, functions, resolution)
+            }
+            SimpleCondition::Not(inner) => {
+                condition_value(inner, caller_path, graph, files, functions, resolution)
+            }
+        }
+    }
+
+    fn statement(
+        value: &mut SimpleStmt,
+        caller_path: &str,
+        graph: &ModuleGraph,
+        files: &[SourceFile],
+        functions: &[FunctionMeta],
+        resolution: &ModuleResolutionIndex,
+    ) -> Result<(), String> {
+        match value {
+            SimpleStmt::Let {
+                expression: value, ..
+            }
+            | SimpleStmt::Assign {
+                expression: value, ..
+            }
+            | SimpleStmt::Expr(value)
+            | SimpleStmt::Return(value) => {
+                expression(value, caller_path, graph, files, functions, resolution)
+            }
+            SimpleStmt::Convert { source, .. } => {
+                expression(source, caller_path, graph, files, functions, resolution)
+            }
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                condition_value(condition, caller_path, graph, files, functions, resolution)?;
+                for nested in then_statements {
+                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                }
+                if let Some(nested) = else_statements {
+                    for statement_value in nested {
+                        statement(
+                            statement_value,
+                            caller_path,
+                            graph,
+                            files,
+                            functions,
+                            resolution,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                statement(init, caller_path, graph, files, functions, resolution)?;
+                condition_value(condition, caller_path, graph, files, functions, resolution)?;
+                statement(step, caller_path, graph, files, functions, resolution)?;
+                for nested in body_statements {
+                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                }
+                Ok(())
+            }
+            SimpleStmt::Foreach {
+                body_statements, ..
+            } => {
+                for nested in body_statements {
+                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                }
+                Ok(())
+            }
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => Ok(()),
+        }
+    }
+
+    for statement_value in statements {
+        statement(
+            statement_value,
+            caller_path,
+            graph,
+            files,
+            functions,
+            resolution,
+        )?;
+    }
+    Ok(())
 }
 
 fn compile_error_message(error: &CompileError) -> &str {
@@ -1690,5 +2154,350 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
             4,
             "no overload, receiver, or file collision"
         );
+    }
+
+    #[test]
+    fn module_context_reports_ambiguous_bare_calls_with_source_span() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"one.stasis\"; import \"two.stasis\"; function main(): i32 { return one.value() + value(); }",
+        );
+        compiler.upsert_file("one.stasis", "function value(): i32 { return 1; }");
+        compiler.upsert_file("two.stasis", "function value(): i32 { return 2; }");
+        let error = compiler.index_pass().unwrap_err();
+        assert!(matches!(error, CompileError::Frontend(_)));
+        let diagnostic = compiler.last_source_diagnostic().unwrap();
+        assert_eq!(diagnostic.path, "main.stasis");
+        assert_eq!(diagnostic.symbol, "value");
+        let main = compiler
+            .files()
+            .iter()
+            .find(|file| file.path == "main.stasis")
+            .unwrap();
+        assert_eq!(&main.content[diagnostic.start..diagnostic.end], "value");
+        assert_eq!(diagnostic.start, main.content.rfind("value").unwrap());
+        assert!(diagnostic
+            .message
+            .contains("ambiguous unqualified call 'value'"));
+    }
+
+    #[test]
+    fn loaded_module_alias_does_not_steal_an_ordinary_receiver_call() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "function value(self: i32): i32 { return self + 1; } function main(): i32 { let two: i32 = 1; return two.value(); }",
+        );
+        compiler.upsert_file("two.stasis", "function value(): i32 { return 99; }");
+        compiler.index_pass().expect("ordinary receiver resolution");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        let local_value = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "value"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("local receiver function");
+        let unrelated_value = compiler
+            .files()
+            .iter()
+            .find(|file| file.path == "two.stasis")
+            .and_then(|file| file.functions.first())
+            .copied()
+            .expect("unrelated module value");
+        assert_eq!(main.dependencies, vec![local_value.id]);
+        assert_ne!(main.dependencies, vec![unrelated_value]);
+    }
+
+    #[test]
+    fn importer_can_call_directly_imported_child() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"child.stasis\"; function main(): i32 { return child(); }",
+        );
+        compiler.upsert_file("child.stasis", "function child(): i32 { return 1; }");
+        compiler.index_pass().expect("directional graph index");
+
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let child = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "child")
+            .unwrap();
+        assert_eq!(main.dependencies, vec![child.id]);
+        assert_eq!(
+            compiler.module_graph().dependency_closure("child.stasis"),
+            BTreeSet::from(["child.stasis".to_string()])
+        );
+        assert_eq!(
+            compiler.module_graph().invalidation_closure("child.stasis"),
+            BTreeSet::from(["child.stasis".to_string(), "main.stasis".to_string()])
+        );
+    }
+
+    #[test]
+    fn imported_child_cannot_call_its_importer() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"child.stasis\"; function main(): i32 { return child(); }",
+        );
+        let child_source = "function child(): i32 { return main(); }";
+        compiler.upsert_file("child.stasis", child_source);
+        let error = compiler.index_pass().expect_err("importer is not visible");
+        assert!(format!("{error:?}").contains("not visible"));
+        let diagnostic = compiler.last_source_diagnostic().unwrap();
+        assert_eq!(diagnostic.path, "child.stasis");
+        assert_eq!(diagnostic.symbol, "main");
+        assert_eq!(&child_source[diagnostic.start..diagnostic.end], "main");
+    }
+
+    #[test]
+    fn imported_child_cannot_call_a_sibling_from_the_importer() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"child.stasis\"; import \"sibling.stasis\"; function main(): i32 { return child(); }",
+        );
+        let child_source = "function child(): i32 { return sibling(); }";
+        compiler.upsert_file("child.stasis", child_source);
+        compiler.upsert_file("sibling.stasis", "function sibling(): i32 { return 2; }");
+        let error = compiler.index_pass().expect_err("sibling is not visible");
+        assert!(format!("{error:?}").contains("not visible"));
+        let diagnostic = compiler.last_source_diagnostic().unwrap();
+        assert_eq!(diagnostic.path, "child.stasis");
+        assert_eq!(diagnostic.symbol, "sibling");
+        assert_eq!(&child_source[diagnostic.start..diagnostic.end], "sibling");
+    }
+
+    #[test]
+    fn transitive_imports_are_visible_for_unqualified_calls() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"child.stasis\"; function main(): i32 { return leaf(); }",
+        );
+        compiler.upsert_file(
+            "child.stasis",
+            "import \"leaf.stasis\"; function child(): i32 { return leaf(); }",
+        );
+        compiler.upsert_file("leaf.stasis", "function leaf(): i32 { return 7; }");
+        compiler.index_pass().expect("transitive graph index");
+
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let leaf = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "leaf")
+            .unwrap();
+        assert_eq!(main.dependencies, vec![leaf.id]);
+    }
+
+    #[test]
+    fn imported_upserts_collapse_to_entry_roots_while_unrelated_files_remain_roots() {
+        let mut entry = Compiler::new();
+        entry.upsert_file("helper.stasis", "function helper(): i32 { return 1; }");
+        entry.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\"; function main(): i32 { return helper(); }",
+        );
+        entry.index_pass().expect("entry closure index");
+        assert_eq!(
+            entry.module_graph().roots(),
+            &BTreeSet::from(["main.stasis".to_string()])
+        );
+
+        entry.upsert_file("orphan.stasis", "function orphan(): i32 { return 0; }");
+        entry.index_pass().expect("directory roots index");
+        assert_eq!(
+            entry.module_graph().roots(),
+            &BTreeSet::from(["main.stasis".to_string(), "orphan.stasis".to_string()])
+        );
+    }
+
+    #[test]
+    fn qualified_dependency_reaches_only_the_selected_module_declaration() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"one.stasis\"; import \"two.stasis\"; function main(): i32 { return one.value(); }",
+        );
+        compiler.upsert_file("one.stasis", "function value(): i32 { return 1; }");
+        compiler.upsert_file("two.stasis", "function value(): i32 { return 2; }");
+        compiler.index_pass().unwrap();
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let selected = compiler
+            .functions()
+            .iter()
+            .find(|function| function.module_alias == "one")
+            .unwrap();
+        let unselected = compiler
+            .functions()
+            .iter()
+            .find(|function| function.module_alias == "two")
+            .unwrap();
+        assert_eq!(main.dependencies, vec![selected.id]);
+        assert!(unselected.dependents.is_empty());
+    }
+
+    #[test]
+    fn graph_refresh_removes_modules_that_leave_the_entry_closure() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\"; function main(): i32 { return helper(); }",
+        );
+        compiler.upsert_file("helper.stasis", "function helper(): i32 { return 1; }");
+        compiler.index_pass().unwrap();
+        assert_eq!(compiler.files().len(), 2);
+
+        compiler.upsert_file("main.stasis", "function main(): i32 { return 1; }");
+        compiler.index_pass().unwrap();
+        assert_eq!(
+            compiler
+                .files()
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["main.stasis"]
+        );
+    }
+
+    #[test]
+    fn imported_file_change_invalidates_reverse_module_dependents() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\"; function main(): i32 { return helper(); }",
+        );
+        compiler.upsert_file("helper.stasis", "function helper(): i32 { return 1; }");
+        compiler.index_pass().unwrap();
+        compiler
+            .emit_pass_with(&mut |_, _, _| Ok(()))
+            .expect("accept initial functions");
+
+        compiler.upsert_file("helper.stasis", "function helper(): i32 { return 2; }");
+        compiler.index_pass().unwrap();
+        let dirty: BTreeSet<_> = compiler
+            .functions()
+            .iter()
+            .filter(|function| function.dirty)
+            .map(|function| function.name.as_str())
+            .collect();
+        assert_eq!(dirty, BTreeSet::from(["helper", "main"]));
+        assert_eq!(
+            compiler
+                .module_graph()
+                .invalidation_closure("helper.stasis"),
+            BTreeSet::from(["helper.stasis".to_string(), "main.stasis".to_string()])
+        );
+    }
+
+    #[test]
+    fn imported_body_edit_preserves_unchanged_dependent_statement_cache() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\"; function main(): i32 { return helper(); }",
+        );
+        compiler.upsert_file("helper.stasis", "function helper(): i32 { return 1; }");
+        compiler.index_pass().expect("initial index");
+        assert_eq!(compiler.statement_parse_count, 2);
+
+        compiler.upsert_file("helper.stasis", "function helper(): i32 { return 2; }");
+        compiler.index_pass().expect("body edit index");
+        assert_eq!(compiler.statement_parse_count, 3);
+        assert!(function_by_name(&compiler, "main").dirty);
+    }
+
+    #[test]
+    fn imported_signature_edit_invalidates_file_context_statement_cache_once() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\"; function main(): i32 { return helper(); }",
+        );
+        compiler.upsert_file("helper.stasis", "function helper(): i32 { return 1; }");
+        compiler.index_pass().expect("initial index");
+        assert_eq!(compiler.statement_parse_count, 2);
+
+        compiler.upsert_file("helper.stasis", "function helper(): f32 { return 1.0; }");
+        compiler.index_pass().expect("signature edit index");
+        assert_eq!(compiler.statement_parse_count, 4);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn compiler_disk_import_rejects_directory_link_escape_at_literal_span() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("stasis_compiler_link_escape_{stamp}"));
+        let root = base.join("project");
+        let outside = base.join("outside");
+        let escape = root.join("escape");
+        std::fs::create_dir_all(&root).expect("project directory");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        std::fs::write(
+            outside.join("helper.stasis"),
+            "function helper(): i32 { return 7; }",
+        )
+        .expect("outside helper");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &escape).expect("directory symlink");
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&escape)
+                .arg(&outside)
+                .status()
+                .expect("create directory junction");
+            assert!(status.success(), "create directory junction");
+        }
+
+        let source = "import \"escape/helper.stasis\"; function main(): i32 { return helper(); }";
+        let mut compiler = Compiler::new();
+        compiler
+            .set_project_root(root.to_string_lossy())
+            .expect("set project root");
+        compiler.upsert_file(root.join("main.stasis").to_string_lossy(), source);
+        let error = compiler
+            .index_pass()
+            .expect_err("linked import must remain confined");
+        assert!(format!("{error:?}").contains("escapes project root"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("source diagnostic");
+        assert_eq!(diagnostic.path, "main.stasis");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "\"escape/helper.stasis\""
+        );
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&escape).expect("junction cleanup");
+        std::fs::remove_dir_all(&base).expect("fixture cleanup");
     }
 }
