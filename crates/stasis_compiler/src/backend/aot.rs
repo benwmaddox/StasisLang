@@ -35,7 +35,6 @@ pub struct AotArtifact {
 #[derive(Debug, Clone, Default)]
 pub struct AotProcess {
     compiler: Compiler,
-    import_base_dir: Option<PathBuf>,
     optimization_profile: AotOptimizationProfile,
     target: stasis_jit::AotTarget,
     next_object_index: u32,
@@ -69,7 +68,6 @@ impl AotProcess {
     pub fn with_optimization_profile(optimization_profile: AotOptimizationProfile) -> Self {
         Self {
             compiler: Compiler::new(),
-            import_base_dir: None,
             optimization_profile,
             target: stasis_jit::AotTarget::default(),
             next_object_index: 0,
@@ -93,7 +91,6 @@ impl AotProcess {
         let _ = self
             .compiler
             .set_project_root(path.to_string_lossy().to_string());
-        self.import_base_dir = Some(path);
     }
 
     pub fn set_target(&mut self, target: stasis_jit::AotTarget) {
@@ -137,8 +134,6 @@ impl AotProcess {
     }
 
     fn compile_internal(&mut self) -> CompileResult<CompileReport> {
-        self.load_import_graph_sources()
-            .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
         self.validate_host_aliases()
             .map_err(crate::compiler::CompileError::Backend)?;
@@ -179,6 +174,7 @@ impl AotProcess {
                 ProgramSnapshot::build(
                     snapshot_revision,
                     self.compiler.files(),
+                    self.compiler.module_graph(),
                     self.compiler.functions(),
                     &analysis_type_table,
                     self.compiler.data_flow_summaries_shared(),
@@ -311,65 +307,6 @@ impl AotProcess {
         self.last_failed_source_diagnostic
             .as_ref()
             .or_else(|| self.compiler.last_source_diagnostic())
-    }
-
-    fn load_import_graph_sources(&mut self) -> Result<(), String> {
-        let mut known_paths: BTreeSet<String> = self
-            .compiler
-            .files()
-            .iter()
-            .map(|file| file.path.clone())
-            .collect();
-        let mut queue: Vec<String> = self
-            .compiler
-            .files()
-            .iter()
-            .map(|file| file.path.clone())
-            .collect();
-
-        while let Some(path) = queue.pop() {
-            let Some(source) = self
-                .compiler
-                .files()
-                .iter()
-                .find(|file| file.path == path)
-                .map(|file| file.content.clone())
-            else {
-                continue;
-            };
-            let imports = parse_import_paths(&source);
-            for import_path in imports {
-                let logical = resolve_import_path(&path, &import_path);
-                let logical_key =
-                    crate::identity::canonical_source_path(None, &logical.to_string_lossy())?;
-                if known_paths.contains(&logical_key) {
-                    continue;
-                }
-                let resolved = self.resolve_import_source_path(&logical);
-                let normalized = normalize_path_for_compiler_key(&resolved);
-                let content = std::fs::read_to_string(&resolved).map_err(|error| {
-                    format!(
-                        "failed to load import '{}' referenced by '{}': {}",
-                        import_path, path, error
-                    )
-                })?;
-                self.compiler.upsert_file(normalized, content);
-                known_paths.insert(logical_key.clone());
-                queue.push(logical_key);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn resolve_import_source_path(&self, path: impl AsRef<Path>) -> PathBuf {
-        let path = path.as_ref();
-        if path.is_absolute() {
-            return path.to_path_buf();
-        }
-        self.import_base_dir
-            .as_ref()
-            .map_or_else(|| path.to_path_buf(), |base| base.join(path))
     }
 
     pub fn artifacts(&self) -> &[AotArtifact] {
@@ -2610,6 +2547,45 @@ mod tests {
             run_linked_i32_noarg_fixture(&aot, "main", "snapshot_parity", &link_config)
         {
             assert_eq!(exit_code, 7);
+        }
+    }
+
+    #[test]
+    fn qualified_same_name_calls_use_identical_jit_and_aot_module_graphs() {
+        let main = include_str!("../../../../tests/module_graph/main.stasis");
+        let one = include_str!("../../../../tests/module_graph/one.stasis");
+        let two = include_str!("../../../../tests/module_graph/two.stasis");
+        let files = [
+            ("tests/module_graph/main.stasis", main),
+            ("tests/module_graph/one.stasis", one),
+            ("tests/module_graph/two.stasis", two),
+        ];
+
+        let mut jit = crate::backend::jit::JitProcess::new();
+        for (path, source) in files {
+            jit.upsert_file(path, source);
+        }
+        jit.compile().expect("qualified JIT compile");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(18));
+
+        let mut aot = AotProcess::new();
+        for (path, source) in files {
+            aot.upsert_file(path, source);
+        }
+        aot.compile().expect("qualified AOT compile");
+        assert_eq!(
+            jit.program_snapshot().unwrap().module_graph(),
+            aot.program_snapshot().unwrap().module_graph()
+        );
+
+        #[cfg(windows)]
+        {
+            let link_config = resolve_link_config_for_smoke()
+                .expect("qualified module graph acceptance requires a Windows linker");
+            let result =
+                run_linked_i32_noarg_fixture(&aot, "main", "qualified_module_graph", &link_config)
+                    .expect("qualified module graph acceptance requires a linked executable");
+            assert_eq!(result, 18);
         }
     }
 

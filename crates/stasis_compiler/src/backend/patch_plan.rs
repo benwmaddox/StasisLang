@@ -928,12 +928,18 @@ mod tests {
     fn multi_file_plan_uses_stable_source_keys() {
         let before = indexed(&[
             ("math.stasis", "function leaf(): i32 { return 1; }"),
-            ("main.stasis", "function main(): i32 { return leaf(); }"),
+            (
+                "main.stasis",
+                "import \"math.stasis\"; function main(): i32 { return leaf(); }",
+            ),
         ]);
         let previous = capture_accepted_program(before.functions(), before.files(), &[]).unwrap();
         let after = indexed(&[
             ("math.stasis", "function leaf(): i32 { return 2; }"),
-            ("main.stasis", "function main(): i32 { return leaf(); }"),
+            (
+                "main.stasis",
+                "import \"math.stasis\"; function main(): i32 { return leaf(); }",
+            ),
         ]);
         let plan = plan_patch(
             after.functions(),

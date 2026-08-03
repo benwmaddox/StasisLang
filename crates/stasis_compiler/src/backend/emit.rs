@@ -17,7 +17,6 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -147,6 +146,14 @@ pub(crate) fn collect_supported_call_signatures(
             continue;
         }
         map.entry(function.name.clone())
+            .or_default()
+            .push(CallSignature {
+                function_id: Some(function.id),
+                extern_symbol: None,
+                params: function.params.clone(),
+                return_type: function.return_type,
+            });
+        map.entry(format!("{}.{}", function.module_alias, function.name))
             .or_default()
             .push(CallSignature {
                 function_id: Some(function.id),
@@ -500,57 +507,6 @@ pub(crate) fn are_assignment_types_compatible(
     }
     is_i32_abi_compatible_type(target_type, type_table)
         && is_i32_abi_compatible_type(expression_type, type_table)
-}
-
-pub(crate) fn parse_import_paths(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim().trim_start_matches('\u{feff}');
-        if !trimmed.starts_with("import") {
-            continue;
-        }
-        let mut chars = trimmed.chars();
-        let mut first_quote_index: Option<usize> = None;
-        let mut quote_char: Option<char> = None;
-        for (index, ch) in chars.by_ref().enumerate() {
-            if ch == '"' || ch == '\'' {
-                first_quote_index = Some(index);
-                quote_char = Some(ch);
-                break;
-            }
-        }
-        let Some(start) = first_quote_index else {
-            continue;
-        };
-        let Some(delim) = quote_char else {
-            continue;
-        };
-        let rest = &trimmed[start + 1..];
-        if let Some(end) = rest.find(delim) {
-            let path = rest[..end].trim();
-            if !path.is_empty() {
-                out.push(path.to_string());
-            }
-        }
-    }
-    out
-}
-
-pub(crate) fn resolve_import_path(base_file: &str, import_path: &str) -> PathBuf {
-    let import = Path::new(import_path);
-    if import.is_absolute() {
-        return import.to_path_buf();
-    }
-    let base = Path::new(base_file);
-    let parent = base.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(import)
-}
-
-pub(crate) fn normalize_path_for_compiler_key(path: &Path) -> String {
-    match std::fs::canonicalize(path) {
-        Ok(canonical) => canonical.to_string_lossy().to_string(),
-        Err(_) => path.to_string_lossy().to_string(),
-    }
 }
 
 pub(crate) fn compile_analysis_requires_reemit(

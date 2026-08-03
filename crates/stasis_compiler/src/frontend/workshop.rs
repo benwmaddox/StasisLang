@@ -85,54 +85,13 @@ pub fn load_workshop_project(
     project_root: &Path,
     entry_file: &Path,
 ) -> Result<Vec<WorkshopSourceFile>, String> {
-    let entry_path = if entry_file.is_absolute() {
-        entry_file.to_path_buf()
-    } else {
-        project_root.join(entry_file)
-    };
-    let mut visited = BTreeSet::new();
-    let mut out = Vec::new();
-    load_workshop_project_file(project_root, &entry_path, &mut visited, &mut out)?;
-    out.sort_by_key(|file| file.path.clone());
-    Ok(out)
-}
-
-fn load_workshop_project_file(
-    project_root: &Path,
-    path: &Path,
-    visited: &mut BTreeSet<PathBuf>,
-    out: &mut Vec<WorkshopSourceFile>,
-) -> Result<(), String> {
-    let normalized_path = normalize_filesystem_path(path);
-    if !visited.insert(normalized_path.clone()) {
-        return Ok(());
-    }
-
-    let source = fs::read_to_string(&normalized_path)
-        .map_err(|error| format!("failed reading {}: {error}", normalized_path.display()))?;
-    let relative_path = normalize_workshop_project_path(project_root, &normalized_path);
-    out.push(WorkshopSourceFile {
-        path: relative_path,
-        source: source.clone(),
-    });
-
-    let import_paths = parse_workshop_import_paths(&source)
-        .map_err(|error| format!("{}: {error}", normalized_path.display()))?;
-    for import_path in import_paths {
-        let base_dir = normalized_path.parent().unwrap_or(project_root);
-        let resolved = normalize_filesystem_path(&base_dir.join(import_path));
-        if resolved
-            .extension()
-            .is_none_or(|ext| !ext.eq_ignore_ascii_case("stasis"))
-        {
-            return Err(format!(
-                "import resolved to non-stasis file: {}",
-                resolved.display()
-            ));
-        }
-        load_workshop_project_file(project_root, &resolved, visited, out)?;
-    }
-    Ok(())
+    let (_, sources) =
+        crate::frontend::module_graph::load_project_module_graph(project_root, entry_file)
+            .map_err(|diagnostic| format!("workshop module graph failed: {diagnostic:?}"))?;
+    Ok(sources
+        .into_iter()
+        .map(|(path, source)| WorkshopSourceFile { path, source })
+        .collect())
 }
 
 fn parse_workshop_import_paths(source: &str) -> Result<Vec<String>, String> {
@@ -592,21 +551,18 @@ pub fn workshop_reachable_files(
         .map(|file| (normalize_project_path_text(&file.path), file))
         .collect::<BTreeMap<_, _>>();
     let entry = normalize_project_path_text(&entry_file.to_string_lossy());
-    let mut pending = vec![entry];
-    let mut visited = BTreeSet::new();
-    let mut out = Vec::new();
-    while let Some(path) = pending.pop() {
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        let file = by_path
-            .get(&path)
-            .ok_or_else(|| format!("import graph file is not loaded: {path}"))?;
-        for import in parse_workshop_import_paths(&file.source)?.into_iter().rev() {
-            pending.push(resolve_project_import_path(&file.path, &import));
-        }
-        out.push((*file).clone());
-    }
+    let (graph, _) = crate::frontend::module_graph::ModuleGraph::load([entry], |path| {
+        by_path
+            .get(path)
+            .map(|file| file.source.clone())
+            .ok_or_else(|| format!("import graph file is not loaded: {path}"))
+    })
+    .map_err(|diagnostic| diagnostic.message)?;
+    let mut out = graph
+        .modules()
+        .keys()
+        .filter_map(|path| by_path.get(path).map(|file| (*file).clone()))
+        .collect::<Vec<_>>();
     out.sort_by_key(|file| file.path.clone());
     Ok(out)
 }
@@ -616,17 +572,23 @@ pub fn workshop_direct_import_files(
     file_path: &Path,
 ) -> Result<Vec<String>, String> {
     let normalized = normalize_project_path_text(&file_path.to_string_lossy());
-    let file = files
+    let by_path = files
         .iter()
-        .find(|file| normalize_project_path_text(&file.path) == normalized)
-        .ok_or_else(|| format!("import graph file is not loaded: {normalized}"))?;
-    let mut imports = parse_workshop_import_paths(&file.source)?
+        .map(|file| (normalize_project_path_text(&file.path), file))
+        .collect::<BTreeMap<_, _>>();
+    let (graph, _) =
+        crate::frontend::module_graph::ModuleGraph::load([normalized.clone()], |path| {
+            by_path
+                .get(path)
+                .map(|file| file.source.clone())
+                .ok_or_else(|| format!("import graph file is not loaded: {path}"))
+        })
+        .map_err(|diagnostic| diagnostic.message)?;
+    Ok(graph
+        .direct_dependencies(&normalized)
         .into_iter()
-        .map(|import| resolve_project_import_path(&file.path, &import))
-        .collect::<Vec<_>>();
-    imports.sort();
-    imports.dedup();
-    Ok(imports)
+        .map(str::to_string)
+        .collect())
 }
 
 fn collect_workshop_source_files(
@@ -3997,9 +3959,8 @@ mod workshop_contract_tests {
         let files = vec![
             WorkshopSourceFile {
                 path: "src/main.stasis".to_string(),
-                source:
-                    "function main(): i32 { return helper(); } function extra(): i32 { return 9; }"
-                        .to_string(),
+                source: "import \"helper.stasis\"; function main(): i32 { return helper(); } function extra(): i32 { return 9; }"
+                    .to_string(),
             },
             WorkshopSourceFile {
                 path: "src/helper.stasis".to_string(),

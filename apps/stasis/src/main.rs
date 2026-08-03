@@ -244,33 +244,6 @@ fn parse_lookup_cli_args(args: &[String]) -> Result<Option<LookupCliArgs>, Strin
     }))
 }
 
-fn parse_lookup_import_paths(source: &str) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("import ") {
-            continue;
-        }
-        let Some(first_quote) = trimmed.find('"') else {
-            continue;
-        };
-        let rest = &trimmed[first_quote + 1..];
-        let Some(second_quote_rel) = rest.find('"') else {
-            continue;
-        };
-        let candidate = &rest[..second_quote_rel];
-        let path = PathBuf::from(candidate);
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("stasis"))
-        {
-            out.push(path);
-        }
-    }
-    out
-}
-
 fn is_lookup_ignored_dir(name: &str) -> bool {
     matches!(name, ".git" | ".stasis_cache" | "target")
 }
@@ -347,30 +320,16 @@ fn collect_lookup_entry_files(root: &Path, entry_file: &Path) -> Result<Vec<Path
         ));
     }
 
-    let mut queue: Vec<PathBuf> = vec![entry_canonical];
-    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
-    while let Some(path) = queue.pop() {
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        let parent = path.parent().unwrap_or(&root_canonical);
-        for import_path in parse_lookup_import_paths(&source) {
-            let candidate = parent.join(import_path);
-            if !candidate.exists() {
-                continue;
-            }
-            let canonical = candidate.canonicalize().map_err(|error| {
-                format!("failed to canonicalize {}: {error}", candidate.display())
-            })?;
-            if canonical.starts_with(&root_canonical) {
-                queue.push(canonical);
-            }
-        }
-    }
-
-    let mut files: Vec<PathBuf> = visited.into_iter().collect();
+    let (graph, _) = stasis_compiler::frontend::module_graph::load_project_module_graph(
+        &root_canonical,
+        &entry_canonical,
+    )
+    .map_err(|diagnostic| diagnostic.message)?;
+    let mut files: Vec<PathBuf> = graph
+        .modules()
+        .keys()
+        .map(|path| root_canonical.join(path))
+        .collect();
     files.sort();
     Ok(files)
 }
@@ -1813,51 +1772,22 @@ fn collect_mobile_aot_sources_from_entry(
         )
     })?;
     let entry_path = resolve_mobile_aot_project_file(&project_root, entry_file)?;
-    let mut queue = vec![entry_path];
-    let mut visited = BTreeSet::new();
-    while let Some(path) = queue.pop() {
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        let parent = path.parent().unwrap_or(&project_root);
-        for import_path in parse_lookup_import_paths(&source) {
-            let candidate = parent.join(import_path);
-            let imported = candidate.canonicalize().map_err(|error| {
-                format!(
-                    "failed to canonicalize import {}: {error}",
-                    candidate.display()
-                )
-            })?;
-            if !imported.starts_with(&project_root) {
-                return Err(format!(
-                    "mobile AOT import {} must stay under project directory {}",
-                    imported.display(),
-                    project_root.display()
-                ));
-            }
-            queue.push(imported);
-        }
-    }
+    let (graph, sources) = stasis_compiler::frontend::module_graph::load_project_module_graph(
+        &project_root,
+        &entry_path,
+    )
+    .map_err(|diagnostic| diagnostic.message)?;
 
     let mut out = Vec::new();
-    for path in visited {
-        if path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(".test.stasis"))
-        {
+    for relative in graph.modules().keys() {
+        if relative.ends_with(".test.stasis") {
             continue;
         }
-        let relative = path
-            .strip_prefix(&project_root)
-            .map_err(|error| format!("failed to relativize {}: {error}", path.display()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        out.push((relative, source));
+        let source = sources
+            .get(relative)
+            .cloned()
+            .ok_or_else(|| format!("module graph source missing for {relative}"))?;
+        out.push((relative.clone(), source));
     }
     out.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(out)
@@ -3067,7 +2997,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_aot_bundle_deduplicates_cyclic_import_graph() {
+    fn mobile_aot_bundle_rejects_cyclic_import_graph() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -3112,14 +3042,17 @@ function frame_width(): i32 { return 360; }
         )
         .expect("write manifest");
 
-        let summary = write_mobile_aot_engine_bundle(
+        let error = match write_mobile_aot_engine_bundle(
             MobileAotTarget::AndroidArm64,
             &project_dir,
             Some(Path::new("src/main.stasis")),
             &output_dir,
-        )
-        .expect("cyclic imports should compile each canonical file once");
-        assert!(summary.package_manifest.is_file());
+        ) {
+            Ok(_) => panic!("cyclic imports must be rejected by the compiler graph"),
+            Err(error) => error,
+        };
+        assert!(error
+            .contains("import cycle: src/window.stasis -> src/frame.stasis -> src/window.stasis"));
 
         std::fs::remove_dir_all(&project_dir).ok();
         std::fs::remove_dir_all(&output_dir).ok();
