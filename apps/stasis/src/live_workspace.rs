@@ -1453,15 +1453,22 @@ fn completion_query_from_snapshot(
             .iter()
             .find(|collection| collection.path == collection_path)
         {
-            index.extend(collection.fields.iter().map(|(field, type_name)| CompletionItem {
-                text: format!("{receiver}{field}"),
-                kind: "field".to_string(),
-                detail: format!("{type_name} via indexed state collection {collection_path}"),
-                type_name: Some(type_name.clone()),
-                source: Some("runtime state layout".to_string()),
-                selector: None,
-                scope: None,
-            }));
+            index.extend(
+                collection
+                    .fields
+                    .iter()
+                    .map(|(field, type_name)| CompletionItem {
+                        text: format!("{receiver}{field}"),
+                        kind: "field".to_string(),
+                        detail: format!(
+                            "{type_name} via indexed state collection {collection_path}"
+                        ),
+                        type_name: Some(type_name.clone()),
+                        source: Some("runtime state layout".to_string()),
+                        selector: None,
+                        scope: None,
+                    }),
+            );
         }
     }
     let mut effective_context = context.clone();
@@ -1487,10 +1494,7 @@ fn completion_query_from_snapshot(
     index.query_with_context(buffer, cursor, limit, &effective_context)
 }
 
-fn indexed_completion_receiver<'a>(
-    buffer: &'a str,
-    cursor: usize,
-) -> Option<(&'a str, &'a str)> {
+fn indexed_completion_receiver<'a>(buffer: &'a str, cursor: usize) -> Option<(&'a str, &'a str)> {
     let cursor = cursor.min(buffer.len());
     let prefix = buffer.get(..cursor)?;
     let field_separator = prefix.rfind("].")?;
