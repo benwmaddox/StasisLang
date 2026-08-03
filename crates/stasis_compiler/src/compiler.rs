@@ -133,6 +133,59 @@ struct StatementCacheKey {
     body_hash: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ModuleResolutionIndex {
+    function_indices_by_name: HashMap<String, Vec<usize>>,
+    context_hash_by_path: BTreeMap<String, u64>,
+}
+
+impl ModuleResolutionIndex {
+    fn build(graph: &ModuleGraph, files: &[SourceFile], functions: &[FunctionMeta]) -> Self {
+        let mut function_indices_by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut signatures_by_path: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for (index, function) in functions.iter().enumerate() {
+            function_indices_by_name
+                .entry(function.name.clone())
+                .or_default()
+                .push(index);
+            let path = files[function.file_id as usize].path.as_str();
+            signatures_by_path.entry(path).or_default().push(format!(
+                "{path}|{}|{}|{}",
+                function.module_alias, function.name, function.signature_hash
+            ));
+        }
+
+        let context_hash_by_path = files
+            .iter()
+            .map(|file| {
+                let visible_paths = graph.dependency_closure(&file.path);
+                let mut context = visible_paths.iter().cloned().collect::<Vec<_>>();
+                for path in &visible_paths {
+                    if let Some(signatures) = signatures_by_path.get(path.as_str()) {
+                        context.extend(signatures.iter().cloned());
+                    }
+                }
+                (file.path.clone(), hash_text(&context.join("\n")))
+            })
+            .collect();
+
+        Self {
+            function_indices_by_name,
+            context_hash_by_path,
+        }
+    }
+
+    fn function_indices(&self, name: &str) -> &[usize] {
+        self.function_indices_by_name
+            .get(name)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn context_hash(&self, path: &str) -> Option<u64> {
+        self.context_hash_by_path.get(path).copied()
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct SymbolTable {
@@ -281,6 +334,7 @@ pub struct Compiler {
     project_root: Option<String>,
     pending_path_error: Option<String>,
     module_graph: ModuleGraph,
+    module_resolution: ModuleResolutionIndex,
     entry_roots: BTreeSet<String>,
     indexed_file_hashes: BTreeMap<String, u64>,
 }
@@ -594,6 +648,8 @@ impl Compiler {
                 });
             }
         }
+        self.module_resolution =
+            ModuleResolutionIndex::build(&self.module_graph, &self.files, &self.functions);
 
         let mut unique_edges = BTreeSet::new();
         for (caller_index, dependencies) in dependencies_by_function.into_iter().enumerate() {
@@ -607,39 +663,19 @@ impl Compiler {
                     &self.module_graph,
                     &self.files,
                     &self.functions,
+                    &self.module_resolution,
                 ) {
                     Ok(resolution) => resolution,
                     Err(error) => {
-                        let relative_span = match error {
-                            ModuleCallResolutionError::InvalidQualifier => dependency
-                                .qualifier_span
-                                .clone()
-                                .unwrap_or_else(|| dependency.name_span.clone()),
-                            ModuleCallResolutionError::Ambiguous
-                            | ModuleCallResolutionError::Inaccessible => {
-                                dependency.name_span.clone()
-                            }
-                        };
+                        let relative_span = dependency.name_span.clone();
                         let base = self.functions[caller_index].source_range.start as usize;
-                        let symbol = match error {
-                            ModuleCallResolutionError::InvalidQualifier => dependency
-                                .qualifier
-                                .clone()
-                                .unwrap_or_else(|| dependency.name.clone()),
-                            ModuleCallResolutionError::Ambiguous
-                            | ModuleCallResolutionError::Inaccessible => dependency.name.clone(),
-                        };
-                        let message = module_call_resolution_message(
-                            error,
-                            dependency.qualifier.as_deref(),
-                            &dependency.name,
-                            caller_path,
-                        );
+                        let message =
+                            module_call_resolution_message(error, &dependency.name, caller_path);
                         self.last_source_diagnostic = Some(crate::SourceDiagnostic {
                             path: caller_path.clone(),
                             start: base + relative_span.start as usize,
                             end: base + relative_span.end as usize,
-                            symbol,
+                            symbol: dependency.name.clone(),
                             message: message.clone(),
                         });
                         return Err(CompileError::Frontend(message));
@@ -648,9 +684,13 @@ impl Compiler {
                 let Some(module_alias) = resolution.module_alias else {
                     continue;
                 };
-                for callee in self.functions.iter().filter(|function| {
-                    function.name == dependency.name && function.module_alias == module_alias
-                }) {
+                for callee in self
+                    .module_resolution
+                    .function_indices(&dependency.name)
+                    .iter()
+                    .map(|index| &self.functions[*index])
+                    .filter(|function| function.module_alias == module_alias)
+                {
                     if caller != callee.id {
                         unique_edges.insert((caller, callee.id));
                     }
@@ -705,14 +745,18 @@ impl Compiler {
             let function_index = self.function_index(*function_id)?;
             let function = &self.functions[function_index];
             let file = &self.files[function.file_id as usize];
+            let module_context_hash =
+                self.module_resolution
+                    .context_hash(&file.path)
+                    .ok_or_else(|| {
+                        CompileError::Invariant(format!(
+                            "missing module resolution context for '{}'",
+                            file.path
+                        ))
+                    })?;
             let key = StatementCacheKey {
                 path: file.path.clone(),
-                module_context_hash: module_resolution_context_hash(
-                    &file.path,
-                    &self.module_graph,
-                    &self.files,
-                    &self.functions,
-                ),
+                module_context_hash,
                 name_hash: function.name_hash,
                 signature_hash: function.signature_hash,
                 body_hash: function.body_hash,
@@ -743,6 +787,7 @@ impl Compiler {
                     &self.module_graph,
                     &self.files,
                     &self.functions,
+                    &self.module_resolution,
                 ) {
                     return Err(CompileError::Frontend(message));
                 }
@@ -935,6 +980,7 @@ impl Compiler {
             &self.module_graph,
             &self.files,
             &self.functions,
+            &self.module_resolution,
         )
         .map_err(CompileError::Frontend)?;
         Ok(FunctionHIR {
@@ -953,7 +999,6 @@ impl Compiler {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModuleCallResolutionError {
-    InvalidQualifier,
     Ambiguous,
     Inaccessible,
 }
@@ -963,26 +1008,6 @@ struct ModuleCallResolution {
     consume_qualifier: bool,
 }
 
-fn module_resolution_context_hash(
-    caller_path: &str,
-    graph: &ModuleGraph,
-    files: &[SourceFile],
-    functions: &[FunctionMeta],
-) -> u64 {
-    let visible_paths = graph.dependency_closure(caller_path);
-    let mut context = visible_paths.iter().cloned().collect::<Vec<_>>();
-    context.extend(functions.iter().filter_map(|function| {
-        let path = &files.get(function.file_id as usize)?.path;
-        visible_paths.contains(path).then(|| {
-            format!(
-                "{path}|{}|{}|{}",
-                function.module_alias, function.name, function.signature_hash
-            )
-        })
-    }));
-    hash_text(&context.join("\n"))
-}
-
 fn resolve_module_call(
     qualifier: Option<&str>,
     name: &str,
@@ -990,6 +1015,7 @@ fn resolve_module_call(
     graph: &ModuleGraph,
     files: &[SourceFile],
     functions: &[FunctionMeta],
+    resolution: &ModuleResolutionIndex,
 ) -> Result<ModuleCallResolution, ModuleCallResolutionError> {
     if let Some(alias) = qualifier {
         if graph.imported_alias_target(caller_path, alias).is_some() {
@@ -998,39 +1024,34 @@ fn resolve_module_call(
                 consume_qualifier: true,
             });
         }
-        if graph.modules().values().any(|module| module.alias == alias) {
-            return Err(ModuleCallResolutionError::InvalidQualifier);
-        }
     }
 
-    let local_modules: BTreeSet<String> = functions
+    let candidates = resolution.function_indices(name);
+    let local_modules: BTreeSet<String> = candidates
         .iter()
-        .filter(|function| {
-            function.name == name
-                && files
-                    .get(function.file_id as usize)
-                    .is_some_and(|file| file.path == caller_path)
+        .filter_map(|index| {
+            let function = &functions[*index];
+            (files[function.file_id as usize].path == caller_path)
+                .then(|| function.module_alias.clone())
         })
-        .map(|function| function.module_alias.clone())
         .collect();
     let modules = if local_modules.is_empty() {
         let mut imported_paths = graph.dependency_closure(caller_path);
         imported_paths.remove(caller_path);
-        functions
+        candidates
             .iter()
-            .filter(|function| {
-                function.name == name
-                    && files
-                        .get(function.file_id as usize)
-                        .is_some_and(|file| imported_paths.contains(&file.path))
+            .filter_map(|index| {
+                let function = &functions[*index];
+                imported_paths
+                    .contains(&files[function.file_id as usize].path)
+                    .then(|| function.module_alias.clone())
             })
-            .map(|function| function.module_alias.clone())
             .collect::<BTreeSet<_>>()
     } else {
         local_modules
     };
     match modules.len() {
-        0 if qualifier.is_none() && functions.iter().any(|function| function.name == name) => {
+        0 if qualifier.is_none() && !candidates.is_empty() => {
             Err(ModuleCallResolutionError::Inaccessible)
         }
         0 => Ok(ModuleCallResolution {
@@ -1047,16 +1068,10 @@ fn resolve_module_call(
 
 fn module_call_resolution_message(
     error: ModuleCallResolutionError,
-    qualifier: Option<&str>,
     name: &str,
     caller_path: &str,
 ) -> String {
     match error {
-        ModuleCallResolutionError::InvalidQualifier => format!(
-            "invalid module qualifier '{}'; module is not imported by '{}'",
-            qualifier.unwrap_or_default(),
-            caller_path
-        ),
         ModuleCallResolutionError::Ambiguous => format!(
             "ambiguous unqualified call '{}'; qualify it as module.{}",
             name, name
@@ -1074,6 +1089,7 @@ fn qualify_module_calls(
     graph: &ModuleGraph,
     files: &[SourceFile],
     functions: &[FunctionMeta],
+    resolution: &ModuleResolutionIndex,
 ) -> Result<(), String> {
     fn expression(
         value: &mut SimpleExpr,
@@ -1081,23 +1097,32 @@ fn qualify_module_calls(
         graph: &ModuleGraph,
         files: &[SourceFile],
         functions: &[FunctionMeta],
+        resolution: &ModuleResolutionIndex,
     ) -> Result<(), String> {
         match value {
             SimpleExpr::Condition(condition) => {
-                condition_value(condition, caller_path, graph, files, functions)
+                condition_value(condition, caller_path, graph, files, functions, resolution)
             }
             SimpleExpr::IndexedPath { index, .. } => {
-                expression(index, caller_path, graph, files, functions)
+                expression(index, caller_path, graph, files, functions, resolution)
             }
             SimpleExpr::Call { target, args } => {
                 for argument in args.iter_mut() {
-                    expression(argument, caller_path, graph, files, functions)?;
+                    expression(argument, caller_path, graph, files, functions, resolution)?;
                 }
                 let qualifier = args.first().and_then(|argument| match argument {
                     SimpleExpr::Identifier(alias) => Some(alias.as_str()),
                     _ => None,
                 });
-                match resolve_module_call(qualifier, target, caller_path, graph, files, functions) {
+                match resolve_module_call(
+                    qualifier,
+                    target,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                ) {
                     Ok(resolution) => {
                         if let Some(alias) = resolution.module_alias {
                             *target = format!("{alias}.{target}");
@@ -1107,17 +1132,12 @@ fn qualify_module_calls(
                         }
                         Ok(())
                     }
-                    Err(error) => Err(module_call_resolution_message(
-                        error,
-                        qualifier,
-                        target,
-                        caller_path,
-                    )),
+                    Err(error) => Err(module_call_resolution_message(error, target, caller_path)),
                 }
             }
             SimpleExpr::Binary { lhs, rhs, .. } => {
-                expression(lhs, caller_path, graph, files, functions)?;
-                expression(rhs, caller_path, graph, files, functions)
+                expression(lhs, caller_path, graph, files, functions, resolution)?;
+                expression(rhs, caller_path, graph, files, functions, resolution)
             }
             SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
@@ -1133,19 +1153,22 @@ fn qualify_module_calls(
         graph: &ModuleGraph,
         files: &[SourceFile],
         functions: &[FunctionMeta],
+        resolution: &ModuleResolutionIndex,
     ) -> Result<(), String> {
         match condition {
             SimpleCondition::Comparison { lhs, rhs, .. } => {
-                expression(lhs, caller_path, graph, files, functions)?;
-                expression(rhs, caller_path, graph, files, functions)
+                expression(lhs, caller_path, graph, files, functions, resolution)?;
+                expression(rhs, caller_path, graph, files, functions, resolution)
             }
-            SimpleCondition::Expr(value) => expression(value, caller_path, graph, files, functions),
+            SimpleCondition::Expr(value) => {
+                expression(value, caller_path, graph, files, functions, resolution)
+            }
             SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-                condition_value(lhs, caller_path, graph, files, functions)?;
-                condition_value(rhs, caller_path, graph, files, functions)
+                condition_value(lhs, caller_path, graph, files, functions, resolution)?;
+                condition_value(rhs, caller_path, graph, files, functions, resolution)
             }
             SimpleCondition::Not(inner) => {
-                condition_value(inner, caller_path, graph, files, functions)
+                condition_value(inner, caller_path, graph, files, functions, resolution)
             }
         }
     }
@@ -1156,6 +1179,7 @@ fn qualify_module_calls(
         graph: &ModuleGraph,
         files: &[SourceFile],
         functions: &[FunctionMeta],
+        resolution: &ModuleResolutionIndex,
     ) -> Result<(), String> {
         match value {
             SimpleStmt::Let {
@@ -1165,22 +1189,31 @@ fn qualify_module_calls(
                 expression: value, ..
             }
             | SimpleStmt::Expr(value)
-            | SimpleStmt::Return(value) => expression(value, caller_path, graph, files, functions),
+            | SimpleStmt::Return(value) => {
+                expression(value, caller_path, graph, files, functions, resolution)
+            }
             SimpleStmt::Convert { source, .. } => {
-                expression(source, caller_path, graph, files, functions)
+                expression(source, caller_path, graph, files, functions, resolution)
             }
             SimpleStmt::If {
                 condition,
                 then_statements,
                 else_statements,
             } => {
-                condition_value(condition, caller_path, graph, files, functions)?;
+                condition_value(condition, caller_path, graph, files, functions, resolution)?;
                 for nested in then_statements {
-                    statement(nested, caller_path, graph, files, functions)?;
+                    statement(nested, caller_path, graph, files, functions, resolution)?;
                 }
                 if let Some(nested) = else_statements {
                     for statement_value in nested {
-                        statement(statement_value, caller_path, graph, files, functions)?;
+                        statement(
+                            statement_value,
+                            caller_path,
+                            graph,
+                            files,
+                            functions,
+                            resolution,
+                        )?;
                     }
                 }
                 Ok(())
@@ -1191,11 +1224,11 @@ fn qualify_module_calls(
                 step,
                 body_statements,
             } => {
-                statement(init, caller_path, graph, files, functions)?;
-                condition_value(condition, caller_path, graph, files, functions)?;
-                statement(step, caller_path, graph, files, functions)?;
+                statement(init, caller_path, graph, files, functions, resolution)?;
+                condition_value(condition, caller_path, graph, files, functions, resolution)?;
+                statement(step, caller_path, graph, files, functions, resolution)?;
                 for nested in body_statements {
-                    statement(nested, caller_path, graph, files, functions)?;
+                    statement(nested, caller_path, graph, files, functions, resolution)?;
                 }
                 Ok(())
             }
@@ -1203,7 +1236,7 @@ fn qualify_module_calls(
                 body_statements, ..
             } => {
                 for nested in body_statements {
-                    statement(nested, caller_path, graph, files, functions)?;
+                    statement(nested, caller_path, graph, files, functions, resolution)?;
                 }
                 Ok(())
             }
@@ -1212,7 +1245,14 @@ fn qualify_module_calls(
     }
 
     for statement_value in statements {
-        statement(statement_value, caller_path, graph, files, functions)?;
+        statement(
+            statement_value,
+            caller_path,
+            graph,
+            files,
+            functions,
+            resolution,
+        )?;
     }
     Ok(())
 }
@@ -2143,25 +2183,36 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
     }
 
     #[test]
-    fn module_context_rejects_known_but_unimported_qualifier() {
+    fn loaded_module_alias_does_not_steal_an_ordinary_receiver_call() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
             "main.stasis",
-            "import \"one.stasis\"; function main(): i32 { let two: i32 = 0; return two.value(); }",
+            "function value(self: i32): i32 { return self + 1; } function main(): i32 { let two: i32 = 1; return two.value(); }",
         );
-        compiler.upsert_file("one.stasis", "function value(): i32 { return 1; }");
-        compiler.upsert_file("two.stasis", "function value(): i32 { return 2; }");
-        let error = compiler.index_pass().unwrap_err();
-        assert!(format!("{error:?}").contains("invalid module qualifier 'two'"));
-        let diagnostic = compiler.last_source_diagnostic().unwrap();
-        assert_eq!(diagnostic.symbol, "two");
+        compiler.upsert_file("two.stasis", "function value(): i32 { return 99; }");
+        compiler.index_pass().expect("ordinary receiver resolution");
         let main = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        let local_value = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "value"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("local receiver function");
+        let unrelated_value = compiler
             .files()
             .iter()
-            .find(|file| file.path == "main.stasis")
-            .unwrap();
-        assert_eq!(&main.content[diagnostic.start..diagnostic.end], "two");
-        assert_eq!(diagnostic.start, main.content.rfind("two").unwrap());
+            .find(|file| file.path == "two.stasis")
+            .and_then(|file| file.functions.first())
+            .copied()
+            .expect("unrelated module value");
+        assert_eq!(main.dependencies, vec![local_value.id]);
+        assert_ne!(main.dependencies, vec![unrelated_value]);
     }
 
     #[test]
@@ -2376,6 +2427,22 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
         compiler.index_pass().expect("body edit index");
         assert_eq!(compiler.statement_parse_count, 3);
         assert!(function_by_name(&compiler, "main").dirty);
+    }
+
+    #[test]
+    fn imported_signature_edit_invalidates_file_context_statement_cache_once() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\"; function main(): i32 { return helper(); }",
+        );
+        compiler.upsert_file("helper.stasis", "function helper(): i32 { return 1; }");
+        compiler.index_pass().expect("initial index");
+        assert_eq!(compiler.statement_parse_count, 2);
+
+        compiler.upsert_file("helper.stasis", "function helper(): f32 { return 1.0; }");
+        compiler.index_pass().expect("signature edit index");
+        assert_eq!(compiler.statement_parse_count, 4);
     }
 
     #[cfg(any(unix, windows))]
