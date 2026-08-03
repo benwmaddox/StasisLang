@@ -5,8 +5,9 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 - Stasis syntax highlighting and editor indentation;
 - continuous compiler diagnostics through a standard Language Server Protocol client;
 - canonical document formatting through `stasis format --stdin`;
-- compiler-backed LSP completion with signatures, documentation, snippets, typed local/member
-  ranking, and safe import edits;
+- compiler-backed LSP completion with signatures, documentation, snippets, expected-type-aware
+  local/member ranking, and revision-safe auto-import edits loaded through standard completion
+  resolve;
 - compiler-aware hover and signature help;
 - compiler-backed LSP **Go to Definition**, **Find All References**, Outline, breadcrumbs, and
   workspace symbol search;

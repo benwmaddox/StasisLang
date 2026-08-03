@@ -33,6 +33,10 @@ impl WorkspaceRevision {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    pub fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,6 +474,19 @@ pub struct LanguageCompletionItem {
     pub insert_text: String,
     pub snippet: bool,
     pub additional_text_edits: Vec<CompletionTextChange>,
+    pub resolve_data: Option<CompletionResolveData>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionResolveData {
+    pub revision: WorkspaceRevision,
+    pub catalog_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageCompletionResolution {
+    pub documentation: Option<String>,
+    pub additional_text_edits: Vec<CompletionTextChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -820,15 +837,12 @@ impl LanguageService {
         let mut completion_index = index.completion.clone();
         completion_index.extend(live_items);
         let query = completion_index.query_with_context(&source, byte_offset, limit, &context);
-        let reachable = workshop_reachable_files(&index.files, Path::new(&relative))?
-            .into_iter()
-            .map(|file| file.path)
-            .collect::<BTreeSet<_>>();
         let items = query
             .items
             .iter()
             .filter_map(|ranked| {
-                let Some(catalog) = matching_workshop_completion(&index.workshop_items, ranked)
+                let Some((catalog_index, catalog)) =
+                    matching_workshop_completion(&index.workshop_items, ranked)
                 else {
                     return Some(LanguageCompletionItem {
                         text: ranked.text.clone(),
@@ -840,6 +854,7 @@ impl LanguageService {
                         insert_text: ranked.text.clone(),
                         snippet: false,
                         additional_text_edits: Vec::new(),
+                        resolve_data: None,
                     });
                 };
                 let (insert_text, snippet) = completion_insert_text(catalog);
@@ -849,14 +864,14 @@ impl LanguageService {
                     detail: ranked.detail.clone(),
                     type_name: ranked.type_name.clone(),
                     signature: catalog.signature.clone(),
-                    documentation: documentation_for_completion(index, catalog),
+                    documentation: None,
                     insert_text,
                     snippet,
-                    additional_text_edits: completion_import_edit(
-                        path, &relative, &reachable, catalog,
-                    )
-                    .into_iter()
-                    .collect(),
+                    additional_text_edits: Vec::new(),
+                    resolve_data: Some(CompletionResolveData {
+                        revision: index.revision,
+                        catalog_index,
+                    }),
                 })
             })
             .collect();
@@ -866,6 +881,38 @@ impl LanguageService {
             truncated: query.truncated,
             items,
         })
+    }
+
+    pub fn resolve_completion(
+        &mut self,
+        path: &str,
+        data: CompletionResolveData,
+    ) -> Result<Option<LanguageCompletionResolution>, String> {
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let current_revision = self.documents.snapshot().revision();
+        let index = self.language_index()?;
+        if index.revision != data.revision {
+            return Ok(None);
+        }
+        let Some(item) = index.workshop_items.get(data.catalog_index) else {
+            return Ok(None);
+        };
+        let documentation = documentation_for_completion(index, item);
+        let additional_text_edits = if current_revision == index.revision {
+            let reachable = workshop_reachable_files(&index.files, Path::new(&relative))?
+                .into_iter()
+                .map(|file| file.path)
+                .collect::<BTreeSet<_>>();
+            completion_import_edit(path, &relative, &reachable, item)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Some(LanguageCompletionResolution {
+            documentation,
+            additional_text_edits,
+        }))
     }
 
     pub fn hover(&mut self, path: &str, byte_offset: usize) -> Result<Option<HoverInfo>, String> {
@@ -1472,8 +1519,8 @@ fn shared_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
 fn matching_workshop_completion<'a>(
     items: &'a [WorkshopCompletionItem],
     ranked: &CompletionItem,
-) -> Option<&'a WorkshopCompletionItem> {
-    items.iter().find(|item| {
+) -> Option<(usize, &'a WorkshopCompletionItem)> {
+    items.iter().enumerate().find(|(_, item)| {
         item.text == ranked.text
             && item.kind == ranked.kind
             && item.detail == ranked.detail
@@ -2315,8 +2362,13 @@ function main(): i32 {
             .expect("function completion item");
         assert_eq!(function.insert_text, "spawn_enemy(${1:count}, ${2:health})");
         assert!(function.snippet);
+        assert!(function.documentation.is_none());
+        let resolution = service
+            .resolve_completion(&path, function.resolve_data.expect("resolve data"))
+            .expect("completion resolve")
+            .expect("current completion resolution");
         assert_eq!(
-            function.documentation.as_deref(),
+            resolution.documentation.as_deref(),
             Some("Creates an enemy with explicit health.")
         );
     }
@@ -2461,12 +2513,30 @@ function main(): i32 {
             .iter()
             .find(|item| item.text == "helper")
             .expect("helper completion");
-        assert_eq!(helper.additional_text_edits.len(), 1);
-        assert_eq!(helper.additional_text_edits[0].range, 0..0);
+        assert!(helper.additional_text_edits.is_empty());
+        assert!(helper.documentation.is_none());
+        let resolution = service
+            .resolve_completion(&main_text, helper.resolve_data.expect("resolve data"))
+            .expect("completion resolve")
+            .expect("current completion resolution");
+        assert_eq!(resolution.additional_text_edits.len(), 1);
+        assert_eq!(resolution.additional_text_edits[0].range, 0..0);
         assert_eq!(
-            helper.additional_text_edits[0].text,
+            resolution.additional_text_edits[0].text,
             "import \"helper.stasis\";\n"
         );
+
+        let stale_data = helper.resolve_data.expect("resolve data");
+        service.open_document(
+            main_text.clone(),
+            1,
+            format!("{source}function unfinished() {{"),
+        );
+        let stale = service
+            .resolve_completion(&main_text, stale_data)
+            .expect("stale completion resolve")
+            .expect("last-good documentation resolution");
+        assert!(stale.additional_text_edits.is_empty());
     }
 
     #[test]

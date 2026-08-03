@@ -17,7 +17,7 @@ use lsp_types::notification::{
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
     InlayHintRequest, PrepareRenameRequest, References, Rename, Request as _,
-    SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
+    ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
@@ -40,12 +40,12 @@ use lsp_types::{
     TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use stasis_language_service::{
-    DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem, LanguageInlayHintKind,
-    LanguageLocation, LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
-    SignatureHelp as SharedSignatureHelp, TextChange,
+    CompletionResolveData, DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem,
+    LanguageInlayHintKind, LanguageLocation, LanguageService, LanguageSymbol, LanguageSymbolKind,
+    Position, SignatureHelp as SharedSignatureHelp, TextChange, WorkspaceRevision,
 };
 use url::Url;
 
@@ -66,6 +66,14 @@ struct LiveStartParams {
 struct LiveRequestParams {
     #[serde(flatten)]
     fields: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletionResolvePayload {
+    path: String,
+    revision: u64,
+    catalog_index: usize,
 }
 
 pub fn run_stdio(project_root: &Path) -> Result<(), String> {
@@ -107,7 +115,7 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
             )),
             completion_provider: Some(CompletionOptions {
                 trigger_characters: Some(vec![".".to_string()]),
-                resolve_provider: Some(false),
+                resolve_provider: Some(true),
                 ..CompletionOptions::default()
             }),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -247,6 +255,15 @@ impl LanguageServer {
                     .extract(Completion::METHOD)
                     .map_err(|error| format!("invalid completion request: {error}"))?;
                 match self.completion(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            ResolveCompletionItem::METHOD => {
+                let (id, params): (_, lsp_types::CompletionItem) = request
+                    .extract(ResolveCompletionItem::METHOD)
+                    .map_err(|error| format!("invalid completion-resolve request: {error}"))?;
+                match self.resolve_completion(params) {
                     Ok(result) => Response::new_ok(id, result),
                     Err(error) => internal_error(id, error),
                 }
@@ -526,6 +543,48 @@ impl LanguageServer {
             is_incomplete: completion.truncated,
             items,
         })))
+    }
+
+    fn resolve_completion(
+        &mut self,
+        mut item: lsp_types::CompletionItem,
+    ) -> Result<lsp_types::CompletionItem, String> {
+        let Some(data) = item.data.as_ref() else {
+            return Ok(item);
+        };
+        let payload: CompletionResolvePayload = serde_json::from_value(data.clone())
+            .map_err(|error| format!("invalid Stasis completion resolve data: {error}"))?;
+        let Some(resolution) = self.service.resolve_completion(
+            &payload.path,
+            CompletionResolveData {
+                revision: WorkspaceRevision::from_raw(payload.revision),
+                catalog_index: payload.catalog_index,
+            },
+        )?
+        else {
+            return Ok(item);
+        };
+        item.documentation = resolution.documentation.map(|value| {
+            Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            })
+        });
+        if !resolution.additional_text_edits.is_empty() {
+            let snapshot = self.service.snapshot();
+            let document = snapshot.document(&payload.path).ok_or_else(|| {
+                format!(
+                    "completion resolve document is not indexed: '{}'",
+                    payload.path
+                )
+            })?;
+            item.additional_text_edits = Some(lsp_completion_text_edits(
+                &resolution.additional_text_edits,
+                &payload.path,
+                document,
+            )?);
+        }
+        Ok(item)
     }
 
     fn hover(&mut self, params: HoverParams) -> Result<Option<Hover>, String> {
@@ -1035,8 +1094,48 @@ fn lsp_completion_item(
     path: &str,
     document: &Document,
 ) -> Result<lsp_types::CompletionItem, String> {
-    let additional_text_edits = item
-        .additional_text_edits
+    let additional_text_edits =
+        lsp_completion_text_edits(&item.additional_text_edits, path, document)?;
+    let data = item
+        .resolve_data
+        .map(|data| {
+            serde_json::to_value(CompletionResolvePayload {
+                path: path.to_string(),
+                revision: data.revision.get(),
+                catalog_index: data.catalog_index,
+            })
+            .map_err(|error| format!("failed serializing completion resolve data: {error}"))
+        })
+        .transpose()?;
+    Ok(lsp_types::CompletionItem {
+        label: item.text.clone(),
+        kind: Some(completion_kind(&item.kind)),
+        detail: Some(item.detail.clone()),
+        documentation: item.documentation.clone().map(|value| {
+            Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            })
+        }),
+        sort_text: Some(format!("{rank:06}")),
+        filter_text: Some(item.text.clone()),
+        insert_text_format: item.snippet.then_some(InsertTextFormat::SNIPPET),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range,
+            new_text: item.insert_text.clone(),
+        })),
+        additional_text_edits: (!additional_text_edits.is_empty()).then_some(additional_text_edits),
+        data,
+        ..lsp_types::CompletionItem::default()
+    })
+}
+
+fn lsp_completion_text_edits(
+    edits: &[stasis_language_service::CompletionTextChange],
+    path: &str,
+    document: &Document,
+) -> Result<Vec<TextEdit>, String> {
+    edits
         .iter()
         .map(|edit| {
             if edit.path != path {
@@ -1056,27 +1155,7 @@ fn lsp_completion_item(
                 new_text: edit.text.clone(),
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(lsp_types::CompletionItem {
-        label: item.text.clone(),
-        kind: Some(completion_kind(&item.kind)),
-        detail: Some(item.detail.clone()),
-        documentation: item.documentation.clone().map(|value| {
-            Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value,
-            })
-        }),
-        sort_text: Some(format!("{rank:06}")),
-        filter_text: Some(item.text.clone()),
-        insert_text_format: item.snippet.then_some(InsertTextFormat::SNIPPET),
-        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-            range,
-            new_text: item.insert_text.clone(),
-        })),
-        additional_text_edits: (!additional_text_edits.is_empty()).then_some(additional_text_edits),
-        ..lsp_types::CompletionItem::default()
-    })
+        .collect()
 }
 
 fn completion_kind(kind: &str) -> CompletionItemKind {
@@ -1709,12 +1788,30 @@ mod tests {
             .items
             .iter()
             .find(|item| item.label == "spawn_enemy")
-            .expect("function completion");
+            .expect("function completion")
+            .clone();
         assert_eq!(function.insert_text_format, Some(InsertTextFormat::SNIPPET));
         let Some(CompletionTextEdit::Edit(edit)) = function.text_edit.as_ref() else {
             panic!("expected completion text edit");
         };
         assert_eq!(edit.new_text, "spawn_enemy(${1:count}, ${2:health})");
+        assert!(function.documentation.is_none());
+        assert!(function.data.is_some());
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(13),
+                    ResolveCompletionItem::METHOD.to_string(),
+                    function,
+                ),
+            )
+            .expect("completion resolve request");
+        let response = receive_response(&client_connection, 13);
+        let function: lsp_types::CompletionItem =
+            serde_json::from_value(response.response_result.expect("completion resolve result"))
+                .expect("resolved completion item");
         assert!(matches!(
             function.documentation.as_ref(),
             Some(Documentation::MarkupContent(content)) if content.value.contains("Creates an enemy")

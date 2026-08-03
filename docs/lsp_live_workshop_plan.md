@@ -241,7 +241,9 @@ Each slice is independently testable and removes the host-specific path it repla
 - [x] Add standard LSP inlay hints from compiler-owned inferred local types and resolved call
   signatures, expose the same read-only query as `:inlay-hints FILE` in the TUI, and recover only
   byte-identical last-good hints outside broken edits.
-- [ ] Add completion resolve/detail, expected-type refinements, and remaining import insertion.
+- [x] Add standard completion resolve so the initial ranked list remains cheap while documentation
+  and compiler-validated import insertion are loaded on selection. Preserve typed ranking and
+  snippets in the initial response, and suppress edit-producing resolution on stale snapshots.
 - [ ] Add call hierarchy and type hierarchy from compiler-owned graphs and symbol IDs.
 
 ### Slice 7: debugging and editing polish
@@ -469,3 +471,19 @@ anchor. Compiler tests prove inferred `let` types originate in the same data-flo
 checking, and packaged VSIX/TUI tests prove type and parameter projections share one cached service.
 This predicts that future live-value hints should join onto these static anchors only when runtime
 identity and source hashes match, exactly as live hover already does.
+
+### Standard completion resolve implementation
+
+- Good: the existing typed catalog already contained signatures, documentation ownership, snippets,
+  expected-type ranking, and import reachability, so resolve could remain a thin revisioned view of
+  the same compiler index.
+- Bad: eager documentation and import calculation made every visible completion candidate pay for
+  data that most requests never display or apply.
+- Adjustment: keep latency-sensitive completion lists compact and defer optional detail, but bind
+  every edit-producing resolve token to an exact workspace revision.
+
+Theory gained: completion identity can outlive the text snapshot for read-only documentation, but
+completion edits cannot. The stale-source test proves the retained last-good catalog can safely
+resolve documentation during an incomplete function while withholding auto-import edits; the LSP
+protocol test proves current items resolve through the standard request. This predicts code-action
+resolve should use the same split between stable semantic explanation and revision-exact mutation.
