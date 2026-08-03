@@ -4,9 +4,11 @@
 
 Stasis is an experimental programming language for games and simulations that should remain understandable while they run and while they change.
 
-The repository includes a Visual Studio Code extension under `vscode-stasis/` with syntax colors,
-canonical formatting, compiler-backed completion/navigation/references, Test Explorer integration,
-graphical play-session controls, and typed live values.
+The repository includes a Visual Studio Code extension under `vscode-stasis/` backed by a standard
+reusable LSP server, with diagnostics, compiler-aware completion/hover/navigation/refactoring,
+semantic highlighting, inlay hints, call and struct-composition hierarchies, Test Explorer
+integration, graphical play-session controls, and typed live values. The live TUI consumes the same
+in-process language-service operations.
 Projects created with `stasis new` recommend it and enable Stasis-only format-on-save. See
 [`vscode-stasis/README.md`](vscode-stasis/README.md).
 

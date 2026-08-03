@@ -658,6 +658,12 @@ impl LiveWorkspace {
             LiveCommand::OrganizeImports { file } => self.language_organize_imports(&file),
             LiveCommand::QuickFixes { file } => self.language_quick_fixes(&file),
             LiveCommand::InlayHints { file } => self.language_inlay_hints(&file),
+            LiveCommand::CallHierarchy { file, offset } => {
+                self.language_call_hierarchy(&file, offset)
+            }
+            LiveCommand::TypeHierarchy { file, offset } => {
+                self.language_type_hierarchy(&file, offset)
+            }
             LiveCommand::RenamePreview {
                 file,
                 offset,
@@ -1126,6 +1132,94 @@ impl LiveWorkspace {
                     "label": hint.label,
                 })).collect::<Vec<_>>(),
             }),
+        ))
+    }
+
+    fn language_call_hierarchy(
+        &mut self,
+        file: &str,
+        offset: usize,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let items = self
+            .language_service
+            .prepare_call_hierarchy(&request_path, offset)?;
+        let mut hierarchy = Vec::new();
+        for item in items {
+            let incoming = self.language_service.incoming_calls(&item.symbol_id)?;
+            let outgoing = self.language_service.outgoing_calls(&item.symbol_id)?;
+            hierarchy.push(json!({
+                "symbol_id": item.symbol_id,
+                "name": item.name,
+                "detail": item.detail,
+                "file": item.location.path,
+                "start": item.location.range.start,
+                "end": item.location.range.end,
+                "incoming": incoming.into_iter().map(|relation| json!({
+                    "symbol_id": relation.item.symbol_id,
+                    "name": relation.item.name,
+                    "file": relation.item.location.path,
+                    "call_ranges": relation.from_ranges.into_iter().map(|location| json!({
+                        "file": location.path,
+                        "start": location.range.start,
+                        "end": location.range.end,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "outgoing": outgoing.into_iter().map(|relation| json!({
+                    "symbol_id": relation.item.symbol_id,
+                    "name": relation.item.name,
+                    "file": relation.item.location.path,
+                    "call_ranges": relation.from_ranges.into_iter().map(|location| json!({
+                        "file": location.path,
+                        "start": location.range.start,
+                        "end": location.range.end,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        Ok((
+            "call_hierarchy",
+            json!({"file": file, "offset": offset, "items": hierarchy}),
+        ))
+    }
+
+    fn language_type_hierarchy(
+        &mut self,
+        file: &str,
+        offset: usize,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let items = self
+            .language_service
+            .prepare_type_hierarchy(&request_path, offset)?;
+        let mut hierarchy = Vec::new();
+        for item in items {
+            let containers = self.language_service.type_supertypes(&item.symbol_id)?;
+            let components = self.language_service.type_subtypes(&item.symbol_id)?;
+            hierarchy.push(json!({
+                "symbol_id": item.symbol_id,
+                "name": item.name,
+                "detail": item.detail,
+                "file": item.location.path,
+                "start": item.location.range.start,
+                "end": item.location.range.end,
+                "containers": containers.into_iter().map(|related| json!({
+                    "symbol_id": related.symbol_id,
+                    "name": related.name,
+                    "file": related.location.path,
+                })).collect::<Vec<_>>(),
+                "components": components.into_iter().map(|related| json!({
+                    "symbol_id": related.symbol_id,
+                    "name": related.name,
+                    "file": related.location.path,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        Ok((
+            "type_hierarchy",
+            json!({"file": file, "offset": offset, "items": hierarchy}),
         ))
     }
 
@@ -2437,6 +2531,7 @@ fn help_data() -> Value {
             ":hover FILE OFFSET", ":definition FILE OFFSET", ":organize-imports FILE",
             ":quick-fixes FILE",
             ":inlay-hints FILE",
+            ":call-hierarchy FILE OFFSET", ":type-hierarchy FILE OFFSET",
             ":rename FILE OFFSET NEW_NAME",
             ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
@@ -2474,6 +2569,8 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":organize-imports",
         ":quick-fixes",
         ":inlay-hints",
+        ":call-hierarchy",
+        ":type-hierarchy",
         ":rename",
         ":validate",
         ":edit",
@@ -3345,7 +3442,7 @@ mod tests {
             .expect("source")
             .replace(
                 "function main(): i32 { score = 1; return 0; }",
-                "function add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let initial = add(1, 2); score = initial; return 0; }",
+                "struct Position { x: i32; }\nstruct Enemy { position: Position; }\nfunction add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let initial = add(1, 2); score = initial; return 0; }",
             );
         fs::write(&source_path, &source).expect("source with inferred local");
         let offset = source.find("score +=").expect("score use") + 2;
@@ -3439,6 +3536,47 @@ mod tests {
         assert!(hints
             .iter()
             .any(|hint| { hint["kind"] == "parameter" && hint["label"] == "amount:" }));
+
+        let add_offset = source.find("add(amount").expect("add") + 1;
+        let calls = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                45,
+                LiveCommand::CallHierarchy {
+                    file: "src/main.stasis".into(),
+                    offset: add_offset,
+                },
+            ),
+        );
+        assert!(calls.ok, "call hierarchy response: {calls:?}");
+        let calls = calls.data.expect("call hierarchy");
+        assert_eq!(calls["items"][0]["incoming"][0]["name"], "main");
+        assert_eq!(calls["items"][0]["outgoing"], json!([]));
+
+        let enemy_offset = source.find("Enemy").expect("Enemy") + 1;
+        let types = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                46,
+                LiveCommand::TypeHierarchy {
+                    file: "src/main.stasis".into(),
+                    offset: enemy_offset,
+                },
+            ),
+        );
+        assert!(types.ok, "type hierarchy response: {types:?}");
+        assert_eq!(
+            types.data.expect("type hierarchy")["items"][0]["components"][0]["name"],
+            "Position"
+        );
         fs::remove_dir_all(root).ok();
     }
 

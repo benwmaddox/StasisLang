@@ -11,11 +11,13 @@ use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, organize_workshop_imports, plan_workshop_rename,
-    prepare_workshop_rename, workshop_completion_items, workshop_inlay_hints,
-    workshop_inlay_hints_from_local_types, workshop_reachable_files, workshop_semantic_tokens,
-    workshop_source_items, workshop_symbols, WorkshopCompletionItem, WorkshopCompletionScope,
-    WorkshopInlayHint, WorkshopInlayHintKind, WorkshopSourceFile, WorkshopSourceItem,
-    WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
+    prepare_workshop_rename, workshop_call_hierarchy, workshop_completion_items,
+    workshop_inlay_hints, workshop_inlay_hints_from_local_types, workshop_reachable_files,
+    workshop_semantic_tokens, workshop_source_items, workshop_symbols, workshop_type_hierarchy,
+    WorkshopCallHierarchyEdge, WorkshopCompletionItem, WorkshopCompletionScope,
+    WorkshopHierarchyItem, WorkshopInlayHint, WorkshopInlayHintKind, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
+    WorkshopTypeHierarchyEdge,
 };
 pub use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
@@ -597,6 +599,28 @@ pub struct LanguageInlayHint {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageHierarchyKind {
+    Function,
+    Struct,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageHierarchyItem {
+    pub symbol_id: String,
+    pub name: String,
+    pub detail: String,
+    pub kind: LanguageHierarchyKind,
+    pub location: LanguageLocation,
+    pub selection_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageCallHierarchyRelation {
+    pub item: LanguageHierarchyItem,
+    pub from_ranges: Vec<LanguageLocation>,
+}
+
 struct LanguageIndex {
     revision: WorkspaceRevision,
     files: Vec<WorkshopSourceFile>,
@@ -604,6 +628,15 @@ struct LanguageIndex {
     completion: CompletionIndex,
     workshop_items: Vec<WorkshopCompletionItem>,
     symbols: Vec<WorkshopSymbol>,
+}
+
+struct LanguageHierarchyIndex {
+    revision: WorkspaceRevision,
+    files: Vec<WorkshopSourceFile>,
+    call_hierarchy_items: Vec<WorkshopHierarchyItem>,
+    call_hierarchy_edges: Vec<WorkshopCallHierarchyEdge>,
+    type_hierarchy_items: Vec<WorkshopHierarchyItem>,
+    type_hierarchy_edges: Vec<WorkshopTypeHierarchyEdge>,
 }
 
 struct LanguageInlayIndex {
@@ -687,6 +720,8 @@ pub struct LanguageService {
     project_root: String,
     language_index: Option<LanguageIndex>,
     language_index_error: Option<(WorkspaceRevision, String)>,
+    hierarchy_index: Option<LanguageHierarchyIndex>,
+    hierarchy_index_error: Option<(WorkspaceRevision, String)>,
     inlay_index: Option<LanguageInlayIndex>,
     inlay_index_error: Option<(WorkspaceRevision, String)>,
     live: LiveSessionBroker,
@@ -703,6 +738,8 @@ impl LanguageService {
             project_root,
             language_index: None,
             language_index_error: None,
+            hierarchy_index: None,
+            hierarchy_index_error: None,
             inlay_index: None,
             inlay_index_error: None,
             live: LiveSessionBroker::default(),
@@ -1205,6 +1242,197 @@ impl LanguageService {
         Ok(actions)
     }
 
+    pub fn prepare_call_hierarchy(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+    ) -> Result<Vec<LanguageHierarchyItem>, String> {
+        self.prepare_hierarchy(path, byte_offset, LanguageHierarchyKind::Function)
+    }
+
+    pub fn incoming_calls(
+        &mut self,
+        symbol_id: &str,
+    ) -> Result<Vec<LanguageCallHierarchyRelation>, String> {
+        let snapshot = self.documents.snapshot();
+        let project_root = self.project_root.clone();
+        let index = self.hierarchy_index()?;
+        let mut grouped = BTreeMap::<String, Vec<LanguageLocation>>::new();
+        for edge in index
+            .call_hierarchy_edges
+            .iter()
+            .filter(|edge| edge.callee_symbol_id == symbol_id)
+        {
+            if let Some(location) = remap_hierarchy_span(
+                &project_root,
+                &snapshot,
+                &index.files,
+                &index.call_hierarchy_items,
+                &edge.caller_symbol_id,
+                edge.call_span.start as usize..edge.call_span.end as usize,
+            ) {
+                grouped
+                    .entry(edge.caller_symbol_id.clone())
+                    .or_default()
+                    .push(location);
+            }
+        }
+        Ok(grouped
+            .into_iter()
+            .filter_map(|(caller, from_ranges)| {
+                let item = index
+                    .call_hierarchy_items
+                    .iter()
+                    .find(|item| item.symbol_id == caller)?;
+                Some(LanguageCallHierarchyRelation {
+                    item: remap_hierarchy_item(
+                        &project_root,
+                        &snapshot,
+                        &index.files,
+                        item,
+                        LanguageHierarchyKind::Function,
+                    )?,
+                    from_ranges,
+                })
+            })
+            .collect())
+    }
+
+    pub fn outgoing_calls(
+        &mut self,
+        symbol_id: &str,
+    ) -> Result<Vec<LanguageCallHierarchyRelation>, String> {
+        let snapshot = self.documents.snapshot();
+        let project_root = self.project_root.clone();
+        let index = self.hierarchy_index()?;
+        let mut grouped = BTreeMap::<String, Vec<LanguageLocation>>::new();
+        for edge in index
+            .call_hierarchy_edges
+            .iter()
+            .filter(|edge| edge.caller_symbol_id == symbol_id)
+        {
+            if let Some(location) = remap_hierarchy_span(
+                &project_root,
+                &snapshot,
+                &index.files,
+                &index.call_hierarchy_items,
+                symbol_id,
+                edge.call_span.start as usize..edge.call_span.end as usize,
+            ) {
+                grouped
+                    .entry(edge.callee_symbol_id.clone())
+                    .or_default()
+                    .push(location);
+            }
+        }
+        Ok(grouped
+            .into_iter()
+            .filter_map(|(callee, from_ranges)| {
+                let item = index
+                    .call_hierarchy_items
+                    .iter()
+                    .find(|item| item.symbol_id == callee)?;
+                Some(LanguageCallHierarchyRelation {
+                    item: remap_hierarchy_item(
+                        &project_root,
+                        &snapshot,
+                        &index.files,
+                        item,
+                        LanguageHierarchyKind::Function,
+                    )?,
+                    from_ranges,
+                })
+            })
+            .collect())
+    }
+
+    pub fn prepare_type_hierarchy(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+    ) -> Result<Vec<LanguageHierarchyItem>, String> {
+        self.prepare_hierarchy(path, byte_offset, LanguageHierarchyKind::Struct)
+    }
+
+    /// Stasis has composition, not inheritance. Supertypes are the structs that contain this type.
+    pub fn type_supertypes(
+        &mut self,
+        symbol_id: &str,
+    ) -> Result<Vec<LanguageHierarchyItem>, String> {
+        self.related_types(symbol_id, true)
+    }
+
+    /// Stasis has composition, not inheritance. Subtypes are the component structs this type contains.
+    pub fn type_subtypes(&mut self, symbol_id: &str) -> Result<Vec<LanguageHierarchyItem>, String> {
+        self.related_types(symbol_id, false)
+    }
+
+    fn prepare_hierarchy(
+        &mut self,
+        path: &str,
+        byte_offset: usize,
+        kind: LanguageHierarchyKind,
+    ) -> Result<Vec<LanguageHierarchyItem>, String> {
+        let snapshot = self.documents.snapshot();
+        let document = snapshot
+            .document(path)
+            .ok_or_else(|| format!("hierarchy document is not indexed: '{path}'"))?;
+        let Some(symbol) = reference_symbol_at(&document.text, byte_offset) else {
+            return Ok(Vec::new());
+        };
+        let name = symbol.rsplit('.').next().unwrap_or(&symbol);
+        let project_root = self.project_root.clone();
+        let index = self.hierarchy_index()?;
+        let items = match kind {
+            LanguageHierarchyKind::Function => &index.call_hierarchy_items,
+            LanguageHierarchyKind::Struct => &index.type_hierarchy_items,
+        };
+        Ok(items
+            .iter()
+            .filter(|item| item.name == name)
+            .filter_map(|item| {
+                remap_hierarchy_item(&project_root, &snapshot, &index.files, item, kind)
+            })
+            .collect())
+    }
+
+    fn related_types(
+        &mut self,
+        symbol_id: &str,
+        containers: bool,
+    ) -> Result<Vec<LanguageHierarchyItem>, String> {
+        let snapshot = self.documents.snapshot();
+        let project_root = self.project_root.clone();
+        let index = self.hierarchy_index()?;
+        let related = index
+            .type_hierarchy_edges
+            .iter()
+            .filter_map(|edge| {
+                if containers && edge.component_symbol_id == symbol_id {
+                    Some(edge.container_symbol_id.as_str())
+                } else if !containers && edge.container_symbol_id == symbol_id {
+                    Some(edge.component_symbol_id.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        Ok(index
+            .type_hierarchy_items
+            .iter()
+            .filter(|item| related.contains(item.symbol_id.as_str()))
+            .filter_map(|item| {
+                remap_hierarchy_item(
+                    &project_root,
+                    &snapshot,
+                    &index.files,
+                    item,
+                    LanguageHierarchyKind::Struct,
+                )
+            })
+            .collect())
+    }
+
     fn diagnostic_quick_fixes(&mut self, path: &str) -> Result<Vec<LanguageCodeAction>, String> {
         let report = self.diagnostics();
         let Some(published) = report
@@ -1446,6 +1674,57 @@ impl LanguageService {
             .as_ref()
             .map(|(_, error)| format!("language index is unavailable: {error}"))
             .unwrap_or_else(|| "language index was not published".to_string()))
+    }
+
+    fn hierarchy_index(&mut self) -> Result<&LanguageHierarchyIndex, String> {
+        let snapshot = self.documents.snapshot();
+        let revision = snapshot.revision();
+        let needs_rebuild = self
+            .hierarchy_index
+            .as_ref()
+            .is_none_or(|index| index.revision != revision)
+            && self
+                .hierarchy_index_error
+                .as_ref()
+                .is_none_or(|(failed_revision, _)| *failed_revision != revision);
+        if needs_rebuild {
+            let files = snapshot
+                .documents()
+                .map(|(path, document)| {
+                    Ok(WorkshopSourceFile {
+                        path: canonical_source_path(Some(&self.project_root), path)?,
+                        source: document.text.to_string(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let rebuilt = (|| {
+                let (call_hierarchy_items, call_hierarchy_edges) = workshop_call_hierarchy(&files)?;
+                let (type_hierarchy_items, type_hierarchy_edges) = workshop_type_hierarchy(&files)?;
+                Ok::<_, String>(LanguageHierarchyIndex {
+                    revision,
+                    files,
+                    call_hierarchy_items,
+                    call_hierarchy_edges,
+                    type_hierarchy_items,
+                    type_hierarchy_edges,
+                })
+            })();
+            match rebuilt {
+                Ok(index) => {
+                    self.hierarchy_index = Some(index);
+                    self.hierarchy_index_error = None;
+                }
+                Err(error) => self.hierarchy_index_error = Some((revision, error)),
+            }
+        }
+        if let Some(index) = self.hierarchy_index.as_ref() {
+            return Ok(index);
+        }
+        Err(self
+            .hierarchy_index_error
+            .as_ref()
+            .map(|(_, error)| format!("hierarchy index is unavailable: {error}"))
+            .unwrap_or_else(|| "hierarchy index was not published".to_string()))
     }
 
     fn current_language_index(&mut self) -> Result<&LanguageIndex, String> {
@@ -2040,6 +2319,61 @@ fn absolute_source_path(project_root: &str, relative_path: &str) -> String {
         .join(relative_path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+fn remap_hierarchy_item(
+    project_root: &str,
+    snapshot: &WorkspaceSnapshot,
+    files: &[WorkshopSourceFile],
+    item: &WorkshopHierarchyItem,
+    kind: LanguageHierarchyKind,
+) -> Option<LanguageHierarchyItem> {
+    let path = absolute_source_path(project_root, &item.file);
+    let indexed = files.iter().find(|file| file.path == item.file)?;
+    let current = snapshot.document(&path)?;
+    let regions = UnchangedRegions::new(&indexed.source, &current.text);
+    let selection_range = regions.remap(
+        &indexed.source,
+        &current.text,
+        item.selection_span.start as usize..item.selection_span.end as usize,
+    )?;
+    let range = regions
+        .remap(
+            &indexed.source,
+            &current.text,
+            item.source_span.start as usize..item.source_span.end as usize,
+        )
+        .unwrap_or_else(|| selection_range.clone());
+    Some(LanguageHierarchyItem {
+        symbol_id: item.symbol_id.clone(),
+        name: item.name.clone(),
+        detail: item.detail.clone(),
+        kind,
+        location: LanguageLocation { path, range },
+        selection_range,
+    })
+}
+
+fn remap_hierarchy_span(
+    project_root: &str,
+    snapshot: &WorkspaceSnapshot,
+    files: &[WorkshopSourceFile],
+    items: &[WorkshopHierarchyItem],
+    owner_symbol_id: &str,
+    span: Range<usize>,
+) -> Option<LanguageLocation> {
+    let owner = items
+        .iter()
+        .find(|item| item.symbol_id == owner_symbol_id)?;
+    let path = absolute_source_path(project_root, &owner.file);
+    let indexed = files.iter().find(|file| file.path == owner.file)?;
+    let current = snapshot.document(&path)?;
+    let range = UnchangedRegions::new(&indexed.source, &current.text).remap(
+        &indexed.source,
+        &current.text,
+        span,
+    )?;
+    Some(LanguageLocation { path, range })
 }
 
 fn language_symbol(project_root: &str, symbol: &WorkshopSymbol) -> LanguageSymbol {
@@ -3044,5 +3378,73 @@ function main(): i32 {
             inlay_hint_p95 < 30_000,
             "inlay hints p95 {inlay_hint_p95}us"
         );
+    }
+
+    #[test]
+    fn hierarchy_recovers_from_incomplete_function_without_stale_call_ranges() {
+        let root = std::env::temp_dir().join("stasis-language-service-hierarchy");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let valid = "function a(): i32 { return 1; }\nfunction b(): i32 { return a(); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("service");
+        service.set_disk_document(path_text.clone(), valid);
+        let b_offset = valid.find("b():").expect("b") + 1;
+        let b = service
+            .prepare_call_hierarchy(&path_text, b_offset)
+            .expect("prepare b")
+            .pop()
+            .expect("b item");
+        let outgoing = service.outgoing_calls(&b.symbol_id).expect("outgoing");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].item.name, "a");
+        assert_eq!(&valid[outgoing[0].from_ranges[0].range.clone()], "a");
+
+        let broken = "function a(): i32 { return 1; }\nfunction b(): i32 { a(state.";
+        service.open_document(path_text.clone(), 1, broken);
+        let a_call = broken.rfind("a(state").expect("incomplete call") + 1;
+        let prepared = service
+            .prepare_call_hierarchy(&path_text, a_call)
+            .expect("last-good prepare");
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].name, "a");
+        assert!(service
+            .incoming_calls(&prepared[0].symbol_id)
+            .expect("incoming")
+            .is_empty());
+        let broken_b_offset = broken.find("b():").expect("broken b") + 1;
+        let broken_b = service
+            .prepare_call_hierarchy(&path_text, broken_b_offset)
+            .expect("last-good b prepare")
+            .pop()
+            .expect("b item");
+        assert_eq!(broken_b.name, "b");
+        assert!(service
+            .outgoing_calls(&broken_b.symbol_id)
+            .expect("broken outgoing")
+            .is_empty());
+    }
+
+    #[test]
+    fn type_hierarchy_exposes_struct_composition() {
+        let root = std::env::temp_dir().join("stasis-language-service-type-hierarchy");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct Position { x: i32; }\nstruct Enemy { position: Position; }\nfunction main(): i32 { return 0; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("service");
+        service.set_disk_document(path_text.clone(), source);
+        let offset = source.find("Enemy").expect("Enemy") + 1;
+        let enemy = service
+            .prepare_type_hierarchy(&path_text, offset)
+            .expect("prepare Enemy")
+            .pop()
+            .expect("Enemy item");
+        let components = service.type_subtypes(&enemy.symbol_id).expect("components");
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].name, "Position");
+        let containers = service
+            .type_supertypes(&components[0].symbol_id)
+            .expect("containers");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].name, "Enemy");
     }
 }

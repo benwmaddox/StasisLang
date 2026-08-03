@@ -246,7 +246,10 @@ Each slice is independently testable and removes the host-specific path it repla
 - [x] Add standard completion resolve so the initial ranked list remains cheap while documentation
   and compiler-validated import insertion are loaded on selection. Preserve typed ranking and
   snippets in the initial response, and suppress edit-producing resolution on stale snapshots.
-- [ ] Add call hierarchy and type hierarchy from compiler-owned graphs and symbol IDs.
+- [x] Add standard call hierarchy from compiler-resolved caller/callee IDs and retained call-site
+  spans. Expose Stasis struct composition through the standard type hierarchy as explicitly
+  documented `contains`/`contained by` relationships (the language has no inheritance), and expose
+  both queries through `:call-hierarchy FILE OFFSET` and `:type-hierarchy FILE OFFSET` in the TUI.
 
 ### Slice 7: debugging and editing polish
 
@@ -505,3 +508,19 @@ continue with accepted code while diagnostics and quick-fix previews analyze new
 Compiler-authored fix identity plus full candidate recompilation proves mutation safety without
 parsing diagnostic prose. This predicts debugger source mapping must likewise identify whether a
 frame belongs to accepted executable source or newer editor text.
+
+### Compiler-owned call and type hierarchy implementation
+
+- Good: retaining resolved call-site spans beside the compiler's existing function dependency IDs
+  made incoming/outgoing calls a direct projection of the compilation graph, shared by LSP and TUI.
+- Bad: the standard type-hierarchy protocol assumes inheritance, while Stasis deliberately has only
+  struct composition; silently labeling composition as inheritance would teach the wrong model.
+- Adjustment: keep relationship meaning explicit at the language-service boundary: LSP supertypes
+  are containing structs and subtypes are contained component structs, while TUI JSON uses the
+  unambiguous `containers` and `components` names.
+
+Theory gained: a hierarchy result is a semantic identity graph plus source anchors, not a fresh
+search over editor text. The compiler call-edge test and incomplete-function recovery test show that
+last-good identities remain useful while call ranges inside changed text must disappear. This
+predicts that debugger frames can reuse accepted function IDs, but source highlighting must still be
+mapped against the exact accepted-source revision.

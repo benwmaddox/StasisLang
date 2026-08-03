@@ -15,37 +15,43 @@ use lsp_types::notification::{
     Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
+    CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
     CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
     InlayHintRequest, PrepareRenameRequest, References, Rename, Request as _,
-    ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
+    ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest, TypeHierarchyPrepare,
+    TypeHierarchySubtypes, TypeHierarchySupertypes, WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CompletionItemKind, CompletionList, CompletionOptions,
-    CompletionParams, CompletionResponse, CompletionTextEdit, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentChanges, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintKind,
-    InlayHintLabel, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
-    InsertTextFormat, Location, MarkupContent, MarkupKind, NumberOrString, OneOf,
-    OptionalVersionedTextDocumentIdentifier, ParameterInformation, ParameterLabel,
-    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, ReferenceParams,
-    RenameOptions, RenameParams, SaveOptions, SemanticToken, SemanticTokenModifier,
-    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult, ServerCapabilities,
-    ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentPositionParams,
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
+    CallHierarchyServerCapability, CodeAction, CodeActionKind, CodeActionOptions,
+    CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability, CompletionItemKind,
+    CompletionList, CompletionOptions, CompletionParams, CompletionResponse, CompletionTextEdit,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentChanges, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions, InlayHintParams,
+    InlayHintServerCapabilities, InsertTextFormat, Location, MarkupContent, MarkupKind,
+    NumberOrString, OneOf, OptionalVersionedTextDocumentIdentifier, ParameterInformation,
+    ParameterLabel, PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams,
+    ReferenceParams, RenameOptions, RenameParams, SaveOptions, SemanticToken,
+    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    ServerCapabilities, ServerInfo, SignatureHelpOptions, SignatureHelpParams, SymbolInformation,
+    SymbolKind, TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    TextDocumentSyncSaveOptions, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use stasis_language_service::{
     CompletionResolveData, DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem,
-    LanguageInlayHintKind, LanguageLocation, LanguageService, LanguageSymbol, LanguageSymbolKind,
-    Position, SignatureHelp as SharedSignatureHelp, TextChange, WorkspaceRevision,
+    LanguageHierarchyItem, LanguageHierarchyKind, LanguageInlayHintKind, LanguageLocation,
+    LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
+    SignatureHelp as SharedSignatureHelp, TextChange, WorkspaceRevision,
 };
 use url::Url;
 
@@ -74,6 +80,12 @@ struct CompletionResolvePayload {
     path: String,
     revision: u64,
     catalog_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HierarchyPayload {
+    symbol_id: String,
 }
 
 pub fn run_stdio(project_root: &Path) -> Result<(), String> {
@@ -126,6 +138,7 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
             }),
             definition_provider: Some(OneOf::Left(true)),
             references_provider: Some(OneOf::Left(true)),
+            call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
             rename_provider: Some(OneOf::Right(RenameOptions {
@@ -162,12 +175,12 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
         }),
     };
+    let mut initialize_value = serde_json::to_value(initialize_result)
+        .map_err(|error| format!("failed serializing LSP capabilities: {error}"))?;
+    // LSP 3.17 defines this capability, but lsp-types 0.97 omits it from ServerCapabilities.
+    initialize_value["capabilities"]["typeHierarchyProvider"] = Value::Bool(true);
     connection
-        .initialize_finish(
-            initialize_id,
-            serde_json::to_value(initialize_result)
-                .map_err(|error| format!("failed serializing LSP capabilities: {error}"))?,
-        )
+        .initialize_finish(initialize_id, initialize_value)
         .map_err(|error| format!("LSP initialization failed: {error}"))?;
 
     let notification_sender = connection.sender.clone();
@@ -303,6 +316,60 @@ impl LanguageServer {
                     .extract(References::METHOD)
                     .map_err(|error| format!("invalid references request: {error}"))?;
                 match self.references(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            CallHierarchyPrepare::METHOD => {
+                let (id, params): (_, CallHierarchyPrepareParams) = request
+                    .extract(CallHierarchyPrepare::METHOD)
+                    .map_err(|error| format!("invalid call-hierarchy prepare request: {error}"))?;
+                match self.prepare_call_hierarchy(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            CallHierarchyIncomingCalls::METHOD => {
+                let (id, params): (_, CallHierarchyIncomingCallsParams) = request
+                    .extract(CallHierarchyIncomingCalls::METHOD)
+                    .map_err(|error| format!("invalid incoming-calls request: {error}"))?;
+                match self.incoming_calls(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            CallHierarchyOutgoingCalls::METHOD => {
+                let (id, params): (_, CallHierarchyOutgoingCallsParams) = request
+                    .extract(CallHierarchyOutgoingCalls::METHOD)
+                    .map_err(|error| format!("invalid outgoing-calls request: {error}"))?;
+                match self.outgoing_calls(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            TypeHierarchyPrepare::METHOD => {
+                let (id, params): (_, TypeHierarchyPrepareParams) = request
+                    .extract(TypeHierarchyPrepare::METHOD)
+                    .map_err(|error| format!("invalid type-hierarchy prepare request: {error}"))?;
+                match self.prepare_type_hierarchy(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            TypeHierarchySupertypes::METHOD => {
+                let (id, params): (_, TypeHierarchySupertypesParams) = request
+                    .extract(TypeHierarchySupertypes::METHOD)
+                    .map_err(|error| format!("invalid type supertypes request: {error}"))?;
+                match self.type_supertypes(params) {
+                    Ok(result) => Response::new_ok(id, result),
+                    Err(error) => internal_error(id, error),
+                }
+            }
+            TypeHierarchySubtypes::METHOD => {
+                let (id, params): (_, TypeHierarchySubtypesParams) = request
+                    .extract(TypeHierarchySubtypes::METHOD)
+                    .map_err(|error| format!("invalid type subtypes request: {error}"))?;
+                match self.type_subtypes(params) {
                     Ok(result) => Response::new_ok(id, result),
                     Err(error) => internal_error(id, error),
                 }
@@ -652,6 +719,110 @@ impl LanguageServer {
         Ok((!locations.is_empty()).then_some(locations))
     }
 
+    fn prepare_call_hierarchy(
+        &mut self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>, String> {
+        let (path, _, byte_offset) =
+            self.document_position(params.text_document_position_params)?;
+        let items = self
+            .service
+            .prepare_call_hierarchy(&path, byte_offset)?
+            .into_iter()
+            .map(|item| self.lsp_call_hierarchy_item(item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!items.is_empty()).then_some(items))
+    }
+
+    fn incoming_calls(
+        &mut self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>, String> {
+        let symbol_id = hierarchy_symbol_id(params.item.data.as_ref())?;
+        let calls = self
+            .service
+            .incoming_calls(&symbol_id)?
+            .into_iter()
+            .map(|relation| {
+                Ok(CallHierarchyIncomingCall {
+                    from: self.lsp_call_hierarchy_item(relation.item)?,
+                    from_ranges: relation
+                        .from_ranges
+                        .into_iter()
+                        .map(|location| self.lsp_location(location).map(|location| location.range))
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((!calls.is_empty()).then_some(calls))
+    }
+
+    fn outgoing_calls(
+        &mut self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>, String> {
+        let symbol_id = hierarchy_symbol_id(params.item.data.as_ref())?;
+        let calls = self
+            .service
+            .outgoing_calls(&symbol_id)?
+            .into_iter()
+            .map(|relation| {
+                Ok(CallHierarchyOutgoingCall {
+                    to: self.lsp_call_hierarchy_item(relation.item)?,
+                    from_ranges: relation
+                        .from_ranges
+                        .into_iter()
+                        .map(|location| self.lsp_location(location).map(|location| location.range))
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((!calls.is_empty()).then_some(calls))
+    }
+
+    fn prepare_type_hierarchy(
+        &mut self,
+        params: TypeHierarchyPrepareParams,
+    ) -> Result<Option<Vec<TypeHierarchyItem>>, String> {
+        let (path, _, byte_offset) =
+            self.document_position(params.text_document_position_params)?;
+        let items = self
+            .service
+            .prepare_type_hierarchy(&path, byte_offset)?
+            .into_iter()
+            .map(|item| self.lsp_type_hierarchy_item(item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!items.is_empty()).then_some(items))
+    }
+
+    fn type_supertypes(
+        &mut self,
+        params: TypeHierarchySupertypesParams,
+    ) -> Result<Option<Vec<TypeHierarchyItem>>, String> {
+        let symbol_id = hierarchy_symbol_id(params.item.data.as_ref())?;
+        let items = self
+            .service
+            .type_supertypes(&symbol_id)?
+            .into_iter()
+            .map(|item| self.lsp_type_hierarchy_item(item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!items.is_empty()).then_some(items))
+    }
+
+    fn type_subtypes(
+        &mut self,
+        params: TypeHierarchySubtypesParams,
+    ) -> Result<Option<Vec<TypeHierarchyItem>>, String> {
+        let symbol_id = hierarchy_symbol_id(params.item.data.as_ref())?;
+        let items = self
+            .service
+            .type_subtypes(&symbol_id)?
+            .into_iter()
+            .map(|item| self.lsp_type_hierarchy_item(item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!items.is_empty()).then_some(items))
+    }
+
     fn document_symbols(
         &mut self,
         params: DocumentSymbolParams,
@@ -947,6 +1118,75 @@ impl LanguageServer {
         ))
     }
 
+    fn lsp_call_hierarchy_item(
+        &self,
+        item: LanguageHierarchyItem,
+    ) -> Result<CallHierarchyItem, String> {
+        let selection_range = self.lsp_range(&item.location.path, item.selection_range.clone())?;
+        let location = self.lsp_location(item.location)?;
+        Ok(CallHierarchyItem {
+            name: item.name,
+            kind: hierarchy_symbol_kind(item.kind),
+            tags: None,
+            detail: Some(item.detail),
+            uri: location.uri,
+            range: location.range,
+            selection_range,
+            data: Some(
+                serde_json::to_value(HierarchyPayload {
+                    symbol_id: item.symbol_id,
+                })
+                .map_err(|error| format!("failed serializing hierarchy identity: {error}"))?,
+            ),
+        })
+    }
+
+    fn lsp_type_hierarchy_item(
+        &self,
+        item: LanguageHierarchyItem,
+    ) -> Result<TypeHierarchyItem, String> {
+        let selection_range = self.lsp_range(&item.location.path, item.selection_range.clone())?;
+        let location = self.lsp_location(item.location)?;
+        Ok(TypeHierarchyItem {
+            name: item.name,
+            kind: hierarchy_symbol_kind(item.kind),
+            tags: None,
+            detail: Some(item.detail),
+            uri: location.uri,
+            range: location.range,
+            selection_range,
+            data: Some(
+                serde_json::to_value(HierarchyPayload {
+                    symbol_id: item.symbol_id,
+                })
+                .map_err(|error| format!("failed serializing hierarchy identity: {error}"))?,
+            ),
+        })
+    }
+
+    fn lsp_range(
+        &self,
+        path: &str,
+        range: std::ops::Range<usize>,
+    ) -> Result<lsp_types::Range, String> {
+        let document = self
+            .service
+            .snapshot()
+            .document(path)
+            .cloned()
+            .ok_or_else(|| format!("hierarchy target is not indexed: '{path}'"))?;
+        let start = document
+            .position(range.start)
+            .map_err(|error| error.to_string())?;
+        let end = document
+            .position(range.end)
+            .map_err(|error| error.to_string())?;
+        Ok(lsp_types::Range::new(
+            lsp_position(start),
+            lsp_position(end),
+        ))
+    }
+
     #[allow(deprecated)]
     fn lsp_document_symbol(&self, symbol: LanguageSymbol) -> Result<DocumentSymbol, String> {
         let location = self.lsp_location(symbol.location)?;
@@ -1203,6 +1443,20 @@ fn lsp_symbol_kind(kind: LanguageSymbolKind) -> SymbolKind {
         LanguageSymbolKind::Constant => SymbolKind::CONSTANT,
         LanguageSymbolKind::Test => SymbolKind::FUNCTION,
     }
+}
+
+fn hierarchy_symbol_kind(kind: LanguageHierarchyKind) -> SymbolKind {
+    match kind {
+        LanguageHierarchyKind::Function => SymbolKind::FUNCTION,
+        LanguageHierarchyKind::Struct => SymbolKind::STRUCT,
+    }
+}
+
+fn hierarchy_symbol_id(data: Option<&Value>) -> Result<String, String> {
+    let data = data.ok_or_else(|| "hierarchy item has no Stasis identity".to_string())?;
+    serde_json::from_value::<HierarchyPayload>(data.clone())
+        .map(|payload| payload.symbol_id)
+        .map_err(|error| format!("invalid hierarchy item identity: {error}"))
 }
 
 fn hover_markdown(hover: &HoverInfo) -> String {
@@ -2160,6 +2414,108 @@ mod tests {
             .edits
             .iter()
             .all(|edit| { matches!(edit, OneOf::Left(edit) if edit.new_text == "create_enemy") }));
+    }
+
+    #[test]
+    fn standard_call_and_composition_type_hierarchy_requests_work() {
+        let (mut server, uri, _) = test_server("hierarchy");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "struct Position { x: i32; }\nstruct Enemy { position: Position; }\nfunction a(): i32 { return 1; }\nfunction b(): i32 { return a(); }\n";
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri, "languageId": "stasis", "version": 1, "text": source }
+                    }),
+                ),
+            )
+            .expect("didOpen");
+        let document = server
+            .service
+            .snapshot()
+            .document(&path_text(&uri_path(&uri).expect("path")))
+            .cloned()
+            .expect("document");
+        let position = |offset| lsp_position(document.position(offset).expect("position"));
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(30),
+                    CallHierarchyPrepare::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": position(source.find("a():").expect("a"))
+                    }),
+                ),
+            )
+            .expect("prepare calls");
+        let prepared: Option<Vec<CallHierarchyItem>> = serde_json::from_value(
+            receive_response(&client_connection, 30)
+                .response_result
+                .expect("prepare calls result"),
+        )
+        .expect("prepare calls response");
+        let item = prepared.expect("call item").remove(0);
+        assert_eq!(item.name, "a");
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(31),
+                    CallHierarchyIncomingCalls::METHOD.to_string(),
+                    serde_json::json!({ "item": item }),
+                ),
+            )
+            .expect("incoming calls");
+        let incoming: Option<Vec<CallHierarchyIncomingCall>> = serde_json::from_value(
+            receive_response(&client_connection, 31)
+                .response_result
+                .expect("incoming result"),
+        )
+        .expect("incoming response");
+        assert_eq!(incoming.expect("incoming")[0].from.name, "b");
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(32),
+                    TypeHierarchyPrepare::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": position(source.find("Enemy").expect("Enemy"))
+                    }),
+                ),
+            )
+            .expect("prepare type");
+        let prepared: Option<Vec<TypeHierarchyItem>> = serde_json::from_value(
+            receive_response(&client_connection, 32)
+                .response_result
+                .expect("prepare type result"),
+        )
+        .expect("prepare type response");
+        let item = prepared.expect("type item").remove(0);
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(33),
+                    TypeHierarchySubtypes::METHOD.to_string(),
+                    serde_json::json!({ "item": item }),
+                ),
+            )
+            .expect("component types");
+        let components: Option<Vec<TypeHierarchyItem>> = serde_json::from_value(
+            receive_response(&client_connection, 33)
+                .response_result
+                .expect("components result"),
+        )
+        .expect("components response");
+        assert_eq!(components.expect("components")[0].name, "Position");
     }
 
     #[cfg(windows)]

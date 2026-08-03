@@ -45,7 +45,14 @@ pub struct FunctionMeta {
     pub return_type: TypeId,
     pub dependencies: Vec<FunctionId>,
     pub dependents: Vec<FunctionId>,
+    pub call_sites: Vec<FunctionCallSite>,
     pub dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionCallSite {
+    pub callee: FunctionId,
+    pub source_range: Range<u32>,
 }
 
 /// Parser-owned source item used by hosts that need function ranges/names before
@@ -661,6 +668,7 @@ impl Compiler {
                     return_type: indexed_function.return_type,
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
+                    call_sites: Vec::new(),
                     dirty: signature_changed
                         || body_changed
                         || reverse_invalidated.contains(&self.files[file_id].path),
@@ -703,18 +711,34 @@ impl Compiler {
                 let Some(module_alias) = resolution.module_alias else {
                     continue;
                 };
-                for callee in self
+                let callees = self
                     .module_resolution
                     .function_indices(&dependency.name)
                     .iter()
                     .map(|index| &self.functions[*index])
                     .filter(|function| function.module_alias == module_alias)
-                {
-                    if caller != callee.id {
-                        unique_edges.insert((caller, callee.id));
+                    .map(|function| function.id)
+                    .collect::<Vec<_>>();
+                for callee in callees {
+                    let base = self.functions[caller_index].source_range.start;
+                    self.functions[caller_index]
+                        .call_sites
+                        .push(FunctionCallSite {
+                            callee,
+                            source_range: base + dependency.name_span.start
+                                ..base + dependency.name_span.end,
+                        });
+                    if caller != callee {
+                        unique_edges.insert((caller, callee));
                     }
                 }
             }
+        }
+        for function in &mut self.functions {
+            function
+                .call_sites
+                .sort_by_key(|site| (site.source_range.start, site.source_range.end, site.callee));
+            function.call_sites.dedup();
         }
         for (caller, callee) in unique_edges {
             let caller_index = self.function_index(caller)?;

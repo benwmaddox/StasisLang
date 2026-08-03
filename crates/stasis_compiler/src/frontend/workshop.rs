@@ -1068,6 +1068,147 @@ pub struct WorkshopInlayHint {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopHierarchyItem {
+    pub symbol_id: String,
+    pub name: String,
+    pub detail: String,
+    pub file: String,
+    pub source_span: WorkshopSourceSpan,
+    pub selection_span: WorkshopSourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopCallHierarchyEdge {
+    pub caller_symbol_id: String,
+    pub callee_symbol_id: String,
+    pub call_span: WorkshopSourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopTypeHierarchyEdge {
+    pub container_symbol_id: String,
+    pub component_symbol_id: String,
+}
+
+pub fn workshop_call_hierarchy(
+    files: &[WorkshopSourceFile],
+) -> Result<(Vec<WorkshopHierarchyItem>, Vec<WorkshopCallHierarchyEdge>), String> {
+    let symbols = workshop_symbols(files)?;
+    let mut compiler = Compiler::new();
+    for file in files {
+        compiler.upsert_file(file.path.clone(), file.source.clone());
+    }
+    compiler
+        .index_pass()
+        .map_err(|error| format!("{error:?}"))?;
+
+    let functions = compiler.functions();
+    let by_id = functions
+        .iter()
+        .map(|function| (function.id, function.symbol_id.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let items = symbols
+        .iter()
+        .filter(|symbol| symbol.kind == WorkshopSymbolKind::Function)
+        .map(|symbol| hierarchy_item(files, symbol))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut edges = Vec::new();
+    for caller in functions {
+        let caller_symbol_id = caller.symbol_id.to_string();
+        for site in &caller.call_sites {
+            let Some(callee_symbol_id) = by_id.get(&site.callee) else {
+                continue;
+            };
+            edges.push(WorkshopCallHierarchyEdge {
+                caller_symbol_id: caller_symbol_id.clone(),
+                callee_symbol_id: callee_symbol_id.clone(),
+                call_span: WorkshopSourceSpan {
+                    start: site.source_range.start,
+                    end: site.source_range.end,
+                },
+            });
+        }
+    }
+    edges.sort_by_key(|edge| {
+        (
+            edge.caller_symbol_id.clone(),
+            edge.call_span.start,
+            edge.callee_symbol_id.clone(),
+        )
+    });
+    edges.dedup();
+    Ok((items, edges))
+}
+
+pub fn workshop_type_hierarchy(
+    files: &[WorkshopSourceFile],
+) -> Result<(Vec<WorkshopHierarchyItem>, Vec<WorkshopTypeHierarchyEdge>), String> {
+    let symbols = workshop_symbols(files)?;
+    let struct_symbols = symbols
+        .iter()
+        .filter(|symbol| symbol.kind == WorkshopSymbolKind::Struct)
+        .map(|symbol| (symbol.name.clone(), symbol))
+        .collect::<BTreeMap<_, _>>();
+    let items = struct_symbols
+        .values()
+        .map(|symbol| hierarchy_item(files, symbol))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut edges = Vec::new();
+    for file in files {
+        for definition in source_workshop_items(&file.source)?.layout.structs {
+            let Some(container) = struct_symbols.get(&definition.name) else {
+                continue;
+            };
+            for field in definition.fields {
+                let component_name = workshop_base_type(&field.type_name);
+                let Some(component) = struct_symbols.get(component_name) else {
+                    continue;
+                };
+                edges.push(WorkshopTypeHierarchyEdge {
+                    container_symbol_id: container.symbol_id.clone(),
+                    component_symbol_id: component.symbol_id.clone(),
+                });
+            }
+        }
+    }
+    edges.sort_by_key(|edge| {
+        (
+            edge.container_symbol_id.clone(),
+            edge.component_symbol_id.clone(),
+        )
+    });
+    edges.dedup();
+    Ok((items, edges))
+}
+
+fn hierarchy_item(
+    files: &[WorkshopSourceFile],
+    symbol: &WorkshopSymbol,
+) -> Result<WorkshopHierarchyItem, String> {
+    let file = files
+        .iter()
+        .find(|file| file.path == symbol.file)
+        .ok_or_else(|| format!("hierarchy source file is missing: {}", symbol.file))?;
+    let selection = lex(&file.source)?
+        .into_iter()
+        .find(|token| {
+            token.kind == TokenKind::Identifier
+                && symbol.source_span.start as usize <= token.start
+                && token.end <= symbol.source_span.end as usize
+                && token_text(&file.source, *token) == symbol.name
+        })
+        .ok_or_else(|| format!("hierarchy declaration name is missing: {}", symbol.name))?;
+    Ok(WorkshopHierarchyItem {
+        symbol_id: symbol.symbol_id.clone(),
+        name: symbol.name.clone(),
+        detail: symbol.signature.clone(),
+        file: symbol.file.clone(),
+        source_span: symbol.source_span.clone(),
+        selection_span: span_from_range(selection.start..selection.end)?,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkshopSemanticEditOperation {
@@ -5864,5 +6005,41 @@ function tick(): i32 {
         let items = workshop_source_items(&after).expect("re-index added items");
         assert!(items.iter().any(|item| item.name == "Config"));
         assert!(items.iter().any(|item| item.name == "helper"));
+    }
+
+    #[test]
+    fn hierarchy_uses_compiler_call_edges_and_struct_composition() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "struct Position { x: i32; }\nstruct Enemy { position: Position; }\nfunction a(): i32 { return 1; }\nfunction b(): i32 { return a(); }\n"
+                .to_string(),
+        }];
+        let (call_items, calls) = workshop_call_hierarchy(&files).expect("call hierarchy");
+        let a = call_items.iter().find(|item| item.name == "a").expect("a");
+        let b = call_items.iter().find(|item| item.name == "b").expect("b");
+        let edge = calls
+            .iter()
+            .find(|edge| {
+                edge.caller_symbol_id == b.symbol_id && edge.callee_symbol_id == a.symbol_id
+            })
+            .expect("b calls a");
+        assert_eq!(
+            &files[0].source[edge.call_span.start as usize..edge.call_span.end as usize],
+            "a"
+        );
+
+        let (type_items, types) = workshop_type_hierarchy(&files).expect("type hierarchy");
+        let position = type_items
+            .iter()
+            .find(|item| item.name == "Position")
+            .expect("Position");
+        let enemy = type_items
+            .iter()
+            .find(|item| item.name == "Enemy")
+            .expect("Enemy");
+        assert!(types.iter().any(|edge| {
+            edge.container_symbol_id == enemy.symbol_id
+                && edge.component_symbol_id == position.symbol_id
+        }));
     }
 }

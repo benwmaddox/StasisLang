@@ -119,6 +119,14 @@ pub enum LiveCommand {
     InlayHints {
         file: String,
     },
+    CallHierarchy {
+        file: String,
+        offset: usize,
+    },
+    TypeHierarchy {
+        file: String,
+        offset: usize,
+    },
     RenamePreview {
         file: String,
         offset: usize,
@@ -1220,6 +1228,18 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":inlay-hints" | ":inlays" => ready(LiveCommand::InlayHints {
             file: required_arg(&args, 1, "file")?.to_string(),
         }),
+        ":call-hierarchy" | ":calls" => ready(LiveCommand::CallHierarchy {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+        }),
+        ":type-hierarchy" | ":types" => ready(LiveCommand::TypeHierarchy {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+        }),
         ":rename" => ready(LiveCommand::RenamePreview {
             file: required_arg(&args, 1, "file")?.to_string(),
             offset: required_arg(&args, 2, "byte offset")?
@@ -2220,6 +2240,34 @@ mod tests {
             inlays.command,
             LiveCommand::InlayHints {
                 file: "src/game.stasis".into(),
+            }
+        );
+
+        let TerminalInput::Request(calls) = terminal
+            .feed_line(":call-hierarchy src/game.stasis 12")
+            .expect("call hierarchy")
+        else {
+            panic!("expected call-hierarchy request");
+        };
+        assert_eq!(
+            calls.command,
+            LiveCommand::CallHierarchy {
+                file: "src/game.stasis".into(),
+                offset: 12,
+            }
+        );
+
+        let TerminalInput::Request(types) = terminal
+            .feed_line(":type-hierarchy src/game.stasis 8")
+            .expect("type hierarchy")
+        else {
+            panic!("expected type-hierarchy request");
+        };
+        assert_eq!(
+            types.command,
+            LiveCommand::TypeHierarchy {
+                file: "src/game.stasis".into(),
+                offset: 8,
             }
         );
 

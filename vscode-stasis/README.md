@@ -15,6 +15,8 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
   through standard LSP code actions;
 - compiler-aware semantic highlighting and inlay hints for inferred local types and resolved call
   parameter names;
+- standard incoming/outgoing call hierarchy and struct-composition hierarchy (`contains` and
+  `contained by`; Stasis does not model inheritance);
 - `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;
@@ -97,7 +99,7 @@ The extension starts one persistent `stasis lsp --stdio` server per Stasis works
 runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
 share them. Formatting still uses its migration adapter until its LSP operation lands in a later
 slice. Diagnostics, hover, signature help, completion, navigation, symbols, rename, and import
-organization, semantic highlighting, and inlay hints use the
+organization, semantic highlighting, inlay hints, and call/type hierarchy use the
 persistent language server. The same server launches and controls the Live Workshop through bounded
 custom LSP requests, owns runtime observations, and composes compatible live values and indexed
 collection fields into standard hover and completion responses. The extension does not spawn or
