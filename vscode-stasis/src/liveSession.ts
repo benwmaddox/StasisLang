@@ -156,13 +156,12 @@ export class LiveSession implements vscode.Disposable {
     });
     this.output.appendLine(`Live Values refresh response: ${snapshot.kind} at tick ${snapshot.tick}`);
     for (const path of paths) {
-      await this.request("watch", { path });
+      await this.request("inspect", { path });
     }
   }
 
   async stopRefreshing(): Promise<void> {
     await this.request("inspect_all", { every_ticks: 0 });
-    await this.request("unwatch");
     this.output.appendLine("Live Values polling stopped because the view is hidden.");
   }
 

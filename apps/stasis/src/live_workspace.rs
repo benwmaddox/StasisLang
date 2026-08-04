@@ -187,6 +187,7 @@ pub(crate) struct LiveWorkspace {
     completion_preparation: Option<CompletionPreparation>,
     dropped_watch_events: u64,
     state_inspection_subscription: Option<(u64, usize, bool)>,
+    watch_polling_enabled: bool,
     validation_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
     host_entry_revision: u64,
     session_id: String,
@@ -247,6 +248,7 @@ impl LiveWorkspace {
             completion_preparation: None,
             dropped_watch_events: 0,
             state_inspection_subscription: None,
+            watch_polling_enabled: true,
             validation_snapshot: None,
             host_entry_revision: stasis_dynload::jit_host_entry_targets()
                 .map_or(0, |targets| targets.revision),
@@ -491,6 +493,9 @@ impl LiveWorkspace {
                     }
                 }
             }
+        }
+        if !self.watch_polling_enabled {
+            return;
         }
         if self.dropped_watch_events > 0 {
             let dropped = self.dropped_watch_events;
@@ -854,11 +859,13 @@ impl LiveWorkspace {
             } => match every_ticks {
                 Some(0) => {
                     self.state_inspection_subscription = None;
+                    self.watch_polling_enabled = false;
                     Ok(("state_inspection_unsubscribed", json!({})))
                 }
                 Some(ticks) => {
                     self.state_inspection_subscription =
                         Some((ticks.clamp(1, u32::MAX as u64), limit, concise));
+                    self.watch_polling_enabled = true;
                     inspect_all_scalars(jit, limit, concise)
                 }
                 None => inspect_all_scalars(jit, limit, concise),
@@ -4011,7 +4018,7 @@ mod tests {
                 LiveRequest::new(
                     91,
                     LiveCommand::Watch {
-                        path: "score".into()
+                        path: "10 / score".into()
                     },
                 ),
             )
@@ -4041,22 +4048,11 @@ mod tests {
                 &mut jit,
                 &mut tick_ptr,
                 &mut render_ptr,
-                LiveRequest::new(93, LiveCommand::Unwatch { path: None }),
-            )
-            .ok
-        );
-        assert!(
-            run_request(
-                &client,
-                &mut workspace,
-                &mut jit,
-                &mut tick_ptr,
-                &mut render_ptr,
                 LiveRequest::new(
-                    94,
+                    93,
                     LiveCommand::Set {
                         path: "score".into(),
-                        expression: "9".into(),
+                        expression: "0".into(),
                         preview: false,
                     },
                 ),
@@ -4067,6 +4063,29 @@ mod tests {
         assert!(client
             .receive_timeout(std::time::Duration::from_millis(10))
             .is_err());
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                94,
+                LiveCommand::InspectAll {
+                    limit: 32,
+                    concise: false,
+                    every_ticks: Some(30),
+                },
+            ),
+        );
+        assert_eq!(response.kind, "state_inspection");
+        workspace.publish_watches(61, &jit);
+        let watch = client
+            .receive_timeout(std::time::Duration::from_secs(1))
+            .expect("remembered watch resumes with the view");
+        assert_eq!(watch.kind, "watch_error");
+        assert_eq!(watch.data.expect("watch data")["path"], "10 / score");
         fs::remove_dir_all(root).ok();
     }
 

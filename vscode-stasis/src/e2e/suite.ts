@@ -637,6 +637,7 @@ export async function run(): Promise<void> {
   }
 
   try {
+    await vscode.commands.executeCommand("stasis.liveValues.focus");
     await api.start();
     await waitFor("running live session", () => api.state() === "running");
     await api.request("pause");
