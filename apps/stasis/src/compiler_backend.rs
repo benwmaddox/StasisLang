@@ -2265,6 +2265,19 @@ fn runtime_runner_file_name() -> &'static str {
     }
 }
 
+fn append_runtime_runner_candidates(candidates: &mut Vec<PathBuf>, directory: &Path) {
+    if cfg!(target_os = "macos") {
+        candidates.push(
+            directory
+                .join("stasis_runner.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("stasis_runner"),
+        );
+    }
+    candidates.push(directory.join(runtime_runner_file_name()));
+}
+
 fn runtime_graphics_file_names() -> &'static [&'static str] {
     if cfg!(windows) {
         &["stasis_graphics.dll"]
@@ -2401,7 +2414,6 @@ fn stage_stasis_dynload_runtime(_link_library: &Path, _output: &Path) -> Result<
 }
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
-    let runner_name = runtime_runner_file_name();
     if let Some(configured) = std::env::var_os("STASIS_RUNTIME_RUNNER_PATH") {
         let configured = PathBuf::from(configured);
         if configured.is_file() {
@@ -2409,27 +2421,24 @@ fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
         }
     }
     let mut candidates = Vec::new();
-    if let Some(installed) = std::env::current_exe()
+    if let Some(installed_directory) = std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(runner_name)))
+        .and_then(|path| path.parent().map(Path::to_path_buf))
     {
-        candidates.push(installed);
+        append_runtime_runner_candidates(&mut candidates, &installed_directory);
     }
-    candidates.extend([
-        repo_root.join(runner_name),
-        repo_root.join("build").join(runner_name),
+    for directory in [
+        repo_root.to_path_buf(),
+        repo_root.join("build"),
+        repo_root.join("runtime").join("build").join("bin"),
         repo_root
             .join("runtime")
             .join("build")
             .join("bin")
-            .join("Release")
-            .join(runner_name),
-        repo_root
-            .join("runtime")
-            .join("build")
-            .join("bin")
-            .join(runner_name),
-    ]);
+            .join("Release"),
+    ] {
+        append_runtime_runner_candidates(&mut candidates, &directory);
+    }
     resolve_latest_existing_path(candidates)
 }
 
@@ -3992,6 +4001,111 @@ fn packaged_launch_sidecar_path(output_exe: &Path) -> Result<PathBuf, String> {
     Ok(output_exe.with_file_name(format!("{file_name}.launch")))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackagedRunnerLayout {
+    executable: PathBuf,
+    app_bundle: Option<PathBuf>,
+    info_plist: Option<PathBuf>,
+}
+
+fn packaged_runner_layout(
+    requested_output: &Path,
+    macos_bundle: bool,
+) -> Result<PackagedRunnerLayout, String> {
+    if !macos_bundle {
+        return Ok(PackagedRunnerLayout {
+            executable: requested_output.to_path_buf(),
+            app_bundle: None,
+            info_plist: None,
+        });
+    }
+    let requested_name = requested_output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("invalid output file name {}", requested_output.display()))?;
+    let (bundle, executable_name) = if requested_output.extension().is_some_and(|ext| ext == "app")
+    {
+        let executable_name = requested_output
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("invalid app bundle name {}", requested_output.display()))?;
+        (requested_output.to_path_buf(), executable_name.to_string())
+    } else {
+        (
+            requested_output.with_file_name(format!("{requested_name}.app")),
+            requested_name.to_string(),
+        )
+    };
+    let contents = bundle.join("Contents");
+    Ok(PackagedRunnerLayout {
+        executable: contents.join("MacOS").join(executable_name),
+        info_plist: Some(contents.join("Info.plist")),
+        app_bundle: Some(bundle),
+    })
+}
+
+fn xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn write_macos_runner_info_plist(path: &Path, executable_name: &str) -> Result<(), String> {
+    let mut bundle_component = String::new();
+    for ch in executable_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            bundle_component.push(ch.to_ascii_lowercase());
+        } else if !bundle_component.ends_with('-') {
+            bundle_component.push('-');
+        }
+    }
+    let bundle_component = bundle_component.trim_matches('-');
+    let bundle_component = if bundle_component.is_empty() {
+        "game"
+    } else {
+        bundle_component
+    };
+    let executable_name = xml_text(executable_name);
+    let contents = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>{executable_name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.stasislang.game.{bundle_component}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>{executable_name}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"#
+    );
+    std::fs::write(path, contents).map_err(|error| {
+        format!(
+            "failed to write macOS app plist {}: {error}",
+            path.display()
+        )
+    })
+}
+
 fn package_engine_bundle_release(
     backend: &mut IncrementalCompilerBackend,
     bundle: &AotEngineBundle,
@@ -4017,7 +4131,11 @@ fn package_engine_bundle_release(
         .find(|row| row.name == "on_code_swap")
         .map(|row| row.symbol.clone());
 
-    let output_root = output_exe.parent().unwrap_or_else(|| Path::new("."));
+    let runner_layout = packaged_runner_layout(output_exe, cfg!(target_os = "macos"))?;
+    let packaged_output_exe = &runner_layout.executable;
+    let output_root = packaged_output_exe
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(output_root).map_err(|error| {
         format!(
             "failed to create AOT output directory {}: {error}",
@@ -4113,7 +4231,8 @@ fn package_engine_bundle_release(
         }
     }
 
-    let linked_library_path = output_exe.with_extension(packaged_runtime_library_extension());
+    let linked_library_path =
+        packaged_output_exe.with_extension(packaged_runtime_library_extension());
     let function_symbols: Vec<String> = manifest
         .functions
         .iter()
@@ -4170,7 +4289,7 @@ fn package_engine_bundle_release(
         runner_src.display(),
         graphics_src.display()
     );
-    copy_file_creating_parent(&runner_src, output_exe)?;
+    copy_file_creating_parent(&runner_src, packaged_output_exe)?;
     let graphics_dst = output_root.join(
         graphics_src
             .file_name()
@@ -4178,7 +4297,7 @@ fn package_engine_bundle_release(
     );
     copy_file_creating_parent(&graphics_src, &graphics_dst)?;
 
-    let launch_path = packaged_launch_sidecar_path(output_exe)?;
+    let launch_path = packaged_launch_sidecar_path(packaged_output_exe)?;
     let linked_library_name = linked_library_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -4231,9 +4350,24 @@ fn package_engine_bundle_release(
             )
         })?;
     }
-    maybe_sign_output_artifact(output_exe)?;
+    if let Some(info_plist) = runner_layout.info_plist.as_deref() {
+        let executable_name = packaged_output_exe
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "invalid packaged executable name {}",
+                    packaged_output_exe.display()
+                )
+            })?;
+        write_macos_runner_info_plist(info_plist, executable_name)?;
+    }
+    maybe_sign_output_artifact(packaged_output_exe)?;
     maybe_sign_output_artifact(&linked_library_path)?;
     maybe_sign_output_artifact(&graphics_dst)?;
+    if let Some(app_bundle) = runner_layout.app_bundle.as_deref() {
+        maybe_sign_output_artifact(app_bundle)?;
+    }
 
     let object_file_names = object_paths
         .iter()
@@ -4245,7 +4379,7 @@ fn package_engine_bundle_release(
         .collect();
     Ok(SelfHostedAotCliSummary {
         source_file_count: object_paths.len(),
-        linked_image_path: output_exe.to_path_buf(),
+        linked_image_path: packaged_output_exe.to_path_buf(),
         entry_symbol: "main".to_string(),
         ir_bundle_path: PathBuf::new(),
         object_bundle_path: bundle.manifest_path.clone(),
@@ -4265,6 +4399,46 @@ fn aot_call_conv() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_packaged_runner_keeps_executable_and_retina_plist_in_app_bundle() {
+        let requested = Path::new("dist").join("Chess TD");
+        let layout = packaged_runner_layout(&requested, true).expect("macOS runner layout");
+        assert_eq!(layout.app_bundle, Some(PathBuf::from("dist/Chess TD.app")));
+        assert_eq!(
+            layout.executable,
+            PathBuf::from("dist/Chess TD.app/Contents/MacOS/Chess TD")
+        );
+        assert_eq!(
+            layout.info_plist,
+            Some(PathBuf::from("dist/Chess TD.app/Contents/Info.plist"))
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_macos_runner_plist_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create plist test directory");
+        let plist = temp_root.join("Info.plist");
+        write_macos_runner_info_plist(&plist, "Chess & TD").expect("write macOS app plist");
+        let contents = fs::read_to_string(&plist).expect("read macOS app plist");
+        assert!(contents.contains("<key>NSHighResolutionCapable</key>\n    <true/>"));
+        assert!(contents.contains("<string>Chess &amp; TD</string>"));
+        assert!(contents.contains("<string>org.stasislang.game.chess-td</string>"));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn macos_packaged_runner_accepts_an_explicit_app_output() {
+        let requested = Path::new("dist").join("ChessTD.app");
+        let layout = packaged_runner_layout(&requested, true).expect("macOS runner layout");
+        assert_eq!(layout.app_bundle, Some(requested));
+        assert_eq!(
+            layout.executable,
+            PathBuf::from("dist/ChessTD.app/Contents/MacOS/ChessTD")
+        );
+    }
 
     fn snapshot_semantic_fingerprint(snapshot: &ProgramSnapshot) -> String {
         format!(

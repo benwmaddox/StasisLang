@@ -18,6 +18,12 @@ class ReleaseProvenanceTests(unittest.TestCase):
         self.assertIn("stasis_platform_storage.c", RUNTIME_FILES)
         self.assertIn("stasis_platform_storage.h", RUNTIME_FILES)
 
+    def test_windows_dpi_manifest_is_part_of_release_provenance(self):
+        self.assertIn("stasis_runner.manifest", RUNTIME_FILES)
+
+    def test_macos_retina_plist_is_part_of_release_provenance(self):
+        self.assertIn("stasis_runner_macos.plist.in", RUNTIME_FILES)
+
     def test_package_verifier_detects_runtime_substitution(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

@@ -56,6 +56,8 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
     "stasis_graphics.c",
+    "stasis_runner.manifest",
+    "stasis_runner_macos.plist.in",
     "stasis_mobile_aot_runtime.c",
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
@@ -2839,15 +2841,21 @@ fn build_workspace(
             )?;
             stage_workspace_assets(
                 workspace,
-                output
-                    .parent()
-                    .ok_or_else(|| format!("release output has no parent: {}", output.display()))?,
+                summary.linked_image_path.parent().ok_or_else(|| {
+                    format!(
+                        "release output has no parent: {}",
+                        summary.linked_image_path.display()
+                    )
+                })?,
             )?;
             Ok(CommandResult::success(
-                format!("built release executable: {}", output.display()),
+                format!(
+                    "built release executable: {}",
+                    summary.linked_image_path.display()
+                ),
                 json!({
                     "backend": "aot",
-                    "output": display_path(&output),
+                    "output": display_path(&summary.linked_image_path),
                     "source_files": summary.source_file_count,
                     "entry_symbol": summary.entry_symbol,
                 }),

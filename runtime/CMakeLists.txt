@@ -273,9 +273,20 @@ endif()
 if(STASIS_BUILD_RUNNER)
     add_executable(stasis_runner stasis_runner.c stasis_data.c cJSON.c)
     if(WIN32)
+        target_sources(stasis_runner PRIVATE stasis_runner.manifest)
         target_compile_definitions(stasis_runner PRIVATE _CRT_SECURE_NO_WARNINGS)
     else()
         target_link_libraries(stasis_runner PRIVATE dl)
+    endif()
+    if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set_target_properties(stasis_runner PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/stasis_runner_macos.plist.in"
+            MACOSX_BUNDLE_BUNDLE_NAME "Stasis Runner"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "org.stasislang.runner"
+            MACOSX_BUNDLE_BUNDLE_VERSION "1"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        )
     endif()
     set_target_properties(stasis_runner PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

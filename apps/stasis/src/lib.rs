@@ -3774,6 +3774,14 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/CMakeLists.txt"
     ));
+    const STASIS_RUNNER_MANIFEST: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_runner.manifest"
+    ));
+    const STASIS_RUNNER_MACOS_PLIST: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_runner_macos.plist.in"
+    ));
     const STASIS_RENDER_CONTRACT_HEADER: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_render_contract.h"
@@ -4179,6 +4187,53 @@ mod tests {
             STASIS_RUNNER_SOURCE.contains("strncmp(out, \"\\\\\\\\?\\\\UNC\\\\\", 8)")
                 && STASIS_RUNNER_SOURCE.contains("strncmp(out, \"\\\\\\\\?\\\\\", 4)"),
             "Windows launchers must normalize extended drive and UNC paths before asset loading"
+        );
+    }
+
+    #[test]
+    fn windows_runtime_uses_physical_drawable_pixels_at_monitor_density() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let dpi_hint = graphics_source
+            .find("SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, \"1\");")
+            .expect("Windows runtime should enable SDL DPI-scaled points");
+        let video_init = graphics_source
+            .find("SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)")
+            .expect("graphics runtime should initialize SDL video");
+        assert!(
+            dpi_hint < video_init,
+            "Windows DPI policy must be set before SDL creates its video subsystem"
+        );
+        assert!(
+            STASIS_RUNTIME_CMAKE
+                .contains("target_sources(stasis_runner PRIVATE stasis_runner.manifest)"),
+            "the DPI-aware manifest must be embedded in the Windows host executable"
+        );
+        for required in [
+            "<dpiAware xmlns=\"http://schemas.microsoft.com/SMI/2005/WindowsSettings\">true/pm</dpiAware>",
+            "<dpiAwareness xmlns=\"http://schemas.microsoft.com/SMI/2016/WindowsSettings\">PerMonitorV2, PerMonitor</dpiAwareness>",
+        ] {
+            assert!(
+                STASIS_RUNNER_MANIFEST.contains(required),
+                "Windows runner manifest should contain {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_runner_is_packaged_for_retina_drawables() {
+        let runner_plist = STASIS_RUNNER_MACOS_PLIST.replace("\r\n", "\n");
+        for required in [
+            "MACOSX_BUNDLE TRUE",
+            "MACOSX_BUNDLE_INFO_PLIST \"${CMAKE_CURRENT_SOURCE_DIR}/stasis_runner_macos.plist.in\"",
+        ] {
+            assert!(
+                STASIS_RUNTIME_CMAKE.contains(required),
+                "macOS runner build should contain {required}"
+            );
+        }
+        assert!(
+            runner_plist.contains("<key>NSHighResolutionCapable</key>\n    <true/>"),
+            "macOS runner bundle must opt into Retina backing pixels"
         );
     }
 

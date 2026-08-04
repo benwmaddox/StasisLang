@@ -20,6 +20,8 @@ RUNTIME_FILES = (
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
     "stasis_graphics.c",
+    "stasis_runner.manifest",
+    "stasis_runner_macos.plist.in",
     "stasis_mobile_aot_runtime.c",
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
