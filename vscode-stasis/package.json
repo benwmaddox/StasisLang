@@ -124,6 +124,16 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "stasis.showCollectionAsTable",
+        "title": "Stasis: Show Collection as Table",
+        "icon": "$(table)"
+      },
+      {
+        "command": "stasis.showCollectionAsTree",
+        "title": "Stasis: Show Collection as Tree",
+        "icon": "$(list-tree)"
+      },
+      {
         "command": "stasis.showOutput",
         "title": "Stasis: Show Output"
       }
@@ -188,6 +198,16 @@
           "command": "stasis.removeWatch",
           "when": "view == stasis.liveValues && viewItem == stasisLiveWatch",
           "group": "inline"
+        },
+        {
+          "command": "stasis.showCollectionAsTable",
+          "when": "view == stasis.liveValues && viewItem == stasisLiveCollectionTree",
+          "group": "inline"
+        },
+        {
+          "command": "stasis.showCollectionAsTree",
+          "when": "view == stasis.liveValues && viewItem == stasisLiveCollectionTable",
+          "group": "inline"
         }
       ]
     },
@@ -205,6 +225,18 @@
           "default": "",
           "description": "Optional project-relative entry file for play sessions. The manifest entry is used when empty."
         },
+        "stasis.live.refreshEveryTicks": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 100000,
+          "description": "Refresh the default Live Values globals snapshot every N accepted game ticks. Use 1 for every tick."
+        },
+        "stasis.live.filterInactiveCollectionRows": {
+          "type": "boolean",
+          "default": true,
+          "description": "Hide rows whose boolean active/Active field is false in Live Values arrays of structs. Disable to show every captured row."
+        },
         "stasis.completion.limit": {
           "type": "number",
           "default": 64,
@@ -221,7 +253,7 @@
     "bundle:e2e": "esbuild src/e2e/run.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/e2e-run.cjs && esbuild src/e2e/suite.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/e2e-suite.cjs",
     "check": "tsc --noEmit",
     "test": "npm run test:unit",
-    "test:unit": "npm run check && esbuild src/protocol.test.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/protocol.test.cjs && node --test dist/protocol.test.cjs",
+    "test:unit": "npm run check && esbuild src/protocol.test.ts src/liveValueTree.test.ts --bundle --platform=node --target=node20 --format=cjs --outdir=dist && node --test dist/protocol.test.js dist/liveValueTree.test.js",
     "test:e2e": "npm run package && npm run bundle:e2e && node dist/e2e-run.cjs",
     "prepackage": "node scripts/prepare-toolchain.mjs && node -e \"require('node:fs').mkdirSync('.vsix', { recursive: true })\"",
     "package": "npm run build && vsce package --out .vsix/stasislang.stasis.vsix"

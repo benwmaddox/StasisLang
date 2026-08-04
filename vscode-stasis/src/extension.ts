@@ -9,7 +9,8 @@ import {
   Trace,
 } from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
-import { displayRuntimeValue, LiveResponse, LiveValue } from "./protocol";
+import { buildLiveValueTree, LiveValueTreeNode } from "./liveValueTree";
+import { displayRuntimeValue, LiveCollection, LiveResponse, LiveValue } from "./protocol";
 import { resolveEditorToolchain } from "./toolchain";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
@@ -225,14 +226,63 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 class LiveValueItem extends vscode.TreeItem {
-  constructor(readonly liveValue: LiveValue) {
-    super(liveValue.path, vscode.TreeItemCollapsibleState.None);
-    this.contextValue = liveValue.watched ? "stasisLiveWatch" : "stasisLiveValue";
-    this.description = liveValue.error
-      ? `error: ${liveValue.error}`
-      : `${liveValue.staticType ? `${liveValue.staticType} = ` : ""}${displayRuntimeValue(liveValue.value)}`;
-    this.tooltip = `${liveValue.path}\n${this.description}\ntick ${liveValue.tick}`;
-    this.iconPath = new vscode.ThemeIcon(liveValue.error ? "error" : liveValue.watched ? "eye" : "symbol-variable");
+  constructor(
+    readonly node: LiveValueTreeNode,
+    tableCollections: ReadonlySet<string>,
+    filterInactiveRows: boolean,
+  ) {
+    super(
+      node.label,
+      node.children.length > 0 || node.kind === "collection"
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None,
+    );
+    const value = node.value;
+    if (value) {
+      this.contextValue = value.watched ? "stasisLiveWatch" : "stasisLiveValue";
+      this.description = value.error
+        ? `error: ${value.error}`
+        : `${value.staticType ? `${value.staticType} = ` : ""}${displayRuntimeValue(value.value)}`;
+      this.tooltip = `${value.path}\n${this.description}\ntick ${value.tick}`;
+      this.iconPath = new vscode.ThemeIcon(value.error ? "error" : value.watched ? "eye" : "symbol-variable");
+      return;
+    }
+    if (node.kind === "collection" && node.collection) {
+      const table = tableCollections.has(node.path);
+      const collection = node.collection;
+      const truncated = collection.rowsTruncated ? ", partial" : "";
+      const activeField = collection.fields.find((field) =>
+        field.field.toLowerCase() === "active" && field.staticType === "bool",
+      );
+      const shownRows = filterInactiveRows && activeField
+        ? collection.rows.filter((row) => row.values[activeField.field] === true).length
+        : collection.rows.length;
+      const filtered = filterInactiveRows && activeField ? `, ${shownRows} shown` : "";
+      this.description = `${collection.elementShape} [${collection.activeCount}/${collection.capacity}${truncated}${filtered}] · ${table ? "table" : "tree"}`;
+      this.tooltip = `${collection.path}\n${collection.fields.map((field) => `${field.field || "value"}: ${field.staticType}`).join("\n")}`;
+      this.iconPath = new vscode.ThemeIcon(table ? "table" : "symbol-array");
+      if (collection.fields.some((field) => field.field.length > 0)) {
+        this.contextValue = table ? "stasisLiveCollectionTable" : "stasisLiveCollectionTree";
+      }
+      return;
+    }
+    if (node.kind === "collection-row" && node.collection && node.rowIndex !== undefined) {
+      const row = node.collection.rows.find((candidate) => candidate.index === node.rowIndex);
+      if (tableCollections.has(node.collection.path) && row) {
+        this.description = node.collection.fields
+          .map((field) => `${field.field || "value"}: ${displayRuntimeValue(row.values[field.field])}`)
+          .join("  |  ");
+        this.tooltip = `${node.path}\n${this.description}\ntick ${node.collection.tick}`;
+      }
+      this.iconPath = new vscode.ThemeIcon("record");
+      return;
+    }
+    this.contextValue = "stasisLiveGroup";
+    this.iconPath = new vscode.ThemeIcon("symbol-object");
+  }
+
+  get liveValue(): LiveValue | undefined {
+    return this.node.value;
   }
 }
 
@@ -240,11 +290,43 @@ class LiveValuesProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
   private readonly emitter = new vscode.EventEmitter<vscode.TreeItem | undefined>();
   private state: LiveSessionState = "stopped";
   private values: readonly LiveValue[] = [];
+  private collections: readonly LiveCollection[] = [];
+  private readonly tableCollections = new Set<string>();
+  private filterInactiveRows: boolean;
   readonly onDidChangeTreeData = this.emitter.event;
 
-  update(state: LiveSessionState, values: readonly LiveValue[]): void {
+  constructor(filterInactiveRows: boolean) {
+    this.filterInactiveRows = filterInactiveRows;
+  }
+
+  update(
+    state: LiveSessionState,
+    values: readonly LiveValue[],
+    collections: readonly LiveCollection[] = [],
+  ): void {
     this.state = state;
     this.values = values;
+    this.collections = collections;
+    const currentPaths = new Set(collections.map((collection) => collection.path));
+    for (const path of this.tableCollections) {
+      if (!currentPaths.has(path)) {
+        this.tableCollections.delete(path);
+      }
+    }
+    this.emitter.fire(undefined);
+  }
+
+  setCollectionTable(path: string, table: boolean): void {
+    if (table) {
+      this.tableCollections.add(path);
+    } else {
+      this.tableCollections.delete(path);
+    }
+    this.emitter.fire(undefined);
+  }
+
+  setFilterInactiveRows(enabled: boolean): void {
+    this.filterInactiveRows = enabled;
     this.emitter.fire(undefined);
   }
 
@@ -252,14 +334,30 @@ class LiveValuesProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
     return element;
   }
 
-  getChildren(): vscode.TreeItem[] {
+  getChildren(element?: vscode.TreeItem): vscode.TreeItem[] {
+    if (element instanceof LiveValueItem) {
+      return element.node.children.map((node) =>
+        new LiveValueItem(node, this.tableCollections, this.filterInactiveRows),
+      );
+    }
     const status = new vscode.TreeItem(`Play session: ${this.state}`);
     status.iconPath = new vscode.ThemeIcon(this.state === "stopped" ? "debug-stop" : "pulse");
     status.contextValue = "stasisLiveStatus";
     if (this.state === "stopped") {
       status.command = { command: "stasis.startPlaySession", title: "Start Play Session" };
     }
-    return [status, ...this.values.map((value) => new LiveValueItem(value))];
+    const roots = buildLiveValueTree(
+      this.values,
+      this.collections,
+      this.tableCollections,
+      this.filterInactiveRows,
+    );
+    return [
+      status,
+      ...roots.map((node) =>
+        new LiveValueItem(node, this.tableCollections, this.filterInactiveRows),
+      ),
+    ];
   }
 }
 
@@ -320,6 +418,7 @@ class LiveController implements vscode.Disposable {
       root,
       client,
       configuration().get<string>("live.entry", ""),
+      Math.max(1, configuration().get<number>("live.refreshEveryTicks", 30)),
       this.output,
     );
     this.current = session;
@@ -328,7 +427,7 @@ class LiveController implements vscode.Disposable {
         this.updateState(state);
       }),
       session.onDidChangeValues((values) => {
-        this.values.update(session.state, values);
+        this.values.update(session.state, values, session.collections);
       }),
     ];
     this.updateState("starting");
@@ -347,6 +446,14 @@ class LiveController implements vscode.Disposable {
     await this.current?.stop();
   }
 
+  async updateRefreshCadence(): Promise<void> {
+    if (this.current && this.current.state !== "stopped") {
+      await this.current.refresh(
+        Math.max(1, configuration().get<number>("live.refreshEveryTicks", 30)),
+      );
+    }
+  }
+
   dispose(): void {
     this.disposeSessionSubscriptions();
     this.current?.dispose();
@@ -354,7 +461,11 @@ class LiveController implements vscode.Disposable {
   }
 
   private updateState(state: LiveSessionState): void {
-    this.values.update(state, state === "stopped" ? [] : (this.current?.values ?? []));
+    this.values.update(
+      state,
+      state === "stopped" ? [] : (this.current?.values ?? []),
+      state === "stopped" ? [] : (this.current?.collections ?? []),
+    );
     this.status.text = `$(pulse) Stasis: ${state}`;
     this.status.tooltip = state === "stopped" ? "Start a Stasis play session" : "Stasis live play session";
     this.status.command = state === "stopped" ? "stasis.startPlaySession" : "stasis.showOutput";
@@ -646,7 +757,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     throw error;
   }
   const languageClients = new StasisLanguageClients(output);
-  const values = new LiveValuesProvider();
+  const values = new LiveValuesProvider(
+    configuration().get<boolean>("live.filterInactiveCollectionRows", true),
+  );
   const controller = new LiveController(
     values,
     output,
@@ -666,6 +779,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     vscode.debug.registerDebugAdapterDescriptorFactory("stasis", debugFactory),
     vscode.debug.registerDebugConfigurationProvider("stasis", debugConfiguration),
     vscode.window.registerTreeDataProvider("stasis.liveValues", values),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("stasis.live.refreshEveryTicks")) {
+        void showCommandError(() => controller.updateRefreshCadence());
+      }
+      if (event.affectsConfiguration("stasis.live.filterInactiveCollectionRows")) {
+        values.setFilterInactiveRows(
+          configuration().get<boolean>("live.filterInactiveCollectionRows", true),
+        );
+      }
+    }),
     command("stasis.startPlaySession", async () => controller.start()),
     command("stasis.stopPlaySession", async () => controller.stop()),
     command("stasis.pausePlaySession", async () => {
@@ -692,8 +815,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
       }
     }),
     command("stasis.removeWatch", async (item) => {
-      if (item instanceof LiveValueItem) {
+      if (item instanceof LiveValueItem && item.liveValue) {
         await controller.requireSession().removeWatch(item.liveValue.path);
+      }
+    }),
+    command("stasis.showCollectionAsTable", async (item) => {
+      if (item instanceof LiveValueItem && item.node.kind === "collection") {
+        values.setCollectionTable(item.node.path, true);
+      }
+    }),
+    command("stasis.showCollectionAsTree", async (item) => {
+      if (item instanceof LiveValueItem && item.node.kind === "collection") {
+        values.setCollectionTable(item.node.path, false);
       }
     }),
     command("stasis.refreshLiveValues", async () => controller.requireSession().refresh()),

@@ -641,6 +641,10 @@ export async function run(): Promise<void> {
     await waitFor("running live session", () => api.state() === "running");
     await api.request("pause");
     await waitFor("paused live session", () => api.state() === "paused");
+    await waitFor(
+      "default global snapshot",
+      () => api.values().some((value) => value.path === "score" && value.staticType === "i32"),
+    );
 
     const memberSource = document.getText();
     const memberPrefix = "state.enemies[0].";

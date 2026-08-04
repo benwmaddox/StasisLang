@@ -166,3 +166,30 @@ Theory gained: definition latency is a cached identity-and-type-edge lookup plus
 not a reference search. The `game -> ChessGame -> progression_dirty` benchmark proves that this path
 stays valid across unrelated edits; this predicts nested state-field navigation cost grows with path
 depth rather than ChessTD workspace size.
+
+### Global-first Live Values tree
+
+Starting a VS Code play session now requests a typed snapshot of all globals without requiring users
+to add watches. Dotted global and struct paths are grouped into an expandable tree. Global arrays of
+structs include a bounded, same-tick row snapshot and expose a native view-item action that toggles
+that collection between field-by-field tree rows and compact table rows. Refresh updates both the
+default global snapshot and user-added watches. Automatic refresh follows accepted game ticks, is
+configurable from every tick to every N ticks, and defaults to 30. The shared runtime caps one
+snapshot at 4,096 scalar values/cells and marks partial collection rows explicitly. Collection
+values use a compact column-described row matrix: field names and static types occur once in shape
+metadata, while rows contain raw scalar cells. The runtime distributes its cell budget across
+collections so a large render buffer cannot starve later gameplay arrays from the snapshot.
+Arrays of structs with a boolean `active`/`Active` field hide false rows by default in both layouts;
+`stasis.live.filterInactiveCollectionRows` exposes all captured rows without another runtime query.
+
+- Good: extending the existing compiler-owned `inspect_all` response kept VS Code and the TUI on the
+  same state-inspection operation and made collection rows internally consistent at one tick.
+- Bad: the previous response returned collection shape metadata without element values, so an editor
+  could describe an array but could not render its contents without one request per cell.
+- Adjustment: bulk inspection contracts should carry bounded values together with shape metadata;
+  clients may choose tree or table presentation without creating a second runtime query path.
+
+Theory gained: live-value presentation is a projection of one typed runtime snapshot, not a watch
+list. Scalar globals plus the `Enemy[]` row regression prove that hierarchy and table layout can share
+the same identities and tick; this predicts nested collection presentation can be added by extending
+snapshot shape metadata without changing the LSP transport or watch semantics.

@@ -199,6 +199,8 @@ pub enum LiveCommand {
         limit: usize,
         #[serde(default)]
         concise: bool,
+        #[serde(default)]
+        every_ticks: Option<u64>,
     },
     Watch {
         path: String,
@@ -1301,6 +1303,7 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":inspect" if args.len() == 1 => ready(LiveCommand::InspectAll {
             limit: default_inspect_limit(),
             concise: false,
+            every_ticks: None,
         }),
         ":inspect" => ready(LiveCommand::Inspect {
             path: remaining_args(&args, 1, "state query")?,
@@ -1970,6 +1973,7 @@ mod tests {
             LiveCommand::InspectAll {
                 limit: 32,
                 concise: false,
+                every_ticks: None,
             }
         );
     }

@@ -50,7 +50,7 @@ Projects created by `stasis new` recommend this extension and enable format-on-s
 
 ## Live play and values
 
-Run **Stasis: Start Play Session**. The extension saves open files, starts the normal graphical hot-swap runtime, and leaves game code on disk as the source of truth. Use the Live Values title actions or command palette to pause, resume, step, inspect a path once, or add a watch.
+Run **Stasis: Start Play Session**. The extension saves open files, starts the normal graphical hot-swap runtime, and leaves game code on disk as the source of truth. The Live Values view immediately shows all scalar globals as an expandable tree. Arrays of structs can be switched between field trees and compact table rows from their inline action. Use the view title actions or command palette to pause, resume, step, inspect a path once, or add a watch.
 
 Examples of accepted live queries include:
 
@@ -63,6 +63,9 @@ enemies[?hp <= 0]
 Watch updates are emitted between deterministic ticks. The extension never evaluates game state independently; displayed values come from the running Stasis runtime.
 
 Set `stasis.live.entry` only when a project needs an entry other than the one in `stasis.json`.
+`stasis.live.refreshEveryTicks` controls automatic global refresh and defaults to 30; set it to 1
+for every tick. Arrays with a boolean `active` or `Active` field hide inactive rows by default;
+disable `stasis.live.filterInactiveCollectionRows` to show every captured row.
 
 ## Navigation and tests
 
