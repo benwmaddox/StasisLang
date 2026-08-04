@@ -1,3 +1,5 @@
+import "../.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
 global gfx_cmd_i32: i32[18464];
 
 global gfx_cmd_f32: f32[108676];

@@ -60,6 +60,13 @@ project root and nested directories. `--workspace PATH` selects a project explic
 }
 ```
 
+Projects that should always use the standard library shipped with the selected toolchain can add
+`"stdlib": "toolchain"`. Before a workspace command starts, that exact stdlib and its matching
+runtime modules are synchronized transactionally into `.stasis_cache/toolchain/src/`; source under
+`src/` imports it with paths such as `../.stasis_cache/toolchain/src/stdlib/storage.stasis`. This keeps
+CLI, LSP, TUI, and VS Code play on one compiler/stdlib build without checking a dated toolchain
+archive into the project.
+
 The project `name` may contain internal ASCII spaces, so display names such as `Chess TD` are
 valid; leading or trailing spaces are rejected. Manifest paths must be project-relative and cannot
 contain `..`. Generated projects include a

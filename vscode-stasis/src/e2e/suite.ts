@@ -432,8 +432,12 @@ export async function run(): Promise<void> {
     sourceUri,
     speedPosition,
   );
+  const speedDeclarationLine = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("speed: i32"));
   assert.equal(fieldDefinitions?.length, 1, "Go to Definition resolves an indexed struct field");
-  assert.equal(fieldDefinitions?.[0]?.range.start.line, 10);
+  assert.equal(fieldDefinitions?.[0]?.range.start.line, speedDeclarationLine);
   const fieldReferences = await vscode.commands.executeCommand<vscode.Location[]>(
     "vscode.executeReferenceProvider",
     sourceUri,
@@ -480,7 +484,13 @@ export async function run(): Promise<void> {
   );
   assert.ok(organize?.edit, "standard LSP code actions expose Organize Stasis imports");
   assert.equal(await vscode.workspace.applyEdit(organize.edit), true, "applies the LSP organize-imports edit");
-  assert.equal(document.getText().includes("import \""), false, "unused and duplicate imports are removed");
+  assert.equal(document.getText().includes('import "unused.stasis"'), false, "unused import is removed");
+  assert.equal(document.getText().includes('import "helper.stasis"'), false, "duplicate probe import is removed");
+  assert.equal(
+    document.getText().includes('import "../.stasis_cache/toolchain/src/stdlib/graphics.stasis"'),
+    true,
+    "required toolchain import is preserved",
+  );
   assert.equal(await document.save(), true, "saves the organized source");
 
   await waitFor("Test Explorer discovery", () => api.testFiles().some((uri) => uri.endsWith("editor.test.stasis")));

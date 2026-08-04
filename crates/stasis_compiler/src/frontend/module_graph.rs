@@ -51,13 +51,7 @@ impl ModuleGraph {
                 continue;
             }
             let source = load_source(&path).map_err(|message| match imported_from {
-                None => SourceDiagnostic::new(
-                    path.clone(),
-                    0,
-                    0,
-                    module_alias(&path).unwrap_or_default(),
-                    message,
-                ),
+                None => SourceDiagnostic::new(path.clone(), 0, 0, module_alias(&path), message),
                 Some((importer, span, declaration_span, alias)) => {
                     let fix = SourceDiagnosticFix {
                         title: format!("Remove unresolved import '{alias}'"),
@@ -87,19 +81,7 @@ impl ModuleGraph {
                     ));
                 }
             }
-            let alias = match module_alias(&path) {
-                Ok(alias) => alias,
-                Err(_) if roots.contains(&path) => root_module_alias(&path),
-                Err(message) => {
-                    return Err(SourceDiagnostic::new(
-                        path.clone(),
-                        0,
-                        path.len(),
-                        "",
-                        message,
-                    ));
-                }
-            };
+            let alias = module_alias(&path);
             sources.insert(path.clone(), source);
             modules.insert(
                 path.clone(),
@@ -295,9 +277,7 @@ pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, Sour
         let target = resolve_import(path, &import_path).map_err(|message| {
             diagnostic(path, literal.start..literal.end, &import_path, message)
         })?;
-        let alias = module_alias(&target).map_err(|message| {
-            diagnostic(path, literal.start..literal.end, &import_path, message)
-        })?;
+        let alias = module_alias(&target);
         let declaration_end = tokens
             .get(cursor + 2)
             .filter(|token| token.kind == TokenKind::Semicolon)
@@ -377,26 +357,8 @@ fn resolve_import(importer: &str, import: &str) -> Result<String, String> {
     crate::identity::canonical_source_path(None, &joined)
 }
 
-fn module_alias(path: &str) -> Result<String, String> {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let Some(alias) = name.strip_suffix(".stasis") else {
-        return Err(format!("module path must end in .stasis: '{path}'"));
-    };
-    if alias.is_empty() {
-        return Err(format!("module basename is empty: '{path}'"));
-    }
-    let tokens =
-        lex(alias).map_err(|message| format!("invalid module alias '{alias}': {message}"))?;
-    if tokens.len() != 2
-        || tokens[0].kind != TokenKind::Identifier
-        || tokens[0].start != 0
-        || tokens[0].end != alias.len()
-    {
-        return Err(format!(
-            "module basename is not a valid Stasis identifier: '{alias}'"
-        ));
-    }
-    Ok(alias.to_string())
+fn module_alias(path: &str) -> String {
+    root_module_alias(path)
 }
 
 fn root_module_alias(path: &str) -> String {
@@ -685,13 +647,30 @@ mod tests {
     }
 
     #[test]
-    fn graph_rejects_module_alias_that_is_not_a_stasis_identifier() {
-        let source = "import \"bad-name.stasis\";";
-        let error = graph(&["main.stasis"], &[("main.stasis", source)]).unwrap_err();
-        assert_eq!(&source[error.start..error.end], "\"bad-name.stasis\"");
-        assert!(error
-            .message
-            .contains("module basename is not a valid Stasis identifier: 'bad-name'"));
+    fn non_identifier_module_filenames_get_internal_identifier_aliases() {
+        let graph = graph(
+            &["main.stasis"],
+            &[
+                (
+                    "main.stasis",
+                    "import \"generated/balance.generated.stasis\"; import \"helpers/bad-name.stasis\";",
+                ),
+                ("generated/balance.generated.stasis", ""),
+                ("helpers/bad-name.stasis", ""),
+            ],
+        )
+        .expect("sanitized module aliases");
+        assert_eq!(
+            graph
+                .module("generated/balance.generated.stasis")
+                .unwrap()
+                .alias,
+            "balance_generated"
+        );
+        assert_eq!(
+            graph.module("helpers/bad-name.stasis").unwrap().alias,
+            "bad_name"
+        );
     }
 
     #[test]
