@@ -592,6 +592,8 @@ export async function run(): Promise<void> {
     const memberOffset = memberSource.indexOf(memberPrefix);
     assert.notEqual(memberOffset, -1, "the fixture contains an indexed state receiver");
     const liveStatus = await api.request("status");
+    const startedGeneration = liveStatus.runtime_identity?.generation;
+    assert.equal(typeof startedGeneration, "number", "the running game publishes a runtime generation");
     assert.ok(
       liveStatus.runtime_identity?.indexed_collections?.some(
         (collection) => collection.path === "state.enemies" && "speed" in collection.fields,
@@ -665,6 +667,11 @@ export async function run(): Promise<void> {
     const editApplied = await api.request("apply", { run_tests: false });
     assert.equal(editApplied.kind, "edit_applied", "the previewed edit applies through the LSP broker");
     await waitFor("semantic edit file refresh", () => document.getText().includes("score += 2"));
+    const functionGeneration = (await api.request("status")).runtime_identity?.generation;
+    assert.ok(
+      typeof functionGeneration === "number" && functionGeneration > startedGeneration!,
+      "the live function edit publishes a newer runtime generation",
+    );
     await api.request("step", { ticks: 1 });
     const edited = inspectedI32(await api.request("inspect", { path: "score" }));
     assert.equal(edited, after + 2, "the broker-applied function executes in the running game");
@@ -708,6 +715,87 @@ export async function run(): Promise<void> {
       }
     }
     assert.equal(hotSwapObserved, true, "saving in VS Code hot-swaps the running tick function");
+    const beforeStructGeneration = (await api.request("status")).runtime_identity?.generation;
+    assert.equal(
+      typeof beforeStructGeneration,
+      "number",
+      "the function hot-swap publishes a runtime generation before struct editing",
+    );
+
+    const structPreview = await api.request("edit", {
+      operation: "update",
+      target: {
+        name: "Enemy",
+        kind: "struct",
+        file: "src/main.stasis",
+      },
+      source: "struct Enemy { hp: i32; speed: i32; armor: i32; }",
+      preview: true,
+      run_tests: false,
+    });
+    assert.equal(structPreview.kind, "edit_preview", "the live struct edit stops at a migration preview");
+    const structPreviewData = structPreview.data as
+      | {
+          validated?: boolean;
+          swap?: {
+            layout_changed?: boolean;
+            state_layout_compatible?: boolean;
+            requires_explicit_apply?: boolean;
+            migration_steps?: Array<{
+              kind?: string;
+              path?: string;
+              field?: string;
+              elements?: number;
+            }>;
+          };
+        }
+      | undefined;
+    assert.equal(structPreviewData?.validated, true, "the compiler validates the candidate struct layout");
+    assert.equal(structPreviewData?.swap?.layout_changed, true, "the compiler identifies the layout change");
+    assert.equal(
+      structPreviewData?.swap?.state_layout_compatible,
+      true,
+      "the compiler accepts the struct migration",
+    );
+    assert.equal(
+      structPreviewData?.swap?.requires_explicit_apply,
+      true,
+      "layout migration requires an explicit VS Code apply",
+    );
+    assert.ok(
+      structPreviewData?.swap?.migration_steps?.some(
+        (step) =>
+          step.kind === "initialize" &&
+          step.path === "state.enemies" &&
+          step.field === "armor" &&
+          step.elements === 2,
+      ),
+      "the migration plan initializes armor for both existing enemies",
+    );
+
+    const structApplied = await api.request("apply", { run_tests: false });
+    assert.equal(structApplied.kind, "edit_applied", "the struct migration applies through the LSP broker");
+    await waitFor("struct edit file refresh", () => document.getText().includes("armor: i32"));
+    const structGeneration = (await api.request("status")).runtime_identity?.generation;
+    assert.ok(
+      typeof structGeneration === "number" && structGeneration > beforeStructGeneration!,
+      "the migrated struct publishes a newer runtime generation",
+    );
+    assert.equal(
+      inspectedI32(await api.request("inspect", { path: "state.enemies[0].hp" })),
+      7,
+      "automatic migration preserves an existing struct field",
+    );
+    assert.equal(
+      inspectedI32(await api.request("inspect", { path: "state.enemies[0].speed" })),
+      2,
+      "automatic migration preserves a sibling struct field",
+    );
+    assert.equal(
+      inspectedI32(await api.request("inspect", { path: "state.enemies[0].armor" })),
+      0,
+      "automatic migration initializes the new struct field",
+    );
 
     await api.request("resume");
     await waitFor("resumed live session", () => api.state() === "running");

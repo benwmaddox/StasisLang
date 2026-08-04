@@ -81,8 +81,10 @@ The completion audit used bounded commands (all below five minutes):
 - `cargo test -p stasis_language_service` and `cargo test -p stasis_lsp`: 29 and 16 passed.
 - `cargo test -p stasis --lib live_workspace::tests`: 50 shared TUI/live-workspace tests passed.
 - `npm test` and `npm run test:e2e` in `vscode-stasis`: unit/type checks passed; the packaged VSIX
-  installed into isolated VS Code 1.96 and completed the LSP, DAP, Live Workshop, hot-swap, and
-  framebuffer acceptance flow.
+  installed into isolated VS Code 1.96 and completed the LSP, DAP, and Live Workshop acceptance
+  flow. The live gate starts and renders the game, applies an observable function hot-swap, and
+  applies a compiler-previewed struct migration that preserves existing fields and initializes a
+  new field to its type default.
 - Every substantive gate in `tools/validate_repo.sh` passed when invoked directly from PowerShell.
   The wrapper itself could not start because this environment does not expose `bash`, `dirname`, or
   `python3` on its executable path; the Python commands, ignore audit, and partitioned Cargo command
@@ -118,3 +120,18 @@ entry parent is only a default watch location. A successful ChessTD graphical li
 that the active executable can materialize its exact stdlib/runtime pair under that boundary and
 compile an entry nested under `src`; this predicts any editor using the same executable and manifest
 will observe identical compiler, stdlib, runtime, diagnostics, and live-play behavior.
+
+### VS Code live-edit acceptance
+
+- Good: extending the packaged editor flow from function-only hot swap to a layout edit proves the
+  VSIX carries the compiler's migration preview and transactional apply contract end to end.
+- Bad: the prior framebuffer and hot-swap checks could pass without exercising state-layout changes,
+  leaving the most consequential live-edit workflow covered only below the editor boundary.
+- Adjustment: packaged VSIX acceptance must always gate running/rendering, an observable function
+  edit, and a compatible struct edit with value-preservation and default-initialization assertions.
+
+Theory gained: VS Code does not migrate state itself; it brokers a compiler-owned preview and apply
+transaction against the running generation. Preserved `hp`/`speed` values and zero-initialized
+`armor` in the next generation prove that source publication, code activation, and state migration
+share one safe-point commit; this predicts a rejected field type change will leave all three on the
+previous generation.
