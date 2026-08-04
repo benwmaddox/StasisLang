@@ -2265,6 +2265,19 @@ fn runtime_runner_file_name() -> &'static str {
     }
 }
 
+fn append_runtime_runner_candidates(candidates: &mut Vec<PathBuf>, directory: &Path) {
+    if cfg!(target_os = "macos") {
+        candidates.push(
+            directory
+                .join("stasis_runner.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("stasis_runner"),
+        );
+    }
+    candidates.push(directory.join(runtime_runner_file_name()));
+}
+
 fn runtime_graphics_file_names() -> &'static [&'static str] {
     if cfg!(windows) {
         &["stasis_graphics.dll"]
@@ -2401,7 +2414,6 @@ fn stage_stasis_dynload_runtime(_link_library: &Path, _output: &Path) -> Result<
 }
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
-    let runner_name = runtime_runner_file_name();
     if let Some(configured) = std::env::var_os("STASIS_RUNTIME_RUNNER_PATH") {
         let configured = PathBuf::from(configured);
         if configured.is_file() {
@@ -2409,27 +2421,24 @@ fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
         }
     }
     let mut candidates = Vec::new();
-    if let Some(installed) = std::env::current_exe()
+    if let Some(installed_directory) = std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(runner_name)))
+        .and_then(|path| path.parent().map(Path::to_path_buf))
     {
-        candidates.push(installed);
+        append_runtime_runner_candidates(&mut candidates, &installed_directory);
     }
-    candidates.extend([
-        repo_root.join(runner_name),
-        repo_root.join("build").join(runner_name),
+    for directory in [
+        repo_root.to_path_buf(),
+        repo_root.join("build"),
+        repo_root.join("runtime").join("build").join("bin"),
         repo_root
             .join("runtime")
             .join("build")
             .join("bin")
-            .join("Release")
-            .join(runner_name),
-        repo_root
-            .join("runtime")
-            .join("build")
-            .join("bin")
-            .join(runner_name),
-    ]);
+            .join("Release"),
+    ] {
+        append_runtime_runner_candidates(&mut candidates, &directory);
+    }
     resolve_latest_existing_path(candidates)
 }
 

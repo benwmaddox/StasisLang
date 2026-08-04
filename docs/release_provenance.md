@@ -42,7 +42,9 @@ only a published `v*` release or generated `nightly-*` release is official.
   hash verification when it regenerates its Android and iOS smoke packages.
 
 Games such as Chess TD may repin only to an official tag. Record the tag,
-`source_commit`, compiler SHA-256, and `runtime/stasis_graphics.c` SHA-256 from
+`source_commit`, compiler SHA-256, Windows runner manifest SHA-256, macOS
+runner plist SHA-256, and
+`runtime/stasis_graphics.c` SHA-256 from
 the release manifest in the game's dependency documentation. Rebuild the
 minimal package from the extracted archive without `--development-build`; a
 successful package audit is the proof that the consumed renderer matches the

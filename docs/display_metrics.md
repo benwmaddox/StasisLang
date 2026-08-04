@@ -66,3 +66,17 @@ the same logical/native/drawable metadata in reserved gfx_cmd v2 header slots,
 use the same aspect-fit viewport, and replace SVG/font/text textures when the
 density generation changes. Those metadata slots are host-populated and are
 not part of the command trace, so JIT/AOT command parity is unchanged.
+
+On Windows, `stasis_runner.exe` declares per-monitor-v2 DPI awareness and the
+graphics runtime enables SDL's DPI-scaled point coordinate mode before video
+initialization. A requested `800 x 600` logical window on a 150% display is
+therefore an `800 x 600` SDL window with a `1200 x 900` drawable. Windows does
+not bitmap-stretch a lower-resolution frame, and the resulting `1.5` raster
+scale rebuilds SVG and font resources at the drawable density.
+
+On macOS, the release toolchain ships `stasis_runner.app` with
+`NSHighResolutionCapable` enabled. Together with SDL's
+`SDL_WINDOW_ALLOW_HIGHDPI` window flag, an `800 x 600` logical window on a
+2x Retina display receives a `1600 x 1200` drawable instead of a
+resolution-doubled low-density surface. The runtime applies the same drawable
+scale and density-sensitive resource rebuild policy used on Windows.

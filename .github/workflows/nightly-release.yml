@@ -162,16 +162,25 @@ jobs:
       - name: Build stasis_graphics runtime (unix)
         if: runner.os != 'Windows'
         run: |
+          runner_build=OFF
+          build_targets=(stasis_graphics)
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            runner_build=ON
+            build_targets+=(stasis_runner)
+          fi
           cmake -S runtime -B runtime/build_ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
             -DSTASIS_GRAPHICS_SDL_ONLY=ON \
-            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_RUNNER="${runner_build}" \
             -DSTASIS_BUILD_SYS=OFF \
             -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}"
-          cmake --build runtime/build_ci --config Release --target stasis_graphics
+          cmake --build runtime/build_ci --config Release --target "${build_targets[@]}"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/stasis_runner.app/Contents/Info.plist)" = "true"
+          fi
 
       - name: Authenticode sign Stasis Windows binaries
         if: runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''
@@ -201,6 +210,9 @@ jobs:
           cp "target/${{ matrix.rust_target }}/release/stasis" "${out}/bin/"
           cp "target/${{ matrix.rust_target }}/release/libstasis_dynload.a" "${out}/bin/"
           find runtime/build_ci/bin -maxdepth 2 -type f \( -name 'libstasis_graphics.so' -o -name 'libstasis_graphics.dylib' \) -exec cp {} "${out}/bin/" \;
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            cp -R runtime/build_ci/bin/stasis_runner.app "${out}/bin/"
+          fi
           cp README.md "${out}/"
           cp LICENSE "${out}/"
           # Ship the stdlib + samples so relative imports keep working in the bundle.
@@ -209,7 +221,7 @@ jobs:
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
           mkdir -p "${out}/runtime"
-          cp runtime/CMakeLists.txt runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_graphics.c runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stb_truetype.h "${out}/runtime/"
+          cp runtime/CMakeLists.txt runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_graphics.c runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stb_truetype.h "${out}/runtime/"
           mkdir -p "${out}/docs"
           cp docs/agent_workflow.md docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md docs/release_provenance.md "${out}/docs/"
           python3 tools/generate_release_provenance.py \
@@ -253,7 +265,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null
-          @('CMakeLists.txt', 'nanosvg.h', 'nanosvgrast.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_graphics.c', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stasis_platform_storage.c', 'stasis_platform_storage.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
+          @('CMakeLists.txt', 'nanosvg.h', 'nanosvgrast.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_graphics.c', 'stasis_runner.manifest', 'stasis_runner_macos.plist.in', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stasis_platform_storage.c', 'stasis_platform_storage.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
           Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md "$out/docs/" -Force
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
