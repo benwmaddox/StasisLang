@@ -193,3 +193,22 @@ Theory gained: live-value presentation is a projection of one typed runtime snap
 list. Scalar globals plus the `Enemy[]` row regression prove that hierarchy and table layout can share
 the same identities and tick; this predicts nested collection presentation can be added by extending
 snapshot shape metadata without changing the LSP transport or watch semantics.
+
+### Navigation cache review hardening
+
+Warm navigation is now best-effort during LSP startup, so an invalid file produces diagnostics while
+the server remains available. Definition cache entries retain all overload declarations. Dotted field
+lookups also retain the compiler source spans that establish each root-type and field-type edge; stale
+reuse is allowed only while those spans map unchanged into the current documents.
+
+- Good: review scenarios became narrow regressions for invalid startup, overload multiplicity, and a
+  same-name field reached through a changed global owner type.
+- Bad: declaration-name remapping alone proved only that the destination still existed; it did not
+  prove that the cached type path still selected that destination.
+- Adjustment: warm semantic caches must retain and validate every source fact used to derive an
+  answer, while purely lexical declaration lookups may continue using target-span remapping alone.
+
+Theory gained: a cached field definition is a path proof, not merely a location. Preserving the root
+type declaration and each struct-field declaration span proves the path remains valid across unrelated
+edits; this predicts call hierarchy caching will need the same dependency-edge validation when it is
+moved onto a persistent index.

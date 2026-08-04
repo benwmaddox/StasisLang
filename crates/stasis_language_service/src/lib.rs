@@ -649,10 +649,23 @@ struct LanguageIndex {
 
 #[derive(Default)]
 struct WarmDefinitionIndex {
-    simple: BTreeMap<String, WorkshopReference>,
+    simple: BTreeMap<String, Vec<WorkshopReference>>,
     root_types: BTreeMap<String, String>,
+    root_dependencies: BTreeMap<String, WarmDefinitionDependency>,
     fields: BTreeMap<(String, String), (String, WorkshopReference)>,
+    field_dependencies: BTreeMap<(String, String), WarmDefinitionDependency>,
     struct_names: BTreeSet<String>,
+}
+
+struct WarmDefinitionResolution {
+    references: Vec<WorkshopReference>,
+    dependencies: Vec<WarmDefinitionDependency>,
+}
+
+#[derive(Clone)]
+struct WarmDefinitionDependency {
+    file: String,
+    source_spans: Vec<stasis_compiler::frontend::workshop::WorkshopSourceSpan>,
 }
 
 impl WarmDefinitionIndex {
@@ -724,11 +737,19 @@ impl WarmDefinitionIndex {
                 };
                 if let Some(kind) = simple_kind {
                     if let Some(container) = containing.filter(|item| item.kind == kind) {
-                        if !index.simple.contains_key(name) {
-                            index.simple.insert(
-                                name.to_string(),
-                                definition_reference(file, token, container, name)?,
-                            );
+                        index
+                            .simple
+                            .entry(name.to_string())
+                            .or_default()
+                            .push(definition_reference(file, token, container, name)?);
+                        if kind == WorkshopSourceItemKind::Globals {
+                            index
+                                .root_dependencies
+                                .entry(name.to_string())
+                                .or_insert_with(|| WarmDefinitionDependency {
+                                    file: file.path.clone(),
+                                    source_spans: container.source_spans.clone(),
+                                });
                         }
                     }
                 }
@@ -744,11 +765,18 @@ impl WarmDefinitionIndex {
                         if let Some(type_name) = field_types.get(&key) {
                             if !index.fields.contains_key(&key) {
                                 index.fields.insert(
-                                    key,
+                                    key.clone(),
                                     (
                                         type_name.clone(),
                                         definition_reference(file, token, container, name)?,
                                     ),
+                                );
+                                index.field_dependencies.insert(
+                                    key,
+                                    WarmDefinitionDependency {
+                                        file: file.path.clone(),
+                                        source_spans: container.source_spans.clone(),
+                                    },
                                 );
                             }
                         }
@@ -759,27 +787,50 @@ impl WarmDefinitionIndex {
         Ok(index)
     }
 
-    fn definition(&self, symbol: &str) -> Option<WorkshopReference> {
+    fn definition(&self, symbol: &str) -> Option<WarmDefinitionResolution> {
         let segments = symbol.split('.').collect::<Vec<_>>();
         if let [name] = segments.as_slice() {
-            return self.simple.get(*name).cloned();
+            return Some(WarmDefinitionResolution {
+                references: self.simple.get(*name)?.clone(),
+                dependencies: Vec::new(),
+            });
         }
         let root = *segments.first()?;
-        let mut type_name = self
-            .root_types
-            .get(root)
-            .cloned()
-            .or_else(|| self.struct_names.contains(root).then(|| root.to_string()))?;
+        let mut dependencies = Vec::new();
+        let mut type_name = if let Some(type_name) = self.root_types.get(root) {
+            if let Some(dependency) = self.root_dependencies.get(root) {
+                dependencies.push(dependency.clone());
+            }
+            type_name.clone()
+        } else if self.struct_names.contains(root) {
+            root.to_string()
+        } else {
+            return None;
+        };
         let mut definition = None;
         for field_name in &segments[1..] {
-            let owner = type_name.split('[').next().unwrap_or(&type_name).trim();
+            let owner = type_name
+                .split('[')
+                .next()
+                .unwrap_or(&type_name)
+                .trim()
+                .to_string();
             let (field_type, reference) = self
                 .fields
-                .get(&(owner.to_string(), (*field_name).to_string()))?;
+                .get(&(owner.clone(), (*field_name).to_string()))?;
             type_name = field_type.clone();
+            if let Some(dependency) = self
+                .field_dependencies
+                .get(&(owner, (*field_name).to_string()))
+            {
+                dependencies.push(dependency.clone());
+            }
             definition = Some(reference.clone());
         }
-        definition
+        Some(WarmDefinitionResolution {
+            references: vec![definition?],
+            dependencies,
+        })
     }
 }
 
@@ -1251,19 +1302,22 @@ impl LanguageService {
         let symbol = reference_symbol_at(&document.text, byte_offset)
             .ok_or_else(|| "no Stasis symbol at navigation position".to_string())?;
         let project_root = self.project_root.clone();
-        if let Some(location) = self.language_index.as_ref().and_then(|index| {
-            index.definitions.definition(&symbol).and_then(|reference| {
-                remap_definition_location(&project_root, &snapshot, index, &reference)
-            })
+        if let Some(locations) = self.language_index.as_ref().and_then(|index| {
+            index
+                .definitions
+                .definition(&symbol)
+                .and_then(|resolution| {
+                    remap_definition_locations(&project_root, &snapshot, index, &resolution)
+                })
         }) {
-            return Ok(vec![location]);
+            return Ok(locations);
         }
         let index = self.language_index()?;
-        if let Some(reference) = index.definitions.definition(&symbol) {
-            if let Some(location) =
-                remap_definition_location(&project_root, &snapshot, index, &reference)
+        if let Some(resolution) = index.definitions.definition(&symbol) {
+            if let Some(locations) =
+                remap_definition_locations(&project_root, &snapshot, index, &resolution)
             {
-                return Ok(vec![location]);
+                return Ok(locations);
             }
         }
         Ok(
@@ -2713,24 +2767,46 @@ fn remap_hierarchy_item(
     })
 }
 
-fn remap_definition_location(
+fn remap_definition_locations(
     project_root: &str,
     snapshot: &WorkspaceSnapshot,
     index: &LanguageIndex,
-    reference: &WorkshopReference,
-) -> Option<LanguageLocation> {
-    let path = absolute_source_path(project_root, &reference.file);
-    let indexed = index
-        .files
+    resolution: &WarmDefinitionResolution,
+) -> Option<Vec<LanguageLocation>> {
+    for dependency in &resolution.dependencies {
+        let indexed = index
+            .files
+            .iter()
+            .find(|candidate| candidate.path == dependency.file)?;
+        let path = absolute_source_path(project_root, &dependency.file);
+        let current = snapshot.document(&path)?;
+        let regions = UnchangedRegions::new(&indexed.source, &current.text);
+        for span in &dependency.source_spans {
+            regions.remap(
+                &indexed.source,
+                &current.text,
+                span.start as usize..span.end as usize,
+            )?;
+        }
+    }
+    resolution
+        .references
         .iter()
-        .find(|file| file.path == reference.file)?;
-    let current = snapshot.document(&path)?;
-    let range = UnchangedRegions::new(&indexed.source, &current.text).remap(
-        &indexed.source,
-        &current.text,
-        reference.source_span.start as usize..reference.source_span.end as usize,
-    )?;
-    Some(LanguageLocation { path, range })
+        .map(|reference| {
+            let path = absolute_source_path(project_root, &reference.file);
+            let indexed = index
+                .files
+                .iter()
+                .find(|file| file.path == reference.file)?;
+            let current = snapshot.document(&path)?;
+            let range = UnchangedRegions::new(&indexed.source, &current.text).remap(
+                &indexed.source,
+                &current.text,
+                reference.source_span.start as usize..reference.source_span.end as usize,
+            )?;
+            Some(LanguageLocation { path, range })
+        })
+        .collect()
 }
 
 fn remap_hierarchy_span(
@@ -3749,6 +3825,56 @@ function main(): i32 {
             service.snapshot().revision(),
             "changing a declaration rebuilds the warm cache for the new revision",
         );
+    }
+
+    #[test]
+    fn warm_field_definition_rebuilds_when_the_global_owner_type_changes() {
+        let root = std::env::temp_dir().join("stasis-language-service-global-type-edge");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct Alpha { value: i32; }\nstruct Bravo { value: i32; }\nglobal state: Alpha;\nfunction main(): i32 { return state.value; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let use_offset = source.rfind("state.value").expect("field use") + "state.".len();
+        let alpha = service
+            .definition(&path_text, use_offset)
+            .expect("alpha field definition");
+        assert_eq!(source[..alpha[0].range.start].matches('\n').count(), 0);
+
+        let changed = source.replace("state: Alpha", "state: Bravo");
+        service.set_disk_document(path_text.clone(), changed.clone());
+        let changed_use = changed.rfind("state.value").expect("changed field use") + "state.".len();
+        let bravo = service
+            .definition(&path_text, changed_use)
+            .expect("bravo field definition");
+        assert_eq!(changed[..bravo[0].range.start].matches('\n').count(), 1);
+        assert_eq!(
+            service
+                .language_index
+                .as_ref()
+                .expect("rebuilt field index")
+                .revision,
+            service.snapshot().revision(),
+        );
+    }
+
+    #[test]
+    fn warm_definition_returns_every_overload() {
+        let root = std::env::temp_dir().join("stasis-language-service-overload-definition");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "function select(value: i32): i32 { return value; }\nfunction select(value: f32): f32 { return value; }\nfunction main(): i32 { return select(1); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let use_offset = source.rfind("select(1)").expect("overload use") + 2;
+
+        let definitions = service
+            .definition(&path_text, use_offset)
+            .expect("overload definitions");
+        assert_eq!(definitions.len(), 2);
+        assert!(definitions
+            .iter()
+            .all(|location| &source[location.range.clone()] == "select"));
     }
 
     #[test]
