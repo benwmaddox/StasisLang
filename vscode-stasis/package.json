@@ -2,7 +2,7 @@
   "name": "stasis",
   "displayName": "Stasis",
   "description": "Stasis language support, navigation, tests, formatting, completion, and live game inspection.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "stasislang",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
@@ -14,6 +14,8 @@
   },
   "activationEvents": [
     "workspaceContains:stasis.json",
+    "workspaceContains:**/stasis.json",
+    "onLanguage:stasis",
     "onDebug:stasis"
   ],
   "categories": [
@@ -124,6 +126,10 @@
       {
         "command": "stasis.showOutput",
         "title": "Stasis: Show Output"
+      },
+      {
+        "command": "stasis.selectToolchain",
+        "title": "Stasis: Select Toolchain Executable"
       }
     ],
     "viewsContainers": {
@@ -194,8 +200,8 @@
       "properties": {
         "stasis.executablePath": {
           "type": "string",
-          "default": "stasis",
-          "description": "Path to the Stasis toolchain executable."
+          "default": "",
+          "description": "Path to a current Stasis toolchain executable. Empty uses the toolchain pinned by a local VSIX or stasis on PATH."
         },
         "stasis.live.entry": {
           "type": "string",
@@ -220,7 +226,7 @@
     "test": "npm run test:unit",
     "test:unit": "npm run check && esbuild src/protocol.test.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/protocol.test.cjs && node --test dist/protocol.test.cjs",
     "test:e2e": "npm run package && npm run bundle:e2e && node dist/e2e-run.cjs",
-    "prepackage": "node -e \"require('node:fs').mkdirSync('.vsix', { recursive: true })\"",
+    "prepackage": "node scripts/prepare-package.mjs",
     "package": "npm run build && vsce package --out .vsix/stasislang.stasis.vsix"
   },
   "devDependencies": {

@@ -58,7 +58,9 @@ async function main(): Promise<void> {
   const userDataDir = path.join(profileRoot, "user-data");
   const userSettingsDir = path.join(userDataDir, "User");
   const fixtureWorkspace = path.join(profileRoot, "workspace");
-  fs.cpSync(path.join(extensionRoot, "test", "fixture"), fixtureWorkspace, { recursive: true });
+  const fixtureProject = path.join(fixtureWorkspace, "nested-project");
+  fs.mkdirSync(fixtureWorkspace, { recursive: true });
+  fs.cpSync(path.join(extensionRoot, "test", "fixture"), fixtureProject, { recursive: true });
   fs.mkdirSync(userSettingsDir, { recursive: true });
   fs.writeFileSync(
     path.join(userSettingsDir, "settings.json"),
@@ -114,6 +116,7 @@ async function main(): Promise<void> {
       extensionTestsEnv: {
         ...process.env,
         STASIS_E2E_EXECUTABLE: executable,
+        STASIS_E2E_PROJECT_ROOT: "nested-project",
         STASIS_E2E_SCREENSHOT: screenshot,
         STASIS_SCREENSHOT_ONCE: screenshot,
         STASIS_SCREENSHOT_FRAME: "2",

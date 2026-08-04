@@ -28,7 +28,15 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 
 ## Requirements
 
-Install a current `stasis` executable on `PATH`, or set `stasis.executablePath` to its absolute path. Open a folder containing `stasis.json`.
+Install a current `stasis` executable on `PATH`, use **Stasis: Select Toolchain Executable**, or set
+`stasis.executablePath` to its absolute path. The extension verifies that the selected executable
+provides both `lsp` and `dap`; an older toolchain produces an actionable error instead of silently
+starting an incomplete editor. Open a folder containing `stasis.json`.
+
+The old `stasislang.stasis-syntax` extension is obsolete and should be uninstalled. The full Stasis
+extension includes the grammar as well as LSP, Live Workshop, Test Explorer, and debugger support.
+Nightly VSIX artifacts use a unique `0.2.<workflow run>` version so VS Code can distinguish updates;
+local source builds use `0.2.0` and should be installed with `-Force` while iterating.
 
 Projects created by `stasis new` recommend this extension and enable format-on-save only for the `stasis` language. For an existing project, use:
 
@@ -92,8 +100,14 @@ On Windows, build, test, package, and install the local extension with:
 powershell -ExecutionPolicy Bypass -File scripts\install_vscode_stasis.ps1 -Force
 ```
 
-Pass `-SkipInstall` to validate and create `.vsix/stasislang.stasis.vsix` without changing the
-installed VS Code extension. The underlying commands are:
+The local installer builds `target/release/stasis.exe`, rebuilds `stasis_graphics` when its native
+inputs are newer, requires the graphics-runtime probe to pass, verifies the LSP and DAP command
+surface, pins that exact executable in the locally generated VSIX, installs the VSIX, and removes
+the obsolete syntax-only extension. Use `-ExecutablePath <path>` to pin an existing current build,
+`-SkipToolchainBuild` to use `stasis` from `PATH`, `-SkipGraphicsRuntimeBuild` for an intentionally
+LSP/DAP-only installation, or `-KeepLegacySyntax` only for compatibility testing. Pass
+`-SkipInstall` to validate and create `.vsix/stasislang.stasis.vsix` without changing the installed
+VS Code extension. The underlying extension commands are:
 
 ```powershell
 cd vscode-stasis

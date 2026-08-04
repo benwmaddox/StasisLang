@@ -144,6 +144,19 @@ export async function run(): Promise<void> {
   if (!folder) {
     throw new Error("The fixture workspace is not open.");
   }
+  const projectRoot = path.join(
+    folder.uri.fsPath,
+    process.env.STASIS_E2E_PROJECT_ROOT ?? "",
+  );
+  assert.equal(
+    fs.existsSync(path.join(projectRoot, "stasis.json")),
+    true,
+    "the nested fixture project manifest is available",
+  );
+  const sourceUri = vscode.Uri.file(path.join(projectRoot, "src", "main.stasis"));
+  const document = await vscode.workspace.openTextDocument(sourceUri);
+  await vscode.window.showTextDocument(document);
+  assert.equal(document.languageId, "stasis", "the nested fixture opens as a Stasis document");
   await vscode.workspace
     .getConfiguration("stasis", folder.uri)
     .update("executablePath", executable, vscode.ConfigurationTarget.Global);
@@ -161,7 +174,7 @@ export async function run(): Promise<void> {
   assert.match(grammar, /storage\.type\.builtin\.stasis/, "the color grammar scopes built-in types");
 
   const formatUri = vscode.Uri.file(
-    path.join(folder.uri.fsPath, `format-input-${process.pid}.stasis`),
+    path.join(projectRoot, `format-input-${process.pid}.stasis`),
   );
   fs.writeFileSync(
     formatUri.fsPath,
@@ -186,11 +199,6 @@ export async function run(): Promise<void> {
     /function sample\(\): i32 \{\r?\n    value \+= 1;/,
     "formatter output applies canonical block newlines and indentation",
   );
-
-  const sourceUri = vscode.Uri.file(path.join(folder.uri.fsPath, "src", "main.stasis"));
-  const document = await vscode.workspace.openTextDocument(sourceUri);
-  await vscode.window.showTextDocument(document);
-  assert.equal(document.languageId, "stasis", "the fixture opens as a Stasis document");
 
   const validLength = document.getText().length;
   const invalidSuffix = "\nfunction lsp_diagnostic_probe(): i32 { while (true) { return 1; } }\n";

@@ -354,6 +354,10 @@ jobs:
         working-directory: vscode-stasis
         run: npm ci
 
+      - name: Stamp nightly extension version
+        working-directory: vscode-stasis
+        run: npm version --no-git-tag-version "0.2.${GITHUB_RUN_NUMBER}"
+
       - name: Test extension protocols
         working-directory: vscode-stasis
         run: npm test

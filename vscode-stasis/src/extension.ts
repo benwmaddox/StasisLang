@@ -10,6 +10,11 @@ import {
 } from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
 import { displayRuntimeValue, LiveResponse, LiveValue } from "./protocol";
+import {
+  loadPackagedToolchain,
+  requireEditorToolchain,
+  resolveToolchainExecutable,
+} from "./toolchain";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
   { language: "stasis", scheme: "file" },
@@ -25,8 +30,13 @@ function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("stasis");
 }
 
+let packagedToolchain: string | undefined;
+
 function executablePath(): string {
-  return configuration().get<string>("executablePath", "stasis").trim() || "stasis";
+  return resolveToolchainExecutable(
+    configuration().get<string>("executablePath", ""),
+    packagedToolchain,
+  );
 }
 
 function findWorkspaceRoot(document?: vscode.TextDocument): string | undefined {
@@ -54,6 +64,16 @@ function findWorkspaceRoot(document?: vscode.TextDocument): string | undefined {
   return vscode.workspace.workspaceFolders?.find((folder) =>
     fs.existsSync(path.join(folder.uri.fsPath, "stasis.json")),
   )?.uri.fsPath;
+}
+
+function rootKey(root: string): string {
+  const resolved = path.resolve(root);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function runStasis(
@@ -122,20 +142,22 @@ class StasisTests implements vscode.Disposable {
   async refresh(): Promise<void> {
     const items: vscode.TestItem[] = [];
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      const manifestPath = path.join(folder.uri.fsPath, "stasis.json");
-      if (!fs.existsSync(manifestPath)) {
-        continue;
-      }
-      const manifest = asRecord(JSON.parse(fs.readFileSync(manifestPath, "utf8")) as unknown);
-      const testsDirectory = typeof manifest?.tests === "string" ? manifest.tests : "tests";
-      const pattern = new vscode.RelativePattern(folder, `${testsDirectory.replaceAll("\\", "/")}/**/*.test.stasis`);
-      const files = await vscode.workspace.findFiles(
-        pattern,
+      const manifestUris = await vscode.workspace.findFiles(
+        new vscode.RelativePattern(folder, "**/stasis.json"),
         "**/{.git,.stasis-cache,node_modules,target,build,dist}/**",
       );
-      for (const uri of files.sort((left, right) => left.fsPath.localeCompare(right.fsPath))) {
-        const label = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll("\\", "/");
-        items.push(this.controller.createTestItem(uri.toString(), label, uri));
+      for (const manifestUri of manifestUris.sort((left, right) => left.fsPath.localeCompare(right.fsPath))) {
+        const projectRoot = path.dirname(manifestUri.fsPath);
+        const manifest = asRecord(JSON.parse(fs.readFileSync(manifestUri.fsPath, "utf8")) as unknown);
+        const testsDirectory = typeof manifest?.tests === "string" ? manifest.tests : "tests";
+        const files = await vscode.workspace.findFiles(
+          new vscode.RelativePattern(projectRoot, `${testsDirectory.replaceAll("\\", "/")}/**/*.test.stasis`),
+          "**/{.git,.stasis-cache,node_modules,target,build,dist}/**",
+        );
+        for (const uri of files.sort((left, right) => left.fsPath.localeCompare(right.fsPath))) {
+          const label = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll("\\", "/");
+          items.push(this.controller.createTestItem(uri.toString(), label, uri));
+        }
       }
     }
     this.controller.items.replace(items);
@@ -350,6 +372,8 @@ class LiveController implements vscode.Disposable {
 
 class StasisLanguageClients implements vscode.Disposable {
   private readonly clients = new Map<string, LanguageClient>();
+  private readonly starts = new Map<string, Promise<void>>();
+  private readonly probes = new Map<string, Promise<void>>();
   private readonly subscriptions: vscode.Disposable[];
 
   constructor(private readonly output: vscode.LogOutputChannel) {
@@ -360,8 +384,13 @@ class StasisLanguageClients implements vscode.Disposable {
         }
         for (const folder of event.added) {
           if (fs.existsSync(path.join(folder.uri.fsPath, "stasis.json"))) {
-            void this.startFolder(folder);
+            this.ensureProjectWithReporting(folder.uri.fsPath, folder);
           }
+        }
+      }),
+      vscode.workspace.onDidOpenTextDocument((document) => {
+        if (document.languageId === "stasis") {
+          this.ensureDocumentWithReporting(document);
         }
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
@@ -369,6 +398,7 @@ class StasisLanguageClients implements vscode.Disposable {
           event.affectsConfiguration("stasis.executablePath") ||
           event.affectsConfiguration("stasis.completion.limit")
         ) {
+          this.probes.clear();
           void this.restart();
         }
       }),
@@ -376,14 +406,26 @@ class StasisLanguageClients implements vscode.Disposable {
   }
 
   async start(): Promise<void> {
-    const folders = (vscode.workspace.workspaceFolders ?? []).filter((folder) =>
-      fs.existsSync(path.join(folder.uri.fsPath, "stasis.json")),
-    );
-    await Promise.all(folders.map((folder) => this.startFolder(folder)));
+    const starts: Promise<void>[] = [];
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      if (fs.existsSync(path.join(folder.uri.fsPath, "stasis.json"))) {
+        starts.push(this.ensureProject(folder.uri.fsPath, folder));
+      }
+    }
+    for (const document of vscode.workspace.textDocuments) {
+      if (document.languageId === "stasis") {
+        starts.push(this.ensureDocument(document));
+      }
+    }
+    const results = await Promise.allSettled(starts);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) {
+      await this.reportStartError(failure.reason);
+    }
   }
 
   clientForRoot(root: string): LanguageClient | undefined {
-    return this.clients.get(root);
+    return this.clients.get(rootKey(root));
   }
 
   dispose(): void {
@@ -394,32 +436,89 @@ class StasisLanguageClients implements vscode.Disposable {
       void client.stop();
     }
     this.clients.clear();
+    this.starts.clear();
   }
 
   private async restart(): Promise<void> {
     const clients = [...this.clients.values()];
     this.clients.clear();
+    this.starts.clear();
     await Promise.all(clients.map((client) => client.stop()));
     await this.start();
   }
 
-  private async startFolder(folder: vscode.WorkspaceFolder): Promise<void> {
-    const root = folder.uri.fsPath;
-    if (this.clients.has(root)) {
+  private ensureDocument(document: vscode.TextDocument): Promise<void> {
+    const root = findWorkspaceRoot(document);
+    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (!root || !folder) {
+      return Promise.resolve();
+    }
+    return this.ensureProject(root, folder);
+  }
+
+  private ensureDocumentWithReporting(document: vscode.TextDocument): void {
+    void this.ensureDocument(document).catch((error) => this.reportStartError(error));
+  }
+
+  private ensureProjectWithReporting(root: string, folder: vscode.WorkspaceFolder): void {
+    void this.ensureProject(root, folder).catch((error) => this.reportStartError(error));
+  }
+
+  private async reportStartError(error: unknown): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    this.output.error(message);
+    const action = await vscode.window.showErrorMessage(
+      `Stasis language tooling is unavailable: ${message}`,
+      "Select Toolchain",
+    );
+    if (action === "Select Toolchain") {
+      await vscode.commands.executeCommand("stasis.selectToolchain");
+    }
+  }
+
+  private ensureProject(root: string, folder: vscode.WorkspaceFolder): Promise<void> {
+    const key = rootKey(root);
+    if (this.clients.has(key)) {
+      return Promise.resolve();
+    }
+    const existing = this.starts.get(key);
+    if (existing) {
+      return existing;
+    }
+    const start = this.startProject(root, key, folder).finally(() => this.starts.delete(key));
+    this.starts.set(key, start);
+    return start;
+  }
+
+  private async startProject(root: string, key: string, folder: vscode.WorkspaceFolder): Promise<void> {
+    if (this.clients.has(key)) {
       return;
     }
+    const toolchain = executablePath();
+    let probe = this.probes.get(toolchain);
+    if (!probe) {
+      probe = requireEditorToolchain(toolchain, root);
+      this.probes.set(toolchain, probe);
+    }
+    await probe;
     const serverOptions: ServerOptions = {
-      command: executablePath(),
+      command: toolchain,
       args: ["--workspace", root, "lsp", "--stdio"],
       options: {
         cwd: root,
       },
     };
+    const relativeRoot = path.relative(folder.uri.fsPath, root).replaceAll("\\", "/");
+    const projectPattern = relativeRoot ? `${relativeRoot}/**/*.stasis` : "**/*.stasis";
     const clientOptions: LanguageClientOptions = {
       documentSelector: [
         {
           language: "stasis",
           scheme: "file",
+          pattern: {
+            baseUri: folder.uri.toString(),
+            pattern: projectPattern,
+          },
         },
       ],
       workspaceFolder: folder,
@@ -433,43 +532,47 @@ class StasisLanguageClients implements vscode.Disposable {
       traceOutputChannel: this.output,
       middleware: {
         didOpen: (document, next) => {
-          const owned = vscode.workspace.getWorkspaceFolder(document.uri)?.index === folder.index;
+          const owner = findWorkspaceRoot(document);
+          const owned = owner !== undefined && rootKey(owner) === key;
           return owned ? next(document) : Promise.resolve();
         },
         didChange: (event, next) => {
-          const owned = vscode.workspace.getWorkspaceFolder(event.document.uri)?.index === folder.index;
+          const owner = findWorkspaceRoot(event.document);
+          const owned = owner !== undefined && rootKey(owner) === key;
           return owned ? next(event) : Promise.resolve();
         },
-        didClose: (document, next) =>
-          vscode.workspace.getWorkspaceFolder(document.uri)?.index === folder.index
-            ? next(document)
-            : Promise.resolve(),
+        didClose: (document, next) => {
+          const owner = findWorkspaceRoot(document);
+          return owner !== undefined && rootKey(owner) === key ? next(document) : Promise.resolve();
+        },
       },
     };
     const client = new LanguageClient(
-      `stasis-${folder.index}`,
-      `Stasis (${folder.name})`,
+      `stasis-${folder.index}-${this.clients.size}`,
+      `Stasis (${path.basename(root)})`,
       serverOptions,
       clientOptions,
     );
-    this.clients.set(root, client);
+    this.clients.set(key, client);
     try {
       await client.start();
       await client.setTrace(Trace.Verbose);
       this.output.appendLine(`Language server ready: ${root}`);
     } catch (error) {
-      this.clients.delete(root);
+      this.clients.delete(key);
       throw error;
     }
   }
 
   private async stopFolder(folder: vscode.WorkspaceFolder): Promise<void> {
-    const client = this.clients.get(folder.uri.fsPath);
-    if (!client) {
-      return;
+    const stopped: Promise<void>[] = [];
+    for (const [root, client] of this.clients) {
+      if (pathIsWithin(folder.uri.fsPath, root)) {
+        this.clients.delete(root);
+        stopped.push(client.stop());
+      }
     }
-    this.clients.delete(folder.uri.fsPath);
-    await client.stop();
+    await Promise.all(stopped);
   }
 }
 
@@ -481,7 +584,8 @@ class StasisDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory 
     if (executable) {
       return executable;
     }
-    const root = session.workspaceFolder?.uri.fsPath ?? findWorkspaceRoot();
+    const configuredRoot = session.configuration.__stasisProjectRoot;
+    const root = typeof configuredRoot === "string" ? configuredRoot : debugProjectRoot(session.workspaceFolder);
     if (!root) {
       throw new Error("Open a folder containing stasis.json before debugging Stasis.");
     }
@@ -498,7 +602,7 @@ class StasisDebugConfigurationProvider implements vscode.DebugConfigurationProvi
     folder: vscode.WorkspaceFolder | undefined,
     config: vscode.DebugConfiguration,
   ): vscode.ProviderResult<vscode.DebugConfiguration> {
-    const root = folder?.uri.fsPath ?? findWorkspaceRoot(vscode.window.activeTextEditor?.document);
+    const root = debugProjectRoot(folder);
     if (!root) {
       void vscode.window.showErrorMessage("Stasis: open a folder containing stasis.json before debugging.");
       return undefined;
@@ -509,8 +613,20 @@ class StasisDebugConfigurationProvider implements vscode.DebugConfigurationProvi
       request: config.request ?? "launch",
       name: config.name ?? "Debug Stasis",
       stopOnEntry: config.stopOnEntry ?? false,
+      __stasisProjectRoot: root,
     };
   }
+}
+
+function debugProjectRoot(folder?: vscode.WorkspaceFolder): string | undefined {
+  const activeRoot = findWorkspaceRoot(vscode.window.activeTextEditor?.document);
+  if (activeRoot && (!folder || pathIsWithin(folder.uri.fsPath, activeRoot))) {
+    return activeRoot;
+  }
+  if (folder && fs.existsSync(path.join(folder.uri.fsPath, "stasis.json"))) {
+    return folder.uri.fsPath;
+  }
+  return findWorkspaceRoot();
 }
 
 async function askForPath(prompt: string): Promise<string | undefined> {
@@ -530,6 +646,11 @@ async function showCommandError(action: () => Promise<void>): Promise<void> {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<StasisExtensionApi> {
+  try {
+    packagedToolchain = loadPackagedToolchain(context.extensionPath);
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Stasis: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const output = vscode.window.createOutputChannel("Stasis", { log: true });
   const languageClients = new StasisLanguageClients(output);
   const values = new LiveValuesProvider();
@@ -584,6 +705,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     }),
     command("stasis.refreshLiveValues", async () => controller.requireSession().refresh()),
     command("stasis.showOutput", async () => output.show(true)),
+    command("stasis.selectToolchain", async () => {
+      const selected = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        openLabel: "Select Stasis Toolchain",
+        filters: process.platform === "win32" ? { Executable: ["exe"] } : undefined,
+      });
+      const selectedPath = selected?.[0]?.fsPath;
+      if (!selectedPath) {
+        return;
+      }
+      const root = findWorkspaceRoot() ?? path.dirname(selectedPath);
+      await requireEditorToolchain(selectedPath, root);
+      await configuration().update("executablePath", selectedPath, vscode.ConfigurationTarget.Global);
+      void vscode.window.showInformationMessage(`Stasis toolchain selected: ${selectedPath}`);
+    }),
   );
   void tests.refresh();
 
