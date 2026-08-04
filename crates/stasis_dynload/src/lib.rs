@@ -2087,32 +2087,20 @@ pub struct JitRuntimeStateSnapshot {
     i32_array_globals: JitI32ArrayGlobalMap,
     f32_array_globals: JitF32ArrayGlobalMap,
     f64_array_globals: JitF64ArrayGlobalMap,
-    i32_ptrs: Vec<RegisteredScalarSnapshot<i32>>,
-    f32_ptrs: Vec<RegisteredScalarSnapshot<f32>>,
-    f64_ptrs: Vec<RegisteredScalarSnapshot<f64>>,
-    i32_arrays: Vec<RegisteredArraySnapshot<i32>>,
-    f32_arrays: Vec<RegisteredArraySnapshot<f32>>,
-    f64_arrays: Vec<RegisteredArraySnapshot<f64>>,
-    u8_arrays: Vec<RegisteredArraySnapshot<u8>>,
-    u16_arrays: Vec<RegisteredArraySnapshot<u16>>,
+    owned_i32_scalars: HashMap<i32, i32>,
+    owned_f32_scalars: HashMap<i32, f32>,
+    owned_f64_scalars: HashMap<i32, f64>,
+    owned_i32_arrays: HashMap<ArrayKey, Vec<i32>>,
+    owned_f32_arrays: HashMap<ArrayKey, Vec<f32>>,
+    owned_f64_arrays: HashMap<ArrayKey, Vec<f64>>,
+    owned_u8_arrays: HashMap<ArrayKey, Vec<u8>>,
+    owned_u16_arrays: HashMap<ArrayKey, Vec<u16>>,
 }
 
-#[derive(Debug, Clone)]
-struct RegisteredScalarSnapshot<T> {
-    key: i32,
-    address: usize,
-    value: T,
-    owned: bool,
-}
-
-#[derive(Debug, Clone)]
-struct RegisteredArraySnapshot<T> {
-    key: ArrayKey,
-    address: usize,
-    values: Vec<T>,
-    owned: bool,
-}
-
+/// Captures state owned by the Stasis runtime.
+///
+/// Host-registered pointers are borrowed FFI memory. They are deliberately excluded: the
+/// registry cannot prove that those allocations still exist when a snapshot is restored.
 pub fn snapshot_jit_runtime_state() -> JitRuntimeStateSnapshot {
     snapshot_jit_runtime_state_bounded(usize::MAX)
         .expect("unbounded JIT runtime snapshot cannot exceed usize")
@@ -2152,15 +2140,33 @@ pub fn snapshot_jit_runtime_state_bounded(
             .lock()
             .expect("jit f64 array global table mutex poisoned")
             .clone(),
-        i32_ptrs: snapshot_registered_ptrs(registered_i32_ptrs(), owned_i32_scalars()),
-        f32_ptrs: snapshot_registered_ptrs(registered_f32_ptrs(), owned_f32_scalars()),
-        f64_ptrs: snapshot_registered_ptrs(registered_f64_ptrs(), owned_f64_scalars()),
-        i32_arrays: snapshot_registered_arrays(registered_i32_arrays(), Some(owned_i32_arrays())),
-        f32_arrays: snapshot_registered_arrays(registered_f32_arrays(), Some(owned_f32_arrays())),
-        f64_arrays: snapshot_registered_arrays(registered_f64_arrays(), Some(owned_f64_arrays())),
-        u8_arrays: snapshot_registered_arrays(registered_u8_arrays(), Some(owned_u8_arrays())),
-        u16_arrays: snapshot_registered_arrays(registered_u16_arrays(), Some(owned_u16_arrays())),
+        owned_i32_scalars: snapshot_owned_scalars(owned_i32_scalars()),
+        owned_f32_scalars: snapshot_owned_scalars(owned_f32_scalars()),
+        owned_f64_scalars: snapshot_owned_scalars(owned_f64_scalars()),
+        owned_i32_arrays: snapshot_owned_arrays(owned_i32_arrays()),
+        owned_f32_arrays: snapshot_owned_arrays(owned_f32_arrays()),
+        owned_f64_arrays: snapshot_owned_arrays(owned_f64_arrays()),
+        owned_u8_arrays: snapshot_owned_arrays(owned_u8_arrays()),
+        owned_u16_arrays: snapshot_owned_arrays(owned_u16_arrays()),
     })
+}
+
+fn snapshot_owned_scalars<T: Copy>(owned: &Mutex<HashMap<i32, Box<T>>>) -> HashMap<i32, T> {
+    owned
+        .lock()
+        .expect("owned scalar table mutex poisoned")
+        .iter()
+        .map(|(key, value)| (*key, **value))
+        .collect()
+}
+
+fn snapshot_owned_arrays<T: Clone>(
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+) -> HashMap<ArrayKey, Vec<T>> {
+    owned
+        .lock()
+        .expect("owned array table mutex poisoned")
+        .clone()
 }
 
 fn runtime_snapshot_bytes() -> Result<usize, String> {
@@ -2217,59 +2223,43 @@ fn runtime_snapshot_bytes() -> Result<usize, String> {
             .len(),
         std::mem::size_of::<((i32, i32, i32), f64)>(),
     )?;
-    add_registered_ptr_bytes(&mut add, registered_i32_ptrs(), std::mem::size_of::<i32>())?;
-    add_registered_ptr_bytes(&mut add, registered_f32_ptrs(), std::mem::size_of::<f32>())?;
-    add_registered_ptr_bytes(&mut add, registered_f64_ptrs(), std::mem::size_of::<f64>())?;
-    add_registered_array_bytes(
-        &mut add,
-        registered_i32_arrays(),
-        std::mem::size_of::<i32>(),
-    )?;
-    add_registered_array_bytes(
-        &mut add,
-        registered_f32_arrays(),
-        std::mem::size_of::<f32>(),
-    )?;
-    add_registered_array_bytes(
-        &mut add,
-        registered_f64_arrays(),
-        std::mem::size_of::<f64>(),
-    )?;
-    add_registered_array_bytes(&mut add, registered_u8_arrays(), std::mem::size_of::<u8>())?;
-    add_registered_array_bytes(
-        &mut add,
-        registered_u16_arrays(),
-        std::mem::size_of::<u16>(),
-    )?;
+    add_owned_scalar_bytes(&mut add, owned_i32_scalars(), std::mem::size_of::<i32>())?;
+    add_owned_scalar_bytes(&mut add, owned_f32_scalars(), std::mem::size_of::<f32>())?;
+    add_owned_scalar_bytes(&mut add, owned_f64_scalars(), std::mem::size_of::<f64>())?;
+    add_owned_array_bytes(&mut add, owned_i32_arrays(), std::mem::size_of::<i32>())?;
+    add_owned_array_bytes(&mut add, owned_f32_arrays(), std::mem::size_of::<f32>())?;
+    add_owned_array_bytes(&mut add, owned_f64_arrays(), std::mem::size_of::<f64>())?;
+    add_owned_array_bytes(&mut add, owned_u8_arrays(), std::mem::size_of::<u8>())?;
+    add_owned_array_bytes(&mut add, owned_u16_arrays(), std::mem::size_of::<u16>())?;
     Ok(bytes)
 }
 
-fn add_registered_ptr_bytes(
+fn add_owned_scalar_bytes<T>(
     add: &mut impl FnMut(usize, usize) -> Result<(), String>,
-    table: &Mutex<HashMap<i32, usize>>,
+    table: &Mutex<HashMap<i32, Box<T>>>,
     item_bytes: usize,
 ) -> Result<(), String> {
     add(
         table
             .lock()
-            .expect("registered global pointer table mutex poisoned")
+            .expect("owned scalar table mutex poisoned")
             .len(),
         item_bytes,
     )
 }
 
-fn add_registered_array_bytes(
+fn add_owned_array_bytes<T>(
     add: &mut impl FnMut(usize, usize) -> Result<(), String>,
-    table: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+    table: &Mutex<HashMap<ArrayKey, Vec<T>>>,
     item_bytes: usize,
 ) -> Result<(), String> {
     let elements = table
         .lock()
-        .expect("registered global array table mutex poisoned")
+        .expect("owned array table mutex poisoned")
         .values()
-        .try_fold(0usize, |total, (_, len)| {
+        .try_fold(0usize, |total, values| {
             total
-                .checked_add(*len)
+                .checked_add(values.len())
                 .ok_or_else(|| "live runtime snapshot size overflow".to_string())
         })?;
     add(elements, item_bytes)
@@ -2297,45 +2287,45 @@ pub fn restore_jit_runtime_state(snapshot: &JitRuntimeStateSnapshot) {
     *jit_f64_array_global_table()
         .lock()
         .expect("jit f64 array global table mutex poisoned") = snapshot.f64_array_globals.clone();
-    restore_registered_ptrs(
-        &snapshot.i32_ptrs,
-        registered_i32_ptrs(),
+    restore_owned_scalars(
+        &snapshot.owned_i32_scalars,
         owned_i32_scalars(),
+        registered_i32_ptrs(),
     );
-    restore_registered_ptrs(
-        &snapshot.f32_ptrs,
-        registered_f32_ptrs(),
+    restore_owned_scalars(
+        &snapshot.owned_f32_scalars,
         owned_f32_scalars(),
+        registered_f32_ptrs(),
     );
-    restore_registered_ptrs(
-        &snapshot.f64_ptrs,
-        registered_f64_ptrs(),
+    restore_owned_scalars(
+        &snapshot.owned_f64_scalars,
         owned_f64_scalars(),
+        registered_f64_ptrs(),
     );
-    restore_registered_arrays(
-        &snapshot.i32_arrays,
+    restore_owned_arrays(
+        &snapshot.owned_i32_arrays,
+        owned_i32_arrays(),
         registered_i32_arrays(),
-        Some(owned_i32_arrays()),
     );
-    restore_registered_arrays(
-        &snapshot.f32_arrays,
+    restore_owned_arrays(
+        &snapshot.owned_f32_arrays,
+        owned_f32_arrays(),
         registered_f32_arrays(),
-        Some(owned_f32_arrays()),
     );
-    restore_registered_arrays(
-        &snapshot.f64_arrays,
+    restore_owned_arrays(
+        &snapshot.owned_f64_arrays,
+        owned_f64_arrays(),
         registered_f64_arrays(),
-        Some(owned_f64_arrays()),
     );
-    restore_registered_arrays(
-        &snapshot.u8_arrays,
+    restore_owned_arrays(
+        &snapshot.owned_u8_arrays,
+        owned_u8_arrays(),
         registered_u8_arrays(),
-        Some(owned_u8_arrays()),
     );
-    restore_registered_arrays(
-        &snapshot.u16_arrays,
+    restore_owned_arrays(
+        &snapshot.owned_u16_arrays,
+        owned_u16_arrays(),
         registered_u16_arrays(),
-        Some(owned_u16_arrays()),
     );
     refresh_direct_storage_slots();
 }
@@ -2353,131 +2343,56 @@ fn refresh_direct_storage_slots() {
     }
 }
 
-fn snapshot_registered_ptrs<T: Copy>(
-    table: &Mutex<HashMap<i32, usize>>,
+fn restore_owned_scalars<T: Copy>(
+    snapshot: &HashMap<i32, T>,
     owned: &Mutex<HashMap<i32, Box<T>>>,
-) -> Vec<RegisteredScalarSnapshot<T>> {
-    let owned_addresses = owned
-        .lock()
-        .expect("owned scalar table mutex poisoned")
+    registered: &Mutex<HashMap<i32, usize>>,
+) {
+    let mut owned = owned.lock().expect("owned scalar table mutex poisoned");
+    let previous_addresses = owned
         .iter()
         .map(|(key, value)| (*key, value.as_ref() as *const T as usize))
         .collect::<HashMap<_, _>>();
-    table
-        .lock()
-        .expect("registered global pointer table mutex poisoned")
-        .iter()
-        .map(|(key, address)| {
-            // Registered pointers remain host-owned and stable for the in-process runtime.
-            let value = unsafe { *(*address as *const T) };
-            RegisteredScalarSnapshot {
-                key: *key,
-                address: *address,
-                value,
-                owned: owned_addresses.get(key) == Some(address),
-            }
-        })
-        .collect()
-}
-
-fn restore_registered_ptrs<T: Copy>(
-    values: &[RegisteredScalarSnapshot<T>],
-    registered: &Mutex<HashMap<i32, usize>>,
-    owned: &Mutex<HashMap<i32, Box<T>>>,
-) {
-    let mut restored = HashMap::new();
-    let mut owned = owned.lock().expect("owned scalar table mutex poisoned");
-    owned.retain(|key, _| values.iter().any(|value| value.owned && value.key == *key));
-    for snapshot in values {
-        let address = if snapshot.owned {
-            let value = owned
-                .entry(snapshot.key)
-                .or_insert_with(|| Box::new(snapshot.value));
-            **value = snapshot.value;
-            value.as_mut() as *mut T as usize
-        } else {
-            // Restoration runs at a main-thread tick boundary while the registered owner is alive.
-            unsafe { *(snapshot.address as *mut T) = snapshot.value };
-            snapshot.address
-        };
-        restored.insert(snapshot.key, address);
+    owned.retain(|key, _| snapshot.contains_key(key));
+    for (key, value) in snapshot {
+        **owned.entry(*key).or_insert_with(|| Box::new(*value)) = *value;
     }
-    *registered
+    let mut registered = registered
         .lock()
-        .expect("registered scalar table mutex poisoned") = restored;
+        .expect("registered scalar table mutex poisoned");
+    registered.retain(|key, address| {
+        snapshot.contains_key(key) || previous_addresses.get(key) != Some(address)
+    });
+    for (key, value) in owned.iter_mut() {
+        registered.insert(*key, value.as_mut() as *mut T as usize);
+    }
 }
 
-fn snapshot_registered_arrays<T: Copy>(
-    table: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
-    owned: Option<&Mutex<HashMap<ArrayKey, Vec<T>>>>,
-) -> Vec<RegisteredArraySnapshot<T>> {
-    let owned_addresses = owned
-        .map(|owned| {
-            owned
-                .lock()
-                .expect("owned array table mutex poisoned")
-                .iter()
-                .map(|(key, values)| (*key, values.as_ptr() as usize))
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
-    table
-        .lock()
-        .expect("registered global array table mutex poisoned")
-        .iter()
-        .map(|(key, (address, len))| {
-            // A zero-length registration deliberately carries no dereferenceable storage;
-            // `from_raw_parts` still requires a non-null pointer even when its length is zero.
-            let values = if *len == 0 {
-                Vec::new()
-            } else {
-                // Registered array memory remains valid until the in-process runner unregisters it.
-                unsafe { std::slice::from_raw_parts(*address as *const T, *len) }.to_vec()
-            };
-            RegisteredArraySnapshot {
-                key: *key,
-                address: *address,
-                values,
-                owned: owned_addresses.contains_key(key),
-            }
-        })
-        .collect()
-}
-
-fn restore_registered_arrays<T: Copy + Default>(
-    arrays: &[RegisteredArraySnapshot<T>],
+fn restore_owned_arrays<T: Clone>(
+    snapshot: &HashMap<ArrayKey, Vec<T>>,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
     registered: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
-    owned: Option<&Mutex<HashMap<ArrayKey, Vec<T>>>>,
 ) {
-    let mut restored = HashMap::new();
-    let mut owned_guard =
-        owned.map(|owned| owned.lock().expect("owned array table mutex poisoned"));
-    if let Some(owned) = owned_guard.as_mut() {
-        owned.retain(|key, _| arrays.iter().any(|array| array.owned && array.key == *key));
+    let mut owned = owned.lock().expect("owned array table mutex poisoned");
+    let previous_addresses = owned
+        .iter()
+        .map(|(key, values)| (*key, values.as_ptr() as usize))
+        .collect::<HashMap<_, _>>();
+    owned.retain(|key, _| snapshot.contains_key(key));
+    for (key, values) in snapshot {
+        let target = owned.entry(*key).or_default();
+        target.clear();
+        target.extend_from_slice(values);
     }
-    for array in arrays {
-        let address = if array.owned {
-            let values = owned_guard
-                .as_mut()
-                .expect("owned snapshot requires owned storage")
-                .entry(array.key)
-                .or_default();
-            values.clear();
-            values.extend_from_slice(&array.values);
-            values.as_mut_ptr() as usize
-        } else {
-            // Restoration is serialized with guest execution at the between-tick boundary.
-            unsafe {
-                std::slice::from_raw_parts_mut(array.address as *mut T, array.values.len())
-                    .copy_from_slice(&array.values)
-            };
-            array.address
-        };
-        restored.insert(array.key, (address, array.values.len()));
-    }
-    *registered
+    let mut registered = registered
         .lock()
-        .expect("registered array table mutex poisoned") = restored;
+        .expect("registered array table mutex poisoned");
+    registered.retain(|key, (address, _)| {
+        snapshot.contains_key(key) || previous_addresses.get(key) != Some(address)
+    });
+    for (key, values) in owned.iter_mut() {
+        registered.insert(*key, (values.as_mut_ptr() as usize, values.len()));
+    }
 }
 
 pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
@@ -4631,7 +4546,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_state_snapshot_restores_registered_and_fallback_memory() {
+    fn runtime_state_snapshot_restores_owned_memory_without_reading_borrowed_memory() {
         let _lock = test_lock();
         clear_registered_global_memory();
         clear_jit_i32_global_table();
@@ -4647,6 +4562,7 @@ mod tests {
         let mut bytes = vec![1u8, 2, 3, 4];
         register_global_i32_ptr(10, &mut scalar);
         register_global_u8_array(20, 0, bytes.as_mut_ptr(), bytes.len());
+        register_global_i32_array(21, 0, 1usize as *mut i32, 4);
         stasis_jit_global_i32_store(30, 9);
         stasis_jit_global_f32_array_store(40, 2, 0, 1.5);
         assert!(snapshot_jit_runtime_state_bounded(1)
@@ -4661,15 +4577,15 @@ mod tests {
         stasis_jit_global_f32_array_store(40, 2, 0, 8.5);
         restore_jit_runtime_state(&snapshot);
 
-        assert_eq!(scalar, 7);
-        assert_eq!(bytes, vec![1, 2, 3, 4]);
+        assert_eq!(scalar, 70);
+        assert_eq!(bytes, vec![9, 9, 9, 9]);
         assert_eq!(stasis_jit_global_i32_load(30), 9);
         assert_eq!(stasis_jit_global_i32_load(31), 0);
         assert_eq!(stasis_jit_global_f32_array_load(40, 2, 0), 1.5);
     }
 
     #[test]
-    fn runtime_state_rollback_rebinds_direct_storage_descriptor_atomically() {
+    fn runtime_state_rollback_leaves_borrowed_storage_descriptor_unchanged() {
         let _lock = test_lock();
         clear_registered_global_memory();
         let key = 77;
@@ -4687,9 +4603,9 @@ mod tests {
 
         restore_jit_runtime_state(&snapshot);
         let slot = unsafe { &*(slot_address as *const JitStorageSlot) };
-        assert_eq!(slot.data, original.as_ptr() as usize);
-        assert_eq!(slot.len, original.len());
-        assert_eq!(unsafe { *(slot.data as *const i32).add(1) }, 5);
+        assert_eq!(slot.data, replacement.as_ptr() as usize);
+        assert_eq!(slot.len, replacement.len());
+        assert_eq!(unsafe { *(slot.data as *const i32).add(1) }, 8);
         clear_registered_global_memory();
     }
 

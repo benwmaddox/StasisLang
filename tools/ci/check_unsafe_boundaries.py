@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Reject unsafe Rust outside the repository's audited platform boundaries."""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+
+UNSAFE_RUST = re.compile(r"\bunsafe\s*(?:\{|fn\b|impl\b|extern\b)")
+SOURCE_ROOTS = ("apps", "crates", "mobile", "tests")
+ALLOWED_PREFIXES = (
+    "crates/stasis_dynload/src/",
+    "crates/stasis_android_bridge/src/",
+    "mobile/android/codex_native/src/",
+)
+
+
+def unsafe_files(root: Path) -> list[str]:
+    found: list[str] = []
+    for source_root in SOURCE_ROOTS:
+        directory = root / source_root
+        if not directory.exists():
+            continue
+        for path in directory.rglob("*.rs"):
+            if UNSAFE_RUST.search(path.read_text(encoding="utf-8")):
+                found.append(path.relative_to(root).as_posix())
+    return sorted(found)
+
+
+def unexpected_unsafe_files(root: Path) -> list[str]:
+    return [
+        path
+        for path in unsafe_files(root)
+        if not path.startswith(ALLOWED_PREFIXES)
+    ]
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parents[2]
+    unexpected = unexpected_unsafe_files(root)
+    if unexpected:
+        print("Unsafe Rust is restricted to audited platform boundaries:", file=sys.stderr)
+        for path in unexpected:
+            print(f"- {path}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
