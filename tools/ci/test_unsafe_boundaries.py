@@ -17,6 +17,17 @@ class UnsafeBoundaryTests(unittest.TestCase):
                 ["apps/stasis/src/lib.rs"],
             )
 
+    def test_rejects_unsafe_traits_in_orchestration_crates(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "crates" / "stasis_runner" / "src" / "lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("unsafe trait Bad {}", encoding="utf-8")
+            self.assertEqual(
+                unexpected_unsafe_files(root),
+                ["crates/stasis_runner/src/lib.rs"],
+            )
+
     def test_allows_unsafe_rust_in_audited_boundary(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 
-UNSAFE_RUST = re.compile(r"\bunsafe\s*(?:\{|fn\b|impl\b|extern\b)")
+UNSAFE_RUST = re.compile(r"\bunsafe\s*(?:\{|fn\b|impl\b|trait\b|extern\b)")
 SOURCE_ROOTS = ("apps", "crates", "mobile", "tests")
 ALLOWED_PREFIXES = (
     "crates/stasis_dynload/src/",

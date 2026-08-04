@@ -2140,9 +2140,9 @@ pub fn snapshot_jit_runtime_state_bounded(
             .lock()
             .expect("jit f64 array global table mutex poisoned")
             .clone(),
-        owned_i32_scalars: snapshot_owned_scalars(owned_i32_scalars()),
-        owned_f32_scalars: snapshot_owned_scalars(owned_f32_scalars()),
-        owned_f64_scalars: snapshot_owned_scalars(owned_f64_scalars()),
+        owned_i32_scalars: snapshot_owned_scalars(owned_i32_scalars(), registered_i32_ptrs()),
+        owned_f32_scalars: snapshot_owned_scalars(owned_f32_scalars(), registered_f32_ptrs()),
+        owned_f64_scalars: snapshot_owned_scalars(owned_f64_scalars(), registered_f64_ptrs()),
         owned_i32_arrays: snapshot_owned_arrays(owned_i32_arrays()),
         owned_f32_arrays: snapshot_owned_arrays(owned_f32_arrays()),
         owned_f64_arrays: snapshot_owned_arrays(owned_f64_arrays()),
@@ -2151,11 +2151,17 @@ pub fn snapshot_jit_runtime_state_bounded(
     })
 }
 
-fn snapshot_owned_scalars<T: Copy>(owned: &Mutex<HashMap<i32, Box<T>>>) -> HashMap<i32, T> {
-    owned
+fn snapshot_owned_scalars<T: Copy>(
+    owned: &Mutex<HashMap<i32, Box<T>>>,
+    registered: &Mutex<HashMap<i32, usize>>,
+) -> HashMap<i32, T> {
+    let owned = owned.lock().expect("owned scalar table mutex poisoned");
+    let registered = registered
         .lock()
-        .expect("owned scalar table mutex poisoned")
+        .expect("registered scalar table mutex poisoned");
+    owned
         .iter()
+        .filter(|(key, value)| registered.get(key) == Some(&(value.as_ref() as *const T as usize)))
         .map(|(key, value)| (*key, **value))
         .collect()
 }
@@ -2402,6 +2408,7 @@ pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    remove_replaced_owned_scalar(path_hash, ptr as usize, owned_i32_scalars());
     let table = registered_i32_ptrs();
     let mut guard = table
         .lock()
@@ -2417,6 +2424,7 @@ pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    remove_replaced_owned_scalar(path_hash, ptr as usize, owned_f32_scalars());
     let table = registered_f32_ptrs();
     let mut guard = table
         .lock()
@@ -2432,6 +2440,7 @@ pub fn register_global_f64_ptr(path_hash: i32, ptr: *mut f64) {
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    remove_replaced_owned_scalar(path_hash, ptr as usize, owned_f64_scalars());
     let table = registered_f64_ptrs();
     let mut guard = table
         .lock()
@@ -2513,6 +2522,20 @@ fn remove_replaced_owned_array<T>(
     if guard
         .get(&key)
         .is_some_and(|values| values.as_ptr() as usize != registered_ptr)
+    {
+        guard.remove(&key);
+    }
+}
+
+fn remove_replaced_owned_scalar<T>(
+    key: i32,
+    registered_ptr: usize,
+    owned: &Mutex<HashMap<i32, Box<T>>>,
+) {
+    let mut guard = owned.lock().expect("owned scalar table mutex poisoned");
+    if guard
+        .get(&key)
+        .is_some_and(|value| value.as_ref() as *const T as usize != registered_ptr)
     {
         guard.remove(&key);
     }
@@ -4582,6 +4605,25 @@ mod tests {
         assert_eq!(stasis_jit_global_i32_load(30), 9);
         assert_eq!(stasis_jit_global_i32_load(31), 0);
         assert_eq!(stasis_jit_global_f32_array_load(40, 2, 0), 1.5);
+    }
+
+    #[test]
+    fn runtime_state_snapshot_does_not_reclaim_scalar_replaced_by_host_memory() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        let key = 76;
+        ensure_owned_i32_scalar(key).expect("provision owned scalar");
+        stasis_jit_global_i32_store(key, 7);
+
+        let mut borrowed = 11;
+        register_global_i32_ptr(key, &mut borrowed);
+        let snapshot = snapshot_jit_runtime_state();
+        borrowed = 13;
+        restore_jit_runtime_state(&snapshot);
+
+        assert_eq!(borrowed, 13);
+        assert_eq!(stasis_jit_global_i32_load(key), 13);
+        clear_registered_global_memory();
     }
 
     #[test]
