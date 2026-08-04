@@ -1,6 +1,7 @@
 LIBRARY stasis_graphics
 EXPORTS
     stasis_graphics_runtime_abi_version
+    stasis_graphics_release_id
     stasis_set_asset_root
     stasis_host_bulk_init
     stasis_host_bulk_apply_requests

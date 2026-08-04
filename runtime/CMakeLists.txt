@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(stasis_graphics C)
 
+set(STASIS_RELEASE_ID "development" CACHE STRING "Immutable Stasis toolchain release identity")
+
 set(STASIS_MOBILE_PLATFORM OFF)
 if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(STASIS_MOBILE_PLATFORM ON)
@@ -20,6 +22,11 @@ option(
     STASIS_GRAPHICS_BUILD_STATIC
     "Build the desktop graphics static library"
     ${STASIS_DESKTOP_TARGET_DEFAULT}
+)
+option(
+    STASIS_GRAPHICS_BUNDLE_SDL
+    "Build pinned SDL2 and SDL2_image into the desktop graphics runtime"
+    OFF
 )
 option(STASIS_BUILD_RUNNER "Build the stasis DLL runner executable" ${STASIS_DESKTOP_TARGET_DEFAULT})
 option(STASIS_BUILD_SYS "Build the sys runtime (file/argv/exec)" ${STASIS_DESKTOP_TARGET_DEFAULT})
@@ -44,6 +51,41 @@ endif()
 
 # Find graphics deps only when building graphics targets.
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_MOBILE_RUNTIME)
+    if(STASIS_GRAPHICS_BUNDLE_SDL)
+        include(FetchContent)
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+        set(SDL_STATIC_PIC ON CACHE BOOL "" FORCE)
+        set(SDL_TEST OFF CACHE BOOL "" FORCE)
+        set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+        set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+        FetchContent_Declare(
+            stasis_sdl2
+            URL https://github.com/libsdl-org/SDL/archive/5d249570393f7a37e037abf22cd6012a4cc56a71.tar.gz
+            URL_HASH SHA256=10f1194f8d2e4a73ca1c7c553b3189d0b68ab9ef3544e8d2a268e4429456b373
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(stasis_sdl2)
+
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_INSTALL OFF CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_SAMPLES OFF CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_TESTS OFF CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_BACKEND_STB ON CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_BACKEND_IMAGEIO OFF CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_AVIF OFF CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_JXL OFF CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_TIF OFF CACHE BOOL "" FORCE)
+        set(SDL2IMAGE_WEBP OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(
+            stasis_sdl2_image
+            URL https://github.com/libsdl-org/SDL_image/archive/12cb2e40330d256d9b1329647be8f366546d715c.tar.gz
+            URL_HASH SHA256=263c88eb8f3ec6e2ee9eb3eb5f9d195e5c58943bfbb86174ab5ed45c64787801
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(stasis_sdl2_image)
+    endif()
+
     # Find SDL2 (via vcpkg or system)
     if(NOT TARGET SDL2::SDL2 AND NOT TARGET SDL2::SDL2-static)
         find_package(SDL2 CONFIG REQUIRED)
@@ -62,6 +104,7 @@ endif()
 
 function(configure_stasis_target target is_static sdl_only link_sdl_main)
     target_sources(${target} PRIVATE stasis_graphics.c)
+    target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     if(link_sdl_main)
         target_link_libraries(${target} PRIVATE $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>)
     endif()

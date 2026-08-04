@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   fs.mkdirSync(userSettingsDir, { recursive: true });
   fs.writeFileSync(
     path.join(userSettingsDir, "settings.json"),
-    `${JSON.stringify({ "stasis.executablePath": executable }, null, 2)}\n`,
+    "{}\n",
   );
   const screenshot = process.env.STASIS_E2E_SCREENSHOT
     ? path.resolve(process.env.STASIS_E2E_SCREENSHOT)

@@ -10,6 +10,7 @@ import {
 } from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
 import { displayRuntimeValue, LiveResponse, LiveValue } from "./protocol";
+import { resolveEditorToolchain } from "./toolchain";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
   { language: "stasis", scheme: "file" },
@@ -25,8 +26,23 @@ function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("stasis");
 }
 
+let activeToolchainExecutable: string | undefined;
+
 function executablePath(): string {
-  return configuration().get<string>("executablePath", "stasis").trim() || "stasis";
+  if (!activeToolchainExecutable) {
+    throw new Error("the Stasis editor toolchain has not been verified");
+  }
+  return activeToolchainExecutable;
+}
+
+function workspaceRootKey(root: string): string {
+  let resolved: string;
+  try {
+    resolved = fs.realpathSync.native(root);
+  } catch {
+    resolved = path.resolve(root);
+  }
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function findWorkspaceRoot(document?: vscode.TextDocument): string | undefined {
@@ -366,7 +382,6 @@ class StasisLanguageClients implements vscode.Disposable {
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (
-          event.affectsConfiguration("stasis.executablePath") ||
           event.affectsConfiguration("stasis.completion.limit")
         ) {
           void this.restart();
@@ -383,7 +398,7 @@ class StasisLanguageClients implements vscode.Disposable {
   }
 
   clientForRoot(root: string): LanguageClient | undefined {
-    return this.clients.get(root);
+    return this.clients.get(workspaceRootKey(root));
   }
 
   dispose(): void {
@@ -405,7 +420,8 @@ class StasisLanguageClients implements vscode.Disposable {
 
   private async startFolder(folder: vscode.WorkspaceFolder): Promise<void> {
     const root = folder.uri.fsPath;
-    if (this.clients.has(root)) {
+    const key = workspaceRootKey(root);
+    if (this.clients.has(key)) {
       return;
     }
     const serverOptions: ServerOptions = {
@@ -452,23 +468,24 @@ class StasisLanguageClients implements vscode.Disposable {
       serverOptions,
       clientOptions,
     );
-    this.clients.set(root, client);
+    this.clients.set(key, client);
     try {
       await client.start();
       await client.setTrace(Trace.Verbose);
       this.output.appendLine(`Language server ready: ${root}`);
     } catch (error) {
-      this.clients.delete(root);
+      this.clients.delete(key);
       throw error;
     }
   }
 
   private async stopFolder(folder: vscode.WorkspaceFolder): Promise<void> {
-    const client = this.clients.get(folder.uri.fsPath);
+    const key = workspaceRootKey(folder.uri.fsPath);
+    const client = this.clients.get(key);
     if (!client) {
       return;
     }
-    this.clients.delete(folder.uri.fsPath);
+    this.clients.delete(key);
     await client.stop();
   }
 }
@@ -531,6 +548,18 @@ async function showCommandError(action: () => Promise<void>): Promise<void> {
 
 export async function activate(context: vscode.ExtensionContext): Promise<StasisExtensionApi> {
   const output = vscode.window.createOutputChannel("Stasis", { log: true });
+  try {
+    activeToolchainExecutable = await resolveEditorToolchain(
+      context.extensionPath,
+      configuration().get<string>("developer.executablePath", ""),
+    );
+    output.appendLine(`Verified editor toolchain: ${activeToolchainExecutable}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Toolchain verification failed: ${message}`);
+    void vscode.window.showErrorMessage(`Stasis: ${message}`);
+    throw error;
+  }
   const languageClients = new StasisLanguageClients(output);
   const values = new LiveValuesProvider();
   const controller = new LiveController(

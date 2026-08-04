@@ -144,10 +144,6 @@ export async function run(): Promise<void> {
   if (!folder) {
     throw new Error("The fixture workspace is not open.");
   }
-  await vscode.workspace
-    .getConfiguration("stasis", folder.uri)
-    .update("executablePath", executable, vscode.ConfigurationTarget.Global);
-
   const extension = vscode.extensions.getExtension<StasisExtensionApi>("stasislang.stasis");
   if (!extension) {
     throw new Error("The packaged Stasis VSIX is not installed.");

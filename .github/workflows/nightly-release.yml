@@ -76,6 +76,12 @@ jobs:
             archive: stasis-nightly-osx-arm64
             ext: tar.gz
     runs-on: ${{ matrix.os }}
+    env:
+      STASIS_RELEASE_ID: ${{ needs.detect.outputs.nightly_tag }}
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
+      STASIS_BUILD_TARGET: ${{ matrix.rust_target }}
+      STASIS_SIGNING_PFX_BASE64: ${{ secrets.STASIS_SIGNING_PFX_BASE64 }}
+      STASIS_SIGNING_PFX_PASSWORD: ${{ secrets.STASIS_SIGNING_PFX_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
 
@@ -92,7 +98,7 @@ jobs:
 
       - name: Install SDL development packages (macos)
         if: runner.os == 'macOS'
-        run: brew install sdl2 sdl2_image
+        run: brew install pkg-config
 
       - name: Setup MSVC dev environment (windows)
         if: runner.os == 'Windows'
@@ -130,19 +136,21 @@ jobs:
           & (Join-Path $vcpkgRoot "vcpkg.exe") install "sdl2:$triplet" "sdl2-image:$triplet" --recurse
 
           $buildDir = "runtime/build_ci"
-          $cmakeHelp = cmake --help | Out-String
-          if ($cmakeHelp -match "Visual Studio 18 2026") {
+          $vsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+          $vsVersion = (& $vsWhere -latest -products * -property installationVersion).Trim()
+          if ($vsVersion.StartsWith("18.")) {
             $generator = "Visual Studio 18 2026"
-          } elseif ($cmakeHelp -match "Visual Studio 17 2022") {
+          } elseif ($vsVersion.StartsWith("17.")) {
             $generator = "Visual Studio 17 2022"
           } else {
-            throw "Supported Visual Studio CMake generator not found."
+            throw "Supported Visual Studio installation not found."
           }
           cmake -S runtime -B $buildDir -G $generator -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET="$triplet" `
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
+            -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}" `
             -DSTASIS_GRAPHICS_SDL_ONLY=ON `
             -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON `
             -DSTASIS_BUILD_RUNNER=ON `
@@ -150,6 +158,38 @@ jobs:
 
           cmake --build $buildDir --config Release --target stasis_graphics stasis_runner stasis_render_contract_test stasis_asset_path_test
           ctest --test-dir $buildDir -C Release -R "stasis_(render_command|asset_path)_contract" --output-on-failure
+
+      - name: Build stasis_graphics runtime (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S runtime -B runtime/build_ci \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
+            -DSTASIS_GRAPHICS_SDL_ONLY=ON \
+            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_SYS=OFF \
+            -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}"
+          cmake --build runtime/build_ci --config Release --target stasis_graphics
+
+      - name: Authenticode sign Stasis Windows binaries
+        if: runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP "stasis-signing.pfx"
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          if (-not $signtool) { throw "signtool.exe not found" }
+          @(
+            "target/${{ matrix.rust_target }}/release/stasis.exe",
+            "runtime/build_ci/bin/Release/stasis_graphics.dll",
+            "runtime/build_ci/bin/Release/stasis_runner.exe"
+          ) | ForEach-Object {
+            & $signtool sign /fd SHA256 /f $certificate /p $env:STASIS_SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $_" }
+          }
+          Remove-Item -LiteralPath $certificate -Force
 
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
@@ -160,6 +200,7 @@ jobs:
           mkdir -p "${out}/bin"
           cp "target/${{ matrix.rust_target }}/release/stasis" "${out}/bin/"
           cp "target/${{ matrix.rust_target }}/release/libstasis_dynload.a" "${out}/bin/"
+          find runtime/build_ci/bin -maxdepth 2 -type f \( -name 'libstasis_graphics.so' -o -name 'libstasis_graphics.dylib' \) -exec cp {} "${out}/bin/" \;
           cp README.md "${out}/"
           cp LICENSE "${out}/"
           # Ship the stdlib + samples so relative imports keep working in the bundle.
@@ -176,8 +217,8 @@ jobs:
             --release-tag "${{ needs.detect.outputs.nightly_tag }}" \
             --source-commit "${{ github.sha }}" \
             --compiler "bin/stasis" \
-            --dependency "sdl2=external-not-linked" \
-            --dependency "sdl2_image=external-not-linked"
+            --dependency "sdl2=2.32.10-static" \
+            --dependency "sdl2_image=2.8.12-static"
           tar -C dist -czf "dist/${{ matrix.archive }}.${{ matrix.ext }}" "${{ matrix.archive }}"
 
       - name: Assemble bundle (windows)
@@ -240,6 +281,7 @@ jobs:
           Remove-Item Env:CC -ErrorAction SilentlyContinue
           Push-Location "dist/${{ matrix.archive }}"
           .\stasis.exe probe-graphics-runtime
+          .\stasis.exe --json editor-info
           & .\samples\windows_launch_smoke\verify.ps1 -Toolchain (Resolve-Path .\stasis.exe) -ArtifactRoot (Join-Path (Get-Location) 'windows-launch-evidence')
           .\stasis.exe new ci_smoke --dir cli-smoke
           .\stasis.exe --workspace cli-smoke check
@@ -271,6 +313,7 @@ jobs:
         run: |
           set -euo pipefail
           pushd "dist/${{ matrix.archive }}"
+          ./bin/stasis --json editor-info
           ./bin/stasis new ci_smoke --dir cli-smoke
           ./bin/stasis --workspace cli-smoke check
           ./bin/stasis --workspace cli-smoke test
@@ -300,13 +343,32 @@ jobs:
   vscode_extension:
     needs: [detect, build]
     if: needs.detect.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archive: stasis-nightly-linux-x64
+            ext: tar.gz
+            executable: bin/stasis
+            vsce_target: linux-x64
+          - os: windows-latest
+            archive: stasis-nightly-win-x64
+            ext: zip
+            executable: stasis.exe
+            vsce_target: win32-x64
+          - os: macos-15
+            archive: stasis-nightly-osx-arm64
+            ext: tar.gz
+            executable: bin/stasis
+            vsce_target: darwin-arm64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_E2E_VSCODE_VERSION: "1.96.0"
-      STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/vscode-nightly/stasis-nightly-linux-x64/bin/stasis
-      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/vscode-e2e-runtime/bin/libstasis_graphics.so
+      STASIS_TOOLCHAIN_DIR: ${{ github.workspace }}/target/vscode-nightly/${{ matrix.archive }}
+      STASIS_TOOLCHAIN_EXECUTABLE: ${{ matrix.executable }}
+      STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/vscode-nightly/${{ matrix.archive }}/${{ matrix.executable }}
       STASIS_E2E_SCREENSHOT: ${{ github.workspace }}/target/vscode-e2e/frame.png
     steps:
       - uses: actions/checkout@v7
@@ -318,37 +380,28 @@ jobs:
           cache: npm
           cache-dependency-path: vscode-stasis/package-lock.json
 
-      - name: Install graphics and display dependencies
+      - name: Install graphics and display dependencies (linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes libsdl2-dev libsdl2-image-dev xvfb
 
-      - name: Download Linux nightly toolchain
+      - name: Install graphics dependencies (macos)
+        if: runner.os == 'macOS'
+        run: brew install sdl2 sdl2_image
+
+      - name: Download matching nightly toolchain
         uses: actions/download-artifact@v8
         with:
-          name: stasis-nightly-linux-x64
+          name: ${{ matrix.archive }}
           path: target/vscode-nightly
 
       - name: Extract and probe nightly toolchain
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          tar -C target/vscode-nightly -xzf target/vscode-nightly/stasis-nightly-linux-x64.tar.gz
-          test -x "$STASIS_E2E_EXECUTABLE"
-          "$STASIS_E2E_EXECUTABLE" version
-
-      - name: Build native graphics runtime
-        run: |
-          cmake -S runtime -B target/vscode-e2e-runtime \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
-            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
-            -DSTASIS_GRAPHICS_SDL_ONLY=ON \
-            -DSTASIS_BUILD_RUNNER=OFF \
-            -DSTASIS_BUILD_SYS=OFF
-          cmake --build target/vscode-e2e-runtime --config Release --target stasis_graphics
-          test -f "$STASIS_RUNTIME_LIBRARY_PATH"
-          "$STASIS_E2E_EXECUTABLE" probe-graphics-runtime
+          tar -xf "target/vscode-nightly/${{ matrix.archive }}.${{ matrix.ext }}" -C target/vscode-nightly
+          if (-not (Test-Path $env:STASIS_E2E_EXECUTABLE)) { throw "toolchain executable missing" }
+          & $env:STASIS_E2E_EXECUTABLE --json editor-info
 
       - name: Install extension dependencies
         working-directory: vscode-stasis
@@ -358,17 +411,42 @@ jobs:
         working-directory: vscode-stasis
         run: npm test
 
+      - name: Stamp nightly extension version
+        working-directory: vscode-stasis
+        run: npm version --no-git-tag-version "0.2.${{ github.run_number }}"
+
       - name: Test installed VSIX in VS Code
+        if: runner.os == 'Linux'
         working-directory: vscode-stasis
         run: |
           mkdir -p ../target/vscode-e2e
           xvfb-run -a npm run test:e2e
 
-      - name: Upload VS Code extension
+      - name: Package platform VSIX
+        working-directory: vscode-stasis
+        run: npm run package -- --target ${{ matrix.vsce_target }}
+
+      - name: Name platform VSIX
+        shell: pwsh
+        run: Move-Item vscode-stasis/.vsix/stasislang.stasis.vsix "vscode-stasis/.vsix/stasislang.stasis-${{ matrix.vsce_target }}.vsix" -Force
+
+      - name: Assemble atomic editor release
+        shell: pwsh
+        run: |
+          $releaseRoot = "target/stasis-editor-release-${{ matrix.vsce_target }}"
+          node tools/assemble_editor_release.mjs `
+            --toolchain-archive "target/vscode-nightly/${{ matrix.archive }}.${{ matrix.ext }}" `
+            --vsix "vscode-stasis/.vsix/stasislang.stasis-${{ matrix.vsce_target }}.vsix" `
+            --out $releaseRoot `
+            --release-id "${{ needs.detect.outputs.nightly_tag }}" `
+            --platform "${{ matrix.vsce_target }}"
+          Compress-Archive -Path "$releaseRoot/*" -DestinationPath "target/stasis-editor-release-${{ matrix.vsce_target }}.zip" -Force
+
+      - name: Upload atomic editor release
         uses: actions/upload-artifact@v4
         with:
-          name: stasis-vscode-extension
-          path: vscode-stasis/.vsix/stasislang.stasis.vsix
+          name: stasis-editor-release-${{ matrix.vsce_target }}
+          path: target/stasis-editor-release-${{ matrix.vsce_target }}.zip
           if-no-files-found: error
 
   release:

@@ -796,6 +796,45 @@ fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String>
     Ok(())
 }
 
+pub fn graphics_runtime_release_id(path: &Path) -> Result<String, String> {
+    let lib = Library::load(path)?;
+    verify_graphics_runtime_abi(&lib, path)?;
+    let address = lib
+        .symbol_address("stasis_graphics_release_id")
+        .map_err(|_| {
+            format!(
+                "incompatible stasis graphics runtime {}: missing release identity",
+                path.display()
+            )
+        })?;
+    #[cfg(windows)]
+    let value = {
+        let identity: extern "system" fn() -> *const c_char =
+            unsafe { std::mem::transmute(address) };
+        identity()
+    };
+    #[cfg(not(windows))]
+    let value = {
+        let identity: extern "C" fn() -> *const c_char = unsafe { std::mem::transmute(address) };
+        identity()
+    };
+    if value.is_null() {
+        return Err(format!(
+            "incompatible stasis graphics runtime {}: empty release identity",
+            path.display()
+        ));
+    }
+    let value = unsafe { std::ffi::CStr::from_ptr(value) }
+        .to_str()
+        .map_err(|_| {
+            format!(
+                "incompatible stasis graphics runtime {}: release identity is not UTF-8",
+                path.display()
+            )
+        })?;
+    Ok(value.to_string())
+}
+
 pub struct StasisGraphicsApi {
     _lib: Library,
     stasis_init_window: usize,
@@ -1071,16 +1110,10 @@ fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, Stri
 
 pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH") {
-        out.push(PathBuf::from(configured));
-    }
-    // Preserve the original variable as a compatibility alias for existing Windows workflows.
-    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
-        out.push(PathBuf::from(configured));
-    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            // Release-friendly default: ship the runtime next to the stasis binary.
+            // A release bundle is one unit. Never let an environment override replace its sibling
+            // runtime with a different build.
             for file_name in runtime_library_file_names() {
                 out.push(exe_dir.join(file_name));
             }
@@ -1100,6 +1133,13 @@ pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
                 }
             }
         }
+    }
+    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH") {
+        out.push(PathBuf::from(configured));
+    }
+    // Preserve the original variable as a compatibility alias for existing Windows workflows.
+    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
+        out.push(PathBuf::from(configured));
     }
 
     // Allow loading from the current working directory too (handy for ad-hoc runs).
@@ -4375,6 +4415,16 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("dynload test lock mutex poisoned")
+    }
+
+    #[test]
+    fn bundled_graphics_runtime_outranks_environment_overrides() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let expected = executable
+            .parent()
+            .expect("test executable directory")
+            .join(runtime_library_file_names()[0]);
+        assert_eq!(runtime_library_candidate_paths().first(), Some(&expected));
     }
 
     #[cfg(not(windows))]

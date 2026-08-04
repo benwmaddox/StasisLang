@@ -57,6 +57,10 @@ static void flush_sprites(void);
 static void render_postfx(void);
 #endif
 
+#ifndef STASIS_RELEASE_ID
+#define STASIS_RELEASE_ID "development"
+#endif
+
 static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
     (void)userdata;
     (void)category;
@@ -111,6 +115,10 @@ STASIS_EXPORT int stasis_storage_save_i32(const char* scope, const char* key, in
 
 STASIS_EXPORT int stasis_graphics_runtime_abi_version(void) {
     return STASIS_GRAPHICS_RUNTIME_ABI_VERSION;
+}
+
+STASIS_EXPORT const char* stasis_graphics_release_id(void) {
+    return STASIS_RELEASE_ID;
 }
 
 /* Global state */
@@ -698,10 +706,12 @@ static void stasis_pump_events(void) {
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
             case SDL_QUIT:
+                SDL_Log("Stasis quit requested: SDL_QUIT");
                 g_should_quit = true;
                 break;
             case SDL_KEYDOWN:
                 if (event.key.keysym.sym == SDLK_ESCAPE) {
+                    SDL_Log("Stasis quit requested: Escape key");
                     g_should_quit = true;
                 }
                 if (event.key.keysym.sym == SDLK_F3 && event.key.repeat == 0) {

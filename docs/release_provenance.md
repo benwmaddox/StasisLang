@@ -48,3 +48,16 @@ minimal package from the extracted archive without `--development-build`; a
 successful package audit is the proof that the consumed renderer matches the
 release. Never label a source-proof or local proof directory as the pinned
 official artifact.
+
+## SDL dependency policy
+
+Desktop release graphics runtimes build SDL2 and SDL2_image from SHA-256-pinned
+upstream source archives and link them into `stasis_graphics`. The pinned
+versions match the versions recorded by the existing official Windows release
+provenance (SDL2 2.32.10 and SDL2_image 2.8.12); Unix package-manager aliases
+must not select a different implementation during a release build.
+
+Changing either SDL version is an explicit dependency upgrade. It requires the
+cross-platform renderer and installed-VSIX acceptance gates, updated provenance,
+and a review of runtime and packaging compatibility. Routine release builds do
+not float to newer SDL packages.
