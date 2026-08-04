@@ -145,11 +145,15 @@ After ordinary edits, unchanged declaration spans are mapped onto the current te
 without a workspace rebuild; an edit that touches the declaration fails that mapping and rebuilds the
 index before returning a location.
 
-The opt-in `chess_td_warm_definition_meets_100ms_contract` benchmark loads the local ChessTD `src/`
-and `tests/` trees. On the audited Windows machine, the former per-request reference scan took 98 ms
-inside the language service, the one-time debug index warmup took 345 ms, and 50 cached
-`game.progression_dirty` definition requests measured 225 us at p95. The normal deterministic warm
-latency test now includes definition with a 100 ms ceiling.
+The opt-in `chess_td_warm_definition_reports_service_component_latency` benchmark loads the local
+ChessTD `src/` and `tests/` trees. On the audited Windows machine, the former per-request reference
+scan took 88 ms inside the language service, the one-time debug index warmup took 345 ms, and 50
+cached `game.progression_dirty` definition requests measured 225 us at p95. The acceptance budget is
+not this component measurement: the packaged VSIX test times 50 complete
+`vscode.executeDefinitionProvider` calls and requires the p95 VS Code -> LSP -> VS Code round trip to
+remain below 100 ms. `STASIS_E2E_SOURCE_PROJECT` runs that same installed-VSIX gate against a copied
+local project. With a copied ChessTD workspace, 50 complete definition requests measured 13.87 ms
+at p95 through the isolated installed VSIX.
 
 - Good: measuring the real ChessTD graph separated one-time index construction from the repeated
   navigation path and exposed the redundant workspace scan.

@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { performance } from "node:perf_hooks";
 import { PNG } from "pngjs";
 import * as vscode from "vscode";
 import type { LiveResponse, LiveValue } from "../protocol";
@@ -84,6 +85,35 @@ async function waitFor(description: string, predicate: () => boolean, timeoutMs 
   throw new Error(`Timed out waiting for ${description}.`);
 }
 
+async function definitionRoundTripP95(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  expectedPathSuffix: string,
+): Promise<number> {
+  const request = async (): Promise<vscode.Location[]> => {
+    const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+      "vscode.executeDefinitionProvider",
+      uri,
+      position,
+    );
+    assert.equal(locations?.length, 1, "the timed definition request resolves exactly one declaration");
+    assert.ok(
+      locations[0]!.uri.fsPath.replaceAll("\\", "/").endsWith(expectedPathSuffix),
+      `the timed definition resolves ${expectedPathSuffix}`,
+    );
+    return locations;
+  };
+  await request();
+  const samples: number[] = [];
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const started = performance.now();
+    await request();
+    samples.push(performance.now() - started);
+  }
+  samples.sort((left, right) => left - right);
+  return samples[47]!;
+}
+
 function inspectedI32(response: LiveResponse): number {
   const data = response.data as Record<string, unknown> | undefined;
   const value = data?.value as Record<string, unknown> | undefined;
@@ -162,6 +192,22 @@ export async function run(): Promise<void> {
     throw new Error("The packaged Stasis VSIX is not installed.");
   }
   const api = await extension.activate();
+
+  if (process.env.STASIS_E2E_LATENCY_ONLY === "1") {
+    const source = document.getText();
+    const symbol = "game.progression_dirty";
+    const symbolOffset = source.indexOf(symbol);
+    assert.notEqual(symbolOffset, -1, "ChessTD contains the representative global-field access");
+    const fieldOffset = symbolOffset + "game.".length + 2;
+    const p95 = await definitionRoundTripP95(
+      sourceUri,
+      document.positionAt(fieldOffset),
+      "/src/game/model.stasis",
+    );
+    assert.ok(p95 < 100, `ChessTD VS Code -> LSP -> VS Code definition p95 ${p95.toFixed(2)}ms`);
+    console.log(`ChessTD VS Code -> LSP -> VS Code definition p95: ${p95.toFixed(2)}ms`);
+    return;
+  }
 
   const grammarPath = path.join(extension.extensionPath, "syntaxes", "stasis.tmLanguage.json");
   assert.equal(fs.existsSync(grammarPath), true, "the installed VSIX contains its Stasis color grammar");
@@ -438,6 +484,15 @@ export async function run(): Promise<void> {
     .findIndex((line) => line.includes("speed: i32"));
   assert.equal(fieldDefinitions?.length, 1, "Go to Definition resolves an indexed struct field");
   assert.equal(fieldDefinitions?.[0]?.range.start.line, speedDeclarationLine);
+  const definitionP95 = await definitionRoundTripP95(
+    sourceUri,
+    speedPosition,
+    "/src/main.stasis",
+  );
+  assert.ok(
+    definitionP95 < 100,
+    `packaged VS Code -> LSP -> VS Code definition p95 ${definitionP95.toFixed(2)}ms`,
+  );
   const fieldReferences = await vscode.commands.executeCommand<vscode.Location[]>(
     "vscode.executeReferenceProvider",
     sourceUri,

@@ -3870,7 +3870,7 @@ function main(): i32 {
 
     #[test]
     #[ignore = "requires STASIS_CHESSTD_ROOT"]
-    fn chess_td_warm_definition_meets_100ms_contract() {
+    fn chess_td_warm_definition_reports_service_component_latency() {
         fn collect_stasis_files(root: &Path, files: &mut Vec<PathBuf>) {
             for entry in std::fs::read_dir(root).expect("read ChessTD source directory") {
                 let path = entry.expect("ChessTD directory entry").path();
