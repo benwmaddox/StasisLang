@@ -35,6 +35,16 @@ function executablePath(): string {
   return activeToolchainExecutable;
 }
 
+function workspaceRootKey(root: string): string {
+  let resolved: string;
+  try {
+    resolved = fs.realpathSync.native(root);
+  } catch {
+    resolved = path.resolve(root);
+  }
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
 function findWorkspaceRoot(document?: vscode.TextDocument): string | undefined {
   if (document?.uri.scheme === "file") {
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
@@ -388,7 +398,7 @@ class StasisLanguageClients implements vscode.Disposable {
   }
 
   clientForRoot(root: string): LanguageClient | undefined {
-    return this.clients.get(root);
+    return this.clients.get(workspaceRootKey(root));
   }
 
   dispose(): void {
@@ -410,7 +420,8 @@ class StasisLanguageClients implements vscode.Disposable {
 
   private async startFolder(folder: vscode.WorkspaceFolder): Promise<void> {
     const root = folder.uri.fsPath;
-    if (this.clients.has(root)) {
+    const key = workspaceRootKey(root);
+    if (this.clients.has(key)) {
       return;
     }
     const serverOptions: ServerOptions = {
@@ -457,23 +468,24 @@ class StasisLanguageClients implements vscode.Disposable {
       serverOptions,
       clientOptions,
     );
-    this.clients.set(root, client);
+    this.clients.set(key, client);
     try {
       await client.start();
       await client.setTrace(Trace.Verbose);
       this.output.appendLine(`Language server ready: ${root}`);
     } catch (error) {
-      this.clients.delete(root);
+      this.clients.delete(key);
       throw error;
     }
   }
 
   private async stopFolder(folder: vscode.WorkspaceFolder): Promise<void> {
-    const client = this.clients.get(folder.uri.fsPath);
+    const key = workspaceRootKey(folder.uri.fsPath);
+    const client = this.clients.get(key);
     if (!client) {
       return;
     }
-    this.clients.delete(folder.uri.fsPath);
+    this.clients.delete(key);
     await client.stop();
   }
 }
