@@ -412,7 +412,7 @@ jobs:
 
       - name: Stamp nightly extension version
         working-directory: vscode-stasis
-        run: npm version --no-git-tag-version "0.2.${GITHUB_RUN_NUMBER}"
+        run: npm version --no-git-tag-version "0.2.${{ github.run_number }}"
 
       - name: Test installed VSIX in VS Code
         if: runner.os == 'Linux'

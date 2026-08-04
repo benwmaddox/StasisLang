@@ -706,10 +706,12 @@ static void stasis_pump_events(void) {
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
             case SDL_QUIT:
+                SDL_Log("Stasis quit requested: SDL_QUIT");
                 g_should_quit = true;
                 break;
             case SDL_KEYDOWN:
                 if (event.key.keysym.sym == SDLK_ESCAPE) {
+                    SDL_Log("Stasis quit requested: Escape key");
                     g_should_quit = true;
                 }
                 if (event.key.keysym.sym == SDLK_F3 && event.key.repeat == 0) {

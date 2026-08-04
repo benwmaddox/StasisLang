@@ -32,7 +32,7 @@ const executable = path.resolve(bundleRoot, executableRelative);
 const envelope = JSON.parse(execFileSync(executable, ["--json", "editor-info"], {
   cwd: path.dirname(executable),
   encoding: "utf8",
-  timeout: 10_000,
+  timeout: 60_000,
   maxBuffer: 1024 * 1024,
 }));
 if (!envelope.ok || envelope.command !== "editor-info" || envelope.result?.schema !== 1) {
