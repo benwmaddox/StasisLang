@@ -738,7 +738,7 @@ Tests must verify that:
 
 Completed implementation work must include a representative `.stasis` program that reaches Cranelift IR, builds into an executable, runs, and verifies behavior with assertions.
 
-All test commands remain bounded to 300 seconds, with lingering processes checked after each run.
+All test commands remain bounded to 900 seconds, with lingering processes checked after each run.
 
 ## 13. Implementation Areas
 

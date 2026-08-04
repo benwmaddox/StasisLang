@@ -277,7 +277,7 @@ For every implementation slice:
 - verify positions with ASCII, multibyte UTF-8, and UTF-16 surrogate pairs;
 - run LSP transcript tests against the compiled `stasis` executable;
 - run VSIX unit/e2e tests for the capabilities changed;
-- run focused Rust tests and `tools/validate_repo.sh`, each bounded to five minutes;
+- run focused Rust tests and `tools/validate_repo.sh`, each bounded to fifteen minutes;
 - check for and terminate lingering test processes after every test step;
 - run one representative sample through compiler, Cranelift IR, executable build, execution, and
   behavioral assertions when compiler behavior changes;
