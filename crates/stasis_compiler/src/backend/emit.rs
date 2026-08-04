@@ -8,7 +8,7 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
     TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
-use crate::ir::hir::FunctionHIR;
+use crate::ir::hir::{DebugStatement, FunctionHIR};
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
     immediates::{Ieee32, Ieee64},
@@ -1407,6 +1407,12 @@ pub(crate) struct RuntimeCallImportIds {
     pub(crate) global_f64_array_ptr: FuncId,
     pub(crate) collection_i32_load: FuncId,
     pub(crate) collection_i32_store: FuncId,
+    pub(crate) debug_frame_enter: Option<FuncId>,
+    pub(crate) debug_frame_leave: Option<FuncId>,
+    pub(crate) debug_statement: Option<FuncId>,
+    pub(crate) debug_values_begin: Option<FuncId>,
+    pub(crate) debug_value_i64: Option<FuncId>,
+    pub(crate) debug_value_f64: Option<FuncId>,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncId>,
 }
 
@@ -1432,6 +1438,7 @@ pub(crate) struct RuntimeCallRefs {
     pub(crate) global_f64_array_ptr: FuncRef,
     pub(crate) collection_i32_load: FuncRef,
     pub(crate) collection_i32_store: FuncRef,
+    pub(crate) debug: Option<DebugRuntimeRefs>,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncRef>,
     pub(crate) direct_storage: Option<DirectStorageRefs>,
 }
@@ -1606,6 +1613,7 @@ pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuil
     named_struct_field_types: &NamedStructFieldTypeMap,
     direct_storage: Option<&DirectStorageBindings>,
     defined_runtime_helper_trampolines: Option<&mut BTreeSet<String>>,
+    debug_instrumentation: bool,
     mut before_statement: BeforeStatement,
     on_function_built: OnFunctionBuilt,
     finalize: Finalize,
@@ -1661,6 +1669,7 @@ where
                 call_signatures,
                 type_table,
                 named_struct_field_types,
+                debug_instrumentation,
             )?
         }
     };
@@ -1820,8 +1829,17 @@ where
             symbol_prefix,
             force_far_nonself_calls,
         });
+        if let Some(debug) = runtime_call_refs.debug.as_ref() {
+            if hir.debug_statements.len() != hir.statements.len() {
+                return Err(format!(
+                    "debug statement metadata mismatch for function '{}'",
+                    meta.name
+                ));
+            }
+            emit_debug_frame_boundary(&mut builder, debug.frame_enter, meta.id);
+        }
         let mut terminated = false;
-        for statement in &hir.statements {
+        for (index, statement) in hir.statements.iter().enumerate() {
             if terminated {
                 break;
             }
@@ -1829,6 +1847,12 @@ where
             terminated = emit_simple_statements(
                 &mut builder,
                 std::slice::from_ref(statement),
+                runtime_call_refs
+                    .debug
+                    .as_ref()
+                    .map(|_| std::slice::from_ref(&hir.debug_statements[index])),
+                runtime_call_refs.debug.as_ref(),
+                meta.id,
                 &mut values_by_name,
                 &runtime_call_refs,
                 &mut internal_calls,
@@ -1846,6 +1870,9 @@ where
         }
         if !terminated {
             if meta.return_type == TYPE_ID_VOID {
+                if let Some(debug) = runtime_call_refs.debug.as_ref() {
+                    emit_debug_frame_boundary(&mut builder, debug.frame_leave, meta.id);
+                }
                 builder.ins().return_(&[]);
             } else {
                 return Err(format!(
@@ -2055,6 +2082,28 @@ pub(crate) fn declare_void_call_import(
         signature.params.push(AbiParam::new(types::I32));
     }
     declare_runtime_helper(module, symbol, signature, linkage)
+}
+
+fn declare_debug_value_i64_import(
+    module: &mut impl Module,
+    linkage: RuntimeHelperLinkage<'_>,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I64));
+    declare_runtime_helper(module, "stasis_jit_debug_value_i64", signature, linkage)
+}
+
+fn declare_debug_value_f64_import(
+    module: &mut impl Module,
+    linkage: RuntimeHelperLinkage<'_>,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::F64));
+    declare_runtime_helper(module, "stasis_jit_debug_value_f64", signature, linkage)
 }
 
 pub(crate) fn declare_f32_global_load_import(
@@ -2443,19 +2492,46 @@ pub(crate) enum ComparisonOp {
     Ge,
 }
 
-pub(crate) fn parse_simple_statements_from_block_with<F>(
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParsedSimpleStatements {
+    pub(crate) statements: Vec<SimpleStmt>,
+    pub(crate) debug_statements: Vec<DebugStatement>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DebugRuntimeRefs {
+    pub(crate) frame_enter: FuncRef,
+    pub(crate) frame_leave: FuncRef,
+    pub(crate) statement: FuncRef,
+    pub(crate) values_begin: FuncRef,
+    pub(crate) value_i64: FuncRef,
+    pub(crate) value_f64: FuncRef,
+}
+
+pub(crate) fn parse_simple_statements_with_debug(
     block_text: &str,
     type_table: &mut TypeTable,
-    mut visitor: F,
-) -> Result<(), String>
-where
-    F: FnMut(&TypeTable, SimpleStmt) -> Result<(), String>,
-{
+) -> Result<ParsedSimpleStatements, String> {
+    parse_simple_statements_with_debug_at(block_text, type_table, 0)
+}
+
+fn parse_simple_statements_with_debug_at(
+    block_text: &str,
+    type_table: &mut TypeTable,
+    block_offset: usize,
+) -> Result<ParsedSimpleStatements, String> {
+    let leading = block_text.len() - block_text.trim_start().len();
     let trimmed = block_text.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return Err("expected function body block enclosed in '{...}'".to_string());
     }
     let inner = &trimmed[1..trimmed.len() - 1];
+    let inner_offset = block_offset
+        .checked_add(leading)
+        .and_then(|offset| offset.checked_add(1))
+        .ok_or_else(|| "statement source offset overflow".to_string())?;
+    let mut statements = Vec::new();
+    let mut debug_statements = Vec::new();
     let mut cursor = 0usize;
     while cursor < inner.len() {
         cursor = skip_ascii_whitespace_and_comments(inner, cursor);
@@ -2467,7 +2543,8 @@ where
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[let_start..semicolon].trim();
             let statement = parse_let_statement(statement_text, type_table)?;
-            visitor(type_table, statement)?;
+            statements.push(statement);
+            debug_statements.push(debug_statement(inner_offset, let_start, Vec::new())?);
             cursor = semicolon + 1;
             continue;
         }
@@ -2476,7 +2553,8 @@ where
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[return_start..semicolon].trim();
             let statement = parse_return_statement(statement_text)?;
-            visitor(type_table, statement)?;
+            statements.push(statement);
+            debug_statements.push(debug_statement(inner_offset, return_start, Vec::new())?);
             cursor = semicolon + 1;
             continue;
         }
@@ -2485,25 +2563,32 @@ where
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[continue_start..semicolon].trim();
             let statement = parse_continue_statement(statement_text)?;
-            visitor(type_table, statement)?;
+            statements.push(statement);
+            debug_statements.push(debug_statement(inner_offset, continue_start, Vec::new())?);
             cursor = semicolon + 1;
             continue;
         }
         if starts_with_keyword(inner, cursor, "for") {
-            let (statement, next_cursor) = parse_for_statement(inner, cursor, type_table)?;
-            visitor(type_table, statement)?;
+            let (statement, debug, next_cursor) =
+                parse_for_statement_at(inner, cursor, type_table, inner_offset)?;
+            statements.push(statement);
+            debug_statements.push(debug);
             cursor = next_cursor;
             continue;
         }
         if starts_with_keyword(inner, cursor, "foreach") {
-            let (statement, next_cursor) = parse_foreach_statement(inner, cursor, type_table)?;
-            visitor(type_table, statement)?;
+            let (statement, debug, next_cursor) =
+                parse_foreach_statement_at(inner, cursor, type_table, inner_offset)?;
+            statements.push(statement);
+            debug_statements.push(debug);
             cursor = next_cursor;
             continue;
         }
         if starts_with_keyword(inner, cursor, "if") {
-            let (statement, next_cursor) = parse_if_statement(inner, cursor, type_table)?;
-            visitor(type_table, statement)?;
+            let (statement, debug, next_cursor) =
+                parse_if_statement_at(inner, cursor, type_table, inner_offset)?;
+            statements.push(statement);
+            debug_statements.push(debug);
             cursor = next_cursor;
             continue;
         }
@@ -2518,7 +2603,8 @@ where
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[start..semicolon].trim();
             let statement = parse_from_conversion_statement(statement_text)?;
-            visitor(type_table, statement)?;
+            statements.push(statement);
+            debug_statements.push(debug_statement(inner_offset, start, Vec::new())?);
             cursor = semicolon + 1;
             continue;
         }
@@ -2527,7 +2613,8 @@ where
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[assignment_start..semicolon].trim();
             let statement = parse_assignment_statement(statement_text)?;
-            visitor(type_table, statement)?;
+            statements.push(statement);
+            debug_statements.push(debug_statement(inner_offset, assignment_start, Vec::new())?);
             cursor = semicolon + 1;
             continue;
         }
@@ -2536,7 +2623,8 @@ where
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[call_start..semicolon].trim();
             let statement = parse_call_statement(statement_text)?;
-            visitor(type_table, statement)?;
+            statements.push(statement);
+            debug_statements.push(debug_statement(inner_offset, call_start, Vec::new())?);
             cursor = semicolon + 1;
             continue;
         }
@@ -2545,19 +2633,22 @@ where
             snippet_from(inner, cursor)
         ));
     }
-    Ok(())
+    Ok(ParsedSimpleStatements {
+        statements,
+        debug_statements,
+    })
 }
 
-pub(crate) fn parse_simple_statements_from_block(
-    block_text: &str,
-    type_table: &mut TypeTable,
-) -> Result<Vec<SimpleStmt>, String> {
-    let mut statements = Vec::new();
-    parse_simple_statements_from_block_with(block_text, type_table, |_type_table, statement| {
-        statements.push(statement);
-        Ok(())
-    })?;
-    Ok(statements)
+fn debug_statement(
+    base: usize,
+    relative: usize,
+    children: Vec<DebugStatement>,
+) -> Result<DebugStatement, String> {
+    Ok(DebugStatement {
+        source_offset: u32::try_from(base.saturating_add(relative))
+            .map_err(|_| "statement source offset exceeds u32".to_string())?,
+        children,
+    })
 }
 
 pub(crate) fn parse_let_statement(
@@ -2879,11 +2970,12 @@ pub(crate) fn parse_continue_statement(statement_text: &str) -> Result<SimpleStm
     Ok(SimpleStmt::Continue)
 }
 
-pub(crate) fn parse_for_statement(
+fn parse_for_statement_at(
     source: &str,
     start: usize,
     type_table: &mut TypeTable,
-) -> Result<(SimpleStmt, usize), String> {
+    source_offset: usize,
+) -> Result<(SimpleStmt, DebugStatement, usize), String> {
     let mut cursor = start + "for".len();
     cursor = skip_ascii_whitespace_and_comments(source, cursor);
     cursor = expect_byte(source, cursor, b'(', "'(' after for")?;
@@ -2912,16 +3004,22 @@ pub(crate) fn parse_for_statement(
     let body_close = find_matching_delimiter(source, body_open, b'{', b'}')
         .ok_or_else(|| "missing '}' for for body".to_string())?;
     let body_block = &source[body_open..=body_close];
-    let body_statements = parse_simple_statements_from_block(body_block, type_table)?;
+    let parsed_body = parse_simple_statements_with_debug_at(
+        body_block,
+        type_table,
+        source_offset.saturating_add(body_open),
+    )?;
     let next_cursor = body_close + 1;
 
+    let debug = debug_statement(source_offset, start, parsed_body.debug_statements)?;
     Ok((
         SimpleStmt::For {
             init: Box::new(init),
             condition,
             step: Box::new(step),
-            body_statements,
+            body_statements: parsed_body.statements,
         },
+        debug,
         next_cursor,
     ))
 }
@@ -2955,11 +3053,12 @@ pub(crate) fn parse_for_control_segment(
     ))
 }
 
-pub(crate) fn parse_foreach_statement(
+fn parse_foreach_statement_at(
     source: &str,
     start: usize,
     type_table: &mut TypeTable,
-) -> Result<(SimpleStmt, usize), String> {
+    source_offset: usize,
+) -> Result<(SimpleStmt, DebugStatement, usize), String> {
     let mut cursor = start + "foreach".len();
     cursor = skip_ascii_whitespace_and_comments(source, cursor);
     cursor = expect_byte(source, cursor, b'(', "'(' after foreach")?;
@@ -3013,25 +3112,32 @@ pub(crate) fn parse_foreach_statement(
     let body_close = find_matching_delimiter(source, body_open, b'{', b'}')
         .ok_or_else(|| "missing '}' for foreach body".to_string())?;
     let body_block = &source[body_open..=body_close];
-    let body_statements = parse_simple_statements_from_block(body_block, type_table)?;
+    let parsed_body = parse_simple_statements_with_debug_at(
+        body_block,
+        type_table,
+        source_offset.saturating_add(body_open),
+    )?;
     let next_cursor = body_close + 1;
 
+    let debug = debug_statement(source_offset, start, parsed_body.debug_statements)?;
     Ok((
         SimpleStmt::Foreach {
             item_name,
             index_name,
             collection_path,
-            body_statements,
+            body_statements: parsed_body.statements,
         },
+        debug,
         next_cursor,
     ))
 }
 
-pub(crate) fn parse_if_statement(
+fn parse_if_statement_at(
     source: &str,
     start: usize,
     type_table: &mut TypeTable,
-) -> Result<(SimpleStmt, usize), String> {
+    source_offset: usize,
+) -> Result<(SimpleStmt, DebugStatement, usize), String> {
     let mut cursor = start + "if".len();
     cursor = skip_ascii_whitespace_and_comments(source, cursor);
     cursor = expect_byte(source, cursor, b'(', "'(' after if")?;
@@ -3050,18 +3156,24 @@ pub(crate) fn parse_if_statement(
     let then_close = find_matching_delimiter(source, then_open, b'{', b'}')
         .ok_or_else(|| "missing '}' for if body".to_string())?;
     let then_block = &source[then_open..=then_close];
-    let then_statements = parse_simple_statements_from_block(then_block, type_table)?;
+    let parsed_then = parse_simple_statements_with_debug_at(
+        then_block,
+        type_table,
+        source_offset.saturating_add(then_open),
+    )?;
     let mut next_cursor = then_close + 1;
     let mut else_statements: Option<Vec<SimpleStmt>> = None;
+    let mut children = parsed_then.debug_statements;
 
     let else_cursor = skip_ascii_whitespace_and_comments(source, next_cursor);
     if starts_with_keyword(source, else_cursor, "else") {
         let mut cursor = else_cursor + "else".len();
         cursor = skip_ascii_whitespace_and_comments(source, cursor);
         if starts_with_keyword(source, cursor, "if") {
-            let (else_if_statement, after_else_if) =
-                parse_if_statement(source, cursor, type_table)?;
+            let (else_if_statement, else_if_debug, after_else_if) =
+                parse_if_statement_at(source, cursor, type_table, source_offset)?;
             else_statements = Some(vec![else_if_statement]);
+            children.push(else_if_debug);
             next_cursor = after_else_if;
         } else {
             cursor = expect_byte(source, cursor, b'{', "'{' after else")?;
@@ -3069,17 +3181,25 @@ pub(crate) fn parse_if_statement(
             let else_close = find_matching_delimiter(source, else_open, b'{', b'}')
                 .ok_or_else(|| "missing '}' for else body".to_string())?;
             let else_block = &source[else_open..=else_close];
-            else_statements = Some(parse_simple_statements_from_block(else_block, type_table)?);
+            let parsed_else = parse_simple_statements_with_debug_at(
+                else_block,
+                type_table,
+                source_offset.saturating_add(else_open),
+            )?;
+            else_statements = Some(parsed_else.statements);
+            children.extend(parsed_else.debug_statements);
             next_cursor = else_close + 1;
         }
     }
 
+    let debug = debug_statement(source_offset, start, children)?;
     Ok((
         SimpleStmt::If {
             condition,
-            then_statements,
+            then_statements: parsed_then.statements,
             else_statements,
         },
+        debug,
         next_cursor,
     ))
 }
@@ -4379,9 +4499,130 @@ pub(crate) fn try_emit_struct_copy_from_global_to_indexed(
     Ok(true)
 }
 
+pub(crate) fn debug_variable_slot(name: &str) -> u32 {
+    let mut hash = 0x811c_9dc5u32;
+    for byte in name.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+fn emit_debug_frame_boundary(
+    builder: &mut FunctionBuilder<'_>,
+    function: FuncRef,
+    function_id: FunctionId,
+) {
+    let function_id = builder.ins().iconst(types::I32, i64::from(function_id));
+    builder.ins().call(function, &[function_id]);
+}
+
+fn emit_debug_statement(
+    builder: &mut FunctionBuilder<'_>,
+    debug: &DebugRuntimeRefs,
+    function_id: FunctionId,
+    site_id: u32,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<(), String> {
+    builder.ins().call(debug.values_begin, &[]);
+    let mut slots = HashMap::<u32, &str>::new();
+    for (name, binding) in values_by_name {
+        let slot = debug_variable_slot(name);
+        if let Some(existing) = slots.insert(slot, name) {
+            return Err(format!(
+                "debug variable slot collision between '{existing}' and '{name}'"
+            ));
+        }
+        let value = builder.use_var(binding.var);
+        emit_debug_value(
+            builder,
+            debug,
+            name,
+            slot,
+            binding.type_id,
+            value,
+            type_table,
+        )?;
+    }
+    for (name, binding) in foreach_bindings {
+        if binding.element_type.is_none() {
+            continue;
+        }
+        let slot = debug_variable_slot(name);
+        if let Some(existing) = slots.insert(slot, name) {
+            return Err(format!(
+                "debug variable slot collision between '{existing}' and '{name}'"
+            ));
+        }
+        let value = emit_foreach_binding_load(builder, runtime_call_refs, type_table, binding, "")?;
+        emit_debug_value(
+            builder,
+            debug,
+            name,
+            slot,
+            value.type_id,
+            value.value,
+            type_table,
+        )?;
+    }
+    let function_id = builder.ins().iconst(types::I32, i64::from(function_id));
+    let site_id = builder.ins().iconst(types::I32, i64::from(site_id as i32));
+    builder.ins().call(debug.statement, &[function_id, site_id]);
+    Ok(())
+}
+
+fn emit_debug_value(
+    builder: &mut FunctionBuilder<'_>,
+    debug: &DebugRuntimeRefs,
+    name: &str,
+    slot: u32,
+    type_id: TypeId,
+    value: Value,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let slot_value = builder.ins().iconst(types::I32, i64::from(slot as i32));
+    let type_value = builder.ins().iconst(types::I32, i64::from(type_id));
+    match type_id {
+        TYPE_ID_F32 => {
+            let value = builder.ins().fpromote(types::F64, value);
+            builder
+                .ins()
+                .call(debug.value_f64, &[slot_value, type_value, value]);
+        }
+        TYPE_ID_F64 => {
+            builder
+                .ins()
+                .call(debug.value_f64, &[slot_value, type_value, value]);
+        }
+        _ => {
+            let clif_type = clif_type_for_type_id(type_id, type_table)?;
+            if clif_type != types::I32 {
+                return Err(format!(
+                    "unsupported debug value type id {type_id} for '{name}'"
+                ));
+            }
+            let value = if type_id == TYPE_ID_I32 {
+                builder.ins().sextend(types::I64, value)
+            } else {
+                builder.ins().uextend(types::I64, value)
+            };
+            builder
+                .ins()
+                .call(debug.value_i64, &[slot_value, type_value, value]);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn emit_simple_statements(
     builder: &mut FunctionBuilder<'_>,
     statements: &[SimpleStmt],
+    debug_statements: Option<&[DebugStatement]>,
+    debug_refs: Option<&DebugRuntimeRefs>,
+    function_id: FunctionId,
     values_by_name: &mut BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
     internal_calls: &mut InternalCallMode<'_>,
@@ -4396,7 +4637,24 @@ pub(crate) fn emit_simple_statements(
     expected_return_type: TypeId,
     next_variable: &mut u32,
 ) -> Result<bool, String> {
-    for statement in statements {
+    if debug_refs.is_some() && debug_statements.is_none_or(|debug| debug.len() != statements.len())
+    {
+        return Err("debug statement metadata does not match lowered statements".to_string());
+    }
+    for (index, statement) in statements.iter().enumerate() {
+        if let Some(debug_refs) = debug_refs {
+            let debug = &debug_statements.expect("debug metadata was validated")[index];
+            emit_debug_statement(
+                builder,
+                debug_refs,
+                function_id,
+                debug.source_offset,
+                values_by_name,
+                runtime_call_refs,
+                type_table,
+                foreach_bindings,
+            )?;
+        }
         match statement {
             SimpleStmt::Noop => {}
             SimpleStmt::Let {
@@ -5431,11 +5689,17 @@ pub(crate) fn emit_simple_statements(
                     expected_return_type,
                     type_table,
                 );
+                if let Some(debug) = debug_refs {
+                    emit_debug_frame_boundary(builder, debug.frame_leave, function_id);
+                }
                 builder.ins().return_(&[value]);
                 return Ok(true);
             }
             SimpleStmt::ReturnVoid => {
                 if expected_return_type == TYPE_ID_VOID {
+                    if let Some(debug) = debug_refs {
+                        emit_debug_frame_boundary(builder, debug.frame_leave, function_id);
+                    }
                     builder.ins().return_(&[]);
                     return Ok(true);
                 }
@@ -5469,10 +5733,24 @@ pub(crate) fn emit_simple_statements(
                 builder.seal_block(then_block);
                 builder.switch_to_block(then_block);
 
+                let expected_children = then_statements.len()
+                    + else_statements
+                        .as_ref()
+                        .map_or(0, |statements| statements.len());
+                let nested_debug = debug_statements.map(|debug| debug[index].children.as_slice());
+                if nested_debug.is_some_and(|debug| debug.len() != expected_children) {
+                    return Err("if debug metadata does not match branch statements".to_string());
+                }
+                let then_debug = nested_debug.map(|debug| &debug[..then_statements.len()]);
+                let else_debug = nested_debug.map(|debug| &debug[then_statements.len()..]);
+
                 let mut then_values = values_by_name.clone();
                 let then_terminated = emit_simple_statements(
                     builder,
                     then_statements,
+                    then_debug,
+                    debug_refs,
+                    function_id,
                     &mut then_values,
                     runtime_call_refs,
                     internal_calls,
@@ -5498,6 +5776,9 @@ pub(crate) fn emit_simple_statements(
                     emit_simple_statements(
                         builder,
                         else_statements,
+                        else_debug,
+                        debug_refs,
+                        function_id,
                         &mut else_values,
                         runtime_call_refs,
                         internal_calls,
@@ -5535,6 +5816,7 @@ pub(crate) fn emit_simple_statements(
                 emit_for_control_statement(
                     builder,
                     init.as_ref(),
+                    function_id,
                     &mut loop_values,
                     runtime_call_refs,
                     internal_calls,
@@ -5583,6 +5865,9 @@ pub(crate) fn emit_simple_statements(
                 let body_terminated = emit_simple_statements(
                     builder,
                     body_statements,
+                    debug_statements.map(|debug| debug[index].children.as_slice()),
+                    debug_refs,
+                    function_id,
                     &mut loop_values,
                     runtime_call_refs,
                     internal_calls,
@@ -5606,6 +5891,7 @@ pub(crate) fn emit_simple_statements(
                 emit_for_control_statement(
                     builder,
                     step.as_ref(),
+                    function_id,
                     &mut loop_values,
                     runtime_call_refs,
                     internal_calls,
@@ -5963,6 +6249,9 @@ pub(crate) fn emit_simple_statements(
                 let body_terminated = emit_simple_statements(
                     builder,
                     body_statements,
+                    debug_statements.map(|debug| debug[index].children.as_slice()),
+                    debug_refs,
+                    function_id,
                     &mut loop_values,
                     runtime_call_refs,
                     internal_calls,
@@ -6074,6 +6363,7 @@ pub(crate) fn emit_conversion_assignment_value(
 pub(crate) fn emit_for_control_statement(
     builder: &mut FunctionBuilder<'_>,
     statement: &SimpleStmt,
+    function_id: FunctionId,
     values_by_name: &mut BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
     internal_calls: &mut InternalCallMode<'_>,
@@ -6096,6 +6386,9 @@ pub(crate) fn emit_for_control_statement(
             let terminated = emit_simple_statements(
                 builder,
                 std::slice::from_ref(statement),
+                None,
+                None,
+                function_id,
                 values_by_name,
                 runtime_call_refs,
                 internal_calls,
@@ -9975,6 +10268,7 @@ fn build_direct_runtime_call_import_ids(
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    debug_instrumentation: bool,
 ) -> Result<RuntimeCallImportIds, String> {
     let print_i32 = if referenced_call_targets
         .iter()
@@ -10089,6 +10383,24 @@ fn build_direct_runtime_call_import_ids(
             uses_collection_runtime,
             declare_void_call_import(module, "stasis_jit_collection_i32_store", linkage, 3,)
         ),
+        debug_frame_enter: debug_instrumentation
+            .then(|| declare_void_call_import(module, "stasis_jit_debug_frame_enter", linkage, 1))
+            .transpose()?,
+        debug_frame_leave: debug_instrumentation
+            .then(|| declare_void_call_import(module, "stasis_jit_debug_frame_leave", linkage, 1))
+            .transpose()?,
+        debug_statement: debug_instrumentation
+            .then(|| declare_void_call_import(module, "stasis_jit_debug_statement", linkage, 2))
+            .transpose()?,
+        debug_values_begin: debug_instrumentation
+            .then(|| declare_void_call_import(module, "stasis_jit_debug_values_begin", linkage, 0))
+            .transpose()?,
+        debug_value_i64: debug_instrumentation
+            .then(|| declare_debug_value_i64_import(module, linkage))
+            .transpose()?,
+        debug_value_f64: debug_instrumentation
+            .then(|| declare_debug_value_f64_import(module, linkage))
+            .transpose()?,
         extern_calls: declare_extern_call_imports(
             module,
             &referenced_extern_signatures,
@@ -10108,6 +10420,25 @@ pub(crate) fn build_runtime_call_refs(
     let direct_storage = direct_storage
         .map(|bindings| resolve_direct_storage_refs(module, func, bindings))
         .transpose()?;
+    let debug = imports
+        .debug_frame_enter
+        .zip(imports.debug_frame_leave)
+        .zip(imports.debug_statement)
+        .zip(imports.debug_values_begin)
+        .zip(imports.debug_value_i64)
+        .zip(imports.debug_value_f64)
+        .map(
+            |(((((frame_enter, frame_leave), statement), values_begin), value_i64), value_f64)| {
+                DebugRuntimeRefs {
+                    frame_enter: module.declare_func_in_func(frame_enter, func),
+                    frame_leave: module.declare_func_in_func(frame_leave, func),
+                    statement: module.declare_func_in_func(statement, func),
+                    values_begin: module.declare_func_in_func(values_begin, func),
+                    value_i64: module.declare_func_in_func(value_i64, func),
+                    value_f64: module.declare_func_in_func(value_f64, func),
+                }
+            },
+        );
     Ok(RuntimeCallRefs {
         print_i32: module.declare_func_in_func(imports.print_i32, func),
         print_string: module.declare_func_in_func(imports.print_string, func),
@@ -10130,6 +10461,7 @@ pub(crate) fn build_runtime_call_refs(
         global_f64_array_ptr: module.declare_func_in_func(imports.global_f64_array_ptr, func),
         collection_i32_load: module.declare_func_in_func(imports.collection_i32_load, func),
         collection_i32_store: module.declare_func_in_func(imports.collection_i32_store, func),
+        debug,
         extern_calls: imports
             .extern_calls
             .iter()

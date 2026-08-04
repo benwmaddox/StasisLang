@@ -2,15 +2,14 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { LiveSession, LiveSessionState } from "./liveSession";
 import {
-  byteOffsetToStringOffset,
-  CompilerCompletion,
-  displayRuntimeValue,
-  LiveResponse,
-  LiveValue,
-  stringOffsetToByteOffset,
-} from "./protocol";
+  LanguageClient,
+  LanguageClientOptions,
+  ServerOptions,
+  Trace,
+} from "vscode-languageclient/node";
+import { LiveSession, LiveSessionState } from "./liveSession";
+import { displayRuntimeValue, LiveResponse, LiveValue } from "./protocol";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
   { language: "stasis", scheme: "file" },
@@ -20,15 +19,6 @@ const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
 interface CommandOutput {
   stdout: string;
   stderr: string;
-}
-
-interface SourceReference {
-  file: string;
-  kind: string;
-  source_span: {
-    start: number;
-    end: number;
-  };
 }
 
 function configuration(): vscode.WorkspaceConfiguration {
@@ -109,108 +99,6 @@ function runStasis(
     child.once("close", () => cancellation?.dispose());
     child.stdin.end(input);
   });
-}
-
-function symbolAtPosition(document: vscode.TextDocument, position: vscode.Position): string | undefined {
-  const word = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
-  if (!word || word.start.line !== word.end.line) {
-    return undefined;
-  }
-  const prefix = document.lineAt(position.line).text.slice(0, word.end.character);
-  const chain = prefix.match(
-    /[A-Za-z_][A-Za-z0-9_]*(?:(?:\s*\[[^\]\r\n]*\])?\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*$/,
-  )?.[0];
-  return chain?.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, "");
-}
-
-async function compilerReferences(
-  document: vscode.TextDocument,
-  position: vscode.Position,
-  token: vscode.CancellationToken,
-): Promise<SourceReference[]> {
-  const root = findWorkspaceRoot(document);
-  const symbol = symbolAtPosition(document, position);
-  if (!root || !symbol || token.isCancellationRequested) {
-    return [];
-  }
-  const output = await runStasis(
-    ["--json", "--workspace", root, "symbol", "references", symbol, "--limit", "256"],
-    root,
-    undefined,
-    token,
-  );
-  const envelope = asRecord(JSON.parse(output.stdout) as unknown);
-  const result = asRecord(envelope?.result);
-  const references = Array.isArray(result?.references) ? result.references : [];
-  return references.flatMap((value) => {
-    const reference = asRecord(value);
-    const span = asRecord(reference?.source_span);
-    if (
-      typeof reference?.file !== "string" ||
-      typeof reference.kind !== "string" ||
-      typeof span?.start !== "number" ||
-      typeof span.end !== "number"
-    ) {
-      return [];
-    }
-    return [{
-      file: reference.file,
-      kind: reference.kind,
-      source_span: { start: span.start, end: span.end },
-    }];
-  });
-}
-
-async function referenceLocation(root: string, reference: SourceReference): Promise<vscode.Location> {
-  const uri = vscode.Uri.file(path.join(root, reference.file));
-  const document = await vscode.workspace.openTextDocument(uri);
-  const source = document.getText();
-  return new vscode.Location(
-    uri,
-    new vscode.Range(
-      document.positionAt(byteOffsetToStringOffset(source, reference.source_span.start)),
-      document.positionAt(byteOffsetToStringOffset(source, reference.source_span.end)),
-    ),
-  );
-}
-
-class StasisDefinitionProvider implements vscode.DefinitionProvider {
-  async provideDefinition(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.Location[]> {
-    const root = findWorkspaceRoot(document);
-    if (!root) {
-      return [];
-    }
-    const references = await compilerReferences(document, position, token);
-    return Promise.all(
-      references
-        .filter((reference) => reference.kind === "definition")
-        .map((reference) => referenceLocation(root, reference)),
-    );
-  }
-}
-
-class StasisReferenceProvider implements vscode.ReferenceProvider {
-  async provideReferences(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    context: vscode.ReferenceContext,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.Location[]> {
-    const root = findWorkspaceRoot(document);
-    if (!root) {
-      return [];
-    }
-    const references = await compilerReferences(document, position, token);
-    return Promise.all(
-      references
-        .filter((reference) => context.includeDeclaration || reference.kind !== "definition")
-        .map((reference) => referenceLocation(root, reference)),
-    );
-  }
 }
 
 class StasisTests implements vscode.Disposable {
@@ -313,161 +201,6 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function completionKind(kind: string): vscode.CompletionItemKind {
-  switch (kind.toLowerCase()) {
-    case "function":
-    case "method":
-      return vscode.CompletionItemKind.Function;
-    case "struct":
-    case "enum":
-    case "type":
-      return vscode.CompletionItemKind.Struct;
-    case "field":
-      return vscode.CompletionItemKind.Field;
-    case "local":
-    case "parameter":
-    case "global":
-      return vscode.CompletionItemKind.Variable;
-    case "keyword":
-    case "command":
-      return vscode.CompletionItemKind.Keyword;
-    case "constant":
-      return vscode.CompletionItemKind.Constant;
-    default:
-      return vscode.CompletionItemKind.Text;
-  }
-}
-
-function compilerCompletionItem(item: CompilerCompletion, rank: number): vscode.CompletionItem {
-  const result = new vscode.CompletionItem(item.text, completionKind(item.kind));
-  result.insertText = item.text;
-  result.detail = item.detail ?? item.type_name ?? item.kind;
-  result.filterText = item.text;
-  result.sortText = rank.toString().padStart(6, "0");
-  return result;
-}
-
-class StasisFormatter implements vscode.DocumentFormattingEditProvider {
-  async provideDocumentFormattingEdits(
-    document: vscode.TextDocument,
-    _options: vscode.FormattingOptions,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.TextEdit[]> {
-    const cwd = findWorkspaceRoot(document) ?? path.dirname(document.uri.fsPath);
-    const output = await runStasis(["format", "--stdin"], cwd, document.getText(), token);
-    const end = document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end;
-    if (output.stdout === document.getText()) {
-      return [];
-    }
-    return [vscode.TextEdit.replace(new vscode.Range(new vscode.Position(0, 0), end), output.stdout)];
-  }
-}
-
-class StasisCompletionProvider implements vscode.CompletionItemProvider {
-  constructor(private readonly controller: LiveController) {}
-
-  async provideCompletionItems(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.CompletionList> {
-    const root = findWorkspaceRoot(document);
-    if (!root || token.isCancellationRequested) {
-      return new vscode.CompletionList();
-    }
-    const limit = Math.max(1, Math.min(200, configuration().get<number>("completion.limit", 64)));
-    const session = this.controller.sessionFor(root);
-    if (session && session.state !== "stopped") {
-      const source = document.getText();
-      const stringOffset = document.offsetAt(position);
-      const response = await session.request("complete", {
-        buffer: source,
-        cursor: stringOffsetToByteOffset(source, stringOffset),
-        limit,
-        context: {
-          file: path.relative(root, document.uri.fsPath).replaceAll("\\", "/"),
-          source_offset: stringOffsetToByteOffset(source, stringOffset),
-        },
-      });
-      if (token.isCancellationRequested) {
-        return new vscode.CompletionList();
-      }
-      return this.liveCompletionList(document, source, response);
-    }
-
-    const word = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_.]*/);
-    const query = word ? document.getText(word) : "";
-    const args = [
-      "--json",
-      "--workspace",
-      root,
-      "symbol",
-      "list",
-      "--limit",
-      String(limit),
-    ];
-    if (query.length > 0) {
-      args.push("--query", query);
-    }
-    const output = await runStasis(args, root, undefined, token);
-    const envelope = asRecord(JSON.parse(output.stdout) as unknown);
-    const result = asRecord(envelope?.result);
-    const items = Array.isArray(result?.items) ? result.items : [];
-    return new vscode.CompletionList(
-      items.flatMap((value, rank) => {
-        const item = asRecord(value);
-        if (!item || typeof item.name !== "string" || typeof item.kind !== "string") {
-          return [];
-        }
-        return [
-          compilerCompletionItem(
-            {
-              text: item.name,
-              kind: item.kind,
-              detail: typeof item.signature === "string" ? item.signature : undefined,
-            },
-            rank,
-          ),
-        ];
-      }),
-      Number(result?.total ?? items.length) > items.length,
-    );
-  }
-
-  private liveCompletionList(
-    document: vscode.TextDocument,
-    source: string,
-    response: LiveResponse,
-  ): vscode.CompletionList {
-    const data = asRecord(response.data);
-    const values = Array.isArray(data?.items) ? data.items : [];
-    const start = typeof data?.replacement_start === "number" ? data.replacement_start : 0;
-    const end = typeof data?.replacement_end === "number" ? data.replacement_end : start;
-    const range = new vscode.Range(
-      document.positionAt(byteOffsetToStringOffset(source, start)),
-      document.positionAt(byteOffsetToStringOffset(source, end)),
-    );
-    const items = values.flatMap((value, rank) => {
-      const item = asRecord(value);
-      if (!item || typeof item.text !== "string" || typeof item.kind !== "string") {
-        return [];
-      }
-      const completion = compilerCompletionItem(
-        {
-          text: item.text,
-          kind: item.kind,
-          detail: typeof item.detail === "string" ? item.detail : undefined,
-          type_name: typeof item.type_name === "string" ? item.type_name : undefined,
-        },
-        rank,
-      );
-      completion.range = range;
-      return [completion];
-    });
-    return new vscode.CompletionList(items, response.truncated === true || data?.truncated === true);
-  }
-}
-
 class LiveValueItem extends vscode.TreeItem {
   constructor(readonly liveValue: LiveValue) {
     super(liveValue.path, vscode.TreeItemCollapsibleState.None);
@@ -515,15 +248,12 @@ class LiveController implements vscode.Disposable {
   constructor(
     private readonly values: LiveValuesProvider,
     private readonly output: vscode.OutputChannel,
+    private readonly clientForRoot: (root: string) => LanguageClient | undefined,
   ) {
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
     this.status.command = "stasis.startPlaySession";
     this.updateState("stopped");
     this.status.show();
-  }
-
-  sessionFor(root: string): LiveSession | undefined {
-    return this.current?.root === root ? this.current : undefined;
   }
 
   get state(): LiveSessionState {
@@ -559,16 +289,24 @@ class LiveController implements vscode.Disposable {
     }
     this.current?.dispose();
     this.disposeSessionSubscriptions();
+    const client = this.clientForRoot(root);
+    if (!client) {
+      throw new Error(`The Stasis language server is not ready for ${root}.`);
+    }
     const session = new LiveSession(
       root,
-      executablePath(),
+      client,
       configuration().get<string>("live.entry", ""),
       this.output,
     );
     this.current = session;
     this.sessionSubscriptions = [
-      session.onDidChangeState((state) => this.updateState(state)),
-      session.onDidChangeValues((values) => this.values.update(session.state, values)),
+      session.onDidChangeState((state) => {
+        this.updateState(state);
+      }),
+      session.onDidChangeValues((values) => {
+        this.values.update(session.state, values);
+      }),
     ];
     this.updateState("starting");
     try {
@@ -610,6 +348,171 @@ class LiveController implements vscode.Disposable {
   }
 }
 
+class StasisLanguageClients implements vscode.Disposable {
+  private readonly clients = new Map<string, LanguageClient>();
+  private readonly subscriptions: vscode.Disposable[];
+
+  constructor(private readonly output: vscode.LogOutputChannel) {
+    this.subscriptions = [
+      vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+        for (const folder of event.removed) {
+          void this.stopFolder(folder);
+        }
+        for (const folder of event.added) {
+          if (fs.existsSync(path.join(folder.uri.fsPath, "stasis.json"))) {
+            void this.startFolder(folder);
+          }
+        }
+      }),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (
+          event.affectsConfiguration("stasis.executablePath") ||
+          event.affectsConfiguration("stasis.completion.limit")
+        ) {
+          void this.restart();
+        }
+      }),
+    ];
+  }
+
+  async start(): Promise<void> {
+    const folders = (vscode.workspace.workspaceFolders ?? []).filter((folder) =>
+      fs.existsSync(path.join(folder.uri.fsPath, "stasis.json")),
+    );
+    await Promise.all(folders.map((folder) => this.startFolder(folder)));
+  }
+
+  clientForRoot(root: string): LanguageClient | undefined {
+    return this.clients.get(root);
+  }
+
+  dispose(): void {
+    for (const subscription of this.subscriptions) {
+      subscription.dispose();
+    }
+    for (const client of this.clients.values()) {
+      void client.stop();
+    }
+    this.clients.clear();
+  }
+
+  private async restart(): Promise<void> {
+    const clients = [...this.clients.values()];
+    this.clients.clear();
+    await Promise.all(clients.map((client) => client.stop()));
+    await this.start();
+  }
+
+  private async startFolder(folder: vscode.WorkspaceFolder): Promise<void> {
+    const root = folder.uri.fsPath;
+    if (this.clients.has(root)) {
+      return;
+    }
+    const serverOptions: ServerOptions = {
+      command: executablePath(),
+      args: ["--workspace", root, "lsp", "--stdio"],
+      options: {
+        cwd: root,
+      },
+    };
+    const clientOptions: LanguageClientOptions = {
+      documentSelector: [
+        {
+          language: "stasis",
+          scheme: "file",
+        },
+      ],
+      workspaceFolder: folder,
+      initializationOptions: {
+        completionLimit: Math.max(
+          1,
+          Math.min(256, vscode.workspace.getConfiguration("stasis", folder.uri).get<number>("completion.limit", 64)),
+        ),
+      },
+      outputChannel: this.output,
+      traceOutputChannel: this.output,
+      middleware: {
+        didOpen: (document, next) => {
+          const owned = vscode.workspace.getWorkspaceFolder(document.uri)?.index === folder.index;
+          return owned ? next(document) : Promise.resolve();
+        },
+        didChange: (event, next) => {
+          const owned = vscode.workspace.getWorkspaceFolder(event.document.uri)?.index === folder.index;
+          return owned ? next(event) : Promise.resolve();
+        },
+        didClose: (document, next) =>
+          vscode.workspace.getWorkspaceFolder(document.uri)?.index === folder.index
+            ? next(document)
+            : Promise.resolve(),
+      },
+    };
+    const client = new LanguageClient(
+      `stasis-${folder.index}`,
+      `Stasis (${folder.name})`,
+      serverOptions,
+      clientOptions,
+    );
+    this.clients.set(root, client);
+    try {
+      await client.start();
+      await client.setTrace(Trace.Verbose);
+      this.output.appendLine(`Language server ready: ${root}`);
+    } catch (error) {
+      this.clients.delete(root);
+      throw error;
+    }
+  }
+
+  private async stopFolder(folder: vscode.WorkspaceFolder): Promise<void> {
+    const client = this.clients.get(folder.uri.fsPath);
+    if (!client) {
+      return;
+    }
+    this.clients.delete(folder.uri.fsPath);
+    await client.stop();
+  }
+}
+
+class StasisDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
+  createDebugAdapterDescriptor(
+    session: vscode.DebugSession,
+    executable: vscode.DebugAdapterExecutable | undefined,
+  ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+    if (executable) {
+      return executable;
+    }
+    const root = session.workspaceFolder?.uri.fsPath ?? findWorkspaceRoot();
+    if (!root) {
+      throw new Error("Open a folder containing stasis.json before debugging Stasis.");
+    }
+    return new vscode.DebugAdapterExecutable(
+      executablePath(),
+      ["--workspace", root, "dap", "--stdio"],
+      { cwd: root },
+    );
+  }
+}
+
+class StasisDebugConfigurationProvider implements vscode.DebugConfigurationProvider {
+  resolveDebugConfiguration(
+    folder: vscode.WorkspaceFolder | undefined,
+    config: vscode.DebugConfiguration,
+  ): vscode.ProviderResult<vscode.DebugConfiguration> {
+    const root = folder?.uri.fsPath ?? findWorkspaceRoot(vscode.window.activeTextEditor?.document);
+    if (!root) {
+      void vscode.window.showErrorMessage("Stasis: open a folder containing stasis.json before debugging.");
+      return undefined;
+    }
+    return {
+      ...config,
+      type: "stasis",
+      request: config.request ?? "launch",
+      name: config.name ?? "Debug Stasis",
+      stopOnEntry: config.stopOnEntry ?? false,
+    };
+  }
+}
+
 async function askForPath(prompt: string): Promise<string | undefined> {
   return vscode.window.showInputBox({
     prompt,
@@ -626,27 +529,29 @@ async function showCommandError(action: () => Promise<void>): Promise<void> {
   }
 }
 
-export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
-  const output = vscode.window.createOutputChannel("Stasis");
+export async function activate(context: vscode.ExtensionContext): Promise<StasisExtensionApi> {
+  const output = vscode.window.createOutputChannel("Stasis", { log: true });
+  const languageClients = new StasisLanguageClients(output);
   const values = new LiveValuesProvider();
-  const controller = new LiveController(values, output);
+  const controller = new LiveController(
+    values,
+    output,
+    (root) => languageClients.clientForRoot(root),
+  );
   const tests = new StasisTests(output);
+  const debugFactory = new StasisDebugAdapterFactory();
+  const debugConfiguration = new StasisDebugConfigurationProvider();
   const command = (name: string, action: (...args: unknown[]) => Promise<void>) =>
     vscode.commands.registerCommand(name, (...args: unknown[]) => showCommandError(() => action(...args)));
 
   context.subscriptions.push(
     output,
+    languageClients,
     controller,
     tests,
+    vscode.debug.registerDebugAdapterDescriptorFactory("stasis", debugFactory),
+    vscode.debug.registerDebugConfigurationProvider("stasis", debugConfiguration),
     vscode.window.registerTreeDataProvider("stasis.liveValues", values),
-    vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_SELECTOR, new StasisFormatter()),
-    vscode.languages.registerDefinitionProvider(LANGUAGE_SELECTOR, new StasisDefinitionProvider()),
-    vscode.languages.registerReferenceProvider(LANGUAGE_SELECTOR, new StasisReferenceProvider()),
-    vscode.languages.registerCompletionItemProvider(
-      LANGUAGE_SELECTOR,
-      new StasisCompletionProvider(controller),
-      ".",
-    ),
     command("stasis.startPlaySession", async () => controller.start()),
     command("stasis.stopPlaySession", async () => controller.stop()),
     command("stasis.pausePlaySession", async () => {
@@ -681,6 +586,8 @@ export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
     command("stasis.showOutput", async () => output.show(true)),
   );
   void tests.refresh();
+
+  await languageClients.start();
 
   return {
     state: () => controller.state,

@@ -3,9 +3,24 @@
 The Stasis extension keeps the editor on the same compiler and runtime contracts as the command-line toolchain. It provides:
 
 - Stasis syntax highlighting and editor indentation;
-- canonical document formatting through `stasis format --stdin`;
-- compiler-backed project completion, with richer local/member completion while a play session is active;
-- compiler-backed **Go to Definition** and **Find All References**;
+- continuous compiler diagnostics through a standard Language Server Protocol client;
+- canonical document, range, and on-type formatting through the standard LSP;
+- compiler-backed LSP completion with signatures, documentation, snippets, expected-type-aware
+  local/member ranking, and revision-safe auto-import edits loaded through standard completion
+  resolve;
+- compiler-aware hover and signature help;
+- compiler-backed LSP **Go to Definition**, **Find All References**, Outline, breadcrumbs, and
+  workspace symbol search;
+- compiler-validated **Quick Fixes** for structured import diagnostics and **Organize Imports**
+  through standard LSP code actions;
+- compiler-aware semantic highlighting and inlay hints for inferred local types and resolved call
+  parameter names;
+- standard incoming/outgoing call hierarchy and struct-composition hierarchy (`contains` and
+  `contained by`; Stasis does not model inheritance);
+- tolerant folding and nested selection ranges, compiler-scoped linked editing, and bracket-aware
+  function snippets;
+- standard VS Code debugging with source breakpoints, pause/continue, step in/over/out, real JIT
+  stack frames, lexical scopes, typed globals, and watches;
 - `.test.stasis` discovery and file-level execution in VS Code's Test Explorer;
 - a graphical hot-swap play session using the manifest entry;
 - pause, resume, and single-tick controls;
@@ -44,9 +59,9 @@ Set `stasis.live.entry` only when a project needs an entry other than the one in
 
 ## Navigation and tests
 
-**Go to Definition** and **Find All References** call the installed compiler's
-`symbol references` command and translate its UTF-8 source spans into VS Code locations. Functions,
-structs, tests, and typed struct fields have definition locations. Indexed receivers such as
+**Go to Definition** and **Find All References** use standard LSP requests backed by the persistent
+compiler index. Functions, structs, tests, globals, and typed struct fields have definition
+locations. Indexed receivers such as
 `state.enemies[0].speed` resolve to the declaring field and expose their reads and writes.
 
 While a play session is active, completion uses the persistent live compiler and runtime layout.
@@ -56,6 +71,18 @@ It resolves locals, members, and concrete indexed state paths such as
 The Test Explorer discovers `.test.stasis` files under the manifest's `tests` directory. Each file
 is one isolated Test Explorer item and runs through `stasis --json test <file>`, so editor and CLI
 test behavior stay identical.
+
+## Debugging
+
+Open **Run and Debug**, choose **Debug Stasis**, and start the generated launch configuration. The
+extension launches `stasis dap --stdio` for the current manifest workspace. Breakpoints resolve to
+compiler-emitted executable statements; stack frames and locals come from the instrumented JIT,
+and Watch expressions can inspect a local name or the same typed state expressions accepted by the
+live inspector. Debug instrumentation is enabled only for the debug process—ordinary JIT play and
+AOT packages are unchanged.
+
+On Windows, `stasis.executablePath` may point to a signed `stasis.exe` when local execution policy
+requires signed binaries.
 
 ## Development
 
@@ -77,11 +104,20 @@ npm run package
 ```
 
 `npm run test:e2e` packages the extension, installs that VSIX into a clean VS Code profile, and
-drives formatting, completion, graphical play, pause/step/resume, live values, and framebuffer
-capture. The test decodes the captured PNG and verifies its physical dimensions, clear color, and
-a command-buffer line, so a platform only passes after it produces the expected rendered pixels.
+drives LSP editing, a real breakpoint/stack/scope/watch/step DAP session, graphical play,
+pause/step/resume, live values, and framebuffer capture. The test decodes the captured PNG and
+verifies its physical dimensions, clear color, and a command-buffer line, so a platform only passes
+after it produces the expected rendered pixels.
 It requires a built `stasis` executable and graphics runtime. Set
 `STASIS_E2E_EXECUTABLE` and `STASIS_RUNTIME_LIBRARY_PATH` when they are not in their standard
 development locations. Linux runs need a display such as `xvfb-run`; GitHub CI supplies one.
 
-The extension is intentionally a thin CLI client. Language or runtime semantics belong in Stasis, where the terminal UI, editor, tests, and packaged games can share them.
+The extension starts one persistent `stasis lsp --stdio` server per Stasis workspace. Language and
+runtime semantics remain in Stasis, where the terminal UI, editor, tests, and packaged games can
+share them. Formatting, diagnostics, hover, signature help, completion, navigation, symbols,
+rename, import organization, semantic highlighting, inlay hints, hierarchy, folding, selection,
+and linked editing use the persistent language server. The same server launches and controls the
+Live Workshop through bounded custom LSP requests, owns runtime observations, and composes
+compatible live values and indexed collection fields into standard hover and completion responses.
+The extension does not spawn or
+parse a parallel live JSON process.

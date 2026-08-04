@@ -125,12 +125,75 @@ pub struct ErrorMetric {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceDiagnosticCode {
+    Generic,
+    MissingModule,
+    DuplicateImportAlias,
+}
+
+impl SourceDiagnosticCode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generic => "stasis.generic",
+            Self::MissingModule => "stasis.missingModule",
+            Self::DuplicateImportAlias => "stasis.duplicateImportAlias",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDiagnosticEdit {
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDiagnosticFix {
+    pub title: String,
+    pub edits: Vec<SourceDiagnosticEdit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDiagnostic {
     pub path: String,
     pub start: usize,
     pub end: usize,
     pub symbol: String,
     pub message: String,
+    pub code: SourceDiagnosticCode,
+    pub fixes: Vec<SourceDiagnosticFix>,
+}
+
+impl SourceDiagnostic {
+    pub fn new(
+        path: impl Into<String>,
+        start: usize,
+        end: usize,
+        symbol: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            start,
+            end,
+            symbol: symbol.into(),
+            message: message.into(),
+            code: SourceDiagnosticCode::Generic,
+            fixes: Vec::new(),
+        }
+    }
+
+    pub fn with_code(mut self, code: SourceDiagnosticCode) -> Self {
+        self.code = code;
+        self
+    }
+
+    pub fn with_fix(mut self, fix: SourceDiagnosticFix) -> Self {
+        self.fixes.push(fix);
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -543,13 +606,9 @@ fn analyze_sources_in_process_parallel(
 
     let mut analyzed_by_path = BTreeMap::new();
     for handle in handles {
-        let (path_key, result) = handle.join().map_err(|_| SourceDiagnostic {
-            path: String::new(),
-            start: 0,
-            end: 0,
-            symbol: String::new(),
-            message: "analysis worker thread panicked".to_string(),
-        })?;
+        let (path_key, result) = handle
+            .join()
+            .map_err(|_| SourceDiagnostic::new("", 0, 0, "", "analysis worker thread panicked"))?;
         let analyzed = result.map_err(|mut diagnostic| {
             diagnostic.path = path_key.clone();
             diagnostic
@@ -570,16 +629,15 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagn
     let mut main_invalid_count = 0i32;
 
     for function in &functions {
-        let body_text =
-            source
-                .get(function.body_range.clone())
-                .ok_or_else(|| SourceDiagnostic {
-                    path: String::new(),
-                    start: function.body_range.start.min(source.len()),
-                    end: function.body_range.end.min(source.len()),
-                    symbol: function.name.clone(),
-                    message: "function body range out of bounds".to_string(),
-                })?;
+        let body_text = source.get(function.body_range.clone()).ok_or_else(|| {
+            SourceDiagnostic::new(
+                "",
+                function.body_range.start.min(source.len()),
+                function.body_range.end.min(source.len()),
+                function.name.clone(),
+                "function body range out of bounds",
+            )
+        })?;
         let id_hash = hash_identifier(&function.name);
         let sig_hash = hash_signature_i32(
             &function.name,
@@ -745,13 +803,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagn
         functions: parsed_functions,
         #[cfg(test)]
         layout_hash: legacy_layout_hash_from_canonical_digest(source).map_err(|message| {
-            SourceDiagnostic {
-                path: "legacy.stasis".to_string(),
-                start: 0,
-                end: source.len(),
-                symbol: String::new(),
-                message,
-            }
+            SourceDiagnostic::new("legacy.stasis", 0, source.len(), "", message)
         })?,
         main_decl_count,
         main_valid_count,
@@ -796,17 +848,17 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Sour
         } else {
             0
         };
-        SourceDiagnostic {
-            path: String::new(),
+        SourceDiagnostic::new(
+            "",
             start,
-            end: source[start..]
+            source[start..]
                 .chars()
                 .next()
                 .map(|value| start + value.len_utf8())
                 .unwrap_or(start),
-            symbol: String::new(),
+            "",
             message,
-        }
+        )
     })?;
     let mut out = Vec::new();
     let mut cursor = 0usize;
@@ -986,13 +1038,13 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Sour
             cursor += 1;
         }
         if depth != 0 {
-            return Err(SourceDiagnostic {
-                path: String::new(),
-                start: name_token.start,
-                end: name_token.end,
-                symbol: name.clone(),
-                message: format!("missing closing '}}' for function '{name}'"),
-            });
+            return Err(SourceDiagnostic::new(
+                "",
+                name_token.start,
+                name_token.end,
+                name.clone(),
+                format!("missing closing '}}' for function '{name}'"),
+            ));
         }
         let body_end = tokens[cursor].end;
         out.push(ParsedFunctionDecl {
@@ -1025,13 +1077,7 @@ fn source_diagnostic_at(
             start: 0,
             end: 0,
         });
-    SourceDiagnostic {
-        path: String::new(),
-        start: token.start,
-        end: token.end,
-        symbol: symbol.to_string(),
-        message,
-    }
+    SourceDiagnostic::new("", token.start, token.end, symbol, message)
 }
 
 fn skip_legacy_function_annotations(

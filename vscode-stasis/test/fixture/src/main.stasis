@@ -25,6 +25,16 @@ function main(): i32 {
     return 0;
 }
 
+// Adds two score components.
+function add_score(amount: i32, bonus: i32): i32 {
+    return amount + bonus;
+}
+
+function lsp_signature_probe(): i32 {
+    let result = add_score(1, 2);
+    return result;
+}
+
 function tick(): i32 {
     score += 1;
     return 0;

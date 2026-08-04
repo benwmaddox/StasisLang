@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::parse_string_literal_text;
-use crate::SourceDiagnostic;
+use crate::{SourceDiagnostic, SourceDiagnosticCode, SourceDiagnosticEdit, SourceDiagnosticFix};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleImport {
@@ -12,6 +12,7 @@ pub struct ModuleImport {
     pub target: String,
     pub alias: String,
     pub span: Range<usize>,
+    pub declaration_span: Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,12 +36,13 @@ impl ModuleGraph {
         mut load_source: impl FnMut(&str) -> Result<String, String>,
     ) -> Result<(Self, BTreeMap<String, String>), SourceDiagnostic> {
         let roots: BTreeSet<String> = roots.into_iter().collect();
-        let mut pending: Vec<(String, Option<(String, Range<usize>, String)>)> = roots
-            .iter()
-            .rev()
-            .cloned()
-            .map(|root| (root, None))
-            .collect();
+        let mut pending: Vec<(String, Option<(String, Range<usize>, Range<usize>, String)>)> =
+            roots
+                .iter()
+                .rev()
+                .cloned()
+                .map(|root| (root, None))
+                .collect();
         let mut sources = BTreeMap::new();
         let mut modules = BTreeMap::new();
 
@@ -49,27 +51,39 @@ impl ModuleGraph {
                 continue;
             }
             let source = load_source(&path).map_err(|message| match imported_from {
-                None => SourceDiagnostic {
-                    path: path.clone(),
-                    start: 0,
-                    end: 0,
-                    symbol: module_alias(&path).unwrap_or_default(),
+                None => SourceDiagnostic::new(
+                    path.clone(),
+                    0,
+                    0,
+                    module_alias(&path).unwrap_or_default(),
                     message,
-                },
-                Some((importer, span, alias)) => SourceDiagnostic {
-                    path: importer,
-                    start: span.start,
-                    end: span.end,
-                    symbol: alias,
-                    message,
-                },
+                ),
+                Some((importer, span, declaration_span, alias)) => {
+                    let fix = SourceDiagnosticFix {
+                        title: format!("Remove unresolved import '{alias}'"),
+                        edits: vec![SourceDiagnosticEdit {
+                            path: importer.clone(),
+                            start: declaration_span.start,
+                            end: declaration_span.end,
+                            new_text: String::new(),
+                        }],
+                    };
+                    SourceDiagnostic::new(importer, span.start, span.end, alias, message)
+                        .with_code(SourceDiagnosticCode::MissingModule)
+                        .with_fix(fix)
+                }
             })?;
             let imports = parse_imports(&path, &source)?;
             for import in imports.iter().rev() {
                 if !modules.contains_key(&import.target) {
                     pending.push((
                         import.target.clone(),
-                        Some((path.clone(), import.span.clone(), import.alias.clone())),
+                        Some((
+                            path.clone(),
+                            import.span.clone(),
+                            import.declaration_span.clone(),
+                            import.alias.clone(),
+                        )),
                     ));
                 }
             }
@@ -77,13 +91,13 @@ impl ModuleGraph {
                 Ok(alias) => alias,
                 Err(_) if roots.contains(&path) => root_module_alias(&path),
                 Err(message) => {
-                    return Err(SourceDiagnostic {
-                        path: path.clone(),
-                        start: 0,
-                        end: path.len(),
-                        symbol: String::new(),
+                    return Err(SourceDiagnostic::new(
+                        path.clone(),
+                        0,
+                        path.len(),
+                        "",
                         message,
-                    });
+                    ));
                 }
             };
             sources.insert(path.clone(), source);
@@ -284,11 +298,16 @@ pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, Sour
         let alias = module_alias(&target).map_err(|message| {
             diagnostic(path, literal.start..literal.end, &import_path, message)
         })?;
+        let declaration_end = tokens
+            .get(cursor + 2)
+            .filter(|token| token.kind == TokenKind::Semicolon)
+            .map_or(literal.end, |token| token.end);
         imports.push(ModuleImport {
             path: import_path,
             target,
             alias,
             span: literal.start..literal.end,
+            declaration_span: import_removal_span(source, token.start, declaration_end),
         });
         cursor += 2;
     }
@@ -300,15 +319,41 @@ pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, Sour
     for pair in imports.windows(2) {
         if pair[0].alias == pair[1].alias {
             let duplicate = &pair[1];
+            let fix = SourceDiagnosticFix {
+                title: format!("Remove duplicate import '{}'", duplicate.path),
+                edits: vec![SourceDiagnosticEdit {
+                    path: path.to_string(),
+                    start: duplicate.declaration_span.start,
+                    end: duplicate.declaration_span.end,
+                    new_text: String::new(),
+                }],
+            };
             return Err(diagnostic(
                 path,
                 duplicate.span.clone(),
                 &duplicate.alias,
                 format!("duplicate imported module alias '{}'", duplicate.alias),
-            ));
+            )
+            .with_code(SourceDiagnosticCode::DuplicateImportAlias)
+            .with_fix(fix));
         }
     }
     Ok(imports)
+}
+
+fn import_removal_span(source: &str, start: usize, end: usize) -> Range<usize> {
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source[end..]
+        .find('\n')
+        .map_or(source.len(), |index| end + index + 1);
+    let suffix_end = line_end.saturating_sub(usize::from(
+        line_end > 0 && source.as_bytes().get(line_end - 1) == Some(&b'\n'),
+    ));
+    if source[line_start..start].trim().is_empty() && source[end..suffix_end].trim().is_empty() {
+        line_start..line_end
+    } else {
+        start..end
+    }
 }
 
 fn resolve_import(importer: &str, import: &str) -> Result<String, String> {
@@ -392,10 +437,22 @@ fn validate_unique_aliases(
                         .imports
                         .iter()
                         .find(|import| import.target == module.path)
-                        .map(|import| (importer.path.as_str(), import.span.clone()))
+                        .map(|import| {
+                            (
+                                importer.path.as_str(),
+                                import.span.clone(),
+                                import.declaration_span.clone(),
+                                import.path.as_str(),
+                            )
+                        })
                 });
-                let (path, span) = import_site.unwrap_or((&module.path, 0..module.path.len()));
-                return Err(diagnostic(
+                let (path, span, declaration_span, import_path) = import_site.unwrap_or((
+                    &module.path,
+                    0..module.path.len(),
+                    0..0,
+                    module.path.as_str(),
+                ));
+                let mut result = diagnostic(
                     path,
                     span,
                     &module.alias,
@@ -403,7 +460,20 @@ fn validate_unique_aliases(
                         "duplicate module alias '{}' for '{}' and '{}'",
                         module.alias, previous, module.path
                     ),
-                ));
+                )
+                .with_code(SourceDiagnosticCode::DuplicateImportAlias);
+                if !declaration_span.is_empty() {
+                    result = result.with_fix(SourceDiagnosticFix {
+                        title: format!("Remove conflicting import '{import_path}'"),
+                        edits: vec![SourceDiagnosticEdit {
+                            path: path.to_string(),
+                            start: declaration_span.start,
+                            end: declaration_span.end,
+                            new_text: String::new(),
+                        }],
+                    });
+                }
+                return Err(result);
             }
         }
     }
@@ -479,13 +549,7 @@ fn diagnostic(
     symbol: impl Into<String>,
     message: impl Into<String>,
 ) -> SourceDiagnostic {
-    SourceDiagnostic {
-        path: path.to_string(),
-        start: span.start,
-        end: span.end,
-        symbol: symbol.into(),
-        message: message.into(),
-    }
+    SourceDiagnostic::new(path, span.start, span.end, symbol, message)
 }
 
 #[cfg(test)]
@@ -576,6 +640,22 @@ mod tests {
         assert_eq!(&source[error.start..error.end], "\"missing.stasis\"");
         assert_eq!(error.symbol, "missing");
         assert!(error.message.contains("missing module 'missing.stasis'"));
+        assert_eq!(error.code, SourceDiagnosticCode::MissingModule);
+        assert_eq!(error.fixes.len(), 1);
+        assert_eq!(error.fixes[0].edits.len(), 1);
+        let edit = &error.fixes[0].edits[0];
+        assert_eq!(&source[edit.start..edit.end], "import \"missing.stasis\";");
+        assert!(edit.new_text.is_empty());
+    }
+
+    #[test]
+    fn duplicate_import_diagnostic_owns_the_removal_fix() {
+        let source = "import \"helper.stasis\"; import \"helper.stasis\";";
+        let error = parse_imports("main.stasis", source).expect_err("duplicate import");
+        assert_eq!(error.code, SourceDiagnosticCode::DuplicateImportAlias);
+        let edit = &error.fixes[0].edits[0];
+        assert_eq!(&source[edit.start..edit.end], "import \"helper.stasis\";");
+        assert_eq!(edit.start, source.rfind("import").expect("second import"));
     }
 
     #[test]

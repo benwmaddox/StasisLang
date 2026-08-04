@@ -101,6 +101,37 @@ pub enum LiveCommand {
         #[serde(default = "default_reference_limit")]
         limit: usize,
     },
+    Diagnostics,
+    Hover {
+        file: String,
+        offset: usize,
+    },
+    Definition {
+        file: String,
+        offset: usize,
+    },
+    OrganizeImports {
+        file: String,
+    },
+    QuickFixes {
+        file: String,
+    },
+    InlayHints {
+        file: String,
+    },
+    CallHierarchy {
+        file: String,
+        offset: usize,
+    },
+    TypeHierarchy {
+        file: String,
+        offset: usize,
+    },
+    RenamePreview {
+        file: String,
+        offset: usize,
+        new_name: String,
+    },
     Validate {
         requirement: LiveValidationRequirement,
         #[serde(default)]
@@ -315,6 +346,23 @@ pub struct LiveSymbolTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveRuntimeIdentity {
+    pub session_id: String,
+    pub generation: u64,
+    pub source_hashes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub indexed_collections: Vec<LiveIndexedCollection>,
+    #[serde(default = "default_true")]
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveIndexedCollection {
+    pub path: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveResponse {
     pub schema_version: u16,
     pub request_id: u64,
@@ -327,6 +375,8 @@ pub struct LiveResponse {
     pub error: Option<String>,
     #[serde(default)]
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_identity: Option<LiveRuntimeIdentity>,
 }
 
 impl LiveResponse {
@@ -340,6 +390,7 @@ impl LiveResponse {
             data: Some(data),
             error: None,
             truncated: false,
+            runtime_identity: None,
         }
     }
 
@@ -353,7 +404,13 @@ impl LiveResponse {
             data: None,
             error: Some(error.into()),
             truncated: false,
+            runtime_identity: None,
         }
+    }
+
+    pub fn with_runtime_identity(mut self, identity: LiveRuntimeIdentity) -> Self {
+        self.runtime_identity = Some(identity);
+        self
     }
 
     pub fn bounded(mut self, max_bytes: usize) -> Self {
@@ -1148,6 +1205,47 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
                 .transpose()?
                 .map(|value| value as usize)
                 .unwrap_or_else(default_reference_limit),
+        }),
+        ":diagnostics" | ":problems" => ready(LiveCommand::Diagnostics),
+        ":hover" | ":type" => ready(LiveCommand::Hover {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+        }),
+        ":definition" | ":def" => ready(LiveCommand::Definition {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+        }),
+        ":organize-imports" | ":organize" => ready(LiveCommand::OrganizeImports {
+            file: required_arg(&args, 1, "file")?.to_string(),
+        }),
+        ":quick-fixes" | ":fixes" => ready(LiveCommand::QuickFixes {
+            file: required_arg(&args, 1, "file")?.to_string(),
+        }),
+        ":inlay-hints" | ":inlays" => ready(LiveCommand::InlayHints {
+            file: required_arg(&args, 1, "file")?.to_string(),
+        }),
+        ":call-hierarchy" | ":calls" => ready(LiveCommand::CallHierarchy {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+        }),
+        ":type-hierarchy" | ":types" => ready(LiveCommand::TypeHierarchy {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+        }),
+        ":rename" => ready(LiveCommand::RenamePreview {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+            new_name: required_arg(&args, 3, "new name")?.to_string(),
         }),
         ":validate" => ready(LiveCommand::Validate {
             requirement: LiveValidationRequirement {
@@ -2040,7 +2138,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_exposes_reference_and_runtime_validation_commands() {
+    fn terminal_exposes_navigation_rename_and_runtime_validation_commands() {
         let mut terminal = TerminalBuffer::new();
         let TerminalInput::Request(references) = terminal
             .feed_line(":references GameState.player_y --limit 24")
@@ -2053,6 +2151,123 @@ mod tests {
             LiveCommand::References {
                 symbol: "GameState.player_y".into(),
                 limit: 24,
+            }
+        );
+
+        let TerminalInput::Request(rename) = terminal
+            .feed_line(":rename src/game.stasis 42 player_speed")
+            .expect("rename preview")
+        else {
+            panic!("expected rename request");
+        };
+        assert_eq!(
+            rename.command,
+            LiveCommand::RenamePreview {
+                file: "src/game.stasis".into(),
+                offset: 42,
+                new_name: "player_speed".into(),
+            }
+        );
+
+        let TerminalInput::Request(hover) = terminal
+            .feed_line(":hover src/game.stasis 24")
+            .expect("hover")
+        else {
+            panic!("expected hover request");
+        };
+        assert_eq!(
+            hover.command,
+            LiveCommand::Hover {
+                file: "src/game.stasis".into(),
+                offset: 24,
+            }
+        );
+
+        let TerminalInput::Request(definition) = terminal
+            .feed_line(":definition src/game.stasis 24")
+            .expect("definition")
+        else {
+            panic!("expected definition request");
+        };
+        assert_eq!(
+            definition.command,
+            LiveCommand::Definition {
+                file: "src/game.stasis".into(),
+                offset: 24,
+            }
+        );
+
+        let TerminalInput::Request(diagnostics) =
+            terminal.feed_line(":diagnostics").expect("diagnostics")
+        else {
+            panic!("expected diagnostics request");
+        };
+        assert_eq!(diagnostics.command, LiveCommand::Diagnostics);
+
+        let TerminalInput::Request(organize) = terminal
+            .feed_line(":organize-imports src/game.stasis")
+            .expect("organize imports")
+        else {
+            panic!("expected organize-imports request");
+        };
+        assert_eq!(
+            organize.command,
+            LiveCommand::OrganizeImports {
+                file: "src/game.stasis".into(),
+            }
+        );
+
+        let TerminalInput::Request(fixes) = terminal
+            .feed_line(":quick-fixes src/game.stasis")
+            .expect("quick fixes")
+        else {
+            panic!("expected quick-fixes request");
+        };
+        assert_eq!(
+            fixes.command,
+            LiveCommand::QuickFixes {
+                file: "src/game.stasis".into(),
+            }
+        );
+
+        let TerminalInput::Request(inlays) = terminal
+            .feed_line(":inlay-hints src/game.stasis")
+            .expect("inlay hints")
+        else {
+            panic!("expected inlay-hints request");
+        };
+        assert_eq!(
+            inlays.command,
+            LiveCommand::InlayHints {
+                file: "src/game.stasis".into(),
+            }
+        );
+
+        let TerminalInput::Request(calls) = terminal
+            .feed_line(":call-hierarchy src/game.stasis 12")
+            .expect("call hierarchy")
+        else {
+            panic!("expected call-hierarchy request");
+        };
+        assert_eq!(
+            calls.command,
+            LiveCommand::CallHierarchy {
+                file: "src/game.stasis".into(),
+                offset: 12,
+            }
+        );
+
+        let TerminalInput::Request(types) = terminal
+            .feed_line(":type-hierarchy src/game.stasis 8")
+            .expect("type hierarchy")
+        else {
+            panic!("expected type-hierarchy request");
+        };
+        assert_eq!(
+            types.command,
+            LiveCommand::TypeHierarchy {
+                file: "src/game.stasis".into(),
+                offset: 8,
             }
         );
 

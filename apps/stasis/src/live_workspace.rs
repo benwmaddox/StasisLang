@@ -3,10 +3,8 @@ use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess, JitScalarValue
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
-use stasis_compiler::frontend::lexer::{lex, TokenKind};
-use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
+    find_workshop_symbols, load_workshop_edit_workspace, load_workshop_source_workspace,
     plan_workshop_semantic_edits, workshop_completion_items, workshop_direct_import_files,
     workshop_reachable_files, workshop_source_hash, workshop_source_items,
     write_workshop_semantic_plan, write_workshop_semantic_receipt, ExpectedReload,
@@ -14,10 +12,16 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
     WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+use stasis_language_service::{
+    DiagnosticSeverity as LanguageDiagnosticSeverity, LanguageCompletionSnapshot,
+    LanguageInlayHintKind, LanguageNavigationSnapshot, LanguageService,
+    LiveIndexedCollection as LanguageLiveCollection, LiveObservation, LiveObservationBatch,
+};
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
-    CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
-    LiveResponseSendError, LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
+    CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveIndexedCollection,
+    LiveRequest, LiveResponse, LiveResponseSendError, LiveRuntimeIdentity, LiveSessionServer,
+    LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
@@ -118,8 +122,7 @@ struct CompletionPreparation {
 #[derive(Clone, Default)]
 struct CompletionSnapshot {
     index: CompletionIndex,
-    source_items: Vec<WorkshopSourceItem>,
-    source_files: Vec<WorkshopSourceFile>,
+    language: LanguageCompletionSnapshot,
     indexed_collections: Vec<IndexedCollectionCompletion>,
 }
 
@@ -184,6 +187,9 @@ pub(crate) struct LiveWorkspace {
     dropped_watch_events: u64,
     validation_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
     host_entry_revision: u64,
+    session_id: String,
+    language_service: LanguageService,
+    language_paths: BTreeSet<String>,
 }
 
 impl Drop for LiveWorkspace {
@@ -208,6 +214,13 @@ impl LiveWorkspace {
         config: LiveRunConfig,
         jit: &JitProcess,
     ) -> Result<Self, String> {
+        let session_id = format!(
+            "{}:{}",
+            std::process::id(),
+            workshop_source_hash(&config.project_root.to_string_lossy())
+        );
+        let language_service =
+            LanguageService::new(config.project_root.to_string_lossy().to_string())?;
         let mut workspace = Self {
             server,
             config,
@@ -234,6 +247,9 @@ impl LiveWorkspace {
             validation_snapshot: None,
             host_entry_revision: stasis_dynload::jit_host_entry_targets()
                 .map_or(0, |targets| targets.revision),
+            session_id,
+            language_service,
+            language_paths: BTreeSet::new(),
         };
         workspace.refresh_completion(jit)?;
         Ok(workspace)
@@ -373,6 +389,11 @@ impl LiveWorkspace {
     }
 
     fn enqueue_response(&mut self, response: LiveResponse) {
+        let response = if response.ok && response.runtime_identity.is_none() {
+            response.with_runtime_identity(self.runtime_identity())
+        } else {
+            response
+        };
         match self.server.respond(response) {
             Ok(()) => {}
             Err(LiveResponseSendError::Full(response)) => {
@@ -380,6 +401,33 @@ impl LiveWorkspace {
             }
             Err(LiveResponseSendError::Disconnected) => self.quit = true,
         }
+    }
+
+    fn runtime_identity(&self) -> LiveRuntimeIdentity {
+        let mut identity = LiveRuntimeIdentity {
+            session_id: self.session_id.clone(),
+            generation: self.host_entry_revision,
+            source_hashes: self
+                .source_files
+                .iter()
+                .map(|file| (file.path.clone(), workshop_source_hash(&file.source)))
+                .collect(),
+            indexed_collections: self
+                .indexed_collections
+                .iter()
+                .map(|collection| LiveIndexedCollection {
+                    path: collection.path.clone(),
+                    fields: collection.fields.iter().cloned().collect(),
+                })
+                .collect(),
+            complete: true,
+        };
+        if serde_json::to_vec(&identity).is_ok_and(|encoded| encoded.len() > 32 * 1024) {
+            identity.source_hashes.clear();
+            identity.indexed_collections.clear();
+            identity.complete = false;
+        }
+        identity
     }
 
     pub(crate) fn should_run_tick(&self) -> bool {
@@ -421,14 +469,18 @@ impl LiveWorkspace {
     }
 
     pub(crate) fn publish_watches(&mut self, tick: u64, jit: &JitProcess) {
+        let runtime_identity = self.runtime_identity();
         if self.dropped_watch_events > 0 {
             let dropped = self.dropped_watch_events;
-            match self.server.respond(LiveResponse::success(
-                0,
-                tick,
-                "watch_backpressure",
-                json!({"dropped_events": dropped}),
-            )) {
+            match self.server.respond(
+                LiveResponse::success(
+                    0,
+                    tick,
+                    "watch_backpressure",
+                    json!({"dropped_events": dropped}),
+                )
+                .with_runtime_identity(runtime_identity.clone()),
+            ) {
                 Ok(()) => self.dropped_watch_events = 0,
                 Err(LiveResponseSendError::Full(_)) => return,
                 Err(LiveResponseSendError::Disconnected) => {
@@ -464,12 +516,15 @@ impl LiveWorkspace {
                         continue;
                     }
                     self.watches.insert(path.clone(), Some(value));
-                    match self.server.respond(LiveResponse::success(
-                        0,
-                        tick,
-                        "watch_error",
-                        json!({"path": path, "error": error}),
-                    )) {
+                    match self.server.respond(
+                        LiveResponse::success(
+                            0,
+                            tick,
+                            "watch_error",
+                            json!({"path": path, "error": error}),
+                        )
+                        .with_runtime_identity(runtime_identity.clone()),
+                    ) {
                         Ok(()) => {}
                         Err(LiveResponseSendError::Full(_)) => {
                             self.dropped_watch_events = self.dropped_watch_events.saturating_add(1);
@@ -488,12 +543,15 @@ impl LiveWorkspace {
             }
             self.watches.insert(path.clone(), Some(value.clone()));
             let observed = inspection_observed_value(&value);
-            match self.server.respond(LiveResponse::success(
-                0,
-                tick,
-                "watch",
-                json!({"path": path, "value": observed, "inspection": value}),
-            )) {
+            match self.server.respond(
+                LiveResponse::success(
+                    0,
+                    tick,
+                    "watch",
+                    json!({"path": path, "value": observed, "inspection": value}),
+                )
+                .with_runtime_identity(runtime_identity.clone()),
+            ) {
                 Ok(()) => {}
                 Err(LiveResponseSendError::Full(_)) => {
                     self.dropped_watch_events = self.dropped_watch_events.saturating_add(1);
@@ -590,9 +648,27 @@ impl LiveWorkspace {
                 "references",
                 json!({
                     "symbol": symbol,
-                    "references": find_workshop_references(&self.source_files, &symbol, limit)?,
+                    "references": LanguageNavigationSnapshot::new(self.source_files.clone())
+                        .references(&symbol, limit)?,
                 }),
             )),
+            LiveCommand::Diagnostics => self.language_diagnostics(),
+            LiveCommand::Hover { file, offset } => self.language_hover(&file, offset, tick, jit),
+            LiveCommand::Definition { file, offset } => self.language_definition(&file, offset),
+            LiveCommand::OrganizeImports { file } => self.language_organize_imports(&file),
+            LiveCommand::QuickFixes { file } => self.language_quick_fixes(&file),
+            LiveCommand::InlayHints { file } => self.language_inlay_hints(&file),
+            LiveCommand::CallHierarchy { file, offset } => {
+                self.language_call_hierarchy(&file, offset)
+            }
+            LiveCommand::TypeHierarchy { file, offset } => {
+                self.language_type_hierarchy(&file, offset)
+            }
+            LiveCommand::RenamePreview {
+                file,
+                offset,
+                new_name,
+            } => self.rename_preview(&file, offset, &new_name),
             LiveCommand::Validate {
                 requirement,
                 frames,
@@ -838,6 +914,352 @@ impl LiveWorkspace {
         }
     }
 
+    fn sync_language_service(&mut self) -> Result<(), String> {
+        let desired =
+            load_workshop_source_workspace(&self.config.project_root, &self.config.entry)?
+                .into_iter()
+                .map(|file| {
+                    (
+                        self.config
+                            .project_root
+                            .join(&file.path)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        file.source.clone(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+        let desired_paths = desired.keys().cloned().collect::<BTreeSet<_>>();
+        for path in self.language_paths.difference(&desired_paths) {
+            self.language_service.remove_disk_document(path);
+        }
+        let changed = {
+            let snapshot = self.language_service.snapshot();
+            desired
+                .iter()
+                .filter(|(path, source)| {
+                    snapshot
+                        .document(path)
+                        .is_none_or(|document| document.text.as_ref() != source.as_str())
+                })
+                .map(|(path, source)| (path.clone(), source.clone()))
+                .collect::<Vec<_>>()
+        };
+        for (path, source) in changed {
+            self.language_service.set_disk_document(path, source);
+        }
+        self.language_paths = desired_paths;
+        Ok(())
+    }
+
+    fn language_document_path(&self, file: &str) -> String {
+        self.config
+            .project_root
+            .join(file)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    fn language_diagnostics(&mut self) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let report = self.language_service.diagnostics();
+        Ok((
+            "diagnostics",
+            json!({
+                "revision": report.revision.get(),
+                "diagnostics": report.diagnostics.into_iter().map(|diagnostic| json!({
+                    "file": diagnostic.path,
+                    "start": diagnostic.range.start,
+                    "end": diagnostic.range.end,
+                    "severity": match diagnostic.severity {
+                        LanguageDiagnosticSeverity::Error => "error",
+                        LanguageDiagnosticSeverity::Warning => "warning",
+                        LanguageDiagnosticSeverity::Information => "information",
+                        LanguageDiagnosticSeverity::Hint => "hint",
+                    },
+                    "code": diagnostic.code,
+                    "source": diagnostic.source,
+                    "message": diagnostic.message,
+                })).collect::<Vec<_>>()
+            }),
+        ))
+    }
+
+    fn language_definition(
+        &mut self,
+        file: &str,
+        offset: usize,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let locations = self.language_service.definition(&request_path, offset)?;
+        Ok((
+            "definition",
+            json!({
+                "file": file,
+                "offset": offset,
+                "locations": locations.into_iter().map(|location| json!({
+                    "file": location.path,
+                    "start": location.range.start,
+                    "end": location.range.end,
+                })).collect::<Vec<_>>()
+            }),
+        ))
+    }
+
+    fn language_hover(
+        &mut self,
+        file: &str,
+        offset: usize,
+        tick: u64,
+        jit: &JitProcess,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let Some(static_hover) = self.language_service.hover(&request_path, offset)? else {
+            return Ok((
+                "hover",
+                json!({"file": file, "offset": offset, "hover": null}),
+            ));
+        };
+        if matches!(
+            static_hover.kind.as_str(),
+            "global" | "field" | "state_path"
+        ) {
+            if let Ok(inspection) = jit.inspect_state_query(&static_hover.symbol) {
+                let identity = self.runtime_identity();
+                self.language_service
+                    .publish_live_observations(LiveObservationBatch {
+                        session_id: identity.session_id,
+                        generation: identity.generation,
+                        source_hashes: identity.source_hashes,
+                        indexed_collections: identity
+                            .indexed_collections
+                            .into_iter()
+                            .map(|collection| LanguageLiveCollection {
+                                path: collection.path,
+                                fields: collection.fields,
+                            })
+                            .collect(),
+                        complete: identity.complete,
+                        observations: vec![LiveObservation {
+                            path: static_hover.symbol.clone(),
+                            type_name: static_hover.type_name.clone(),
+                            value: live_observation_text(&inspection),
+                            tick,
+                        }],
+                    });
+            }
+        }
+        let hover = self
+            .language_service
+            .hover(&request_path, offset)?
+            .unwrap_or(static_hover);
+        Ok((
+            "hover",
+            json!({
+                "file": file,
+                "offset": offset,
+                "hover": {
+                    "start": hover.range.start,
+                    "end": hover.range.end,
+                    "symbol": hover.symbol,
+                    "kind": hover.kind,
+                    "type_name": hover.type_name,
+                    "owner": hover.owner,
+                    "signatures": hover.signatures,
+                    "documentation": hover.documentation,
+                    "live_value": hover.live_value,
+                }
+            }),
+        ))
+    }
+
+    fn language_organize_imports(&mut self, file: &str) -> Result<(&'static str, Value), String> {
+        self.language_code_actions(file, "source.organizeImports")
+    }
+
+    fn language_quick_fixes(&mut self, file: &str) -> Result<(&'static str, Value), String> {
+        self.language_code_actions(file, "quickfix")
+    }
+
+    fn language_code_actions(
+        &mut self,
+        file: &str,
+        requested_kind: &str,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let actions = self
+            .language_service
+            .code_actions(&request_path, &[requested_kind.to_string()])?;
+        Ok((
+            "code_actions",
+            json!({
+                "file": file,
+                "actions": actions.into_iter().map(|action| json!({
+                    "title": action.title,
+                    "kind": action.kind,
+                    "preferred": action.preferred,
+                    "diagnostic_code": action.diagnostic_code,
+                    "edits": action.edits.into_iter().map(|edit| json!({
+                        "file": edit.path,
+                        "start": edit.range.start,
+                        "end": edit.range.end,
+                        "new_text": edit.new_text,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            }),
+        ))
+    }
+
+    fn language_inlay_hints(&mut self, file: &str) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let hints = self.language_service.inlay_hints(&request_path)?;
+        Ok((
+            "inlay_hints",
+            json!({
+                "file": file,
+                "hints": hints.into_iter().map(|hint| json!({
+                    "position": hint.position,
+                    "start": hint.anchor.start,
+                    "end": hint.anchor.end,
+                    "kind": match hint.kind {
+                        LanguageInlayHintKind::Type => "type",
+                        LanguageInlayHintKind::Parameter => "parameter",
+                    },
+                    "label": hint.label,
+                })).collect::<Vec<_>>(),
+            }),
+        ))
+    }
+
+    fn language_call_hierarchy(
+        &mut self,
+        file: &str,
+        offset: usize,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let items = self
+            .language_service
+            .prepare_call_hierarchy(&request_path, offset)?;
+        let mut hierarchy = Vec::new();
+        for item in items {
+            let incoming = self.language_service.incoming_calls(&item.symbol_id)?;
+            let outgoing = self.language_service.outgoing_calls(&item.symbol_id)?;
+            hierarchy.push(json!({
+                "symbol_id": item.symbol_id,
+                "name": item.name,
+                "detail": item.detail,
+                "file": item.location.path,
+                "start": item.location.range.start,
+                "end": item.location.range.end,
+                "incoming": incoming.into_iter().map(|relation| json!({
+                    "symbol_id": relation.item.symbol_id,
+                    "name": relation.item.name,
+                    "file": relation.item.location.path,
+                    "call_ranges": relation.from_ranges.into_iter().map(|location| json!({
+                        "file": location.path,
+                        "start": location.range.start,
+                        "end": location.range.end,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "outgoing": outgoing.into_iter().map(|relation| json!({
+                    "symbol_id": relation.item.symbol_id,
+                    "name": relation.item.name,
+                    "file": relation.item.location.path,
+                    "call_ranges": relation.from_ranges.into_iter().map(|location| json!({
+                        "file": location.path,
+                        "start": location.range.start,
+                        "end": location.range.end,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        Ok((
+            "call_hierarchy",
+            json!({"file": file, "offset": offset, "items": hierarchy}),
+        ))
+    }
+
+    fn language_type_hierarchy(
+        &mut self,
+        file: &str,
+        offset: usize,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let items = self
+            .language_service
+            .prepare_type_hierarchy(&request_path, offset)?;
+        let mut hierarchy = Vec::new();
+        for item in items {
+            let containers = self.language_service.type_supertypes(&item.symbol_id)?;
+            let components = self.language_service.type_subtypes(&item.symbol_id)?;
+            hierarchy.push(json!({
+                "symbol_id": item.symbol_id,
+                "name": item.name,
+                "detail": item.detail,
+                "file": item.location.path,
+                "start": item.location.range.start,
+                "end": item.location.range.end,
+                "containers": containers.into_iter().map(|related| json!({
+                    "symbol_id": related.symbol_id,
+                    "name": related.name,
+                    "file": related.location.path,
+                })).collect::<Vec<_>>(),
+                "components": components.into_iter().map(|related| json!({
+                    "symbol_id": related.symbol_id,
+                    "name": related.name,
+                    "file": related.location.path,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        Ok((
+            "type_hierarchy",
+            json!({"file": file, "offset": offset, "items": hierarchy}),
+        ))
+    }
+
+    fn rename_preview(
+        &mut self,
+        file: &str,
+        offset: usize,
+        new_name: &str,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service()?;
+        let request_path = self.language_document_path(file);
+        let plan = self
+            .language_service
+            .rename(&request_path, offset, new_name)?;
+        let edits = plan
+            .edits
+            .iter()
+            .map(|edit| {
+                json!({
+                    "file": edit.path,
+                    "start": edit.range.start,
+                    "end": edit.range.end,
+                    "new_text": edit.new_text,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok((
+            "rename_preview",
+            json!({
+                "validated": true,
+                "revision": plan.revision.get(),
+                "old_name": plan.old_name,
+                "new_name": plan.new_name,
+                "kind": plan.kind,
+                "owner": plan.owner,
+                "edits": edits,
+            }),
+        ))
+    }
+
     fn load_files(&self) -> Result<Vec<WorkshopSourceFile>, String> {
         load_workshop_edit_workspace(&self.config.project_root, &self.config.entry)
     }
@@ -1032,16 +1454,16 @@ impl LiveWorkspace {
         let worker = std::thread::Builder::new()
             .name(format!("stasis-live-completion-{request_id}"))
             .spawn(move || {
-                let query = completion_query_from_snapshot(
-                    snapshot.index.clone(),
-                    &snapshot.source_items,
-                    &snapshot.source_files,
+                let mut index = snapshot.index.clone();
+                extend_indexed_collection_completion(
+                    &mut index,
                     &snapshot.indexed_collections,
                     &buffer,
                     cursor,
-                    limit,
-                    &context,
                 );
+                let query = snapshot
+                    .language
+                    .query_with_index(index, &buffer, cursor, limit, &context);
                 let _ = sender.send(query);
             })
             .map_err(|error| format!("failed starting live completion analysis: {error}"))?;
@@ -1401,8 +1823,10 @@ impl LiveWorkspace {
             .collect();
         self.completion_snapshot = Arc::new(CompletionSnapshot {
             index: self.completion.clone(),
-            source_items: self.source_items.clone(),
-            source_files: self.source_files.clone(),
+            language: LanguageCompletionSnapshot::new(
+                self.source_items.clone(),
+                self.source_files.clone(),
+            ),
             indexed_collections: self.indexed_collections.clone(),
         });
     }
@@ -1415,16 +1839,11 @@ impl LiveWorkspace {
         limit: usize,
         context: &stasis_runner::live::CompletionContext,
     ) -> stasis_runner::live::CompletionQuery {
-        completion_query_from_snapshot(
-            self.completion.clone(),
-            &self.source_items,
-            &self.source_files,
-            &self.indexed_collections,
-            buffer,
-            cursor,
-            limit,
-            context,
-        )
+        let mut index = self.completion.clone();
+        extend_indexed_collection_completion(&mut index, &self.indexed_collections, buffer, cursor);
+        self.completion_snapshot
+            .language
+            .query_with_index(index, buffer, cursor, limit, context)
     }
 }
 
@@ -1438,16 +1857,12 @@ fn is_static_type_field(item: &WorkshopCompletionItem) -> bool {
         })
 }
 
-fn completion_query_from_snapshot(
-    mut index: CompletionIndex,
-    source_items: &[WorkshopSourceItem],
-    source_files: &[WorkshopSourceFile],
+fn extend_indexed_collection_completion(
+    index: &mut CompletionIndex,
     indexed_collections: &[IndexedCollectionCompletion],
     buffer: &str,
     cursor: usize,
-    limit: usize,
-    context: &CompletionContext,
-) -> CompletionQuery {
+) {
     if let Some((collection_path, receiver)) = indexed_completion_receiver(buffer, cursor) {
         if let Some(collection) = indexed_collections
             .iter()
@@ -1471,27 +1886,6 @@ fn completion_query_from_snapshot(
             );
         }
     }
-    let mut effective_context = context.clone();
-    if effective_context.expected_type.is_none() {
-        effective_context.expected_type =
-            completion_expected_type(buffer, cursor).unwrap_or_default();
-    }
-    let overlay = if effective_context.owner.is_none() {
-        overlay_document_completion_items(
-            source_items,
-            source_files,
-            buffer,
-            cursor,
-            &mut effective_context,
-        )
-    } else {
-        overlay_completion_items(source_items, source_files, buffer, &effective_context)
-    };
-    if let Some(items) = overlay {
-        index.retain(|item| !completion_item_belongs_to_context(item, &effective_context));
-        index.extend(items.into_iter().map(|item| live_completion_item(&item)));
-    }
-    index.query_with_context(buffer, cursor, limit, &effective_context)
 }
 
 fn indexed_completion_receiver<'a>(buffer: &'a str, cursor: usize) -> Option<(&'a str, &'a str)> {
@@ -1526,117 +1920,6 @@ fn indexed_completion_receiver<'a>(buffer: &'a str, cursor: usize) -> Option<(&'
     Some((collection_path, receiver))
 }
 
-fn overlay_document_completion_items(
-    source_items: &[WorkshopSourceItem],
-    source_files: &[WorkshopSourceFile],
-    buffer: &str,
-    cursor: usize,
-    context: &mut CompletionContext,
-) -> Option<Vec<WorkshopCompletionItem>> {
-    let file = context.file.as_deref()?;
-    let mut files = source_files.to_vec();
-    let mut cursor = cursor.min(buffer.len());
-    while !buffer.is_char_boundary(cursor) {
-        cursor = cursor.saturating_sub(1);
-    }
-    let source_index = files.iter().position(|source| source.path == file)?;
-    files[source_index].source = buffer.to_string();
-    let owner = workshop_source_items(&files)
-        .ok()?
-        .into_iter()
-        .filter(|item| item.kind == WorkshopSourceItemKind::Function && item.file == file)
-        .filter_map(|item| {
-            let span = item.source_spans.first()?;
-            let start = span.start as usize;
-            let end = span.end as usize;
-            (start <= cursor && cursor <= end).then_some((
-                end.saturating_sub(start),
-                start,
-                end,
-                item,
-            ))
-        })
-        .min_by_key(|(width, _, _, _)| *width);
-    let (_, dirty_start, _, dirty_owner) = owner?;
-    let accepted_owner = source_items
-        .iter()
-        .find(|item| {
-            item.kind == WorkshopSourceItemKind::Function
-                && item.file == file
-                && item.name == dirty_owner.name
-                && item.signature == dirty_owner.signature
-        })
-        .or_else(|| {
-            let mut matches = source_items.iter().filter(|item| {
-                item.kind == WorkshopSourceItemKind::Function
-                    && item.file == file
-                    && item.name == dirty_owner.name
-            });
-            let first = matches.next()?;
-            matches.next().is_none().then_some(first)
-        })?;
-    let accepted_start = accepted_owner.source_spans.first()?.start as usize;
-    let definition = buffer.get(dirty_start..cursor)?;
-    context.owner = Some(accepted_owner.name.clone());
-    context.owner_signature = Some(accepted_owner.signature.clone());
-    context.source_offset = Some(accepted_start.saturating_add(definition.len()));
-    overlay_completion_items(source_items, source_files, definition, context)
-}
-
-fn overlay_completion_items(
-    source_items: &[WorkshopSourceItem],
-    source_files: &[WorkshopSourceFile],
-    buffer: &str,
-    context: &CompletionContext,
-) -> Option<Vec<WorkshopCompletionItem>> {
-    let file = context.file.as_deref()?;
-    let owner = context.owner.as_deref()?;
-    let item = source_items.iter().find(|item| {
-        item.file == file
-            && item.name == owner
-            && context
-                .owner_signature
-                .as_deref()
-                .is_none_or(|signature| item.signature == signature)
-    })?;
-    let span = item.source_spans.first()?;
-    let mut files = source_files.to_vec();
-    let source_file = files.iter_mut().find(|source| source.path == file)?;
-    let start = span.start as usize;
-    let end = span.end as usize;
-    if start > end || end > source_file.source.len() {
-        return None;
-    }
-    let overlay = balanced_definition(buffer)?;
-    source_file.source.replace_range(start..end, &overlay);
-    let mut items = workshop_completion_items(&files).ok()?;
-    for completion in &mut items {
-        if let Some(scope) = completion
-            .scope
-            .as_mut()
-            .filter(|scope| scope.owner == owner && scope.file == file)
-        {
-            scope.owner_signature = context.owner_signature.clone();
-        }
-    }
-    Some(items)
-}
-
-fn completion_item_belongs_to_context(
-    item: &CompletionItem,
-    context: &stasis_runner::live::CompletionContext,
-) -> bool {
-    let Some(scope) = item.scope.as_ref() else {
-        return false;
-    };
-    scope.owner == context.owner.as_deref().unwrap_or_default()
-        && scope.file == context.file.as_deref().unwrap_or_default()
-        && context
-            .owner_signature
-            .as_deref()
-            .is_none_or(|signature| scope.owner_signature.as_deref() == Some(signature))
-}
-
 fn live_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
     CompletionItem {
         text: item.text.clone(),
@@ -1660,23 +1943,6 @@ fn live_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
             visible_to: scope.visible_to,
         }),
     }
-}
-
-fn balanced_definition(source: &str) -> Option<String> {
-    let tokens = lex(source).ok()?;
-    let mut depth = 0usize;
-    for token in tokens {
-        match token.kind {
-            TokenKind::LBrace => depth = depth.saturating_add(1),
-            TokenKind::RBrace => depth = depth.checked_sub(1)?,
-            _ => {}
-        }
-    }
-    let mut balanced = source.to_string();
-    for _ in 0..depth {
-        balanced.push('}');
-    }
-    Some(balanced)
 }
 
 fn paged_completion_query(
@@ -2261,7 +2527,13 @@ fn help_data() -> Value {
             ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
             ":symbols [query] [--file PATH ... --kind KIND --owner OWNER --page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
-            ":references SYMBOL [--limit N]", ":validate PATH OP VALUE [--frames N]",
+            ":references SYMBOL [--limit N]", ":diagnostics",
+            ":hover FILE OFFSET", ":definition FILE OFFSET", ":organize-imports FILE",
+            ":quick-fixes FILE",
+            ":inlay-hints FILE",
+            ":call-hierarchy FILE OFFSET", ":type-hierarchy FILE OFFSET",
+            ":rename FILE OFFSET NEW_NAME",
+            ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
             ":ai PROMPT | :ai status | :ai cancel (interactive TUI; installed Codex subscription)",
             ":complete BUFFER", ":palette [QUERY]",
@@ -2291,6 +2563,15 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":find",
         ":read",
         ":references",
+        ":diagnostics",
+        ":hover",
+        ":definition",
+        ":organize-imports",
+        ":quick-fixes",
+        ":inlay-hints",
+        ":call-hierarchy",
+        ":type-hierarchy",
+        ":rename",
         ":validate",
         ":edit",
         ":ai",
@@ -2406,6 +2687,18 @@ fn inspection_observed_value(inspection: &Value) -> Value {
         .get("value")
         .cloned()
         .unwrap_or_else(|| inspection.clone())
+}
+
+fn live_observation_text(inspection: &Value) -> String {
+    let observed = inspection_observed_value(inspection);
+    let scalar = observed
+        .get("value")
+        .cloned()
+        .unwrap_or_else(|| observed.clone());
+    scalar
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| scalar.to_string())
 }
 
 fn validate_live_runtime(
@@ -3046,6 +3339,244 @@ mod tests {
         assert!(references
             .iter()
             .all(|reference| reference.get("source").is_none()));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rename_preview_is_compiler_validated_and_does_not_write_sources() {
+        let (root, config) = project();
+        let source_path = root.join("src/main.stasis");
+        let before = fs::read_to_string(&source_path).expect("source before preview");
+        let offset = before.find("score +=").expect("score use") + 2;
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                40,
+                LiveCommand::RenamePreview {
+                    file: "src/main.stasis".into(),
+                    offset,
+                    new_name: "points".into(),
+                },
+            ),
+        );
+
+        assert!(response.ok, "rename response: {response:?}");
+        let identity = response
+            .runtime_identity
+            .as_ref()
+            .expect("accepted runtime identity");
+        assert!(identity.source_hashes.contains_key("src/main.stasis"));
+        assert_eq!(identity.generation, workspace.host_entry_revision);
+        let data = response.data.expect("rename preview data");
+        assert_eq!(data["validated"], true);
+        assert_eq!(data["old_name"], "score");
+        assert_eq!(data["new_name"], "points");
+        assert!(data["edits"]
+            .as_array()
+            .is_some_and(|edits| edits.len() == 3));
+        assert_eq!(
+            fs::read_to_string(&source_path).expect("source after preview"),
+            before
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tui_quick_fix_preview_uses_structured_language_service_actions() {
+        let (root, config) = project();
+        let source_path = root.join("src/main.stasis");
+        let before = fs::read_to_string(&source_path).expect("source before quick fix");
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let broken = format!("import \"missing.stasis\";\n{before}");
+        fs::write(&source_path, &broken).expect("source with missing import");
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                401,
+                LiveCommand::QuickFixes {
+                    file: "src/main.stasis".into(),
+                },
+            ),
+        );
+
+        assert!(response.ok, "quick-fix response: {response:?}");
+        let actions = response.data.expect("quick-fix data")["actions"]
+            .as_array()
+            .expect("quick-fix actions")
+            .clone();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["kind"], "quickfix");
+        assert_eq!(actions[0]["diagnostic_code"], "stasis.missingModule");
+        assert_eq!(actions[0]["edits"][0]["new_text"], "");
+        assert_eq!(
+            fs::read_to_string(&source_path).expect("source after quick-fix preview"),
+            broken
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tui_language_queries_share_persistent_service_and_live_hover() {
+        let (root, config) = project();
+        let source_path = root.join("src/main.stasis");
+        let source = fs::read_to_string(&source_path)
+            .expect("source")
+            .replace(
+                "function main(): i32 { score = 1; return 0; }",
+                "struct Position { x: i32; }\nstruct Enemy { position: Position; }\nfunction add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let initial = add(1, 2); score = initial; return 0; }",
+            );
+        fs::write(&source_path, &source).expect("source with inferred local");
+        let offset = source.find("score +=").expect("score use") + 2;
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        let diagnostics = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(41, LiveCommand::Diagnostics),
+        );
+        assert!(diagnostics.ok);
+        assert_eq!(
+            diagnostics.data.expect("diagnostics")["diagnostics"],
+            json!([])
+        );
+
+        let hover = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                42,
+                LiveCommand::Hover {
+                    file: "src/main.stasis".into(),
+                    offset,
+                },
+            ),
+        );
+        assert!(hover.ok, "hover response: {hover:?}");
+        let hover = hover.data.expect("hover data")["hover"].clone();
+        assert_eq!(hover["symbol"], "score");
+        assert_eq!(hover["type_name"], "i32");
+        assert!(hover["live_value"]
+            .as_str()
+            .is_some_and(|value| value.contains("tick")));
+
+        let definition = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                43,
+                LiveCommand::Definition {
+                    file: "src/main.stasis".into(),
+                    offset,
+                },
+            ),
+        );
+        assert!(definition.ok, "definition response: {definition:?}");
+        let locations = definition.data.expect("definition data")["locations"]
+            .as_array()
+            .expect("locations")
+            .clone();
+        assert_eq!(locations.len(), 1);
+        let start = locations[0]["start"].as_u64().expect("start") as usize;
+        let end = locations[0]["end"].as_u64().expect("end") as usize;
+        assert_eq!(&source[start..end], "score");
+
+        let inlays = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                44,
+                LiveCommand::InlayHints {
+                    file: "src/main.stasis".into(),
+                },
+            ),
+        );
+        assert!(inlays.ok, "inlay response: {inlays:?}");
+        let hints = inlays.data.expect("inlay data")["hints"]
+            .as_array()
+            .expect("hints")
+            .clone();
+        assert!(hints
+            .iter()
+            .any(|hint| hint["kind"] == "type" && hint["label"] == ": i32"));
+        assert!(hints
+            .iter()
+            .any(|hint| { hint["kind"] == "parameter" && hint["label"] == "amount:" }));
+
+        let add_offset = source.find("add(amount").expect("add") + 1;
+        let calls = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                45,
+                LiveCommand::CallHierarchy {
+                    file: "src/main.stasis".into(),
+                    offset: add_offset,
+                },
+            ),
+        );
+        assert!(calls.ok, "call hierarchy response: {calls:?}");
+        let calls = calls.data.expect("call hierarchy");
+        assert_eq!(calls["items"][0]["incoming"][0]["name"], "main");
+        assert_eq!(calls["items"][0]["outgoing"], json!([]));
+
+        let enemy_offset = source.find("Enemy").expect("Enemy") + 1;
+        let types = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                46,
+                LiveCommand::TypeHierarchy {
+                    file: "src/main.stasis".into(),
+                    offset: enemy_offset,
+                },
+            ),
+        );
+        assert!(types.ok, "type hierarchy response: {types:?}");
+        assert_eq!(
+            types.data.expect("type hierarchy")["items"][0]["components"][0]["name"],
+            "Position"
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -4409,13 +4940,6 @@ mod tests {
         };
         let query = workspace.completion_query(buffer, buffer.len(), 10, &context);
         assert_eq!(query.items[0].text, "local_speed");
-        assert_eq!(
-            balanced_definition(buffer)
-                .expect("balanced")
-                .matches('}')
-                .count(),
-            1
-        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -4440,29 +4964,19 @@ mod tests {
             expected_type: None,
         };
 
-        let mut inferred = context.clone();
-        let overlay = overlay_document_completion_items(
-            &workspace.source_items,
-            &workspace.source_files,
-            &source,
-            cursor,
-            &mut inferred,
-        )
-        .expect("document overlay");
-        assert_eq!(inferred.owner.as_deref(), Some("tick"));
-        let local = overlay
+        let query = workspace.completion_query(&source, cursor, 10, &context);
+        let local = query
+            .items
             .iter()
             .find(|item| item.text == "local_speed")
             .expect("dirty local completion");
         let scope = local.scope.as_ref().expect("dirty local scope");
         assert_eq!(scope.owner, "tick");
-        assert_eq!(scope.owner_signature, inferred.owner_signature);
+        assert_eq!(scope.owner_signature.as_deref(), Some("tick(): i32"));
         assert!(
             scope.visible_from <= cursor && cursor <= scope.visible_to,
             "{scope:?}"
         );
-
-        let query = workspace.completion_query(&source, cursor, 10, &context);
 
         assert_eq!(query.items[0].text, "local_speed");
         assert_eq!(query.replacement_end, cursor);

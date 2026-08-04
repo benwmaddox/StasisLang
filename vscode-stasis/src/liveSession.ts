@@ -1,19 +1,13 @@
-import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as vscode from "vscode";
+import { LanguageClient } from "vscode-languageclient/node";
 import {
   isLiveResponse,
-  JsonLineDecoder,
   LiveResponse,
+  LiveRuntimeIdentity,
   LiveValue,
 } from "./protocol";
 
 export type LiveSessionState = "starting" | "running" | "paused" | "stopped";
-
-interface PendingRequest {
-  resolve: (response: LiveResponse) => void;
-  reject: (error: Error) => void;
-  timeout: NodeJS.Timeout;
-}
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null
@@ -21,26 +15,60 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+interface LiveStateNotification {
+  state?: unknown;
+  detail?: unknown;
+}
+
 export class LiveSession implements vscode.Disposable {
-  private readonly decoder = new JsonLineDecoder();
-  private readonly pending = new Map<number, PendingRequest>();
   private readonly valuesByPath = new Map<string, LiveValue>();
   private readonly stateEmitter = new vscode.EventEmitter<LiveSessionState>();
   private readonly valuesEmitter = new vscode.EventEmitter<readonly LiveValue[]>();
-  private process: ChildProcessWithoutNullStreams | undefined;
-  private nextRequestId = 1;
+  private readonly subscriptions: vscode.Disposable[];
   private disposed = false;
   private _state: LiveSessionState = "stopped";
+  private _runtimeIdentity: LiveRuntimeIdentity | undefined;
 
   readonly onDidChangeState = this.stateEmitter.event;
   readonly onDidChangeValues = this.valuesEmitter.event;
 
   constructor(
     readonly root: string,
-    private readonly executable: string,
+    private readonly client: LanguageClient,
     private readonly entry: string,
     private readonly output: vscode.OutputChannel,
-  ) {}
+  ) {
+    this.subscriptions = [
+      client.onNotification("stasis/liveEvent", (value: unknown) => {
+        if (isLiveResponse(value)) {
+          this.acceptResponse(value);
+        } else {
+          this.output.appendLine(`Ignored invalid LSP live event: ${JSON.stringify(value)}`);
+        }
+      }),
+      client.onNotification("stasis/liveState", (notification: LiveStateNotification) => {
+        if (notification.state === "starting") {
+          this.setState("starting");
+          return;
+        }
+        if (notification.state === "stopped") {
+          this._runtimeIdentity = undefined;
+          this.valuesByPath.clear();
+          this.emitValues();
+          this.setState("stopped");
+          if (typeof notification.detail === "string" && notification.detail !== "live Workshop stopped") {
+            this.output.appendLine(notification.detail);
+          }
+        }
+      }),
+      client.onNotification("stasis/liveLog", (notification: unknown) => {
+        const fields = record(notification);
+        if (typeof fields?.message === "string") {
+          this.output.appendLine(fields.message);
+        }
+      }),
+    ];
+  }
 
   get state(): LiveSessionState {
     return this._state;
@@ -52,79 +80,50 @@ export class LiveSession implements vscode.Disposable {
     );
   }
 
+  get runtimeIdentity(): LiveRuntimeIdentity | undefined {
+    return this._runtimeIdentity;
+  }
+
   async start(): Promise<void> {
-    if (this.process) {
+    if (this._state !== "stopped") {
       return;
     }
     this.setState("starting");
-    const args = ["--workspace", this.root, "tui"];
-    if (this.entry.trim().length > 0) {
-      args.push(this.entry.trim());
+    this.output.appendLine(`Starting LSP-owned play session: ${this.root}`);
+    try {
+      const response = await this.client.sendRequest<unknown>("stasis/live/start", {
+        entry: this.entry.trim() || undefined,
+      });
+      this.acceptCommandResponse(response);
+    } catch (error) {
+      this.setState("stopped");
+      throw error;
     }
-    args.push("--live-stdio");
-    this.output.appendLine(`Starting: ${this.executable} ${args.join(" ")}`);
-    const child = spawn(this.executable, args, {
-      cwd: this.root,
-      stdio: "pipe",
-      windowsHide: true,
-    });
-    this.process = child;
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => this.acceptStdout(chunk));
-    child.stderr.on("data", (chunk: string) => this.output.append(chunk));
-    child.once("error", (error) => this.end(error));
-    child.once("exit", (code, signal) => {
-      const detail = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
-      this.end(new Error(`Stasis play session ended with ${detail}.`));
-    });
-
-    const status = await this.request("status");
-    this.applyStateFromResponse(status);
   }
 
-  request(type: string, fields: Record<string, unknown> = {}): Promise<LiveResponse> {
-    if (!this.process?.stdin.writable) {
-      return Promise.reject(new Error("No Stasis play session is running."));
+  async request(type: string, fields: Record<string, unknown> = {}): Promise<LiveResponse> {
+    if (this._state === "stopped") {
+      throw new Error("No Stasis play session is running.");
     }
-    const requestId = this.nextRequestId++;
-    const request = {
-      schema_version: 1,
-      request_id: requestId,
+    const response = await this.client.sendRequest<unknown>("stasis/live/request", {
       type,
       ...fields,
-    };
-    return new Promise<LiveResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(requestId);
-        reject(new Error(`Stasis live request ${requestId} timed out.`));
-      }, 300_000);
-      this.pending.set(requestId, { resolve, reject, timeout });
-      this.process?.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
-        if (!error) {
-          return;
-        }
-        const pending = this.pending.get(requestId);
-        if (pending) {
-          clearTimeout(pending.timeout);
-          this.pending.delete(requestId);
-          pending.reject(error);
-        }
-      });
     });
+    return this.acceptCommandResponse(response);
   }
 
   async stop(): Promise<void> {
-    const child = this.process;
-    if (!child) {
+    if (this._state === "stopped") {
       return;
     }
-    try {
-      await this.request("quit");
-    } catch (error) {
-      this.output.appendLine(`Graceful stop failed: ${String(error)}`);
-      child.kill();
+    const response = await this.client.sendRequest<unknown>("stasis/live/stop", {});
+    if (isLiveResponse(response)) {
+      this.acceptResponse(response);
     }
+    this._runtimeIdentity = undefined;
+    this.valuesByPath.clear();
+    this.emitValues();
+    this.setState("stopped");
   }
 
   async addWatch(path: string): Promise<void> {
@@ -147,44 +146,34 @@ export class LiveSession implements vscode.Disposable {
 
   dispose(): void {
     this.disposed = true;
-    this.process?.kill();
-    this.end(new Error("Stasis extension disposed."));
+    for (const subscription of this.subscriptions) {
+      subscription.dispose();
+    }
+    this.subscriptions.length = 0;
     this.stateEmitter.dispose();
     this.valuesEmitter.dispose();
   }
 
-  private acceptStdout(chunk: string): void {
-    try {
-      for (const decoded of this.decoder.push(chunk)) {
-        if (!isLiveResponse(decoded)) {
-          this.output.appendLine(`Ignored non-protocol stdout: ${JSON.stringify(decoded)}`);
-          continue;
-        }
-        this.acceptResponse(decoded);
-      }
-    } catch (error) {
-      this.output.appendLine(`Invalid live JSON response: ${String(error)}`);
+  private acceptCommandResponse(value: unknown): LiveResponse {
+    if (!isLiveResponse(value)) {
+      throw new Error("The Stasis LSP returned an invalid live response.");
     }
+    this.acceptResponse(value);
+    if (!value.ok) {
+      throw new Error(value.error ?? `Stasis live request failed: ${value.kind}`);
+    }
+    return value;
   }
 
   private acceptResponse(response: LiveResponse): void {
+    if (this.disposed) {
+      return;
+    }
+    if (response.runtime_identity) {
+      this._runtimeIdentity = response.runtime_identity;
+    }
     this.applyStateFromResponse(response);
     this.applyValueFromResponse(response);
-    if (response.request_id === 0 || ["completion_preparing", "edit_preparing"].includes(response.kind)) {
-      return;
-    }
-    const pending = this.pending.get(response.request_id);
-    if (!pending) {
-      this.output.appendLine(`Unmatched live response #${response.request_id}: ${response.kind}`);
-      return;
-    }
-    clearTimeout(pending.timeout);
-    this.pending.delete(response.request_id);
-    if (response.ok) {
-      pending.resolve(response);
-    } else {
-      pending.reject(new Error(response.error ?? `Stasis live request failed: ${response.kind}`));
-    }
   }
 
   private applyStateFromResponse(response: LiveResponse): void {
@@ -243,7 +232,9 @@ export class LiveSession implements vscode.Disposable {
   }
 
   private emitValues(): void {
-    this.valuesEmitter.fire(this.values);
+    if (!this.disposed) {
+      this.valuesEmitter.fire(this.values);
+    }
   }
 
   private setState(state: LiveSessionState): void {
@@ -251,22 +242,8 @@ export class LiveSession implements vscode.Disposable {
       return;
     }
     this._state = state;
-    this.stateEmitter.fire(state);
-  }
-
-  private end(error: Error): void {
-    if (!this.process && this._state === "stopped") {
-      return;
-    }
-    this.process = undefined;
-    this.setState("stopped");
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(error);
-    }
-    this.pending.clear();
-    if (!this.disposed && !error.message.includes("exit code 0")) {
-      this.output.appendLine(error.message);
+    if (!this.disposed) {
+      this.stateEmitter.fire(state);
     }
   }
 }

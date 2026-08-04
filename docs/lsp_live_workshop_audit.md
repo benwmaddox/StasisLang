@@ -1,0 +1,104 @@
+# LSP, Live Workshop, TUI, and DAP Completion Audit
+
+This audit maps the requested editor experience to the implementation and executable evidence. The
+compiler and `stasis_language_service` remain the semantic authorities; LSP, VS Code, the TUI, and
+DAP are transports or presentation hosts.
+
+## Architecture and latency
+
+- `stasis lsp --stdio` is a long-lived LSP 3.17 server. It owns one persistent, revisioned
+  `LanguageService` and incremental UTF-16 document overlays.
+- `vscode-stasis` uses `vscode-languageclient`. It registers no VS Code language providers and
+  starts no per-request compiler commands. Its only child processes are the persistent LSP and DAP
+  transports selected for a workspace or debug session.
+- Live Workshop process ownership, request correlation, backpressure, and the bounded latest-value
+  cache live in `stasis_lsp`. Static requests never wait for a game tick. Runtime values enrich a
+  result only when accepted source hashes and semantic identities match the current index.
+- The TUI holds the same Rust language-service and live-observation state in process; it does not
+  loop language queries through JSON-RPC or maintain another parser.
+- `warm_intelligence_queries_meet_local_latency_contract` covers warm completion, hover, signature,
+  symbol, diagnostic, and rename budgets. LSP worker tests cover asynchronous live dispatch and
+  backpressure.
+
+## Requirement matrix
+
+| # | Requirement | Implementation evidence | Behavioral evidence |
+| ---: | --- | --- | --- |
+| 1 | Continuous diagnostics | Incremental overlays publish compiler diagnostics through standard `textDocument/publishDiagnostics`. | `diagnostics_follow_dirty_overlay_revisions_and_clear_on_close`; `did_open_publishes_diagnostic_and_full_change_clears_it`; packaged VS Code E2E adds, observes, repairs, and clears an unsaved compiler error. |
+| 2 | Hover: type, owner, signature, docs, live value | `LanguageService::hover` joins compiler identities with compatible cached runtime observations; standard `textDocument/hover` projects Markdown. | `hover_reports_inferred_type_owner_signature_and_documentation`; `hover_uses_only_hash_and_type_compatible_live_observations`; standard LSP and packaged live-hover tests. |
+| 3 | Signature help | Compiler-owned callable signatures drive standard `textDocument/signatureHelp`, including the active parameter. | `signature_help_tracks_active_parameter`; `standard_requests_return_completion_hover_and_signature_help`. |
+| 4 | Compiler-validated rename | Prepare/rename uses semantic bindings, exact snapshot revisions, collision checks, candidate compilation, and versioned workspace edits. | `rename_is_revisioned_and_compiler_validated`; standard LSP prepare/rename assertions; TUI rename-preview test. |
+| 5 | Document/workspace symbols | Compiler symbol spans project through standard document and workspace symbol methods. | `navigation_and_symbols_share_compiler_owned_spans`; standard LSP symbol assertions; packaged Outline/workspace-symbol requests. |
+| 6 | Code actions | Structured compiler diagnostics carry quick-fix edits; organize imports uses the compiler import graph and validates the candidate workspace. Rename supplies the safe-refactor path. | `structured_import_quick_fixes_are_compiler_validated`; `duplicate_import_quick_fix_preserves_the_compiling_import`; `organize_imports_code_action_is_current_compiler_validated_edit`; standard and packaged code-action tests. |
+| 7 | Semantic highlighting | Standard semantic tokens use compiler bindings to distinguish type, function, global, field, parameter, and local identities. Broken edits retain only coordinate-safe unchanged regions. | `semantic_tokens_recover_only_unchanged_regions_of_broken_source`; `standard_semantic_tokens_distinguish_compiler_bound_symbols`; packaged semantic-token request. |
+| 8 | Inlay hints | Standard hints project compiler-inferred local types, resolved parameter names, and compatible cached live values. | `inlay_hints_publish_inferred_types_parameters_and_last_good_recovery`; standard and packaged inlay-hint tests. |
+| 9 | Detailed completion | Completion/resolve supplies signatures, deferred documentation, expected-type ranking, bracket-aware snippets, indexed fields, and revision-safe auto-import edits. | `completion_uses_typed_dirty_snapshot_scope_and_replacement_range`; `completion_adds_import_for_unreachable_workspace_symbol`; `compatible_runtime_layout_completes_indexed_collection_fields`; standard resolve and packaged completion tests. |
+| 10 | Call/type hierarchy | Standard call hierarchy projects compiler call edges. Type hierarchy explicitly models Stasis struct composition as containing/contained components, not inheritance. | `hierarchy_recovers_from_incomplete_function_without_stale_call_ranges`; `type_hierarchy_exposes_struct_composition`; standard hierarchy protocol and TUI hierarchy tests. |
+| 11 | DAP debugging | `stasis dap --stdio` runs the actual instrumented Cranelift JIT on a worker thread and exposes source breakpoints, pause/continue, step in/over/out, accepted-source stack frames, current lexical scalar values, typed globals, and watch evaluation. Normal JIT and AOT builds remain uninstrumented. | `jit_debugger_blocks_on_breakpoints_and_preserves_real_nested_frames`; `instrumented_jit_stops_with_nested_frames_and_current_lexical_values`; `instrumented_jit_exposes_scalar_foreach_item_and_index`; `dap_session_stops_in_real_jit_with_stack_locals_globals_and_stepping`; packaged VS Code DAP E2E. |
+| 12 | Editing polish | Standard folding, selection, linked editing, document/range/on-type formatting, and bracket-aware snippets use the canonical lexer, formatter, and semantic scopes. | `folding_and_selection_use_current_incomplete_overlay`; `linked_edits_use_current_compiler_scopes`; `document_range_and_on_type_formatting_share_canonical_formatter`; corresponding standard LSP and packaged tests. |
+
+## Recovery and navigation invariants
+
+- Dirty text is always the coordinate authority. Successful analysis publishes a new immutable
+  semantic snapshot atomically.
+- When a function is temporarily unparseable, diagnostics come from the current text while
+  read-only queries may use last-good identities only where offsets can be recovered safely.
+  Edit-producing operations such as rename are rejected until the semantic snapshot is current.
+- `incomplete_call_keeps_global_receiver_field_completion` covers both requested forms:
+  `function b() { a(state.` and `function b() { a(state. }`. Both retain `state.x` completion.
+- `global_receiver_and_owned_field_navigate_to_distinct_definitions` proves that invoking Go to
+  Definition on `state` in `state.x` reaches the global declaration, while invoking it on `x`
+  reaches the owning struct field.
+
+## TUI reuse
+
+The live TUI uses the persistent service directly for completion and exposes shared commands for
+references, diagnostics, hover/type inspection, definition, compiler-authored quick fixes,
+organize imports, inlay hints, call hierarchy, type hierarchy, and rename preview. Tests exercise
+reference and rename responses, structured quick fixes, persistent service reuse, and live-hover
+composition. Runtime control and terminal rendering remain host-specific.
+
+## Windows executable policy
+
+Generated AOT test programs can be blocked when launched from the system temp directory. The
+repository supports a stable `.stasis_cache/tmp` execution path and `STASIS_AOT_SIGN_TOOL`, invoked
+as `<tool> <artifact>`, for environments that require signing. On the audited Windows machine, all
+50 AOT backend tests passed from the stable path without signing; this distinguishes path policy
+from compiler or linker failure.
+
+## Final validation evidence
+
+The completion audit used bounded commands (all below five minutes):
+
+- `cargo test -p stasis_compiler -- --test-threads=1`: 462 passed, including real JIT, linked AOT,
+  JIT/AOT parity, debugger frames, and scalar `foreach` scope values. Generated executables used
+  `.stasis_cache/tmp` on Windows.
+- `cargo test --workspace --all-targets --exclude stasis_compiler --exclude stasis --
+  --test-threads=1`: all remaining library and target suites passed.
+- `cargo test -p stasis --all-targets -- --test-threads=1`: 245 library, 108 binary, and 21 CLI
+  integration tests passed under normal temp semantics. The Windows game-launch test passed
+  separately under `.stasis_cache/tmp` after system-temp execution was blocked with error 4551.
+- `cargo test -p stasis_language_service` and `cargo test -p stasis_lsp`: 29 and 16 passed.
+- `cargo test -p stasis --lib live_workspace::tests`: 50 shared TUI/live-workspace tests passed.
+- `npm test` and `npm run test:e2e` in `vscode-stasis`: unit/type checks passed; the packaged VSIX
+  installed into isolated VS Code 1.96 and completed the LSP, DAP, Live Workshop, hot-swap, and
+  framebuffer acceptance flow.
+- Every substantive gate in `tools/validate_repo.sh` passed when invoked directly from PowerShell.
+  The wrapper itself could not start because this environment does not expose `bash`, `dirname`, or
+  `python3` on its executable path; the Python commands, ignore audit, and partitioned Cargo command
+  were run directly instead.
+
+## Slice reflection
+
+- Good: the requirement-by-requirement audit found a real scope omission that feature-level DAP
+  coverage had missed, and a compiled breakpoint regression now proves the corrected behavior.
+- Bad: one broad test invocation initially reported policy and fixture-location failures together,
+  obscuring whether the compiler or the Windows launch environment was responsible.
+- Adjustment: keep executable-launch tests on the stable cache path, keep standalone project-root
+  tests on the system temp path, and report the two partitions explicitly.
+
+Theory gained: a debugger scope is truthful only when compiler metadata and values emitted at the
+same executable statement describe the same lexical bindings. The scalar `foreach` regression
+proves item and index identities now meet at the JIT rendezvous; this predicts composite `foreach`
+items should become expandable DAP variables by extending this value projection, without changing
+parsing, stepping, or frame ownership.

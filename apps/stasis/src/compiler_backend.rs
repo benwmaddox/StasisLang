@@ -4291,13 +4291,13 @@ mod tests {
             "\nfunction helper(): i32 { return missing(); }".to_string(),
         );
         let diagnostic = backend.runner_diagnostic_from_source(
-            Some(&stasis_compiler::SourceDiagnostic {
-                path: "dep.stasis".to_string(),
-                start: 1,
-                end: 9,
-                symbol: "helper".to_string(),
-                message: "unknown call target".to_string(),
-            }),
+            Some(&stasis_compiler::SourceDiagnostic::new(
+                "dep.stasis",
+                1,
+                9,
+                "helper",
+                "unknown call target",
+            )),
             "fallback".to_string(),
             Some(PathBuf::from("main.stasis")),
         );

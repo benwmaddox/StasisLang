@@ -1,13 +1,14 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::ffi::CStr;
@@ -35,6 +36,315 @@ pub struct JitHostEntryTargets {
 }
 
 static JIT_HOST_ENTRY_TARGETS: AtomicUsize = AtomicUsize::new(0);
+
+static JIT_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+fn jit_output_capture() -> &'static Mutex<Option<String>> {
+    static CAPTURE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CAPTURE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_jit_output_capture(enabled: bool) {
+    *lock_unpoisoned(jit_output_capture()) = enabled.then(String::new);
+}
+
+pub fn drain_jit_output() -> String {
+    let mut capture = lock_unpoisoned(jit_output_capture());
+    capture.as_mut().map(std::mem::take).unwrap_or_default()
+}
+
+fn write_jit_output(text: &str) {
+    let mut capture = lock_unpoisoned(jit_output_capture());
+    if let Some(capture) = capture.as_mut() {
+        capture.push_str(text);
+    } else {
+        print!("{text}");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JitDebugValue {
+    I64 { type_tag: i32, value: i64 },
+    F64 { type_tag: i32, value: f64 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JitDebugFrame {
+    pub function_id: u32,
+    pub site_id: u32,
+    pub values: HashMap<u32, JitDebugValue>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JitDebugStop {
+    pub sequence: u64,
+    pub function_id: u32,
+    pub site_id: u32,
+    pub frames: Vec<JitDebugFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitDebugResume {
+    Continue,
+    StepIn,
+    StepOver,
+    StepOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JitDebugRunMode {
+    Continue,
+    StepIn,
+    StepOver { depth: usize },
+    StepOut { depth: usize },
+}
+
+struct JitDebugState {
+    enabled: bool,
+    breakpoints: HashSet<(u32, u32)>,
+    frames: Vec<JitDebugFrame>,
+    mode: JitDebugRunMode,
+    stopped: Option<JitDebugStop>,
+    sequence: u64,
+}
+
+impl Default for JitDebugState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            breakpoints: HashSet::new(),
+            frames: Vec::new(),
+            mode: JitDebugRunMode::Continue,
+            stopped: None,
+            sequence: 0,
+        }
+    }
+}
+
+fn jit_debug_controller() -> &'static (Mutex<JitDebugState>, Condvar) {
+    static CONTROLLER: OnceLock<(Mutex<JitDebugState>, Condvar)> = OnceLock::new();
+    CONTROLLER.get_or_init(|| (Mutex::new(JitDebugState::default()), Condvar::new()))
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub fn enable_jit_debugger(breakpoints: impl IntoIterator<Item = (u32, u32)>) {
+    let (state, wake) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    state.enabled = true;
+    state.breakpoints = breakpoints.into_iter().collect();
+    state.frames.clear();
+    state.mode = JitDebugRunMode::Continue;
+    state.stopped = None;
+    JIT_DEBUG_ENABLED.store(true, Ordering::Release);
+    wake.notify_all();
+}
+
+pub fn set_jit_debug_breakpoints(breakpoints: impl IntoIterator<Item = (u32, u32)>) {
+    let (state, _) = jit_debug_controller();
+    lock_unpoisoned(state).breakpoints = breakpoints.into_iter().collect();
+}
+
+pub fn disable_jit_debugger() {
+    JIT_DEBUG_ENABLED.store(false, Ordering::Release);
+    let (state, wake) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    state.enabled = false;
+    state.frames.clear();
+    state.stopped = None;
+    state.mode = JitDebugRunMode::Continue;
+    wake.notify_all();
+}
+
+pub fn jit_debug_stop() -> Option<JitDebugStop> {
+    let (state, _) = jit_debug_controller();
+    lock_unpoisoned(state).stopped.clone()
+}
+
+pub fn wait_for_jit_debug_stop(after_sequence: u64, timeout: Duration) -> Option<JitDebugStop> {
+    let (state, wake) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(stop) = state
+            .stopped
+            .as_ref()
+            .filter(|stop| stop.sequence > after_sequence)
+        {
+            return Some(stop.clone());
+        }
+        if !state.enabled {
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let (next, result) = wake
+            .wait_timeout(state, remaining)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = next;
+        if result.timed_out() {
+            return state
+                .stopped
+                .as_ref()
+                .filter(|stop| stop.sequence > after_sequence)
+                .cloned();
+        }
+    }
+}
+
+pub fn resume_jit_debugger(resume: JitDebugResume) -> Result<(), String> {
+    let (state, wake) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    if !state.enabled {
+        return Err("JIT debugger is not enabled".to_string());
+    }
+    let depth = state.frames.len();
+    state.mode = match resume {
+        JitDebugResume::Continue => JitDebugRunMode::Continue,
+        JitDebugResume::StepIn => JitDebugRunMode::StepIn,
+        JitDebugResume::StepOver => JitDebugRunMode::StepOver { depth },
+        JitDebugResume::StepOut => JitDebugRunMode::StepOut { depth },
+    };
+    state.stopped = None;
+    wake.notify_all();
+    Ok(())
+}
+
+pub fn pause_jit_debugger() -> Result<(), String> {
+    let (state, _) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    if !state.enabled {
+        return Err("JIT debugger is not enabled".to_string());
+    }
+    state.mode = JitDebugRunMode::StepIn;
+    Ok(())
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_debug_frame_enter(function_id: i32) {
+    if !JIT_DEBUG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let (state, _) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    if state.enabled {
+        state.frames.push(JitDebugFrame {
+            function_id: function_id as u32,
+            site_id: 0,
+            values: HashMap::new(),
+        });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_debug_frame_leave(function_id: i32) {
+    if !JIT_DEBUG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let (state, _) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    if !state.enabled {
+        return;
+    }
+    if state
+        .frames
+        .last()
+        .is_some_and(|frame| frame.function_id == function_id as u32)
+    {
+        state.frames.pop();
+    } else {
+        state.frames.clear();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_debug_values_begin() {
+    if !JIT_DEBUG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let (state, _) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    if let Some(frame) = state.frames.last_mut() {
+        frame.values.clear();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_debug_value_i64(slot: i32, type_tag: i32, value: i64) {
+    if !JIT_DEBUG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let (state, _) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    if let Some(frame) = state.frames.last_mut() {
+        frame
+            .values
+            .insert(slot as u32, JitDebugValue::I64 { type_tag, value });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_debug_value_f64(slot: i32, type_tag: i32, value: f64) {
+    if !JIT_DEBUG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let (state, _) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    if let Some(frame) = state.frames.last_mut() {
+        frame
+            .values
+            .insert(slot as u32, JitDebugValue::F64 { type_tag, value });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_debug_statement(function_id: i32, site_id: i32) {
+    if !JIT_DEBUG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let (state, wake) = jit_debug_controller();
+    let mut state = lock_unpoisoned(state);
+    if !state.enabled {
+        return;
+    }
+    let function_id = function_id as u32;
+    let site_id = site_id as u32;
+    let depth = state.frames.len();
+    if let Some(frame) = state.frames.last_mut() {
+        frame.site_id = site_id;
+    }
+    let should_stop = state.breakpoints.contains(&(function_id, site_id))
+        || match state.mode {
+            JitDebugRunMode::Continue => false,
+            JitDebugRunMode::StepIn => true,
+            JitDebugRunMode::StepOver { depth: target } => depth <= target,
+            JitDebugRunMode::StepOut { depth: target } => depth < target,
+        };
+    if !should_stop {
+        return;
+    }
+    state.sequence = state.sequence.saturating_add(1);
+    state.mode = JitDebugRunMode::Continue;
+    state.stopped = Some(JitDebugStop {
+        sequence: state.sequence,
+        function_id,
+        site_id,
+        frames: state.frames.clone(),
+    });
+    wake.notify_all();
+    while state.enabled && state.stopped.is_some() {
+        state = wake
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+}
 
 pub fn publish_jit_host_entry_targets(targets: JitHostEntryTargets) -> Result<(), String> {
     validate_jit_host_entry_targets(&targets)?;
@@ -2534,15 +2844,13 @@ pub extern "C" fn stasis_jit_global_f64_array_ptr(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_print_i32(value: i32) {
-    print!("{value}");
-    let _ = std::io::stdout().flush();
+    write_jit_output(&value.to_string());
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     if let Some(bytes) = jit_text_arg_bytes(value_id) {
-        print!("{}", String::from_utf8_lossy(&bytes));
-        let _ = std::io::stdout().flush();
+        write_jit_output(&String::from_utf8_lossy(&bytes));
         return;
     }
 
@@ -2551,8 +2859,7 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
         .lock()
         .expect("jit string literal table mutex poisoned");
     if let Some(text) = guard.get(&value_id) {
-        print!("{text}");
-        let _ = std::io::stdout().flush();
+        write_jit_output(text);
     }
 }
 
@@ -4135,6 +4442,69 @@ mod tests {
             .expect("resolve GetTickCount");
         let value = invoke_noarg_u64(address).expect("invoke GetTickCount");
         assert!(value <= u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn jit_debugger_blocks_on_breakpoints_and_preserves_real_nested_frames() {
+        let _lock = test_lock();
+        disable_jit_debugger();
+        enable_jit_debugger([(2, 20)]);
+        let worker = std::thread::spawn(|| {
+            stasis_jit_debug_frame_enter(1);
+            stasis_jit_debug_value_i64(0, 1, 7);
+            stasis_jit_debug_statement(1, 10);
+            stasis_jit_debug_frame_enter(2);
+            stasis_jit_debug_value_f64(0, 2, 1.5);
+            stasis_jit_debug_statement(2, 20);
+            stasis_jit_debug_frame_enter(3);
+            stasis_jit_debug_statement(3, 30);
+            stasis_jit_debug_frame_leave(3);
+            stasis_jit_debug_statement(2, 21);
+            stasis_jit_debug_frame_leave(2);
+            stasis_jit_debug_statement(1, 11);
+            stasis_jit_debug_frame_leave(1);
+        });
+
+        let first = wait_for_jit_debug_stop(0, Duration::from_secs(2)).expect("breakpoint stop");
+        assert_eq!((first.function_id, first.site_id), (2, 20));
+        assert_eq!(first.frames.len(), 2);
+        assert_eq!(
+            first.frames[0].values.get(&0),
+            Some(&JitDebugValue::I64 {
+                type_tag: 1,
+                value: 7
+            })
+        );
+        assert_eq!(
+            first.frames[1].values.get(&0),
+            Some(&JitDebugValue::F64 {
+                type_tag: 2,
+                value: 1.5
+            })
+        );
+
+        resume_jit_debugger(JitDebugResume::StepIn).expect("step in");
+        let second =
+            wait_for_jit_debug_stop(first.sequence, Duration::from_secs(2)).expect("step-in stop");
+        assert_eq!((second.function_id, second.site_id), (3, 30));
+        assert_eq!(second.frames.len(), 3);
+
+        resume_jit_debugger(JitDebugResume::StepOut).expect("step out");
+        let third = wait_for_jit_debug_stop(second.sequence, Duration::from_secs(2))
+            .expect("step-out stop");
+        assert_eq!((third.function_id, third.site_id), (2, 21));
+        assert_eq!(third.frames.len(), 2);
+
+        resume_jit_debugger(JitDebugResume::StepOut).expect("step out to caller");
+        let fourth = wait_for_jit_debug_stop(third.sequence, Duration::from_secs(2))
+            .expect("caller step-out stop");
+        assert_eq!((fourth.function_id, fourth.site_id), (1, 11));
+        assert_eq!(fourth.frames.len(), 1);
+
+        resume_jit_debugger(JitDebugResume::Continue).expect("continue");
+        worker.join().expect("debug worker");
+        disable_jit_debugger();
+        assert!(jit_debug_stop().is_none());
     }
 
     #[test]

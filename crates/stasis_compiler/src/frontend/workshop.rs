@@ -1,11 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::compiler::source_workshop_items;
+use crate::compiler::{source_workshop_items, Compiler};
+use crate::data_flow::CompilerLocalType;
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
 use crate::identity::{
@@ -542,6 +543,38 @@ pub fn load_workshop_edit_workspace(
     Ok(files)
 }
 
+pub fn load_workshop_source_workspace(
+    project_root: &Path,
+    entry_file: &Path,
+) -> Result<Vec<WorkshopSourceFile>, String> {
+    let mut files = Vec::new();
+    let mut known = BTreeSet::new();
+    let entry = if entry_file.is_absolute() {
+        entry_file.to_path_buf()
+    } else {
+        project_root.join(entry_file)
+    };
+    if entry.is_file() {
+        let relative = normalize_workshop_project_path(project_root, &entry);
+        known.insert(relative.clone());
+        files.push(WorkshopSourceFile {
+            path: relative,
+            source: fs::read_to_string(&entry)
+                .map_err(|error| format!("failed reading {}: {error}", entry.display()))?,
+        });
+    }
+    for directory in ["src", "tests"] {
+        collect_workshop_source_files(
+            project_root,
+            &project_root.join(directory),
+            &mut known,
+            &mut files,
+        )?;
+    }
+    files.sort_by_key(|file| file.path.clone());
+    Ok(files)
+}
+
 pub fn workshop_reachable_files(
     files: &[WorkshopSourceFile],
     entry_file: &Path,
@@ -961,6 +994,31 @@ pub struct WorkshopReference {
     pub containing_source_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopRenameEdit {
+    pub file: String,
+    pub source_span: WorkshopSourceSpan,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopRenamePlan {
+    pub old_name: String,
+    pub new_name: String,
+    pub kind: String,
+    pub owner: Option<String>,
+    pub request_span: WorkshopSourceSpan,
+    pub edits: Vec<WorkshopRenameEdit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopRenamePreparation {
+    pub name: String,
+    pub kind: String,
+    pub owner: Option<String>,
+    pub request_span: WorkshopSourceSpan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopCompletionItem {
     pub text: String,
@@ -987,6 +1045,257 @@ pub struct WorkshopCompletionScope {
     pub owner_end: Option<usize>,
     pub visible_from: usize,
     pub visible_to: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopSemanticToken {
+    pub text: String,
+    pub kind: String,
+    pub source_span: WorkshopSourceSpan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkshopInlayHintKind {
+    Type,
+    Parameter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopInlayHint {
+    pub file: String,
+    pub source_span: WorkshopSourceSpan,
+    pub kind: WorkshopInlayHintKind,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopHierarchyItem {
+    pub symbol_id: String,
+    pub name: String,
+    pub detail: String,
+    pub file: String,
+    pub source_span: WorkshopSourceSpan,
+    pub selection_span: WorkshopSourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopCallHierarchyEdge {
+    pub caller_symbol_id: String,
+    pub callee_symbol_id: String,
+    pub call_span: WorkshopSourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopTypeHierarchyEdge {
+    pub container_symbol_id: String,
+    pub component_symbol_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopFoldingRange {
+    pub source_span: WorkshopSourceSpan,
+}
+
+pub fn workshop_folding_ranges(source: &str) -> Result<Vec<WorkshopFoldingRange>, String> {
+    let mut ranges = workshop_delimiter_ranges(source)?
+        .into_iter()
+        .filter(|(delimiter, _)| *delimiter == '{')
+        .map(|(_, range)| {
+            Ok(WorkshopFoldingRange {
+                source_span: span_from_range(range)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    ranges.sort_by_key(|range| (range.source_span.start, range.source_span.end));
+    Ok(ranges)
+}
+
+pub fn workshop_selection_ranges(
+    source: &str,
+    byte_offset: usize,
+) -> Result<Vec<WorkshopSourceSpan>, String> {
+    if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
+        return Err(format!("selection offset {byte_offset} is invalid"));
+    }
+    let tokens = lex(source)?;
+    let mut ranges = tokens
+        .iter()
+        .filter(|token| token.kind != TokenKind::Eof)
+        .filter(|token| token.start <= byte_offset && byte_offset < token.end)
+        .map(|token| token.start..token.end)
+        .collect::<Vec<_>>();
+    ranges.extend(
+        workshop_delimiter_ranges(source)?
+            .into_iter()
+            .map(|(_, range)| range)
+            .filter(|range| range.start <= byte_offset && byte_offset <= range.end),
+    );
+    ranges.push(0..source.len());
+    ranges.sort_by_key(|range| (range.end.saturating_sub(range.start), range.start));
+    ranges.dedup();
+    let mut nested = Vec::<Range<usize>>::new();
+    for range in ranges {
+        if nested.last().is_none_or(|child| {
+            range.start <= child.start && child.end <= range.end && *child != range
+        }) {
+            nested.push(range);
+        }
+    }
+    nested
+        .into_iter()
+        .map(span_from_range)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn workshop_delimiter_ranges(source: &str) -> Result<Vec<(char, Range<usize>)>, String> {
+    let tokens = lex(source)?;
+    let mut stack = Vec::<(char, usize)>::new();
+    let mut ranges = Vec::new();
+    for token in tokens {
+        let text = token_text(source, token);
+        let character = match token.kind {
+            TokenKind::LBrace => Some('{'),
+            TokenKind::LParen => Some('('),
+            TokenKind::Other if text == "[" => Some('['),
+            _ => None,
+        };
+        if let Some(character) = character {
+            stack.push((character, token.start));
+            continue;
+        }
+        let expected = match token.kind {
+            TokenKind::RBrace => Some('{'),
+            TokenKind::RParen => Some('('),
+            TokenKind::Other if text == "]" => Some('['),
+            _ => None,
+        };
+        let Some(expected) = expected else {
+            continue;
+        };
+        if stack.last().is_some_and(|(open, _)| *open == expected) {
+            let (_, start) = stack.pop().expect("matching delimiter remains on stack");
+            ranges.push((expected, start..token.end));
+        }
+    }
+    Ok(ranges)
+}
+
+pub fn workshop_call_hierarchy(
+    files: &[WorkshopSourceFile],
+) -> Result<(Vec<WorkshopHierarchyItem>, Vec<WorkshopCallHierarchyEdge>), String> {
+    let symbols = workshop_symbols(files)?;
+    let mut compiler = Compiler::new();
+    for file in files {
+        compiler.upsert_file(file.path.clone(), file.source.clone());
+    }
+    compiler
+        .index_pass()
+        .map_err(|error| format!("{error:?}"))?;
+
+    let functions = compiler.functions();
+    let by_id = functions
+        .iter()
+        .map(|function| (function.id, function.symbol_id.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let items = symbols
+        .iter()
+        .filter(|symbol| symbol.kind == WorkshopSymbolKind::Function)
+        .map(|symbol| hierarchy_item(files, symbol))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut edges = Vec::new();
+    for caller in functions {
+        let caller_symbol_id = caller.symbol_id.to_string();
+        for site in &caller.call_sites {
+            let Some(callee_symbol_id) = by_id.get(&site.callee) else {
+                continue;
+            };
+            edges.push(WorkshopCallHierarchyEdge {
+                caller_symbol_id: caller_symbol_id.clone(),
+                callee_symbol_id: callee_symbol_id.clone(),
+                call_span: WorkshopSourceSpan {
+                    start: site.source_range.start,
+                    end: site.source_range.end,
+                },
+            });
+        }
+    }
+    edges.sort_by_key(|edge| {
+        (
+            edge.caller_symbol_id.clone(),
+            edge.call_span.start,
+            edge.callee_symbol_id.clone(),
+        )
+    });
+    edges.dedup();
+    Ok((items, edges))
+}
+
+pub fn workshop_type_hierarchy(
+    files: &[WorkshopSourceFile],
+) -> Result<(Vec<WorkshopHierarchyItem>, Vec<WorkshopTypeHierarchyEdge>), String> {
+    let symbols = workshop_symbols(files)?;
+    let struct_symbols = symbols
+        .iter()
+        .filter(|symbol| symbol.kind == WorkshopSymbolKind::Struct)
+        .map(|symbol| (symbol.name.clone(), symbol))
+        .collect::<BTreeMap<_, _>>();
+    let items = struct_symbols
+        .values()
+        .map(|symbol| hierarchy_item(files, symbol))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut edges = Vec::new();
+    for file in files {
+        for definition in source_workshop_items(&file.source)?.layout.structs {
+            let Some(container) = struct_symbols.get(&definition.name) else {
+                continue;
+            };
+            for field in definition.fields {
+                let component_name = workshop_base_type(&field.type_name);
+                let Some(component) = struct_symbols.get(component_name) else {
+                    continue;
+                };
+                edges.push(WorkshopTypeHierarchyEdge {
+                    container_symbol_id: container.symbol_id.clone(),
+                    component_symbol_id: component.symbol_id.clone(),
+                });
+            }
+        }
+    }
+    edges.sort_by_key(|edge| {
+        (
+            edge.container_symbol_id.clone(),
+            edge.component_symbol_id.clone(),
+        )
+    });
+    edges.dedup();
+    Ok((items, edges))
+}
+
+fn hierarchy_item(
+    files: &[WorkshopSourceFile],
+    symbol: &WorkshopSymbol,
+) -> Result<WorkshopHierarchyItem, String> {
+    let file = files
+        .iter()
+        .find(|file| file.path == symbol.file)
+        .ok_or_else(|| format!("hierarchy source file is missing: {}", symbol.file))?;
+    let selection = lex(&file.source)?
+        .into_iter()
+        .find(|token| {
+            token.kind == TokenKind::Identifier
+                && symbol.source_span.start as usize <= token.start
+                && token.end <= symbol.source_span.end as usize
+                && token_text(&file.source, *token) == symbol.name
+        })
+        .ok_or_else(|| format!("hierarchy declaration name is missing: {}", symbol.name))?;
+    Ok(WorkshopHierarchyItem {
+        symbol_id: symbol.symbol_id.clone(),
+        name: symbol.name.clone(),
+        detail: symbol.signature.clone(),
+        file: symbol.file.clone(),
+        source_span: symbol.source_span.clone(),
+        selection_span: span_from_range(selection.start..selection.end)?,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1029,6 +1338,43 @@ pub struct WorkshopSemanticEditPlan {
     pub edits: Vec<WorkshopSemanticEdit>,
     pub changed_files: Vec<WorkshopSemanticFileChange>,
     pub reload: WorkshopReloadClassification,
+}
+
+pub fn organize_workshop_imports(
+    files: &[WorkshopSourceFile],
+    file_path: &str,
+) -> Result<Option<WorkshopSemanticFileChange>, String> {
+    let before = files
+        .iter()
+        .find(|file| file.path == file_path)
+        .ok_or_else(|| format!("organize-imports file is not loaded: {file_path}"))?;
+    let mut after = files.to_vec();
+    prune_unused_workshop_imports(&mut after, &BTreeSet::from([file_path.to_string()]))?;
+
+    let file_index = after
+        .iter()
+        .position(|file| file.path == file_path)
+        .expect("organize-imports file remains loaded");
+    let rendered = render_imports(parse_workshop_import_paths(&after[file_index].source)?);
+    let import_item = workshop_source_items(&after)?
+        .into_iter()
+        .find(|item| item.file == file_path && item.kind == WorkshopSourceItemKind::Imports)
+        .ok_or_else(|| format!("imports item not found for {file_path}"))?;
+    if import_item.source != rendered {
+        replace_source_item(&mut after, &import_item, &rendered)?;
+    }
+
+    let after = &after[file_index];
+    if after.source == before.source {
+        return Ok(None);
+    }
+    Ok(Some(WorkshopSemanticFileChange {
+        file: file_path.to_string(),
+        before_source: before.source.clone(),
+        after_source: after.source.clone(),
+        before_hash: workshop_source_hash(&before.source),
+        after_hash: workshop_source_hash(&after.source),
+    }))
 }
 
 const fn semantic_edit_schema_version() -> u32 {
@@ -1153,9 +1499,11 @@ pub fn find_workshop_references(
     }
     let limit = limit.clamp(1, 256);
     let items = workshop_source_items(files)?;
-    let mut references = field_definition_reference(files, &segments, &items)?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let definition = match field_definition_reference(files, &segments, &items)? {
+        Some(reference) => Some(reference),
+        None => global_definition_reference(files, &segments, &items)?,
+    };
+    let mut references = definition.into_iter().collect::<Vec<_>>();
     for file in files {
         let tokens = lex(&file.source)?;
         for start_index in 0..tokens.len() {
@@ -1187,6 +1535,13 @@ pub fn find_workshop_references(
             };
             let kind =
                 classify_workshop_reference(&file.source, &tokens, end_index, item, symbol, start);
+            if references.iter().any(|reference| {
+                reference.file == file.path
+                    && reference.source_span.start as usize == start
+                    && reference.source_span.end as usize == end
+            }) {
+                continue;
+            }
             references.push(WorkshopReference {
                 symbol: symbol.to_string(),
                 kind,
@@ -1207,6 +1562,683 @@ pub fn find_workshop_references(
         }
     }
     Ok(references)
+}
+
+pub fn plan_workshop_rename(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    byte_offset: usize,
+    new_name: &str,
+) -> Result<(Vec<WorkshopSourceFile>, WorkshopRenamePlan), String> {
+    if !is_workshop_identifier(new_name) {
+        return Err("rename target must be an ASCII Stasis identifier".to_string());
+    }
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("rename file is not indexed: {request_file}"))?;
+    let (request_token, semantic_path) = rename_symbol_at(&file.source, byte_offset)?;
+    let old_name = token_text(&file.source, request_token).to_string();
+    if old_name == new_name {
+        return Err("rename target already has the requested name".to_string());
+    }
+    let catalog = workshop_completion_items(files)?;
+    let target =
+        resolve_workshop_rename_target(files, &catalog, file, request_token, &semantic_path)?;
+    reject_workshop_rename_collision(&catalog, &target, new_name)?;
+    let mut references = rename_target_references(files, &catalog, &target)?;
+    references.insert((file.path.clone(), request_token.start, request_token.end));
+    let edits = references
+        .into_iter()
+        .map(|(file, start, end)| {
+            Ok(WorkshopRenameEdit {
+                file,
+                source_span: WorkshopSourceSpan {
+                    start: u32::try_from(start)
+                        .map_err(|_| "rename edit start exceeds u32".to_string())?,
+                    end: u32::try_from(end)
+                        .map_err(|_| "rename edit end exceeds u32".to_string())?,
+                },
+                new_text: new_name.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if edits.is_empty() {
+        return Err("rename target has no compiler-owned source locations".to_string());
+    }
+    let plan = WorkshopRenamePlan {
+        old_name,
+        new_name: new_name.to_string(),
+        kind: target.kind,
+        owner: target.owner,
+        request_span: WorkshopSourceSpan {
+            start: u32::try_from(request_token.start)
+                .map_err(|_| "rename request start exceeds u32".to_string())?,
+            end: u32::try_from(request_token.end)
+                .map_err(|_| "rename request end exceeds u32".to_string())?,
+        },
+        edits,
+    };
+    let mut after = files.to_vec();
+    apply_workshop_rename_edits(&mut after, &plan)?;
+    build_workshop_symbol_tree(&after)?;
+    workshop_completion_items(&after)?;
+    Ok((after, plan))
+}
+
+pub fn prepare_workshop_rename(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    byte_offset: usize,
+) -> Result<WorkshopRenamePreparation, String> {
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("rename file is not indexed: {request_file}"))?;
+    let (request_token, semantic_path) = rename_symbol_at(&file.source, byte_offset)?;
+    let catalog = workshop_completion_items(files)?;
+    let target =
+        resolve_workshop_rename_target(files, &catalog, file, request_token, &semantic_path)?;
+    Ok(WorkshopRenamePreparation {
+        name: token_text(&file.source, request_token).to_string(),
+        kind: target.kind,
+        owner: target.owner,
+        request_span: WorkshopSourceSpan {
+            start: u32::try_from(request_token.start)
+                .map_err(|_| "rename request start exceeds u32".to_string())?,
+            end: u32::try_from(request_token.end)
+                .map_err(|_| "rename request end exceeds u32".to_string())?,
+        },
+    })
+}
+
+pub fn workshop_linked_edit_ranges(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    byte_offset: usize,
+) -> Result<Option<Vec<WorkshopSourceSpan>>, String> {
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("linked-edit file is not indexed: {request_file}"))?;
+    let (request_token, semantic_path) = rename_symbol_at(&file.source, byte_offset)?;
+    let catalog = workshop_completion_items(files)?;
+    let target =
+        resolve_workshop_rename_target(files, &catalog, file, request_token, &semantic_path)?;
+    if !matches!(target.kind.as_str(), "local" | "parameter") {
+        return Ok(None);
+    }
+    let mut references = rename_target_references(files, &catalog, &target)?;
+    references.insert((file.path.clone(), request_token.start, request_token.end));
+    let ranges = references
+        .into_iter()
+        .filter(|(path, _, _)| normalize_project_path_text(path) == normalized_file)
+        .map(|(_, start, end)| span_from_range(start..end))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((ranges.len() > 1).then_some(ranges))
+}
+
+#[derive(Clone)]
+struct WorkshopRenameTarget {
+    kind: String,
+    name: String,
+    owner: Option<String>,
+    file: String,
+    scope: Option<WorkshopCompletionScope>,
+    signature: Option<String>,
+}
+
+fn rename_symbol_at(source: &str, byte_offset: usize) -> Result<(Token, String), String> {
+    if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
+        return Err(format!("rename offset {byte_offset} is invalid"));
+    }
+    let tokens = lex(source)?;
+    let token = tokens
+        .iter()
+        .copied()
+        .find(|token| {
+            token.kind == TokenKind::Identifier
+                && token.start <= byte_offset
+                && byte_offset <= token.end
+        })
+        .ok_or_else(|| "no renameable Stasis identifier at position".to_string())?;
+    Ok((token, semantic_path_for_token(source, token)?))
+}
+
+fn semantic_path_for_token(source: &str, token: Token) -> Result<String, String> {
+    let line_start = source[..token.start]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let prefix = &source[line_start..token.end];
+    let mut start = prefix.len();
+    let mut bracket_depth = 0usize;
+    for (index, character) in prefix.char_indices().rev() {
+        match character {
+            ']' => bracket_depth = bracket_depth.saturating_add(1),
+            '[' if bracket_depth > 0 => bracket_depth -= 1,
+            _ if bracket_depth > 0 => {}
+            character
+                if character.is_ascii_alphanumeric() || character == '_' || character == '.' => {}
+            _ => {
+                start = index + character.len_utf8();
+                break;
+            }
+        }
+        start = index;
+    }
+    let mut path = String::new();
+    bracket_depth = 0;
+    for character in prefix[start..].chars() {
+        match character {
+            '[' => bracket_depth = bracket_depth.saturating_add(1),
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            _ if bracket_depth > 0 => {}
+            _ => path.push(character),
+        }
+    }
+    if path
+        .split('.')
+        .any(|segment| !is_workshop_identifier(segment))
+    {
+        return Err("rename target is not a semantic identifier path".to_string());
+    }
+    Ok(path)
+}
+
+pub fn workshop_semantic_tokens(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+) -> Result<Vec<WorkshopSemanticToken>, String> {
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("semantic-token file is not indexed: {request_file}"))?;
+    let catalog = workshop_completion_items(files)?;
+    let tokens = lex(&file.source)?;
+    let mut semantic_tokens = Vec::new();
+    for token in tokens
+        .into_iter()
+        .filter(|token| token.kind == TokenKind::Identifier)
+    {
+        let Ok(semantic_path) = semantic_path_for_token(&file.source, token) else {
+            continue;
+        };
+        let Ok(target) =
+            resolve_workshop_rename_target(files, &catalog, file, token, &semantic_path)
+        else {
+            continue;
+        };
+        semantic_tokens.push(WorkshopSemanticToken {
+            text: token_text(&file.source, token).to_string(),
+            kind: target.kind,
+            source_span: WorkshopSourceSpan {
+                start: u32::try_from(token.start)
+                    .map_err(|_| "semantic token start exceeds u32".to_string())?,
+                end: u32::try_from(token.end)
+                    .map_err(|_| "semantic token end exceeds u32".to_string())?,
+            },
+        });
+    }
+    Ok(semantic_tokens)
+}
+
+pub fn workshop_inlay_hints(
+    files: &[WorkshopSourceFile],
+) -> Result<Vec<WorkshopInlayHint>, String> {
+    let mut compiler = Compiler::new();
+    for file in files {
+        compiler.upsert_file(file.path.clone(), file.source.clone());
+    }
+    let locals = compiler
+        .local_types()
+        .map_err(|error| format!("inlay type analysis failed: {error:?}"))?;
+    workshop_inlay_hints_from_local_types(files, &locals)
+}
+
+pub fn workshop_inlay_hints_from_local_types(
+    files: &[WorkshopSourceFile],
+    locals: &[CompilerLocalType],
+) -> Result<Vec<WorkshopInlayHint>, String> {
+    let mut inferred = BTreeMap::<(String, String, String), VecDeque<String>>::new();
+    for local in locals.iter().filter(|local| local.inferred) {
+        inferred
+            .entry((
+                local.file.clone(),
+                local.function.clone(),
+                local.name.clone(),
+            ))
+            .or_default()
+            .push_back(local.type_name.clone());
+    }
+
+    let catalog = workshop_completion_items(files)?;
+    let mut hints = Vec::new();
+    for file in files {
+        let functions = parse_top_level_functions(&file.source)?;
+        let tokens = lex(&file.source)?;
+        for function in &functions {
+            let mut cursor =
+                tokens.partition_point(|token| token.start < function.body_range.start);
+            while cursor + 2 < tokens.len() && tokens[cursor].start < function.body_range.end {
+                let token = tokens[cursor];
+                if token.kind == TokenKind::Identifier && token_text(&file.source, token) == "let" {
+                    let name = tokens[cursor + 1];
+                    let annotation = tokens[cursor + 2];
+                    if name.kind == TokenKind::Identifier && annotation.kind != TokenKind::Colon {
+                        let key = (
+                            file.path.clone(),
+                            function.name.clone(),
+                            token_text(&file.source, name).to_string(),
+                        );
+                        if let Some(type_name) =
+                            inferred.get_mut(&key).and_then(VecDeque::pop_front)
+                        {
+                            hints.push(WorkshopInlayHint {
+                                file: file.path.clone(),
+                                source_span: span_from_range(name.start..name.end)?,
+                                kind: WorkshopInlayHintKind::Type,
+                                label: format!(": {type_name}"),
+                            });
+                        }
+                    }
+                }
+                cursor += 1;
+            }
+        }
+
+        for (index, token) in tokens.iter().copied().enumerate() {
+            if token.kind != TokenKind::Identifier
+                || !tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.kind == TokenKind::LParen)
+                || functions.iter().any(|function| {
+                    function.name == token_text(&file.source, token)
+                        && function.signature_range.start <= token.start
+                        && token.end <= function.signature_range.end
+                })
+            {
+                continue;
+            }
+            let Ok(semantic_path) = semantic_path_for_token(&file.source, token) else {
+                continue;
+            };
+            let Ok(target) =
+                resolve_workshop_rename_target(files, &catalog, file, token, &semantic_path)
+            else {
+                continue;
+            };
+            if !matches!(target.kind.as_str(), "function" | "method") {
+                continue;
+            }
+            let Some(signature) = target.signature.as_deref() else {
+                continue;
+            };
+            let Some(arguments) = call_argument_spans(&file.source, &tokens, index + 1) else {
+                continue;
+            };
+            let mut parameters = signature_parameter_names(signature);
+            if target.kind == "method" && parameters.len() == arguments.len() + 1 {
+                parameters.remove(0);
+            }
+            for (argument, parameter) in arguments.into_iter().zip(parameters) {
+                if file.source[argument.clone()].trim() == parameter {
+                    continue;
+                }
+                hints.push(WorkshopInlayHint {
+                    file: file.path.clone(),
+                    source_span: span_from_range(argument)?,
+                    kind: WorkshopInlayHintKind::Parameter,
+                    label: format!("{parameter}:"),
+                });
+            }
+        }
+    }
+    hints.sort_by_key(|hint| (hint.file.clone(), hint.source_span.start, hint.kind as u8));
+    Ok(hints)
+}
+
+fn signature_parameter_names(signature: &str) -> Vec<String> {
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = signature[open + 1..]
+        .find(')')
+        .map(|index| open + 1 + index)
+    else {
+        return Vec::new();
+    };
+    signature[open + 1..close]
+        .split(',')
+        .filter_map(|parameter| parameter.split_once(':').map(|(name, _)| name.trim()))
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn call_argument_spans(
+    source: &str,
+    tokens: &[Token],
+    open_index: usize,
+) -> Option<Vec<Range<usize>>> {
+    let mut arguments = Vec::new();
+    let mut argument_start = None;
+    let mut argument_end = None;
+    let mut paren_depth = 1usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    for token in tokens.iter().copied().skip(open_index + 1) {
+        match token.kind {
+            TokenKind::LParen => paren_depth += 1,
+            TokenKind::RParen => {
+                paren_depth = paren_depth.checked_sub(1)?;
+                if paren_depth == 0 {
+                    if let (Some(start), Some(end)) = (argument_start, argument_end) {
+                        arguments.push(start..end);
+                    }
+                    return Some(arguments);
+                }
+            }
+            TokenKind::LBrace => brace_depth += 1,
+            TokenKind::RBrace => brace_depth = brace_depth.checked_sub(1)?,
+            TokenKind::Other if token_text(source, token) == "[" => bracket_depth += 1,
+            TokenKind::Other if token_text(source, token) == "]" => {
+                bracket_depth = bracket_depth.checked_sub(1)?;
+            }
+            TokenKind::Comma if paren_depth == 1 && bracket_depth == 0 && brace_depth == 0 => {
+                if let (Some(start), Some(end)) = (argument_start.take(), argument_end.take()) {
+                    arguments.push(start..end);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if paren_depth > 0 {
+            argument_start.get_or_insert(token.start);
+            argument_end = Some(token.end);
+        }
+    }
+    None
+}
+
+fn resolve_workshop_rename_target(
+    files: &[WorkshopSourceFile],
+    catalog: &[WorkshopCompletionItem],
+    file: &WorkshopSourceFile,
+    token: Token,
+    semantic_path: &str,
+) -> Result<WorkshopRenameTarget, String> {
+    let token_name = token_text(&file.source, token);
+    let mut candidates = catalog
+        .iter()
+        .filter(|item| {
+            (item.text == semantic_path || item.text == token_name)
+                && rename_completion_visible(files, item, file, token)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|item| {
+        let scope = item.scope.as_ref();
+        (
+            usize::from(scope.is_none()),
+            scope
+                .map(|scope| scope.visible_to.saturating_sub(scope.visible_from))
+                .unwrap_or(usize::MAX),
+            std::cmp::Reverse(scope.map(|scope| scope.visible_from).unwrap_or(0)),
+            item.kind.clone(),
+        )
+    });
+    let primary = candidates
+        .first()
+        .copied()
+        .ok_or_else(|| format!("compiler could not resolve rename target '{semantic_path}'"))?;
+    Ok(WorkshopRenameTarget {
+        kind: primary.kind.clone(),
+        name: token_name.to_string(),
+        owner: primary.owner.clone(),
+        file: file.path.clone(),
+        scope: primary.scope.clone(),
+        signature: primary.signature.clone(),
+    })
+}
+
+fn rename_completion_visible(
+    files: &[WorkshopSourceFile],
+    item: &WorkshopCompletionItem,
+    file: &WorkshopSourceFile,
+    token: Token,
+) -> bool {
+    let Some(scope) = item.scope.as_ref() else {
+        return true;
+    };
+    if scope.file != file.path {
+        return false;
+    }
+    if scope.visible_from <= token.start && token.end <= scope.visible_to {
+        return true;
+    }
+    if item.kind == "local" && token.end == scope.visible_from {
+        return true;
+    }
+    if item.kind == "parameter" {
+        return files
+            .iter()
+            .find(|source| source.path == scope.file)
+            .and_then(|source| parse_top_level_functions(&source.source).ok())
+            .is_some_and(|functions| {
+                functions.into_iter().any(|function| {
+                    function.name == scope.owner
+                        && function.signature_range.start <= token.start
+                        && token.end <= function.signature_range.end
+                })
+            });
+    }
+    false
+}
+
+fn reject_workshop_rename_collision(
+    catalog: &[WorkshopCompletionItem],
+    target: &WorkshopRenameTarget,
+    new_name: &str,
+) -> Result<(), String> {
+    let collision = catalog.iter().any(|item| {
+        item.text == new_name
+            && match target.kind.as_str() {
+                "local" | "parameter" => {
+                    matches!(item.kind.as_str(), "local" | "parameter")
+                        && item.file == target.file
+                        && item.scope.as_ref().zip(target.scope.as_ref()).is_some_and(
+                            |(left, right)| {
+                                left.owner == right.owner
+                                    && left.visible_from < right.visible_to
+                                    && right.visible_from < left.visible_to
+                            },
+                        )
+                }
+                "field" | "state_path" => {
+                    matches!(item.kind.as_str(), "field" | "state_path")
+                        && item.owner == target.owner
+                }
+                _ => item.scope.is_none(),
+            }
+    });
+    if collision {
+        Err(format!(
+            "rename would collide with existing symbol '{new_name}'"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn rename_target_references(
+    files: &[WorkshopSourceFile],
+    catalog: &[WorkshopCompletionItem],
+    target: &WorkshopRenameTarget,
+) -> Result<BTreeSet<(String, usize, usize)>, String> {
+    if matches!(target.kind.as_str(), "local" | "parameter") {
+        return scoped_binding_references(files, catalog, target);
+    }
+    let mut paths = BTreeSet::new();
+    if matches!(target.kind.as_str(), "field" | "state_path") {
+        for item in catalog.iter().filter(|item| {
+            matches!(item.kind.as_str(), "field" | "state_path")
+                && item.owner == target.owner
+                && item.text.rsplit('.').next() == Some(target.name.as_str())
+                && item.text.contains('.')
+        }) {
+            paths.insert(item.text.clone());
+        }
+        if let Some(owner) = &target.owner {
+            paths.insert(format!("{owner}.{}", target.name));
+        }
+    } else {
+        paths.insert(target.name.clone());
+    }
+    let mut locations = BTreeSet::new();
+    for path in paths {
+        let references = find_workshop_references(files, &path, 256)?;
+        if references.len() == 256 {
+            return Err(format!(
+                "rename target '{path}' exceeds the 255-reference safety limit"
+            ));
+        }
+        for reference in references {
+            let end = reference.source_span.end as usize;
+            let start = end.saturating_sub(target.name.len());
+            locations.insert((reference.file, start, end));
+        }
+    }
+    Ok(locations)
+}
+
+fn scoped_binding_references(
+    files: &[WorkshopSourceFile],
+    catalog: &[WorkshopCompletionItem],
+    target: &WorkshopRenameTarget,
+) -> Result<BTreeSet<(String, usize, usize)>, String> {
+    let scope = target
+        .scope
+        .as_ref()
+        .ok_or_else(|| "scoped rename target has no compiler scope".to_string())?;
+    let file = files
+        .iter()
+        .find(|file| file.path == scope.file)
+        .ok_or_else(|| format!("rename scope file is missing: {}", scope.file))?;
+    let shadowed = catalog
+        .iter()
+        .filter(|item| {
+            item.text == target.name
+                && matches!(item.kind.as_str(), "local" | "parameter")
+                && item.file == scope.file
+        })
+        .filter_map(|item| item.scope.as_ref())
+        .filter(|other| {
+            scope.visible_from < other.visible_from && other.visible_to <= scope.visible_to
+        })
+        .map(|other| other.visible_from..other.visible_to)
+        .collect::<Vec<_>>();
+    let tokens = lex(&file.source)?;
+    let functions = (target.kind == "parameter")
+        .then(|| parse_top_level_functions(&file.source))
+        .transpose()?
+        .unwrap_or_default();
+    let mut locations = BTreeSet::new();
+    for token in tokens {
+        if token.kind != TokenKind::Identifier || token_text(&file.source, token) != target.name {
+            continue;
+        }
+        let is_local_definition = target.kind == "local" && token.end == scope.visible_from;
+        let is_parameter_definition = target.kind == "parameter"
+            && token.end <= scope.visible_from
+            && functions.iter().any(|function| {
+                function.name == scope.owner
+                    && function.signature_range.start <= token.start
+                    && token.end <= function.signature_range.end
+            });
+        let is_visible_use = scope.visible_from <= token.start
+            && token.end <= scope.visible_to
+            && !shadowed
+                .iter()
+                .any(|range| range.start <= token.start && token.end <= range.end);
+        if is_local_definition || is_parameter_definition || is_visible_use {
+            locations.insert((file.path.clone(), token.start, token.end));
+        }
+    }
+    Ok(locations)
+}
+
+fn apply_workshop_rename_edits(
+    files: &mut [WorkshopSourceFile],
+    plan: &WorkshopRenamePlan,
+) -> Result<(), String> {
+    let mut by_file = BTreeMap::<String, Vec<&WorkshopRenameEdit>>::new();
+    for edit in &plan.edits {
+        by_file.entry(edit.file.clone()).or_default().push(edit);
+    }
+    for (path, mut edits) in by_file {
+        let file = files
+            .iter_mut()
+            .find(|file| file.path == path)
+            .ok_or_else(|| format!("rename edit file is missing: {path}"))?;
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.source_span.start));
+        for edit in edits {
+            let range = edit.source_span.start as usize..edit.source_span.end as usize;
+            if file.source.get(range.clone()) != Some(plan.old_name.as_str()) {
+                return Err(format!(
+                    "rename source changed at {}:{}..{}",
+                    path, range.start, range.end
+                ));
+            }
+            file.source.replace_range(range, &edit.new_text);
+        }
+    }
+    Ok(())
+}
+
+fn global_definition_reference(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    items: &[WorkshopSourceItem],
+) -> Result<Option<WorkshopReference>, String> {
+    let [name] = segments else {
+        return Ok(None);
+    };
+    for file in files {
+        let tokens = lex(&file.source)?;
+        let Some(name_token) = tokens.windows(2).find_map(|pair| {
+            (matches!(token_text(&file.source, pair[0]), "global" | "const")
+                && pair[1].kind == TokenKind::Identifier
+                && token_text(&file.source, pair[1]) == *name)
+                .then_some(pair[1])
+        }) else {
+            continue;
+        };
+        let Some(container) = items
+            .iter()
+            .find(|item| item.file == file.path && item.kind == WorkshopSourceItemKind::Globals)
+        else {
+            continue;
+        };
+        return Ok(Some(WorkshopReference {
+            symbol: name.to_string(),
+            kind: WorkshopReferenceKind::Definition,
+            file: file.path.clone(),
+            source_span: WorkshopSourceSpan {
+                start: u32::try_from(name_token.start)
+                    .map_err(|_| "global definition start exceeds u32".to_string())?,
+                end: u32::try_from(name_token.end)
+                    .map_err(|_| "global definition end exceeds u32".to_string())?,
+            },
+            containing_kind: container.kind,
+            containing_name: container.name.clone(),
+            containing_signature: container.signature.clone(),
+            containing_source_hash: container.source_hash.clone(),
+        }));
+    }
+    Ok(None)
 }
 
 fn is_workshop_identifier(value: &str) -> bool {
@@ -1727,7 +2759,7 @@ pub fn workshop_completion_items(
                     "{signature} via {} {}: {} [{method_file}]",
                     binding.kind, binding.name, binding.type_name
                 );
-                let item = match binding.scope.clone() {
+                let mut item = match binding.scope.clone() {
                     Some(scope) => scoped_completion_catalog_item(
                         &text,
                         "method",
@@ -1745,6 +2777,7 @@ pub fn workshop_completion_items(
                         Some(binding.type_name.clone()),
                     ),
                 };
+                item.signature = Some(signature.clone());
                 items.push(item);
             }
         }
@@ -3848,6 +4881,10 @@ mod project_loader_tests {
         let error = load_workshop_project(&root, Path::new("src/main.stasis"))
             .expect_err("expected missing import failure");
         assert!(error.contains("missing.stasis"));
+        let current = load_workshop_source_workspace(&root, Path::new("src/main.stasis"))
+            .expect("raw source workspace remains available for editor recovery");
+        assert_eq!(current.len(), 1);
+        assert!(current[0].source.contains("missing.stasis"));
         fs::remove_dir_all(&root).ok();
     }
 }
@@ -4285,6 +5322,145 @@ mod workshop_contract_tests {
     }
 
     #[test]
+    fn references_publish_exact_global_definition_without_duplicate_write() {
+        let source = "struct State { x: i32; }\nglobal state: State;\nfunction main(): void { state.x = 2; }\n";
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+
+        let references = find_workshop_references(&files, "state", 16).expect("references");
+        let definitions = references
+            .iter()
+            .filter(|reference| reference.kind == WorkshopReferenceKind::Definition)
+            .collect::<Vec<_>>();
+        assert_eq!(definitions.len(), 1);
+        let definition = definitions[0];
+        assert_eq!(
+            &source[definition.source_span.start as usize..definition.source_span.end as usize],
+            "state"
+        );
+        assert_eq!(
+            references
+                .iter()
+                .filter(|reference| reference.source_span == definition.source_span)
+                .count(),
+            1
+        );
+    }
+
+    fn rename_fixture() -> (Vec<WorkshopSourceFile>, String) {
+        let source = "struct State { x: i32; y: i32; }\nglobal state: State;\nfunction helper(amount: i32): i32 { let value: i32 = amount; state.x = value; return value + amount; }\nfunction read(other: State): i32 { return other.x; }\nfunction other(): i32 { let value: i32 = 9; return value; }\nfunction main(): i32 { state.y = helper(3); return read(state); }\n".to_string();
+        (
+            vec![WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: source.clone(),
+            }],
+            source,
+        )
+    }
+
+    #[test]
+    fn semantic_tokens_use_compiler_bindings_for_state_fields_and_scopes() {
+        let (files, source) = rename_fixture();
+        let tokens = workshop_semantic_tokens(&files, "src/main.stasis").expect("semantic tokens");
+        let token_at = |needle: &str, within: usize| {
+            let offset = source.find(needle).expect("semantic token use") + within;
+            tokens
+                .iter()
+                .find(|token| {
+                    token.source_span.start as usize <= offset
+                        && offset <= token.source_span.end as usize
+                })
+                .unwrap_or_else(|| panic!("missing semantic token for {needle}"))
+        };
+        assert_eq!(token_at("global state", 8).kind, "global");
+        assert_eq!(token_at("state.x", 1).kind, "global");
+        assert_eq!(token_at("state.x", 7).kind, "field");
+        assert_eq!(token_at("amount; state", 2).kind, "parameter");
+        assert_eq!(token_at("value + amount", 2).kind, "local");
+        assert_eq!(token_at("helper(3)", 2).kind, "function");
+        assert_eq!(token_at("State;", 2).kind, "struct");
+    }
+
+    #[test]
+    fn inlay_hints_use_inferred_types_and_bound_parameter_names() {
+        let source = "function add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let total = add(1, add(2, 3)); let amount = 4; return add(amount, 5); }\n";
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+        let hints = workshop_inlay_hints(&files).expect("inlay hints");
+        let rendered = hints
+            .iter()
+            .map(|hint| {
+                (
+                    &source[hint.source_span.start as usize..hint.source_span.end as usize],
+                    hint.kind,
+                    hint.label.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(rendered.contains(&("total", WorkshopInlayHintKind::Type, ": i32")));
+        assert!(rendered.contains(&("amount", WorkshopInlayHintKind::Type, ": i32")));
+        assert!(rendered.contains(&("1", WorkshopInlayHintKind::Parameter, "amount:")));
+        assert!(rendered.contains(&("5", WorkshopInlayHintKind::Parameter, "bonus:")));
+        assert!(!rendered.contains(&("amount", WorkshopInlayHintKind::Parameter, "amount:")));
+    }
+
+    #[test]
+    fn rename_plan_covers_declarations_references_and_scoped_bindings() {
+        let cases = [
+            ("helper(3)", 2usize, "assist", "function", 2usize),
+            ("state.y =", 2, "world", "global", 3),
+            ("State;", 2, "World", "struct", 3),
+            ("other.x", 7, "speed", "field", 3),
+            ("amount; state", 2, "delta", "parameter", 3),
+            ("value + amount", 2, "total", "local", 3),
+        ];
+        for (needle, within, new_name, expected_kind, minimum_edits) in cases {
+            let (files, source) = rename_fixture();
+            let offset = source.find(needle).expect("rename use") + within;
+            let (after, plan) = plan_workshop_rename(&files, "src/main.stasis", offset, new_name)
+                .unwrap_or_else(|error| panic!("rename {needle} failed: {error}"));
+            assert_eq!(plan.kind, expected_kind, "{needle}");
+            assert!(plan.edits.len() >= minimum_edits, "{needle}: {plan:?}");
+            assert!(!after[0].source.contains(match expected_kind {
+                "function" => "helper(3)",
+                "global" => "state.y",
+                "struct" => "State;",
+                "field" => ".x",
+                "parameter" => "amount; state",
+                "local" => "value + amount",
+                _ => unreachable!(),
+            }));
+            let mut process = crate::backend::jit::JitProcess::new();
+            process.upsert_file(after[0].path.clone(), after[0].source.clone());
+            process.compile().unwrap_or_else(|error| {
+                panic!("renamed {expected_kind} did not compile: {error:?}")
+            });
+            assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(3));
+        }
+    }
+
+    #[test]
+    fn rename_plan_rejects_collisions_and_preserves_same_named_other_scope() {
+        let (files, source) = rename_fixture();
+        let field = source.find("other.x").expect("field") + "other.".len();
+        let error = plan_workshop_rename(&files, "src/main.stasis", field, "y")
+            .expect_err("field collision");
+        assert!(error.contains("collide"), "{error}");
+
+        let local = source.find("value + amount").expect("local") + 2;
+        let (after, plan) =
+            plan_workshop_rename(&files, "src/main.stasis", local, "total").expect("local rename");
+        assert_eq!(plan.edits.len(), 3);
+        assert!(after[0]
+            .source
+            .contains("function other(): i32 { let value: i32 = 9; return value; }"));
+    }
+
+    #[test]
     fn completion_catalog_includes_scoped_bindings_fields_and_receiver_methods() {
         let files = vec![WorkshopSourceFile {
             path: "src/main.stasis".to_string(),
@@ -4456,6 +5632,40 @@ function tick(): i32 {
         };
         let (after, _) = plan_workshop_semantic_edits(&files, &batch).expect("update main");
         assert!(after[0].source.contains("import \"game.stasis\";"));
+    }
+
+    #[test]
+    fn organize_imports_sorts_deduplicates_and_prunes_unused_modules() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: "import \"unused.stasis\";\nimport \"used.stasis\";\nimport \"used.stasis\";\nfunction main(): i32 { return helper(); }\n"
+                    .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/used.stasis".to_string(),
+                source: "function helper(): i32 { return 3; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/unused.stasis".to_string(),
+                source: "function unrelated(): i32 { return 4; }\n".to_string(),
+            },
+        ];
+        let change = organize_workshop_imports(&files, "src/main.stasis")
+            .expect("organize imports")
+            .expect("source change");
+        assert_eq!(
+            change.after_source,
+            "import \"used.stasis\";\nfunction main(): i32 { return helper(); }\n"
+        );
+        assert_eq!(
+            change.before_hash,
+            workshop_source_hash(&change.before_source)
+        );
+        assert_eq!(
+            change.after_hash,
+            workshop_source_hash(&change.after_source)
+        );
     }
 
     #[test]
@@ -4911,5 +6121,90 @@ function tick(): i32 {
         let items = workshop_source_items(&after).expect("re-index added items");
         assert!(items.iter().any(|item| item.name == "Config"));
         assert!(items.iter().any(|item| item.name == "helper"));
+    }
+
+    #[test]
+    fn hierarchy_uses_compiler_call_edges_and_struct_composition() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "struct Position { x: i32; }\nstruct Enemy { position: Position; }\nfunction a(): i32 { return 1; }\nfunction b(): i32 { return a(); }\n"
+                .to_string(),
+        }];
+        let (call_items, calls) = workshop_call_hierarchy(&files).expect("call hierarchy");
+        let a = call_items.iter().find(|item| item.name == "a").expect("a");
+        let b = call_items.iter().find(|item| item.name == "b").expect("b");
+        let edge = calls
+            .iter()
+            .find(|edge| {
+                edge.caller_symbol_id == b.symbol_id && edge.callee_symbol_id == a.symbol_id
+            })
+            .expect("b calls a");
+        assert_eq!(
+            &files[0].source[edge.call_span.start as usize..edge.call_span.end as usize],
+            "a"
+        );
+
+        let (type_items, types) = workshop_type_hierarchy(&files).expect("type hierarchy");
+        let position = type_items
+            .iter()
+            .find(|item| item.name == "Position")
+            .expect("Position");
+        let enemy = type_items
+            .iter()
+            .find(|item| item.name == "Enemy")
+            .expect("Enemy");
+        assert!(types.iter().any(|edge| {
+            edge.container_symbol_id == enemy.symbol_id
+                && edge.component_symbol_id == position.symbol_id
+        }));
+    }
+
+    #[test]
+    fn folding_and_selection_ranges_recover_around_incomplete_delimiters() {
+        let source = "function a(): i32 { if (true) { return 1; } }\nfunction b(): i32 { a(state.";
+        let folds = workshop_folding_ranges(source).expect("folding ranges");
+        assert_eq!(folds.len(), 2);
+        assert!(folds.iter().all(|range| {
+            &source[range.source_span.start as usize..range.source_span.end as usize]
+                != "{ a(state."
+        }));
+
+        let offset = source.find("return 1").expect("return") + 2;
+        let selections = workshop_selection_ranges(source, offset).expect("selection ranges");
+        assert_eq!(
+            &source[selections[0].start as usize..selections[0].end as usize],
+            "return"
+        );
+        assert!(selections
+            .windows(2)
+            .all(|pair| { pair[1].start <= pair[0].start && pair[0].end <= pair[1].end }));
+        assert_eq!(
+            selections.last().expect("file selection").end as usize,
+            source.len()
+        );
+    }
+
+    #[test]
+    fn linked_edits_are_limited_to_compiler_scoped_bindings() {
+        let source = "global score: i32;\nfunction add(value: i32): i32 { let copy: i32 = value; copy += value; return copy; }\n";
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+        let copy_offset = source.find("copy: i32").expect("copy") + 1;
+        let ranges = workshop_linked_edit_ranges(&files, "src/main.stasis", copy_offset)
+            .expect("linked local")
+            .expect("local ranges");
+        assert_eq!(ranges.len(), 3);
+        assert!(ranges
+            .iter()
+            .all(|range| { &source[range.start as usize..range.end as usize] == "copy" }));
+
+        let global_offset = source.find("score").expect("score") + 1;
+        assert!(
+            workshop_linked_edit_ranges(&files, "src/main.stasis", global_offset)
+                .expect("global linked edit")
+                .is_none()
+        );
     }
 }

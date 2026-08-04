@@ -13,6 +13,7 @@ use stasis_assets::{
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
+use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
@@ -39,8 +40,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::toolchain_formatter::format_source;
-
+mod dap;
 mod live_tui;
 
 const MANIFEST_NAME: &str = "stasis.json";
@@ -116,6 +116,8 @@ const COMMANDS: &[&str] = &[
     "ai",
     "validate",
     "run",
+    "lsp",
+    "dap",
     "tui",
     "build",
     "package",
@@ -230,6 +232,18 @@ enum ToolchainCommand {
         /// Explicitly select the headless runtime (currently the default).
         #[arg(long)]
         headless: bool,
+    },
+    /// Run the persistent Stasis language server.
+    Lsp {
+        /// Communicate with the editor over standard input and output.
+        #[arg(long)]
+        stdio: bool,
+    },
+    /// Run the Stasis debug adapter over the Debug Adapter Protocol.
+    Dap {
+        /// Communicate with the editor over standard input and output.
+        #[arg(long)]
+        stdio: bool,
     },
     /// Run one graphical entry with hot swap and the live-workspace TUI.
     Tui {
@@ -719,6 +733,8 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Validate { .. } => "validate",
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
+        ToolchainCommand::Lsp { .. } => "lsp",
+        ToolchainCommand::Dap { .. } => "dap",
         ToolchainCommand::Tui { .. } => "tui",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
@@ -837,6 +853,24 @@ fn execute(
                         run_workspace_watch(&workspace)
                     } else {
                         run_workspace(&workspace, headless)
+                    }
+                }
+                ToolchainCommand::Lsp { stdio } => {
+                    if json_output {
+                        Err("--json cannot be combined with lsp; LSP owns stdout".to_string())
+                    } else {
+                        let _ = stdio;
+                        stasis_lsp::run_stdio(&workspace.root)?;
+                        Ok(CommandResult::success(String::new(), json!({})))
+                    }
+                }
+                ToolchainCommand::Dap { stdio } => {
+                    if json_output {
+                        Err("--json cannot be combined with dap; DAP owns stdout".to_string())
+                    } else {
+                        let _ = stdio;
+                        dap::run(&workspace)?;
+                        Ok(CommandResult::success(String::new(), json!({})))
                     }
                 }
                 ToolchainCommand::Tui {
@@ -1274,12 +1308,20 @@ fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
 }
 
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
+    compile_workspace_jit_with_debug(workspace, false)
+}
+
+fn compile_workspace_jit_with_debug(
+    workspace: &Workspace,
+    debug_instrumentation: bool,
+) -> Result<JitProcess, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
     validate_workspace_destination(workspace, "entry", &entry)?;
     let files =
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    jit.set_debug_instrumentation(debug_instrumentation)?;
     jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&runtime_analysis_roots());
     let mut sources = BTreeMap::new();
@@ -1900,6 +1942,19 @@ fn format_live_response(response: &LiveResponse) -> String {
         "symbols" => format_live_symbols(data),
         "symbol" => format_live_symbol(data),
         "references" => format_live_references(data),
+        "diagnostics" => format_live_diagnostics(data),
+        "hover" => format_live_hover(data),
+        "definition" => format_live_definition(data),
+        "code_actions" => format_live_code_actions(data),
+        "inlay_hints" => format_live_inlay_hints(data),
+        "rename_preview" => format!(
+            "rename {} -> {} ({} validated edit(s))",
+            string_field(data, "old_name", "symbol"),
+            string_field(data, "new_name", "symbol"),
+            data.get("edits")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        ),
         "completion" | "palette" if response.truncated => {
             "completion response exceeded the output bound; narrow the query".to_string()
         }
@@ -1968,6 +2023,112 @@ fn format_live_response(response: &LiveResponse) -> String {
         "changes" => format_live_changes(data),
         kind => kind.to_string(),
     }
+}
+
+fn format_live_diagnostics(data: &Value) -> String {
+    let Some(diagnostics) = data.get("diagnostics").and_then(Value::as_array) else {
+        return "diagnostics unavailable".to_string();
+    };
+    if diagnostics.is_empty() {
+        return "no compiler diagnostics".to_string();
+    }
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{}:{}..{}: {}: {}",
+                string_field(diagnostic, "file", "source"),
+                diagnostic.get("start").and_then(Value::as_u64).unwrap_or(0),
+                diagnostic.get("end").and_then(Value::as_u64).unwrap_or(0),
+                string_field(diagnostic, "severity", "error"),
+                string_field(diagnostic, "message", "compiler diagnostic")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_hover(data: &Value) -> String {
+    let Some(hover) = data.get("hover").filter(|hover| !hover.is_null()) else {
+        return "no symbol at offset".to_string();
+    };
+    let symbol = string_field(hover, "symbol", "symbol");
+    let type_name = hover.get("type_name").and_then(Value::as_str);
+    let live_value = hover.get("live_value").and_then(Value::as_str);
+    match (type_name, live_value) {
+        (Some(type_name), Some(value)) => format!("{symbol}: {type_name} = {value}"),
+        (Some(type_name), None) => format!("{symbol}: {type_name}"),
+        (None, Some(value)) => format!("{symbol} = {value}"),
+        (None, None) => symbol.to_string(),
+    }
+}
+
+fn format_live_definition(data: &Value) -> String {
+    let Some(locations) = data.get("locations").and_then(Value::as_array) else {
+        return "definition unavailable".to_string();
+    };
+    if locations.is_empty() {
+        return "definition not found".to_string();
+    }
+    locations
+        .iter()
+        .map(|location| {
+            format!(
+                "{}:{}..{}",
+                string_field(location, "file", "source"),
+                location.get("start").and_then(Value::as_u64).unwrap_or(0),
+                location.get("end").and_then(Value::as_u64).unwrap_or(0)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_code_actions(data: &Value) -> String {
+    let Some(actions) = data.get("actions").and_then(Value::as_array) else {
+        return "code actions unavailable".to_string();
+    };
+    if actions.is_empty() {
+        return "no safe code actions available".to_string();
+    }
+    actions
+        .iter()
+        .map(|action| {
+            let edits = action
+                .get("edits")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            format!(
+                "{} ({} edit(s), preview only)",
+                string_field(action, "title", "code action"),
+                edits
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_inlay_hints(data: &Value) -> String {
+    let Some(hints) = data.get("hints").and_then(Value::as_array) else {
+        return "inlay hints unavailable".to_string();
+    };
+    if hints.is_empty() {
+        return "no inlay hints".to_string();
+    }
+    hints
+        .iter()
+        .map(|hint| {
+            format!(
+                "{} @ {}:{}..{} {}",
+                string_field(hint, "kind", "hint"),
+                string_field(data, "file", "source"),
+                hint.get("start").and_then(Value::as_u64).unwrap_or(0),
+                hint.get("end").and_then(Value::as_u64).unwrap_or(0),
+                string_field(hint, "label", "")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn string_field<'a>(data: &'a Value, name: &str, fallback: &'a str) -> &'a str {
@@ -4327,6 +4488,87 @@ mod tests {
             }),
         );
         assert_eq!(format_live_response(&response), "player.score: i32 = 12");
+    }
+
+    #[test]
+    fn human_live_output_formats_shared_language_queries() {
+        let diagnostics = LiveResponse::success(8, 42, "diagnostics", json!({"diagnostics": []}));
+        assert_eq!(
+            format_live_response(&diagnostics),
+            "no compiler diagnostics"
+        );
+
+        let hover = LiveResponse::success(
+            9,
+            43,
+            "hover",
+            json!({"hover": {
+                "symbol": "score",
+                "type_name": "i32",
+                "live_value": "12 (tick 43)"
+            }}),
+        );
+        assert_eq!(format_live_response(&hover), "score: i32 = 12 (tick 43)");
+
+        let definition = LiveResponse::success(
+            10,
+            43,
+            "definition",
+            json!({"locations": [{
+                "file": "src/main.stasis",
+                "start": 7,
+                "end": 12
+            }]}),
+        );
+        assert_eq!(format_live_response(&definition), "src/main.stasis:7..12");
+
+        let rename = LiveResponse::success(
+            11,
+            43,
+            "rename_preview",
+            json!({
+                "old_name": "score",
+                "new_name": "points",
+                "edits": [{"file": "src/main.stasis"}, {"file": "src/ui.stasis"}]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&rename),
+            "rename score -> points (2 validated edit(s))"
+        );
+
+        let organize = LiveResponse::success(
+            12,
+            43,
+            "code_actions",
+            json!({"actions": [{
+                "title": "Organize Stasis imports",
+                "edits": [{"file": "src/main.stasis"}]
+            }]}),
+        );
+        assert_eq!(
+            format_live_response(&organize),
+            "Organize Stasis imports (1 edit(s), preview only)"
+        );
+
+        let inlays = LiveResponse::success(
+            13,
+            43,
+            "inlay_hints",
+            json!({
+                "file": "src/main.stasis",
+                "hints": [{
+                    "kind": "type",
+                    "start": 21,
+                    "end": 26,
+                    "label": ": i32"
+                }]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&inlays),
+            "type @ src/main.stasis:21..26 : i32"
+        );
     }
 
     #[test]

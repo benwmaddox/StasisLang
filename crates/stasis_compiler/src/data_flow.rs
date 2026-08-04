@@ -71,6 +71,15 @@ pub struct FunctionDataFlowSummary {
     internal_signature_hash: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerLocalType {
+    pub file: String,
+    pub function: String,
+    pub name: String,
+    pub type_name: String,
+    pub inferred: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EffectSets {
     reads: BTreeSet<String>,
@@ -86,6 +95,7 @@ struct EffectSets {
     iteration_products: BTreeMap<u32, Option<u64>>,
     active_iterations: Vec<u32>,
     next_iteration_id: u32,
+    local_types: Vec<(String, TypeId, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -488,6 +498,37 @@ fn analyze_function_effects(
     Ok(effects)
 }
 
+pub(crate) fn compiler_local_types(
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    statements_by_id: &[Vec<SimpleStmt>],
+    types: &TypeTable,
+) -> Result<Vec<CompilerLocalType>, String> {
+    let context = build_context(files, functions, types)?;
+    let mut out = Vec::new();
+    for function in functions {
+        let effects = analyze_function_effects(function, statements_by_id, &context)?;
+        let file = files
+            .get(function.file_id as usize)
+            .ok_or_else(|| format!("function '{}' has no source file", function.name))?;
+        out.extend(
+            effects
+                .local_types
+                .into_iter()
+                .filter_map(|(name, type_id, inferred)| {
+                    Some(CompilerLocalType {
+                        file: file.path.clone(),
+                        function: function.name.clone(),
+                        name,
+                        type_name: types.type_info(type_id)?.name.clone(),
+                        inferred,
+                    })
+                }),
+        );
+    }
+    Ok(out)
+}
+
 fn effect_fingerprint(effects: &EffectSets) -> u64 {
     let mut hasher = DefaultHasher::new();
     effects.call_sites.hash(&mut hasher);
@@ -881,11 +922,13 @@ fn analyze_statements(
                 type_id,
                 expression,
             } => {
+                let inferred = type_id.is_none();
                 let inferred_type =
                     type_id.or_else(|| expression_type(expression, context, local_types, aliases));
                 analyze_expression(expression, context, locals, local_types, aliases, effects);
                 locals.insert(name.clone());
                 if let Some(type_id) = inferred_type {
+                    effects.local_types.push((name.clone(), type_id, inferred));
                     local_types.insert(name.clone(), type_id);
                 }
             }

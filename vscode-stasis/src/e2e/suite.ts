@@ -110,6 +110,26 @@ function applyTextEdits(document: vscode.TextDocument, edits: readonly vscode.Te
   return text;
 }
 
+async function waitForDebugStack(
+  session: vscode.DebugSession,
+  timeoutMs = 30_000,
+): Promise<{ stackFrames: Array<{ id: number; name: string; line: number }> }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const stack = await session.customRequest("stackTrace", { threadId: 1 });
+      if (Array.isArray(stack?.stackFrames) && stack.stackFrames.length > 0) {
+        return stack as { stackFrames: Array<{ id: number; name: string; line: number }> };
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for a stopped Stasis debug stack: ${String(lastError)}`);
+}
+
 export async function run(): Promise<void> {
   const executable = process.env.STASIS_E2E_EXECUTABLE;
   const screenshot = process.env.STASIS_E2E_SCREENSHOT;
@@ -170,6 +190,105 @@ export async function run(): Promise<void> {
   const sourceUri = vscode.Uri.file(path.join(folder.uri.fsPath, "src", "main.stasis"));
   const document = await vscode.workspace.openTextDocument(sourceUri);
   await vscode.window.showTextDocument(document);
+  assert.equal(document.languageId, "stasis", "the fixture opens as a Stasis document");
+
+  const validLength = document.getText().length;
+  const invalidSuffix = "\nfunction lsp_diagnostic_probe(): i32 { while (true) { return 1; } }\n";
+  const introduceDiagnostic = new vscode.WorkspaceEdit();
+  introduceDiagnostic.insert(sourceUri, document.positionAt(validLength), invalidSuffix);
+  assert.equal(
+    await vscode.workspace.applyEdit(introduceDiagnostic),
+    true,
+    "VS Code applies an unsaved diagnostic probe",
+  );
+  try {
+    await waitFor("LSP compiler diagnostic", () =>
+      vscode.languages
+        .getDiagnostics(sourceUri)
+        .some((diagnostic) => diagnostic.source === "stasis" && diagnostic.message.includes("while")),
+    );
+  } catch (error) {
+    const observed = vscode.languages.getDiagnostics(sourceUri).map((diagnostic) => ({
+      message: diagnostic.message,
+      source: diagnostic.source,
+      severity: diagnostic.severity,
+      range: diagnostic.range,
+    }));
+    throw new Error(`${String(error)} Observed diagnostics: ${JSON.stringify(observed)}`);
+  }
+  const compilerDiagnostic = vscode.languages
+    .getDiagnostics(sourceUri)
+    .find((diagnostic) => diagnostic.source === "stasis" && diagnostic.message.includes("while"));
+  assert.equal(compilerDiagnostic?.severity, vscode.DiagnosticSeverity.Error);
+  assert.ok(
+    compilerDiagnostic && !compilerDiagnostic.range.isEmpty,
+    "the compiler diagnostic has a source range",
+  );
+
+  const repairDiagnostic = new vscode.WorkspaceEdit();
+  repairDiagnostic.delete(
+    sourceUri,
+    new vscode.Range(document.positionAt(validLength), document.positionAt(document.getText().length)),
+  );
+  assert.equal(
+    await vscode.workspace.applyEdit(repairDiagnostic),
+    true,
+    "VS Code repairs the unsaved diagnostic probe",
+  );
+  await waitFor(
+    "cleared LSP compiler diagnostic",
+    () => vscode.languages.getDiagnostics(sourceUri).length === 0,
+  );
+
+  const missingImport = 'import "missing.stasis";\n';
+  const introduceMissingImport = new vscode.WorkspaceEdit();
+  introduceMissingImport.insert(sourceUri, new vscode.Position(0, 0), missingImport);
+  assert.equal(
+    await vscode.workspace.applyEdit(introduceMissingImport),
+    true,
+    "VS Code applies an unresolved import probe",
+  );
+  await waitFor("structured missing-module diagnostic", () =>
+    vscode.languages
+      .getDiagnostics(sourceUri)
+      .some((diagnostic) => diagnostic.code === "stasis.missingModule"),
+  );
+  const quickFixes = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+    "vscode.executeCodeActionProvider",
+    sourceUri,
+    new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, missingImport.length - 1)),
+    vscode.CodeActionKind.QuickFix.value,
+  );
+  const removeMissingImport = quickFixes?.find(
+    (action): action is vscode.CodeAction =>
+      "edit" in action &&
+      action.kind?.value === vscode.CodeActionKind.QuickFix.value &&
+      action.title === "Remove unresolved import 'missing'",
+  );
+  if (!removeMissingImport?.edit) {
+    throw new Error(
+      `the packaged LSP did not return the structured import quick fix: ${JSON.stringify(
+        quickFixes?.map((action) => ({
+          title: "title" in action ? action.title : undefined,
+          kind: "kind" in action ? action.kind?.value : undefined,
+          diagnostics:
+            "diagnostics" in action
+              ? action.diagnostics?.map((diagnostic) => diagnostic.code)
+              : undefined,
+          edit: "edit" in action && action.edit !== undefined,
+        })),
+      )}`,
+    );
+  }
+  assert.equal(
+    await vscode.workspace.applyEdit(removeMissingImport.edit),
+    true,
+    "VS Code applies the compiler-validated quick fix",
+  );
+  await waitFor(
+    "quick fix clears the missing-module diagnostic",
+    () => vscode.languages.getDiagnostics(sourceUri).length === 0,
+  );
 
   const tickLineNumber = document
     .getText()
@@ -188,7 +307,61 @@ export async function run(): Promise<void> {
   );
   assert.ok(
     completions?.items.some((item) => item.label === "tick"),
-    "compiler-backed completion returns the fixture function",
+    "standard LSP completion returns the fixture function",
+  );
+
+  const scoreUseOffset = document.getText().indexOf("score += 1");
+  assert.notEqual(scoreUseOffset, -1, "the fixture contains a typed score use");
+  const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+    "vscode.executeHoverProvider",
+    sourceUri,
+    document.positionAt(scoreUseOffset + 2),
+  );
+  const hoverText = hovers
+    ?.flatMap((hover) => hover.contents)
+    .map((content) => (typeof content === "string" ? content : content.value))
+    .join("\n");
+  assert.match(hoverText ?? "", /score: i32/, "standard LSP hover reports the global type");
+
+  const signatureCall = "add_score(1, 2)";
+  const signatureOffset = document.getText().indexOf(signatureCall);
+  assert.notEqual(signatureOffset, -1, "the fixture contains a signature-help call");
+  const signatureHelp = await vscode.commands.executeCommand<vscode.SignatureHelp>(
+    "vscode.executeSignatureHelpProvider",
+    sourceUri,
+    document.positionAt(signatureOffset + "add_score(1, ".length),
+    ",",
+  );
+  assert.equal(signatureHelp?.activeParameter, 1, "signature help selects the second parameter");
+  assert.equal(
+    signatureHelp?.signatures[0]?.label,
+    "add_score(amount: i32, bonus: i32): i32",
+    "signature help returns compiler-owned parameter names and types",
+  );
+  const signatureDocumentation = signatureHelp?.signatures[0]?.documentation;
+  assert.match(
+    typeof signatureDocumentation === "string"
+      ? signatureDocumentation
+      : signatureDocumentation?.value ?? "",
+    /Adds two score components/,
+    "signature help includes source documentation",
+  );
+  const inlayHints = await vscode.commands.executeCommand<vscode.InlayHint[]>(
+    "vscode.executeInlayHintProvider",
+    sourceUri,
+    new vscode.Range(new vscode.Position(0, 0), document.positionAt(document.getText().length)),
+  );
+  assert.ok(
+    inlayHints?.some(
+      (hint) => hint.kind === vscode.InlayHintKind.Type && hint.label === ": i32",
+    ),
+    "standard LSP inlay hints expose compiler-inferred local types",
+  );
+  assert.ok(
+    inlayHints?.some(
+      (hint) => hint.kind === vscode.InlayHintKind.Parameter && hint.label === "amount:",
+    ),
+    "standard LSP inlay hints expose compiler-resolved parameter names",
   );
 
   const mainLineNumber = document
@@ -216,6 +389,20 @@ export async function run(): Promise<void> {
     references && references.length >= 2,
     "Find All References includes the function declaration and call",
   );
+  const renameEdit = await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
+    "vscode.executeDocumentRenameProvider",
+    sourceUri,
+    callPosition,
+    "update_game",
+  );
+  const renameEntries = renameEdit?.entries() ?? [];
+  const renameTextEdits = renameEntries.flatMap(([, edits]) => edits);
+  assert.ok(renameEntries.some(([uri]) => uri.fsPath === sourceUri.fsPath));
+  assert.ok(renameTextEdits.length >= 2, "standard LSP rename covers declaration and calls");
+  assert.ok(
+    renameTextEdits.every((edit) => edit.newText === "update_game"),
+    "standard LSP rename returns compiler-validated replacement text",
+  );
 
   const speedLineNumber = document
     .getText()
@@ -223,6 +410,18 @@ export async function run(): Promise<void> {
     .findIndex((line) => line.includes("state.enemies[0].speed"));
   assert.notEqual(speedLineNumber, -1, "the fixture uses an indexed struct field");
   const speedLine = document.lineAt(speedLineNumber);
+  const statePosition = new vscode.Position(speedLineNumber, speedLine.text.indexOf("state") + 2);
+  const stateDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeDefinitionProvider",
+    sourceUri,
+    statePosition,
+  );
+  const stateDeclarationLine = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("global state:"));
+  assert.equal(stateDefinitions?.length, 1, "Go to Definition resolves a global receiver");
+  assert.equal(stateDefinitions?.[0]?.range.start.line, stateDeclarationLine);
   const speedPosition = new vscode.Position(speedLineNumber, speedLine.text.indexOf("speed") + 1);
   const fieldDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
     "vscode.executeDefinitionProvider",
@@ -241,6 +440,45 @@ export async function run(): Promise<void> {
     "Find All References includes the indexed field declaration and write",
   );
 
+  const documentSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+    "vscode.executeDocumentSymbolProvider",
+    sourceUri,
+  );
+  assert.ok(
+    documentSymbols?.some((symbol) => symbol.name === "tick"),
+    "Outline receives compiler-owned document symbols through LSP",
+  );
+  const workspaceSymbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+    "vscode.executeWorkspaceSymbolProvider",
+    "tick",
+  );
+  assert.ok(
+    workspaceSymbols?.some((symbol) => symbol.name === "tick"),
+    "Go to Symbol in Workspace receives compiler-owned symbols through LSP",
+  );
+
+  const importProbe = new vscode.WorkspaceEdit();
+  importProbe.insert(
+    sourceUri,
+    new vscode.Position(0, 0),
+    'import "unused.stasis";\nimport "helper.stasis";\nimport "helper.stasis";\n',
+  );
+  assert.equal(await vscode.workspace.applyEdit(importProbe), true, "adds an organize-imports probe");
+  const organizeActions = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+    "vscode.executeCodeActionProvider",
+    sourceUri,
+    new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0)),
+    vscode.CodeActionKind.SourceOrganizeImports.value,
+  );
+  const organize = organizeActions?.find(
+    (action): action is vscode.CodeAction =>
+      "edit" in action && action.kind?.value === vscode.CodeActionKind.SourceOrganizeImports.value,
+  );
+  assert.ok(organize?.edit, "standard LSP code actions expose Organize Stasis imports");
+  assert.equal(await vscode.workspace.applyEdit(organize.edit), true, "applies the LSP organize-imports edit");
+  assert.equal(document.getText().includes("import \""), false, "unused and duplicate imports are removed");
+  assert.equal(await document.save(), true, "saves the organized source");
+
   await waitFor("Test Explorer discovery", () => api.testFiles().some((uri) => uri.endsWith("editor.test.stasis")));
   const testUri = api.testFiles().find((uri) => uri.endsWith("editor.test.stasis"));
   assert.ok(testUri, "Test Explorer discovers the packaged fixture test");
@@ -248,6 +486,86 @@ export async function run(): Promise<void> {
   const testEnvelope = JSON.parse(testResult.stdout) as { ok?: boolean; result?: { tests_passed?: number } };
   assert.equal(testEnvelope.ok, true, "Test Explorer executes the test through the Stasis CLI");
   assert.equal(testEnvelope.result?.tests_passed, 1, "the discovered fixture test passes");
+
+  const debugLine = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("score += 1"));
+  assert.notEqual(debugLine, -1, "the fixture contains an executable debugger statement");
+  const breakpoint = new vscode.SourceBreakpoint(
+    new vscode.Location(sourceUri, new vscode.Position(debugLine, 0)),
+  );
+  vscode.debug.addBreakpoints([breakpoint]);
+  try {
+    assert.equal(
+      await vscode.debug.startDebugging(folder, {
+        type: "stasis",
+        request: "launch",
+        name: "Stasis packaged DAP test",
+      }),
+      true,
+      "VS Code starts the packaged Stasis debug adapter",
+    );
+    await waitFor(
+      "active Stasis debug session",
+      () => vscode.debug.activeDebugSession?.type === "stasis",
+    );
+    const debugSession = vscode.debug.activeDebugSession;
+    if (!debugSession) {
+      throw new Error("The Stasis debug session did not become active.");
+    }
+    const firstStack = await waitForDebugStack(debugSession);
+    assert.deepEqual(
+      firstStack.stackFrames.slice(0, 2).map((frame) => frame.name),
+      ["tick", "main"],
+      "the packaged DAP exposes real nested JIT stack frames",
+    );
+    assert.equal(
+      firstStack.stackFrames[0]?.line,
+      debugLine + 1,
+      "the breakpoint resolves to the compiler-owned source statement",
+    );
+    const scopes = (await debugSession.customRequest("scopes", {
+      frameId: firstStack.stackFrames[0]!.id,
+    })) as { scopes: Array<{ name: string; variablesReference: number }> };
+    const globals = scopes.scopes.find((scope) => scope.name === "Globals");
+    assert.ok(globals, "the packaged DAP exposes a Globals scope");
+    const globalVariables = (await debugSession.customRequest("variables", {
+      variablesReference: globals.variablesReference,
+    })) as { variables: Array<{ name: string; value: string; type?: string }> };
+    assert.ok(
+      globalVariables.variables.some(
+        (variable) => variable.name === "score" && variable.value === "1" && variable.type === "i32",
+      ),
+      "the packaged DAP reads the stopped runtime's real global state",
+    );
+    const watchedBefore = (await debugSession.customRequest("evaluate", {
+      expression: "score",
+      frameId: firstStack.stackFrames[0]!.id,
+      context: "watch",
+    })) as { result: string; type?: string };
+    assert.deepEqual(
+      { result: watchedBefore.result, type: watchedBefore.type },
+      { result: "1", type: "i32" },
+      "DAP watches evaluate compiler-typed state expressions",
+    );
+    await debugSession.customRequest("next", { threadId: 1 });
+    const steppedStack = await waitForDebugStack(debugSession);
+    assert.equal(steppedStack.stackFrames[0]?.name, "tick", "Step Over remains in the tick frame");
+    const watchedAfter = (await debugSession.customRequest("evaluate", {
+      expression: "score",
+      frameId: steppedStack.stackFrames[0]!.id,
+      context: "watch",
+    })) as { result: string; type?: string };
+    assert.equal(watchedAfter.result, "2", "Step Over executes exactly the selected Stasis statement");
+    await vscode.debug.stopDebugging(debugSession);
+    await waitFor("terminated Stasis debug session", () => vscode.debug.activeDebugSession !== debugSession);
+  } finally {
+    vscode.debug.removeBreakpoints([breakpoint]);
+    if (vscode.debug.activeDebugSession?.type === "stasis") {
+      await vscode.debug.stopDebugging(vscode.debug.activeDebugSession);
+    }
+  }
 
   try {
     await api.start();
@@ -259,14 +577,27 @@ export async function run(): Promise<void> {
     const memberPrefix = "state.enemies[0].";
     const memberOffset = memberSource.indexOf(memberPrefix);
     assert.notEqual(memberOffset, -1, "the fixture contains an indexed state receiver");
-    const memberCompletions = await vscode.commands.executeCommand<vscode.CompletionList>(
-      "vscode.executeCompletionItemProvider",
-      sourceUri,
-      document.positionAt(memberOffset + memberPrefix.length),
+    const liveStatus = await api.request("status");
+    assert.ok(
+      liveStatus.runtime_identity?.indexed_collections?.some(
+        (collection) => collection.path === "state.enemies" && "speed" in collection.fields,
+      ),
+      "live status publishes the accepted indexed collection layout",
     );
-    const memberLabels = memberCompletions?.items.map((item) =>
-      typeof item.label === "string" ? item.label : item.label.label,
-    );
+    let memberLabels: string[] | undefined;
+    for (let attempt = 0; attempt < 40 && !memberLabels?.includes("state.enemies[0].speed"); attempt += 1) {
+      const memberCompletions = await vscode.commands.executeCommand<vscode.CompletionList>(
+        "vscode.executeCompletionItemProvider",
+        sourceUri,
+        document.positionAt(memberOffset + memberPrefix.length),
+      );
+      memberLabels = memberCompletions?.items.map((item) =>
+        typeof item.label === "string" ? item.label : item.label.label,
+      );
+      if (!memberLabels?.includes("state.enemies[0].speed")) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
     assert.ok(
       memberLabels?.includes("state.enemies[0].hp"),
       "live compiler completion resolves a field through an indexed state path",
@@ -277,11 +608,59 @@ export async function run(): Promise<void> {
     );
 
     const before = inspectedI32(await api.request("inspect", { path: "score" }));
+    let liveHoverText = "";
+    for (let attempt = 0; attempt < 40 && !liveHoverText.includes("Live value:"); attempt += 1) {
+      const liveHovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        sourceUri,
+        document.positionAt(scoreUseOffset + 2),
+      );
+      liveHoverText = liveHovers
+        ?.flatMap((hover) => hover.contents)
+        .map((content) => (typeof content === "string" ? content : content.value))
+        .join("\n") ?? "";
+      if (!liveHoverText.includes("Live value:")) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    assert.match(
+      liveHoverText,
+      new RegExp(`Live value:\\*\\* .*${before} \\(tick \\d+\\)`),
+      "standard LSP hover composes a hash-compatible cached runtime value",
+    );
     await api.request("watch", { path: "score" });
     await api.request("step", { ticks: 1 });
     const after = inspectedI32(await api.request("inspect", { path: "score" }));
     assert.equal(after, before + 1, "single-step executes exactly one game tick");
     assert.ok(api.values().some((value) => value.path === "score"), "the Live Values model receives runtime state");
+
+    const editPreview = await api.request("edit", {
+      operation: "update",
+      target: {
+        name: "tick",
+        kind: "function",
+        file: "src/main.stasis",
+      },
+      source: "function tick(): i32 { score += 2; return 0; }",
+      preview: true,
+      run_tests: false,
+    });
+    assert.equal(editPreview.kind, "edit_preview", "semantic edit preview completes through the LSP broker");
+    assert.match(document.getText(), /score \+= 1/, "preview does not mutate the editor source");
+
+    const editApplied = await api.request("apply", { run_tests: false });
+    assert.equal(editApplied.kind, "edit_applied", "the previewed edit applies through the LSP broker");
+    await waitFor("semantic edit file refresh", () => document.getText().includes("score += 2"));
+    await api.request("step", { ticks: 1 });
+    const edited = inspectedI32(await api.request("inspect", { path: "score" }));
+    assert.equal(edited, after + 2, "the broker-applied function executes in the running game");
+
+    const editUndone = await api.request("undo", { run_tests: false });
+    assert.equal(editUndone.kind, "edit_undone", "semantic edit rollback completes through the LSP broker");
+    await waitFor("semantic rollback file refresh", () => document.getText().includes("score += 1"));
+    await api.request("step", { ticks: 1 });
+    const rolledBack = inspectedI32(await api.request("inspect", { path: "score" }));
+    assert.equal(rolledBack, edited + 1, "rollback restores the previous function in the running game");
 
     const source = document.getText();
     const oldTick = "score += 1";
@@ -299,7 +678,7 @@ export async function run(): Promise<void> {
     assert.equal(await vscode.workspace.applyEdit(hotEdit), true, "VS Code applies the live source edit");
     assert.equal(await document.save(), true, "VS Code saves the live source edit");
 
-    let current = after;
+    let current = rolledBack;
     let hotSwapObserved = false;
     const hotSwapDeadline = Date.now() + 30_000;
     while (Date.now() < hotSwapDeadline) {

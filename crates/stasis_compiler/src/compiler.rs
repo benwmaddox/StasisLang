@@ -3,14 +3,18 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::backend::emit::{
-    parse_simple_statements_from_block, SimpleCondition, SimpleExpr, SimpleStmt,
+    parse_simple_statements_with_debug, ParsedSimpleStatements, SimpleCondition, SimpleExpr,
+    SimpleStmt,
 };
-use crate::data_flow::{build_function_data_flow_summaries, FunctionDataFlowSummary};
+use crate::data_flow::{
+    build_function_data_flow_summaries, compiler_local_types, CompilerLocalType,
+    FunctionDataFlowSummary,
+};
 use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
-use crate::ir::hir::{Block, FunctionHIR};
+use crate::ir::hir::{Block, DebugStatement, FunctionHIR};
 
 pub type FunctionId = FnId;
 pub type FunctionStorageIndex = u32;
@@ -42,7 +46,14 @@ pub struct FunctionMeta {
     pub return_type: TypeId,
     pub dependencies: Vec<FunctionId>,
     pub dependents: Vec<FunctionId>,
+    pub call_sites: Vec<FunctionCallSite>,
     pub dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionCallSite {
+    pub callee: FunctionId,
+    pub source_range: Range<u32>,
 }
 
 /// Parser-owned source item used by hosts that need function ranges/names before
@@ -323,8 +334,9 @@ pub struct Compiler {
     deps: DependencyGraph,
     types: TypeTable,
     parsed_statements: Vec<Vec<SimpleStmt>>,
+    parsed_debug_statements: Vec<Vec<DebugStatement>>,
     parsed_statement_ids: BTreeSet<FunctionId>,
-    statement_cache: HashMap<StatementCacheKey, Vec<SimpleStmt>>,
+    statement_cache: HashMap<StatementCacheKey, ParsedSimpleStatements>,
     analysis_required_roots: Vec<String>,
     data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
     data_flow_context_fingerprint: u64,
@@ -481,6 +493,22 @@ impl Compiler {
     }
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
+        self.index_pass_with_scope(false)
+    }
+
+    pub fn check(&mut self) -> CompileResult<IndexPassResult> {
+        let index = self.index_pass_with_scope(true)?;
+        let functions = self.functions.clone();
+        for function in functions {
+            if let Err(error) = self.lower_function_to_hir(&function) {
+                self.record_function_diagnostic(&function, compile_error_message(&error));
+                return Err(error);
+            }
+        }
+        Ok(index)
+    }
+
+    fn index_pass_with_scope(&mut self, analyze_all: bool) -> CompileResult<IndexPassResult> {
         self.last_source_diagnostic = None;
         if let Some(error) = self.pending_path_error.take() {
             return Err(CompileError::Frontend(error));
@@ -549,13 +577,13 @@ impl Compiler {
                     })
                     .flatten()
                     .unwrap_or_default();
-                self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-                    path: file.path.clone(),
+                self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                    file.path.clone(),
                     start,
                     end,
                     symbol,
-                    message: message.clone(),
-                });
+                    message.clone(),
+                ));
             }
             return Err(CompileError::Frontend(message));
         }
@@ -563,6 +591,7 @@ impl Compiler {
         self.functions.clear();
         self.function_index_by_id.clear();
         self.parsed_statements.clear();
+        self.parsed_debug_statements.clear();
         self.parsed_statement_ids.clear();
         self.deps = DependencyGraph;
 
@@ -574,13 +603,13 @@ impl Compiler {
                 Ok(indexed) => indexed,
                 Err(message) => {
                     let file = &self.files[file_id];
-                    self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-                        path: file.path.clone(),
-                        start: 0,
-                        end: file.content.len(),
-                        symbol: String::new(),
-                        message: message.clone(),
-                    });
+                    self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                        file.path.clone(),
+                        0,
+                        file.content.len(),
+                        "",
+                        message.clone(),
+                    ));
                     return Err(CompileError::Frontend(message));
                 }
             };
@@ -642,6 +671,7 @@ impl Compiler {
                     return_type: indexed_function.return_type,
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
+                    call_sites: Vec::new(),
                     dirty: signature_changed
                         || body_changed
                         || reverse_invalidated.contains(&self.files[file_id].path),
@@ -671,31 +701,47 @@ impl Compiler {
                         let base = self.functions[caller_index].source_range.start as usize;
                         let message =
                             module_call_resolution_message(error, &dependency.name, caller_path);
-                        self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-                            path: caller_path.clone(),
-                            start: base + relative_span.start as usize,
-                            end: base + relative_span.end as usize,
-                            symbol: dependency.name.clone(),
-                            message: message.clone(),
-                        });
+                        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                            caller_path.clone(),
+                            base + relative_span.start as usize,
+                            base + relative_span.end as usize,
+                            dependency.name.clone(),
+                            message.clone(),
+                        ));
                         return Err(CompileError::Frontend(message));
                     }
                 };
                 let Some(module_alias) = resolution.module_alias else {
                     continue;
                 };
-                for callee in self
+                let callees = self
                     .module_resolution
                     .function_indices(&dependency.name)
                     .iter()
                     .map(|index| &self.functions[*index])
                     .filter(|function| function.module_alias == module_alias)
-                {
-                    if caller != callee.id {
-                        unique_edges.insert((caller, callee.id));
+                    .map(|function| function.id)
+                    .collect::<Vec<_>>();
+                for callee in callees {
+                    let base = self.functions[caller_index].source_range.start;
+                    self.functions[caller_index]
+                        .call_sites
+                        .push(FunctionCallSite {
+                            callee,
+                            source_range: base + dependency.name_span.start
+                                ..base + dependency.name_span.end,
+                        });
+                    if caller != callee {
+                        unique_edges.insert((caller, callee));
                     }
                 }
             }
+        }
+        for function in &mut self.functions {
+            function
+                .call_sites
+                .sort_by_key(|site| (site.source_range.start, site.source_range.end, site.callee));
+            function.call_sites.dedup();
         }
         for (caller, callee) in unique_edges {
             let caller_index = self.function_index(caller)?;
@@ -705,10 +751,15 @@ impl Compiler {
         }
 
         self.parsed_statements = vec![Vec::new(); self.functions.len()];
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
-            &self.functions,
-            &self.analysis_required_roots,
-        );
+        self.parsed_debug_statements = vec![Vec::new(); self.functions.len()];
+        let reachable = if analyze_all {
+            self.functions.iter().map(|function| function.id).collect()
+        } else {
+            crate::backend::reachability::compute_reachable_function_ids(
+                &self.functions,
+                &self.analysis_required_roots,
+            )
+        };
         self.prepare_statement_artifacts(&reachable.iter().copied().collect::<Vec<_>>())?;
 
         self.propagate_dirty_from_signature_changes(&signature_changed_ids);
@@ -761,7 +812,7 @@ impl Compiler {
                 signature_hash: function.signature_hash,
                 body_hash: function.body_hash,
             };
-            let statements = if let Some(cached) = self.statement_cache.get(&key) {
+            let artifacts = if let Some(cached) = self.statement_cache.get(&key) {
                 cached.clone()
             } else {
                 changed_function_ids.insert(*function_id);
@@ -778,9 +829,20 @@ impl Compiler {
                             function.name
                         ))
                     })?;
-                let statements = parse_simple_statements_from_block(body, &mut self.types)
-                    .map_err(CompileError::Backend)?;
-                let mut validated = statements.clone();
+                let artifacts = match parse_simple_statements_with_debug(body, &mut self.types) {
+                    Ok(artifacts) => artifacts,
+                    Err(message) => {
+                        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                            file.path.clone(),
+                            function.source_range.start as usize,
+                            function.source_range.end as usize,
+                            function.name.clone(),
+                            message.clone(),
+                        ));
+                        return Err(CompileError::Backend(message));
+                    }
+                };
+                let mut validated = artifacts.statements.clone();
                 if let Err(message) = qualify_module_calls(
                     &mut validated,
                     &file.path,
@@ -791,10 +853,12 @@ impl Compiler {
                 ) {
                     return Err(CompileError::Frontend(message));
                 }
-                statements
+                artifacts
             };
-            next_statement_cache.insert(key, statements.clone());
-            self.parsed_statements[function.storage_index as usize] = statements;
+            next_statement_cache.insert(key, artifacts.clone());
+            self.parsed_statements[function.storage_index as usize] = artifacts.statements;
+            self.parsed_debug_statements[function.storage_index as usize] =
+                artifacts.debug_statements;
             self.parsed_statement_ids.insert(*function_id);
         }
         self.statement_cache = next_statement_cache;
@@ -882,6 +946,26 @@ impl Compiler {
         &self.data_flow_summaries
     }
 
+    pub fn local_types(&mut self) -> CompileResult<Vec<CompilerLocalType>> {
+        self.check()?;
+        self.indexed_local_types()
+    }
+
+    pub fn indexed_local_types(&self) -> CompileResult<Vec<CompilerLocalType>> {
+        if self.parsed_statement_ids.len() != self.functions.len() {
+            return Err(CompileError::Invariant(
+                "local types require a completed all-functions compiler check".to_string(),
+            ));
+        }
+        compiler_local_types(
+            &self.files,
+            &self.functions,
+            &self.parsed_statements,
+            &self.types,
+        )
+        .map_err(CompileError::Backend)
+    }
+
     pub(crate) fn data_flow_summaries_shared(&self) -> Arc<[FunctionDataFlowSummary]> {
         Arc::clone(&self.data_flow_summaries)
     }
@@ -907,13 +991,13 @@ impl Compiler {
         let Some(file) = self.files.get(function.file_id as usize) else {
             return;
         };
-        self.last_source_diagnostic = Some(crate::SourceDiagnostic {
-            path: file.path.clone(),
-            start: function.source_range.start as usize,
-            end: function.source_range.end as usize,
-            symbol: function.name.clone(),
-            message: message.to_string(),
-        });
+        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+            file.path.clone(),
+            function.source_range.start as usize,
+            function.source_range.end as usize,
+            function.name.clone(),
+            message,
+        ));
     }
 
     fn capture_previous_hashes(&self) -> HashMap<SymbolId, PreviousFunctionHashes> {
@@ -986,6 +1070,16 @@ impl Compiler {
         Ok(FunctionHIR {
             blocks: vec![Block { source: body }],
             statements,
+            debug_statements: self
+                .parsed_debug_statements
+                .get(function.storage_index as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    CompileError::Invariant(format!(
+                        "function '{}' has no debug statement artifact",
+                        function.name
+                    ))
+                })?,
         })
     }
 
@@ -1275,12 +1369,39 @@ struct PreviousFunctionHashes {
 mod tests {
     use super::*;
 
+    fn flatten_debug_offsets(statements: &[DebugStatement], out: &mut Vec<usize>) {
+        for statement in statements {
+            out.push(statement.source_offset as usize);
+            flatten_debug_offsets(&statement.children, out);
+        }
+    }
+
     fn function_by_name<'a>(compiler: &'a Compiler, name: &str) -> &'a FunctionMeta {
         compiler
             .functions()
             .iter()
             .find(|function| function.name == name)
             .expect("missing function by name")
+    }
+
+    #[test]
+    fn canonical_statement_parser_retains_nested_debug_source_offsets() {
+        let source = "function main(): i32 {\n    let value: i32 = 1;\n    if (value > 0) {\n        value += 2;\n    }\n    return value;\n}\n";
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("src/main.stasis", source);
+        compiler.check().expect("compile source");
+        let function = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&function)
+            .expect("lower function");
+        let body = &hir.blocks[0].source;
+        let mut offsets = Vec::new();
+        flatten_debug_offsets(&hir.debug_statements, &mut offsets);
+        let starts = offsets
+            .into_iter()
+            .map(|offset| body[offset..].split_whitespace().next().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec!["let", "if", "value", "return"]);
     }
 
     #[test]
@@ -1868,6 +1989,28 @@ function unreachable(): i32 { while (true) { return 1; } }
     }
 
     #[test]
+    fn check_reports_errors_in_functions_unreachable_from_runtime_roots() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unreachable(): i32 { while (true) { return 1; } }
+"#,
+        );
+
+        compiler
+            .check()
+            .expect_err("full check must analyze dead code");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured unreachable-function diagnostic");
+        assert_eq!(diagnostic.path, "dead.stasis");
+        assert_eq!(diagnostic.symbol, "unreachable");
+        assert!(diagnostic.message.contains("while"));
+    }
+
+    #[test]
     fn data_flow_rebuilds_when_fixed_capacity_metadata_changes() {
         let mut compiler = Compiler::new();
         for capacity in [4, 8] {
@@ -2427,6 +2570,32 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
         compiler.index_pass().expect("body edit index");
         assert_eq!(compiler.statement_parse_count, 3);
         assert!(function_by_name(&compiler, "main").dirty);
+    }
+
+    #[test]
+    fn local_types_publish_compiler_inference_in_source_order() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "function main(): i32 { let sum = 0; let ready = true; let copy = sum; let exact: f32 = 1.0; return copy; }",
+        );
+        let locals = compiler.local_types().expect("compiler local types");
+        assert_eq!(
+            locals
+                .iter()
+                .map(|local| (
+                    local.name.as_str(),
+                    local.type_name.as_str(),
+                    local.inferred
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sum", "i32", true),
+                ("ready", "bool", true),
+                ("copy", "i32", true),
+                ("exact", "f32", false),
+            ]
+        );
     }
 
     #[test]
