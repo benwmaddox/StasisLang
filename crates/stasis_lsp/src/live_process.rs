@@ -306,14 +306,14 @@ impl LiveProcessBroker {
                 }
                 Ok(_) => match serde_json::from_slice::<Value>(&line) {
                     Ok(response) => self.accept_response(token, response),
-                    Err(error) => {
+                    Err(_) => {
                         let preview = String::from_utf8_lossy(&line);
                         let preview = preview.trim().chars().take(512).collect::<String>();
                         (self.inner.notify)(
                             LIVE_LOG_METHOD,
                             json!({
                                 "stream": "stdout",
-                                "message": format!("invalid live JSON: {error}; output={preview:?}")
+                                "message": format!("live stdout: {preview}")
                             }),
                         )
                     }

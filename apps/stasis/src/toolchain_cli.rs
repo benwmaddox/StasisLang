@@ -1706,7 +1706,7 @@ fn run_workspace_tui(
         server,
         config,
     );
-    if !terminal.is_finished() {
+    if !wait_for_live_terminal_shutdown(&terminal, run_result.is_ok()) {
         return match run_result {
             Ok(()) => Err("live runner ended before the terminal session completed".to_string()),
             Err(error) => Err(error),
@@ -4217,6 +4217,21 @@ fn editor_info_result() -> Result<CommandResult, String> {
     ))
 }
 
+fn wait_for_live_terminal_shutdown(
+    terminal: &thread::JoinHandle<Result<(), String>>,
+    runner_succeeded: bool,
+) -> bool {
+    if runner_succeeded {
+        for _ in 0..200 {
+            if terminal.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    terminal.is_finished()
+}
+
 fn default_release_output(workspace: &Workspace) -> PathBuf {
     workspace
         .root
@@ -4458,6 +4473,19 @@ mod tests {
     use super::*;
     use stasis_ai::live_tool_specs;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn successful_live_runner_allows_terminal_acknowledgement_to_finish() {
+        let terminal = thread::spawn(|| {
+            thread::sleep(Duration::from_millis(25));
+            Ok(())
+        });
+        assert!(wait_for_live_terminal_shutdown(&terminal, true));
+        terminal
+            .join()
+            .expect("join terminal")
+            .expect("terminal result");
+    }
 
     #[test]
     fn inspect_exposes_compiler_function_data_flow() {
