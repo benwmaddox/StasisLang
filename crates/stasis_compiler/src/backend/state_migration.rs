@@ -52,6 +52,12 @@ struct CapturedMigrationState {
     collections: Vec<(String, String, Vec<JitScalarValue>)>,
 }
 
+#[derive(Debug)]
+struct CapturedRuntimeState {
+    scalars: Vec<(String, JitScalarValue)>,
+    collections: Vec<(String, String, Vec<JitScalarValue>)>,
+}
+
 #[derive(Debug, Clone)]
 struct CollectionFieldLayout {
     type_name: String,
@@ -422,9 +428,13 @@ pub fn activate_candidate_transactionally<T>(
     }
     preflight_collection_growth(candidate, preview)?;
     let needs_snapshot = preview.layout_changed || hook_may_mutate_state;
-    let snapshot = needs_snapshot
-        .then(|| stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES))
-        .transpose()?;
+    let runtime_state = if needs_snapshot {
+        active
+            .map(|active| capture_runtime_state(active, candidate, MAX_STATE_SNAPSHOT_BYTES))
+            .transpose()?
+    } else {
+        None
+    };
     let migration_state = if preview.layout_changed {
         let active = active.ok_or_else(|| {
             "layout migration requires an active JIT candidate at the safe point".to_string()
@@ -439,39 +449,38 @@ pub fn activate_candidate_transactionally<T>(
     };
 
     let transaction = (|| {
+        if preview.layout_changed {
+            prepare_collection_growth(candidate, preview)?;
+        }
         candidate.activate_staged_runtime()?;
-        if let Some(snapshot) = snapshot.as_ref() {
-            if preview.layout_changed {
-                stasis_dynload::restore_jit_runtime_state(snapshot);
-                prepare_collection_growth(candidate, preview)?;
-                candidate.activate_staged_runtime()?;
-                apply_migration_state(
-                    candidate,
-                    preview,
-                    migration_state
-                        .as_ref()
-                        .expect("layout changes capture migration state"),
-                )?;
-            }
+        if preview.layout_changed {
+            apply_migration_state(
+                candidate,
+                preview,
+                migration_state
+                    .as_ref()
+                    .expect("layout changes capture migration state"),
+            )?;
         }
         Ok(apply())
     })();
     let result = match transaction {
         Ok(result) => result,
         Err(error) => {
-            rollback_runtime(active, snapshot.as_ref())?;
+            rollback_runtime(active, candidate, runtime_state.as_ref())?;
             return Err(error);
         }
     };
     if !accepted(&result) {
-        rollback_runtime(active, snapshot.as_ref())?;
+        rollback_runtime(active, candidate, runtime_state.as_ref())?;
     }
     Ok(result)
 }
 
 fn rollback_runtime(
     active: Option<&JitProcess>,
-    snapshot: Option<&stasis_dynload::JitRuntimeStateSnapshot>,
+    candidate: &JitProcess,
+    snapshot: Option<&CapturedRuntimeState>,
 ) -> Result<(), String> {
     if let Some(active) = active {
         active.activate_staged_runtime().map_err(|error| {
@@ -479,7 +488,104 @@ fn rollback_runtime(
         })?;
     }
     if let Some(snapshot) = snapshot {
-        stasis_dynload::restore_jit_runtime_state(snapshot);
+        let active = active.ok_or_else(|| {
+            "cannot restore runtime state without an active JIT generation".to_string()
+        })?;
+        restore_runtime_state(active, candidate, snapshot)?;
+    }
+    Ok(())
+}
+
+fn capture_runtime_state(
+    active: &JitProcess,
+    candidate: &JitProcess,
+    max_bytes: usize,
+) -> Result<CapturedRuntimeState, String> {
+    let active_layout = active.state_layout();
+    let candidate_layout = candidate.state_layout();
+    let mut scalar_paths = BTreeSet::new();
+    let mut scalar_sources = Vec::new();
+    for (source, layout) in [(active, &active_layout), (candidate, &candidate_layout)] {
+        for scalar in &layout.scalars {
+            if scalar_paths.insert(scalar.path.clone()) {
+                scalar_sources.push((source, scalar.path.clone()));
+            }
+        }
+    }
+    let mut collection_keys = BTreeSet::new();
+    let mut collection_sources = Vec::new();
+    for (source, layout) in [(active, &active_layout), (candidate, &candidate_layout)] {
+        for collection in &layout.collections {
+            for field in &collection.fields {
+                if collection_keys.insert((collection.path.clone(), field.field.clone())) {
+                    collection_sources.push((
+                        source,
+                        collection.path.clone(),
+                        field.field.clone(),
+                        collection.capacity,
+                    ));
+                }
+            }
+        }
+    }
+    let value_count = collection_sources.iter().try_fold(
+        scalar_sources.len(),
+        |total, (_, path, _, capacity)| {
+            let capacity = usize::try_from(*capacity)
+                .map_err(|_| format!("collection '{path}' has negative capacity {capacity}"))?;
+            total
+                .checked_add(capacity)
+                .ok_or_else(|| "runtime state snapshot value count overflow".to_string())
+        },
+    )?;
+    let required_bytes = value_count
+        .checked_mul(std::mem::size_of::<JitScalarValue>())
+        .ok_or_else(|| "runtime state snapshot size overflow".to_string())?;
+    if required_bytes > max_bytes {
+        return Err(format!(
+            "live runtime snapshot requires {required_bytes} bytes; limit is {max_bytes} bytes"
+        ));
+    }
+
+    let scalars = scalar_sources
+        .into_iter()
+        .map(|(source, path)| source.read_global_scalar(&path).map(|value| (path, value)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut collections = Vec::new();
+    for (source, path, field, capacity) in collection_sources {
+        let mut values = Vec::with_capacity(capacity as usize);
+        for index in 0..capacity {
+            values.push(source.read_global_collection_scalar(&path, &field, index)?);
+        }
+        collections.push((path, field, values));
+    }
+    Ok(CapturedRuntimeState {
+        scalars,
+        collections,
+    })
+}
+
+fn restore_runtime_state(
+    active: &JitProcess,
+    candidate: &JitProcess,
+    snapshot: &CapturedRuntimeState,
+) -> Result<(), String> {
+    for (path, value) in &snapshot.scalars {
+        if active.has_global_path(path) {
+            active.write_global_scalar(path, *value)?;
+        } else {
+            candidate.write_global_scalar(path, *value)?;
+        }
+    }
+    for (path, field, values) in &snapshot.collections {
+        let target = if active.global_collection_capacity(path).is_some() {
+            active
+        } else {
+            candidate
+        };
+        for (index, value) in values.iter().copied().enumerate() {
+            target.write_global_collection_scalar(path, field, index as i32, value)?;
+        }
     }
     Ok(())
 }
@@ -936,6 +1042,63 @@ mod tests {
                 && step.field.is_none()
                 && step.type_name == "i32"
         }));
+    }
+
+    #[test]
+    fn transactional_snapshot_ignores_unrelated_raw_registrations() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "main.stasis",
+            "global score: i32;\nfunction main(): i32 { score = 7; return 0; }\n",
+        );
+        active.compile_staged().expect("compile active generation");
+        active
+            .activate_staged_runtime()
+            .expect("activate active generation");
+        active
+            .execute_i32_noarg_by_name("main")
+            .expect("initialize active state");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "main.stasis",
+            "global score: i32;\nfunction main(): i32 { score = 8; return 0; }\n",
+        );
+        candidate
+            .compile_staged()
+            .expect("compile candidate generation");
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            vec!["main".to_string()],
+            false,
+            None,
+        )
+        .expect("plan body-only swap");
+
+        // This deliberately non-dereferenceable pointer represents an unrelated host bridge
+        // registration. A generation-scoped transaction must never inspect or restore it.
+        stasis_dynload::register_global_i32_array(0x5a17_5a17, 0, 1usize as *mut i32, 2);
+        let accepted = activate_candidate_transactionally(
+            Some(&active),
+            &candidate,
+            &preview,
+            true,
+            || {
+                candidate
+                    .write_global_scalar("score", JitScalarValue::I32(99))
+                    .expect("mutate candidate state");
+                false
+            },
+            |accepted| *accepted,
+        )
+        .expect("transaction rejects without touching unrelated registration");
+
+        assert!(!accepted);
+        assert_eq!(
+            active.read_global_scalar("score"),
+            Ok(JitScalarValue::I32(7))
+        );
     }
 
     #[test]

@@ -64,8 +64,10 @@ Watch updates are emitted between deterministic ticks. The extension never evalu
 
 Set `stasis.live.entry` only when a project needs an entry other than the one in `stasis.json`.
 `stasis.live.refreshEveryTicks` controls automatic global refresh and defaults to 30; set it to 1
-for every tick. Arrays with a boolean `active` or `Active` field hide inactive rows by default;
-disable `stasis.live.filterInactiveCollectionRows` to show every captured row.
+for every tick. Global snapshots and explicit watches run only while the Live Values view is visible;
+hiding it suspends both so the running game pays no inspection cost. Arrays with a boolean
+`active` or `Active` field hide inactive rows by default; disable
+`stasis.live.filterInactiveCollectionRows` to show every captured row.
 
 ## Navigation and tests
 

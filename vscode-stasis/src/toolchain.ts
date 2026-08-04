@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const MAXIMUM_INFO_BYTES = 1024 * 1024;
-const INFO_TIMEOUT_MS = 10_000;
+const INFO_TIMEOUT_MS = 30_000;
 
 interface ToolchainFile {
   path: string;

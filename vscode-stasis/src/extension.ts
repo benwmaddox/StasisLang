@@ -364,6 +364,8 @@ class LiveValuesProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
 class LiveController implements vscode.Disposable {
   private current: LiveSession | undefined;
   private sessionSubscriptions: vscode.Disposable[] = [];
+  private valuesViewVisible = false;
+  private visibilityUpdate: Promise<void> = Promise.resolve();
   readonly status: vscode.StatusBarItem;
 
   constructor(
@@ -418,7 +420,6 @@ class LiveController implements vscode.Disposable {
       root,
       client,
       configuration().get<string>("live.entry", ""),
-      Math.max(1, configuration().get<number>("live.refreshEveryTicks", 30)),
       this.output,
     );
     this.current = session;
@@ -433,6 +434,7 @@ class LiveController implements vscode.Disposable {
     this.updateState("starting");
     try {
       await session.start();
+      await this.queueVisibilityUpdate();
       this.output.appendLine(`Play session ready: ${root}`);
     } catch (error) {
       session.dispose();
@@ -447,11 +449,28 @@ class LiveController implements vscode.Disposable {
   }
 
   async updateRefreshCadence(): Promise<void> {
-    if (this.current && this.current.state !== "stopped") {
-      await this.current.refresh(
-        Math.max(1, configuration().get<number>("live.refreshEveryTicks", 30)),
-      );
+    if (this.valuesViewVisible && this.current && this.current.state !== "stopped") {
+      await this.queueVisibilityUpdate();
     }
+  }
+
+  async setValuesViewVisible(visible: boolean): Promise<void> {
+    this.valuesViewVisible = visible;
+    await this.queueVisibilityUpdate();
+  }
+
+  async refreshLiveValues(): Promise<void> {
+    if (!this.valuesViewVisible) {
+      throw new Error("Open the Live Values view before refreshing live data.");
+    }
+    await this.requireSession().refresh(this.refreshEveryTicks());
+  }
+
+  async addWatch(path: string): Promise<void> {
+    if (!this.valuesViewVisible) {
+      throw new Error("Open the Live Values view before adding a live watch.");
+    }
+    await this.requireSession().addWatch(path);
   }
 
   dispose(): void {
@@ -479,6 +498,28 @@ class LiveController implements vscode.Disposable {
       disposable.dispose();
     }
     this.sessionSubscriptions = [];
+  }
+
+  private refreshEveryTicks(): number {
+    return Math.max(1, configuration().get<number>("live.refreshEveryTicks", 30));
+  }
+
+  private queueVisibilityUpdate(): Promise<void> {
+    const update = this.visibilityUpdate
+      .catch(() => undefined)
+      .then(async () => {
+        const session = this.current;
+        if (!session || session.state === "stopped" || session.state === "starting") {
+          return;
+        }
+        if (this.valuesViewVisible) {
+          await session.refresh(this.refreshEveryTicks());
+        } else {
+          await session.stopRefreshing();
+        }
+      });
+    this.visibilityUpdate = update;
+    return update;
   }
 }
 
@@ -765,6 +806,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     output,
     (root) => languageClients.clientForRoot(root),
   );
+  const liveValuesView = vscode.window.createTreeView("stasis.liveValues", {
+    treeDataProvider: values,
+  });
   const tests = new StasisTests(output);
   const debugFactory = new StasisDebugAdapterFactory();
   const debugConfiguration = new StasisDebugConfigurationProvider();
@@ -775,10 +819,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     output,
     languageClients,
     controller,
+    liveValuesView,
     tests,
     vscode.debug.registerDebugAdapterDescriptorFactory("stasis", debugFactory),
     vscode.debug.registerDebugConfigurationProvider("stasis", debugConfiguration),
-    vscode.window.registerTreeDataProvider("stasis.liveValues", values),
+    liveValuesView.onDidChangeVisibility((event) => {
+      void showCommandError(() => controller.setValuesViewVisible(event.visible));
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("stasis.live.refreshEveryTicks")) {
         void showCommandError(() => controller.updateRefreshCadence());
@@ -808,10 +855,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
       }
     }),
     command("stasis.addWatch", async () => {
-      const session = controller.requireSession();
       const livePath = await askForPath("Watch a value while the Stasis game runs");
       if (livePath) {
-        await session.addWatch(livePath.trim());
+        await controller.addWatch(livePath.trim());
       }
     }),
     command("stasis.removeWatch", async (item) => {
@@ -829,9 +875,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
         values.setCollectionTable(item.node.path, false);
       }
     }),
-    command("stasis.refreshLiveValues", async () => controller.requireSession().refresh()),
+    command("stasis.refreshLiveValues", async () => controller.refreshLiveValues()),
     command("stasis.showOutput", async () => output.show(true)),
   );
+  void controller.setValuesViewVisible(liveValuesView.visible);
   void tests.refresh();
 
   await languageClients.start();

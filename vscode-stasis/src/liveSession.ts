@@ -40,7 +40,6 @@ export class LiveSession implements vscode.Disposable {
     readonly root: string,
     private readonly client: LanguageClient,
     private readonly entry: string,
-    private readonly refreshEveryTicks: number,
     private readonly output: vscode.OutputChannel,
   ) {
     this.subscriptions = [
@@ -105,7 +104,6 @@ export class LiveSession implements vscode.Disposable {
         entry: this.entry.trim() || undefined,
       });
       this.acceptCommandResponse(response);
-      await this.refresh(this.refreshEveryTicks);
     } catch (error) {
       this.setState("stopped");
       throw error;
@@ -160,6 +158,11 @@ export class LiveSession implements vscode.Disposable {
     for (const path of paths) {
       await this.request("inspect", { path });
     }
+  }
+
+  async stopRefreshing(): Promise<void> {
+    await this.request("inspect_all", { every_ticks: 0 });
+    this.output.appendLine("Live Values polling stopped because the view is hidden.");
   }
 
   dispose(): void {

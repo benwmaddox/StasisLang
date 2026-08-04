@@ -579,18 +579,7 @@ impl JitProcess {
         #[cfg(test)]
         let _test_guard = acquire_jit_process_test_guard();
         #[cfg(test)]
-        {
-            // Many unit tests manipulate process-global JIT tables. Keep them isolated and
-            // deterministic by clearing under the test guard.
-            stasis_dynload::clear_jit_i32_global_table();
-            stasis_dynload::clear_jit_f32_global_table();
-            stasis_dynload::clear_jit_f64_global_table();
-            stasis_dynload::clear_jit_i32_array_global_table();
-            stasis_dynload::clear_jit_f32_array_global_table();
-            stasis_dynload::clear_jit_f64_array_global_table();
-            stasis_dynload::clear_jit_string_literal_table();
-            stasis_dynload::clear_registered_global_memory();
-        }
+        clear_jit_process_test_runtime();
 
         Self::new_inner(
             #[cfg(test)]
@@ -2357,6 +2346,32 @@ impl JitProcess {
             }
         }
     }
+}
+
+#[cfg(test)]
+impl Drop for JitProcess {
+    fn drop(&mut self) {
+        if self._test_guard.is_some() {
+            // Clear registrations before modules and the serialization guard are dropped. This
+            // prevents the next test from observing raw pointers into an already-freed JIT/host
+            // allocation, even when that test snapshots runtime state before creating a process.
+            clear_jit_process_test_runtime();
+        }
+    }
+}
+
+#[cfg(test)]
+fn clear_jit_process_test_runtime() {
+    // Many unit tests manipulate process-global JIT tables. Keep them isolated and
+    // deterministic by clearing under the test guard.
+    stasis_dynload::clear_jit_i32_global_table();
+    stasis_dynload::clear_jit_f32_global_table();
+    stasis_dynload::clear_jit_f64_global_table();
+    stasis_dynload::clear_jit_i32_array_global_table();
+    stasis_dynload::clear_jit_f32_array_global_table();
+    stasis_dynload::clear_jit_f64_array_global_table();
+    stasis_dynload::clear_jit_string_literal_table();
+    stasis_dynload::clear_registered_global_memory();
 }
 
 fn scalar_type_name(type_id: u16) -> Option<&'static str> {

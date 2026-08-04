@@ -5557,7 +5557,7 @@ mod tests {
         let mut active = JitProcess::new();
         active.upsert_file(
             "watch_rollback.stasis",
-            "function main(): i32 { return 0; }",
+            "global WatchRollback { score: i32; }\nfunction main(): i32 { return 0; }",
         );
         active.compile().expect("active compile");
         let mut candidate = active.staged_candidate();

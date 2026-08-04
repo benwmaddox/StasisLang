@@ -187,6 +187,7 @@ pub(crate) struct LiveWorkspace {
     completion_preparation: Option<CompletionPreparation>,
     dropped_watch_events: u64,
     state_inspection_subscription: Option<(u64, usize, bool)>,
+    watch_polling_enabled: bool,
     validation_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
     host_entry_revision: u64,
     session_id: String,
@@ -247,6 +248,7 @@ impl LiveWorkspace {
             completion_preparation: None,
             dropped_watch_events: 0,
             state_inspection_subscription: None,
+            watch_polling_enabled: true,
             validation_snapshot: None,
             host_entry_revision: stasis_dynload::jit_host_entry_targets()
                 .map_or(0, |targets| targets.revision),
@@ -491,6 +493,9 @@ impl LiveWorkspace {
                     }
                 }
             }
+        }
+        if !self.watch_polling_enabled {
+            return;
         }
         if self.dropped_watch_events > 0 {
             let dropped = self.dropped_watch_events;
@@ -851,13 +856,20 @@ impl LiveWorkspace {
                 limit,
                 concise,
                 every_ticks,
-            } => {
-                if let Some(ticks) = every_ticks {
+            } => match every_ticks {
+                Some(0) => {
+                    self.state_inspection_subscription = None;
+                    self.watch_polling_enabled = false;
+                    Ok(("state_inspection_unsubscribed", json!({})))
+                }
+                Some(ticks) => {
                     self.state_inspection_subscription =
                         Some((ticks.clamp(1, u32::MAX as u64), limit, concise));
+                    self.watch_polling_enabled = true;
+                    inspect_all_scalars(jit, limit, concise)
                 }
-                inspect_all_scalars(jit, limit, concise)
-            }
+                None => inspect_all_scalars(jit, limit, concise),
+            },
             LiveCommand::Watch { path } => {
                 let value = jit.inspect_state_query(&path)?;
                 if !self.watches.contains_key(&path) && self.watches.len() >= MAX_LIVE_WATCHES {
@@ -1727,7 +1739,7 @@ impl LiveWorkspace {
                 })
             },
         );
-        *jit = prepared.candidate;
+        jit.accept_staged_candidate(prepared.candidate);
         self.source_items = source_items;
         self.completion_items = completion_items;
         self.source_files = source_files;
@@ -3063,6 +3075,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn project() -> (PathBuf, LiveRunConfig) {
+        // stasis_compiler is a dependency of this test binary, so its cfg(test) JIT isolation is
+        // not enabled here. Clear process-global runtime storage before each app-level fixture;
+        // otherwise registrations can retain pointers into a previous test's dropped host Vec.
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_f64_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        stasis_dynload::clear_jit_f64_array_global_table();
+        stasis_dynload::clear_jit_string_literal_table();
+        stasis_dynload::clear_registered_global_memory();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -3959,7 +3982,7 @@ mod tests {
     }
 
     #[test]
-    fn state_inspection_subscription_uses_runtime_tick_cadence() {
+    fn hidden_live_view_stops_snapshot_and_watch_polling() {
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -3995,6 +4018,85 @@ mod tests {
         assert_eq!(refresh.request_id, 0);
         assert_eq!(refresh.tick, 30);
         assert_eq!(refresh.kind, "state_inspection");
+
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    91,
+                    LiveCommand::Watch {
+                        path: "10 / score".into()
+                    },
+                ),
+            )
+            .ok
+        );
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                92,
+                LiveCommand::InspectAll {
+                    limit: 32,
+                    concise: false,
+                    every_ticks: Some(0),
+                },
+            ),
+        );
+        assert_eq!(response.kind, "state_inspection_unsubscribed");
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    93,
+                    LiveCommand::Set {
+                        path: "score".into(),
+                        expression: "0".into(),
+                        preview: false,
+                    },
+                ),
+            )
+            .ok
+        );
+        workspace.publish_watches(60, &jit);
+        assert!(client
+            .receive_timeout(std::time::Duration::from_millis(10))
+            .is_err());
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                94,
+                LiveCommand::InspectAll {
+                    limit: 32,
+                    concise: false,
+                    every_ticks: Some(30),
+                },
+            ),
+        );
+        assert_eq!(response.kind, "state_inspection");
+        workspace.publish_watches(61, &jit);
+        let watch = client
+            .receive_timeout(std::time::Duration::from_secs(1))
+            .expect("remembered watch resumes with the view");
+        assert_eq!(watch.kind, "watch_error");
+        assert_eq!(watch.data.expect("watch data")["path"], "10 / score");
         fs::remove_dir_all(root).ok();
     }
 
