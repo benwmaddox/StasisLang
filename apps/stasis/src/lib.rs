@@ -4145,6 +4145,10 @@ mod tests {
             "the graphics DLL must expose an explicit compatibility boundary"
         );
         assert!(
+            STASIS_GRAPHICS_SOURCE.contains("stasis_graphics_release_id(void)"),
+            "the graphics DLL must expose its immutable toolchain release identity"
+        );
+        assert!(
             STASIS_RUNNER_SOURCE.contains("stasis_set_asset_root(exe_dir)")
                 && STASIS_RUNNER_SOURCE.contains("set_graphics_asset_root(launcher_asset_root)")
                 && STASIS_RUNNER_SOURCE.contains("stasis_set_packaged_graphics_path(exe_dir)")

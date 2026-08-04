@@ -29,6 +29,7 @@ logs/nightshift/
 out/
 
 # Build artifacts
+dist/stasis-editor-release-*/
 *.dll
 *.exe
 *.so

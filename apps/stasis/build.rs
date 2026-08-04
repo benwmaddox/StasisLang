@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-env-changed=STASIS_RUNTIME_LIBRARY_PATH");
     println!("cargo:rerun-if-env-changed=STASIS_RUNTIME_DLL_PATH");
+    println!("cargo:rerun-if-env-changed=STASIS_RELEASE_ID");
+    println!("cargo:rerun-if-env-changed=STASIS_SOURCE_COMMIT");
+    println!("cargo:rerun-if-env-changed=STASIS_BUILD_TARGET");
 
     for candidate in runtime_library_candidate_paths() {
         println!("cargo:rerun-if-changed={}", candidate.display());

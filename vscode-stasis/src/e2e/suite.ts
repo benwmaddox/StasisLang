@@ -157,10 +157,6 @@ export async function run(): Promise<void> {
   const document = await vscode.workspace.openTextDocument(sourceUri);
   await vscode.window.showTextDocument(document);
   assert.equal(document.languageId, "stasis", "the nested fixture opens as a Stasis document");
-  await vscode.workspace
-    .getConfiguration("stasis", folder.uri)
-    .update("executablePath", executable, vscode.ConfigurationTarget.Global);
-
   const extension = vscode.extensions.getExtension<StasisExtensionApi>("stasislang.stasis");
   if (!extension) {
     throw new Error("The packaged Stasis VSIX is not installed.");

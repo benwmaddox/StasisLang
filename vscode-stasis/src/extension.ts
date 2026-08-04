@@ -10,11 +10,7 @@ import {
 } from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
 import { displayRuntimeValue, LiveResponse, LiveValue } from "./protocol";
-import {
-  loadPackagedToolchain,
-  requireEditorToolchain,
-  resolveToolchainExecutable,
-} from "./toolchain";
+import { resolveEditorToolchain } from "./toolchain";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
   { language: "stasis", scheme: "file" },
@@ -30,13 +26,23 @@ function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("stasis");
 }
 
-let packagedToolchain: string | undefined;
+let activeToolchainExecutable: string | undefined;
 
 function executablePath(): string {
-  return resolveToolchainExecutable(
-    configuration().get<string>("executablePath", ""),
-    packagedToolchain,
-  );
+  if (!activeToolchainExecutable) {
+    throw new Error("the Stasis editor toolchain has not been verified");
+  }
+  return activeToolchainExecutable;
+}
+
+function workspaceRootKey(root: string): string {
+  let resolved: string;
+  try {
+    resolved = fs.realpathSync.native(root);
+  } catch {
+    resolved = path.resolve(root);
+  }
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function findWorkspaceRoot(document?: vscode.TextDocument): string | undefined {
@@ -64,11 +70,6 @@ function findWorkspaceRoot(document?: vscode.TextDocument): string | undefined {
   return vscode.workspace.workspaceFolders?.find((folder) =>
     fs.existsSync(path.join(folder.uri.fsPath, "stasis.json")),
   )?.uri.fsPath;
-}
-
-function rootKey(root: string): string {
-  const resolved = path.resolve(root);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function pathIsWithin(root: string, candidate: string): boolean {
@@ -373,7 +374,6 @@ class LiveController implements vscode.Disposable {
 class StasisLanguageClients implements vscode.Disposable {
   private readonly clients = new Map<string, LanguageClient>();
   private readonly starts = new Map<string, Promise<void>>();
-  private readonly probes = new Map<string, Promise<void>>();
   private readonly subscriptions: vscode.Disposable[];
 
   constructor(private readonly output: vscode.LogOutputChannel) {
@@ -395,10 +395,8 @@ class StasisLanguageClients implements vscode.Disposable {
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (
-          event.affectsConfiguration("stasis.executablePath") ||
           event.affectsConfiguration("stasis.completion.limit")
         ) {
-          this.probes.clear();
           void this.restart();
         }
       }),
@@ -425,7 +423,7 @@ class StasisLanguageClients implements vscode.Disposable {
   }
 
   clientForRoot(root: string): LanguageClient | undefined {
-    return this.clients.get(rootKey(root));
+    return this.clients.get(workspaceRootKey(root));
   }
 
   dispose(): void {
@@ -467,17 +465,11 @@ class StasisLanguageClients implements vscode.Disposable {
   private async reportStartError(error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     this.output.error(message);
-    const action = await vscode.window.showErrorMessage(
-      `Stasis language tooling is unavailable: ${message}`,
-      "Select Toolchain",
-    );
-    if (action === "Select Toolchain") {
-      await vscode.commands.executeCommand("stasis.selectToolchain");
-    }
+    await vscode.window.showErrorMessage(`Stasis language tooling is unavailable: ${message}`);
   }
 
   private ensureProject(root: string, folder: vscode.WorkspaceFolder): Promise<void> {
-    const key = rootKey(root);
+    const key = workspaceRootKey(root);
     if (this.clients.has(key)) {
       return Promise.resolve();
     }
@@ -495,12 +487,6 @@ class StasisLanguageClients implements vscode.Disposable {
       return;
     }
     const toolchain = executablePath();
-    let probe = this.probes.get(toolchain);
-    if (!probe) {
-      probe = requireEditorToolchain(toolchain, root);
-      this.probes.set(toolchain, probe);
-    }
-    await probe;
     const serverOptions: ServerOptions = {
       command: toolchain,
       args: ["--workspace", root, "lsp", "--stdio"],
@@ -533,17 +519,17 @@ class StasisLanguageClients implements vscode.Disposable {
       middleware: {
         didOpen: (document, next) => {
           const owner = findWorkspaceRoot(document);
-          const owned = owner !== undefined && rootKey(owner) === key;
+          const owned = owner !== undefined && workspaceRootKey(owner) === key;
           return owned ? next(document) : Promise.resolve();
         },
         didChange: (event, next) => {
           const owner = findWorkspaceRoot(event.document);
-          const owned = owner !== undefined && rootKey(owner) === key;
+          const owned = owner !== undefined && workspaceRootKey(owner) === key;
           return owned ? next(event) : Promise.resolve();
         },
         didClose: (document, next) => {
           const owner = findWorkspaceRoot(document);
-          return owner !== undefined && rootKey(owner) === key ? next(document) : Promise.resolve();
+          return owner !== undefined && workspaceRootKey(owner) === key ? next(document) : Promise.resolve();
         },
       },
     };
@@ -646,12 +632,19 @@ async function showCommandError(action: () => Promise<void>): Promise<void> {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<StasisExtensionApi> {
-  try {
-    packagedToolchain = loadPackagedToolchain(context.extensionPath);
-  } catch (error) {
-    void vscode.window.showErrorMessage(`Stasis: ${error instanceof Error ? error.message : String(error)}`);
-  }
   const output = vscode.window.createOutputChannel("Stasis", { log: true });
+  try {
+    activeToolchainExecutable = await resolveEditorToolchain(
+      context.extensionPath,
+      configuration().get<string>("developer.executablePath", ""),
+    );
+    output.appendLine(`Verified editor toolchain: ${activeToolchainExecutable}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Toolchain verification failed: ${message}`);
+    void vscode.window.showErrorMessage(`Stasis: ${message}`);
+    throw error;
+  }
   const languageClients = new StasisLanguageClients(output);
   const values = new LiveValuesProvider();
   const controller = new LiveController(
@@ -705,23 +698,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     }),
     command("stasis.refreshLiveValues", async () => controller.requireSession().refresh()),
     command("stasis.showOutput", async () => output.show(true)),
-    command("stasis.selectToolchain", async () => {
-      const selected = await vscode.window.showOpenDialog({
-        canSelectFiles: true,
-        canSelectFolders: false,
-        canSelectMany: false,
-        openLabel: "Select Stasis Toolchain",
-        filters: process.platform === "win32" ? { Executable: ["exe"] } : undefined,
-      });
-      const selectedPath = selected?.[0]?.fsPath;
-      if (!selectedPath) {
-        return;
-      }
-      const root = findWorkspaceRoot() ?? path.dirname(selectedPath);
-      await requireEditorToolchain(selectedPath, root);
-      await configuration().update("executablePath", selectedPath, vscode.ConfigurationTarget.Global);
-      void vscode.window.showInformationMessage(`Stasis toolchain selected: ${selectedPath}`);
-    }),
   );
   void tests.refresh();
 
