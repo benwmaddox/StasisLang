@@ -146,18 +146,16 @@ jobs:
 
       - name: Install macOS graphics dependencies
         if: runner.os == 'macOS'
-        run: brew install sdl2 sdl2_image pkg-config
+        run: brew install pkg-config
 
       - name: Build native graphics runtime
         shell: bash
         run: |
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            export CMAKE_PREFIX_PATH="$(brew --prefix):${CMAKE_PREFIX_PATH:-}"
-          fi
           cmake -S runtime -B target/vscode-e2e-runtime \
             -DCMAKE_BUILD_TYPE=Release \
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
             -DSTASIS_GRAPHICS_SDL_ONLY=ON \
             -DSTASIS_BUILD_RUNNER=OFF \
             -DSTASIS_BUILD_SYS=OFF

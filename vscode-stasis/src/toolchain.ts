@@ -9,7 +9,7 @@ const INFO_TIMEOUT_MS = 10_000;
 interface ToolchainFile {
   path: string;
   sha256: string;
-  role: "executable" | "graphics_runtime";
+  role: "executable" | "graphics_runtime" | "support";
 }
 
 interface EditorInfo {
@@ -116,7 +116,7 @@ function parseManifest(source: string): PackagedToolchainManifest {
       !file ||
       typeof file.path !== "string" ||
       !/^[0-9a-f]{64}$/u.test(file.sha256) ||
-      (file.role !== "executable" && file.role !== "graphics_runtime")
+      !["executable", "graphics_runtime", "support"].includes(file.role)
     )
   ) {
     throw new Error("invalid packaged Stasis toolchain manifest");

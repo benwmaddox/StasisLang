@@ -98,7 +98,7 @@ jobs:
 
       - name: Install SDL development packages (macos)
         if: runner.os == 'macOS'
-        run: brew install sdl2 sdl2_image
+        run: brew install pkg-config
 
       - name: Setup MSVC dev environment (windows)
         if: runner.os == 'Windows'
@@ -166,6 +166,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
             -DSTASIS_GRAPHICS_SDL_ONLY=ON \
             -DSTASIS_BUILD_RUNNER=OFF \
             -DSTASIS_BUILD_SYS=OFF \
@@ -216,8 +217,8 @@ jobs:
             --release-tag "${{ needs.detect.outputs.nightly_tag }}" \
             --source-commit "${{ github.sha }}" \
             --compiler "bin/stasis" \
-            --dependency "sdl2=external-not-linked" \
-            --dependency "sdl2_image=external-not-linked"
+            --dependency "sdl2=2.32.10-static" \
+            --dependency "sdl2_image=2.8.12-static"
           tar -C dist -czf "dist/${{ matrix.archive }}.${{ matrix.ext }}" "${{ matrix.archive }}"
 
       - name: Assemble bundle (windows)

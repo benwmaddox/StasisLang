@@ -56,16 +56,33 @@ const relativeInsideBundle = (absolute) => {
   return relative.split(path.sep).join("/");
 };
 const sha256 = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-const files = [
+const requiredFiles = [
   ["executable", executable, identity.executable.sha256],
   ["graphics_runtime", path.resolve(nativePath(identity.graphics_runtime.path)), identity.graphics_runtime.sha256],
-].map(([role, file, reportedHash]) => {
+];
+const roles = new Map(requiredFiles.map(([role, file]) => [relativeInsideBundle(file), role]));
+for (const [, file, reportedHash] of requiredFiles) {
   const actualHash = sha256(file);
   if (actualHash !== reportedHash) {
     throw new Error(`Stasis reported the wrong hash for ${file}.`);
   }
-  return { path: relativeInsideBundle(file), sha256: actualHash, role };
+}
+const bundleFiles = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+  const file = path.join(directory, entry.name);
+  if (entry.isDirectory()) return bundleFiles(file);
+  if (!entry.isFile()) throw new Error(`Unsupported entry in Stasis toolchain bundle: ${file}`);
+  return [file];
 });
+const files = bundleFiles(bundleRoot)
+  .map((file) => {
+    const relative = relativeInsideBundle(file);
+    return {
+      path: relative,
+      sha256: sha256(file),
+      role: roles.get(relative) ?? "support",
+    };
+  })
+  .sort((left, right) => left.path.localeCompare(right.path));
 const manifest = {
   schema: 1,
   executable: executableRelative.split(path.sep).join("/"),
