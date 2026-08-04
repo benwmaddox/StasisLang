@@ -1739,7 +1739,7 @@ impl LiveWorkspace {
                 })
             },
         );
-        *jit = prepared.candidate;
+        jit.accept_staged_candidate(prepared.candidate);
         self.source_items = source_items;
         self.completion_items = completion_items;
         self.source_files = source_files;
@@ -3075,6 +3075,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn project() -> (PathBuf, LiveRunConfig) {
+        // stasis_compiler is a dependency of this test binary, so its cfg(test) JIT isolation is
+        // not enabled here. Clear process-global runtime storage before each app-level fixture;
+        // otherwise registrations can retain pointers into a previous test's dropped host Vec.
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_f64_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        stasis_dynload::clear_jit_f64_array_global_table();
+        stasis_dynload::clear_jit_string_literal_table();
+        stasis_dynload::clear_registered_global_memory();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
