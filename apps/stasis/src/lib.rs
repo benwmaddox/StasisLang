@@ -4221,6 +4221,7 @@ mod tests {
 
     #[test]
     fn macos_runner_is_packaged_for_retina_drawables() {
+        let runner_plist = STASIS_RUNNER_MACOS_PLIST.replace("\r\n", "\n");
         for required in [
             "MACOSX_BUNDLE TRUE",
             "MACOSX_BUNDLE_INFO_PLIST \"${CMAKE_CURRENT_SOURCE_DIR}/stasis_runner_macos.plist.in\"",
@@ -4231,7 +4232,7 @@ mod tests {
             );
         }
         assert!(
-            STASIS_RUNNER_MACOS_PLIST.contains("<key>NSHighResolutionCapable</key>\n    <true/>"),
+            runner_plist.contains("<key>NSHighResolutionCapable</key>\n    <true/>"),
             "macOS runner bundle must opt into Retina backing pixels"
         );
     }

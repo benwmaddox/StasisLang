@@ -177,9 +177,9 @@ jobs:
           cmake --build target/vscode-e2e-runtime --config Release --target "${build_targets[@]}"
           test -f "$STASIS_RUNTIME_LIBRARY_PATH"
           if [[ "${{ runner.os }}" == "macOS" ]]; then
-            runner="target/vscode-e2e-runtime/bin/stasis_runner.app/Contents/MacOS/stasis_runner"
+            runner="target/vscode-e2e-runtime/bin/Release/stasis_runner.app/Contents/MacOS/stasis_runner"
             test -x "${runner}"
-            test "$(plutil -extract NSHighResolutionCapable raw target/vscode-e2e-runtime/bin/stasis_runner.app/Contents/Info.plist)" = "true"
+            test "$(plutil -extract NSHighResolutionCapable raw target/vscode-e2e-runtime/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
             echo "STASIS_RUNTIME_RUNNER_PATH=${GITHUB_WORKSPACE}/${runner}" >> "$GITHUB_ENV"
           fi
 

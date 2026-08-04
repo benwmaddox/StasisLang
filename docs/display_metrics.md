@@ -74,8 +74,9 @@ therefore an `800 x 600` SDL window with a `1200 x 900` drawable. Windows does
 not bitmap-stretch a lower-resolution frame, and the resulting `1.5` raster
 scale rebuilds SVG and font resources at the drawable density.
 
-On macOS, the release toolchain ships `stasis_runner.app` with
-`NSHighResolutionCapable` enabled. Together with SDL's
+On macOS, the release toolchain ships `stasis_runner.app`, and generated
+desktop packages preserve the same app-bundle contract with a game-specific
+`Info.plist`. Both enable `NSHighResolutionCapable`. Together with SDL's
 `SDL_WINDOW_ALLOW_HIGHDPI` window flag, an `800 x 600` logical window on a
 2x Retina display receives a `1600 x 1200` drawable instead of a
 resolution-doubled low-density surface. The runtime applies the same drawable

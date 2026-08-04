@@ -89,6 +89,9 @@ process default.
 - The macOS runner is now a minimal `.app` bundle with
   `NSHighResolutionCapable=true`, and release/bootstrap archives include that
   bundle. The toolchain resolves its inner executable transparently.
+- Generated macOS desktop packages stage the runner, game library, graphics
+  runtime, launch metadata, and assets inside a game-specific `.app` bundle,
+  retaining the Retina opt-in through the final distribution boundary.
 - macOS CI builds the bundle and reads the generated plist with `plutil` so a
   packaging regression cannot silently disable Retina drawables.
 
