@@ -60,7 +60,20 @@ async function main(): Promise<void> {
   const fixtureWorkspace = path.join(profileRoot, "workspace");
   const fixtureProject = path.join(fixtureWorkspace, "nested-project");
   fs.mkdirSync(fixtureWorkspace, { recursive: true });
-  fs.cpSync(path.join(extensionRoot, "test", "fixture"), fixtureProject, { recursive: true });
+  const sourceProject = process.env.STASIS_E2E_SOURCE_PROJECT?.trim();
+  if (sourceProject) {
+    const sourceRoot = path.resolve(sourceProject);
+    fs.mkdirSync(fixtureProject, { recursive: true });
+    fs.copyFileSync(path.join(sourceRoot, "stasis.json"), path.join(fixtureProject, "stasis.json"));
+    for (const directory of ["src", "tests"]) {
+      const sourceDirectory = path.join(sourceRoot, directory);
+      if (fs.existsSync(sourceDirectory)) {
+        fs.cpSync(sourceDirectory, path.join(fixtureProject, directory), { recursive: true });
+      }
+    }
+  } else {
+    fs.cpSync(path.join(extensionRoot, "test", "fixture"), fixtureProject, { recursive: true });
+  }
   fs.mkdirSync(userSettingsDir, { recursive: true });
   fs.writeFileSync(
     path.join(userSettingsDir, "settings.json"),
@@ -117,6 +130,7 @@ async function main(): Promise<void> {
         ...process.env,
         STASIS_E2E_EXECUTABLE: executable,
         STASIS_E2E_PROJECT_ROOT: "nested-project",
+        STASIS_E2E_LATENCY_ONLY: sourceProject ? "1" : "0",
         STASIS_E2E_SCREENSHOT: screenshot,
         STASIS_SCREENSHOT_ONCE: screenshot,
         STASIS_SCREENSHOT_FRAME: "2",

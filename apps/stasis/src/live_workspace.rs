@@ -44,6 +44,7 @@ const MAX_LIVE_TRANSACTION_ASSIGNMENTS: usize = 64;
 const MAX_STAGED_TEST_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_STAGED_TEST_DIAGNOSTIC_BYTES: usize = 4096;
 const MAX_WATCH_PREDICATE_SCAN_PER_TICK: usize = 4096;
+const MAX_INSPECT_VALUES: usize = 4096;
 #[derive(Debug, Clone)]
 pub struct LiveRunConfig {
     pub project_root: PathBuf,
@@ -185,6 +186,7 @@ pub(crate) struct LiveWorkspace {
     edit_preparation: Option<EditPreparation>,
     completion_preparation: Option<CompletionPreparation>,
     dropped_watch_events: u64,
+    state_inspection_subscription: Option<(u64, usize, bool)>,
     validation_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
     host_entry_revision: u64,
     session_id: String,
@@ -244,6 +246,7 @@ impl LiveWorkspace {
             edit_preparation: None,
             completion_preparation: None,
             dropped_watch_events: 0,
+            state_inspection_subscription: None,
             validation_snapshot: None,
             host_entry_revision: stasis_dynload::jit_host_entry_targets()
                 .map_or(0, |targets| targets.revision),
@@ -470,6 +473,25 @@ impl LiveWorkspace {
 
     pub(crate) fn publish_watches(&mut self, tick: u64, jit: &JitProcess) {
         let runtime_identity = self.runtime_identity();
+        if let Some((every_ticks, limit, concise)) = self.state_inspection_subscription {
+            if tick % every_ticks == 0 {
+                let response = match inspect_all_scalars(jit, limit, concise) {
+                    Ok((kind, data)) => LiveResponse::success(0, tick, kind, data),
+                    Err(error) => LiveResponse::failure(0, tick, error),
+                }
+                .with_runtime_identity(runtime_identity.clone());
+                match self.server.respond(response) {
+                    Ok(()) => {}
+                    Err(LiveResponseSendError::Full(_)) => {
+                        self.dropped_watch_events = self.dropped_watch_events.saturating_add(1);
+                    }
+                    Err(LiveResponseSendError::Disconnected) => {
+                        self.quit = true;
+                        return;
+                    }
+                }
+            }
+        }
         if self.dropped_watch_events > 0 {
             let dropped = self.dropped_watch_events;
             match self.server.respond(
@@ -825,7 +847,17 @@ impl LiveWorkspace {
                 }
             }
             LiveCommand::Inspect { path } => inspect_scalar(jit, &path),
-            LiveCommand::InspectAll { limit, concise } => inspect_all_scalars(jit, limit, concise),
+            LiveCommand::InspectAll {
+                limit,
+                concise,
+                every_ticks,
+            } => {
+                if let Some(ticks) = every_ticks {
+                    self.state_inspection_subscription =
+                        Some((ticks.clamp(1, u32::MAX as u64), limit, concise));
+                }
+                inspect_all_scalars(jit, limit, concise)
+            }
             LiveCommand::Watch { path } => {
                 let value = jit.inspect_state_query(&path)?;
                 if !self.watches.contains_key(&path) && self.watches.len() >= MAX_LIVE_WATCHES {
@@ -2769,7 +2801,7 @@ fn inspect_all_scalars(
         .filter(|(path, _)| !concise || concise_state_path_is_visible(path, &path_names))
         .collect::<Vec<_>>();
     let total = paths.len();
-    let limit = limit.clamp(1, 64);
+    let limit = limit.clamp(1, MAX_INSPECT_VALUES);
     let items = paths
         .into_iter()
         .take(limit)
@@ -2780,33 +2812,65 @@ fn inspect_all_scalars(
         .collect::<Result<Vec<_>, String>>()?;
     let memory = jit.state_memory_report(&BTreeMap::new(), MAX_STATE_SNAPSHOT_BYTES as u64)?;
     let layout = jit.state_layout();
+    let mut remaining_values = limit.saturating_sub(items.len());
+    let mut collection_rows_truncated = false;
+    let visible_collection_count = layout.collections.len().min(limit);
     let collections = layout
         .collections
         .iter()
-        .take(limit)
-        .map(|collection| {
+        .take(visible_collection_count)
+        .enumerate()
+        .map(|(collection_index, collection)| -> Result<Value, String> {
             let active_count = memory
                 .entries
                 .iter()
                 .find(|entry| entry.path == collection.path && entry.kind == "collection_field")
-                .and_then(|entry| entry.active_count);
-            json!({
+                .and_then(|entry| entry.active_count)
+                .unwrap_or_else(|| u64::try_from(collection.capacity).unwrap_or(0))
+                .min(u64::try_from(collection.capacity).unwrap_or(0));
+            let field_value_count = collection.fields.len().max(1);
+            let collections_left = visible_collection_count - collection_index;
+            let fair_value_share = remaining_values / collections_left.max(1);
+            let row_limit = fair_value_share / field_value_count;
+            let visible_rows = usize::try_from(active_count)
+                .unwrap_or(usize::MAX)
+                .min(row_limit);
+            let mut row_values = Vec::with_capacity(visible_rows);
+            for index in 0..visible_rows {
+                let mut values = Vec::with_capacity(collection.fields.len());
+                for field in &collection.fields {
+                    let value = jit.read_global_collection_scalar(
+                        &collection.path,
+                        &field.field,
+                        i32::try_from(index).map_err(|_| "collection row index exceeds i32")?,
+                    )?;
+                    values.push(compact_scalar_value(value));
+                }
+                row_values.push(values);
+            }
+            remaining_values = remaining_values.saturating_sub(visible_rows * field_value_count);
+            let rows_truncated = visible_rows < usize::try_from(active_count).unwrap_or(usize::MAX);
+            collection_rows_truncated |= rows_truncated;
+            Ok(json!({
                 "path": collection.path,
                 "kind": "collection",
                 "element_shape": collection.element_shape,
                 "capacity": collection.capacity,
                 "active_count": active_count,
                 "fields": collection.fields,
-            })
+                "row_start": 0,
+                "row_values": row_values,
+                "rows_truncated": rows_truncated,
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     let structs = layout.structs.iter().take(limit).collect::<Vec<_>>();
     Ok((
         "state_inspection",
         json!({
             "total": total,
             "limit": limit,
-            "truncated": total > limit || layout.collections.len() > limit || layout.structs.len() > limit,
+            "truncated": total > limit || layout.collections.len() > limit || layout.structs.len() > limit || collection_rows_truncated,
             "concise": concise,
             "items": items,
             "collections": collections,
@@ -2820,6 +2884,18 @@ fn inspect_all_scalars(
             },
         }),
     ))
+}
+
+fn compact_scalar_value(value: JitScalarValue) -> Value {
+    match value {
+        JitScalarValue::I32(value) => json!(value),
+        JitScalarValue::F32(value) => json!(value),
+        JitScalarValue::F64(value) => json!(value),
+        JitScalarValue::Bool(value) => json!(value),
+        JitScalarValue::U8(value) => json!(value),
+        JitScalarValue::U16(value) => json!(value),
+        JitScalarValue::U32(value) => json!(value),
+    }
 }
 
 fn concise_state_path_is_visible(path: &str, all_paths: &HashSet<String>) -> bool {
@@ -3237,6 +3313,31 @@ mod tests {
         assert_eq!(data["items"][0]["path"], "score");
         assert_eq!(data["items"][0]["static_type"], "i32");
         assert_eq!(data["items"][0]["value"]["value"], 1);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn state_inspection_includes_bounded_collection_rows() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "struct Enemy { hp: i32; speed: f32; }\nglobal enemies: Enemy[2];\nfunction main(): i32 { enemies[0].hp = 9; enemies[0].speed = 2.5; return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("write source");
+        let (jit, _) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (_, data) = inspect_all_scalars(&jit, 8, false).expect("state inspection");
+        assert_eq!(data["collections"][0]["path"], "enemies");
+        assert_eq!(data["collections"][0]["row_start"], 0);
+        assert_eq!(
+            data["collections"][0]["row_values"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(data["collections"][0]["row_values"][0][0], 9);
+        assert_eq!(data["collections"][0]["row_values"][0][1], 2.5);
+        assert!(serde_json::to_vec(&data).expect("encode inspection").len() < 4096);
         fs::remove_dir_all(root).ok();
     }
 
@@ -3854,6 +3955,46 @@ mod tests {
         assert!(workspace.should_run_tick());
         workspace.after_tick();
         assert!(!workspace.should_run_tick());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn state_inspection_subscription_uses_runtime_tick_cadence() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                90,
+                LiveCommand::InspectAll {
+                    limit: 32,
+                    concise: false,
+                    every_ticks: Some(30),
+                },
+            ),
+        );
+        assert_eq!(response.kind, "state_inspection");
+
+        workspace.publish_watches(29, &jit);
+        assert!(client
+            .receive_timeout(std::time::Duration::from_millis(10))
+            .is_err());
+        workspace.publish_watches(30, &jit);
+        let refresh = client
+            .receive_timeout(std::time::Duration::from_millis(10))
+            .expect("tick-based state refresh");
+        assert_eq!(refresh.request_id, 0);
+        assert_eq!(refresh.tick, 30);
+        assert_eq!(refresh.kind, "state_inspection");
         fs::remove_dir_all(root).ok();
     }
 

@@ -644,6 +644,216 @@ struct LanguageIndex {
     completion: CompletionIndex,
     workshop_items: Vec<WorkshopCompletionItem>,
     symbols: Vec<WorkshopSymbol>,
+    definitions: WarmDefinitionIndex,
+}
+
+#[derive(Default)]
+struct WarmDefinitionIndex {
+    simple: BTreeMap<String, Vec<WorkshopReference>>,
+    root_types: BTreeMap<String, String>,
+    root_dependencies: BTreeMap<String, WarmDefinitionDependency>,
+    fields: BTreeMap<(String, String), (String, WorkshopReference)>,
+    field_dependencies: BTreeMap<(String, String), WarmDefinitionDependency>,
+    struct_names: BTreeSet<String>,
+}
+
+struct WarmDefinitionResolution {
+    references: Vec<WorkshopReference>,
+    dependencies: Vec<WarmDefinitionDependency>,
+}
+
+#[derive(Clone)]
+struct WarmDefinitionDependency {
+    file: String,
+    source_spans: Vec<stasis_compiler::frontend::workshop::WorkshopSourceSpan>,
+}
+
+impl WarmDefinitionIndex {
+    fn build(
+        files: &[WorkshopSourceFile],
+        source_items: &[WorkshopSourceItem],
+        completion_items: &[WorkshopCompletionItem],
+    ) -> Result<Self, String> {
+        let mut index = Self::default();
+        let mut field_types = BTreeMap::<(String, String), String>::new();
+        for item in completion_items {
+            match item.kind.as_str() {
+                "global" | "constant" => {
+                    if let Some(type_name) = item.type_name.as_ref() {
+                        index
+                            .root_types
+                            .entry(item.text.clone())
+                            .or_insert_with(|| type_name.clone());
+                    }
+                }
+                "field" if !item.text.contains('.') => {
+                    if let (Some(owner), Some(type_name)) =
+                        (item.owner.as_ref(), item.type_name.as_ref())
+                    {
+                        field_types
+                            .entry((owner.clone(), item.text.clone()))
+                            .or_insert_with(|| type_name.clone());
+                    }
+                }
+                "struct" => {
+                    index.struct_names.insert(item.text.clone());
+                }
+                _ => {}
+            }
+        }
+
+        for file in files {
+            let tokens = lex(&file.source)?;
+            for (token_index, token) in tokens.iter().copied().enumerate() {
+                if token.kind != TokenKind::Identifier {
+                    continue;
+                }
+                let name = &file.source[token.start..token.end];
+                let containing = source_items
+                    .iter()
+                    .filter(|item| {
+                        item.file == file.path
+                            && item.source_spans.iter().any(|span| {
+                                span.start as usize <= token.start && token.end <= span.end as usize
+                            })
+                    })
+                    .min_by_key(|item| {
+                        item.source_spans
+                            .iter()
+                            .map(|span| span.end.saturating_sub(span.start))
+                            .min()
+                            .unwrap_or(u32::MAX)
+                    });
+                let previous = token_index
+                    .checked_sub(1)
+                    .and_then(|index| tokens.get(index).copied())
+                    .map(|token| &file.source[token.start..token.end]);
+                let simple_kind = match previous {
+                    Some("function") => Some(WorkshopSourceItemKind::Function),
+                    Some("test") => Some(WorkshopSourceItemKind::Test),
+                    Some("struct") => Some(WorkshopSourceItemKind::Struct),
+                    Some("global" | "const") => Some(WorkshopSourceItemKind::Globals),
+                    _ => None,
+                };
+                if let Some(kind) = simple_kind {
+                    if let Some(container) = containing.filter(|item| item.kind == kind) {
+                        index
+                            .simple
+                            .entry(name.to_string())
+                            .or_default()
+                            .push(definition_reference(file, token, container, name)?);
+                        if kind == WorkshopSourceItemKind::Globals {
+                            index
+                                .root_dependencies
+                                .entry(name.to_string())
+                                .or_insert_with(|| WarmDefinitionDependency {
+                                    file: file.path.clone(),
+                                    source_spans: container.source_spans.clone(),
+                                });
+                        }
+                    }
+                }
+
+                if tokens
+                    .get(token_index + 1)
+                    .is_some_and(|next| next.kind == TokenKind::Colon)
+                {
+                    if let Some(container) =
+                        containing.filter(|item| item.kind == WorkshopSourceItemKind::Struct)
+                    {
+                        let key = (container.name.clone(), name.to_string());
+                        if let Some(type_name) = field_types.get(&key) {
+                            if !index.fields.contains_key(&key) {
+                                index.fields.insert(
+                                    key.clone(),
+                                    (
+                                        type_name.clone(),
+                                        definition_reference(file, token, container, name)?,
+                                    ),
+                                );
+                                index.field_dependencies.insert(
+                                    key,
+                                    WarmDefinitionDependency {
+                                        file: file.path.clone(),
+                                        source_spans: container.source_spans.clone(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(index)
+    }
+
+    fn definition(&self, symbol: &str) -> Option<WarmDefinitionResolution> {
+        let segments = symbol.split('.').collect::<Vec<_>>();
+        if let [name] = segments.as_slice() {
+            return Some(WarmDefinitionResolution {
+                references: self.simple.get(*name)?.clone(),
+                dependencies: Vec::new(),
+            });
+        }
+        let root = *segments.first()?;
+        let mut dependencies = Vec::new();
+        let mut type_name = if let Some(type_name) = self.root_types.get(root) {
+            if let Some(dependency) = self.root_dependencies.get(root) {
+                dependencies.push(dependency.clone());
+            }
+            type_name.clone()
+        } else if self.struct_names.contains(root) {
+            root.to_string()
+        } else {
+            return None;
+        };
+        let mut definition = None;
+        for field_name in &segments[1..] {
+            let owner = type_name
+                .split('[')
+                .next()
+                .unwrap_or(&type_name)
+                .trim()
+                .to_string();
+            let (field_type, reference) = self
+                .fields
+                .get(&(owner.clone(), (*field_name).to_string()))?;
+            type_name = field_type.clone();
+            if let Some(dependency) = self
+                .field_dependencies
+                .get(&(owner, (*field_name).to_string()))
+            {
+                dependencies.push(dependency.clone());
+            }
+            definition = Some(reference.clone());
+        }
+        Some(WarmDefinitionResolution {
+            references: vec![definition?],
+            dependencies,
+        })
+    }
+}
+
+fn definition_reference(
+    file: &WorkshopSourceFile,
+    token: Token,
+    container: &WorkshopSourceItem,
+    symbol: &str,
+) -> Result<WorkshopReference, String> {
+    Ok(WorkshopReference {
+        symbol: symbol.to_string(),
+        kind: WorkshopReferenceKind::Definition,
+        file: file.path.clone(),
+        source_span: stasis_compiler::frontend::workshop::WorkshopSourceSpan {
+            start: u32::try_from(token.start)
+                .map_err(|_| "definition start exceeds u32".to_string())?,
+            end: u32::try_from(token.end).map_err(|_| "definition end exceeds u32".to_string())?,
+        },
+        containing_kind: container.kind,
+        containing_name: container.name.clone(),
+        containing_signature: container.signature.clone(),
+        containing_source_hash: container.source_hash.clone(),
+    })
 }
 
 struct LanguageHierarchyIndex {
@@ -772,6 +982,10 @@ impl LanguageService {
 
     pub fn clear_live_observations(&mut self) {
         self.live.clear();
+    }
+
+    pub fn warm_navigation_cache(&mut self) -> Result<(), String> {
+        self.language_index().map(|_| ())
     }
 
     pub fn set_disk_document(&mut self, path: impl Into<String>, text: impl Into<String>) {
@@ -1081,13 +1295,45 @@ impl LanguageService {
         path: &str,
         byte_offset: usize,
     ) -> Result<Vec<LanguageLocation>, String> {
-        Ok(self
-            .symbol_references(path, byte_offset)?
-            .into_iter()
-            .filter_map(|(kind, location)| {
-                (kind == WorkshopReferenceKind::Definition).then_some(location)
-            })
-            .collect())
+        let snapshot = self.documents.snapshot();
+        let document = snapshot
+            .document(path)
+            .ok_or_else(|| format!("navigation document is not indexed: '{path}'"))?;
+        let symbol = reference_symbol_at(&document.text, byte_offset)
+            .ok_or_else(|| "no Stasis symbol at navigation position".to_string())?;
+        let project_root = self.project_root.clone();
+        if let Some(locations) = self.language_index.as_ref().and_then(|index| {
+            index
+                .definitions
+                .definition(&symbol)
+                .and_then(|resolution| {
+                    remap_definition_locations(&project_root, &snapshot, index, &resolution)
+                })
+        }) {
+            return Ok(locations);
+        }
+        let index = self.language_index()?;
+        if let Some(resolution) = index.definitions.definition(&symbol) {
+            if let Some(locations) =
+                remap_definition_locations(&project_root, &snapshot, index, &resolution)
+            {
+                return Ok(locations);
+            }
+        }
+        Ok(
+            find_workshop_references(&self.language_index()?.files, &symbol, 256)?
+                .into_iter()
+                .filter_map(|reference| {
+                    (reference.kind == WorkshopReferenceKind::Definition).then(|| {
+                        LanguageLocation {
+                            path: absolute_source_path(&project_root, &reference.file),
+                            range: reference.source_span.start as usize
+                                ..reference.source_span.end as usize,
+                        }
+                    })
+                })
+                .collect(),
+        )
     }
 
     pub fn references(
@@ -1715,6 +1961,8 @@ impl LanguageService {
                 let source_items = workshop_source_items(&files)?;
                 let symbols = workshop_symbols(&files)?;
                 let workshop_items = workshop_completion_items(&files)?;
+                let definitions =
+                    WarmDefinitionIndex::build(&files, &source_items, &workshop_items)?;
                 let completion_items = workshop_items
                     .iter()
                     .map(shared_completion_item)
@@ -1728,6 +1976,7 @@ impl LanguageService {
                     completion,
                     workshop_items,
                     symbols,
+                    definitions,
                 })
             })();
             match rebuilt {
@@ -2518,6 +2767,48 @@ fn remap_hierarchy_item(
     })
 }
 
+fn remap_definition_locations(
+    project_root: &str,
+    snapshot: &WorkspaceSnapshot,
+    index: &LanguageIndex,
+    resolution: &WarmDefinitionResolution,
+) -> Option<Vec<LanguageLocation>> {
+    for dependency in &resolution.dependencies {
+        let indexed = index
+            .files
+            .iter()
+            .find(|candidate| candidate.path == dependency.file)?;
+        let path = absolute_source_path(project_root, &dependency.file);
+        let current = snapshot.document(&path)?;
+        let regions = UnchangedRegions::new(&indexed.source, &current.text);
+        for span in &dependency.source_spans {
+            regions.remap(
+                &indexed.source,
+                &current.text,
+                span.start as usize..span.end as usize,
+            )?;
+        }
+    }
+    resolution
+        .references
+        .iter()
+        .map(|reference| {
+            let path = absolute_source_path(project_root, &reference.file);
+            let indexed = index
+                .files
+                .iter()
+                .find(|file| file.path == reference.file)?;
+            let current = snapshot.document(&path)?;
+            let range = UnchangedRegions::new(&indexed.source, &current.text).remap(
+                &indexed.source,
+                &current.text,
+                reference.source_span.start as usize..reference.source_span.end as usize,
+            )?;
+            Some(LanguageLocation { path, range })
+        })
+        .collect()
+}
+
 fn remap_hierarchy_span(
     project_root: &str,
     snapshot: &WorkspaceSnapshot,
@@ -2720,6 +3011,7 @@ impl std::error::Error for PositionError {}
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use std::time::Instant;
 
     #[test]
@@ -3494,6 +3786,95 @@ function main(): i32 {
         assert_eq!(field.len(), 1);
         assert_eq!(&source[field[0].range.clone()], "x");
         assert_eq!(source[..field[0].range.start].matches('\n').count(), 0);
+
+        let warm_revision = service
+            .language_index
+            .as_ref()
+            .expect("warm definition index")
+            .revision;
+        let shifted = format!("\n{source}");
+        service.set_disk_document(path_text.clone(), shifted.clone());
+        let shifted_use = shifted.find("state.x =").expect("shifted field use");
+        let shifted_field = service
+            .definition(&path_text, shifted_use + "state.".len())
+            .expect("definition from warm cache after unrelated edit");
+        assert_eq!(&shifted[shifted_field[0].range.clone()], "x");
+        assert_eq!(
+            service
+                .language_index
+                .as_ref()
+                .expect("preserved warm index")
+                .revision,
+            warm_revision,
+            "an unrelated edit remaps the warm declaration without rebuilding the workspace",
+        );
+
+        let renamed = shifted.replace(" x:", " y:").replace("state.x", "state.y");
+        service.set_disk_document(path_text.clone(), renamed.clone());
+        let renamed_use = renamed.find("state.y =").expect("renamed field use");
+        let renamed_field = service
+            .definition(&path_text, renamed_use + "state.".len())
+            .expect("definition after declaration edit");
+        assert_eq!(&renamed[renamed_field[0].range.clone()], "y");
+        assert_eq!(
+            service
+                .language_index
+                .as_ref()
+                .expect("refreshed definition index")
+                .revision,
+            service.snapshot().revision(),
+            "changing a declaration rebuilds the warm cache for the new revision",
+        );
+    }
+
+    #[test]
+    fn warm_field_definition_rebuilds_when_the_global_owner_type_changes() {
+        let root = std::env::temp_dir().join("stasis-language-service-global-type-edge");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct Alpha { value: i32; }\nstruct Bravo { value: i32; }\nglobal state: Alpha;\nfunction main(): i32 { return state.value; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let use_offset = source.rfind("state.value").expect("field use") + "state.".len();
+        let alpha = service
+            .definition(&path_text, use_offset)
+            .expect("alpha field definition");
+        assert_eq!(source[..alpha[0].range.start].matches('\n').count(), 0);
+
+        let changed = source.replace("state: Alpha", "state: Bravo");
+        service.set_disk_document(path_text.clone(), changed.clone());
+        let changed_use = changed.rfind("state.value").expect("changed field use") + "state.".len();
+        let bravo = service
+            .definition(&path_text, changed_use)
+            .expect("bravo field definition");
+        assert_eq!(changed[..bravo[0].range.start].matches('\n').count(), 1);
+        assert_eq!(
+            service
+                .language_index
+                .as_ref()
+                .expect("rebuilt field index")
+                .revision,
+            service.snapshot().revision(),
+        );
+    }
+
+    #[test]
+    fn warm_definition_returns_every_overload() {
+        let root = std::env::temp_dir().join("stasis-language-service-overload-definition");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "function select(value: i32): i32 { return value; }\nfunction select(value: f32): f32 { return value; }\nfunction main(): i32 { return select(1); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let use_offset = source.rfind("select(1)").expect("overload use") + 2;
+
+        let definitions = service
+            .definition(&path_text, use_offset)
+            .expect("overload definitions");
+        assert_eq!(definitions.len(), 2);
+        assert!(definitions
+            .iter()
+            .all(|location| &source[location.range.clone()] == "select"));
     }
 
     #[test]
@@ -3541,12 +3922,16 @@ function main(): i32 {
             .semantic_tokens(&path)
             .expect("warm semantic tokens");
         service.inlay_hints(&path).expect("warm inlay hints");
+        service
+            .definition(&path, hover_offset)
+            .expect("warm definition");
 
         let mut completion_micros = Vec::new();
         let mut hover_micros = Vec::new();
         let mut signature_micros = Vec::new();
         let mut semantic_token_micros = Vec::new();
         let mut inlay_hint_micros = Vec::new();
+        let mut definition_micros = Vec::new();
         for _ in 0..50 {
             let started = Instant::now();
             service
@@ -3571,20 +3956,26 @@ function main(): i32 {
             let started = Instant::now();
             service.inlay_hints(&path).expect("inlay hints");
             inlay_hint_micros.push(started.elapsed().as_micros());
+
+            let started = Instant::now();
+            service.definition(&path, hover_offset).expect("definition");
+            definition_micros.push(started.elapsed().as_micros());
         }
         completion_micros.sort_unstable();
         hover_micros.sort_unstable();
         signature_micros.sort_unstable();
         semantic_token_micros.sort_unstable();
         inlay_hint_micros.sort_unstable();
+        definition_micros.sort_unstable();
         let p95 = |samples: &[u128]| samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
         let completion_p95 = p95(&completion_micros);
         let hover_p95 = p95(&hover_micros);
         let signature_p95 = p95(&signature_micros);
         let semantic_token_p95 = p95(&semantic_token_micros);
         let inlay_hint_p95 = p95(&inlay_hint_micros);
+        let definition_p95 = p95(&definition_micros);
         eprintln!(
-            "warm p95: completion={completion_p95}us hover={hover_p95}us signature={signature_p95}us semantic_tokens={semantic_token_p95}us inlay_hints={inlay_hint_p95}us"
+            "warm p95: completion={completion_p95}us hover={hover_p95}us signature={signature_p95}us semantic_tokens={semantic_token_p95}us inlay_hints={inlay_hint_p95}us definition={definition_p95}us"
         );
         assert!(completion_p95 < 20_000, "completion p95 {completion_p95}us");
         assert!(hover_p95 < 30_000, "hover p95 {hover_p95}us");
@@ -3597,6 +3988,92 @@ function main(): i32 {
             inlay_hint_p95 < 30_000,
             "inlay hints p95 {inlay_hint_p95}us"
         );
+        assert!(
+            definition_p95 < 100_000,
+            "definition p95 {definition_p95}us"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires STASIS_CHESSTD_ROOT"]
+    fn chess_td_warm_definition_reports_service_component_latency() {
+        fn collect_stasis_files(root: &Path, files: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(root).expect("read ChessTD source directory") {
+                let path = entry.expect("ChessTD directory entry").path();
+                if path.is_dir() {
+                    collect_stasis_files(&path, files);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "stasis")
+                {
+                    files.push(path);
+                }
+            }
+        }
+
+        let root = PathBuf::from(
+            std::env::var("STASIS_CHESSTD_ROOT").expect("STASIS_CHESSTD_ROOT must name ChessTD"),
+        );
+        let mut paths = Vec::new();
+        collect_stasis_files(&root.join("src"), &mut paths);
+        collect_stasis_files(&root.join("tests"), &mut paths);
+        paths.sort();
+        let root_text = root.to_string_lossy().replace('\\', "/");
+        let mut service = LanguageService::new(&root_text).expect("ChessTD service");
+        let mut files = Vec::new();
+        for path in paths {
+            let source = std::fs::read_to_string(&path).expect("read ChessTD source");
+            let path_text = path.to_string_lossy().replace('\\', "/");
+            service.set_disk_document(path_text.clone(), source.clone());
+            files.push(WorkshopSourceFile {
+                path: canonical_source_path(Some(&root_text), &path_text)
+                    .expect("canonical ChessTD path"),
+                source,
+            });
+        }
+        let main_path = root.join("src/main.stasis");
+        let main_path = main_path.to_string_lossy().replace('\\', "/");
+        let main_source = service
+            .snapshot()
+            .document(&main_path)
+            .expect("ChessTD main source")
+            .text
+            .clone();
+        let symbol = "game.progression_dirty";
+        let offset = main_source.find(symbol).expect("ChessTD field use") + "game.".len() + 2;
+
+        let diagnostics_started = Instant::now();
+        let diagnostics = service.diagnostics();
+        let diagnostics_millis = diagnostics_started.elapsed().as_millis();
+        let diagnostic_count = diagnostics.diagnostics.len();
+        let warm_started = Instant::now();
+        service
+            .workspace_symbols("", 256)
+            .expect("warm ChessTD index");
+        let warm_millis = warm_started.elapsed().as_millis();
+        let legacy_started = Instant::now();
+        let legacy = find_workshop_references(&files, symbol, 256).expect("legacy definition scan");
+        let legacy_millis = legacy_started.elapsed().as_millis();
+        assert!(legacy
+            .iter()
+            .any(|reference| reference.kind == WorkshopReferenceKind::Definition));
+
+        let mut micros = Vec::new();
+        for _ in 0..50 {
+            let started = Instant::now();
+            let definitions = service
+                .definition(&main_path, offset)
+                .expect("cached ChessTD definition");
+            micros.push(started.elapsed().as_micros());
+            assert_eq!(definitions.len(), 1);
+            assert!(definitions[0].path.ends_with("src/game/model.stasis"));
+        }
+        micros.sort_unstable();
+        let p95 = micros[47];
+        eprintln!(
+            "ChessTD definition: diagnostics={diagnostics_millis}ms/{diagnostic_count} warm_index={warm_millis}ms legacy_scan={legacy_millis}ms cached_p95={p95}us"
+        );
+        assert!(p95 < 100_000, "ChessTD cached definition p95 {p95}us");
     }
 
     #[test]

@@ -2,12 +2,15 @@ import * as vscode from "vscode";
 import { LanguageClient } from "vscode-languageclient/node";
 import {
   isLiveResponse,
+  LiveCollection,
   LiveResponse,
   LiveRuntimeIdentity,
   LiveValue,
 } from "./protocol";
 
 export type LiveSessionState = "starting" | "running" | "paused" | "stopped";
+
+const LIVE_GLOBAL_VALUE_LIMIT = 4096;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null
@@ -22,6 +25,7 @@ interface LiveStateNotification {
 
 export class LiveSession implements vscode.Disposable {
   private readonly valuesByPath = new Map<string, LiveValue>();
+  private _collections: readonly LiveCollection[] = [];
   private readonly stateEmitter = new vscode.EventEmitter<LiveSessionState>();
   private readonly valuesEmitter = new vscode.EventEmitter<readonly LiveValue[]>();
   private readonly subscriptions: vscode.Disposable[];
@@ -36,6 +40,7 @@ export class LiveSession implements vscode.Disposable {
     readonly root: string,
     private readonly client: LanguageClient,
     private readonly entry: string,
+    private readonly refreshEveryTicks: number,
     private readonly output: vscode.OutputChannel,
   ) {
     this.subscriptions = [
@@ -54,6 +59,7 @@ export class LiveSession implements vscode.Disposable {
         if (notification.state === "stopped") {
           this._runtimeIdentity = undefined;
           this.valuesByPath.clear();
+          this._collections = [];
           this.emitValues();
           this.setState("stopped");
           if (typeof notification.detail === "string" && notification.detail !== "live Workshop stopped") {
@@ -84,6 +90,10 @@ export class LiveSession implements vscode.Disposable {
     return this._runtimeIdentity;
   }
 
+  get collections(): readonly LiveCollection[] {
+    return this._collections;
+  }
+
   async start(): Promise<void> {
     if (this._state !== "stopped") {
       return;
@@ -95,6 +105,7 @@ export class LiveSession implements vscode.Disposable {
         entry: this.entry.trim() || undefined,
       });
       this.acceptCommandResponse(response);
+      await this.refresh(this.refreshEveryTicks);
     } catch (error) {
       this.setState("stopped");
       throw error;
@@ -122,6 +133,7 @@ export class LiveSession implements vscode.Disposable {
     }
     this._runtimeIdentity = undefined;
     this.valuesByPath.clear();
+    this._collections = [];
     this.emitValues();
     this.setState("stopped");
   }
@@ -137,8 +149,14 @@ export class LiveSession implements vscode.Disposable {
     this.emitValues();
   }
 
-  async refresh(): Promise<void> {
+  async refresh(everyTicks?: number): Promise<void> {
     const paths = this.values.filter((value) => value.watched).map((value) => value.path);
+    const snapshot = await this.request("inspect_all", {
+      limit: LIVE_GLOBAL_VALUE_LIMIT,
+      concise: false,
+      ...(everyTicks === undefined ? {} : { every_ticks: everyTicks }),
+    });
+    this.output.appendLine(`Live Values refresh response: ${snapshot.kind} at tick ${snapshot.tick}`);
     for (const path of paths) {
       await this.request("inspect", { path });
     }
@@ -213,6 +231,11 @@ export class LiveSession implements vscode.Disposable {
       return;
     }
     if (response.kind === "state_inspection" && Array.isArray(data.items)) {
+      for (const [path, value] of this.valuesByPath) {
+        if (!value.watched) {
+          this.valuesByPath.delete(path);
+        }
+      }
       for (const item of data.items) {
         const fields = record(item);
         if (!fields || typeof fields.path !== "string") {
@@ -227,6 +250,56 @@ export class LiveSession implements vscode.Disposable {
           watched: existing?.watched === true,
         });
       }
+      this._collections = Array.isArray(data.collections)
+        ? data.collections.flatMap((collection): LiveCollection[] => {
+            const fields = record(collection);
+            if (!fields || typeof fields.path !== "string") {
+              return [];
+            }
+            const collectionFields = Array.isArray(fields.fields)
+              ? fields.fields.flatMap((field) => {
+                  const value = record(field);
+                  return value && typeof value.field === "string" && typeof value.type_name === "string"
+                    ? [{ field: value.field, staticType: value.type_name }]
+                    : [];
+                })
+              : [];
+            const rows = Array.isArray(fields.rows)
+              ? fields.rows.flatMap((row) => {
+                  const value = record(row);
+                  return value && typeof value.index === "number" && record(value.values)
+                    ? [{ index: value.index, values: record(value.values)! }]
+                    : [];
+                })
+              : Array.isArray(fields.row_values)
+                ? fields.row_values.flatMap((row, rowOffset) => {
+                    if (!Array.isArray(row)) {
+                      return [];
+                    }
+                    const rowStart = typeof fields.row_start === "number" ? fields.row_start : 0;
+                    return [{
+                      index: rowStart + rowOffset,
+                      values: Object.fromEntries(
+                        collectionFields.map((field, fieldIndex) => [field.field, row[fieldIndex]]),
+                      ),
+                    }];
+                  })
+                : [];
+            return [{
+              path: fields.path,
+              elementShape: typeof fields.element_shape === "string" ? fields.element_shape : "unknown",
+              capacity: typeof fields.capacity === "number" ? fields.capacity : rows.length,
+              activeCount: typeof fields.active_count === "number" ? fields.active_count : rows.length,
+              fields: collectionFields,
+              rows,
+              rowsTruncated: fields.rows_truncated === true,
+              tick: response.tick,
+            }];
+          })
+        : [];
+      this.output.appendLine(
+        `Live Values snapshot: ${data.items.length} globals, ${this._collections.length} collections at tick ${response.tick}`,
+      );
       this.emitValues();
     }
   }

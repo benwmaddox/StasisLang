@@ -259,6 +259,7 @@ impl LanguageServer {
             uri_by_path.insert(key.clone(), path_uri(&path)?);
             service.set_disk_document(key, text);
         }
+        let _ = service.warm_navigation_cache();
         let (live_process, live_cache_event) = LiveProcessBroker::new(&project_root, notify)?;
         Ok(Self {
             service,
@@ -1935,6 +1936,20 @@ mod tests {
             vec![source]
         );
 
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn invalid_disk_source_does_not_prevent_lsp_startup() {
+        let root =
+            std::env::temp_dir().join(format!("stasis-lsp-invalid-startup-{}", std::process::id()));
+        let source = root.join("src/main.stasis");
+        fs::create_dir_all(source.parent().unwrap()).expect("source directory");
+        fs::write(&source, "function unfinished(): i32 {").expect("invalid source");
+
+        let mut server = LanguageServer::new(&root, 64, Arc::new(|_, _| {}))
+            .expect("LSP starts with diagnostics-capable invalid source");
+        assert!(!server.service.diagnostics().diagnostics.is_empty());
         fs::remove_dir_all(root).ok();
     }
 

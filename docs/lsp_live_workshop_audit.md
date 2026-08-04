@@ -135,3 +135,80 @@ transaction against the running generation. Preserved `hp`/`speed` values and ze
 `armor` in the next generation prove that source publication, code activation, and state migration
 share one safe-point commit; this predicts a rejected field type change will leave all three on the
 previous generation.
+
+### Warm declaration navigation
+
+The language index now retains compiler-derived declaration spans, root types, and struct-field type
+edges for its workspace revision. The LSP warms that navigation cache at startup. Definition requests
+walk the cached type edges instead of rebuilding source items and scanning every token in every file.
+After ordinary edits, unchanged declaration spans are mapped onto the current text and remain usable
+without a workspace rebuild; an edit that touches the declaration fails that mapping and rebuilds the
+index before returning a location.
+
+The opt-in `chess_td_warm_definition_reports_service_component_latency` benchmark loads the local
+ChessTD `src/` and `tests/` trees. On the audited Windows machine, the former per-request reference
+scan took 88 ms inside the language service, the one-time debug index warmup took 345 ms, and 50
+cached `game.progression_dirty` definition requests measured 225 us at p95. The acceptance budget is
+not this component measurement: the packaged VSIX test times 50 complete
+`vscode.executeDefinitionProvider` calls and requires the p95 VS Code -> LSP -> VS Code round trip to
+remain below 100 ms. `STASIS_E2E_SOURCE_PROJECT` runs that same installed-VSIX gate against a copied
+local project. With a copied ChessTD workspace, 50 complete definition requests measured 13.87 ms
+at p95 through the isolated installed VSIX.
+
+- Good: measuring the real ChessTD graph separated one-time index construction from the repeated
+  navigation path and exposed the redundant workspace scan.
+- Bad: definition previously reused the references operation, paying to classify every matching use
+  even though it only needed one declaration.
+- Adjustment: keep read-only navigation indexes alive across revisions when unchanged-region mapping
+  proves their target spans are still current; rebuild only when that proof fails.
+
+Theory gained: definition latency is a cached identity-and-type-edge lookup plus coordinate mapping,
+not a reference search. The `game -> ChessGame -> progression_dirty` benchmark proves that this path
+stays valid across unrelated edits; this predicts nested state-field navigation cost grows with path
+depth rather than ChessTD workspace size.
+
+### Global-first Live Values tree
+
+Starting a VS Code play session now requests a typed snapshot of all globals without requiring users
+to add watches. Dotted global and struct paths are grouped into an expandable tree. Global arrays of
+structs include a bounded, same-tick row snapshot and expose a native view-item action that toggles
+that collection between field-by-field tree rows and compact table rows. Refresh updates both the
+default global snapshot and user-added watches. Automatic refresh follows accepted game ticks, is
+configurable from every tick to every N ticks, and defaults to 30. The shared runtime caps one
+snapshot at 4,096 scalar values/cells and marks partial collection rows explicitly. Collection
+values use a compact column-described row matrix: field names and static types occur once in shape
+metadata, while rows contain raw scalar cells. The runtime distributes its cell budget across
+collections so a large render buffer cannot starve later gameplay arrays from the snapshot.
+Arrays of structs with a boolean `active`/`Active` field hide false rows by default in both layouts;
+`stasis.live.filterInactiveCollectionRows` exposes all captured rows without another runtime query.
+
+- Good: extending the existing compiler-owned `inspect_all` response kept VS Code and the TUI on the
+  same state-inspection operation and made collection rows internally consistent at one tick.
+- Bad: the previous response returned collection shape metadata without element values, so an editor
+  could describe an array but could not render its contents without one request per cell.
+- Adjustment: bulk inspection contracts should carry bounded values together with shape metadata;
+  clients may choose tree or table presentation without creating a second runtime query path.
+
+Theory gained: live-value presentation is a projection of one typed runtime snapshot, not a watch
+list. Scalar globals plus the `Enemy[]` row regression prove that hierarchy and table layout can share
+the same identities and tick; this predicts nested collection presentation can be added by extending
+snapshot shape metadata without changing the LSP transport or watch semantics.
+
+### Navigation cache review hardening
+
+Warm navigation is now best-effort during LSP startup, so an invalid file produces diagnostics while
+the server remains available. Definition cache entries retain all overload declarations. Dotted field
+lookups also retain the compiler source spans that establish each root-type and field-type edge; stale
+reuse is allowed only while those spans map unchanged into the current documents.
+
+- Good: review scenarios became narrow regressions for invalid startup, overload multiplicity, and a
+  same-name field reached through a changed global owner type.
+- Bad: declaration-name remapping alone proved only that the destination still existed; it did not
+  prove that the cached type path still selected that destination.
+- Adjustment: warm semantic caches must retain and validate every source fact used to derive an
+  answer, while purely lexical declaration lookups may continue using target-span remapping alone.
+
+Theory gained: a cached field definition is a path proof, not merely a location. Preserving the root
+type declaration and each struct-field declaration span proves the path remains valid across unrelated
+edits; this predicts call hierarchy caching will need the same dependency-edge validation when it is
+moved onto a persistent index.

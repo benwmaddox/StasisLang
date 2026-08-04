@@ -29,6 +29,27 @@ export interface LiveValue {
   watched: boolean;
 }
 
+export interface LiveCollectionField {
+  field: string;
+  staticType: string;
+}
+
+export interface LiveCollectionRow {
+  index: number;
+  values: Record<string, unknown>;
+}
+
+export interface LiveCollection {
+  path: string;
+  elementShape: string;
+  capacity: number;
+  activeCount: number;
+  fields: readonly LiveCollectionField[];
+  rows: readonly LiveCollectionRow[];
+  rowsTruncated: boolean;
+  tick: number;
+}
+
 export function isLiveResponse(value: unknown): value is LiveResponse {
   if (typeof value !== "object" || value === null) {
     return false;

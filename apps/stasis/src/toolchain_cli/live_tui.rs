@@ -1436,6 +1436,7 @@ impl LiveTui {
             LiveCommand::InspectAll {
                 limit: 32,
                 concise: true,
+                every_ticks: None,
             },
         )) {
             self.pending.remove(&request_id);
@@ -2036,6 +2037,7 @@ impl LiveAiTools {
             "inspect_runtime_state" => LiveCommand::InspectAll {
                 limit: 64,
                 concise: true,
+                every_ticks: None,
             },
             "run_frame" => LiveCommand::Step { ticks: 1 },
             _ => return ToolObservation::error(&call.tool, "tool is not a read operation"),
