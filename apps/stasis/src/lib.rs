@@ -1872,8 +1872,11 @@ fn run_play_in_process_inner(
     let canonical_repository = repository_root
         .canonicalize()
         .unwrap_or_else(|_| repository_root.clone());
-    let project_root =
-        resolve_play_project_root(&root_path, &watch_dir_abs, &canonical_repository)?;
+    let project_root = if let Some((_, config)) = live.as_ref() {
+        resolve_live_play_project_root(&root_path, &config.project_root)?
+    } else {
+        resolve_play_project_root(&root_path, &watch_dir_abs, &canonical_repository)?
+    };
 
     let asset_working_dir = prepare_play_asset_working_dir(&watch_dir_abs)?;
     std::env::set_current_dir(&asset_working_dir).map_err(|error| {
@@ -2410,6 +2413,23 @@ fn resolve_play_project_root(
     } else {
         Ok(watch_dir.to_path_buf())
     }
+}
+
+fn resolve_live_play_project_root(
+    root_path: &Path,
+    configured_project_root: &Path,
+) -> Result<PathBuf, String> {
+    let configured = configured_project_root
+        .canonicalize()
+        .unwrap_or_else(|_| configured_project_root.to_path_buf());
+    if !root_path.starts_with(&configured) {
+        return Err(format!(
+            "live entry {} is outside project root {}",
+            root_path.display(),
+            configured.display()
+        ));
+    }
+    Ok(configured)
 }
 
 fn normalize_real_backend_config_paths(config: &mut RunnerConfig) {
@@ -5902,6 +5922,26 @@ mod tests {
             jit.execute_i32_noarg_by_name("main").expect("execute main"),
             7
         );
+
+        fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn live_play_uses_configured_project_root_above_entry_watch_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("stasis_live_play_project_{stamp}"));
+        let src = project.join("src");
+        fs::create_dir_all(&src).expect("create src");
+        let entry = src.join("main.stasis");
+        fs::write(&entry, "function main(): i32 { return 0; }\n").expect("write entry");
+        let entry = entry.canonicalize().expect("canonical entry");
+        let project = project.canonicalize().expect("canonical project");
+
+        let selected = resolve_live_play_project_root(&entry, &project).expect("live project root");
+        assert_eq!(selected, project);
 
         fs::remove_dir_all(&project).ok();
     }

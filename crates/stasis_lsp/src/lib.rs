@@ -1861,7 +1861,7 @@ fn stasis_files(root: &Path) -> Result<Vec<PathBuf>, String> {
                 let name = entry.file_name();
                 if !matches!(
                     name.to_str(),
-                    Some(".git" | ".worktrees" | "build" | "target")
+                    Some(".git" | ".stasis_cache" | ".worktrees" | "build" | "target")
                 ) {
                     pending.push(path);
                 }
@@ -1917,6 +1917,25 @@ mod tests {
                 return response;
             }
         }
+    }
+
+    #[test]
+    fn workspace_discovery_excludes_generated_toolchain_cache() {
+        let root =
+            std::env::temp_dir().join(format!("stasis-lsp-cache-discovery-{}", std::process::id()));
+        let source = root.join("src/main.stasis");
+        let cached = root.join(".stasis_cache/toolchain/src/stdlib/graphics.stasis");
+        fs::create_dir_all(source.parent().unwrap()).expect("source directory");
+        fs::create_dir_all(cached.parent().unwrap()).expect("cache directory");
+        fs::write(&source, "function main(): i32 { return 0; }\n").expect("source");
+        fs::write(&cached, "function cached(): i32 { return 1; }\n").expect("cache source");
+
+        assert_eq!(
+            stasis_files(&root).expect("workspace sources"),
+            vec![source]
+        );
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

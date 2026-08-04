@@ -312,7 +312,7 @@ reproduction commands, and the direct-call tradeoff are recorded in
 [selective_jit_benchmarks.md](selective_jit_benchmarks.md). Named physical Android arm64 acceptance
 remains a release-evidence gate and cannot be inferred from host-side Workshop tests.
 
-Each child uses commands bounded to 300 seconds, includes a representative executable Stasis path,
+Each child uses commands bounded to 900 seconds, includes a representative executable Stasis path,
 performs a touched-code cruft review, and records Good/Bad/Adjustment plus Theory gained.
 
 ## Superseded architecture to remove

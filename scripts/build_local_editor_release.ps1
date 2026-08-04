@@ -49,6 +49,12 @@ if (-not $SkipBuild) {
   } else {
     throw "A supported Visual Studio installation was not found."
   }
+  # Some automation hosts inject both Path and PATH. MSBuild treats them as a
+  # duplicate dictionary key when it launches cl.exe, so retain one canonical entry.
+  $processPath = [Environment]::GetEnvironmentVariable("Path", "Process")
+  [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+  [Environment]::SetEnvironmentVariable("Path", $null, "Process")
+  [Environment]::SetEnvironmentVariable("Path", $processPath, "Process")
   $cmakeCache = Join-Path $runtimeBuild "CMakeCache.txt"
   if ((Test-Path $cmakeCache) -and -not (Select-String -Path $cmakeCache -SimpleMatch "CMAKE_GENERATOR:INTERNAL=$generator" -Quiet)) {
     Remove-Item -LiteralPath $runtimeBuild -Recurse -Force

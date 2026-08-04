@@ -144,6 +144,19 @@ export async function run(): Promise<void> {
   if (!folder) {
     throw new Error("The fixture workspace is not open.");
   }
+  const projectRoot = path.join(
+    folder.uri.fsPath,
+    process.env.STASIS_E2E_PROJECT_ROOT ?? "",
+  );
+  assert.equal(
+    fs.existsSync(path.join(projectRoot, "stasis.json")),
+    true,
+    "the nested fixture project manifest is available",
+  );
+  const sourceUri = vscode.Uri.file(path.join(projectRoot, "src", "main.stasis"));
+  const document = await vscode.workspace.openTextDocument(sourceUri);
+  await vscode.window.showTextDocument(document);
+  assert.equal(document.languageId, "stasis", "the nested fixture opens as a Stasis document");
   const extension = vscode.extensions.getExtension<StasisExtensionApi>("stasislang.stasis");
   if (!extension) {
     throw new Error("The packaged Stasis VSIX is not installed.");
@@ -157,7 +170,7 @@ export async function run(): Promise<void> {
   assert.match(grammar, /storage\.type\.builtin\.stasis/, "the color grammar scopes built-in types");
 
   const formatUri = vscode.Uri.file(
-    path.join(folder.uri.fsPath, `format-input-${process.pid}.stasis`),
+    path.join(projectRoot, `format-input-${process.pid}.stasis`),
   );
   fs.writeFileSync(
     formatUri.fsPath,
@@ -182,11 +195,6 @@ export async function run(): Promise<void> {
     /function sample\(\): i32 \{\r?\n    value \+= 1;/,
     "formatter output applies canonical block newlines and indentation",
   );
-
-  const sourceUri = vscode.Uri.file(path.join(folder.uri.fsPath, "src", "main.stasis"));
-  const document = await vscode.workspace.openTextDocument(sourceUri);
-  await vscode.window.showTextDocument(document);
-  assert.equal(document.languageId, "stasis", "the fixture opens as a Stasis document");
 
   const validLength = document.getText().length;
   const invalidSuffix = "\nfunction lsp_diagnostic_probe(): i32 { while (true) { return 1; } }\n";
@@ -424,8 +432,12 @@ export async function run(): Promise<void> {
     sourceUri,
     speedPosition,
   );
+  const speedDeclarationLine = document
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("speed: i32"));
   assert.equal(fieldDefinitions?.length, 1, "Go to Definition resolves an indexed struct field");
-  assert.equal(fieldDefinitions?.[0]?.range.start.line, 10);
+  assert.equal(fieldDefinitions?.[0]?.range.start.line, speedDeclarationLine);
   const fieldReferences = await vscode.commands.executeCommand<vscode.Location[]>(
     "vscode.executeReferenceProvider",
     sourceUri,
@@ -472,7 +484,13 @@ export async function run(): Promise<void> {
   );
   assert.ok(organize?.edit, "standard LSP code actions expose Organize Stasis imports");
   assert.equal(await vscode.workspace.applyEdit(organize.edit), true, "applies the LSP organize-imports edit");
-  assert.equal(document.getText().includes("import \""), false, "unused and duplicate imports are removed");
+  assert.equal(document.getText().includes('import "unused.stasis"'), false, "unused import is removed");
+  assert.equal(document.getText().includes('import "helper.stasis"'), false, "duplicate probe import is removed");
+  assert.equal(
+    document.getText().includes('import "../.stasis_cache/toolchain/src/stdlib/graphics.stasis"'),
+    true,
+    "required toolchain import is preserved",
+  );
   assert.equal(await document.save(), true, "saves the organized source");
 
   await waitFor("Test Explorer discovery", () => api.testFiles().some((uri) => uri.endsWith("editor.test.stasis")));

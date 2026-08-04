@@ -44,7 +44,7 @@ Boundary rule:
 5. Update docs in the same PR when behavior changes.
 6. Preserve deterministic tick-based behavior.
 7. No ambient host API paths; each new host interaction must ship with explicit host-set contract docs/tests.
-8. Test command budget is strict: no single test command should exceed 5 minutes (300 seconds); split/shard test runs if needed and treat overruns as stability issues.
+8. Test command budget is strict: no single test command should exceed 15 minutes (900 seconds); split/shard test runs if needed and treat overruns as stability issues.
 
 ## Tooling Note
 

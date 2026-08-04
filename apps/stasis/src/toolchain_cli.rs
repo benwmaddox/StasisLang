@@ -517,6 +517,8 @@ struct ProjectManifest {
     tests: String,
     output: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    stdlib: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     android: Option<AndroidProjectManifest>,
 }
 
@@ -537,6 +539,7 @@ impl ProjectManifest {
             entry: "src/main.stasis".to_string(),
             tests: "tests".to_string(),
             output: "build".to_string(),
+            stdlib: None,
             android: None,
         }
     }
@@ -555,6 +558,13 @@ impl ProjectManifest {
             ("output", self.output.as_str()),
         ] {
             validate_relative_path(field, Path::new(value))?;
+        }
+        if self
+            .stdlib
+            .as_deref()
+            .is_some_and(|value| value != "toolchain")
+        {
+            return Err("stdlib must be 'toolchain' when specified".to_string());
         }
         if let Some(android) = &self.android {
             validate_android_application_id(&android.application_id)?;
@@ -1156,7 +1166,114 @@ fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
     let manifest: ProjectManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
     manifest.validate()?;
+    if manifest.stdlib.as_deref() == Some("toolchain") {
+        sync_toolchain_stdlib(&root)?;
+    }
     Ok(Workspace { root, manifest })
+}
+
+fn sync_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
+    let stdlib = bundled_stdlib_dir()?;
+    let source = stdlib
+        .parent()
+        .ok_or_else(|| format!("bundled stdlib has no src parent: {}", stdlib.display()))?
+        .to_path_buf();
+    let fingerprint = directory_sha256(&source)?;
+    let cache_root = workspace_root.join(".stasis_cache/toolchain");
+    let target = cache_root.join("src");
+    let marker = target.join(".toolchain-sha256");
+    if fs::read_to_string(&marker)
+        .ok()
+        .is_some_and(|value| value.trim() == fingerprint)
+    {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&cache_root)
+        .map_err(|error| format!("failed to create {}: {error}", cache_root.display()))?;
+    let suffix = std::process::id();
+    let staging = cache_root.join(format!("src.sync-{suffix}"));
+    let backup = cache_root.join(format!("src.previous-{suffix}"));
+    for path in [&staging, &backup] {
+        if path.exists() {
+            fs::remove_dir_all(path)
+                .map_err(|error| format!("failed to clear {}: {error}", path.display()))?;
+        }
+    }
+    copy_dir_if_exists(&source, &staging)?;
+    fs::write(
+        staging.join(".toolchain-sha256"),
+        format!("{fingerprint}\n"),
+    )
+    .map_err(|error| format!("failed to write stdlib fingerprint: {error}"))?;
+
+    if target.exists() {
+        let metadata = fs::symlink_metadata(&target)
+            .map_err(|error| format!("failed to inspect {}: {error}", target.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "refusing to replace non-directory stdlib cache {}",
+                target.display()
+            ));
+        }
+        fs::rename(&target, &backup).map_err(|error| {
+            format!(
+                "failed to stage existing stdlib cache {}: {error}",
+                target.display()
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(&staging, &target) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &target);
+        }
+        return Err(format!(
+            "failed to publish toolchain stdlib cache {}: {error}",
+            target.display()
+        ));
+    }
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .map_err(|error| format!("failed to clear {}: {error}", backup.display()))?;
+    }
+    Ok(())
+}
+
+fn directory_sha256(root: &Path) -> Result<String, String> {
+    fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+        let mut entries = fs::read_dir(directory)
+            .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to enumerate {}: {error}", directory.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let kind = entry.file_type().map_err(|error| {
+                format!("failed to inspect {}: {error}", entry.path().display())
+            })?;
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                collect(root, &entry.path(), files)?;
+            } else if kind.is_file() {
+                files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect(root, root, &mut files)?;
+    let mut digest = Sha256::new();
+    for relative in files {
+        digest.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        digest.update([0]);
+        let bytes = fs::read(root.join(&relative))
+            .map_err(|error| format!("failed to read {}: {error}", relative.display()))?;
+        digest.update(bytes);
+        digest.update([0]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
@@ -5350,6 +5467,44 @@ mod tests {
             ..ProjectManifest::new("demo".to_string())
         };
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_accepts_only_the_active_toolchain_stdlib() {
+        let mut manifest = ProjectManifest::new("demo".to_string());
+        manifest.stdlib = Some("toolchain".to_string());
+        assert!(manifest.validate().is_ok());
+        manifest.stdlib = Some("nightly-20260730-162".to_string());
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn loading_opted_in_workspace_materializes_the_active_toolchain_stdlib() {
+        let root = temp_dir("toolchain_stdlib");
+        create_project(root.clone(), "demo".to_string()).expect("create project");
+        let mut manifest = ProjectManifest::new("demo".to_string());
+        manifest.stdlib = Some("toolchain".to_string());
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("enable toolchain stdlib");
+
+        load_workspace(Some(&root)).expect("load workspace");
+        let cached = root.join(".stasis_cache/toolchain/src/stdlib/storage.stasis");
+        assert_eq!(
+            fs::read(&cached).expect("read cached stdlib"),
+            fs::read(
+                bundled_stdlib_dir()
+                    .expect("bundled stdlib")
+                    .join("storage.stasis")
+            )
+            .expect("read bundled stdlib")
+        );
+        assert!(root
+            .join(".stasis_cache/toolchain/src/.toolchain-sha256")
+            .is_file());
+        assert!(root
+            .join(".stasis_cache/toolchain/src/runtime/gfx_cmd.stasis")
+            .is_file());
+
+        remove_temp(&root);
     }
 
     #[test]

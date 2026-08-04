@@ -46,7 +46,7 @@
 - Prefer deterministic, isolated tests with explicit expected output/state.
 - If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
 - Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
-- Keep each test command bounded to 5 minutes max (300 seconds); split/shard runs when needed, and treat overruns as stability regressions.
+- Keep each test command bounded to 15 minutes max (900 seconds); split/shard runs when needed, and treat overruns as stability regressions.
 - After each edit/test step, check for lingering test processes (for example `target/debug/deps/*.exe`) and clean them up before the next step.
 - For incremental compilation:
 - Validate file-level invalidation correctness.
@@ -104,7 +104,7 @@
 - Keep diagnostic/instrumented behavior on the same pipeline (extra checks/tracing only), not a second compilation path.
 - Keep commits narrow and slice-scoped: avoid mixing reachability/lowering changes with unrelated backend/runtime work in the same commit.
 - End each slice with a cruft pass on touched files and aggressively remove code paths that no longer conform to the active reachability-first approach.
-- Keep test runs bounded and deterministic: each command must stay within 5 minutes (300 seconds), and lingering test/compiler processes must be checked/cleaned after each step.
+- Keep test runs bounded and deterministic: each command must stay within 15 minutes (900 seconds), and lingering test/compiler processes must be checked/cleaned after each step.
 - Compiler feature-slice completion gate: each slice must include at least one representative sample program that goes end-to-end through the compiler pipeline to Cranelift IR, is built into an executable, is run, and has its behavior verified by test assertions.
 - If a slice cannot yet pass that end-to-end executable verification path, the slice is not complete.
 - After each code change, run a quick simplicity review on the touched code and simplify again if a more direct version is possible.

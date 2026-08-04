@@ -88,7 +88,7 @@ and Watch expressions can inspect a local name or the same typed state expressio
 live inspector. Debug instrumentation is enabled only for the debug process—ordinary JIT play and
 AOT packages are unchanged.
 
-On Windows, `stasis.executablePath` may point to a signed `stasis.exe` when local execution policy
+On Windows, `stasis.developer.executablePath` may point to a signed `stasis.exe` when local execution policy
 requires signed binaries.
 
 ## Development
@@ -99,8 +99,11 @@ On Windows, build, test, package, and install the local extension with:
 powershell -ExecutionPolicy Bypass -File scripts\install_vscode_stasis.ps1 -Force
 ```
 
-Pass `-SkipInstall` to validate and create `.vsix/stasislang.stasis.vsix` without changing the
-installed VS Code extension. The underlying commands are:
+The local installer builds one atomic editor release under `dist/stasis-editor-release-win32-x64`.
+That release contains the VSIX, compiler/LSP/DAP executable, standard library, and matching native
+runtime. Pass `-SkipBuild` to reuse an existing release, `-RunVsCodeE2E` to exercise it in a clean
+VS Code profile, or `-SkipInstall` to build without changing the installed extension. The underlying
+extension commands are:
 
 ```powershell
 cd vscode-stasis

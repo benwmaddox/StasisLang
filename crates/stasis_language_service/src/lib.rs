@@ -428,6 +428,9 @@ impl LiveSessionBroker {
         }
         if batch.source_hashes.is_empty()
             || batch.source_hashes.iter().any(|(path, accepted_hash)| {
+                if path.starts_with(".stasis_cache/toolchain/") {
+                    return false;
+                }
                 files
                     .iter()
                     .find(|file| file.path == *path)
@@ -2716,6 +2719,7 @@ impl std::error::Error for PositionError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::time::Instant;
 
     #[test]
@@ -2893,16 +2897,32 @@ mod tests {
 
     #[test]
     fn vscode_fixture_is_clean_under_full_workspace_check() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../vscode-stasis/test/fixture")
-            .canonicalize()
-            .expect("VS Code fixture root");
+        let root = std::env::temp_dir().join(format!(
+            "stasis-language-service-vscode-fixture-{}",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join("src")).expect("fixture source directory");
         let path = root.join("src/main.stasis");
+        let source = include_str!("../../../vscode-stasis/test/fixture/src/main.stasis");
+        fs::write(&path, source).expect("fixture source");
+        let toolchain_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
+        for directory in ["runtime", "stdlib"] {
+            let cached_directory = root.join(".stasis_cache/toolchain/src").join(directory);
+            fs::create_dir_all(&cached_directory).expect("toolchain cache directory");
+            for entry in std::fs::read_dir(toolchain_source.join(directory))
+                .expect("toolchain source directory")
+            {
+                let entry = entry.expect("toolchain source entry");
+                if entry.path().extension().and_then(|value| value.to_str()) != Some("stasis") {
+                    continue;
+                }
+                fs::copy(entry.path(), cached_directory.join(entry.file_name()))
+                    .expect("cached toolchain source");
+            }
+        }
         let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
-        service.set_disk_document(
-            path.to_string_lossy(),
-            include_str!("../../../vscode-stasis/test/fixture/src/main.stasis"),
-        );
+        service.set_disk_document(path.to_string_lossy(), source);
 
         let report = service.diagnostics();
         assert!(
@@ -2910,6 +2930,24 @@ mod tests {
             "fixture diagnostics: {:?}",
             report.diagnostics
         );
+
+        service.open_document(
+            path.to_string_lossy(),
+            1,
+            format!(
+                "{source}\nfunction lsp_diagnostic_probe(): i32 {{ while (true) {{ return 1; }} }}\n"
+            ),
+        );
+        let dirty = service.diagnostics();
+        assert!(
+            dirty
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("while")),
+            "dirty fixture diagnostics: {:?}",
+            dirty.diagnostics
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     fn intelligence_service() -> (LanguageService, String, String) {
@@ -3293,10 +3331,13 @@ function main(): i32 {
         service.publish_live_observations(LiveObservationBatch {
             session_id: "test-session".into(),
             generation: 4,
-            source_hashes: BTreeMap::from([(
-                "src/main.stasis".into(),
-                workshop_source_hash(source),
-            )]),
+            source_hashes: BTreeMap::from([
+                ("src/main.stasis".into(), workshop_source_hash(source)),
+                (
+                    ".stasis_cache/toolchain/src/stdlib/graphics.stasis".into(),
+                    "accepted-toolchain-hash".into(),
+                ),
+            ]),
             observations: vec![LiveObservation {
                 path: "score".into(),
                 type_name: Some("i32".into()),
@@ -3338,10 +3379,13 @@ function main(): i32 {
         service.publish_live_observations(LiveObservationBatch {
             session_id: "indexed-session".into(),
             generation: 1,
-            source_hashes: BTreeMap::from([(
-                "src/main.stasis".into(),
-                workshop_source_hash(source),
-            )]),
+            source_hashes: BTreeMap::from([
+                ("src/main.stasis".into(), workshop_source_hash(source)),
+                (
+                    ".stasis_cache/toolchain/src/stdlib/graphics.stasis".into(),
+                    "accepted-toolchain-hash".into(),
+                ),
+            ]),
             observations: Vec::new(),
             indexed_collections: vec![LiveIndexedCollection {
                 path: "state.enemies".into(),
