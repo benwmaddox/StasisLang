@@ -10,6 +10,7 @@ import {
 } from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
 import { displayRuntimeValue, LiveResponse, LiveValue } from "./protocol";
+import { resolveEditorToolchain } from "./toolchain";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
   { language: "stasis", scheme: "file" },
@@ -25,8 +26,13 @@ function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("stasis");
 }
 
+let activeToolchainExecutable: string | undefined;
+
 function executablePath(): string {
-  return configuration().get<string>("executablePath", "stasis").trim() || "stasis";
+  if (!activeToolchainExecutable) {
+    throw new Error("the Stasis editor toolchain has not been verified");
+  }
+  return activeToolchainExecutable;
 }
 
 function findWorkspaceRoot(document?: vscode.TextDocument): string | undefined {
@@ -366,7 +372,6 @@ class StasisLanguageClients implements vscode.Disposable {
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (
-          event.affectsConfiguration("stasis.executablePath") ||
           event.affectsConfiguration("stasis.completion.limit")
         ) {
           void this.restart();
@@ -531,6 +536,18 @@ async function showCommandError(action: () => Promise<void>): Promise<void> {
 
 export async function activate(context: vscode.ExtensionContext): Promise<StasisExtensionApi> {
   const output = vscode.window.createOutputChannel("Stasis", { log: true });
+  try {
+    activeToolchainExecutable = await resolveEditorToolchain(
+      context.extensionPath,
+      configuration().get<string>("developer.executablePath", ""),
+    );
+    output.appendLine(`Verified editor toolchain: ${activeToolchainExecutable}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Toolchain verification failed: ${message}`);
+    void vscode.window.showErrorMessage(`Stasis: ${message}`);
+    throw error;
+  }
   const languageClients = new StasisLanguageClients(output);
   const values = new LiveValuesProvider();
   const controller = new LiveController(

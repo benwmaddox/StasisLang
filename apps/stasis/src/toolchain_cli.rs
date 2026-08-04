@@ -126,6 +126,7 @@ const COMMANDS: &[&str] = &[
     "replay",
     "verify",
     "version",
+    "editor-info",
     "env",
     "symbol",
     "help",
@@ -314,6 +315,8 @@ enum ToolchainCommand {
     Verify,
     /// Print the installed toolchain version.
     Version,
+    /// Report the editor protocols and the sibling graphics runtime identity.
+    EditorInfo,
     /// Print toolchain, workspace, cache, and offline capability information.
     Env,
     /// Find and transactionally edit compiler-owned semantic symbols.
@@ -743,6 +746,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Replay => "replay",
         ToolchainCommand::Verify => "verify",
         ToolchainCommand::Version => "version",
+        ToolchainCommand::EditorInfo => "editor-info",
         ToolchainCommand::Env => "env",
         ToolchainCommand::Symbol { .. } => "symbol",
     }
@@ -765,6 +769,7 @@ fn execute(
             create_project(root, name.unwrap_or(inferred))
         }
         ToolchainCommand::Version => Ok(version_result()),
+        ToolchainCommand::EditorInfo => editor_info_result(),
         ToolchainCommand::Env => env_result(workspace_arg.as_deref()),
         ToolchainCommand::Replay => Err(
             "replay is unavailable in toolchain 0.1; no replay runtime contract is implemented"
@@ -4152,6 +4157,64 @@ fn version_result() -> CommandResult {
         format!("stasis {}", env!("CARGO_PKG_VERSION")),
         json!({"version": env!("CARGO_PKG_VERSION")}),
     )
+}
+
+fn editor_info_result() -> Result<CommandResult, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve stasis executable: {error}"))?;
+    let runtime = installed_runtime_library().ok_or_else(|| {
+        format!(
+            "the Stasis graphics runtime is not installed beside {}",
+            executable.display()
+        )
+    })?;
+    let runtime = runtime
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve graphics runtime: {error}"))?;
+    stasis_dynload::StasisGraphicsApi::load(&runtime)
+        .map_err(|error| format!("the sibling graphics runtime is incompatible: {error}"))?;
+
+    let version = env!("CARGO_PKG_VERSION");
+    let release_id = option_env!("STASIS_RELEASE_ID").unwrap_or("development");
+    let runtime_release_id = stasis_dynload::graphics_runtime_release_id(&runtime)?;
+    if runtime_release_id != release_id {
+        return Err(format!(
+            "toolchain release mismatch: stasis is '{release_id}' but {} is '{runtime_release_id}'",
+            runtime.display()
+        ));
+    }
+    let source_commit = option_env!("STASIS_SOURCE_COMMIT").unwrap_or("development");
+    let target = option_env!("STASIS_BUILD_TARGET")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}-{}", env::consts::ARCH, env::consts::OS));
+    let data = json!({
+        "schema": 1,
+        "release_id": release_id,
+        "version": version,
+        "source_commit": source_commit,
+        "target": target,
+        "protocols": {
+            "lsp": 1,
+            "dap": 1,
+            "live": 1,
+            "graphics_abi": 1,
+        },
+        "executable": {
+            "path": executable,
+            "sha256": sha256_file(&executable)?,
+        },
+        "graphics_runtime": {
+            "path": runtime,
+            "release_id": runtime_release_id,
+            "sha256": sha256_file(&runtime)?,
+        },
+    });
+    Ok(CommandResult::success(
+        format!("stasis editor toolchain {release_id} ({target})"),
+        data,
+    ))
 }
 
 fn default_release_output(workspace: &Workspace) -> PathBuf {

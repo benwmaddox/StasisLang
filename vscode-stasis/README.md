@@ -28,7 +28,14 @@ The Stasis extension keeps the editor on the same compiler and runtime contracts
 
 ## Requirements
 
-Install a current `stasis` executable on `PATH`, or set `stasis.executablePath` to its absolute path. Open a folder containing `stasis.json`.
+Install the VSIX matching the current operating system and architecture. It contains an immutable,
+release-matched `stasis` compiler/LSP/DAP and graphics runtime; no separate `PATH` installation is
+used. Activation verifies their release identities, protocol versions, and hashes before starting
+any editor service. Open a folder containing `stasis.json`.
+
+For source-tree development only, set `stasis.developer.executablePath` to an absolute executable
+path and reload VS Code. The override must provide `stasis --json editor-info` and have its matching
+graphics runtime beside it.
 
 Projects created by `stasis new` recommend this extension and enable format-on-save only for the `stasis` language. For an existing project, use:
 

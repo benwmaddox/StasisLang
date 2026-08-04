@@ -122,7 +122,9 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_E2E_VSCODE_VERSION: "1.96.0"
       STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/vscode-e2e-runtime/bin/${{ matrix.runtime_library }}
-      STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/debug/stasis
+      STASIS_TOOLCHAIN_DIR: ${{ github.workspace }}/target/vscode-e2e-toolchain
+      STASIS_TOOLCHAIN_EXECUTABLE: bin/stasis
+      STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/vscode-e2e-toolchain/bin/stasis
       STASIS_E2E_SCREENSHOT: ${{ github.workspace }}/target/vscode-e2e/frame.png
     steps:
       - name: Checkout
@@ -167,7 +169,11 @@ jobs:
         run: |
           cargo test -p stasis_dynload -- --test-threads=1
           cargo build -p stasis
-          "$STASIS_E2E_EXECUTABLE" probe-graphics-runtime
+          mkdir -p target/vscode-e2e-toolchain/bin
+          cp target/debug/stasis target/vscode-e2e-toolchain/bin/
+          cp "$STASIS_RUNTIME_LIBRARY_PATH" target/vscode-e2e-toolchain/bin/
+          cp -R src target/vscode-e2e-toolchain/
+          "$STASIS_E2E_EXECUTABLE" --json editor-info
 
       - name: Install extension dependencies
         working-directory: vscode-stasis

@@ -1,63 +1,29 @@
 param(
   [switch]$Force,
-  [switch]$SkipInstall
+  [switch]$SkipInstall,
+  [switch]$SkipBuild,
+  [switch]$RunVsCodeE2E
 )
 
 $ErrorActionPreference = "Stop"
-
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$extensionDir = Join-Path $repoRoot "vscode-stasis"
-$vsixDir = Join-Path $extensionDir ".vsix"
-$vsixPath = Join-Path $vsixDir "stasislang.stasis.vsix"
+$releaseRoot = Join-Path $repoRoot "dist/stasis-editor-release-win32-x64"
+$builder = Join-Path $PSScriptRoot "build_local_editor_release.ps1"
 
-if (-not (Test-Path (Join-Path $extensionDir "package.json"))) {
-  throw "Missing VS Code extension: $extensionDir"
+& $builder -OutputRoot $releaseRoot -SkipBuild:$SkipBuild -RunVsCodeE2E:$RunVsCodeE2E
+if ($LASTEXITCODE -ne 0) { throw "Local Stasis editor release failed." }
+
+$vsix = Get-ChildItem $releaseRoot -Filter "*.vsix" | Select-Object -First 1
+if (-not $vsix) { throw "Local editor release does not contain a VSIX." }
+if ($SkipInstall) {
+  Write-Host "Built editor release: $releaseRoot"
+  return
 }
 
-$npm = Get-Command npm -ErrorAction SilentlyContinue
-if (-not $npm) {
-  throw "npm is required to build the Stasis VS Code extension."
-}
-
-if (-not $SkipInstall) {
-  $code = Get-Command code -ErrorAction SilentlyContinue
-  if (-not $code) {
-    throw "VS Code CLI (code) is not on PATH. Run with -SkipInstall to build only."
-  }
-}
-
-Push-Location $extensionDir
-try {
-  & $npm.Path @("ci")
-  if ($LASTEXITCODE -ne 0) {
-    throw "npm ci failed."
-  }
-
-  & $npm.Path @("test")
-  if ($LASTEXITCODE -ne 0) {
-    throw "extension tests failed."
-  }
-
-  New-Item -ItemType Directory -Force -Path $vsixDir | Out-Null
-  & $npm.Path @("run", "package", "--", "--out", $vsixPath)
-  if ($LASTEXITCODE -ne 0) {
-    throw "VSIX packaging failed."
-  }
-
-  if ($SkipInstall) {
-    Write-Host "Built VSIX: $vsixPath"
-    return
-  }
-
-  $installArgs = @("--install-extension", $vsixPath)
-  if ($Force) {
-    $installArgs += "--force"
-  }
-  & $code.Path @installArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw "VSIX install failed."
-  }
-  Write-Host "Installed VSIX: $vsixPath"
-} finally {
-  Pop-Location
-}
+$code = Get-Command code -ErrorAction SilentlyContinue
+if (-not $code) { throw "VS Code CLI (code) is not on PATH. Use -SkipInstall to build only." }
+$installArgs = @("--install-extension", $vsix.FullName)
+if ($Force) { $installArgs += "--force" }
+& $code.Source @installArgs
+if ($LASTEXITCODE -ne 0) { throw "VSIX install failed." }
+Write-Host "Installed VSIX from atomic editor release: $($vsix.FullName)"

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(stasis_graphics C)
 
+set(STASIS_RELEASE_ID "development" CACHE STRING "Immutable Stasis toolchain release identity")
+
 set(STASIS_MOBILE_PLATFORM OFF)
 if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(STASIS_MOBILE_PLATFORM ON)
@@ -62,6 +64,7 @@ endif()
 
 function(configure_stasis_target target is_static sdl_only link_sdl_main)
     target_sources(${target} PRIVATE stasis_graphics.c)
+    target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     if(link_sdl_main)
         target_link_libraries(${target} PRIVATE $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>)
     endif()
