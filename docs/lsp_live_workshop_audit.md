@@ -135,3 +135,30 @@ transaction against the running generation. Preserved `hp`/`speed` values and ze
 `armor` in the next generation prove that source publication, code activation, and state migration
 share one safe-point commit; this predicts a rejected field type change will leave all three on the
 previous generation.
+
+### Warm declaration navigation
+
+The language index now retains compiler-derived declaration spans, root types, and struct-field type
+edges for its workspace revision. The LSP warms that navigation cache at startup. Definition requests
+walk the cached type edges instead of rebuilding source items and scanning every token in every file.
+After ordinary edits, unchanged declaration spans are mapped onto the current text and remain usable
+without a workspace rebuild; an edit that touches the declaration fails that mapping and rebuilds the
+index before returning a location.
+
+The opt-in `chess_td_warm_definition_meets_100ms_contract` benchmark loads the local ChessTD `src/`
+and `tests/` trees. On the audited Windows machine, the former per-request reference scan took 98 ms
+inside the language service, the one-time debug index warmup took 345 ms, and 50 cached
+`game.progression_dirty` definition requests measured 225 us at p95. The normal deterministic warm
+latency test now includes definition with a 100 ms ceiling.
+
+- Good: measuring the real ChessTD graph separated one-time index construction from the repeated
+  navigation path and exposed the redundant workspace scan.
+- Bad: definition previously reused the references operation, paying to classify every matching use
+  even though it only needed one declaration.
+- Adjustment: keep read-only navigation indexes alive across revisions when unchanged-region mapping
+  proves their target spans are still current; rebuild only when that proof fails.
+
+Theory gained: definition latency is a cached identity-and-type-edge lookup plus coordinate mapping,
+not a reference search. The `game -> ChessGame -> progression_dirty` benchmark proves that this path
+stays valid across unrelated edits; this predicts nested state-field navigation cost grows with path
+depth rather than ChessTD workspace size.

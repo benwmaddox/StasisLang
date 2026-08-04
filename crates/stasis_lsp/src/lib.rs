@@ -259,6 +259,7 @@ impl LanguageServer {
             uri_by_path.insert(key.clone(), path_uri(&path)?);
             service.set_disk_document(key, text);
         }
+        service.warm_navigation_cache()?;
         let (live_process, live_cache_event) = LiveProcessBroker::new(&project_root, notify)?;
         Ok(Self {
             service,
