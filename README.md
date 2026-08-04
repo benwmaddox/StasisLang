@@ -246,6 +246,42 @@ stasis package-mobile --target android-arm64
 
 The integrated CLI, workspace manifest, JSON output, offline guarantees, and installation layout are specified in [docs/toolchain_cli.md](docs/toolchain_cli.md). Mobile packaging is documented in [docs/mobile_packaging.md](docs/mobile_packaging.md).
 
+## Visual Studio Code Extension
+
+The repository includes the [Stasis extension for Visual Studio Code](vscode-stasis/README.md). Open
+a folder containing `stasis.json`, then open any `.stasis` file; the extension activates one
+persistent, workspace-scoped `stasis lsp --stdio` process and keeps its compiler index warm. Release
+VSIX packages bundle a matching compiler, LSP, debug adapter, standard library, and graphics runtime,
+so editor behavior does not depend on a different `stasis` executable on `PATH`.
+
+The extension provides:
+
+- continuous compiler diagnostics, canonical formatting, completion, hover, signature help,
+  semantic highlighting, and inferred-type/parameter inlay hints;
+- compiler-backed Go to Definition and references for functions, structs, locals, globals, and
+  fields—including field navigation from expressions such as `state.player.health`—plus Outline,
+  breadcrumbs, workspace symbols, rename, quick fixes, and import organization;
+- call and struct-composition hierarchies, folding, nested selection ranges, linked editing, and
+  bracket-aware snippets through standard LSP requests;
+- Test Explorer discovery and isolated execution of `.test.stasis` files;
+- Debug Adapter Protocol support for source breakpoints, pause/continue, step in/over/out, real JIT
+  stack frames, lexical scopes, typed globals, and watch expressions;
+- **Stasis: Start Play Session**, which launches the graphical game and supports transactional live
+  function edits and compatible struct edits with automatic state migration, plus pause, single-tick,
+  resume, and stop controls;
+- a **Stasis > Live Values** view that starts with all globals in an expandable tree, supports typed
+  inspection and watches, and can display arrays of structs as either a tree or table. Collections
+  with an `active` or `Active` field hide inactive rows by default;
+- tick-based live-value refresh (`stasis.live.refreshEveryTicks`, default `30`). Snapshots and watches
+  are polled only while the Live Values view is visible, so a closed view adds no inspection polling
+  to the running game.
+
+Projects created by `stasis new` recommend the extension and enable format-on-save only for Stasis.
+Install the platform VSIX from the [nightly releases](https://github.com/benwmaddox/StasisLang/releases),
+or use `scripts/install_vscode_stasis.ps1` for a source-tree Windows development build. See the
+[extension README](vscode-stasis/README.md) for configuration, debugging, packaging, and end-to-end
+test commands.
+
 ## Data Belongs Beside the Model
 
 Editable runtime data can live in a project-level `data/` directory. JSON and CSV files with matching `<name>.struct-meta.json` metadata bind to declared globals automatically.
