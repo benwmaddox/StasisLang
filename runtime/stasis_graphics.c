@@ -3638,6 +3638,14 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
     log_package_provenance();
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+#if defined(_WIN32)
+    /*
+     * Keep SDL window coordinates in DPI-scaled points while the renderer uses
+     * the full physical drawable. This must precede video initialization so
+     * SDL can request per-monitor-v2 awareness before creating an HWND.
+     */
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "1");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
         stasis_report_runtime_errorf("SDL initialization failed: %s", SDL_GetError());
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -4006,7 +4014,7 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
 
 /*
  * Set window size (windowed mode).
- * width/height are in pixels.
+ * width/height are logical canvas/window points, not necessarily drawable pixels.
  */
 STASIS_EXPORT void stasis_set_window_size(int width, int height) {
     if (!g_window) {

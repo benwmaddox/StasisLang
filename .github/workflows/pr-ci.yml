@@ -89,6 +89,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/render-parity-runtime --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $runner = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe").Path
+          $runnerManifest = Join-Path $PWD "target/render-parity-runtime/stasis_runner.embedded.manifest"
+          & mt.exe -nologo "-inputresource:$runner;#1" "-out:$runnerManifest"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $manifestText = Get-Content -LiteralPath $runnerManifest -Raw
+          if ($manifestText -notmatch '<dpiAware[^>]*>true/pm</dpiAware>' -or
+              $manifestText -notmatch '<dpiAwareness[^>]*>PerMonitorV2, PerMonitor</dpiAwareness>') {
+            throw "stasis_runner.exe is missing its per-monitor-v2 DPI manifest"
+          }
           New-Item -ItemType Directory -Force target/render-parity-ci | Out-Null
           $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
           $env:STASIS_RUNTIME_RUNNER_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe")
@@ -151,16 +160,28 @@ jobs:
       - name: Build native graphics runtime
         shell: bash
         run: |
+          runner_build=OFF
+          build_targets=(stasis_graphics)
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            runner_build=ON
+            build_targets+=(stasis_runner)
+          fi
           cmake -S runtime -B target/vscode-e2e-runtime \
             -DCMAKE_BUILD_TYPE=Release \
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
             -DSTASIS_GRAPHICS_SDL_ONLY=ON \
-            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_RUNNER="${runner_build}" \
             -DSTASIS_BUILD_SYS=OFF
-          cmake --build target/vscode-e2e-runtime --config Release --target stasis_graphics
+          cmake --build target/vscode-e2e-runtime --config Release --target "${build_targets[@]}"
           test -f "$STASIS_RUNTIME_LIBRARY_PATH"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            runner="target/vscode-e2e-runtime/bin/Release/stasis_runner.app/Contents/MacOS/stasis_runner"
+            test -x "${runner}"
+            test "$(plutil -extract NSHighResolutionCapable raw target/vscode-e2e-runtime/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
+            echo "STASIS_RUNTIME_RUNNER_PATH=${GITHUB_WORKSPACE}/${runner}" >> "$GITHUB_ENV"
+          fi
 
       - name: Build and probe Stasis runtime loading
         shell: bash
