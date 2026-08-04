@@ -181,6 +181,9 @@ metadata, while rows contain raw scalar cells. The runtime distributes its cell 
 collections so a large render buffer cannot starve later gameplay arrays from the snapshot.
 Arrays of structs with a boolean `active`/`Active` field hide false rows by default in both layouts;
 `stasis.live.filterInactiveCollectionRows` exposes all captured rows without another runtime query.
+VS Code subscribes to automatic snapshots and runtime watches only while the Live Values view is
+visible. It explicitly unsubscribes both when hidden; the play session and hot-swap loop continue
+without inspection work, and locally remembered watches are restored when the view reopens.
 
 - Good: extending the existing compiler-owned `inspect_all` response kept VS Code and the TUI on the
   same state-inspection operation and made collection rows internally consistent at one tick.

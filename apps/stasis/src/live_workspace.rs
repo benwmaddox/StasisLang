@@ -851,13 +851,18 @@ impl LiveWorkspace {
                 limit,
                 concise,
                 every_ticks,
-            } => {
-                if let Some(ticks) = every_ticks {
+            } => match every_ticks {
+                Some(0) => {
+                    self.state_inspection_subscription = None;
+                    Ok(("state_inspection_unsubscribed", json!({})))
+                }
+                Some(ticks) => {
                     self.state_inspection_subscription =
                         Some((ticks.clamp(1, u32::MAX as u64), limit, concise));
+                    inspect_all_scalars(jit, limit, concise)
                 }
-                inspect_all_scalars(jit, limit, concise)
-            }
+                None => inspect_all_scalars(jit, limit, concise),
+            },
             LiveCommand::Watch { path } => {
                 let value = jit.inspect_state_query(&path)?;
                 if !self.watches.contains_key(&path) && self.watches.len() >= MAX_LIVE_WATCHES {
@@ -3959,7 +3964,7 @@ mod tests {
     }
 
     #[test]
-    fn state_inspection_subscription_uses_runtime_tick_cadence() {
+    fn hidden_live_view_stops_snapshot_and_watch_polling() {
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -3995,6 +4000,73 @@ mod tests {
         assert_eq!(refresh.request_id, 0);
         assert_eq!(refresh.tick, 30);
         assert_eq!(refresh.kind, "state_inspection");
+
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    91,
+                    LiveCommand::Watch {
+                        path: "score".into()
+                    },
+                ),
+            )
+            .ok
+        );
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                92,
+                LiveCommand::InspectAll {
+                    limit: 32,
+                    concise: false,
+                    every_ticks: Some(0),
+                },
+            ),
+        );
+        assert_eq!(response.kind, "state_inspection_unsubscribed");
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(93, LiveCommand::Unwatch { path: None }),
+            )
+            .ok
+        );
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    94,
+                    LiveCommand::Set {
+                        path: "score".into(),
+                        expression: "9".into(),
+                        preview: false,
+                    },
+                ),
+            )
+            .ok
+        );
+        workspace.publish_watches(60, &jit);
+        assert!(client
+            .receive_timeout(std::time::Duration::from_millis(10))
+            .is_err());
         fs::remove_dir_all(root).ok();
     }
 
