@@ -660,9 +660,9 @@ mod tests {
     fn project_root_imports_resolve_from_any_source_directory() {
         for importer in ["src/main.stasis", "src/game/player.stasis"] {
             assert_eq!(
-                resolve_import_path(importer, "/vendor/stasis/src/stdlib/game_math.stasis")
+                resolve_import_path(importer, "/vendor/stasis/src/stdlib/storage.stasis")
                     .expect("project-root import"),
-                "vendor/stasis/src/stdlib/game_math.stasis"
+                "vendor/stasis/src/stdlib/storage.stasis"
             );
         }
         assert_eq!(
