@@ -14,7 +14,9 @@ use stasis_ai::{
     AgentEvent, AgentProfile, CodexExecProvider, ToolCall, ToolExecutor, ToolObservation,
     DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
 };
-use stasis_compiler::frontend::parser::completion_expected_type;
+use stasis_compiler::frontend::parser::{
+    completion_expected_type, parse_top_level_extern_functions,
+};
 use stasis_compiler::frontend::workshop::{
     workshop_source_hash, workshop_symbols, WorkshopSourceFile, WorkshopSourceItem,
     WorkshopSourceItemKind, WorkshopSymbolKind,
@@ -380,6 +382,7 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
             .map_err(|_| "Stasis stdlib module resolved outside the project".to_string())?
             .to_string_lossy()
             .replace('\\', "/");
+        let extern_functions = parse_top_level_extern_functions(&source)?;
         let file = WorkshopSourceFile {
             path: relative.clone(),
             source,
@@ -400,6 +403,26 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
             items.push(serde_json::json!({
                 "kind": symbol.kind,
                 "signature": symbol.signature,
+            }));
+            total = total.saturating_add(1);
+        }
+        for external in extern_functions {
+            if total >= MAX_STDLIB_API_ITEMS {
+                break;
+            }
+            let params = external
+                .params
+                .iter()
+                .map(|param| format!("{}: {}", param.name, param.type_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            items.push(serde_json::json!({
+                "kind": "function",
+                "signature": format!(
+                    "{}({params}): {}",
+                    external.name, external.return_type_name
+                ),
+                "extern": true,
             }));
             total = total.saturating_add(1);
         }
@@ -3792,6 +3815,8 @@ mod tests {
             concat!(
                 "struct Sprite { handle: i32; }\n",
                 "global private_counter: i32;\n",
+                "extern function load_font(path: string, size: i32): i32;\n",
+                "function @extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\n",
                 "function draw_line(x: f32, y: f32): void { return; }\n",
             ),
         )
@@ -3805,9 +3830,14 @@ mod tests {
         let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
 
         assert_eq!(catalog["available"], true);
-        assert_eq!(catalog["total"], 3);
+        assert_eq!(catalog["total"], 5);
         let rendered = serde_json::to_string(&catalog).expect("catalog JSON");
         assert!(rendered.contains("draw_line(x: f32, y: f32): void"));
+        assert!(rendered.contains("load_font(path: string, size: i32): i32"));
+        assert!(rendered.contains(
+            "load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool"
+        ));
+        assert!(rendered.contains("\"extern\":true"));
         assert!(rendered.contains("/vendor/stasis/src/stdlib/graphics.stasis"));
         assert!(!rendered.contains("private_counter"));
         assert!(!rendered.contains("host_private"));
