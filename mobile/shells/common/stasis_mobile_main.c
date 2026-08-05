@@ -1,5 +1,6 @@
 #define SDL_MAIN_HANDLED
-#include <SDL.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +19,7 @@ static void report_runtime_status(const char *stage, int status) {
 
 static int configure_asset_root(void) {
 #if defined(__APPLE__) && !defined(__ANDROID__)
-    char *base = SDL_GetBasePath();
+    const char *base = SDL_GetBasePath();
     if (base == NULL) {
         return -1;
     }
@@ -29,7 +30,6 @@ static int configure_asset_root(void) {
         "%sstasis_game/@STASIS_ASSET_BASE@",
         base
     );
-    SDL_free(base);
     if (written < 0 || (size_t)written >= sizeof(path)) {
         return -1;
     }

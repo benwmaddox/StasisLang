@@ -25,7 +25,7 @@ option(
 )
 option(
     STASIS_GRAPHICS_BUNDLE_SDL
-    "Build pinned SDL2 and SDL2_image into the desktop graphics runtime"
+    "Build pinned SDL3 and SDL3_image into the graphics runtime"
     OFF
 )
 option(STASIS_BUILD_RUNNER "Build the stasis DLL runner executable" ${STASIS_DESKTOP_TARGET_DEFAULT})
@@ -53,45 +53,48 @@ endif()
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_MOBILE_RUNTIME)
     if(STASIS_GRAPHICS_BUNDLE_SDL)
         include(FetchContent)
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
         set(SDL_SHARED OFF CACHE BOOL "" FORCE)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
-        set(SDL_STATIC_PIC ON CACHE BOOL "" FORCE)
         set(SDL_TEST OFF CACHE BOOL "" FORCE)
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
         set(SDL_TESTS OFF CACHE BOOL "" FORCE)
-        set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+        set(SDL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
         FetchContent_Declare(
-            stasis_sdl2
-            URL https://github.com/libsdl-org/SDL/archive/5d249570393f7a37e037abf22cd6012a4cc56a71.tar.gz
-            URL_HASH SHA256=10f1194f8d2e4a73ca1c7c553b3189d0b68ab9ef3544e8d2a268e4429456b373
+            stasis_sdl3
+            URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-3.4.10.tar.gz
+            URL_HASH SHA256=12b34280415ec8418c864408b93d008a20a6530687ee613d60bfbd20411f2785
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
-        FetchContent_MakeAvailable(stasis_sdl2)
+        FetchContent_MakeAvailable(stasis_sdl3)
 
         set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_INSTALL OFF CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_SAMPLES OFF CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_TESTS OFF CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_BACKEND_STB ON CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_BACKEND_IMAGEIO OFF CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_AVIF OFF CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_JXL OFF CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_TIF OFF CACHE BOOL "" FORCE)
-        set(SDL2IMAGE_WEBP OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_INSTALL OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_SAMPLES OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_TESTS OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_VENDORED OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_BACKEND_STB ON CACHE BOOL "" FORCE)
+        set(SDLIMAGE_BACKEND_IMAGEIO OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_AVIF OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_JXL OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_TIF OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_WEBP OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_PNG_LIBPNG OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
-            stasis_sdl2_image
-            URL https://github.com/libsdl-org/SDL_image/archive/12cb2e40330d256d9b1329647be8f366546d715c.tar.gz
-            URL_HASH SHA256=263c88eb8f3ec6e2ee9eb3eb5f9d195e5c58943bfbb86174ab5ed45c64787801
+            stasis_sdl3_image
+            URL https://github.com/libsdl-org/SDL_image/releases/download/release-3.4.4/SDL3_image-3.4.4.tar.gz
+            URL_HASH SHA256=29751304a13d25ac513f24305fa25b06a6edd9607718c90129b8350d35fc5573
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
-        FetchContent_MakeAvailable(stasis_sdl2_image)
+        FetchContent_MakeAvailable(stasis_sdl3_image)
     endif()
 
-    # Find SDL2 (via vcpkg or system)
-    if(NOT TARGET SDL2::SDL2 AND NOT TARGET SDL2::SDL2-static)
-        find_package(SDL2 CONFIG REQUIRED)
+    # Find SDL3 (via vcpkg, system package, or the pinned bundled family).
+    if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
+        find_package(SDL3 CONFIG REQUIRED)
     endif()
-    if(NOT TARGET SDL2_image::SDL2_image AND NOT TARGET SDL2_image::SDL2_image-static)
-        find_package(SDL2_image CONFIG REQUIRED)
+    if(NOT TARGET SDL3_image::SDL3_image AND NOT TARGET SDL3_image::SDL3_image-static)
+        find_package(SDL3_image CONFIG REQUIRED)
     endif()
 
     if((STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC) AND
@@ -102,15 +105,12 @@ if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_
     endif()
 endif()
 
-function(configure_stasis_target target is_static sdl_only link_sdl_main)
+function(configure_stasis_target target is_static sdl_only)
     target_sources(${target} PRIVATE stasis_graphics.c)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
-    if(link_sdl_main)
-        target_link_libraries(${target} PRIVATE $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>)
-    endif()
     target_link_libraries(${target} PRIVATE
-        $<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>
-        $<IF:$<TARGET_EXISTS:SDL2_image::SDL2_image>,SDL2_image::SDL2_image,SDL2_image::SDL2_image-static>
+        $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>
+        $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image>,SDL3_image::SDL3_image,SDL3_image::SDL3_image-static>
     )
 
     if(NOT sdl_only)
@@ -146,7 +146,7 @@ endfunction()
 
 if(STASIS_GRAPHICS_BUILD_SHARED)
     add_library(stasis_graphics SHARED)
-    configure_stasis_target(stasis_graphics OFF ${STASIS_GRAPHICS_SDL_ONLY} ON)
+    configure_stasis_target(stasis_graphics OFF ${STASIS_GRAPHICS_SDL_ONLY})
 
     # On Windows, use .def file for explicit exports
     if(WIN32)
@@ -166,7 +166,7 @@ endif()
 
 if(STASIS_GRAPHICS_BUILD_STATIC)
     add_library(stasis_graphics_static STATIC)
-    configure_stasis_target(stasis_graphics_static ON ${STASIS_GRAPHICS_SDL_ONLY} ON)
+    configure_stasis_target(stasis_graphics_static ON ${STASIS_GRAPHICS_SDL_ONLY})
     set_target_properties(stasis_graphics_static PROPERTIES
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Release"
         ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"
@@ -183,7 +183,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
     )
-    configure_stasis_target(stasis_mobile_runtime ON TRUE OFF)
+    configure_stasis_target(stasis_mobile_runtime ON TRUE)
     target_include_directories(stasis_mobile_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
     set_target_properties(stasis_mobile_runtime PROPERTIES
         POSITION_INDEPENDENT_CODE ON

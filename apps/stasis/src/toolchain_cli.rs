@@ -3389,12 +3389,13 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
     if dependencies["cargo_packages"]
         .as_array()
         .is_none_or(Vec::is_empty)
-        || dependencies["sdl2"].as_str().is_none_or(str::is_empty)
-        || dependencies["sdl2_image"]
-            .as_str()
-            .is_none_or(str::is_empty)
+        || dependencies["sdl3"] != "3.4.10-static"
+        || dependencies["sdl3_image"] != "3.4.4-static"
     {
-        return Err("release provenance is missing exact dependency versions".to_string());
+        return Err(
+            "release provenance must use SDL3 3.4.10-static and SDL3_image 3.4.4-static"
+                .to_string(),
+        );
     }
     let root = path.parent().unwrap_or(Path::new("."));
     let compiler = &value["compiler"];
@@ -3480,9 +3481,14 @@ fn development_provenance() -> Result<Value, String> {
         "runtime_sources": sources,
         "mobile_shell_sources": content_hashes(&mobile_shells, "mobile/shells")?,
         "command_buffer": {"name": "gfx_cmd", "version": 2},
-        "backends": ["sdl2"],
+        "backends": ["sdl3"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
-        "dependencies": {"stasis": env!("CARGO_PKG_VERSION"), "toolchain": "development"},
+        "dependencies": {
+            "stasis": env!("CARGO_PKG_VERSION"),
+            "toolchain": "development",
+            "sdl3": "3.4.10-static",
+            "sdl3_image": "3.4.4-static",
+        },
     }))
 }
 
@@ -3572,7 +3578,7 @@ fn write_ios_object_config(aot_root: &Path, output: &Path) -> Result<(), String>
     fs::write(
         output,
         format!(
-            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited) STASIS_GRAPHICS_SDL_ONLY=1\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL2.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL2_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL2.xcframework/ios-arm64/SDL2.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL2_image.xcframework/ios-arm64/SDL2_image.framework/Headers\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL2 -framework SDL2_image {object_flags}\n"
+            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited) STASIS_GRAPHICS_SDL_ONLY=1\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image {object_flags}\n"
         ),
     )
     .map_err(|error| format!("failed to write {}: {error}", output.display()))
@@ -5265,13 +5271,13 @@ mod tests {
             "runtime_sources": runtime_sources,
             "mobile_shell_sources": mobile_shell_sources,
             "command_buffer": {"name": "gfx_cmd", "version": 2},
-            "backends": ["sdl2"],
+            "backends": ["sdl3"],
             "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
             "dependencies": {
                 "cargo_lock_sha256": "fixture",
                 "cargo_packages": ["fixture 1.0.0 workspace"],
-                "sdl2": "2.30.0",
-                "sdl2_image": "2.8.0",
+                "sdl3": "3.4.10-static",
+                "sdl3_image": "3.4.4-static",
             },
         });
         let manifest_path = root.join(RELEASE_PROVENANCE_NAME);

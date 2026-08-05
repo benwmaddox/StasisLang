@@ -1328,8 +1328,10 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     let android_cmake_path = project.join("android/android/app/src/main/cpp/CMakeLists.txt");
     assert!(android_cmake_path.is_file());
     let android_cmake = fs::read_to_string(&android_cmake_path).expect("read Android CMake");
-    assert!(android_cmake.contains("set(SDL2IMAGE_BACKEND_STB ON CACHE BOOL \"\" FORCE)"));
-    assert!(android_cmake.contains("set(SDL2IMAGE_PNG ON CACHE BOOL \"\" FORCE)"));
+    assert!(android_cmake.contains("set(SDLIMAGE_BACKEND_STB ON CACHE BOOL \"\" FORCE)"));
+    assert!(android_cmake.contains("set(SDLIMAGE_PNG ON CACHE BOOL \"\" FORCE)"));
+    assert!(android_cmake.contains("set(SDLIMAGE_VENDORED OFF CACHE BOOL \"\" FORCE)"));
+    assert!(android_cmake.contains("set(SDLIMAGE_PNG_LIBPNG OFF CACHE BOOL \"\" FORCE)"));
     assert!(project
         .join("android/android/app/src/main/assets/stasis_game/assets/manifest.json")
         .is_file());

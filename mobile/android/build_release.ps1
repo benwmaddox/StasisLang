@@ -6,8 +6,8 @@ param(
     [string]$StasisPath = "",
     [switch]$DevelopmentBuild,
     [string]$GradlePath = "",
-    [string]$Sdl2Source = "",
-    [string]$Sdl2ImageSource = ""
+    [string]$Sdl3Source = "",
+    [string]$Sdl3ImageSource = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,16 +72,16 @@ if (-not $gradle -or -not (Test-Path -LiteralPath $gradle -PathType Leaf)) {
     throw "Gradle was not found; pass -GradlePath or install Gradle"
 }
 
-$resolvedSdl2 = if ($Sdl2Source) { $Sdl2Source } else { $env:STASIS_SDL2_SOURCE }
-$resolvedSdl2Image = if ($Sdl2ImageSource) { $Sdl2ImageSource } else { $env:STASIS_SDL2_IMAGE_SOURCE }
-if (-not $resolvedSdl2 -or -not (Test-Path -LiteralPath $resolvedSdl2 -PathType Container)) {
-    throw "SDL2 source was not found; pass -Sdl2Source or set STASIS_SDL2_SOURCE"
+$resolvedSdl3 = if ($Sdl3Source) { $Sdl3Source } else { $env:STASIS_SDL3_SOURCE }
+$resolvedSdl3Image = if ($Sdl3ImageSource) { $Sdl3ImageSource } else { $env:STASIS_SDL3_IMAGE_SOURCE }
+if (-not $resolvedSdl3 -or -not (Test-Path -LiteralPath $resolvedSdl3 -PathType Container)) {
+    throw "SDL3 source was not found; pass -Sdl3Source or set STASIS_SDL3_SOURCE"
 }
-if (-not $resolvedSdl2Image -or -not (Test-Path -LiteralPath $resolvedSdl2Image -PathType Container)) {
-    throw "SDL2_image source was not found; pass -Sdl2ImageSource or set STASIS_SDL2_IMAGE_SOURCE"
+if (-not $resolvedSdl3Image -or -not (Test-Path -LiteralPath $resolvedSdl3Image -PathType Container)) {
+    throw "SDL3_image source was not found; pass -Sdl3ImageSource or set STASIS_SDL3_IMAGE_SOURCE"
 }
-$env:STASIS_SDL2_SOURCE = [IO.Path]::GetFullPath($resolvedSdl2)
-$env:STASIS_SDL2_IMAGE_SOURCE = [IO.Path]::GetFullPath($resolvedSdl2Image)
+$env:STASIS_SDL3_SOURCE = [IO.Path]::GetFullPath($resolvedSdl3)
+$env:STASIS_SDL3_IMAGE_SOURCE = [IO.Path]::GetFullPath($resolvedSdl3Image)
 
 Push-Location $androidRoot
 try {

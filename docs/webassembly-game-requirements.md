@@ -58,8 +58,8 @@ The current runtime and execution path are explicitly native:
 
 - `crates/stasis_dynload/src/lib.rs` loads `stasis_graphics.dll` with `LoadLibraryW` and resolves symbols with `GetProcAddress`.
 - many `stasis_dynload` host calls explicitly return "only supported on windows" outside Windows.
-- `runtime/CMakeLists.txt` builds `stasis_graphics` as a native SDL2/OpenGL library.
-- `runtime/README.md` documents a native SDL2/OpenGL runtime.
+- `runtime/CMakeLists.txt` builds `stasis_graphics` as a native SDL3/OpenGL library.
+- `runtime/README.md` documents a native SDL3/OpenGL runtime.
 - `apps/stasis/src/lib.rs` implements `play` as a native loop that:
   - loads the graphics runtime
   - JIT-compiles game code

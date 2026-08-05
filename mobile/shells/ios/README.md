@@ -1,7 +1,7 @@
 # iOS arm64 package
 
-On macOS, install Xcode and place device-capable `SDL2.xcframework` and
-`SDL2_image.xcframework` in one directory. Build the checked-in thin Xcode
+On macOS, install Xcode and place device-capable `SDL3.xcframework` and
+`SDL3_image.xcframework` in one directory. Build the checked-in thin Xcode
 project with your signing team:
 
 ```text

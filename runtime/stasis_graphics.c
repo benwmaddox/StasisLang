@@ -1,17 +1,17 @@
 /*
  * Stasis Graphics Runtime Library
- * SDL2 + OpenGL backend for vector graphics rendering
+ * SDL3 + OpenGL backend for vector graphics rendering
  */
 
-#include <SDL.h>
-#include <SDL_image.h>
+#include <SDL3/SDL.h>
+#include <SDL3_image/SDL_image.h>
 #if defined(__ANDROID__) && !defined(STASIS_GRAPHICS_SDL_ONLY)
 #define STASIS_GRAPHICS_SDL_ONLY 1
 #endif
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 #include <GL/glew.h>
-#include <SDL_opengl.h>
+#include <SDL3/SDL_opengl.h>
 #endif
 #include <stdbool.h>
 #include <string.h>
@@ -75,11 +75,10 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
 }
 
 static void log_package_provenance(void) {
-    char* base = SDL_GetBasePath();
+    const char* base = SDL_GetBasePath();
     if (!base) return;
     char path[1024];
     int written = snprintf(path, sizeof(path), "%sstasis_provenance.json", base);
-    SDL_free(base);
     if (written < 0 || (size_t)written >= sizeof(path)) return;
     FILE* file = fopen(path, "rb");
     if (!file) return;
@@ -129,7 +128,7 @@ static SDL_GLContext g_gl_context = NULL;
 static SDL_Renderer* g_renderer = NULL;
 static bool g_use_sdl_renderer = false;
 static bool g_should_quit = false;
-static const Uint8* g_keyboard_state = NULL;
+static const bool* g_keyboard_state = NULL;
 static int g_window_width = 800;
 static int g_window_height = 600;
 static int g_native_window_width = 800;
@@ -176,8 +175,8 @@ static int g_perf_sample_next = 0;
 static uint64_t g_perf_pending_tick_us = 0;
 static uint64_t g_perf_pending_guest_render_us = 0;
 static uint64_t g_perf_render_started_counter = 0;
-static SDL_atomic_t g_perf_latest_tick_us;
-static SDL_atomic_t g_perf_latest_render_us;
+static SDL_AtomicInt g_perf_latest_tick_us;
+static SDL_AtomicInt g_perf_latest_render_us;
 static int g_perf_font_handle = -1;
 static const char* g_restore_label[] = {
     "   01110 11111 01110 01110 11111 01110   ",
@@ -381,8 +380,10 @@ static void stasis_present_gpu_loading(void) {
 
     if (g_use_sdl_renderer && g_renderer) {
         SDL_SetRenderTarget(g_renderer, NULL);
-        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
-        SDL_RenderSetClipRect(g_renderer, NULL);
+        SDL_SetRenderLogicalPresentation(
+            g_renderer, g_window_width, g_window_height,
+            SDL_LOGICAL_PRESENTATION_LETTERBOX);
+        SDL_SetRenderClipRect(g_renderer, NULL);
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
         SDL_SetRenderDrawColor(g_renderer, 15, 20, 28, 255);
         SDL_RenderClear(g_renderer);
@@ -391,11 +392,11 @@ static void stasis_present_gpu_loading(void) {
             const char* pixels = g_restore_label[row];
             for (int column = 0; column < columns; column++) {
                 if (pixels[column] != '1') continue;
-                SDL_Rect pixel = {
-                    origin_x + column * cell,
-                    origin_y + row * cell,
-                    cell,
-                    cell
+                SDL_FRect pixel = {
+                    (float)(origin_x + column * cell),
+                    (float)(origin_y + row * cell),
+                    (float)cell,
+                    (float)cell
                 };
                 SDL_RenderFillRect(g_renderer, &pixel);
             }
@@ -480,15 +481,17 @@ static void stasis_sync_display_metrics(void) {
     int drawable_w = native_w;
     int drawable_h = native_h;
     if (g_use_sdl_renderer && g_renderer) {
-        if (SDL_GetRendererOutputSize(g_renderer, &drawable_w, &drawable_h) != 0) {
+        if (!SDL_GetCurrentRenderOutputSize(g_renderer, &drawable_w, &drawable_h)) {
             drawable_w = native_w;
             drawable_h = native_h;
         }
-        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+        SDL_SetRenderLogicalPresentation(
+            g_renderer, g_window_width, g_window_height,
+            SDL_LOGICAL_PRESENTATION_LETTERBOX);
     }
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     else if (g_gl_context) {
-        SDL_GL_GetDrawableSize(g_window, &drawable_w, &drawable_h);
+        SDL_GetWindowSizeInPixels(g_window, &drawable_w, &drawable_h);
     }
 #endif
 
@@ -516,10 +519,6 @@ static void stasis_sync_display_metrics(void) {
     if (g_display_generation == 0 || dimensions_changed) {
         g_display_generation++;
         g_window_resized = true;
-    }
-    if (dimensions_changed && g_use_sdl_renderer &&
-        g_resource_lifecycle.state != STASIS_RENDERER_UNAVAILABLE) {
-        stasis_renderer_lifecycle_surface_changed(&g_resource_lifecycle);
     }
     g_display_metrics = next;
     g_drawable_width = drawable_w;
@@ -611,11 +610,11 @@ static void stasis_update_safe_viewport(void) {
     StasisDisplayViewport safe_native = {
         0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
 
-    int display = SDL_GetWindowDisplayIndex(g_window);
-    if (display < 0) goto publish;
+    SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
+    if (display == 0) goto publish;
 
     SDL_Rect usable;
-    if (SDL_GetDisplayUsableBounds(display, &usable) != 0) {
+    if (!SDL_GetDisplayUsableBounds(display, &usable)) {
         goto publish;
     }
 
@@ -705,37 +704,35 @@ static void stasis_pump_events(void) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
-            case SDL_QUIT:
-                SDL_Log("Stasis quit requested: SDL_QUIT");
+            case SDL_EVENT_QUIT:
+                SDL_Log("Stasis quit requested: SDL_EVENT_QUIT");
                 g_should_quit = true;
                 break;
-            case SDL_KEYDOWN:
-                if (event.key.keysym.sym == SDLK_ESCAPE) {
+            case SDL_EVENT_KEY_DOWN:
+                if (event.key.key == SDLK_ESCAPE) {
                     SDL_Log("Stasis quit requested: Escape key");
                     g_should_quit = true;
                 }
-                if (event.key.keysym.sym == SDLK_F3 && event.key.repeat == 0) {
+                if (event.key.key == SDLK_F3 && !event.key.repeat) {
                     g_force_debug_overlay = !g_force_debug_overlay;
                     if (g_force_debug_overlay) (void)stasis_perf_font();
                     SDL_Log("performance HUD %s (F3 toggles)", g_force_debug_overlay ? "on" : "off");
                 }
                 break;
-            case SDL_WINDOWEVENT:
-                if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    stasis_sync_display_metrics();
+            case SDL_EVENT_WINDOW_RESIZED:
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                stasis_sync_display_metrics();
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
                     if (!g_use_sdl_renderer) {
                         reset_line_program();
                         reset_sprite_program();
                     }
 #endif
-                    g_input_frame.viewport_w_px = g_window_width;
-                    g_input_frame.viewport_h_px = g_window_height;
-                    stasis_update_safe_viewport();
-                }
+                g_input_frame.viewport_w_px = g_window_width;
+                g_input_frame.viewport_h_px = g_window_height;
+                stasis_update_safe_viewport();
                 break;
-#if SDL_VERSION_ATLEAST(2,0,2)
-            case SDL_RENDER_TARGETS_RESET:
+            case SDL_EVENT_RENDER_TARGETS_RESET:
                 stasis_renderer_lifecycle_renderer_reset(
                     &g_resource_lifecycle, STASIS_RENDERER_REASON_TARGETS_RESET);
                 stasis_invalidate_renderer_resources(0);
@@ -744,7 +741,7 @@ static void stasis_pump_events(void) {
                     g_resource_lifecycle.surface_generation,
                     g_resource_lifecycle.renderer_generation);
                 break;
-            case SDL_RENDER_DEVICE_RESET:
+            case SDL_EVENT_RENDER_DEVICE_RESET:
                 stasis_renderer_lifecycle_renderer_reset(
                     &g_resource_lifecycle, STASIS_RENDERER_REASON_DEVICE_RESET);
                 stasis_invalidate_renderer_resources(0);
@@ -753,29 +750,28 @@ static void stasis_pump_events(void) {
                     g_resource_lifecycle.surface_generation,
                     g_resource_lifecycle.renderer_generation);
                 break;
-#endif
-            case SDL_APP_WILLENTERBACKGROUND:
+            case SDL_EVENT_WILL_ENTER_BACKGROUND:
                 stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
                 g_resource_frame_ready = false;
                 break;
-            case SDL_APP_DIDENTERFOREGROUND:
+            case SDL_EVENT_DID_ENTER_FOREGROUND:
                 if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
                     stasis_renderer_lifecycle_resume(&g_resource_lifecycle);
                 }
                 break;
-            case SDL_MOUSEBUTTONDOWN:
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     g_input_frame.pointers[0].went_down = 1;
                 }
                 break;
-            case SDL_MOUSEBUTTONUP:
+            case SDL_EVENT_MOUSE_BUTTON_UP:
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     g_input_frame.pointers[0].went_up = 1;
                 }
                 break;
-            case SDL_FINGERDOWN:
+            case SDL_EVENT_FINGER_DOWN:
                 {
-                    int slot = stasis_alloc_finger_slot(event.tfinger.fingerId);
+                    int slot = stasis_alloc_finger_slot(event.tfinger.fingerID);
                     if (slot < 0) {
                         g_input_frame.dropped_pointers++;
                         break;
@@ -792,9 +788,9 @@ static void stasis_pump_events(void) {
                     stasis_set_pointer_pos_px(idx, logical_x, logical_y);
                 }
                 break;
-            case SDL_FINGERMOTION:
+            case SDL_EVENT_FINGER_MOTION:
                 {
-                    int slot = stasis_find_finger_slot(event.tfinger.fingerId);
+                    int slot = stasis_find_finger_slot(event.tfinger.fingerID);
                     if (slot < 0) break;
                     int idx = slot + 1;
                     float logical_x = 0.0f;
@@ -806,14 +802,14 @@ static void stasis_pump_events(void) {
                     stasis_set_pointer_pos_px(idx, logical_x, logical_y);
                 }
                 break;
-            case SDL_FINGERUP:
+            case SDL_EVENT_FINGER_UP:
                 {
-                    int slot = stasis_find_finger_slot(event.tfinger.fingerId);
+                    int slot = stasis_find_finger_slot(event.tfinger.fingerID);
                     if (slot < 0) break;
                     int idx = slot + 1;
                     g_input_frame.pointers[idx].is_down = 0;
                     g_input_frame.pointers[idx].went_up = 1;
-                    stasis_release_finger_slot(event.tfinger.fingerId);
+                    stasis_release_finger_slot(event.tfinger.fingerID);
                     float logical_x = 0.0f;
                     float logical_y = 0.0f;
                     stasis_window_to_logical(
@@ -829,13 +825,14 @@ static void stasis_pump_events(void) {
     }
 
     /* Mouse position and button state (left button = primary). */
-    int mx = 0, my = 0;
-    Uint32 buttons = SDL_GetMouseState(&mx, &my);
+    float mx = 0.0f, my = 0.0f;
+    SDL_MouseButtonFlags buttons = SDL_GetMouseState(&mx, &my);
     float logical_mouse_x = 0.0f;
     float logical_mouse_y = 0.0f;
-    stasis_window_to_logical((float)mx, (float)my, &logical_mouse_x, &logical_mouse_y);
+    stasis_window_to_logical(mx, my, &logical_mouse_x, &logical_mouse_y);
     stasis_set_pointer_pos_px(0, logical_mouse_x, logical_mouse_y);
-    g_input_frame.pointers[0].is_down = (buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) ? 1 : 0;
+    g_input_frame.pointers[0].is_down =
+        (buttons & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)) ? 1 : 0;
 
     /* Compute deltas from previous tick positions. */
     for (int i = 0; i < STASIS_MAX_POINTERS; i++) {
@@ -986,18 +983,18 @@ STASIS_EXPORT void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_
 STASIS_EXPORT void stasis_host_report_runtime_error(const char* message)
 {
     if (!message || !*message) return;
-    SDL_AtomicLock(&g_runtime_error_lock);
+    SDL_LockSpinlock(&g_runtime_error_lock);
     snprintf(g_runtime_error, sizeof(g_runtime_error), "%s", message);
-    SDL_AtomicUnlock(&g_runtime_error_lock);
+    SDL_UnlockSpinlock(&g_runtime_error_lock);
 }
 
 STASIS_EXPORT int stasis_host_copy_runtime_error(char* output, size_t output_size)
 {
     if (!output || output_size == 0) return 0;
-    SDL_AtomicLock(&g_runtime_error_lock);
+    SDL_LockSpinlock(&g_runtime_error_lock);
     int has_error = g_runtime_error[0] != '\0';
     snprintf(output, output_size, "%s", g_runtime_error);
-    SDL_AtomicUnlock(&g_runtime_error_lock);
+    SDL_UnlockSpinlock(&g_runtime_error_lock);
     return has_error;
 }
 
@@ -1016,10 +1013,10 @@ STASIS_EXPORT void stasis_host_get_latest_performance_metrics(
     uint32_t* render_us)
 {
     if (tick_us) {
-        *tick_us = (uint32_t)SDL_AtomicGet(&g_perf_latest_tick_us);
+        *tick_us = (uint32_t)SDL_GetAtomicInt(&g_perf_latest_tick_us);
     }
     if (render_us) {
-        *render_us = (uint32_t)SDL_AtomicGet(&g_perf_latest_render_us);
+        *render_us = (uint32_t)SDL_GetAtomicInt(&g_perf_latest_render_us);
     }
 }
 
@@ -1134,7 +1131,7 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
 
     /* Keyboard state: one i32 per scancode (0/1). */
     int num_keys = 0;
-    const Uint8* keys = SDL_GetKeyboardState(&num_keys);
+    const bool* keys = SDL_GetKeyboardState(&num_keys);
     for (int i = 0; i < i32_key_count; i++) {
         out_i32[i32_key_base + i] = (keys && i < num_keys && keys[i]) ? 1 : 0;
     }
@@ -1171,11 +1168,10 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
 }
 
 /* ============================================================
- * Audio output (SDL2) - f32 stereo ring buffer
+ * Audio output (SDL3) - f32 stereo ring buffer feeding a device stream
  * ============================================================ */
 
-static SDL_AudioDeviceID g_audio_device = 0;
-static SDL_AudioSpec g_audio_spec_obtained;
+static SDL_AudioStream* g_audio_stream = NULL;
 static int g_audio_initialized = 0;
 static int g_audio_underruns = 0;
 static int g_audio_channels = 2;
@@ -1192,52 +1188,50 @@ static int64_t g_audio_running_frame_index = 0;
 static int stasis_audio_maxi(int a, int b) { return a > b ? a : b; }
 static int stasis_audio_mini(int a, int b) { return a < b ? a : b; }
 
-static void stasis_audio_callback(void* userdata, Uint8* stream, int len) {
+static void SDLCALL stasis_audio_callback(
+    void* userdata,
+    SDL_AudioStream* stream,
+    int additional_amount,
+    int total_amount
+) {
     (void)userdata;
-    if (!stream || len <= 0) return;
+    (void)total_amount;
+    if (!stream || additional_amount <= 0 || g_audio_channels <= 0) return;
 
-    if (!g_audio_ring || g_audio_channels <= 0) {
-        SDL_memset(stream, 0, (size_t)len);
-        g_audio_underruns++;
-        return;
+    int remaining_samples = additional_amount / (int)sizeof(float);
+    if (g_audio_queued_samples < remaining_samples) g_audio_underruns++;
+
+    float output[1024];
+    while (remaining_samples > 0) {
+        int chunk = stasis_audio_mini(remaining_samples, (int)(sizeof(output) / sizeof(output[0])));
+        int available = stasis_audio_mini(chunk, g_audio_queued_samples);
+        int copied = 0;
+        while (copied < available) {
+            int contiguous = g_audio_ring_capacity_samples - g_audio_read_sample;
+            int part = stasis_audio_mini(available - copied, contiguous);
+            SDL_memcpy(
+                &output[copied], &g_audio_ring[g_audio_read_sample],
+                (size_t)part * sizeof(float));
+            copied += part;
+            g_audio_read_sample =
+                (g_audio_read_sample + part) % g_audio_ring_capacity_samples;
+            g_audio_queued_samples -= part;
+        }
+        if (copied < chunk) {
+            SDL_memset(&output[copied], 0, (size_t)(chunk - copied) * sizeof(float));
+        }
+        if (!SDL_PutAudioStreamData(stream, output, chunk * (int)sizeof(float))) return;
+        remaining_samples -= chunk;
     }
 
-    const int requested_samples = len / (int)sizeof(float);
-    if (requested_samples <= 0) {
-        return;
-    }
-
-    float* out = (float*)stream;
-    int remaining = requested_samples;
-    int have = g_audio_queued_samples;
-
-    if (have < requested_samples) {
-        g_audio_underruns++;
-    }
-
-    int to_copy = stasis_audio_mini(have, requested_samples);
-    while (to_copy > 0) {
-        int contiguous = g_audio_ring_capacity_samples - g_audio_read_sample;
-        int chunk = stasis_audio_mini(to_copy, contiguous);
-        SDL_memcpy(out, &g_audio_ring[g_audio_read_sample], (size_t)chunk * sizeof(float));
-        out += chunk;
-        remaining -= chunk;
-        to_copy -= chunk;
-        g_audio_read_sample = (g_audio_read_sample + chunk) % g_audio_ring_capacity_samples;
-        g_audio_queued_samples -= chunk;
-    }
-
-    if (remaining > 0) {
-        SDL_memset(out, 0, (size_t)remaining * sizeof(float));
-    }
-
-    g_audio_running_frame_index += requested_samples / g_audio_channels;
+    g_audio_running_frame_index +=
+        (additional_amount / (int)sizeof(float)) / g_audio_channels;
 }
 
 static void stasis_audio_shutdown_internal(void) {
-    if (g_audio_device != 0) {
-        SDL_CloseAudioDevice(g_audio_device);
-        g_audio_device = 0;
+    if (g_audio_stream) {
+        SDL_DestroyAudioStream(g_audio_stream);
+        g_audio_stream = NULL;
     }
 
     if (g_audio_ring) {
@@ -1264,49 +1258,40 @@ static int stasis_audio_ensure_init(void) {
     if (stasis_audio_disabled()) {
         return 0;
     }
-    if (g_audio_initialized && g_audio_device != 0) {
+    if (g_audio_initialized && g_audio_stream) {
         return 1;
     }
 
-    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
-        if (SDL_Init(SDL_INIT_AUDIO) != 0) {
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        if (!SDL_Init(SDL_INIT_AUDIO)) {
             return 0;
         }
     }
 
     SDL_AudioSpec desired;
     SDL_zero(desired);
-    desired.format = AUDIO_F32SYS;
+    desired.format = SDL_AUDIO_F32;
     desired.channels = 2;
-    desired.samples = 512;
-    desired.callback = stasis_audio_callback;
-
-    SDL_AudioSpec obtained;
-    SDL_zero(obtained);
 
     /* Try 48k first, then 44.1k. */
     int rates[2] = { 48000, 44100 };
-    SDL_AudioDeviceID dev = 0;
-    for (int i = 0; i < 2 && dev == 0; i++) {
+    SDL_AudioStream* stream = NULL;
+    for (int i = 0; i < 2 && !stream; i++) {
         desired.freq = rates[i];
-        dev = SDL_OpenAudioDevice(NULL, 0, &desired, &obtained, 0);
-        if (dev != 0) {
-            g_audio_sample_rate = obtained.freq;
-        }
+        stream = SDL_OpenAudioDeviceStream(
+            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+            &desired,
+            stasis_audio_callback,
+            NULL);
+        if (stream) g_audio_sample_rate = rates[i];
     }
 
-    if (dev == 0) {
+    if (!stream) {
         return 0;
     }
 
-    if (obtained.format != AUDIO_F32SYS || obtained.channels != 2) {
-        SDL_CloseAudioDevice(dev);
-        return 0;
-    }
-
-    g_audio_device = dev;
-    g_audio_spec_obtained = obtained;
-    g_audio_channels = (int)obtained.channels;
+    g_audio_stream = stream;
+    g_audio_channels = 2;
 
     g_audio_target_latency_frames = stasis_audio_maxi(512, g_audio_target_latency_frames);
     g_audio_ring_capacity_frames = stasis_audio_maxi(8192, g_audio_target_latency_frames * 4);
@@ -1314,8 +1299,8 @@ static int stasis_audio_ensure_init(void) {
 
     g_audio_ring = (float*)malloc((size_t)g_audio_ring_capacity_samples * sizeof(float));
     if (!g_audio_ring) {
-        SDL_CloseAudioDevice(g_audio_device);
-        g_audio_device = 0;
+        SDL_DestroyAudioStream(g_audio_stream);
+        g_audio_stream = NULL;
         return 0;
     }
     SDL_memset(g_audio_ring, 0, (size_t)g_audio_ring_capacity_samples * sizeof(float));
@@ -1327,7 +1312,10 @@ static int stasis_audio_ensure_init(void) {
     g_audio_running_frame_index = 0;
     g_audio_initialized = 1;
 
-    SDL_PauseAudioDevice(g_audio_device, 0);
+    if (!SDL_ResumeAudioStreamDevice(g_audio_stream)) {
+        stasis_audio_shutdown_internal();
+        return 0;
+    }
     return 1;
 }
 
@@ -2793,28 +2781,28 @@ static int bake_raster_to_rgba_sized(const char* resolved_path, int max_w, int m
 
     SDL_Surface* loaded = IMG_Load(resolved_path);
     if (!loaded) {
-        fprintf(stderr, "bake_raster_to_rgba_sized: IMG_Load failed for %s: %s\n", resolved_path, IMG_GetError());
+        fprintf(stderr, "bake_raster_to_rgba_sized: IMG_Load failed for %s: %s\n", resolved_path, SDL_GetError());
         return 0;
     }
 
-    SDL_Surface* rgba = SDL_ConvertSurfaceFormat(loaded, SDL_PIXELFORMAT_RGBA32, 0);
-    SDL_FreeSurface(loaded);
+    SDL_Surface* rgba = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(loaded);
     if (!rgba) {
-        fprintf(stderr, "bake_raster_to_rgba_sized: SDL_ConvertSurfaceFormat failed for %s: %s\n", resolved_path, SDL_GetError());
+        fprintf(stderr, "bake_raster_to_rgba_sized: SDL_ConvertSurface failed for %s: %s\n", resolved_path, SDL_GetError());
         return 0;
     }
 
     const int src_w = rgba->w;
     const int src_h = rgba->h;
     if (src_w <= 0 || src_h <= 0) {
-        SDL_FreeSurface(rgba);
+        SDL_DestroySurface(rgba);
         fprintf(stderr, "bake_raster_to_rgba_sized: invalid raster size %dx%d in %s\n", src_w, src_h, resolved_path);
         return 0;
     }
 
     unsigned char* out = (unsigned char*)malloc((size_t)max_w * (size_t)max_h * 4u);
     if (!out) {
-        SDL_FreeSurface(rgba);
+        SDL_DestroySurface(rgba);
         fprintf(stderr, "bake_raster_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved_path);
         return 0;
     }
@@ -2855,7 +2843,7 @@ static int bake_raster_to_rgba_sized(const char* resolved_path, int max_w, int m
         }
     }
 
-    SDL_FreeSurface(rgba);
+    SDL_DestroySurface(rgba);
 
     /* Match GL sprite pipeline: premultiplied alpha. */
     premultiply_rgba(out, max_w, max_h);
@@ -3117,17 +3105,28 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
                     color.b = (Uint8)(g_lines[i].b * 255.0f);
                     color.a = (Uint8)(g_lines[i].a * 255.0f);
                     SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-                    SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+                    SDL_RenderLine(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
                 }
                 g_line_count = 0;
             }
 
-            /* SDL_RenderReadPixels reads from the current render target before present. */
-            int rc = SDL_RenderReadPixels(g_renderer, NULL, SDL_PIXELFORMAT_BGRA32, pixels, w * 4);
-            if (rc == 0) {
+            /* SDL3 returns an owned surface for renderer readback. */
+            SDL_Surface* readback = SDL_RenderReadPixels(g_renderer, NULL);
+            SDL_Surface* bgra = readback
+                ? SDL_ConvertSurface(readback, SDL_PIXELFORMAT_BGRA32)
+                : NULL;
+            if (bgra && bgra->w == w && bgra->h == h) {
+                for (int row = 0; row < h; row++) {
+                    SDL_memcpy(
+                        pixels + (size_t)row * (size_t)w * 4u,
+                        (const uint8_t*)bgra->pixels + (size_t)row * (size_t)bgra->pitch,
+                        (size_t)w * 4u);
+                }
                 ok = png ? write_png_bgra32(out_path, w, h, pixels, 0)
                          : write_bmp_bgra32(out_path, w, h, pixels, 0);
             }
+            SDL_DestroySurface(bgra);
+            SDL_DestroySurface(readback);
         }
         free(pixels);
         return ok;
@@ -3485,17 +3484,15 @@ static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
     RenderTestResult* result = &g_last_test_result;
     memset(result, 0, sizeof(*result));
 
-    /* Get renderer info for diagnostics */
-    SDL_RendererInfo info;
-    if (SDL_GetRendererInfo(renderer, &info) == 0) {
-        strncpy(result->gl_renderer, info.name ? info.name : "unknown", sizeof(result->gl_renderer) - 1);
-        snprintf(result->gl_version, sizeof(result->gl_version), "flags=0x%X", info.flags);
-    }
+    const char* renderer_name = SDL_GetRendererName(renderer);
+    strncpy(result->gl_renderer, renderer_name ? renderer_name : "unknown",
+        sizeof(result->gl_renderer) - 1);
+    snprintf(result->gl_version, sizeof(result->gl_version), "SDL3 renderer");
 
     /* Clear to black */
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    int rc = SDL_RenderClear(renderer);
-    if (rc != 0) {
+    bool rc = SDL_RenderClear(renderer);
+    if (!rc) {
         snprintf(result->error_message, sizeof(result->error_message),
             "SDL_RenderClear failed: %s", SDL_GetError());
         SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
@@ -3508,9 +3505,11 @@ static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
     int size = 50;
 
     SDL_SetRenderDrawColor(renderer, 255, 0, 255, 255);  /* Magenta */
-    SDL_Rect rect = { cx - size, cy - size, size * 2, size * 2 };
+    SDL_FRect rect = {
+        (float)(cx - size), (float)(cy - size),
+        (float)(size * 2), (float)(size * 2)};
     rc = SDL_RenderFillRect(renderer, &rect);
-    if (rc != 0) {
+    if (!rc) {
         snprintf(result->error_message, sizeof(result->error_message),
             "SDL_RenderFillRect failed: %s", SDL_GetError());
         SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
@@ -3542,13 +3541,16 @@ static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
     /* Read back a single pixel from center */
     unsigned char pixels[4] = {0, 0, 0, 0};
     SDL_Rect readRect = { cx, cy, 1, 1 };
-    rc = SDL_RenderReadPixels(renderer, &readRect, SDL_PIXELFORMAT_RGBA8888, pixels, 4);
+    SDL_Surface* readback = SDL_RenderReadPixels(renderer, &readRect);
+    rc = readback && SDL_ReadSurfacePixel(
+        readback, 0, 0, &pixels[0], &pixels[1], &pixels[2], &pixels[3]);
+    SDL_DestroySurface(readback);
 
     /* Switch back to default target */
     SDL_SetRenderTarget(renderer, NULL);
     SDL_DestroyTexture(target);
 
-    if (rc != 0) {
+    if (!rc) {
         snprintf(result->error_message, sizeof(result->error_message),
             "SDL_RenderReadPixels failed: %s", SDL_GetError());
         SDL_Log("STARTUP TEST WARNING: %s", result->error_message);
@@ -3560,26 +3562,13 @@ static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
 
     result->pixels_tested = 1;
 
-    /* We drew magenta (R=255, G=0, B=255). Check various pixel formats:
-     * - RGBA: [R,G,B,A] = [255,0,255,255]
-     * - BGRA: [B,G,R,A] = [255,0,255,255]
-     * - ABGR: [A,B,G,R] = [255,255,0,255]  <- This matches what user got!
-     *
-     * The key insight: if we see two channels at ~255 and one at ~0,
-     * and the ~0 is NOT in the alpha position, we have a valid render.
-     * This handles all reasonable byte orderings.
-     */
+    /* SDL3 normalizes the surface readback into explicit RGBA channels. */
 
     int high_count = 0;
     int low_count = 0;
-    int low_pos = -1;
-
     for (int i = 0; i < 4; i++) {
         if (pixels[i] >= 200) high_count++;
-        if (pixels[i] <= 55) {
-            low_count++;
-            low_pos = i;
-        }
+        if (pixels[i] <= 55) low_count++;
     }
 
     /* For magenta (two high RGB + one zero RGB + high alpha), we expect:
@@ -3644,31 +3633,12 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         return 1;
     }
 
-    SDL_LogSetOutputFunction(stasis_sdl_log_output, NULL);
-    SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
+    SDL_SetLogOutputFunction(stasis_sdl_log_output, NULL);
+    SDL_SetLogPriorities(SDL_LOG_PRIORITY_INFO);
     log_package_provenance();
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
-#if defined(_WIN32)
-    /*
-     * Keep SDL window coordinates in DPI-scaled points while the renderer uses
-     * the full physical drawable. This must precede video initialization so
-     * SDL can request per-monitor-v2 awareness before creating an HWND.
-     */
-    SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "1");
-#endif
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         stasis_report_runtime_errorf("SDL initialization failed: %s", SDL_GetError());
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
-        return 0;
-    }
-
-    /* Enable PNG sprite loading via SDL_image. */
-    int img_flags = IMG_INIT_PNG;
-    int img_inited = IMG_Init(img_flags);
-    if ((img_inited & img_flags) != img_flags) {
-        stasis_report_runtime_errorf("Image decoder initialization failed: %s", IMG_GetError());
-        SDL_Log("IMG_Init failed (got=0x%x want=0x%x): %s", img_inited, img_flags, IMG_GetError());
-        SDL_Quit();
         return 0;
     }
 
@@ -3724,22 +3694,20 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 
     int native_request_width = width;
     int native_request_height = height;
-    Uint32 window_flags = (want_sdl ? 0 : SDL_WINDOW_OPENGL) |
-        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    SDL_WindowFlags window_flags = (want_sdl ? 0 : SDL_WINDOW_OPENGL) |
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 #if defined(__ANDROID__) || defined(__IPHONEOS__)
-    SDL_DisplayMode display_mode;
-    if (SDL_GetCurrentDisplayMode(0, &display_mode) == 0 &&
-        display_mode.w > 0 && display_mode.h > 0) {
-        native_request_width = display_mode.w;
-        native_request_height = display_mode.h;
+    const SDL_DisplayMode* display_mode =
+        SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
+    if (display_mode && display_mode->w > 0 && display_mode->h > 0) {
+        native_request_width = display_mode->w;
+        native_request_height = display_mode->h;
     }
-    window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+    window_flags |= SDL_WINDOW_FULLSCREEN;
 #endif
 
     g_window = SDL_CreateWindow(
         title ? title : "Stasis",
-        SDL_WINDOWPOS_CENTERED,
-        SDL_WINDOWPOS_CENTERED,
         native_request_width,
         native_request_height,
         window_flags
@@ -3751,6 +3719,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_Quit();
         return 0;
     }
+    SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
     /* Optional: start window minimized to keep automated/local test runs unobtrusive. */
     {
@@ -3769,7 +3738,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             GLenum glew_status = glewInit();
             if (glew_status != GLEW_OK) {
                 SDL_Log("glewInit failed: %s", (const char*)glewGetErrorString(glew_status));
-                SDL_GL_DeleteContext(g_gl_context);
+                SDL_GL_DestroyContext(g_gl_context);
                 g_gl_context = NULL;
             } else {
                 int want_vsync = 1;
@@ -3777,8 +3746,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
                 if (vsync_env && vsync_env[0] == '0') {
                     want_vsync = 0;
                 }
-                int swap_ok = SDL_GL_SetSwapInterval(want_vsync ? 1 : 0);
-                if (swap_ok != 0) {
+                bool swap_ok = SDL_GL_SetSwapInterval(want_vsync ? 1 : 0);
+                if (!swap_ok) {
                     SDL_Log("SDL_GL_SetSwapInterval failed (vsync=%d): %s", want_vsync, SDL_GetError());
                 }
                 glViewport(0, 0, width, height);
@@ -3810,7 +3779,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     if (g_gl_context == NULL) {
         g_use_sdl_renderer = true;
         g_postfx_force_disable = true;
-        g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        g_renderer = SDL_CreateRenderer(g_window, NULL);
         if (!g_renderer) {
             stasis_report_runtime_errorf("Renderer creation failed: %s", SDL_GetError());
             SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
@@ -3820,16 +3789,15 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             SDL_Quit();
             return 0;
         }
-        if (SDL_RenderSetVSync(g_renderer, 1) != 0) {
-            SDL_Log("SDL_RenderSetVSync failed: %s", SDL_GetError());
+        if (!SDL_SetRenderVSync(g_renderer, 1)) {
+            SDL_Log("SDL_SetRenderVSync failed: %s", SDL_GetError());
         }
-        SDL_RenderSetLogicalSize(g_renderer, width, height);
-        SDL_RendererInfo info;
-        if (SDL_GetRendererInfo(g_renderer, &info) == 0) {
-            SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d name=%s flags=0x%x", width, height, info.name ? info.name : "?", info.flags);
-        } else {
-            SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d", width, height);
-        }
+        SDL_SetDefaultTextureScaleMode(g_renderer, SDL_SCALEMODE_LINEAR);
+        SDL_SetRenderLogicalPresentation(
+            g_renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+        const char* renderer_name = SDL_GetRendererName(g_renderer);
+        SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d name=%s",
+            width, height, renderer_name ? renderer_name : "?");
     } else {
         g_use_sdl_renderer = false;
     }
@@ -3917,7 +3885,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 
             /* Cleanup and return failure */
             if (g_gl_context) {
-                SDL_GL_DeleteContext(g_gl_context);
+                SDL_GL_DestroyContext(g_gl_context);
                 g_gl_context = NULL;
             }
             if (g_renderer) {
@@ -4007,14 +3975,15 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
     }
 
     SDL_Rect bounds;
-    if (SDL_GetDisplayUsableBounds(0, &bounds) == 0) {
+    SDL_DisplayID display = SDL_GetPrimaryDisplay();
+    if (display != 0 && SDL_GetDisplayUsableBounds(display, &bounds)) {
         w = bounds.w;
         h = bounds.h;
     } else {
-        SDL_DisplayMode mode;
-        if (SDL_GetDesktopDisplayMode(0, &mode) == 0) {
-            w = mode.w;
-            h = mode.h;
+        const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(display);
+        if (mode) {
+            w = mode->w;
+            h = mode->h;
         }
     }
 
@@ -4062,10 +4031,9 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
         return 0;
     }
 
-    Uint32 flags = fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
-    int result = SDL_SetWindowFullscreen(g_window, flags);
+    bool result = SDL_SetWindowFullscreen(g_window, fullscreen != 0);
 
-    if (result == 0) {
+    if (result) {
         stasis_sync_display_metrics();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -4077,7 +4045,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
 #endif
     }
 
-    return (result == 0) ? 1 : 0;
+    return result ? 1 : 0;
 }
 
 /*
@@ -4095,7 +4063,7 @@ STASIS_EXPORT void stasis_begin_frame(void) {
     g_line_count = 0;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-        SDL_RenderSetClipRect(g_renderer, NULL);
+        SDL_SetRenderClipRect(g_renderer, NULL);
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
         stasis_gl_clear_letterbox_bars();
@@ -4128,8 +4096,8 @@ static void stasis_perf_finish_render_sample(void) {
     sample->tick_us = g_perf_pending_tick_us;
     sample->render_us = g_perf_pending_guest_render_us
         + stasis_perf_elapsed_us(g_perf_render_started_counter, now);
-    SDL_AtomicSet(&g_perf_latest_tick_us, (int)sample->tick_us);
-    SDL_AtomicSet(&g_perf_latest_render_us, (int)sample->render_us);
+    SDL_SetAtomicInt(&g_perf_latest_tick_us, (int)sample->tick_us);
+    SDL_SetAtomicInt(&g_perf_latest_render_us, (int)sample->render_us);
     g_perf_sample_next = (g_perf_sample_next + 1) % STASIS_PERF_SAMPLE_CAPACITY;
     if (g_perf_sample_count < STASIS_PERF_SAMPLE_CAPACITY) {
         g_perf_sample_count++;
@@ -4215,7 +4183,7 @@ static void stasis_perf_draw_overlay(void) {
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(g_renderer, 20, 28, 38, 170);
-        SDL_Rect background = { 8, 8, background_width, 28 };
+        SDL_FRect background = { 8.0f, 8.0f, (float)background_width, 28.0f };
         if (background.w > 0) SDL_RenderFillRect(g_renderer, &background);
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -4258,7 +4226,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
             color.b = (Uint8)(g_lines[i].b * 255.0f);
             color.a = (Uint8)(g_lines[i].a * 255.0f);
             SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-            SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+            SDL_RenderLine(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
 
         /* Capture before present so we read the current render target. */
@@ -4303,7 +4271,7 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
         SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
         SDL_FRect logical_canvas = {
             0.0f, 0.0f, (float)g_window_width, (float)g_window_height};
-        SDL_RenderFillRectF(g_renderer, &logical_canvas);
+        SDL_RenderFillRect(g_renderer, &logical_canvas);
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -4412,7 +4380,7 @@ static void flush_lines_before_later_layers(void) {
                 (Uint8)(g_lines[i].g * 255.0f),
                 (Uint8)(g_lines[i].b * 255.0f),
                 (Uint8)(g_lines[i].a * 255.0f));
-            SDL_RenderDrawLineF(
+            SDL_RenderLine(
                 g_renderer,
                 g_lines[i].x1,
                 g_lines[i].y1,
@@ -4694,7 +4662,7 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
             return 0;
         }
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-        if (SDL_UpdateTexture(tex, NULL, pixels, w * 4) != 0) {
+        if (!SDL_UpdateTexture(tex, NULL, pixels, w * 4)) {
             SDL_Log("gfx_load_sprite: SDL_UpdateTexture failed: %s", SDL_GetError());
             SDL_DestroyTexture(tex);
             free(pixels);
@@ -4927,7 +4895,7 @@ static SpriteEntry* sprite_fallback_get(void) {
             g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, 2, 2);
         if (!next.sdl_tex) return NULL;
         SDL_SetTextureBlendMode(next.sdl_tex, SDL_BLENDMODE_BLEND);
-        if (SDL_UpdateTexture(next.sdl_tex, NULL, pixels, 2 * 4) != 0) {
+        if (!SDL_UpdateTexture(next.sdl_tex, NULL, pixels, 2 * 4)) {
             SDL_DestroyTexture(next.sdl_tex);
             return NULL;
         }
@@ -5039,7 +5007,6 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
 
     if (g_use_sdl_renderer) {
         if (!g_renderer || !e->sdl_tex) return;
-#if SDL_VERSION_ATLEAST(2,0,10)
         SDL_FRect dst;
         dst.w = w;
         dst.h = h;
@@ -5048,22 +5015,7 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
         SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
         SDL_SetTextureColorMod(e->sdl_tex, 255, 255, 255);
         SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)a);
-        SDL_RenderCopyExF(g_renderer, e->sdl_tex, NULL, &dst, (double)rot_degrees, &center, SDL_FLIP_NONE);
-#else
-        SDL_Rect dst;
-        const int left = (int)floorf(x);
-        const int top = (int)floorf(y);
-        const int right = (int)ceilf(x + w);
-        const int bottom = (int)ceilf(y + h);
-        dst.w = right - left;
-        dst.h = bottom - top;
-        dst.x = left;
-        dst.y = top;
-        SDL_Point center = { dst.w / 2, dst.h / 2 };
-        SDL_SetTextureColorMod(e->sdl_tex, 255, 255, 255);
-        SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)a);
-        SDL_RenderCopyEx(g_renderer, e->sdl_tex, NULL, &dst, (double)rot_degrees, &center, SDL_FLIP_NONE);
-#endif
+        SDL_RenderTextureRotated(g_renderer, e->sdl_tex, NULL, &dst, (double)rot_degrees, &center, SDL_FLIP_NONE);
         return;
     }
 
@@ -5145,7 +5097,7 @@ STASIS_EXPORT int stasis_is_key_down(int scancode) {
     SDL_PumpEvents();
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     if (!g_keyboard_state) return 0;
-    if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return 0;
+    if (scancode < 0 || scancode >= SDL_SCANCODE_COUNT) return 0;
     return g_keyboard_state[scancode] ? 1 : 0;
 }
 
@@ -5153,34 +5105,13 @@ STASIS_EXPORT int stasis_is_key_down(int scancode) {
  * Get current time in milliseconds
  */
 STASIS_EXPORT int stasis_get_time_ms(void) {
-#if defined(_WIN32)
-    if (SDL_WasInit(SDL_INIT_TIMER) == 0) {
-        if (SDL_Init(SDL_INIT_TIMER) != 0) {
-            return 0;
-        }
-    }
     return (int)SDL_GetTicks();
-#else
-    if (SDL_WasInit(SDL_INIT_TIMER) != 0) {
-        return (int)SDL_GetTicks();
-    }
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-        return 0;
-    }
-    return (int)((now.tv_sec * 1000) + (now.tv_nsec / 1000000));
-#endif
 }
 
 /*
  * Get current time in microseconds (truncated to i32).
  */
 STASIS_EXPORT int stasis_get_time_us(void) {
-    if (SDL_WasInit(SDL_INIT_TIMER) == 0) {
-        if (SDL_Init(SDL_INIT_TIMER) != 0) {
-            return 0;
-        }
-    }
     Uint64 freq = SDL_GetPerformanceFrequency();
     if (freq == 0) return 0;
     Uint64 counter = SDL_GetPerformanceCounter();
@@ -5192,23 +5123,7 @@ STASIS_EXPORT int stasis_get_time_us(void) {
  * Sleep for specified milliseconds
  */
 STASIS_EXPORT void stasis_sleep_ms(int ms) {
-    if (ms > 0) {
-        if (SDL_WasInit(SDL_INIT_TIMER) != 0) {
-            SDL_Delay((Uint32)ms);
-            return;
-        }
-#if defined(_WIN32)
-        if (SDL_Init(SDL_INIT_TIMER) != 0) {
-            return;
-        }
-        SDL_Delay((Uint32)ms);
-#else
-        struct timespec delay;
-        delay.tv_sec = ms / 1000;
-        delay.tv_nsec = (ms % 1000) * 1000000;
-        nanosleep(&delay, NULL);
-#endif
-    }
+    if (ms > 0) SDL_Delay((Uint32)ms);
 }
 
 static int stasis_storage_component_valid(const char* value) {
@@ -5327,7 +5242,7 @@ STASIS_EXPORT int stasis_audio_init(int sample_rate, int channels, int target_la
     g_audio_channels = 2;
     if (target_latency_frames > 0) g_audio_target_latency_frames = target_latency_frames;
 
-    if (g_audio_device != 0) {
+    if (g_audio_stream) {
         stasis_audio_shutdown_internal();
     }
 
@@ -5356,11 +5271,11 @@ STASIS_EXPORT int stasis_audio_get_queued_frames(void) {
     if (!stasis_audio_ensure_init()) return 0;
 
     int queued = 0;
-    SDL_LockAudioDevice(g_audio_device);
+    SDL_LockAudioStream(g_audio_stream);
     if (g_audio_channels > 0) {
         queued = g_audio_queued_samples / g_audio_channels;
     }
-    SDL_UnlockAudioDevice(g_audio_device);
+    SDL_UnlockAudioStream(g_audio_stream);
     return queued;
 }
 
@@ -5368,9 +5283,9 @@ STASIS_EXPORT int stasis_audio_get_underruns(void) {
     if (!stasis_audio_ensure_init()) return 0;
 
     int underruns = 0;
-    SDL_LockAudioDevice(g_audio_device);
+    SDL_LockAudioStream(g_audio_stream);
     underruns = g_audio_underruns;
-    SDL_UnlockAudioDevice(g_audio_device);
+    SDL_UnlockAudioStream(g_audio_stream);
     return underruns;
 }
 
@@ -5381,7 +5296,7 @@ STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr,
     int accepted_samples = 0;
     const int requested_samples = frame_count * g_audio_channels;
 
-    SDL_LockAudioDevice(g_audio_device);
+    SDL_LockAudioStream(g_audio_stream);
     int free_samples = g_audio_ring_capacity_samples - g_audio_queued_samples;
     int to_write = stasis_audio_mini(requested_samples, free_samples);
 
@@ -5394,7 +5309,7 @@ STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr,
         accepted_samples += chunk;
         to_write -= chunk;
     }
-    SDL_UnlockAudioDevice(g_audio_device);
+    SDL_UnlockAudioStream(g_audio_stream);
 
     if (g_audio_channels <= 0) return 0;
     return accepted_samples / g_audio_channels;
@@ -5433,8 +5348,12 @@ STASIS_EXPORT int stasis_mobile_poll_events(void) {
 }
 
 STASIS_EXPORT void stasis_mobile_set_paused(int paused) {
-    if (g_audio_device != 0) {
-        SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0);
+    if (g_audio_stream) {
+        if (paused) {
+            SDL_PauseAudioStreamDevice(g_audio_stream);
+        } else {
+            SDL_ResumeAudioStreamDevice(g_audio_stream);
+        }
     }
     if (paused) {
         stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
@@ -5556,7 +5475,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
     }
     g_use_sdl_renderer = false;
     if (g_gl_context) {
-        SDL_GL_DeleteContext(g_gl_context);
+        SDL_GL_DestroyContext(g_gl_context);
         g_gl_context = NULL;
     }
     if (g_window) {
@@ -5844,7 +5763,7 @@ static int stasis_build_font_atlas(StasisFont* font) {
             return 0;
         }
         SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-        if (SDL_UpdateTexture(texture, NULL, rgba, atlas_size * 4) != 0) {
+        if (!SDL_UpdateTexture(texture, NULL, rgba, atlas_size * 4)) {
             SDL_DestroyTexture(texture);
             free(rgba);
             free(atlas_bitmap);
@@ -6122,7 +6041,9 @@ static void stasis_draw_text_cached_internal(int run_handle, float x, float y, f
             dst.h = q->y1 - q->y0;
 
             if (src.w > 0 && src.h > 0 && dst.w > 0.0f && dst.h > 0.0f) {
-                SDL_RenderCopyF(g_renderer, font->sdl_texture, &src, &dst);
+                SDL_FRect source = {
+                    (float)src.x, (float)src.y, (float)src.w, (float)src.h};
+                SDL_RenderTexture(g_renderer, font->sdl_texture, &source, &dst);
             }
         }
         return;
@@ -6306,7 +6227,9 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
                 dst.h = (quad.y1 - quad.y0) / pixel_scale;
 
                 if (src.w > 0 && src.h > 0 && dst.w > 0.0f && dst.h > 0.0f) {
-                    SDL_RenderCopyF(g_renderer, font->sdl_texture, &src, &dst);
+                    SDL_FRect source = {
+                        (float)src.x, (float)src.y, (float)src.w, (float)src.h};
+                    SDL_RenderTexture(g_renderer, font->sdl_texture, &source, &dst);
                 }
             }
 

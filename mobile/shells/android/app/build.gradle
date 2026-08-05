@@ -2,12 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
-def sdl2Source = providers.gradleProperty('stasisSdl2Source')
-        .orElse(providers.environmentVariable('STASIS_SDL2_SOURCE'))
-def sdl2ImageSource = providers.gradleProperty('stasisSdl2ImageSource')
-        .orElse(providers.environmentVariable('STASIS_SDL2_IMAGE_SOURCE'))
-if (!sdl2Source.isPresent() || !sdl2ImageSource.isPresent()) {
-    throw new GradleException('Set STASIS_SDL2_SOURCE and STASIS_SDL2_IMAGE_SOURCE to SDL2 and SDL2_image source trees')
+def sdl3Source = providers.gradleProperty('stasisSdl3Source')
+        .orElse(providers.environmentVariable('STASIS_SDL3_SOURCE'))
+def sdl3ImageSource = providers.gradleProperty('stasisSdl3ImageSource')
+        .orElse(providers.environmentVariable('STASIS_SDL3_IMAGE_SOURCE'))
+if (!sdl3Source.isPresent() || !sdl3ImageSource.isPresent()) {
+    throw new GradleException('Set STASIS_SDL3_SOURCE and STASIS_SDL3_IMAGE_SOURCE to SDL3 and SDL3_image source trees')
 }
 
 android {
@@ -25,13 +25,13 @@ android {
         }
         externalNativeBuild {
             cmake {
-                arguments '-DSTASIS_SDL2_SOURCE=' + sdl2Source.get(),
-                        '-DSTASIS_SDL2_IMAGE_SOURCE=' + sdl2ImageSource.get()
+                arguments '-DSTASIS_SDL3_SOURCE=' + sdl3Source.get(),
+                        '-DSTASIS_SDL3_IMAGE_SOURCE=' + sdl3ImageSource.get()
             }
         }
     }
 
-    sourceSets.main.java.srcDir(new File(sdl2Source.get(), 'android-project/app/src/main/java'))
+    sourceSets.main.java.srcDir(new File(sdl3Source.get(), 'android-project/app/src/main/java'))
     externalNativeBuild {
         cmake {
             path 'src/main/cpp/CMakeLists.txt'

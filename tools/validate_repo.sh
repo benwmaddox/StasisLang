@@ -9,12 +9,14 @@ if [[ -f "$HOME/.cargo/env" ]]; then
 fi
 
 python3 tools/ci/check_stasis_src_layout.py
+python3 tools/ci/check_sdl3_migration.py
 python3 tools/ci/check_jit_generation_contract.py
 python3 tools/ci/check_unsafe_boundaries.py
 python3 -m unittest tools.ci.test_jit_generation_contract
 python3 -m unittest tools.ci.test_unsafe_boundaries
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
+python3 -m unittest tools.ci.test_sdl3_migration
 python3 -m unittest tools.ci.test_verify_render_parity
 python3 tools/ci/verify_render_parity.py
 

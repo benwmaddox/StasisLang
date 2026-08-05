@@ -49,8 +49,8 @@ public final class MainActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle state) {
-        System.loadLibrary("SDL2");
-        System.loadLibrary("SDL2_image");
+        System.loadLibrary("SDL3");
+        System.loadLibrary("SDL3_image");
         System.loadLibrary("main");
         File root = new File(getFilesDir(), "stasis_game");
         File staging = new File(getFilesDir(), ".stasis_game.staging");
@@ -380,7 +380,7 @@ public final class MainActivity extends SDLActivity {
 
     @Override
     protected String[] getLibraries() {
-        return new String[] {"SDL2", "SDL2_image", "main"};
+        return new String[] {"SDL3", "SDL3_image", "main"};
     }
 
     private static final class RollingMetric {

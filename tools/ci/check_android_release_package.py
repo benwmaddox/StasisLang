@@ -14,7 +14,7 @@ from pathlib import Path
 MAX_PACKAGE_BYTES = 150 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_MANIFEST_ASSETS = 4096
-REQUIRED_NATIVE_LIBRARIES = {"libSDL2.so", "libSDL2_image.so", "libmain.so"}
+REQUIRED_NATIVE_LIBRARIES = {"libSDL3.so", "libSDL3_image.so", "libmain.so"}
 FORBIDDEN_SUFFIXES = {
     "libstasis_android_bridge.so",
     "libstasis_codex_android.so",

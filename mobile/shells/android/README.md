@@ -1,8 +1,8 @@
 # Android arm64 package
 
 Install JDK 17, Android SDK 35, NDK, CMake 3.22.1, Ninja, and Gradle 8.9.
-Set `ANDROID_HOME`, `STASIS_SDL2_SOURCE`, and `STASIS_SDL2_IMAGE_SOURCE` to
-local SDL2 and SDL2_image source checkouts, then run:
+Set `ANDROID_HOME`, `STASIS_SDL3_SOURCE`, and `STASIS_SDL3_IMAGE_SOURCE` to
+local SDL3 and SDL3_image source checkouts, then run:
 
 ```text
 gradle :app:assembleDebug

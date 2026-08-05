@@ -41,7 +41,7 @@
 			outputPaths = ();
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\nfor name in SDL2 SDL2_image; do\n  source=\"${STASIS_SDL_FRAMEWORKS}/${name}.xcframework/ios-arm64/${name}.framework\"\n  test -d \"${source}\" || { echo \"missing ${source}\" >&2; exit 1; }\n  destination=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n  mkdir -p \"${destination}\"\n  ditto \"${source}\" \"${destination}/${name}.framework\"\n  if test -n \"${EXPANDED_CODE_SIGN_IDENTITY:-}\"; then\n    codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \"${destination}/${name}.framework\"\n  fi\ndone\n";
+			shellScript = "set -eu\nfor name in SDL3 SDL3_image; do\n  source=\"${STASIS_SDL_FRAMEWORKS}/${name}.xcframework/ios-arm64/${name}.framework\"\n  test -d \"${source}\" || { echo \"missing ${source}\" >&2; exit 1; }\n  destination=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n  mkdir -p \"${destination}\"\n  ditto \"${source}\" \"${destination}/${name}.framework\"\n  if test -n \"${EXPANDED_CODE_SIGN_IDENTITY:-}\"; then\n    codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \"${destination}/${name}.framework\"\n  fi\ndone\n";
 		};
 
 		200000000000000000000001 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/main.m; sourceTree = "<group>"; };
