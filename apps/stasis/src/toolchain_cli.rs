@@ -2053,6 +2053,7 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         "tests_run": summary.tests_run,
         "tests_passed": summary.tests_passed,
         "tests_failed": summary.tests_failed,
+        "passed_tests": summary.passed_tests,
         "failures": summary.failures,
     });
     if summary.tests_failed > 0 {
