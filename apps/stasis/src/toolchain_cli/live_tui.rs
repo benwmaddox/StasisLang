@@ -69,7 +69,8 @@ pub(super) fn run_scripted_ai_with_cancel(
         false,
         None,
         canceled,
-    )?;
+    )
+    .map_err(|error| error.message)?;
     Ok((outcome.summary, outcome.trace, outcome.usage_trace))
 }
 
@@ -92,7 +93,8 @@ pub(super) fn run_scripted_project_ai_with_cancel(
         false,
         None,
         canceled,
-    )?;
+    )
+    .map_err(|error| error.message)?;
     Ok((outcome.summary, outcome.trace, outcome.usage_trace))
 }
 
@@ -101,6 +103,30 @@ pub(super) struct ScriptedAiOutcome {
     pub trace: PathBuf,
     pub usage_trace: PathBuf,
     pub model_calls: u32,
+}
+
+pub(super) struct ScriptedAiFailure {
+    pub message: String,
+    pub trace: Option<PathBuf>,
+    pub usage_trace: Option<PathBuf>,
+    pub model_calls: u32,
+}
+
+impl std::fmt::Display for ScriptedAiFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<String> for ScriptedAiFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            trace: None,
+            usage_trace: None,
+            model_calls: 0,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -115,7 +141,7 @@ pub(super) fn run_scripted_ai_profile(
     auto_apply_layout: bool,
     decision_log: Option<&Path>,
     canceled: &AtomicBool,
-) -> Result<ScriptedAiOutcome, String> {
+) -> Result<ScriptedAiOutcome, ScriptedAiFailure> {
     let mut audit = AiAuditLog::create_with_model(
         project_root,
         prompt,
@@ -133,6 +159,9 @@ pub(super) fn run_scripted_ai_profile(
     if let Some(reasoning_effort) = profile.reasoning_effort.as_deref() {
         provider = provider.with_reasoning_effort(reasoning_effort);
     }
+    if let Some(timeout) = profile.request_timeout {
+        provider = provider.with_timeout(timeout);
+    }
     let mut tools = if allow_project_assets {
         LiveAiTools::new_project_assets(
             client.clone(),
@@ -144,11 +173,17 @@ pub(super) fn run_scripted_ai_profile(
     } else {
         LiveAiTools::new(client.clone())
     };
-    let initial_context = load_ai_initial_context(&mut tools, canceled)?;
-    audit.write(serde_json::json!({
-        "event": "initial_context",
-        "value": initial_context.clone(),
-    }))?;
+    let initial_context = load_ai_initial_context(&mut tools, canceled).map_err(|message| {
+        scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
+    })?;
+    audit
+        .write(serde_json::json!({
+            "event": "initial_context",
+            "value": initial_context.clone(),
+        }))
+        .map_err(|message| {
+            scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
+        })?;
     let mut audit_error = None;
     let result = run_agent_with_profile(
         &mut provider,
@@ -176,15 +211,24 @@ pub(super) fn run_scripted_ai_profile(
         },
     );
     if let Some(error) = audit_error {
-        return Err(error);
+        return Err(scripted_ai_failure(
+            error,
+            &trace_path,
+            &usage_path,
+            provider.call_count(),
+        ));
     }
     match result {
         Ok(summary) => {
-            audit.write(serde_json::json!({
-                "event": "finished",
-                "ok": true,
-                "summary": summary,
-            }))?;
+            audit
+                .write(serde_json::json!({
+                    "event": "finished",
+                    "ok": true,
+                    "summary": summary,
+                }))
+                .map_err(|message| {
+                    scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
+                })?;
             Ok(ScriptedAiOutcome {
                 summary,
                 trace: trace_path,
@@ -193,13 +237,36 @@ pub(super) fn run_scripted_ai_profile(
             })
         }
         Err(error) => {
-            audit.write(serde_json::json!({
-                "event": "finished",
-                "ok": false,
-                "error": error,
-            }))?;
-            Err(error)
+            audit
+                .write(serde_json::json!({
+                    "event": "finished",
+                    "ok": false,
+                    "error": error,
+                }))
+                .map_err(|message| {
+                    scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
+                })?;
+            Err(scripted_ai_failure(
+                error,
+                &trace_path,
+                &usage_path,
+                provider.call_count(),
+            ))
         }
+    }
+}
+
+fn scripted_ai_failure(
+    message: String,
+    trace: &Path,
+    usage_trace: &Path,
+    model_calls: u32,
+) -> ScriptedAiFailure {
+    ScriptedAiFailure {
+        message,
+        trace: Some(trace.to_path_buf()),
+        usage_trace: Some(usage_trace.to_path_buf()),
+        model_calls,
     }
 }
 
@@ -2106,6 +2173,7 @@ struct LiveAiTools {
     auto_apply_layout: bool,
     decision_log: Option<PathBuf>,
     decision_role: Option<String>,
+    terminal_blocker: Option<String>,
 }
 
 impl LiveAiTools {
@@ -2120,6 +2188,7 @@ impl LiveAiTools {
             auto_apply_layout: false,
             decision_log: None,
             decision_role: None,
+            terminal_blocker: None,
         }
     }
 
@@ -2227,6 +2296,62 @@ impl LiveAiTools {
             ),
             Err(error) => ToolObservation::error(&call.tool, error),
         }
+    }
+
+    fn report_blocked(&mut self, call: &ToolCall) -> ToolObservation {
+        let Some(args) = call.args.as_object() else {
+            return ToolObservation::error(&call.tool, "blocked report args must be an object");
+        };
+        let read = |name: &str| -> Result<String, String> {
+            let value = args
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("report_blocked requires non-empty string arg: {name}"))?;
+            if value.chars().count() > MAX_DECISION_FIELD_CHARS {
+                return Err(format!(
+                    "report_blocked arg {name} exceeds {MAX_DECISION_FIELD_CHARS} characters"
+                ));
+            }
+            Ok(value.to_string())
+        };
+        let (reason, evidence, next_step) =
+            match (read("reason"), read("evidence"), read("next_step")) {
+                (Ok(reason), Ok(evidence), Ok(next_step)) => (reason, evidence, next_step),
+                values => {
+                    let error = [values.0.err(), values.1.err(), values.2.err()]
+                        .into_iter()
+                        .flatten()
+                        .next()
+                        .unwrap_or_else(|| "invalid blocked report".to_string());
+                    return ToolObservation::error(&call.tool, error);
+                }
+            };
+        let decision = ToolCall {
+            tool: "record_decision".to_string(),
+            args: serde_json::json!({
+                "kind": "builder_blocked",
+                "summary": reason,
+                "rationale": "The builder cannot recover using the supplied tools and must not retry the same failed operation.",
+                "evidence": evidence,
+                "next_step": next_step,
+            }),
+        };
+        let recorded = self.record_decision(&decision);
+        if let Some(error) = recorded.error {
+            return ToolObservation::error(&call.tool, error);
+        }
+        self.terminal_blocker = Some(format!(
+            "builder reported blocked: {}; evidence: {}; next step: {}",
+            decision.args["summary"].as_str().unwrap_or("blocked"),
+            decision.args["evidence"].as_str().unwrap_or("none"),
+            decision.args["next_step"].as_str().unwrap_or("none")
+        ));
+        ToolObservation::result(
+            &call.tool,
+            serde_json::json!({"status":"attempt_terminated","decision":"recorded"}),
+        )
     }
 
     fn request(
@@ -2567,6 +2692,9 @@ impl ToolExecutor for LiveAiTools {
             } else if calls[index].tool == "record_decision" {
                 observations.push(self.record_decision(&calls[index]));
                 index += 1;
+            } else if calls[index].tool == "report_blocked" {
+                observations.push(self.report_blocked(&calls[index]));
+                index += 1;
             } else {
                 observations.push(self.execute_read(&calls[index], canceled));
                 index += 1;
@@ -2594,6 +2722,10 @@ impl ToolExecutor for LiveAiTools {
                     .to_string(),
             ),
         }
+    }
+
+    fn terminal_failure(&self) -> Option<String> {
+        self.terminal_blocker.clone()
     }
 }
 
@@ -3404,6 +3536,44 @@ mod tests {
             }),
         });
         assert!(oversized.error.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gauntlet_agent_can_terminate_an_impossible_attempt() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_blocked_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let decision_log = root.join("decisions.jsonl");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            true,
+            Some(decision_log.clone()),
+            "Fresh builder".to_string(),
+        );
+
+        let observation = tools.report_blocked(&ToolCall {
+            tool: "report_blocked".to_string(),
+            args: json!({
+                "reason": "Required executable is unavailable",
+                "evidence": "The atomic write gate returned a deterministic environment error.",
+                "next_step": "Provision the executable before retrying."
+            }),
+        });
+
+        assert!(observation.error.is_none());
+        assert!(tools
+            .terminal_failure()
+            .expect("terminal blocker")
+            .contains("Required executable is unavailable"));
+        let source = fs::read_to_string(decision_log).expect("blocked decision");
+        assert!(source.contains("builder_blocked"));
         let _ = fs::remove_dir_all(root);
     }
 

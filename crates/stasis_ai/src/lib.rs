@@ -19,7 +19,7 @@ pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
 pub const MIN_COMPACTION_BYTES: usize = 256 * 1024;
 pub const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMPACTION_RETAINED_TURNS: usize = 16;
-const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Treat every listed function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing symbols before writing. For collision or geometry changes, use rendered rectangle bounds as the coordinate source of truth and derive contact test inputs after the update function's movement order instead of copying old collision constants. Put all related source and requested durable-test changes in one contiguous atomic write batch. The write compiles the batch and runs project tests; if it succeeds, return done immediately without a separate test call. If it fails, correct only the reported defect and retry atomically. Return exactly one JSON object matching the response contract.";
+const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. These are host-mediated virtual tools described by tool_specs in the immutable request header, not native Codex registry tools. Invoke them by returning mode=tool_calls with the requested calls in the structured response contract; never search for them in or reject them because of the native callable-tool registry. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Treat every listed function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing symbols before writing. For collision or geometry changes, use rendered rectangle bounds as the coordinate source of truth and derive contact test inputs after the update function's movement order instead of copying old collision constants. Put all related source and requested durable-test changes in one contiguous atomic write batch. The write compiles the batch and runs project tests; if it succeeds, return done immediately without a separate test call. If it fails, correct only the reported defect and retry atomically. Return exactly one JSON object matching the response contract.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -28,6 +28,7 @@ pub struct AgentProfile {
     pub max_turns: usize,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub request_timeout: Option<Duration>,
     pub compaction: Option<AgentCompactionPolicy>,
 }
 
@@ -46,6 +47,7 @@ impl Default for AgentProfile {
             max_turns: DEFAULT_AGENT_TURNS,
             model: None,
             reasoning_effort: None,
+            request_timeout: None,
             compaction: None,
         }
     }
@@ -164,6 +166,10 @@ pub trait ToolExecutor {
 
     fn validate_completion(&self) -> Result<(), String> {
         Ok(())
+    }
+
+    fn terminal_failure(&self) -> Option<String> {
+        None
     }
 }
 
@@ -309,6 +315,9 @@ where
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 let observations = bound_observations(executor.execute(&tool_calls, canceled));
                 emit(AgentEvent::Observations(observations.clone()));
+                if let Some(error) = executor.terminal_failure() {
+                    return Err(error);
+                }
                 transcript.append(&response_record, &observations)?;
                 compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
             }
@@ -696,6 +705,7 @@ pub struct CodexExecProvider {
     images: Vec<PathBuf>,
     web_search: bool,
     call_count: u32,
+    request_timeout: Option<Duration>,
 }
 
 impl Default for CodexExecProvider {
@@ -717,6 +727,7 @@ impl Default for CodexExecProvider {
             images: Vec::new(),
             web_search: false,
             call_count: 0,
+            request_timeout: None,
         }
     }
 }
@@ -736,6 +747,7 @@ pub fn project_ai_tool_specs() -> Vec<ToolSpec> {
 pub fn gauntlet_tool_specs() -> Vec<ToolSpec> {
     let mut tools = project_ai_tool_specs();
     tools.push(spec("record_decision", "Persist one concise Gauntlet decision, rationale, evidence summary, and next step for future fresh agents. Record conclusions and tradeoffs, never hidden chain-of-thought.", &["kind", "summary", "rationale", "evidence", "next_step"], &[]));
+    tools.push(spec("report_blocked", "Immediately terminate this builder attempt when a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools. Do not use this for an ordinary code/test failure that can be corrected.", &["reason", "evidence", "next_step"], &[]));
     tools
 }
 
@@ -757,6 +769,11 @@ impl CodexExecProvider {
 
     pub fn with_web_search(mut self, enabled: bool) -> Self {
         self.web_search = enabled;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
         self
     }
 
@@ -848,18 +865,36 @@ impl CodexExecProvider {
             .take()
             .ok_or_else(|| "Codex stdout was unavailable".to_string())?;
         let usage_worker = std::thread::spawn(move || read_codex_usage(stdout));
-        child
+        let mut stdin = child
             .stdin
             .take()
-            .ok_or_else(|| "Codex stdin was unavailable".to_string())?
-            .write_all(request.as_bytes())
-            .map_err(|error| format!("failed sending Codex request: {error}"))?;
+            .ok_or_else(|| "Codex stdin was unavailable".to_string())?;
+        let request = request.as_bytes().to_vec();
+        let input_worker = std::thread::spawn(move || {
+            stdin
+                .write_all(&request)
+                .map_err(|error| format!("failed sending Codex request: {error}"))
+        });
+        let started = std::time::Instant::now();
         loop {
             if canceled.load(Ordering::Acquire) {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = input_worker.join();
                 let _ = usage_worker.join();
                 return Err("AI request canceled".to_string());
+            }
+            if let Some(timeout) = self.request_timeout {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = input_worker.join();
+                    let _ = usage_worker.join();
+                    return Err(format!(
+                        "AI request exceeded its {} second timeout",
+                        timeout.as_secs()
+                    ));
+                }
             }
             match child
                 .try_wait()
@@ -867,12 +902,16 @@ impl CodexExecProvider {
             {
                 Some(status) if status.success() => break,
                 Some(status) => {
+                    let _ = input_worker.join();
                     let _ = usage_worker.join();
                     return Err(codex_failure_message(&run.stderr, status));
                 }
                 None => std::thread::sleep(Duration::from_millis(50)),
             }
         }
+        input_worker
+            .join()
+            .map_err(|_| "Codex input writer panicked".to_string())??;
         self.last_usage = usage_worker
             .join()
             .map_err(|_| "Codex usage reader panicked".to_string())??;
@@ -1129,6 +1168,7 @@ mod tests {
                 max_turns: 20,
                 model: None,
                 reasoning_effort: None,
+                request_timeout: None,
                 compaction: None,
             },
             "extended task",
@@ -1331,6 +1371,7 @@ mod tests {
                 max_turns: 8,
                 model: None,
                 reasoning_effort: None,
+                request_timeout: None,
                 compaction: Some(AgentCompactionPolicy {
                     max_request_bytes: MIN_COMPACTION_BYTES,
                     retain_recent_turns: 4,
@@ -1470,6 +1511,74 @@ mod tests {
     }
 
     #[test]
+    fn terminal_tool_failure_ends_the_agent_without_another_turn() {
+        struct OneResponse {
+            calls: usize,
+        }
+        impl ModelProvider for OneResponse {
+            fn respond(
+                &mut self,
+                _request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.calls += 1;
+                Ok(ModelResponse::ToolCalls {
+                    working_notes:
+                        "Intent: stop. Observed: terminal blocker. Next: escalate. Blocker: environment."
+                            .to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: "report_blocked".to_string(),
+                        args: json!({
+                            "reason": "missing executable",
+                            "evidence": "staged test gate failed",
+                            "next_step": "provision the host"
+                        }),
+                    }],
+                })
+            }
+        }
+
+        #[derive(Default)]
+        struct BlockedTools {
+            failure: Option<String>,
+        }
+        impl ToolExecutor for BlockedTools {
+            fn execute(
+                &mut self,
+                calls: &[ToolCall],
+                _canceled: &AtomicBool,
+            ) -> Vec<ToolObservation> {
+                self.failure = Some("builder reported blocked: missing executable".to_string());
+                calls
+                    .iter()
+                    .map(|call| ToolObservation::result(&call.tool, json!({"status":"terminated"})))
+                    .collect()
+            }
+
+            fn terminal_failure(&self) -> Option<String> {
+                self.failure.clone()
+            }
+        }
+
+        let mut provider = OneResponse { calls: 0 };
+        let mut tools = BlockedTools::default();
+        let error = run_agent(
+            &mut provider,
+            &mut tools,
+            "attempt the change",
+            json!({}),
+            gauntlet_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect_err("terminal blocker");
+
+        assert_eq!(provider.calls, 1);
+        assert_eq!(error, "builder reported blocked: missing executable");
+    }
+
+    #[test]
     fn rejects_unknown_tools_before_execution() {
         let mut provider = Responses(vec![ModelResponse::ToolCalls {
             working_notes: "Intent: act. Observed: none. Next: shell. Blocker: none.".to_string(),
@@ -1523,9 +1632,13 @@ mod tests {
             assert!(project.iter().any(|tool| tool.tool == expected));
         }
         assert!(!project.iter().any(|tool| tool.tool == "record_decision"));
+        assert!(!project.iter().any(|tool| tool.tool == "report_blocked"));
         assert!(gauntlet_tool_specs()
             .iter()
             .any(|tool| tool.tool == "record_decision"));
+        assert!(gauntlet_tool_specs()
+            .iter()
+            .any(|tool| tool.tool == "report_blocked"));
     }
 
     #[test]
