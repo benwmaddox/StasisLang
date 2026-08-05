@@ -123,15 +123,8 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $buildDir = "runtime/build_ci"
-          $vsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
-          $vsVersion = (& $vsWhere -latest -products * -property installationVersion).Trim()
-          if ($vsVersion.StartsWith("18.")) {
-            $generator = "Visual Studio 18 2026"
-          } elseif ($vsVersion.StartsWith("17.")) {
-            $generator = "Visual Studio 17 2022"
-          } else {
-            throw "Supported Visual Studio installation not found."
-          }
+          $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
           cmake -S runtime -B $buildDir -G $generator -A x64 `
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON `
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
