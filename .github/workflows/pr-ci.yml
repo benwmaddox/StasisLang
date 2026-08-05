@@ -150,7 +150,10 @@ jobs:
 
       - name: Install Linux graphics and display dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        run: >-
+          sudo apt-get update && sudo apt-get install -y xvfb libx11-dev
+          libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
+          libxss-dev libxtst-dev libxkbcommon-dev
 
       - name: Install macOS graphics dependencies
         if: runner.os == 'macOS'

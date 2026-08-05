@@ -33,6 +33,11 @@ PINNED = {
         '"libSDL3.so"',
         '"libSDL3_image.so"',
     ),
+    ".github/workflows/pr-ci.yml": (
+        "STASIS_GRAPHICS_BUNDLE_SDL=ON",
+        "libx11-dev",
+        "libxrandr-dev",
+    ),
     "docs/sdl3_migration.md": (
         "There is no SDL2 or `sdl2-compat` fallback.",
         "Windows x64",

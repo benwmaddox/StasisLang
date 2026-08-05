@@ -520,10 +520,6 @@ static void stasis_sync_display_metrics(void) {
         g_display_generation++;
         g_window_resized = true;
     }
-    if (dimensions_changed && g_use_sdl_renderer &&
-        g_resource_lifecycle.state != STASIS_RENDERER_UNAVAILABLE) {
-        stasis_renderer_lifecycle_surface_changed(&g_resource_lifecycle);
-    }
     g_display_metrics = next;
     g_drawable_width = drawable_w;
     g_drawable_height = drawable_h;

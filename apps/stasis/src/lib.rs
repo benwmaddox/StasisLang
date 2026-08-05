@@ -3824,7 +3824,7 @@ mod tests {
     #[test]
     fn windows_performance_hud_uses_frame_work_and_60_fps_budget() {
         for required in [
-            "event.key.keysym.sym == SDLK_F3",
+            "event.key.key == SDLK_F3",
             "stasis_host_set_performance_metrics",
             "g_perf_pending_guest_render_us",
             "stasis_perf_elapsed_us(g_perf_render_started_counter, now)",
@@ -4201,6 +4201,10 @@ mod tests {
             "SDL3 runtime should request high-density windows and read physical pixels"
         );
         assert!(
+            !STASIS_GRAPHICS_SOURCE.contains("stasis_renderer_lifecycle_surface_changed("),
+            "SDL3 window metric events must not invalidate renderer-owned textures"
+        );
+        assert!(
             STASIS_RUNTIME_CMAKE
                 .contains("target_sources(stasis_runner PRIVATE stasis_runner.manifest)"),
             "the DPI-aware manifest must be embedded in the Windows host executable"
@@ -4268,8 +4272,7 @@ mod tests {
             );
         }
         assert!(
-            STASIS_RUNTIME_CMAKE
-                .contains("configure_stasis_target(stasis_mobile_runtime ON TRUE OFF)"),
+            STASIS_RUNTIME_CMAKE.contains("configure_stasis_target(stasis_mobile_runtime ON TRUE)"),
             "mobile target should be static, SDL-only, and exclude the SDL desktop main shim"
         );
         assert!(

@@ -43,7 +43,10 @@ jobs:
 
       - name: Install SDL development packages (linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes pkg-config
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes pkg-config
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev
+          libxi-dev libxss-dev libxtst-dev libxkbcommon-dev
 
       - name: Install SDL development packages (macos)
         if: runner.os == 'macOS'
