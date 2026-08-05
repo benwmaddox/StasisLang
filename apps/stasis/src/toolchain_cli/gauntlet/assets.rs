@@ -117,14 +117,18 @@ pub(crate) fn apply_asset_calls(
             "import_png_asset" => {
                 let id = controlled_id(&required_string(args, "id")?)?;
                 let source = required_string(args, "source_path")?;
-                let (bytes, width, height) = load_imagegen_png(project_root, &source)?;
+                let (source_bytes, source_width, source_height) =
+                    load_imagegen_png(project_root, &source)?;
+                let source_hash = sha256(&source_bytes);
+                let (bytes, width, height, transformed) =
+                    transform_imported_png(args, source_bytes, source_width, source_height)?;
                 upsert_entry(
                     &mut manifest,
                     AssetEntry {
                         id,
                         path: relative.replace('\\', "/"),
                         content_sha256: sha256(&bytes),
-                        prepared_from_sha256: None,
+                        prepared_from_sha256: transformed.then_some(source_hash),
                         format: AssetFormat::Sprite {
                             encoding: SpriteEncoding::Png,
                             width,
@@ -284,7 +288,10 @@ fn controlled_asset_path(root: &Path, relative: &str, tool: &str) -> Result<Path
     Ok(root.join(relative))
 }
 
-fn load_imagegen_png(root: &Path, relative: &str) -> Result<(Vec<u8>, u32, u32), String> {
+pub(crate) fn load_imagegen_png(
+    root: &Path,
+    relative: &str,
+) -> Result<(Vec<u8>, u32, u32), String> {
     let relative = Path::new(relative);
     if relative.is_absolute()
         || relative
@@ -330,6 +337,72 @@ fn load_imagegen_png(root: &Path, relative: &str) -> Result<(Vec<u8>, u32, u32),
         return Err("ImageGen PNG exceeds the 4,194,304-pixel limit".to_string());
     }
     Ok((bytes, width, height))
+}
+
+fn transform_imported_png(
+    args: &serde_json::Map<String, Value>,
+    bytes: Vec<u8>,
+    source_width: u32,
+    source_height: u32,
+) -> Result<(Vec<u8>, u32, u32, bool), String> {
+    let crop_names = ["crop_x", "crop_y", "crop_width", "crop_height"];
+    let crop_count = crop_names
+        .iter()
+        .filter(|name| args.contains_key(**name))
+        .count();
+    if !matches!(crop_count, 0 | 4) {
+        return Err(
+            "PNG crop requires crop_x, crop_y, crop_width, and crop_height together".to_string(),
+        );
+    }
+    let transparent = args.get("transparent_color").is_some();
+    if !transparent && args.contains_key("transparent_tolerance") {
+        return Err("transparent_tolerance requires transparent_color".to_string());
+    }
+    if crop_count == 0 && !transparent {
+        return Ok((bytes, source_width, source_height, false));
+    }
+    let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
+        .map_err(|error| format!("failed decoding PNG for transformation: {error}"))?;
+    let mut image = decoded.to_rgba8();
+    if crop_count == 4 {
+        let x = required_u32(args, "crop_x", 0, source_width.saturating_sub(1))?;
+        let y = required_u32(args, "crop_y", 0, source_height.saturating_sub(1))?;
+        let width = required_u32(args, "crop_width", 1, source_width)?;
+        let height = required_u32(args, "crop_height", 1, source_height)?;
+        if x.saturating_add(width) > source_width || y.saturating_add(height) > source_height {
+            return Err("PNG crop rectangle exceeds the source bounds".to_string());
+        }
+        image = image::imageops::crop_imm(&image, x, y, width, height).to_image();
+    }
+    if transparent {
+        let key = parse_color(
+            args.get("transparent_color")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "transparent_color must be #RRGGBB".to_string())?,
+        )?;
+        let tolerance = args
+            .get("transparent_tolerance")
+            .map(|_| required_u32(args, "transparent_tolerance", 0, 255))
+            .transpose()?
+            .unwrap_or(12) as u8;
+        for pixel in image.pixels_mut() {
+            let distance = pixel[0]
+                .abs_diff(key[0])
+                .max(pixel[1].abs_diff(key[1]))
+                .max(pixel[2].abs_diff(key[2]));
+            if distance <= tolerance {
+                pixel[3] = 0;
+            }
+        }
+    }
+    let width = image.width();
+    let height = image.height();
+    let mut output = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(|error| format!("failed encoding transformed PNG asset: {error}"))?;
+    Ok((output.into_inner(), width, height, true))
 }
 
 fn render_png(
@@ -618,5 +691,33 @@ mod tests {
         fs::write(&assisted, &png).expect("assisted input");
         assert!(load_imagegen_png(&root, "build/ai-assets/imagegen/ship.png").is_ok());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imagegen_png_import_can_crop_and_remove_a_flat_background() {
+        let mut source = RgbaImage::from_pixel(8, 6, parse_color("#00ff00").unwrap());
+        source.put_pixel(3, 2, parse_color("#d08040").unwrap());
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let args = serde_json::json!({
+            "crop_x": 2,
+            "crop_y": 1,
+            "crop_width": 4,
+            "crop_height": 3,
+            "transparent_color": "#00ff00",
+            "transparent_tolerance": 0
+        });
+        let (png, width, height, transformed) =
+            transform_imported_png(args.as_object().unwrap(), encoded.into_inner(), 8, 6).unwrap();
+        let decoded = image::load_from_memory_with_format(&png, ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+
+        assert!(transformed);
+        assert_eq!((width, height), (4, 3));
+        assert_eq!(decoded.get_pixel(0, 0)[3], 0);
+        assert_eq!(decoded.get_pixel(1, 1), &parse_color("#d08040").unwrap());
     }
 }

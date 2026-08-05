@@ -212,21 +212,33 @@ attachments for fresh critics.
 
 ImageGen is an optional host capability for concept art, backgrounds, and
 texture sheets. The current `codex exec` child transport accepts image inputs
-but does not expose the in-product ImageGen tool, so the core CLI never assumes
-it is present and never falls back to an API key. A host that can invoke
-the built-in ImageGen tool copies the selected project-bound output into the
-selected project workspace, then submits its PNG bytes plus provider/model/prompt
-provenance to the same bounded PNG import transaction; it must not leave a
-referenced asset only in the host's generated-images directory. Both Gauntlet
-and the one-shot `stasis ai` command can use the import bridge; deterministic
-raster composition remains their always-available fallback. In either case, a
-critic judges the rendered in-game result, not the generator's preview.
+but does not expose the in-product ImageGen tool directly. An agent instead
+calls `request_imagegen_asset`; Stasis persists the exact prompt and intended
+use under the project-bound ImageGen inbox and waits up to 30 minutes for a
+capable host to save the requested PNG. The observation returns the validated
+`source_path`, which the same agent passes to `import_png_asset` in its later
+atomic asset/source write batch. The core CLI never assumes a provider or falls
+back to an API key. A host must not leave a referenced asset only in its own
+generated-images directory. Both Gauntlet and the one-shot `stasis ai` command
+use this handshake; deterministic raster composition remains their
+always-available fallback. In either case, a critic judges the rendered in-game
+result, not the generator's preview.
 
-The host bridge is `import_png_asset`: the host places a selected PNG under
+Request one isolated asset or subject per generated image, not a multi-item
+atlas. Masters default to 1024x1024; an agent may request up to 2048x2048 when
+extra detail or crop latitude is justified. Leave that master in the ignored
+ImageGen inbox. The transactional import may
+copy it unchanged, crop it, or remove a flat background to create the tracked
+game asset without degrading the reusable source.
+
+The request is stored under `build/gauntlet/imagegen/requests/`. The host places
+the selected PNG at the request's `output_path` under
 `build/gauntlet/imagegen/`, then the same contiguous asset/source transaction
 copies it under `assets/generated/` and derives the manifest entry. Imports
 must be real PNG files, non-symlinks, at most 16 MiB, at most 2048 pixels per
-edge, and at most 4,194,304 pixels total. This bridge is inert when the running
+edge, and at most 4,194,304 pixels total. `import_png_asset` can copy the image
+unchanged, crop a bounded rectangle, and remove a caller-selected flat background
+color with a bounded tolerance before saving the project PNG. This bridge is inert when the running
 host has no ImageGen capability. One-shot `stasis ai` uses the equivalent
 `build/ai-assets/imagegen/` inbox.
 

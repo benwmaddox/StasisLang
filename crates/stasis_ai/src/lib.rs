@@ -771,9 +771,10 @@ impl Default for CodexExecProvider {
 pub fn project_ai_tool_specs() -> Vec<ToolSpec> {
     let mut tools = live_tool_specs();
     tools.extend([
+        spec("request_imagegen_asset", "Request one host-generated PNG containing one isolated asset or subject, not an atlas. The master defaults to 1024x1024; request up to 2048x2048 only when extra detail or crop latitude is needed. Keep it in the controlled ImageGen inbox and derive the game copy later with import_png_asset crop/background-removal options. The host persists the prompt and this call waits for the PNG, then returns its source_path. Use only when generated bitmap art materially improves the task; request before the atomic asset/source write batch.", &["filename", "prompt", "purpose"], &["width", "height"]),
         spec("write_svg_asset", "Stage one bounded SVG under assets/generated and derive its v2 manifest entry. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "source", "width", "height"], &[]),
         spec("write_png_asset", "Generate and stage one deterministic PNG under assets/generated from a background and bounded rect/circle/line shape array, then derive its v2 manifest entry. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "width", "height", "background", "shapes"], &[]),
-        spec("import_png_asset", "Import a host-generated PNG from build/ai-assets/imagegen or build/gauntlet/imagegen into assets/generated, validate its dimensions and bytes, and derive its v2 manifest entry. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "source_path"], &[]),
+        spec("import_png_asset", "Copy a host-generated PNG from build/ai-assets/imagegen or build/gauntlet/imagegen into assets/generated, optionally crop it and remove a flat background color, validate the result, and derive its v2 manifest entry. Supply all four crop fields together. transparent_color is #RRGGBB; transparent_tolerance defaults to 12. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "source_path"], &["crop_x", "crop_y", "crop_width", "crop_height", "transparent_color", "transparent_tolerance"]),
         spec("write_data_asset", "Stage bounded JSON or CSV data under assets/generated. It must be in the same tool batch immediately before related source writes.", &["path", "source"], &[]),
         spec("write_procedural_wav", "Stage deterministic mono PCM audio under assets/generated and derive its v2 manifest entry. It must be in the same tool batch immediately before related source writes.", &["id", "path", "frequency_hz", "duration_ms"], &[]),
     ]);
@@ -1713,6 +1714,7 @@ mod tests {
     fn project_ai_gets_assets_without_gauntlet_decision_memory() {
         let project = project_ai_tool_specs();
         for expected in [
+            "request_imagegen_asset",
             "write_svg_asset",
             "write_png_asset",
             "import_png_asset",

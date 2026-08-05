@@ -41,6 +41,7 @@ const MAX_DECISION_FIELD_CHARS: usize = 2_000;
 const MAX_STDLIB_API_FILES: usize = 16;
 const MAX_STDLIB_API_ITEMS: usize = 256;
 const MAX_STDLIB_API_FILE_BYTES: u64 = 512 * 1024;
+const DEFAULT_IMAGEGEN_WAIT_SECONDS: u64 = 30 * 60;
 
 enum AiUiEvent {
     InitialContext(Value),
@@ -85,7 +86,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     canceled: &AtomicBool,
 ) -> Result<(String, PathBuf, PathBuf), String> {
     let mut profile = AgentProfile::default();
-    profile.instruction.push_str(" You may create or update project assets with write_svg_asset, write_png_asset, import_png_asset, write_data_asset, and write_procedural_wav. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
+    profile.instruction.push_str(" You may request host-generated bitmap art with request_imagegen_asset, then import its returned source_path with import_png_asset. Request one isolated subject per image; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. You may also create or update project assets with write_svg_asset, write_png_asset, write_data_asset, and write_procedural_wav. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
     let outcome = run_scripted_ai_profile(
         client,
         project_root,
@@ -2399,6 +2400,229 @@ impl LiveAiTools {
         }
     }
 
+    fn request_imagegen_asset(&self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
+        let Some(project_root) = self.project_root.as_ref() else {
+            return ToolObservation::error(
+                &call.tool,
+                "ImageGen requests require a project workspace",
+            );
+        };
+        let Some(args) = call.args.as_object() else {
+            return ToolObservation::error(&call.tool, "ImageGen request args must be an object");
+        };
+        let read = |name: &str| -> Result<String, String> {
+            let value = args
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!("request_imagegen_asset requires non-empty string arg: {name}")
+                })?;
+            if value.chars().count() > MAX_DECISION_FIELD_CHARS {
+                return Err(format!(
+                    "request_imagegen_asset arg {name} exceeds {MAX_DECISION_FIELD_CHARS} characters"
+                ));
+            }
+            Ok(value.to_string())
+        };
+        let (filename, prompt, purpose) = match (read("filename"), read("prompt"), read("purpose"))
+        {
+            (Ok(filename), Ok(prompt), Ok(purpose)) => (filename, prompt, purpose),
+            values => {
+                let error = [values.0.err(), values.1.err(), values.2.err()]
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .unwrap_or_else(|| "invalid ImageGen request".to_string());
+                return ToolObservation::error(&call.tool, error);
+            }
+        };
+        let filename_path = Path::new(&filename);
+        let valid_filename = filename_path.components().count() == 1
+            && filename_path
+                .extension()
+                .is_some_and(|value| value.eq_ignore_ascii_case("png"))
+            && filename
+                .chars()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | '.'));
+        if !valid_filename {
+            return ToolObservation::error(
+                &call.tool,
+                "ImageGen filename must be one portable .png basename",
+            );
+        }
+        let read_dimension = |name: &str| -> Result<Option<u32>, String> {
+            let Some(value) = args.get(name) else {
+                return Ok(None);
+            };
+            let value = value
+                .as_u64()
+                .filter(|value| (1..=2048).contains(value))
+                .ok_or_else(|| {
+                    format!("request_imagegen_asset {name} must be an integer from 1 to 2048")
+                })?;
+            Ok(Some(value as u32))
+        };
+        let (mut width, mut height) = match (read_dimension("width"), read_dimension("height")) {
+            (Ok(width), Ok(height)) => (width, height),
+            (Err(error), _) | (_, Err(error)) => return ToolObservation::error(&call.tool, error),
+        };
+        if width.is_some() != height.is_some() {
+            return ToolObservation::error(
+                &call.tool,
+                "ImageGen width and height must be supplied together",
+            );
+        }
+        if width.is_none() {
+            width = Some(1024);
+            height = Some(1024);
+        }
+        if width
+            .zip(height)
+            .is_some_and(|(width, height)| u64::from(width) * u64::from(height) > 4_194_304)
+        {
+            return ToolObservation::error(
+                &call.tool,
+                "ImageGen request exceeds the 4,194,304-pixel import limit",
+            );
+        }
+        let inbox = if self.decision_log.is_some() {
+            "build/gauntlet/imagegen"
+        } else {
+            "build/ai-assets/imagegen"
+        };
+        let relative_png = format!("{inbox}/{filename}");
+        let png_path = project_root.join(&relative_png);
+        let requests = project_root.join(inbox).join("requests");
+        if let Err(error) = fs::create_dir_all(&requests) {
+            return ToolObservation::error(
+                &call.tool,
+                format!("failed creating ImageGen request inbox: {error}"),
+            );
+        }
+        let request_path = requests.join(format!("{filename}.json"));
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "unix_ms": unix_ms(),
+            "role": self.decision_role.as_deref().unwrap_or("Stasis AI agent"),
+            "prompt": prompt,
+            "purpose": purpose,
+            "width": width,
+            "height": height,
+            "output_path": relative_png,
+        });
+        let encoded = match serde_json::to_vec_pretty(&request) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                return ToolObservation::error(
+                    &call.tool,
+                    format!("failed encoding ImageGen request: {error}"),
+                )
+            }
+        };
+        if request_path.is_file() {
+            match fs::read(&request_path)
+                .ok()
+                .and_then(|source| serde_json::from_slice::<Value>(&source).ok())
+            {
+                Some(existing)
+                    if existing.get("prompt") == request.get("prompt")
+                        && existing.get("purpose") == request.get("purpose")
+                        && existing.get("output_path") == request.get("output_path") => {}
+                Some(_) => {
+                    return ToolObservation::error(
+                        &call.tool,
+                        "ImageGen request filename is already bound to a different prompt; choose a unique filename",
+                    )
+                }
+                None => {
+                    return ToolObservation::error(
+                        &call.tool,
+                        "existing ImageGen request is invalid; choose a unique filename",
+                    )
+                }
+            }
+        } else {
+            let temporary = request_path.with_extension("json.tmp");
+            if let Err(error) =
+                fs::write(&temporary, encoded).and_then(|()| fs::rename(&temporary, &request_path))
+            {
+                let _ = fs::remove_file(&temporary);
+                return ToolObservation::error(
+                    &call.tool,
+                    format!("failed persisting ImageGen request: {error}"),
+                );
+            }
+        }
+        if let Some(path) = self.decision_log.as_ref() {
+            let decision = serde_json::json!({
+                "schema_version": 1,
+                "unix_ms": unix_ms(),
+                "audience": "lead_builder",
+                "role": self.decision_role.as_deref().unwrap_or("Gauntlet agent"),
+                "kind": "imagegen_requested",
+                "summary": purpose,
+                "rationale": "Generated bitmap art materially improves the assigned visual workstream.",
+                "evidence": format!("request={}; output={relative_png}", request_path.display()),
+                "next_step": "Import the fulfilled PNG with import_png_asset in the same atomic batch as source that uses it.",
+            });
+            if let Err(error) = self.append_decision_record(path, &decision) {
+                return ToolObservation::error(&call.tool, error);
+            }
+        }
+        let wait_seconds = std::env::var("STASIS_IMAGEGEN_WAIT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_IMAGEGEN_WAIT_SECONDS)
+            .min(DEFAULT_IMAGEGEN_WAIT_SECONDS);
+        let deadline = Instant::now() + Duration::from_secs(wait_seconds);
+        let mut last_validation_error = None;
+        loop {
+            if canceled.load(Ordering::Acquire) {
+                return ToolObservation::error(&call.tool, "ImageGen request canceled");
+            }
+            if png_path.is_file() {
+                match super::gauntlet::assets::load_imagegen_png(project_root, &relative_png) {
+                    Ok((_, actual_width, actual_height))
+                        if Some(actual_width) == width && Some(actual_height) == height =>
+                    {
+                        return ToolObservation::result(
+                            &call.tool,
+                            serde_json::json!({
+                                "status": "ready",
+                                "source_path": relative_png,
+                                "width": actual_width,
+                                "height": actual_height,
+                                "request_path": request_path,
+                            }),
+                        )
+                    }
+                    Ok((_, actual_width, actual_height)) => {
+                        last_validation_error = Some(format!(
+                        "host PNG dimensions are {actual_width}x{actual_height}, expected {}x{}",
+                        width.unwrap_or(1024),
+                        height.unwrap_or(1024)
+                    ))
+                    }
+                    Err(error) => last_validation_error = Some(error),
+                }
+            }
+            if Instant::now() >= deadline {
+                return ToolObservation::error(
+                    &call.tool,
+                    format!(
+                        "ImageGen request timed out after {wait_seconds} seconds; request remains at {}; last PNG validation error: {}",
+                        request_path.display(),
+                        last_validation_error.as_deref().unwrap_or("no PNG was supplied")
+                    ),
+                );
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+
     fn report_blocked(&mut self, call: &ToolCall) -> ToolObservation {
         let Some(args) = call.args.as_object() else {
             return ToolObservation::error(&call.tool, "blocked report args must be an object");
@@ -2874,6 +3098,9 @@ impl ToolExecutor for LiveAiTools {
                 index = range.end;
             } else if calls[index].tool == "record_decision" {
                 observations.push(self.record_decision(&calls[index]));
+                index += 1;
+            } else if calls[index].tool == "request_imagegen_asset" {
+                observations.push(self.request_imagegen_asset(&calls[index], canceled));
                 index += 1;
             } else if calls[index].tool == "report_blocked" {
                 observations.push(self.report_blocked(&calls[index]));
@@ -3919,6 +4146,65 @@ mod tests {
             .contains("Required executable is unavailable"));
         let source = fs::read_to_string(decision_log).expect("blocked decision");
         assert!(source.contains("builder_blocked"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gauntlet_agent_can_request_and_receive_a_host_imagegen_png() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_imagegen_request_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let output = root.join("build/gauntlet/imagegen/terrain.png");
+        fs::create_dir_all(output.parent().expect("imagegen inbox")).expect("imagegen inbox");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            16,
+            12,
+            image::Rgba([20, 40, 60, 255]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encode imagegen fixture");
+        fs::write(&output, png.into_inner()).expect("host PNG");
+        let decision_log = root.join("decisions.jsonl");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            true,
+            Some(decision_log.clone()),
+            "Fresh builder".to_string(),
+        );
+
+        let observation = tools.request_imagegen_asset(
+            &ToolCall {
+                tool: "request_imagegen_asset".to_string(),
+                args: json!({
+                    "filename": "terrain.png",
+                    "prompt": "One original warm medieval keep on a flat chroma background, without text.",
+                    "purpose": "Replace the placeholder board with readable bitmap terrain.",
+                    "width": 16,
+                    "height": 12
+                }),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert!(observation.error.is_none());
+        assert_eq!(
+            observation.result.as_ref().unwrap()["source_path"],
+            "build/gauntlet/imagegen/terrain.png"
+        );
+        let request =
+            fs::read_to_string(root.join("build/gauntlet/imagegen/requests/terrain.png.json"))
+                .expect("persisted request");
+        assert!(request.contains("One original warm medieval keep"));
+        assert!(fs::read_to_string(decision_log)
+            .expect("decision memory")
+            .contains("imagegen_requested"));
         let _ = fs::remove_dir_all(root);
     }
 

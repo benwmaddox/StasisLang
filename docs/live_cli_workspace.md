@@ -95,13 +95,17 @@ must form one contiguous group immediately before the source writes that load th
 the v2 manifest entries, validates the complete bundle, compiles and tests the related source, and
 rolls the asset and source sides back together on failure; the model never edits the manifest.
 
-For ImageGen, a capable host copies the selected project-bound PNG into
-`build/ai-assets/imagegen/`; `import_png_asset` then validates and copies it under
-`assets/generated/`. The installed `codex exec` child still cannot invoke the built-in ImageGen
-tool directly, so this is an explicit host bridge rather than an API-key fallback. Deterministic
-`write_png_asset` remains available without that host capability. One-shot AI does not inherit
+For ImageGen, the agent calls `request_imagegen_asset`. Stasis persists the prompt under
+`build/ai-assets/imagegen/requests/` and waits for a capable host to copy the selected
+project-bound PNG to the request's output path. The returned `source_path` is passed to
+`import_png_asset`, which validates and copies it under `assets/generated/`. The installed
+`codex exec` child still cannot invoke the built-in ImageGen tool directly, so this is an explicit
+host handshake rather than an API-key fallback. Deterministic `write_png_asset` remains available
+without that host capability. One-shot AI does not inherit
 Gauntlet's autonomous layout migration: an asset/source edit requiring a layout change is left
 unapplied and reported as requiring the normal explicit approval workflow.
+Request one isolated subject per PNG. Masters default to 1024x1024 and may be increased to
+2048x2048 when the agent needs extra detail or crop latitude.
 
 Human commands intentionally cover every useful live AI capability:
 
