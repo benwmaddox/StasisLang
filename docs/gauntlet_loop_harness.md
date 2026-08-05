@@ -80,6 +80,10 @@ independent critiques, even if doing so crosses the admission budget. The total
 counter still records every call, and the controller will not admit another
 candidate once the configured budget is exhausted. This prevents a primary
 builder from leaving only a token one-turn escalation or an unevaluated edit.
+`budget.wall_time_minutes` bounds one active controller session. `resume`
+starts a fresh wall-time session while preserving the original run start,
+model-call count, accepted checkpoint, critiques, and decision memory, so host
+downtime does not consume the working budget.
 
 Interactive terminals default to the human-readable terminal observer. `stop` cooperatively cancels
 the active model or test, rolls back a provisional candidate, and retains the
@@ -257,7 +261,21 @@ conclusions: kind, summary, concise rationale, evidence, and next step. The
 impossible builder attempt. The
 controller also records lead choices, accepted/rejected checkpoints, and final
 gate failures. Each append is flushed and synced so interruption or resume does
-not erase the current theory of the game.
+not erase the current theory of the game. A failed builder attempt extracts a
+bounded, deduplicated summary of tool errors from its trace, including repeat
+counts, and records that evidence before any rescue starts. The rescue receives
+the refreshed decision memory in its prompt rather than the primary builder's
+stale initial snapshot. Atomic-write and completion-gate failures are also
+flushed into decision memory when the live tool returns them, before the agent
+can retry. A controller or machine interruption during that attempt therefore
+does not strand the only useful diagnostic in a raw trace.
+
+At start and resume, the controller imports up to 12 recent failure and
+rejection lessons from the four newest prior runs. Imported records retain the
+source run, source event kind, and source timestamp and are idempotent on
+resume. Legacy failure events are enriched from traces only when the resolved
+trace is inside the project's `build/ai-traces/` directory. Raw traces remain
+separate; only bounded explicit errors enter model-visible memory.
 
 ## Execution architecture
 
@@ -266,7 +284,12 @@ not erase the current theory of the game.
 For a new game, Stasis creates a target project with a real `main`, `tick`,
 `render`, and `on_code_swap`, a deterministic test, an empty v2 asset manifest,
 and a visible blank-canvas scene. It commits that seed and runs on that new
-repository's current branch.
+repository's current branch. The seed imports only the command-buffer and
+window-request runtime modules that it materializes. Game code requests its
+initial window through the runtime mailbox helper; payload fields are written
+before the sequence counter publishes the request. This stays on the same
+batched guest-to-host boundary as rendering instead of adding a startup-only
+extern call or exposing ABI globals in generated game code.
 
 For an existing game, Stasis requires a clean checkout and operates directly
 on the current branch. Every accepted improvement becomes a narrow Git
@@ -339,9 +362,11 @@ latest 48 decision records, capped at 32 KiB. Builders may call
 `record_decision` during exploration and after tested choices, so architectural
 decisions and failed approaches survive context boundaries and `resume`.
 Controller outcomes use the same journal, and the latest recorded next step
-restores the working gap after a restart. Blind visual and gameplay critics are
-never given this memory; they receive only anonymous evidence, the frozen bar,
-and reference material.
+restores the working gap after a restart. A rescue builder sees the primary
+attempt's exact bounded failure evidence, and later candidates see recent
+provenance-tagged lessons imported from earlier runs. Blind visual and gameplay
+critics are never given this memory; they receive only anonymous evidence, the
+frozen bar, and reference material.
 
 ### Project and asset transaction
 
@@ -407,7 +432,10 @@ to start while a fresh heartbeat exists, preventing two controllers from
 mutating the same project workspace. A stale or missing heartbeat on a
 non-terminal phase is recoverable: resume restores the latest accepted Git
 checkpoint, retains the quality-acceptance streak and decision journal, clears
-the old stop request, and restarts the loop. Model timeouts, invalid structured
+the old stop request, opens a fresh wall-time session, and restarts the loop.
+Stopped, stalled, budget-exhausted, and failed runs are also explicitly
+resumable after their cause has been addressed; only a converged run is final.
+Model timeouts, invalid structured
 responses, and transient role failures consume their real call budget and
 produce explicit attempt events. Scout/lead bootstrap has a bounded
 deterministic fallback; candidate capture or exhausted critic recovery rolls
