@@ -316,13 +316,19 @@ fn load_ai_initial_context(
 
 fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
     let candidates = [
-        project_root.join("vendor/stasis/src/stdlib"),
-        project_root.join(".stasis_cache/toolchain/src/stdlib"),
-        project_root.join("stdlib"),
+        (
+            project_root.join("vendor/stasis/src/stdlib"),
+            "/vendor/stasis/src/stdlib",
+        ),
+        (
+            project_root.join(".stasis_cache/toolchain/src/stdlib"),
+            "/.stasis_cache/toolchain/src/stdlib",
+        ),
+        (project_root.join("stdlib"), "/stdlib"),
     ];
-    let Some(root) = candidates
+    let Some((root, import_prefix)) = candidates
         .into_iter()
-        .find(|path| path.join("stdlib.stasis").is_file())
+        .find(|(path, _)| path.join("stdlib.stasis").is_file())
     else {
         return Ok(serde_json::json!({
             "available": false,
@@ -405,7 +411,7 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
             .ok_or_else(|| "Stasis stdlib module name is not UTF-8".to_string())?;
         modules.push(serde_json::json!({
             "file": relative,
-            "canonical_import": format!("/vendor/stasis/src/stdlib/{file_name}"),
+            "canonical_import": format!("{import_prefix}/{file_name}"),
             "items": items,
         }));
         if total >= MAX_STDLIB_API_ITEMS {
@@ -3578,6 +3584,32 @@ mod tests {
         assert!(rendered.contains("/vendor/stasis/src/stdlib/graphics.stasis"));
         assert!(!rendered.contains("private_counter"));
         assert!(!rendered.contains("host_private"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn initial_context_uses_the_matched_legacy_stdlib_import_root() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_legacy_stdlib_catalog_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let stdlib = root.join("stdlib");
+        fs::create_dir_all(&stdlib).expect("stdlib dir");
+        fs::write(
+            stdlib.join("stdlib.stasis"),
+            "function print(value: i32): void { return; }\n",
+        )
+        .expect("stdlib module");
+
+        let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
+
+        assert_eq!(
+            catalog["modules"][0]["canonical_import"],
+            "/stdlib/stdlib.stasis"
+        );
         fs::remove_dir_all(root).ok();
     }
 
