@@ -508,9 +508,19 @@ fn controller_loop(
         scenario_pointer,
         &mut next_request,
     )?;
-    let mut largest_gap = latest_decision_next_step(artifacts).unwrap_or_else(|| {
-        "Build the first complete playable version of the frozen brief.".to_string()
-    });
+    let readiness = verify_harness_readiness(&project_root, artifacts, &canceled)?;
+    emit_event(artifacts, "harness_ready", json!({"evidence": readiness}))?;
+    append_decision(
+        artifacts,
+        "controller",
+        "harness_ready",
+        "Verified the Stasis test harness before model work",
+        "Harness provisioning is controller-owned and must not be delegated to a semantic builder.",
+        &readiness,
+        "Select the highest-value game implementation gap; the harness is ready and requires no builder investigation.",
+    )?;
+    let mut largest_gap =
+        "The controller verified the Stasis executable and existing deterministic project tests. Select the highest-value game implementation gap; do not assign harness provisioning or CLI discovery to the builder.".to_string();
     let mut final_acceptances = 0_u32;
     loop {
         if should_stop(artifacts) {
@@ -1356,6 +1366,66 @@ fn checkpoint(root: &Path, candidate: &str, workstream: &str) -> Result<String, 
     git_stdout(root, &["rev-parse", "HEAD"])
 }
 
+fn verify_harness_readiness(
+    project_root: &Path,
+    artifacts: &Path,
+    canceled: &AtomicBool,
+) -> Result<String, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed locating Stasis for harness readiness: {error}"))?;
+    let log_path = artifacts.join("harness-readiness.log");
+    let stdout = fs::File::create(&log_path)
+        .map_err(|error| format!("failed creating {}: {error}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|error| format!("failed cloning harness readiness log: {error}"))?;
+    let mut command = Command::new(&executable);
+    command
+        .arg("--workspace")
+        .arg(project_root)
+        .args(["--json", "test"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed starting harness readiness test: {error}"))?;
+    let started = Instant::now();
+    let status = loop {
+        if canceled.load(Ordering::Acquire) || started.elapsed() >= Duration::from_secs(300) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "harness readiness test was canceled or exceeded 300 seconds; see {}",
+                log_path.display()
+            ));
+        }
+        match child
+            .try_wait()
+            .map_err(|error| format!("failed waiting for harness readiness test: {error}"))?
+        {
+            Some(status) => break status,
+            None => thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    if !status.success() {
+        return Err(format!(
+            "harness readiness test exited with {status}; see {}",
+            log_path.display()
+        ));
+    }
+    Ok(format!(
+        "{} ran the existing deterministic project tests successfully; log={}",
+        executable.display(),
+        log_path.display()
+    ))
+}
+
 fn run_final_gates(project_root: &Path, artifacts: &Path) -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("failed locating Stasis for final validation: {error}"))?;
@@ -1773,17 +1843,6 @@ fn decision_memory_snapshot(artifacts: &Path) -> Result<String, String> {
     }
 }
 
-fn latest_decision_next_step(artifacts: &Path) -> Option<String> {
-    read_decision_records(artifacts)
-        .ok()?
-        .into_iter()
-        .rev()
-        .find(|record| record.get("audience").and_then(Value::as_str) == Some("lead_builder"))?
-        .get("next_step")?
-        .as_str()
-        .map(str::to_string)
-}
-
 fn read_decision_records(artifacts: &Path) -> Result<Vec<Value>, String> {
     let path = artifacts.join(DECISIONS_NAME);
     if !path.is_file() {
@@ -2054,14 +2113,12 @@ mod tests {
         assert!(!snapshot.contains("decision-0\""));
         assert!(snapshot.contains("decision-54"));
         assert!(snapshot.lines().count() <= MAX_MEMORY_RECORDS);
-        assert_eq!(latest_decision_next_step(&root).as_deref(), Some("next-54"));
         OpenOptions::new()
             .append(true)
             .open(root.join(DECISIONS_NAME))
             .expect("decision log")
             .write_all(b"{\"torn\":")
             .expect("torn final record");
-        assert_eq!(latest_decision_next_step(&root).as_deref(), Some("next-54"));
         let _ = fs::remove_dir_all(root);
     }
 
