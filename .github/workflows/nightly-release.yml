@@ -186,7 +186,7 @@ jobs:
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             cp -R runtime/build_ci/bin/Release/stasis_runner.app "${out}/bin/"
           else
-            cp runtime/build_ci/bin/stasis_runner "${out}/bin/"
+            cp runtime/build_ci/bin/Release/stasis_runner "${out}/bin/"
           fi
           cp README.md "${out}/"
           cp LICENSE "${out}/"
