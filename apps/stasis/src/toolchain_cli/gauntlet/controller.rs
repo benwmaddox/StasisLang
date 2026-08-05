@@ -640,32 +640,101 @@ fn controller_loop(
             "Frozen game brief:\n{goal}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
             decision.workstream, decision.builder_prompt
         );
-        let profile = AgentProfile {
-            role: "Fresh Stasis Gauntlet builder".to_string(),
-            instruction: "Use only the supplied Stasis live-workspace tools. Inspect relevant symbols and references, then make one contiguous atomic semantic edit batch. You may create bounded SVG, PNG, JSON/CSV, or procedural WAV assets; put one contiguous asset-tool group immediately before the related source writes in the same response. Use record_decision during exploration and after consequential tested choices to preserve concise conclusions, tradeoffs, evidence, and next steps for future agents; never record hidden chain-of-thought. The write must compile and run tests. Do not grade your own visual quality. Return done immediately after a successful tested write and decision record.".to_string(),
-            max_turns: usize::try_from(
-                remaining_calls.min(config.execution.builder_max_turns),
-            )
-            .unwrap_or(stasis_ai::DEFAULT_AGENT_TURNS),
-            model: config.models.builder.model.clone(),
-            reasoning_effort: config.models.builder.reasoning_effort.clone(),
-            compaction: config.execution.compaction.enabled.then(|| AgentCompactionPolicy {
-                max_request_bytes: config.execution.compaction.max_request_bytes,
-                retain_recent_turns: config.execution.compaction.retain_recent_turns,
-            }),
-        };
-        let outcome = live_tui::run_scripted_ai_profile(
-            &client,
-            &project_root,
-            &prompt,
-            profile,
-            vec![baseline.clone()],
-            false,
-            true,
-            true,
-            Some(&artifacts.join(DECISIONS_NAME)),
-            &canceled,
+        let run_builder =
+            |model: &GauntletRoleModel, role: &str, instruction: &str, available_calls: u32| {
+                let profile = AgentProfile {
+                    role: role.to_string(),
+                    instruction: instruction.to_string(),
+                    max_turns: usize::try_from(
+                        available_calls.min(config.execution.builder_max_turns),
+                    )
+                    .unwrap_or(stasis_ai::DEFAULT_AGENT_TURNS),
+                    model: model.model.clone(),
+                    reasoning_effort: model.reasoning_effort.clone(),
+                    compaction: config.execution.compaction.enabled.then(|| {
+                        AgentCompactionPolicy {
+                            max_request_bytes: config.execution.compaction.max_request_bytes,
+                            retain_recent_turns: config.execution.compaction.retain_recent_turns,
+                        }
+                    }),
+                };
+                live_tui::run_scripted_ai_profile(
+                    &client,
+                    &project_root,
+                    &prompt,
+                    profile,
+                    vec![baseline.clone()],
+                    false,
+                    true,
+                    true,
+                    Some(&artifacts.join(DECISIONS_NAME)),
+                    &canceled,
+                )
+            };
+        let primary_instruction = "Use only the supplied Stasis live-workspace tools. Inspect relevant symbols and references, then make one contiguous atomic semantic edit batch. You may create bounded SVG, PNG, JSON/CSV, or procedural WAV assets; put one contiguous asset-tool group immediately before the related source writes in the same response. Use record_decision during exploration and after consequential tested choices to preserve concise conclusions, tradeoffs, evidence, and next steps for future agents; never record hidden chain-of-thought. The write must compile and run tests. Do not grade your own visual quality. Return done immediately after a successful tested write and decision record. If a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools, call report_blocked once; it terminates this attempt immediately. Never retry the same terminal failure.";
+        let mut outcome = run_builder(
+            &config.models.builder,
+            "Fresh Stasis Gauntlet builder",
+            primary_instruction,
+            remaining_calls,
         );
+        if let Err(failure) = &outcome {
+            record_builder_attempt_failure(
+                &mut state,
+                artifacts,
+                &candidate_id,
+                "primary",
+                &config.models.builder,
+                failure,
+            )?;
+            let remaining_calls = config.budget.model_calls.saturating_sub(state.model_calls);
+            if should_escalate_builder(failure, &canceled)
+                && remaining_calls > 0
+                && config.models.builder_escalation.is_some()
+            {
+                rollback_candidate(
+                    &project_root,
+                    state.best_commit.as_deref().unwrap_or(&state.base_commit),
+                )?;
+                let escalation = config.models.builder_escalation.as_ref().unwrap();
+                emit_event(
+                    artifacts,
+                    "builder_escalated",
+                    json!({
+                        "candidate": candidate_id,
+                        "from_model": config.models.builder.model,
+                        "to_model": escalation.model,
+                        "reason": failure.message,
+                    }),
+                )?;
+                append_decision(
+                    artifacts,
+                    "controller",
+                    "builder_escalated",
+                    &format!("Escalated {candidate_id} to the rescue builder"),
+                    "The primary builder could not finish, so the configured one-shot escalation policy applies.",
+                    &failure.message,
+                    "Make one bounded rescue attempt, then either complete or preserve the terminal blocker.",
+                )?;
+                let escalation_instruction = "You are the one-shot rescue builder after the primary builder failed. Use the durable decision memory and current evidence to avoid repeating failed exploration. Make one bounded atomic correction that completes the assigned work. If the failure is environmental or otherwise non-recoverable from the supplied tools, call report_blocked once to terminate immediately. Never loop on the same failed operation.";
+                outcome = run_builder(
+                    escalation,
+                    "Escalated Stasis Gauntlet builder",
+                    escalation_instruction,
+                    remaining_calls,
+                );
+                if let Err(failure) = &outcome {
+                    record_builder_attempt_failure(
+                        &mut state,
+                        artifacts,
+                        &candidate_id,
+                        "escalation",
+                        escalation,
+                        failure,
+                    )?;
+                }
+            }
+        }
         match outcome {
             Ok(outcome) => {
                 state.model_calls = state.model_calls.saturating_add(outcome.model_calls);
@@ -695,7 +764,7 @@ fn controller_loop(
                     "Capture and independently evaluate the candidate.",
                 )?;
             }
-            Err(error) => {
+            Err(failure) => {
                 rollback_candidate(
                     &project_root,
                     state.best_commit.as_deref().unwrap_or(&state.base_commit),
@@ -704,10 +773,11 @@ fn controller_loop(
                     &mut state,
                     artifacts,
                     &candidate_id,
-                    &format!("builder failed: {error}"),
+                    &format!("builder failed: {}", failure.message),
                 )?;
                 largest_gap = format!(
-                    "The previous builder failed before producing a valid candidate: {error}"
+                    "The previous builder failed before producing a valid candidate: {}",
+                    failure.message
                 );
                 continue;
             }
@@ -1403,6 +1473,39 @@ fn rollback_candidate(root: &Path, commit: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn should_escalate_builder(failure: &live_tui::ScriptedAiFailure, canceled: &AtomicBool) -> bool {
+    !canceled.load(Ordering::Acquire) && failure.message != "AI request canceled"
+}
+
+fn record_builder_attempt_failure(
+    state: &mut GauntletRunStateV1,
+    artifacts: &Path,
+    candidate: &str,
+    attempt: &str,
+    model: &GauntletRoleModel,
+    failure: &live_tui::ScriptedAiFailure,
+) -> Result<(), String> {
+    state.model_calls = state.model_calls.saturating_add(failure.model_calls);
+    persist_state(artifacts, state)?;
+    if let Some(usage_trace) = failure.usage_trace.as_deref().filter(|path| path.is_file()) {
+        append_usage_file(artifacts, usage_trace)?;
+    }
+    emit_event(
+        artifacts,
+        "builder_attempt_failed",
+        json!({
+            "candidate": candidate,
+            "attempt": attempt,
+            "model": model.model,
+            "reasoning_effort": model.reasoning_effort,
+            "reason": failure.message,
+            "trace": failure.trace,
+            "usage": failure.usage_trace,
+            "model_calls": failure.model_calls,
+        }),
+    )
+}
+
 fn reject(
     state: &mut GauntletRunStateV1,
     artifacts: &Path,
@@ -2016,6 +2119,29 @@ mod tests {
         assert_eq!(state.terminal_reason, None);
         assert_eq!(state.rejected_candidates, 5);
         assert_eq!(state.best_commit.as_deref(), Some("cafebabe"));
+    }
+
+    #[test]
+    fn builder_escalation_skips_canceled_attempts() {
+        let failure = live_tui::ScriptedAiFailure {
+            message: "AI agent reached the 30-turn limit".to_string(),
+            trace: None,
+            usage_trace: None,
+            model_calls: 30,
+        };
+        let canceled = AtomicBool::new(false);
+        assert!(should_escalate_builder(&failure, &canceled));
+        canceled.store(true, Ordering::Release);
+        assert!(!should_escalate_builder(&failure, &canceled));
+
+        let canceled_failure = live_tui::ScriptedAiFailure {
+            message: "AI request canceled".to_string(),
+            trace: None,
+            usage_trace: None,
+            model_calls: 1,
+        };
+        canceled.store(false, Ordering::Release);
+        assert!(!should_escalate_builder(&canceled_failure, &canceled));
     }
 
     #[test]

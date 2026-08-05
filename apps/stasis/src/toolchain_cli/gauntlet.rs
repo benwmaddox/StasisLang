@@ -192,6 +192,8 @@ pub(super) struct GauntletRoleModels {
     pub lead: GauntletRoleModel,
     #[serde(default = "default_luna_role_model")]
     pub builder: GauntletRoleModel,
+    #[serde(default = "default_builder_escalation_model")]
+    pub builder_escalation: Option<GauntletRoleModel>,
     #[serde(default)]
     pub visual_critic: GauntletRoleModel,
     #[serde(default)]
@@ -213,10 +215,18 @@ impl Default for GauntletRoleModels {
             scout: default_luna_role_model(),
             lead: GauntletRoleModel::default(),
             builder: default_luna_role_model(),
+            builder_escalation: default_builder_escalation_model(),
             visual_critic: GauntletRoleModel::default(),
             gameplay_critic: GauntletRoleModel::default(),
         }
     }
+}
+
+fn default_builder_escalation_model() -> Option<GauntletRoleModel> {
+    Some(GauntletRoleModel {
+        model: Some("gpt-5.6-sol".to_string()),
+        reasoning_effort: Some("high".to_string()),
+    })
 }
 
 fn default_luna_role_model() -> GauntletRoleModel {
@@ -346,6 +356,9 @@ impl GauntletConfigV1 {
             ("gameplay_critic", &self.models.gameplay_critic),
         ] {
             profile.validate(role)?;
+        }
+        if let Some(profile) = &self.models.builder_escalation {
+            profile.validate("builder_escalation")?;
         }
         for reference in &self.quality_bar.references {
             validate_relative_path("reference path", Path::new(&reference.path))?;
@@ -789,9 +802,22 @@ mod tests {
             config.models.builder.reasoning_effort.as_deref(),
             Some("max")
         );
+        let escalation = config
+            .models
+            .builder_escalation
+            .as_ref()
+            .expect("default builder escalation");
+        assert_eq!(escalation.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(escalation.reasoning_effort.as_deref(), Some("high"));
         assert!(config.models.lead.model.is_none());
         assert!(config.models.visual_critic.model.is_none());
         assert!(config.models.gameplay_critic.model.is_none());
+
+        let mut value = serde_json::to_value(&config).expect("config value");
+        value["models"]["builder_escalation"] = serde_json::Value::Null;
+        let without_escalation: GauntletConfigV1 =
+            serde_json::from_value(value).expect("disabled escalation");
+        assert!(without_escalation.models.builder_escalation.is_none());
     }
 
     #[test]

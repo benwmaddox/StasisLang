@@ -112,6 +112,7 @@ The project root contains a strict, versioned `gauntlet.json`:
     "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
     "lead": {},
     "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
+    "builder_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
     "visual_critic": {},
     "gameplay_critic": {}
   }
@@ -130,6 +131,13 @@ total model-call and wall-time budgets. This gives a difficult workstream room
 for multiple inspect/test/correct cycles without silently granting an
 unlimited session.
 
+A builder must not spend that allowance repeating a terminal failure. The
+Gauntlet-only `report_blocked` tool records the reason, evidence, and required
+next step, then terminates the attempt in the same turn. The controller can
+immediately apply the configured one-shot builder escalation. If the rescue
+builder reports the same non-recoverable condition, the candidate is rejected
+without consuming the rest of its turn allowance.
+
 When compaction is enabled, a builder request is compacted after it exceeds
 the configured byte ceiling. Stasis retains up to the configured number of
 recent raw turns and replaces older turns with deterministic summaries of
@@ -143,7 +151,8 @@ is 2 MiB and six turns.
 
 Every role has an independent optional `model` and `reasoning_effort`. New
 Gauntlet configurations default the scout and builder to `gpt-5.6-luna` with `max`
-reasoning; lead and both critics inherit `STASIS_AI_MODEL`,
+reasoning. If the primary builder cannot finish, the same candidate receives one
+bounded rescue attempt from `gpt-5.6-sol` with `high` reasoning. Lead and both critics inherit `STASIS_AI_MODEL`,
 `STASIS_AI_REASONING_EFFORT`, and ultimately the installed defaults. An explicit
 empty role object also selects that inherited behavior. Values are passed
 directly to the installed Codex CLI, so a model identifier must actually be
@@ -154,6 +163,7 @@ supported there. A fully explicit configuration can use:
   "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
   "lead": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
   "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
+  "builder_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
   "visual_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "medium"},
   "gameplay_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "high"}
 }
@@ -161,8 +171,11 @@ supported there. A fully explicit configuration can use:
 
 This default puts the discounted model on high-volume bounded work while the
 lead and independent critics remain on the stronger installed default. Projects
-can override any role when observed acceptance quality warrants it. Model-call
-accounting stays global across roles.
+can override any role when observed acceptance quality warrants it. Set
+`models.builder_escalation` to another `{model, reasoning_effort}` object to
+change the rescue tier, use `{}` to inherit the installed defaults, or use
+`null` to disable builder escalation. Failed primary calls and rescue calls both
+count against the global model-call budget.
 
 Subscription-backed Codex is the first provider. Stasis does not request an API
 key or estimate a dollar cost. The [Codex non-interactive command
@@ -217,6 +230,8 @@ rejected candidates, and the largest remaining gap.
 `decisions.jsonl` is durable model working memory, not a dump of private
 chain-of-thought. The `record_decision` tool stores bounded explicit
 conclusions: kind, summary, concise rationale, evidence, and next step. The
+`report_blocked` tool writes the same durable evidence before terminating an
+impossible builder attempt. The
 controller also records lead choices, accepted/rejected checkpoints, and final
 gate failures. Each append is flushed and synced so interruption or resume does
 not erase the current theory of the game.
