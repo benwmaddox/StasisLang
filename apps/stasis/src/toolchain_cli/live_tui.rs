@@ -159,6 +159,9 @@ pub(super) fn run_scripted_ai_profile(
     if let Some(reasoning_effort) = profile.reasoning_effort.as_deref() {
         provider = provider.with_reasoning_effort(reasoning_effort);
     }
+    if let Some(timeout) = profile.request_timeout {
+        provider = provider.with_timeout(timeout);
+    }
     let mut tools = if allow_project_assets {
         LiveAiTools::new_project_assets(
             client.clone(),

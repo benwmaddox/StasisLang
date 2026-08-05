@@ -28,6 +28,7 @@ pub struct AgentProfile {
     pub max_turns: usize,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub request_timeout: Option<Duration>,
     pub compaction: Option<AgentCompactionPolicy>,
 }
 
@@ -46,6 +47,7 @@ impl Default for AgentProfile {
             max_turns: DEFAULT_AGENT_TURNS,
             model: None,
             reasoning_effort: None,
+            request_timeout: None,
             compaction: None,
         }
     }
@@ -703,6 +705,7 @@ pub struct CodexExecProvider {
     images: Vec<PathBuf>,
     web_search: bool,
     call_count: u32,
+    request_timeout: Option<Duration>,
 }
 
 impl Default for CodexExecProvider {
@@ -724,6 +727,7 @@ impl Default for CodexExecProvider {
             images: Vec::new(),
             web_search: false,
             call_count: 0,
+            request_timeout: None,
         }
     }
 }
@@ -765,6 +769,11 @@ impl CodexExecProvider {
 
     pub fn with_web_search(mut self, enabled: bool) -> Self {
         self.web_search = enabled;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
         self
     }
 
@@ -856,18 +865,36 @@ impl CodexExecProvider {
             .take()
             .ok_or_else(|| "Codex stdout was unavailable".to_string())?;
         let usage_worker = std::thread::spawn(move || read_codex_usage(stdout));
-        child
+        let mut stdin = child
             .stdin
             .take()
-            .ok_or_else(|| "Codex stdin was unavailable".to_string())?
-            .write_all(request.as_bytes())
-            .map_err(|error| format!("failed sending Codex request: {error}"))?;
+            .ok_or_else(|| "Codex stdin was unavailable".to_string())?;
+        let request = request.as_bytes().to_vec();
+        let input_worker = std::thread::spawn(move || {
+            stdin
+                .write_all(&request)
+                .map_err(|error| format!("failed sending Codex request: {error}"))
+        });
+        let started = std::time::Instant::now();
         loop {
             if canceled.load(Ordering::Acquire) {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = input_worker.join();
                 let _ = usage_worker.join();
                 return Err("AI request canceled".to_string());
+            }
+            if let Some(timeout) = self.request_timeout {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = input_worker.join();
+                    let _ = usage_worker.join();
+                    return Err(format!(
+                        "AI request exceeded its {} second timeout",
+                        timeout.as_secs()
+                    ));
+                }
             }
             match child
                 .try_wait()
@@ -875,12 +902,16 @@ impl CodexExecProvider {
             {
                 Some(status) if status.success() => break,
                 Some(status) => {
+                    let _ = input_worker.join();
                     let _ = usage_worker.join();
                     return Err(codex_failure_message(&run.stderr, status));
                 }
                 None => std::thread::sleep(Duration::from_millis(50)),
             }
         }
+        input_worker
+            .join()
+            .map_err(|_| "Codex input writer panicked".to_string())??;
         self.last_usage = usage_worker
             .join()
             .map_err(|_| "Codex usage reader panicked".to_string())??;
@@ -1137,6 +1168,7 @@ mod tests {
                 max_turns: 20,
                 model: None,
                 reasoning_effort: None,
+                request_timeout: None,
                 compaction: None,
             },
             "extended task",
@@ -1339,6 +1371,7 @@ mod tests {
                 max_turns: 8,
                 model: None,
                 reasoning_effort: None,
+                request_timeout: None,
                 compaction: Some(AgentCompactionPolicy {
                     max_request_bytes: MIN_COMPACTION_BYTES,
                     retain_recent_turns: 4,
