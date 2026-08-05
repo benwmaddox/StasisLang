@@ -86,7 +86,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     canceled: &AtomicBool,
 ) -> Result<(String, PathBuf, PathBuf), String> {
     let mut profile = AgentProfile::default();
-    profile.instruction.push_str(" You may request host-generated bitmap art with request_imagegen_asset, then import its returned source_path with import_png_asset. Request one isolated subject per image; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. You may also create or update project assets with write_svg_asset, write_png_asset, write_data_asset, and write_procedural_wav. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
+    profile.instruction.push_str(" You may request host-generated bitmap art with request_imagegen_asset, then import its returned source_path with import_png_asset. Request one isolated subject per image; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Character and unit art should use an existing authored sprite or ImageGen by default; reserve primitive SVG and shape-composed PNGs for basic UI, simple icons, selection/range overlays, and deterministic capability fallbacks. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
     let outcome = run_scripted_ai_profile(
         client,
         project_root,
@@ -4205,6 +4205,61 @@ mod tests {
         assert!(fs::read_to_string(decision_log)
             .expect("decision memory")
             .contains("imagegen_requested"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn one_shot_ai_uses_its_own_imagegen_inbox_with_the_same_request_contract() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_imagegen_request_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let output = root.join("build/ai-assets/imagegen/unit.png");
+        fs::create_dir_all(output.parent().expect("AI ImageGen inbox")).expect("AI ImageGen inbox");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            10,
+            10,
+            image::Rgba([80, 30, 20, 255]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encode AI imagegen fixture");
+        fs::write(&output, png.into_inner()).expect("host PNG");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            false,
+            None,
+            "Stasis AI agent".to_string(),
+        );
+
+        let observation = tools.request_imagegen_asset(
+            &ToolCall {
+                tool: "request_imagegen_asset".to_string(),
+                args: json!({
+                    "filename": "unit.png",
+                    "prompt": "One original medieval unit on a flat chroma background.",
+                    "purpose": "Add a readable unit sprite.",
+                    "width": 10,
+                    "height": 10
+                }),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert!(observation.error.is_none());
+        assert_eq!(
+            observation.result.as_ref().unwrap()["source_path"],
+            "build/ai-assets/imagegen/unit.png"
+        );
+        assert!(root
+            .join("build/ai-assets/imagegen/requests/unit.png.json")
+            .is_file());
+        assert!(!root.join("build/gauntlet/imagegen").exists());
         let _ = fs::remove_dir_all(root);
     }
 

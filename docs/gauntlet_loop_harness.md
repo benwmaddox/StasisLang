@@ -231,6 +231,12 @@ ImageGen inbox. The transactional import may
 copy it unchanged, crop it, or remove a flat background to create the tracked
 game asset without degrading the reusable source.
 
+Character and unit art defaults to an existing authored sprite or an isolated
+ImageGen PNG. Primitive SVG and shape-composed PNG assets are intended for basic
+UI, simple icons, selection/range overlays, and deterministic fallbacks when the
+host capability is unavailable; agents should not construct characters from
+those primitives by default.
+
 The request is stored under `build/gauntlet/imagegen/requests/`. The host places
 the selected PNG at the request's `output_path` under
 `build/gauntlet/imagegen/`, then the same contiguous asset/source transaction
