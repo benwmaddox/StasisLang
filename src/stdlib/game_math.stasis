@@ -22,39 +22,55 @@ function game_abs(x: f32): f32 {
 }
 
 function game_min(a: i32, b: i32): i32 {
-    if (a < b) { return a; }
+    if (a < b) {
+        return a;
+    }
     return b;
 }
 
 function game_min(a: f32, b: f32): f32 {
-    if (a < b) { return a; }
+    if (a < b) {
+        return a;
+    }
     return b;
 }
 
 function game_max(a: i32, b: i32): i32 {
-    if (a > b) { return a; }
+    if (a > b) {
+        return a;
+    }
     return b;
 }
 
 function game_max(a: f32, b: f32): f32 {
-    if (a > b) { return a; }
+    if (a > b) {
+        return a;
+    }
     return b;
 }
 
 function game_clamp(x: i32, lo: i32, hi: i32): i32 {
-    if (x < lo) { return lo; }
-    if (x > hi) { return hi; }
+    if (x < lo) {
+        return lo;
+    }
+    if (x > hi) {
+        return hi;
+    }
     return x;
 }
 
 function game_clamp(x: f32, lo: f32, hi: f32): f32 {
-    if (x < lo) { return lo; }
-    if (x > hi) { return hi; }
+    if (x < lo) {
+        return lo;
+    }
+    if (x > hi) {
+        return hi;
+    }
     return x;
 }
 
 function game_lerp(a: f32, b: f32, t: f32): f32 {
-    return a + (b - a) * t;
+    return a +(b - a) * t;
 }
 
 // Deterministic RNG (LCG).
@@ -75,17 +91,16 @@ function game_rng_range_i32(state: i32[], min_incl: i32, max_incl: i32): i32 {
         // Avoid INT_MIN overflow on negation (keeps modulo in-range).
         if (r == -2147483648) {
             r = 2147483647;
-        }
-        else {
+        } else {
             r = 0 - r;
         }
     }
 
-    let span: i32 = (max_incl - min_incl) + 1;
+    let span: i32 =(max_incl - min_incl) + 1;
     if (span <= 1) {
         return min_incl;
     }
-    return min_incl + (r % span);
+    return min_incl +(r % span);
 }
 
 function game_rng_f32_01(state: i32[]): f32 {
@@ -94,6 +109,5 @@ function game_rng_f32_01(state: i32[]): f32 {
 }
 
 function game_rng_range_f32(state: i32[], min_incl: f32, max_incl: f32): f32 {
-    return min_incl + game_rng_f32_01(state) * (max_incl - min_incl);
+    return min_incl + game_rng_f32_01(state) *(max_incl - min_incl);
 }
-

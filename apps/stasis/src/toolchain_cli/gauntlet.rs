@@ -1,6 +1,4 @@
-use super::{
-    absolute_path, bundled_stdlib_dir, create_new_project, load_workspace, CommandResult, Workspace,
-};
+use super::{absolute_path, create_new_project, load_workspace, CommandResult, Workspace};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -566,33 +564,6 @@ fn selected_observer(tui: bool, jsonl: bool) -> GauntletObserver {
 fn write_graphical_seed(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root.join("assets"))
         .map_err(|error| format!("failed creating Gauntlet assets: {error}"))?;
-    fs::create_dir_all(root.join("runtime"))
-        .map_err(|error| format!("failed creating Gauntlet runtime source directory: {error}"))?;
-    let stdlib = bundled_stdlib_dir()?;
-    let runtime_gfx = stdlib
-        .parent()
-        .ok_or_else(|| "bundled stdlib has no source parent".to_string())?
-        .join("runtime/gfx_cmd.stasis");
-    fs::copy(&runtime_gfx, root.join("runtime/gfx_cmd.stasis")).map_err(|error| {
-        format!(
-            "failed copying graphical command-buffer module {}: {error}",
-            runtime_gfx.display()
-        )
-    })?;
-    let runtime_window_request = stdlib
-        .parent()
-        .ok_or_else(|| "bundled stdlib has no source parent".to_string())?
-        .join("runtime/host_window_request.stasis");
-    fs::copy(
-        &runtime_window_request,
-        root.join("runtime/host_window_request.stasis"),
-    )
-    .map_err(|error| {
-        format!(
-            "failed copying window-request module {}: {error}",
-            runtime_window_request.display()
-        )
-    })?;
     fs::write(root.join("src/main.stasis"), GAUNTLET_SEED_SOURCE)
         .map_err(|error| format!("failed writing Gauntlet seed source: {error}"))?;
     fs::write(root.join("tests/main.test.stasis"), GAUNTLET_SEED_TEST)
@@ -720,8 +691,8 @@ fn hex_sha256(bytes: &[u8]) -> String {
 }
 
 const GAUNTLET_SEED_SOURCE: &str = r#"@link("stasis_graphics");
-import "../runtime/gfx_cmd.stasis";
-import "../runtime/host_window_request.stasis";
+import "/vendor/stasis/src/runtime/gfx_cmd.stasis";
+import "/vendor/stasis/src/runtime/host_window_request.stasis";
 
 struct Game {
     ticks: i32;

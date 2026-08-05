@@ -38,7 +38,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod dap;
 mod gauntlet;
@@ -132,6 +132,7 @@ const COMMANDS: &[&str] = &[
     "version",
     "editor-info",
     "env",
+    "vendor",
     "symbol",
     "help",
     "__validate-runtime",
@@ -328,11 +329,24 @@ enum ToolchainCommand {
     EditorInfo,
     /// Print toolchain, workspace, cache, and offline capability information.
     Env,
+    /// Inspect or update the checked-in Stasis vendor snapshot.
+    Vendor {
+        #[command(subcommand)]
+        command: VendorCommand,
+    },
     /// Find and transactionally edit compiler-owned semantic symbols.
     Symbol {
         #[command(subcommand)]
         command: SymbolCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum VendorCommand {
+    /// Compare the checked-in snapshot with its manifest and this executable.
+    Status,
+    /// Atomically replace the checked-in snapshot with this executable's sources.
+    Update,
 }
 
 #[derive(Debug, Subcommand)]
@@ -528,7 +542,20 @@ struct ProjectManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stdlib: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    vendor: Option<VendorManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     android: Option<AndroidProjectManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct VendorManifest {
+    stasis: StasisVendorManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StasisVendorManifest {
+    release_id: String,
+    sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -549,6 +576,7 @@ impl ProjectManifest {
             tests: "tests".to_string(),
             output: "build".to_string(),
             stdlib: None,
+            vendor: None,
             android: None,
         }
     }
@@ -574,6 +602,23 @@ impl ProjectManifest {
             .is_some_and(|value| value != "toolchain")
         {
             return Err("stdlib must be 'toolchain' when specified".to_string());
+        }
+        if self.stdlib.is_some() && self.vendor.is_some() {
+            return Err("stdlib and vendor modes cannot be enabled together".to_string());
+        }
+        if let Some(vendor) = &self.vendor {
+            if vendor.stasis.release_id.trim().is_empty() {
+                return Err("vendor.stasis.release_id must not be empty".to_string());
+            }
+            if vendor.stasis.sha256.len() != 64
+                || !vendor
+                    .stasis
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                return Err("vendor.stasis.sha256 must be a lowercase SHA-256 digest".to_string());
+            }
         }
         if let Some(android) = &self.android {
             validate_android_application_id(&android.application_id)?;
@@ -768,6 +813,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Version => "version",
         ToolchainCommand::EditorInfo => "editor-info",
         ToolchainCommand::Env => "env",
+        ToolchainCommand::Vendor { .. } => "vendor",
         ToolchainCommand::Symbol { .. } => "symbol",
     }
 }
@@ -838,7 +884,11 @@ fn execute(
                 ToolchainCommand::Tui { entry, .. } => entry.as_deref(),
                 _ => None,
             });
-            let workspace = load_workspace(workspace_path)?;
+            let vendor_gate = match &other {
+                ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
+                _ => VendorGate::Sync,
+            };
+            let workspace = load_workspace_with_vendor_gate(workspace_path, vendor_gate)?;
             match other {
                 ToolchainCommand::Fmt { check, .. } => format_workspace(&workspace, check),
                 ToolchainCommand::Check => check_workspace(&workspace),
@@ -973,6 +1023,7 @@ fn execute(
                     capacities,
                     mobile_budget_bytes,
                 } => inspect_workspace(&workspace, &capacities, mobile_budget_bytes),
+                ToolchainCommand::Vendor { command } => vendor_command(&workspace, command),
                 ToolchainCommand::Symbol { command } => symbol_workspace(&workspace, command),
                 _ => Err("unsupported command routing".to_string()),
             }
@@ -999,6 +1050,13 @@ fn create_project_with_options(
     }
     let root = absolute_path(&path)?;
     let bundled_stdlib = bundled_stdlib_dir()?;
+    let bundled_runtime = bundled_stasis_runtime_dir(&bundled_stdlib)?;
+    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
+        format!(
+            "bundled stdlib has no src parent: {}",
+            bundled_stdlib.display()
+        )
+    })?;
     let manifest_path = root.join(MANIFEST_NAME);
     let mut reserved_paths = vec![
         manifest_path.clone(),
@@ -1007,7 +1065,7 @@ fn create_project_with_options(
         root.join(PROJECT_ARCHITECTURE_NAME),
         root.join("src/main.stasis"),
         root.join("tests/main.test.stasis"),
-        root.join("stdlib"),
+        root.join("vendor/stasis"),
         root.join(".vscode/settings.json"),
         root.join(".vscode/extensions.json"),
     ];
@@ -1027,6 +1085,18 @@ fn create_project_with_options(
             ));
         }
     }
+    let vendor_directory = root.join("vendor");
+    if vendor_directory.exists() {
+        let metadata = fs::symlink_metadata(&vendor_directory).map_err(|error| {
+            format!("failed to inspect {}: {error}", vendor_directory.display())
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "refusing to write vendored packages through {}",
+                vendor_directory.display()
+            ));
+        }
+    }
     for reserved in &reserved_paths {
         if reserved.exists() {
             return Err(format!("refusing to overwrite {}", reserved.display()));
@@ -1036,9 +1106,12 @@ fn create_project_with_options(
         .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
     fs::create_dir_all(root.join("tests"))
         .map_err(|error| format!("failed to create tests directory: {error}"))?;
-    let manifest = ProjectManifest::new(name.clone());
+    let mut manifest = ProjectManifest::new(name.clone());
+    manifest.vendor = Some(current_vendor_manifest(bundled_source)?);
     write_manifest(&manifest_path, &manifest)?;
-    copy_dir_if_exists(&bundled_stdlib, &root.join("stdlib"))?;
+    let vendor_source = root.join("vendor/stasis/src");
+    copy_dir_if_exists(&bundled_stdlib, &vendor_source.join("stdlib"))?;
+    copy_dir_if_exists(&bundled_runtime, &vendor_source.join("runtime"))?;
     write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
     write_new_file(&root.join("CLAUDE.md"), PROJECT_CLAUDE_GUIDE)?;
     write_new_file(
@@ -1047,7 +1120,7 @@ fn create_project_with_options(
     )?;
     write_new_file(
         &root.join("src/main.stasis"),
-        "import \"../stdlib/stdlib.stasis\";\r\n\r\nfunction main(): i32 {\r\n    return 0;\r\n}\r\n",
+        "import \"/vendor/stasis/src/stdlib/stdlib.stasis\";\r\n\r\nfunction main(): i32 {\r\n    return 0;\r\n}\r\n",
     )?;
     write_new_file(
         &root.join("tests/main.test.stasis"),
@@ -1152,7 +1225,20 @@ fn write_manifest(path: &Path, manifest: &ProjectManifest) -> Result<(), String>
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VendorGate {
+    Sync,
+    Inspect,
+}
+
 fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
+    load_workspace_with_vendor_gate(explicit, VendorGate::Sync)
+}
+
+fn load_workspace_with_vendor_gate(
+    explicit: Option<&Path>,
+    vendor_gate: VendorGate,
+) -> Result<Workspace, String> {
     if let Some(path) = explicit {
         let absolute = absolute_path(path)?;
         if !absolute.exists() {
@@ -1179,11 +1265,14 @@ fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
     let root = canonical_workspace_root(&discovered_root)?;
     let bytes = fs::read(root.join(MANIFEST_NAME))
         .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
-    let manifest: ProjectManifest = serde_json::from_slice(&bytes)
+    let mut manifest: ProjectManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
     manifest.validate()?;
     if manifest.stdlib.as_deref() == Some("toolchain") {
         sync_toolchain_stdlib(&root)?;
+    }
+    if vendor_gate != VendorGate::Inspect {
+        reconcile_project_vendor(&root, &mut manifest)?;
     }
     Ok(Workspace { root, manifest })
 }
@@ -1290,6 +1379,287 @@ fn directory_sha256(root: &Path) -> Result<String, String> {
         digest.update([0]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn current_release_id() -> &'static str {
+    option_env!("STASIS_RELEASE_ID").unwrap_or("development")
+}
+
+fn current_vendor_manifest(source: &Path) -> Result<VendorManifest, String> {
+    Ok(VendorManifest {
+        stasis: StasisVendorManifest {
+            release_id: current_release_id().to_string(),
+            sha256: directory_sha256(source)?,
+        },
+    })
+}
+
+fn validate_vendor_sources(source_root: &Path) -> Result<(), String> {
+    let mut files = Vec::new();
+    collect_stasis_files(source_root, &mut files)?;
+    for file in files {
+        let source = fs::read_to_string(&file)
+            .map_err(|error| format!("failed to read {}: {error}", file.display()))?;
+        let formatted = format_source(&source)
+            .map_err(|error| format!("failed to format {}: {error}", file.display()))?;
+        if formatted != source {
+            return Err(format!(
+                "selected toolchain contains noncanonical vendored source {}",
+                file.display()
+            ));
+        }
+        let relative = file
+            .strip_prefix(source_root)
+            .map_err(|_| format!("vendor source escaped {}", source_root.display()))?;
+        let logical = format!(
+            "vendor/stasis/src/{}",
+            relative.to_string_lossy().replace('\\', "/")
+        );
+        let imports = stasis_compiler::frontend::module_graph::parse_imports(&logical, &source)
+            .map_err(|diagnostic| format!("invalid vendor import in {logical}: {diagnostic:?}"))?;
+        for import in imports {
+            let relative_target = import
+                .target
+                .strip_prefix("vendor/stasis/src/")
+                .ok_or_else(|| {
+                    format!(
+                        "vendor import '{}' from {logical} escapes the Stasis package",
+                        import.path
+                    )
+                })?;
+            if !source_root.join(relative_target).is_file() {
+                return Err(format!(
+                    "vendor import '{}' from {logical} is missing its target",
+                    import.path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct VendorStatus {
+    recorded: Option<StasisVendorManifest>,
+    installed: StasisVendorManifest,
+    actual_sha256: Option<String>,
+    local_changes: bool,
+    update_available: bool,
+}
+
+fn inspect_project_vendor(
+    workspace_root: &Path,
+    manifest: &ProjectManifest,
+) -> Result<VendorStatus, String> {
+    let bundled_stdlib = bundled_stdlib_dir()?;
+    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
+        format!(
+            "bundled stdlib has no src parent: {}",
+            bundled_stdlib.display()
+        )
+    })?;
+    let installed = current_vendor_manifest(bundled_source)?.stasis;
+    let recorded = manifest.vendor.as_ref().map(|vendor| vendor.stasis.clone());
+    let vendor_source = workspace_root.join("vendor/stasis/src");
+    let actual_sha256 = if vendor_source.exists() {
+        let metadata = fs::symlink_metadata(&vendor_source)
+            .map_err(|error| format!("failed to inspect {}: {error}", vendor_source.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "refusing to inspect vendored sources through {}",
+                vendor_source.display()
+            ));
+        }
+        Some(directory_sha256(&vendor_source)?)
+    } else {
+        None
+    };
+    let local_changes = recorded
+        .as_ref()
+        .is_some_and(|recorded| actual_sha256.as_deref() != Some(recorded.sha256.as_str()));
+    let update_available = recorded.as_ref().is_none_or(|recorded| {
+        recorded.release_id != installed.release_id || recorded.sha256 != installed.sha256
+    });
+    Ok(VendorStatus {
+        recorded,
+        installed,
+        actual_sha256,
+        local_changes,
+        update_available,
+    })
+}
+
+fn reconcile_project_vendor(
+    workspace_root: &Path,
+    manifest: &mut ProjectManifest,
+) -> Result<(), String> {
+    if manifest.vendor.is_none() {
+        return Ok(());
+    }
+    let status = inspect_project_vendor(workspace_root, manifest)?;
+    if !status.update_available
+        && status.actual_sha256.as_deref() == Some(status.installed.sha256.as_str())
+    {
+        return Ok(());
+    }
+    update_vendor_snapshot(workspace_root, manifest)?;
+    Ok(())
+}
+
+fn transaction_suffix() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("{}-{nanos}", std::process::id())
+}
+
+fn serialized_manifest(manifest: &ProjectManifest) -> Result<String, String> {
+    let mut contents = serde_json::to_string_pretty(manifest)
+        .map_err(|error| format!("failed to serialize manifest: {error}"))?;
+    contents.push('\n');
+    Ok(contents)
+}
+
+fn update_vendor_snapshot(
+    workspace_root: &Path,
+    manifest: &mut ProjectManifest,
+) -> Result<bool, String> {
+    let status = inspect_project_vendor(workspace_root, manifest)?;
+    if !status.update_available
+        && status.actual_sha256.as_deref() == Some(status.installed.sha256.as_str())
+    {
+        return Ok(false);
+    }
+    let bundled_stdlib = bundled_stdlib_dir()?;
+    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
+        format!(
+            "bundled stdlib has no src parent: {}",
+            bundled_stdlib.display()
+        )
+    })?;
+    let vendor_root = workspace_root.join("vendor");
+    fs::create_dir_all(&vendor_root)
+        .map_err(|error| format!("failed to create {}: {error}", vendor_root.display()))?;
+    let metadata = fs::symlink_metadata(&vendor_root)
+        .map_err(|error| format!("failed to inspect {}: {error}", vendor_root.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "refusing to write vendored packages through {}",
+            vendor_root.display()
+        ));
+    }
+
+    let suffix = transaction_suffix();
+    let target = vendor_root.join("stasis");
+    let staging = vendor_root.join(format!(".stasis.sync-{suffix}"));
+    let backup = vendor_root.join(format!(".stasis.previous-{suffix}"));
+    let manifest_path = workspace_root.join(MANIFEST_NAME);
+    let manifest_staging = workspace_root.join(format!("{MANIFEST_NAME}.vendor-sync-{suffix}"));
+    let manifest_backup = workspace_root.join(format!("{MANIFEST_NAME}.vendor-previous-{suffix}"));
+
+    if let Err(error) = copy_dir_if_exists(bundled_source, &staging.join("src")) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if let Err(error) = validate_vendor_sources(&staging.join("src")) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let staged_hash = directory_sha256(&staging.join("src"))?;
+    if staged_hash != status.installed.sha256 {
+        let _ = fs::remove_dir_all(&staging);
+        return Err("staged Stasis vendor fingerprint does not match the toolchain".to_string());
+    }
+
+    manifest.vendor = Some(VendorManifest {
+        stasis: StasisVendorManifest {
+            release_id: status.installed.release_id.clone(),
+            sha256: status.installed.sha256.clone(),
+        },
+    });
+    fs::write(&manifest_staging, serialized_manifest(manifest)?)
+        .map_err(|error| format!("failed to stage {MANIFEST_NAME}: {error}"))?;
+
+    let had_target = target.exists();
+    if had_target {
+        let metadata = fs::symlink_metadata(&target)
+            .map_err(|error| format!("failed to inspect {}: {error}", target.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!("refusing to replace {}", target.display()));
+        }
+        fs::rename(&target, &backup)
+            .map_err(|error| format!("failed to stage {}: {error}", target.display()))?;
+    }
+    if let Err(error) = fs::rename(&staging, &target) {
+        if had_target {
+            let _ = fs::rename(&backup, &target);
+        }
+        return Err(format!("failed to publish {}: {error}", target.display()));
+    }
+    if let Err(error) = fs::rename(&manifest_path, &manifest_backup) {
+        let _ = fs::remove_dir_all(&target);
+        if had_target {
+            let _ = fs::rename(&backup, &target);
+        }
+        return Err(format!("failed to stage {MANIFEST_NAME}: {error}"));
+    }
+    if let Err(error) = fs::rename(&manifest_staging, &manifest_path) {
+        let _ = fs::rename(&manifest_backup, &manifest_path);
+        let _ = fs::remove_dir_all(&target);
+        if had_target {
+            let _ = fs::rename(&backup, &target);
+        }
+        return Err(format!("failed to publish {MANIFEST_NAME}: {error}"));
+    }
+    if had_target {
+        fs::remove_dir_all(&backup)
+            .map_err(|error| format!("failed to clear {}: {error}", backup.display()))?;
+    }
+    fs::remove_file(&manifest_backup)
+        .map_err(|error| format!("failed to clear {}: {error}", manifest_backup.display()))?;
+    Ok(true)
+}
+
+fn vendor_command(workspace: &Workspace, command: VendorCommand) -> Result<CommandResult, String> {
+    match command {
+        VendorCommand::Status => {
+            let status = inspect_project_vendor(&workspace.root, &workspace.manifest)?;
+            let current = !status.update_available && !status.local_changes;
+            Ok(CommandResult::success(
+                if current {
+                    "Stasis vendor is current".to_string()
+                } else if status.local_changes {
+                    "Stasis vendor has local changes".to_string()
+                } else {
+                    "Stasis vendor update is available".to_string()
+                },
+                json!({
+                    "current": current,
+                    "update_available": status.update_available,
+                    "local_changes": status.local_changes,
+                    "recorded": status.recorded,
+                    "installed": status.installed,
+                    "actual_sha256": status.actual_sha256,
+                }),
+            ))
+        }
+        VendorCommand::Update => {
+            let mut manifest = workspace.manifest.clone();
+            let changed = update_vendor_snapshot(&workspace.root, &mut manifest)?;
+            Ok(CommandResult::success(
+                if changed {
+                    "updated vendor/stasis from the selected toolchain".to_string()
+                } else {
+                    "Stasis vendor is already current".to_string()
+                },
+                json!({
+                    "changed": changed,
+                    "release_id": manifest.vendor.as_ref().map(|vendor| &vendor.stasis.release_id),
+                    "sha256": manifest.vendor.as_ref().map(|vendor| &vendor.stasis.sha256),
+                }),
+            ))
+        }
+    }
 }
 
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
@@ -4426,6 +4796,20 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
     )
 }
 
+fn bundled_stasis_runtime_dir(stdlib: &Path) -> Result<PathBuf, String> {
+    let runtime = stdlib
+        .parent()
+        .ok_or_else(|| format!("bundled stdlib has no src parent: {}", stdlib.display()))?
+        .join("runtime");
+    if runtime.join("host_frame.stasis").is_file() && runtime.join("gfx_cmd.stasis").is_file() {
+        return Ok(runtime);
+    }
+    Err(format!(
+        "installed toolchain is missing src/runtime required by stdlib imports: {}",
+        runtime.display()
+    ))
+}
+
 fn bundled_mobile_assets_dir() -> Result<PathBuf, String> {
     bundled_toolchain_directory("mobile/shells", "mobile shell templates")
 }
@@ -5107,6 +5491,81 @@ mod tests {
     }
 
     #[test]
+    fn vendor_upgrade_is_automatic_and_uses_the_content_hash() {
+        let root = temp_dir("vendor_upgrade");
+        create_project(root.clone(), "vendor_upgrade".to_string()).expect("create project");
+        let manifest_path = root.join(MANIFEST_NAME);
+        let mut manifest: ProjectManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read generated manifest"))
+                .expect("parse generated manifest");
+        let vendor = manifest.vendor.as_mut().expect("tracked vendor");
+        vendor.stasis.release_id = "older-toolchain".to_string();
+        write_manifest(&manifest_path, &manifest).expect("record older vendor");
+        let workspace = load_workspace(Some(&root)).expect("upgrade older vendor automatically");
+        assert_eq!(
+            workspace
+                .manifest
+                .vendor
+                .expect("updated vendor")
+                .stasis
+                .release_id,
+            current_release_id()
+        );
+
+        let older_source = root.join("vendor/stasis/src/stdlib/audio.stasis");
+        let mut older_contents = fs::read_to_string(&older_source).expect("read vendor source");
+        older_contents.push_str("// older clean snapshot\r\n");
+        fs::write(&older_source, older_contents).expect("write older clean snapshot");
+        let vendor = manifest.vendor.as_mut().expect("tracked vendor");
+        vendor.stasis.release_id = current_release_id().to_string();
+        vendor.stasis.sha256 =
+            directory_sha256(&root.join("vendor/stasis/src")).expect("hash older clean snapshot");
+        write_manifest(&manifest_path, &manifest).expect("record older content hash");
+        let workspace = load_workspace(Some(&root)).expect("content-hash update");
+        let updated = workspace.manifest.vendor.expect("updated vendor").stasis;
+        assert_eq!(updated.release_id, current_release_id());
+        assert_eq!(
+            updated.sha256,
+            directory_sha256(&root.join("vendor/stasis/src")).expect("hash updated vendor")
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn automatic_upgrade_replaces_vendor_edits_owned_by_stasis() {
+        let root = temp_dir("vendor_local_edits");
+        create_project(root.clone(), "vendor_local_edits".to_string()).expect("create project");
+        let edited = root.join("vendor/stasis/src/stdlib/audio.stasis");
+        fs::write(&edited, "// local vendor edit\n").expect("edit vendor source");
+
+        let current = load_workspace(Some(&root)).expect("automatic vendor replacement");
+        assert_ne!(
+            fs::read_to_string(&edited).expect("read restored vendor"),
+            "// local vendor edit\n"
+        );
+        assert_eq!(
+            current
+                .manifest
+                .vendor
+                .expect("tracked vendor")
+                .stasis
+                .release_id,
+            current_release_id()
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_cli_parses_status_and_update() {
+        for args in [
+            vec!["stasis", "vendor", "status"],
+            vec!["stasis", "vendor", "update"],
+        ] {
+            ToolchainCli::try_parse_from(args).expect("parse vendor command");
+        }
+    }
+
+    #[test]
     fn run_accepts_headless_and_watch_modes() {
         let parsed = ToolchainCli::try_parse_from([
             "stasis",
@@ -5507,6 +5966,24 @@ mod tests {
     }
 
     #[test]
+    fn manifest_validates_vendor_identity_and_exclusive_source_mode() {
+        let mut manifest = ProjectManifest::new("demo".to_string());
+        manifest.vendor = Some(VendorManifest {
+            stasis: StasisVendorManifest {
+                release_id: "development".to_string(),
+                sha256: "a".repeat(64),
+            },
+        });
+        assert!(manifest.validate().is_ok());
+
+        manifest.vendor.as_mut().unwrap().stasis.sha256 = "not-a-hash".to_string();
+        assert!(manifest.validate().is_err());
+        manifest.vendor.as_mut().unwrap().stasis.sha256 = "a".repeat(64);
+        manifest.stdlib = Some("toolchain".to_string());
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
     fn loading_opted_in_workspace_materializes_the_active_toolchain_stdlib() {
         let root = temp_dir("toolchain_stdlib");
         create_project(root.clone(), "demo".to_string()).expect("create project");
@@ -5578,6 +6055,38 @@ mod tests {
             "user source\n"
         );
         remove_temp(&root);
+    }
+
+    #[test]
+    fn init_preserves_other_vendors_and_preflights_the_stasis_package() {
+        let root = temp_dir("vendor_preflight");
+        fs::create_dir_all(root.join("vendor/example")).expect("create existing vendor");
+        fs::write(root.join("vendor/example/keep.txt"), "keep\n").expect("write existing vendor");
+
+        create_project(root.clone(), "demo".to_string()).expect("create alongside other vendor");
+        assert_eq!(
+            fs::read_to_string(root.join("vendor/example/keep.txt")).expect("read existing vendor"),
+            "keep\n"
+        );
+        assert!(root
+            .join("vendor/stasis/src/stdlib/stdlib.stasis")
+            .is_file());
+        remove_temp(&root);
+
+        let conflict = temp_dir("vendor_conflict");
+        fs::create_dir_all(conflict.join("vendor/stasis")).expect("create package conflict");
+        fs::write(conflict.join("vendor/stasis/keep.txt"), "keep\n")
+            .expect("write package conflict");
+        let error = create_project(conflict.clone(), "demo".to_string())
+            .expect_err("reject existing stasis package");
+        assert!(error.contains("vendor\\stasis") || error.contains("vendor/stasis"));
+        assert!(!conflict.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read_to_string(conflict.join("vendor/stasis/keep.txt"))
+                .expect("read preserved package conflict"),
+            "keep\n"
+        );
+        remove_temp(&conflict);
     }
 
     #[test]

@@ -3391,7 +3391,7 @@ fn prune_unused_workshop_imports(
         let identifiers = source_identifiers(&body)?;
         let mut kept = Vec::new();
         for import in imports {
-            let imported_path = resolve_project_import_path(&file.path, &import);
+            let imported_path = resolve_project_import_path(&file.path, &import)?;
             let Some(_) = by_path.get(&imported_path) else {
                 kept.push(import);
                 continue;
@@ -3595,7 +3595,7 @@ fn exported_identifiers(
         .map(|symbol| symbol.name)
         .collect::<BTreeSet<_>>();
     for import in parse_workshop_import_paths(&file.source)? {
-        let imported_path = resolve_project_import_path(&file.path, &import);
+        let imported_path = resolve_project_import_path(&file.path, &import)?;
         exports.extend(exported_identifiers(
             &imported_path,
             files,
@@ -3607,11 +3607,8 @@ fn exported_identifiers(
     Ok(exports)
 }
 
-fn resolve_project_import_path(file: &str, import: &str) -> String {
-    let base = Path::new(file).parent().unwrap_or_else(|| Path::new(""));
-    normalize_filesystem_path(&base.join(import))
-        .to_string_lossy()
-        .replace('\\', "/")
+fn resolve_project_import_path(file: &str, import: &str) -> Result<String, String> {
+    crate::frontend::module_graph::resolve_import_path(file, import)
 }
 
 fn validate_source_item_replacement(
@@ -5118,6 +5115,18 @@ mod workshop_contract_tests {
         }
         fs::write(&path, source).expect("write project file");
         path
+    }
+
+    #[test]
+    fn semantic_tooling_resolves_project_root_imports_from_nested_files() {
+        assert_eq!(
+            resolve_project_import_path(
+                "src/game/player.stasis",
+                "/vendor/stasis/src/stdlib/graphics.stasis"
+            )
+            .expect("project-root import"),
+            "vendor/stasis/src/stdlib/graphics.stasis"
+        );
     }
 
     #[test]

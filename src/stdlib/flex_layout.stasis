@@ -1,5 +1,5 @@
 // Flex-style layout helpers for simple UI composition.
-// Import explicitly: import "src/stdlib/flex_layout.stasis";
+// From a generated project: import "/vendor/stasis/src/stdlib/flex_layout.stasis";
 //
 // Uses plain f32 arrays for portability across backends.
 // Rect layout: [x, y, w, h]
@@ -8,28 +8,42 @@ import "stdlib.stasis";
 import "graphics.stasis";
 
 const FLEX_RECT_STRIDE: i32 = 4;
+
 const FLEX_RECT_X: i32 = 0;
+
 const FLEX_RECT_Y: i32 = 1;
+
 const FLEX_RECT_W: i32 = 2;
+
 const FLEX_RECT_H: i32 = 3;
 
 const FLEX_JUSTIFY_START: i32 = 0;
+
 const FLEX_JUSTIFY_CENTER: i32 = 1;
+
 const FLEX_JUSTIFY_END: i32 = 2;
+
 const FLEX_JUSTIFY_SPACE_BETWEEN: i32 = 3;
 
 const FLEX_ALIGN_START: i32 = 0;
+
 const FLEX_ALIGN_CENTER: i32 = 1;
+
 const FLEX_ALIGN_END: i32 = 2;
+
 const FLEX_ALIGN_STRETCH: i32 = 3;
 
 function flex_max_f32(a: f32, b: f32): f32 {
-    if (a > b) { return a; }
+    if (a > b) {
+        return a;
+    }
     return b;
 }
 
 function flex_min_i32(a: i32, b: i32): i32 {
-    if (a < b) { return a; }
+    if (a < b) {
+        return a;
+    }
     return b;
 }
 
@@ -99,8 +113,10 @@ function flex_row(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32[],
 
     let actual_gap: f32 = gap;
     if (justify == FLEX_JUSTIFY_SPACE_BETWEEN && count > 1) {
-        actual_gap = (parent[FLEX_RECT_W] - sum_w) / i32_to_f32(count - 1);
-        if (actual_gap < 0.0) { actual_gap = 0.0; }
+        actual_gap =(parent[FLEX_RECT_W] - sum_w) / i32_to_f32(count - 1);
+        if (actual_gap < 0.0) {
+            actual_gap = 0.0;
+        }
     }
 
     let total_w: f32 = sum_w;
@@ -110,7 +126,7 @@ function flex_row(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32[],
 
     let cursor_x: f32 = parent[FLEX_RECT_X];
     if (justify == FLEX_JUSTIFY_CENTER) {
-        cursor_x = parent[FLEX_RECT_X] + (parent[FLEX_RECT_W] - total_w) * 0.5;
+        cursor_x = parent[FLEX_RECT_X] +(parent[FLEX_RECT_W] - total_w) * 0.5;
     }
     if (justify == FLEX_JUSTIFY_END) {
         cursor_x = parent[FLEX_RECT_X] + parent[FLEX_RECT_W] - total_w;
@@ -120,7 +136,7 @@ function flex_row(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32[],
         let y: f32 = parent[FLEX_RECT_Y];
         let h: f32 = item_h[i];
         if (align == FLEX_ALIGN_CENTER) {
-            y = parent[FLEX_RECT_Y] + (parent[FLEX_RECT_H] - h) * 0.5;
+            y = parent[FLEX_RECT_Y] +(parent[FLEX_RECT_H] - h) * 0.5;
         }
         if (align == FLEX_ALIGN_END) {
             y = parent[FLEX_RECT_Y] + parent[FLEX_RECT_H] - h;
@@ -143,8 +159,10 @@ function flex_column(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32
 
     let actual_gap: f32 = gap;
     if (justify == FLEX_JUSTIFY_SPACE_BETWEEN && count > 1) {
-        actual_gap = (parent[FLEX_RECT_H] - sum_h) / i32_to_f32(count - 1);
-        if (actual_gap < 0.0) { actual_gap = 0.0; }
+        actual_gap =(parent[FLEX_RECT_H] - sum_h) / i32_to_f32(count - 1);
+        if (actual_gap < 0.0) {
+            actual_gap = 0.0;
+        }
     }
 
     let total_h: f32 = sum_h;
@@ -154,7 +172,7 @@ function flex_column(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32
 
     let cursor_y: f32 = parent[FLEX_RECT_Y];
     if (justify == FLEX_JUSTIFY_CENTER) {
-        cursor_y = parent[FLEX_RECT_Y] + (parent[FLEX_RECT_H] - total_h) * 0.5;
+        cursor_y = parent[FLEX_RECT_Y] +(parent[FLEX_RECT_H] - total_h) * 0.5;
     }
     if (justify == FLEX_JUSTIFY_END) {
         cursor_y = parent[FLEX_RECT_Y] + parent[FLEX_RECT_H] - total_h;
@@ -164,7 +182,7 @@ function flex_column(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32
         let x: f32 = parent[FLEX_RECT_X];
         let w: f32 = item_w[i];
         if (align == FLEX_ALIGN_CENTER) {
-            x = parent[FLEX_RECT_X] + (parent[FLEX_RECT_W] - w) * 0.5;
+            x = parent[FLEX_RECT_X] +(parent[FLEX_RECT_W] - w) * 0.5;
         }
         if (align == FLEX_ALIGN_END) {
             x = parent[FLEX_RECT_X] + parent[FLEX_RECT_W] - w;
@@ -179,7 +197,9 @@ function flex_column(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32
 }
 
 function flex_grid(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32[], count: i32, columns: i32, col_gap: f32, row_gap: f32): void {
-    if (count <= 0 || columns <= 0) { return; }
+    if (count <= 0 || columns <= 0) {
+        return;
+    }
 
     let row_start: i32 = 0;
     let row_y: f32 = parent[FLEX_RECT_Y];

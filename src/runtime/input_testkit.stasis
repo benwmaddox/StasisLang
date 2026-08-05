@@ -43,15 +43,7 @@ function input_testkit_set_pointer_count_raw(count: i32): void {
     host_i32[HOST_I_POINTER_COUNT] = count;
 }
 
-function input_testkit_set_pointer(
-    index: i32,
-    id: i32,
-    is_down: bool,
-    went_down: bool,
-    went_up: bool,
-    x_px: f32,
-    y_px: f32
-): void {
+function input_testkit_set_pointer(index: i32, id: i32, is_down: bool, went_down: bool, went_up: bool, x_px: f32, y_px: f32): void {
     if (index < 0 || index >= HOST_MAX_POINTERS) {
         return;
     }
