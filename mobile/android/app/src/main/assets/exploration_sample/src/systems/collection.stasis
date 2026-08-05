@@ -1,6 +1,8 @@
 function exploration_emit_collection(slot: i32): void {
     let count: i32 = GameState.collection_event_count;
-    if (count >= COLLECTION_EVENT_CAPACITY) { return; }
+    if (count >= COLLECTION_EVENT_CAPACITY) {
+        return;
+    }
     GameState.collection_event_entity_id[count] = slot + 1;
     GameState.collection_event_kind[count] = World.collectible_kind[slot];
     GameState.collection_event_count = count + 1;
@@ -13,7 +15,7 @@ function exploration_collection_system(): void {
         if (World.entity_alive[slot] != 0 && World.collectible_active[slot] != 0) {
             let dx: i32 = World.position_x[slot] - World.position_x[0];
             let dy: i32 = World.position_y[slot] - World.position_y[0];
-            if ((dx * dx) + (dy * dy) <= PICKUP_RADIUS * PICKUP_RADIUS) {
+            if ((dx * dx) +(dy * dy) <= PICKUP_RADIUS * PICKUP_RADIUS) {
                 World.collectible_active[slot] = 0;
                 exploration_emit_collection(slot);
             }

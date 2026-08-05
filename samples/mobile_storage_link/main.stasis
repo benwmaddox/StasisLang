@@ -1,12 +1,19 @@
 extern function storage_load_i32(scope: string, key: string, fallback: i32): i32;
+
 extern function storage_save_i32(scope: string, key: string, value: i32): bool;
 
 function main(): i32 {
     let unlocked: i32 = storage_load_i32("mobile_link_ci", "unlocked", 1);
-    if (unlocked < 2 && !storage_save_i32("mobile_link_ci", "unlocked", 2)) { return 1; }
+    if (unlocked < 2 && !storage_save_i32("mobile_link_ci", "unlocked", 2)) {
+        return 1;
+    }
     return 0;
 }
 
-function tick(): i32 { return 0; }
+function tick(): i32 {
+    return 0;
+}
 
-function render(): i32 { return 0; }
+function render(): i32 {
+    return 0;
+}

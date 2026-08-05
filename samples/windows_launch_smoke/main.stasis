@@ -1,21 +1,33 @@
 @link("stasis_graphics");
 
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+
 extern function load_font(path: string, size: i32): i32;
+
 function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
 
 global gfx_cmd_i32: i32[18464];
+
 global gfx_cmd_f32: f32[108676];
+
 global gfx_cmd_u8: u8[65536];
+
 global host_req_flags: i32;
+
 global host_req_window_w_px: i32;
+
 global host_req_window_h_px: i32;
+
 global host_req_seq: i32;
 
 global png_sprite: i32;
+
 global svg_sprite: i32;
+
 global smoke_font: i32;
+
 global cached_label: i32;
+
 global ticks: i32;
 
 function main(): i32 {
@@ -27,11 +39,19 @@ function main(): i32 {
     png_sprite = gfx_load_sprite("assets/smoke.png", 64, 64);
     svg_sprite = gfx_load_sprite("assets/smoke.svg", 64, 64);
     smoke_font = load_font("assets/smoke.ttf", 24);
-    if (png_sprite == 0) { return 21; }
-    if (svg_sprite == 0) { return 22; }
-    if (smoke_font == 0) { return 23; }
+    if (png_sprite == 0) {
+        return 21;
+    }
+    if (svg_sprite == 0) {
+        return 22;
+    }
+    if (smoke_font == 0) {
+        return 23;
+    }
     cached_label = gfx_cache_text(smoke_font, "WINDOWS LAUNCH OK");
-    if (cached_label == 0) { return 24; }
+    if (cached_label == 0) {
+        return 24;
+    }
     ticks = 0;
     return 0;
 }
@@ -85,4 +105,6 @@ function render(): i32 {
     return 0;
 }
 
-function on_code_swap(): void { return; }
+function on_code_swap(): void {
+    return;
+}

@@ -1,6 +1,6 @@
 // Stasis standard library (stub).
 // From a generated project: import "/vendor/stasis/src/stdlib/stdlib.stasis";
-// For runtime bindings, import "/vendor/stasis/src/stdlib/graphics.stasis" and/or
+// For host-backed APIs, import "/vendor/stasis/src/stdlib/graphics.stasis" and/or
 // "/vendor/stasis/src/stdlib/audio.stasis".
 
 import "memory.stasis";

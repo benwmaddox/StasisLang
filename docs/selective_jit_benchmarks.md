@@ -42,7 +42,7 @@ of the same root object into a false patch seed. The final Chess TD timings belo
 - Broad-helper method: 1 cold sample, 5 warmups, 10 measured alternating edits
 
 The Chess TD source was copied under the StasisLang workspace for the run. Only its `src` tree and
-the imported nightly `src/stdlib` and `src/runtime` trees were copied; the temporary copy was deleted
+the imported nightly `src/stdlib` tree, including its internal ABI modules, were copied; the temporary copy was deleted
 after measurement. The original Chess TD checkout was not modified.
 
 ## Results

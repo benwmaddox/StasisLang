@@ -38,11 +38,11 @@ The shortest credible path is not "port the Windows runner to the browser." The 
 These parts are already aligned with a browser-hosted model:
 
 - `README.md` describes the intended game loop as `main()`, then `tick()`, then `render()`.
-- `src/runtime/host_frame.stasis` defines a host-owned frame snapshot for time, window size, pointers, keyboard state, and quit state.
-- `src/runtime/host_window_request.stasis` defines guest-to-host window requests as globals.
-- `src/runtime/gfx_cmd.stasis` defines a fixed graphics command buffer ABI.
+- `src/stdlib/internal/host_frame.stasis` defines a host-owned frame snapshot for time, window size, pointers, keyboard state, and quit state.
+- `src/stdlib/internal/host_window_request.stasis` defines guest-to-host window requests as globals.
+- `src/stdlib/internal/gfx_cmd.stasis` defines the single fixed graphics command buffer ABI.
 - `src/stdlib/graphics.stasis` uses host snapshots for reads and command buffers for render output.
-- `src/runtime/host_input_snapshot.stasis` and `src/stdlib/input_snapshot.stasis` already move games toward a snapshot-based input model.
+- `src/stdlib/testing/input_testkit.stasis` provides test-only mutation of the host snapshot.
 
 This matters because browser-hosted games also want:
 

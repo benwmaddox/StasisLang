@@ -5,7 +5,10 @@ struct Node {
 }
 
 global nodes: Node[COUNT];
-global State { snap: f32; }
+
+global State {
+    snap: f32;
+}
 
 function main(): i32 {
     let sum: i32 = 0;

@@ -1,4 +1,4 @@
-// Guest -> host window request ABI.
+// Guest-to-host window request ABI.
 //
 // The host polls these globals once per tick (or at least once after `main()`),
 // and applies any requested mode/size changes.

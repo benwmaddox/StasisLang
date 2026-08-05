@@ -1,4 +1,6 @@
-global State { init_calls: i32; }
+global State {
+    init_calls: i32;
+}
 
 function mark_init(): void {
     State.init_calls += 1;

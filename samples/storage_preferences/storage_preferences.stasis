@@ -4,7 +4,11 @@ function main(): i32 {
     let scope: string = "stasis_storage_sample";
     let key: string = "progress";
     let previous: i32 = storage_load_i32(scope, key, 1);
-    if (previous < 7 && !storage_save_i32(scope, key, 7)) { return 1; }
-    if (storage_load_i32(scope, key, 1) != 7) { return 2; }
+    if (previous < 7 && !storage_save_i32(scope, key, 7)) {
+        return 1;
+    }
+    if (storage_load_i32(scope, key, 1) != 7) {
+        return 2;
+    }
     return 0;
 }

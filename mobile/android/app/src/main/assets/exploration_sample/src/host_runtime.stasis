@@ -1,84 +1,141 @@
 @link("stasis_graphics");
 
 const HOST_F_LOGICAL_W: i32 = 50;
+
 const HOST_F_LOGICAL_H: i32 = 51;
+
 const HOST_I_POINTER_COUNT: i32 = 7;
+
 const HOST_I_POINTER_BASE: i32 = 544;
+
 const HOST_I_POINTER_STRIDE: i32 = 4;
+
 const HOST_F_POINTER_STRIDE: i32 = 6;
 
 const HOST_REQ_FLAG_WINDOWED: i32 = 1;
+
 global host_req_seq: i32;
+
 global host_req_flags: i32;
+
 global host_req_window_w_px: i32;
+
 global host_req_window_h_px: i32;
 
 global host_i32: i32[768];
+
 global host_f32: f32[64];
 
 const GFX_MAGIC: i32 = 1196967473;
+
 const GFX_VERSION: i32 = 2;
+
 const GFX_FLAG_CLEAR: i32 = 1;
+
 const GFX_FLAG_PRESENT: i32 = 2;
+
 const GFX_I_FLAGS: i32 = 2;
+
 const GFX_I_LINE_COUNT: i32 = 3;
+
 const GFX_I_SPRITE_COUNT: i32 = 4;
+
 const GFX_I_SPRITE_BASE: i32 = 32;
+
 const GFX_F_LINE_BASE: i32 = 4;
+
 const GFX_F_SPRITE_BASE: i32 = 80004;
+
 global gfx_cmd_i32: i32[18464];
+
 global gfx_cmd_f32: f32[108676];
+
 global gfx_cmd_u8: u8[65536];
 
-struct Sprite { handle: i32; width: i32; height: i32; }
+struct Sprite {
+    handle: i32;
+    width: i32;
+    height: i32;
+}
+
 function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 
 function exploration_host_request_window(): void {
     host_req_flags = HOST_REQ_FLAG_WINDOWED;
-    host_req_window_w_px = 360; host_req_window_h_px = 640;
+    host_req_window_w_px = 360;
+    host_req_window_h_px = 640;
     host_req_seq += 1;
 }
 
 function exploration_host_sync_input(): void {
-    Input.screen_w.from_f32(host_f32[HOST_F_LOGICAL_W]); Input.screen_h.from_f32(host_f32[HOST_F_LOGICAL_H]);
-    if (Input.screen_w <= 0) { Input.screen_w = 360; }
-    if (Input.screen_h <= 0) { Input.screen_h = 640; }
+    Input.screen_w.from_f32(host_f32[HOST_F_LOGICAL_W]);
+    Input.screen_h.from_f32(host_f32[HOST_F_LOGICAL_H]);
+    if (Input.screen_w <= 0) {
+        Input.screen_w = 360;
+    }
+    if (Input.screen_h <= 0) {
+        Input.screen_h = 640;
+    }
     Input.touch_active = 0;
     if (host_i32[HOST_I_POINTER_COUNT] > 0) {
         Input.touch_active = host_i32[HOST_I_POINTER_BASE + 1];
-        let touch_x: i32; touch_x.from_f32(host_f32[0]); Input.touch_x = touch_x;
-        let touch_y: i32; touch_y.from_f32(host_f32[1]); Input.touch_y = touch_y;
+        let touch_x: i32;
+        touch_x.from_f32(host_f32[0]);
+        Input.touch_x = touch_x;
+        let touch_y: i32;
+        touch_y.from_f32(host_f32[1]);
+        Input.touch_y = touch_y;
     }
 }
 
 function exploration_host_begin_frame(): void {
-    gfx_cmd_i32[0] = GFX_MAGIC; gfx_cmd_i32[1] = GFX_VERSION;
+    gfx_cmd_i32[0] = GFX_MAGIC;
+    gfx_cmd_i32[1] = GFX_VERSION;
     gfx_cmd_i32[GFX_I_FLAGS] = GFX_FLAG_CLEAR;
-    gfx_cmd_i32[GFX_I_LINE_COUNT] = 0; gfx_cmd_i32[GFX_I_SPRITE_COUNT] = 0;
-    gfx_cmd_f32[0] = 0.06; gfx_cmd_f32[1] = 0.10; gfx_cmd_f32[2] = 0.18; gfx_cmd_f32[3] = 1.0;
+    gfx_cmd_i32[GFX_I_LINE_COUNT] = 0;
+    gfx_cmd_i32[GFX_I_SPRITE_COUNT] = 0;
+    gfx_cmd_f32[0] = 0.06;
+    gfx_cmd_f32[1] = 0.10;
+    gfx_cmd_f32[2] = 0.18;
+    gfx_cmd_f32[3] = 1.0;
     if (GameState.tutorial_stage >= 2) {
-        gfx_cmd_f32[0] = 0.09; gfx_cmd_f32[1] = 0.24; gfx_cmd_f32[2] = 0.13;
+        gfx_cmd_f32[0] = 0.09;
+        gfx_cmd_f32[1] = 0.24;
+        gfx_cmd_f32[2] = 0.13;
     }
 }
 
 function exploration_host_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rotation: i32, alpha: i32): void {
     let index: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
-    if (index >= 4096) { return; }
+    if (index >= 4096) {
+        return;
+    }
     let i_base: i32 = GFX_I_SPRITE_BASE + index * 3;
     let f_base: i32 = GFX_F_SPRITE_BASE + index * 4;
-    gfx_cmd_i32[i_base] = handle; gfx_cmd_i32[i_base + 1] = rotation; gfx_cmd_i32[i_base + 2] = alpha;
-    gfx_cmd_f32[f_base].from_i32(x); gfx_cmd_f32[f_base + 1].from_i32(y);
-    gfx_cmd_f32[f_base + 2].from_i32(w); gfx_cmd_f32[f_base + 3].from_i32(h);
+    gfx_cmd_i32[i_base] = handle;
+    gfx_cmd_i32[i_base + 1] = rotation;
+    gfx_cmd_i32[i_base + 2] = alpha;
+    gfx_cmd_f32[f_base].from_i32(x);
+    gfx_cmd_f32[f_base + 1].from_i32(y);
+    gfx_cmd_f32[f_base + 2].from_i32(w);
+    gfx_cmd_f32[f_base + 3].from_i32(h);
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = index + 1;
 }
 
 function exploration_host_line(x1: i32, y1: i32, x2: i32, y2: i32, r: f32, g: f32, b: f32): void {
     let index: i32 = gfx_cmd_i32[GFX_I_LINE_COUNT];
-    if (index >= 10000) { return; }
+    if (index >= 10000) {
+        return;
+    }
     let base: i32 = GFX_F_LINE_BASE + index * 8;
-    gfx_cmd_f32[base].from_i32(x1); gfx_cmd_f32[base + 1].from_i32(y1);
-    gfx_cmd_f32[base + 2].from_i32(x2); gfx_cmd_f32[base + 3].from_i32(y2);
-    gfx_cmd_f32[base + 4] = r; gfx_cmd_f32[base + 5] = g; gfx_cmd_f32[base + 6] = b; gfx_cmd_f32[base + 7] = 1.0;
+    gfx_cmd_f32[base].from_i32(x1);
+    gfx_cmd_f32[base + 1].from_i32(y1);
+    gfx_cmd_f32[base + 2].from_i32(x2);
+    gfx_cmd_f32[base + 3].from_i32(y2);
+    gfx_cmd_f32[base + 4] = r;
+    gfx_cmd_f32[base + 5] = g;
+    gfx_cmd_f32[base + 6] = b;
+    gfx_cmd_f32[base + 7] = 1.0;
     gfx_cmd_i32[GFX_I_LINE_COUNT] = index + 1;
 }
 

@@ -15,14 +15,22 @@ function draw_debug_ui(): i32 {
 
 function main(): i32 {
     on_code_swap();
-    if (draw_debug_ui() != 1) { return 10; }
+    if (draw_debug_ui() != 1) {
+        return 10;
+    }
 
     let i: i32 = 0;
     for (i = 0; i < 179; i = i + 1) {
-        if (draw_debug_ui() != 1) { return 20; }
+        if (draw_debug_ui() != 1) {
+            return 20;
+        }
     }
 
-    if (swapFlashTicks != 0) { return 30; }
-    if (draw_debug_ui() != 0) { return 40; }
+    if (swapFlashTicks != 0) {
+        return 30;
+    }
+    if (draw_debug_ui() != 0) {
+        return 40;
+    }
     return 0;
 }

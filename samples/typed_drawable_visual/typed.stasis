@@ -10,16 +10,28 @@ global state: VisualState;
 
 function main(): i32 {
     init_window(360, 240, "Typed Drawable Visual");
-    if (!state.sprite.load_sprite_from("../render_parity/assets/opaque.svg", 160, 96)) { return 1; }
+    if (!state.sprite.load_sprite_from("../render_parity/assets/opaque.svg", 160, 96)) {
+        return 1;
+    }
     state.font = load_font("../render_parity/assets/parity.ttf", 28);
-    if (state.font <= 0) { return 2; }
-    if (!state.text.load_text_from(state.font, "TYPED DRAW")) { return 3; }
-    if (state.sprite.width != 160 || state.sprite.height != 96) { return 4; }
-    if (state.text.width <= 0.0 || state.text.height <= 0.0) { return 5; }
+    if (state.font <= 0) {
+        return 2;
+    }
+    if (!state.text.load_text_from(state.font, "TYPED DRAW")) {
+        return 3;
+    }
+    if (state.sprite.width != 160 || state.sprite.height != 96) {
+        return 4;
+    }
+    if (state.text.width <= 0.0 || state.text.height <= 0.0) {
+        return 5;
+    }
     return 0;
 }
 
-function tick(): i32 { return 0; }
+function tick(): i32 {
+    return 0;
+}
 
 function render(): i32 {
     begin_frame();
@@ -30,4 +42,6 @@ function render(): i32 {
     return 0;
 }
 
-function on_code_swap(): void { return; }
+function on_code_swap(): void {
+    return;
+}

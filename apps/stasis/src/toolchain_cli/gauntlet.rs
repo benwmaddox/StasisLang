@@ -678,13 +678,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-const GAUNTLET_SEED_SOURCE: &str = r#"@link("stasis_graphics");
-import "/vendor/stasis/src/runtime/gfx_cmd.stasis";
-
-global host_req_flags: i32;
-global host_req_window_w_px: i32;
-global host_req_window_h_px: i32;
-global host_req_seq: i32;
+const GAUNTLET_SEED_SOURCE: &str = r#"import "/vendor/stasis/src/stdlib/graphics.stasis";
 
 struct Game {
     ticks: i32;

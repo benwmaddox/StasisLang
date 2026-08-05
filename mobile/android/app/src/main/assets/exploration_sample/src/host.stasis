@@ -1,15 +1,20 @@
 import "host_game.stasis";
 
 function main(): i32 {
-  exploration_host_start();
-  return 0;
+    exploration_host_start();
+    return 0;
 }
+
 function tick(): i32 {
-  exploration_host_tick();
-  return 0;
+    exploration_host_tick();
+    return 0;
 }
+
 function render(): i32 {
-  exploration_host_draw();
-  return 0;
+    exploration_host_draw();
+    return 0;
 }
-function on_code_swap(): void { exploration_host_draw(); }
+
+function on_code_swap(): void {
+    exploration_host_draw();
+}
