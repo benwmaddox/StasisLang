@@ -1,7 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/graphics.stasis";
-import "../src/stdlib/input.stasis";
-import "../src/stdlib/game_draw.stasis";
 import "../src/stdlib/sdl_scancodes.stasis";
 
 // Bucket Catcher - minimal instructional sample.
@@ -224,10 +222,10 @@ function update_input(): void {
 
     // Keyboard input: steer left/right with arrow keys.
     let move: i32 = 0;
-    if (input_key_down(80)) {
+    if (is_key_down(80)) {
         move = move - 1;
     }
-    if (input_key_down(79)) {
+    if (is_key_down(79)) {
         move = move + 1;
     }
     if (move != 0) {
