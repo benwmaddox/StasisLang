@@ -1,11 +1,12 @@
 use super::{
     hex_sha256, image_extension, import_references, read_bounded_bytes, read_bounded_utf8,
-    write_json, GauntletConfigV1, GauntletObserver, GauntletReference, GauntletRoleModel,
-    GauntletRunPhase, GauntletRunStateV1, GAUNTLET_SCHEMA_VERSION, MAX_GOAL_BYTES,
-    MAX_REFERENCE_BYTES,
+    write_json, GauntletConfigV1, GauntletIsolation, GauntletObserver, GauntletReference,
+    GauntletRoleModel, GauntletRunPhase, GauntletRunStateV1, GAUNTLET_SCHEMA_VERSION,
+    MAX_GOAL_BYTES, MAX_REFERENCE_BYTES,
 };
 use crate::toolchain_cli::live_tui;
 use crate::toolchain_cli::{CommandResult, Workspace};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stasis::{run_live_in_process, LiveRunConfig};
@@ -31,16 +32,37 @@ const USAGE_NAME: &str = "usage.jsonl";
 const DECISIONS_NAME: &str = "decisions.jsonl";
 const REPORT_NAME: &str = "index.html";
 const STOP_NAME: &str = "stop.request";
+const HEARTBEAT_NAME: &str = "heartbeat.json";
 const QUALITY_BAR_NAME: &str = "quality-bar.json";
 const MAX_CAPTURE_WAIT: Duration = Duration::from_secs(10);
+const MAX_LIVE_REQUEST_WAIT: Duration = Duration::from_secs(30);
 const FINAL_ACCEPTANCES: u32 = 2;
 const MAX_MEMORY_RECORDS: usize = 48;
 const MAX_MEMORY_CHARS: usize = 32 * 1024;
 const MAX_DECISION_FIELD_CHARS: usize = 2_000;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_STALE_AFTER_MS: u64 = 15_000;
 
 struct StopWatcher {
     done: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+}
+
+struct LiveQuitGuard(LiveSessionClient);
+
+impl Drop for LiveQuitGuard {
+    fn drop(&mut self) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            match self.0.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit)) {
+                Ok(()) => break,
+                Err(error) if error == "live-session command queue is full" => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 impl StopWatcher {
@@ -72,6 +94,105 @@ impl Drop for StopWatcher {
             let _ = worker.join();
         }
     }
+}
+
+struct RunHeartbeat {
+    done: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+    path: PathBuf,
+}
+
+impl RunHeartbeat {
+    fn start(artifacts: &Path) -> Result<Self, String> {
+        let path = artifacts.join(HEARTBEAT_NAME);
+        if heartbeat_is_fresh(&path) {
+            return Err("Gauntlet run already has a live controller heartbeat".to_string());
+        }
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("failed clearing stale Gauntlet heartbeat: {error}"))?;
+        }
+        let done = Arc::new(AtomicBool::new(false));
+        let worker_done = Arc::clone(&done);
+        let worker_path = path.clone();
+        let mut owner = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| format!("failed claiming Gauntlet heartbeat: {error}"))?;
+        owner
+            .write_all(&heartbeat_bytes()?)
+            .map_err(|error| format!("failed writing Gauntlet heartbeat: {error}"))?;
+        let worker = thread::spawn(move || {
+            while !worker_done.load(Ordering::Acquire) {
+                thread::sleep(HEARTBEAT_INTERVAL);
+                if !worker_done.load(Ordering::Acquire) {
+                    let _ = write_heartbeat(&worker_path);
+                }
+            }
+        });
+        Ok(Self {
+            done,
+            worker: Some(worker),
+            path,
+        })
+    }
+}
+
+impl Drop for RunHeartbeat {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn write_heartbeat(path: &Path) -> Result<(), String> {
+    fs::write(path, heartbeat_bytes()?)
+        .map_err(|error| format!("failed writing Gauntlet heartbeat: {error}"))
+}
+
+fn heartbeat_bytes() -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&json!({
+        "schema_version": 1,
+        "pid": std::process::id(),
+        "unix_ms": unix_ms(),
+    }))
+    .map_err(|error| error.to_string())
+}
+
+fn heartbeat_unix_ms(path: &Path) -> Option<u64> {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| value.get("unix_ms").and_then(Value::as_u64))
+        .or_else(|| {
+            fs::metadata(path)
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        })
+}
+
+fn heartbeat_is_fresh(path: &Path) -> bool {
+    heartbeat_unix_ms(path)
+        .is_some_and(|heartbeat| unix_ms().saturating_sub(heartbeat) <= HEARTBEAT_STALE_AFTER_MS)
+}
+
+fn is_terminal_phase(phase: &GauntletRunPhase) -> bool {
+    matches!(
+        phase,
+        GauntletRunPhase::Converged
+            | GauntletRunPhase::BudgetExhausted
+            | GauntletRunPhase::Stalled
+            | GauntletRunPhase::Canceled
+            | GauntletRunPhase::Failed
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +249,36 @@ struct BlindCritique {
     summary: String,
 }
 
+fn preference_selects_candidate(critique: &BlindCritique, candidate_is_a: bool) -> bool {
+    matches!(
+        (critique.preferred.as_str(), candidate_is_a),
+        ("a", true) | ("b", false)
+    )
+}
+
+fn preference_supports_candidate(critique: &BlindCritique, candidate_is_a: bool) -> bool {
+    preference_selects_candidate(critique, candidate_is_a) || critique.preferred == "equivalent"
+}
+
+fn score_for_candidate(critique: &BlindCritique, candidate_is_a: bool) -> u32 {
+    if candidate_is_a {
+        critique.score_a
+    } else {
+        critique.score_b
+    }
+}
+
+fn critics_allow_checkpoint(
+    visual: &BlindCritique,
+    gameplay: &BlindCritique,
+    candidate_is_a: bool,
+) -> bool {
+    preference_supports_candidate(visual, candidate_is_a)
+        && preference_supports_candidate(gameplay, candidate_is_a)
+        && (preference_selects_candidate(visual, candidate_is_a)
+            || preference_selects_candidate(gameplay, candidate_is_a))
+}
+
 pub(super) fn start(
     workspace: &Workspace,
     config_path: &Path,
@@ -167,13 +318,7 @@ pub(super) fn start(
     require_clean_checkout(&workspace.root)?;
     let base_commit = git_stdout(&workspace.root, &["rev-parse", "HEAD"])?;
     let run_id = new_run_id(&base_commit);
-    let branch = format!("stasis/gauntlet/{run_id}");
     let artifacts = run_artifacts(&workspace.root, &run_id);
-    let worktree = workspace
-        .root
-        .join(RUNS_PATH)
-        .join("worktrees")
-        .join(&run_id);
     fs::create_dir_all(&artifacts)
         .map_err(|error| format!("failed creating Gauntlet run directory: {error}"))?;
     let mut references = config.quality_bar.references.clone();
@@ -181,24 +326,42 @@ pub(super) fn start(
     config.quality_bar.references = freeze_references(&workspace.root, &run_id, references)?;
     config.validate()?;
     write_json(&artifacts.join(EFFECTIVE_CONFIG_NAME), &config)?;
-    git_ok(
-        &workspace.root,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &branch,
-            &worktree.to_string_lossy(),
-            &base_commit,
-        ],
-    )?;
-    let bootstrap_commit = ensure_worktree_ignores(&worktree)?;
+    let (project_root, branch) = match &config.execution.isolation {
+        GauntletIsolation::InPlace => {
+            let branch = git_stdout(&workspace.root, &["branch", "--show-current"])?;
+            if branch.is_empty() {
+                return Err("in-place Gauntlet runs require a checked-out branch".to_string());
+            }
+            (workspace.root.clone(), branch)
+        }
+        GauntletIsolation::Worktree => {
+            let branch = format!("stasis/gauntlet/{run_id}");
+            let worktree = workspace
+                .root
+                .join(RUNS_PATH)
+                .join("worktrees")
+                .join(&run_id);
+            git_ok(
+                &workspace.root,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch,
+                    &worktree.to_string_lossy(),
+                    &base_commit,
+                ],
+            )?;
+            (worktree, branch)
+        }
+    };
+    let bootstrap_commit = ensure_worktree_ignores(&project_root)?;
     let now = unix_ms();
     let mut state = GauntletRunStateV1 {
         schema_version: GAUNTLET_SCHEMA_VERSION,
         run_id: run_id.clone(),
         phase: GauntletRunPhase::Created,
-        project_root: worktree.to_string_lossy().to_string(),
+        project_root: project_root.to_string_lossy().to_string(),
         original_root: workspace.root.to_string_lossy().to_string(),
         branch,
         base_commit: base_commit.clone(),
@@ -208,6 +371,7 @@ pub(super) fn start(
         accepted_candidates: 0,
         rejected_candidates: 0,
         consecutive_stalls: 0,
+        quality_acceptance_streak: 0,
         started_unix_ms: now,
         updated_unix_ms: now,
         terminal_reason: None,
@@ -216,7 +380,12 @@ pub(super) fn start(
     emit_event(
         &artifacts,
         "run_created",
-        json!({"run_id": run_id, "branch": state.branch, "worktree": worktree}),
+        json!({
+            "run_id": run_id,
+            "branch": state.branch,
+            "project_root": project_root,
+            "isolation": config.execution.isolation,
+        }),
     )?;
     run_persistent(workspace, config, state, artifacts)
 }
@@ -271,19 +440,24 @@ pub(super) fn resume(
     if matches!(state.phase, GauntletRunPhase::Converged) {
         return status(workspace, run_id);
     }
+    if heartbeat_is_fresh(&artifacts.join(HEARTBEAT_NAME)) {
+        return Err(format!(
+            "Gauntlet {run_id} still has a live controller; use status or stop instead of starting a concurrent resume"
+        ));
+    }
     let mut config: GauntletConfigV1 = read_json(&artifacts.join(EFFECTIVE_CONFIG_NAME))?;
     config.execution.observer = observer;
     config.validate()?;
     write_json(&artifacts.join(EFFECTIVE_CONFIG_NAME), &config)?;
-    let worktree = PathBuf::from(&state.project_root);
-    if !worktree.join("stasis.json").is_file() {
+    let project_root = PathBuf::from(&state.project_root);
+    if !project_root.join("stasis.json").is_file() {
         return Err(format!(
-            "Gauntlet worktree is unavailable: {}",
-            worktree.display()
+            "Gauntlet project workspace is unavailable: {}",
+            project_root.display()
         ));
     }
     rollback_candidate(
-        &worktree,
+        &project_root,
         state.best_commit.as_deref().unwrap_or(&state.base_commit),
     )?;
     let stop = artifacts.join(STOP_NAME);
@@ -307,9 +481,27 @@ pub(super) fn status(workspace: &Workspace, run_id: &str) -> Result<CommandResul
     validate_run_id(run_id)?;
     let artifacts = run_artifacts(&workspace.root, run_id);
     let state = load_state(&artifacts)?;
+    let heartbeat = heartbeat_unix_ms(&artifacts.join(HEARTBEAT_NAME));
+    let active =
+        heartbeat.is_some_and(|value| unix_ms().saturating_sub(value) <= HEARTBEAT_STALE_AFTER_MS);
+    let recoverable = !active && !is_terminal_phase(&state.phase);
+    let mut data = serde_json::to_value(&state).map_err(|error| error.to_string())?;
+    data["health"] = json!({
+        "active": active,
+        "recoverable": recoverable,
+        "heartbeat_unix_ms": heartbeat,
+        "stale_after_ms": HEARTBEAT_STALE_AFTER_MS,
+    });
+    let health = if active {
+        "active"
+    } else if recoverable {
+        "interrupted; resume is safe"
+    } else {
+        "terminal"
+    };
     Ok(CommandResult::success(
-        format_status(&state, &artifacts),
-        serde_json::to_value(&state).map_err(|error| error.to_string())?,
+        format!("{}\nhealth: {health}", format_status(&state, &artifacts)),
+        data,
     ))
 }
 
@@ -343,6 +535,24 @@ pub(super) fn promote(
         .as_deref()
         .ok_or_else(|| "Gauntlet has no accepted checkpoint to promote".to_string())?;
     let head = git_stdout(&workspace.root, &["rev-parse", "HEAD"])?;
+    let in_place =
+        fs::canonicalize(&workspace.root).ok() == fs::canonicalize(&state.project_root).ok();
+    if in_place {
+        if head != best {
+            return Err(format!(
+                "in-place promotion expected the accepted checkpoint {best}; current HEAD is {head}"
+            ));
+        }
+        emit_event(
+            &artifacts,
+            "promoted",
+            json!({"commit": best, "already_in_place": true}),
+        )?;
+        return Ok(CommandResult::success(
+            format!("Gauntlet {run_id} checkpoint {best} is already in the main project"),
+            json!({"run_id": run_id, "commit": best, "branch": state.branch, "already_in_place": true}),
+        ));
+    }
     if head != state.base_commit {
         return Err(format!(
             "promotion requires the original checkout to remain at {}; current HEAD is {head}",
@@ -363,6 +573,7 @@ fn run_persistent(
     state: GauntletRunStateV1,
     artifacts: PathBuf,
 ) -> Result<CommandResult, String> {
+    let _heartbeat = RunHeartbeat::start(&artifacts)?;
     let project_root = PathBuf::from(&state.project_root);
     let manifest_source = fs::read_to_string(project_root.join("stasis.json"))
         .map_err(|error| format!("failed reading isolated project manifest: {error}"))?;
@@ -385,14 +596,13 @@ fn run_persistent(
     let controller_client = client.clone();
     let controller_artifacts = artifacts.clone();
     let controller = thread::spawn(move || {
-        let result = controller_loop(
+        let _quit = LiveQuitGuard(controller_client.clone());
+        controller_loop(
             controller_client.clone(),
             config,
             state,
             &controller_artifacts,
-        );
-        let _ = controller_client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
-        result
+        )
     });
     let live_config = LiveRunConfig::new(
         project_root.clone(),
@@ -481,7 +691,20 @@ fn controller_loop(
     let bar = if artifacts.join(QUALITY_BAR_NAME).is_file() {
         read_json(&artifacts.join(QUALITY_BAR_NAME))?
     } else {
-        let bar = bootstrap_bar(&goal, &config, &mut state, artifacts, &canceled)?;
+        let bar = match bootstrap_bar(&goal, &config, &mut state, artifacts, &canceled) {
+            Ok(bar) => bar,
+            Err(error) if canceled.load(Ordering::Acquire) => {
+                finish_canceled_or_budget(&mut state, artifacts)?;
+                emit_event(
+                    artifacts,
+                    "role_interrupted",
+                    json!({"role": "quality_bar", "error": error}),
+                )?;
+                generate_report_shell(artifacts, &state)?;
+                return Ok(state);
+            }
+            Err(error) => return Err(error),
+        };
         persist_state(artifacts, &mut state)?;
         write_json(&artifacts.join(QUALITY_BAR_NAME), &bar)?;
         emit_event(
@@ -521,7 +744,6 @@ fn controller_loop(
     )?;
     let mut largest_gap =
         "The controller verified the Stasis executable and existing deterministic project tests. Select the highest-value game implementation gap; do not assign harness provisioning or CLI discovery to the builder.".to_string();
-    let mut final_acceptances = 0_u32;
     loop {
         if should_stop(artifacts) {
             finish(
@@ -570,10 +792,32 @@ fn controller_loop(
             &mut model_calls,
             artifacts,
             &config.models.lead,
+            config.models.controller_escalation.as_ref(),
+            config.budget.model_calls,
             &canceled,
-        )?;
+        );
         state.model_calls = model_calls;
         persist_state(artifacts, &mut state)?;
+        let decision = match decision {
+            Ok(decision) => decision,
+            Err(error) if canceled.load(Ordering::Acquire) => {
+                finish_canceled_or_budget(&mut state, artifacts)?;
+                emit_event(
+                    artifacts,
+                    "role_interrupted",
+                    json!({"role": "lead", "error": error}),
+                )?;
+                break;
+            }
+            Err(error) => {
+                emit_event(
+                    artifacts,
+                    "lead_fallback",
+                    json!({"reason": error, "recovery": "use the frozen workstream and largest gap"}),
+                )?;
+                fallback_lead_decision(&bar, &largest_gap)
+            }
+        };
         emit_event(
             artifacts,
             "lead_decision",
@@ -591,8 +835,8 @@ fn controller_loop(
             ),
             &decision.next_step,
         )?;
-        if decision.done && final_acceptances >= FINAL_ACCEPTANCES {
-            match run_final_gates(&project_root, artifacts) {
+        if decision.done && state.quality_acceptance_streak >= FINAL_ACCEPTANCES {
+            match run_final_gates(&project_root, artifacts, &canceled) {
                 Ok(()) => {
                     finish(
                         &mut state,
@@ -602,9 +846,18 @@ fn controller_loop(
                     )?;
                     break;
                 }
+                Err(error) if canceled.load(Ordering::Acquire) => {
+                    finish_canceled_or_budget(&mut state, artifacts)?;
+                    emit_event(
+                        artifacts,
+                        "final_validation_interrupted",
+                        json!({"error": error}),
+                    )?;
+                    break;
+                }
                 Err(error) => {
                     largest_gap = format!("Final release validation failed: {error}");
-                    final_acceptances = 0;
+                    state.quality_acceptance_streak = 0;
                     state.consecutive_stalls = state.consecutive_stalls.saturating_add(1);
                     emit_event(
                         artifacts,
@@ -625,19 +878,29 @@ fn controller_loop(
                 }
             }
         }
-        if decision.builder_prompt.trim().is_empty() || decision.workstream.trim().is_empty() {
-            return fail_state(&mut state, artifacts, "lead returned an empty work item");
-        }
+        let decision = if decision.builder_prompt.trim().is_empty()
+            || decision.workstream.trim().is_empty()
+        {
+            emit_event(
+                artifacts,
+                "lead_fallback",
+                json!({"reason": "lead returned an empty work item", "recovery": "use the frozen workstream and largest gap"}),
+            )?;
+            fallback_lead_decision(&bar, &largest_gap)
+        } else {
+            decision
+        };
         state.phase = GauntletRunPhase::Building;
         state.current_workstream = Some(decision.workstream.clone());
         persist_state(artifacts, &mut state)?;
         let remaining_calls = config.budget.model_calls.saturating_sub(state.model_calls);
-        if remaining_calls == 0 {
+        let builder_calls = remaining_calls.saturating_sub(2);
+        if builder_calls == 0 {
             finish(
                 &mut state,
                 artifacts,
                 GauntletRunPhase::BudgetExhausted,
-                "model-call budget exhausted before builder",
+                "model-call budget cannot fund a builder plus both independent critics",
             )?;
             break;
         }
@@ -672,7 +935,7 @@ fn controller_loop(
             &config.models.builder,
             "Fresh Stasis Gauntlet builder",
             primary_instruction,
-            remaining_calls,
+            builder_calls,
         );
         if let Err(failure) = &outcome {
             record_builder_attempt_failure(
@@ -684,15 +947,17 @@ fn controller_loop(
                 failure,
             )?;
             let remaining_calls = config.budget.model_calls.saturating_sub(state.model_calls);
-            if should_escalate_builder(failure, &canceled)
-                && remaining_calls > 0
-                && config.models.builder_escalation.is_some()
+            let escalation_calls = remaining_calls.saturating_sub(2);
+            if let Some(escalation) = config
+                .models
+                .builder_escalation
+                .as_ref()
+                .filter(|_| should_escalate_builder(failure, &canceled) && escalation_calls > 0)
             {
                 rollback_candidate(
                     &project_root,
                     state.best_commit.as_deref().unwrap_or(&state.base_commit),
                 )?;
-                let escalation = config.models.builder_escalation.as_ref().unwrap();
                 emit_event(
                     artifacts,
                     "builder_escalated",
@@ -717,7 +982,7 @@ fn controller_loop(
                     escalation,
                     "Escalated Stasis Gauntlet builder",
                     escalation_instruction,
-                    remaining_calls,
+                    escalation_calls,
                 );
                 if let Err(failure) = &outcome {
                     record_builder_attempt_failure(
@@ -780,14 +1045,33 @@ fn controller_loop(
         }
         state.phase = GauntletRunPhase::Evaluating;
         persist_state(artifacts, &mut state)?;
-        let (candidate, candidate_state) = capture_scenario(
+        let candidate_capture = capture_scenario(
             &client,
             &project_root,
             artifacts,
             &candidate_id,
             scenario_pointer,
             &mut next_request,
-        )?;
+        );
+        let (candidate, candidate_state) = match candidate_capture {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                rollback_candidate(
+                    &project_root,
+                    state.best_commit.as_deref().unwrap_or(&state.base_commit),
+                )?;
+                reject(
+                    &mut state,
+                    artifacts,
+                    &candidate_id,
+                    &format!("candidate evidence capture failed: {error}"),
+                )?;
+                largest_gap = format!(
+                    "The candidate could not be evaluated because deterministic evidence capture failed: {error}"
+                );
+                continue;
+            }
+        };
         let candidate_changed = !git_stdout(&project_root, &["status", "--porcelain"])?
             .trim()
             .is_empty();
@@ -801,7 +1085,7 @@ fn controller_loop(
             largest_gap = "The previous work item produced no source or asset change.".to_string();
             continue;
         }
-        if state.model_calls >= config.budget.model_calls {
+        if config.budget.model_calls.saturating_sub(state.model_calls) < 2 {
             rollback_candidate(
                 &project_root,
                 state.best_commit.as_deref().unwrap_or(&state.base_commit),
@@ -810,7 +1094,7 @@ fn controller_loop(
                 &mut state,
                 artifacts,
                 GauntletRunPhase::BudgetExhausted,
-                "model-call budget exhausted before visual critique",
+                "model-call budget cannot fund both independent critics",
             )?;
             break;
         }
@@ -831,19 +1115,44 @@ fn controller_loop(
             &mut state.model_calls,
             artifacts,
             &config.models.visual_critic,
+            config.models.controller_escalation.as_ref(),
+            config.budget.model_calls.saturating_sub(1),
             &canceled,
-        )?;
+        );
         persist_state(artifacts, &mut state)?;
-        let preferred_candidate = match critique.preferred.as_str() {
-            "a" => candidate_is_a,
-            "b" => !candidate_is_a,
-            _ => false,
+        let critique = match critique {
+            Ok(critique) => critique,
+            Err(error) if canceled.load(Ordering::Acquire) => {
+                rollback_candidate(
+                    &project_root,
+                    state.best_commit.as_deref().unwrap_or(&state.base_commit),
+                )?;
+                finish_canceled_or_budget(&mut state, artifacts)?;
+                emit_event(
+                    artifacts,
+                    "role_interrupted",
+                    json!({"role": "visual_critic", "error": error}),
+                )?;
+                break;
+            }
+            Err(error) => {
+                rollback_candidate(
+                    &project_root,
+                    state.best_commit.as_deref().unwrap_or(&state.base_commit),
+                )?;
+                reject(
+                    &mut state,
+                    artifacts,
+                    &candidate_id,
+                    &format!("visual critic exhausted recovery attempts: {error}"),
+                )?;
+                largest_gap =
+                    format!("The candidate needs fresh visual evaluation evidence: {error}");
+                continue;
+            }
         };
-        let candidate_score = if candidate_is_a {
-            critique.score_a
-        } else {
-            critique.score_b
-        };
+        let preferred_candidate = preference_selects_candidate(&critique, candidate_is_a);
+        let candidate_score = score_for_candidate(&critique, candidate_is_a);
         if state.model_calls >= config.budget.model_calls {
             rollback_candidate(
                 &project_root,
@@ -870,15 +1179,49 @@ fn controller_loop(
             &mut state.model_calls,
             artifacts,
             &config.models.gameplay_critic,
+            config.models.controller_escalation.as_ref(),
+            config.budget.model_calls,
             &canceled,
-        )?;
+        );
         persist_state(artifacts, &mut state)?;
-        let gameplay_passes = match gameplay.preferred.as_str() {
-            "a" => candidate_is_a,
-            "b" => !candidate_is_a,
-            "equivalent" => true,
-            _ => false,
+        let gameplay = match gameplay {
+            Ok(gameplay) => gameplay,
+            Err(error) if canceled.load(Ordering::Acquire) => {
+                rollback_candidate(
+                    &project_root,
+                    state.best_commit.as_deref().unwrap_or(&state.base_commit),
+                )?;
+                finish_canceled_or_budget(&mut state, artifacts)?;
+                emit_event(
+                    artifacts,
+                    "role_interrupted",
+                    json!({"role": "gameplay_critic", "error": error}),
+                )?;
+                break;
+            }
+            Err(error) => {
+                rollback_candidate(
+                    &project_root,
+                    state.best_commit.as_deref().unwrap_or(&state.base_commit),
+                )?;
+                reject(
+                    &mut state,
+                    artifacts,
+                    &candidate_id,
+                    &format!("gameplay critic exhausted recovery attempts: {error}"),
+                )?;
+                largest_gap =
+                    format!("The candidate needs fresh gameplay evaluation evidence: {error}");
+                continue;
+            }
         };
+        let visual_passes = preference_supports_candidate(&critique, candidate_is_a);
+        let gameplay_passes = preference_supports_candidate(&gameplay, candidate_is_a);
+        let checkpoint_passes = critics_allow_checkpoint(&critique, &gameplay, candidate_is_a);
+        let gameplay_score = score_for_candidate(&gameplay, candidate_is_a);
+        let quality_bar_passes = checkpoint_passes
+            && candidate_score >= bar.acceptance_score
+            && gameplay_score >= bar.acceptance_score;
         emit_event(
             artifacts,
             "critic_completed",
@@ -890,32 +1233,51 @@ fn controller_loop(
                 "preferred_candidate": preferred_candidate,
                 "gameplay": gameplay,
                 "gameplay_passes": gameplay_passes,
+                "gameplay_score": gameplay_score,
+                "checkpoint_passes": checkpoint_passes,
+                "quality_bar_passes": quality_bar_passes,
             }),
         )?;
-        if preferred_candidate && gameplay_passes && candidate_score >= bar.acceptance_score {
+        if checkpoint_passes {
             state.phase = GauntletRunPhase::Checkpointing;
             persist_state(artifacts, &mut state)?;
             let commit = checkpoint(&project_root, &candidate_id, &decision.workstream)?;
             state.best_commit = Some(commit.clone());
             state.accepted_candidates = state.accepted_candidates.saturating_add(1);
             state.consecutive_stalls = 0;
-            final_acceptances = final_acceptances.saturating_add(1);
+            if quality_bar_passes {
+                state.quality_acceptance_streak = state.quality_acceptance_streak.saturating_add(1);
+            } else {
+                state.quality_acceptance_streak = 0;
+            }
             baseline = candidate;
             baseline_state = candidate_state;
-            largest_gap = critique.largest_gap;
+            largest_gap = if gameplay_score < candidate_score {
+                gameplay.largest_gap.clone()
+            } else {
+                critique.largest_gap.clone()
+            };
             persist_state(artifacts, &mut state)?;
             emit_event(
                 artifacts,
                 "candidate_accepted",
-                json!({"candidate": candidate_id, "commit": commit}),
+                json!({
+                    "candidate": candidate_id,
+                    "commit": commit,
+                    "quality_bar_passes": quality_bar_passes,
+                    "visual_score": candidate_score,
+                    "gameplay_score": gameplay_score,
+                }),
             )?;
             append_decision(
                 artifacts,
                 "controller",
                 "candidate_accepted",
                 &format!("Accepted {candidate_id} for {}", decision.workstream),
-                "The blind visual critic preferred the candidate and the gameplay critic found no regression.",
-                &format!("commit={commit}; visual_score={candidate_score}"),
+                "At least one independent critic preferred the candidate and neither critic found a regression.",
+                &format!(
+                    "commit={commit}; visual_score={candidate_score}; gameplay_score={gameplay_score}; quality_bar_passes={quality_bar_passes}"
+                ),
                 &largest_gap,
             )?;
             generate_report_shell(artifacts, &state)?;
@@ -924,14 +1286,20 @@ fn controller_loop(
                 &project_root,
                 state.best_commit.as_deref().unwrap_or(&state.base_commit),
             )?;
-            largest_gap = critique.largest_gap;
-            final_acceptances = 0;
-            reject(
-                &mut state,
-                artifacts,
-                &candidate_id,
-                "blind critic did not prefer the candidate at the required score",
-            )?;
+            largest_gap = if !gameplay_passes {
+                gameplay.largest_gap.clone()
+            } else {
+                critique.largest_gap.clone()
+            };
+            state.quality_acceptance_streak = 0;
+            let rejection_reason = if !visual_passes {
+                "visual critic preferred the accepted checkpoint or found neither candidate sufficient"
+            } else if !gameplay_passes {
+                "gameplay critic preferred the accepted checkpoint or found neither candidate sufficient"
+            } else {
+                "critics found no evidenced improvement over the accepted checkpoint"
+            };
+            reject(&mut state, artifacts, &candidate_id, rejection_reason)?;
             append_decision(
                 artifacts,
                 "critic",
@@ -950,6 +1318,44 @@ fn controller_loop(
     Ok(state)
 }
 
+fn fallback_lead_decision(bar: &FrozenBar, largest_gap: &str) -> LeadDecision {
+    let workstream = bar
+        .workstreams
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "Integration and release quality".to_string());
+    LeadDecision {
+        done: false,
+        workstream,
+        builder_prompt: format!(
+            "Make one bounded, tested improvement that directly addresses this evidenced gap: {largest_gap}"
+        ),
+        rationale: "The configured lead exhausted its bounded attempts, so the controller selected a deterministic recovery task from the frozen bar.".to_string(),
+        next_step: "Produce one compiler-tested candidate, then return it to independent evaluation.".to_string(),
+    }
+}
+
+fn finish_canceled_or_budget(
+    state: &mut GauntletRunStateV1,
+    artifacts: &Path,
+) -> Result<(), String> {
+    if should_stop(artifacts) {
+        finish(
+            state,
+            artifacts,
+            GauntletRunPhase::Canceled,
+            "stop requested during an active operation",
+        )
+    } else {
+        finish(
+            state,
+            artifacts,
+            GauntletRunPhase::BudgetExhausted,
+            "wall-time budget exhausted during an active operation",
+        )
+    }
+}
+
 fn bootstrap_bar(
     goal: &str,
     config: &GauntletConfigV1,
@@ -961,44 +1367,89 @@ fn bootstrap_bar(
     if config.quality_bar.allow_web_discovery
         && config.budget.model_calls.saturating_sub(state.model_calls) >= 2
     {
-        let mut provider = provider_for_role(&config.models.scout).with_web_search(true);
         let prompt = format!(
             "Act as a read-only visual reference scout for this 2D game brief. Find up to five reputable HTTPS pages whose visual or interaction patterns can form a concrete quality bar. Do not suggest copying protected assets. Return only the requested JSON.\n\n{goal}"
         );
-        let scout: ScoutResult = provider.respond_structured(&prompt, &scout_schema(), canceled)?;
-        append_provider_usage(artifacts, &mut provider)?;
-        state.model_calls = state.model_calls.saturating_add(provider.call_count());
-        persist_state(artifacts, state)?;
-        web_sources = scout
-            .sources
-            .into_iter()
-            .filter(|source| source.url.starts_with("https://"))
-            .take(5)
-            .collect();
-        emit_event(
+        let scout = call_structured_role::<ScoutResult>(
+            "reference_scout",
+            &prompt,
+            &scout_schema(),
+            &config.models.scout,
+            config.models.controller_escalation.as_ref(),
+            &[],
+            true,
+            &mut state.model_calls,
+            config.budget.model_calls.saturating_sub(1),
             artifacts,
-            "reference_scout_completed",
-            json!({"summary": scout.summary, "sources": web_sources}),
-        )?;
+            canceled,
+        );
+        persist_state(artifacts, state)?;
+        match scout {
+            Ok(scout) => {
+                web_sources = scout
+                    .sources
+                    .into_iter()
+                    .filter(|source| source.url.starts_with("https://"))
+                    .take(5)
+                    .collect();
+                emit_event(
+                    artifacts,
+                    "reference_scout_completed",
+                    json!({"summary": scout.summary, "sources": web_sources}),
+                )?;
+            }
+            Err(error) if canceled.load(Ordering::Acquire) => return Err(error),
+            Err(error) => emit_event(
+                artifacts,
+                "reference_scout_skipped",
+                json!({"reason": error, "recovery": "continue with local brief and references"}),
+            )?,
+        }
     }
-    let mut provider = provider_for_role(&config.models.lead);
     let prompt = format!(
         "Act as the lead for an autonomous Stasis 2D game build. Decompose this immutable brief into 4-10 independently improvable workstreams. Use short noun phrases. Return only the requested JSON.\n\n{goal}"
     );
-    let bootstrap: LeadBootstrap =
-        provider.respond_structured(&prompt, &bootstrap_schema(), canceled)?;
-    append_provider_usage(artifacts, &mut provider)?;
-    state.model_calls = state.model_calls.saturating_add(provider.call_count());
+    let bootstrap = call_structured_role::<LeadBootstrap>(
+        "quality_bar_lead",
+        &prompt,
+        &bootstrap_schema(),
+        &config.models.lead,
+        config.models.controller_escalation.as_ref(),
+        &[],
+        false,
+        &mut state.model_calls,
+        config.budget.model_calls,
+        artifacts,
+        canceled,
+    );
     persist_state(artifacts, state)?;
-    let workstreams = bootstrap
-        .workstreams
-        .into_iter()
-        .filter(|value| !value.trim().is_empty())
-        .take(10)
-        .collect::<Vec<_>>();
-    if workstreams.is_empty() {
-        return Err("Gauntlet lead produced no usable workstreams".to_string());
-    }
+    let workstreams = match bootstrap {
+        Ok(bootstrap) => bootstrap
+            .workstreams
+            .into_iter()
+            .filter(|value| !value.trim().is_empty())
+            .take(10)
+            .collect::<Vec<_>>(),
+        Err(error) if canceled.load(Ordering::Acquire) => return Err(error),
+        Err(error) => {
+            emit_event(
+                artifacts,
+                "quality_bar_lead_fallback",
+                json!({"reason": error, "recovery": "use deterministic workstreams"}),
+            )?;
+            default_workstreams()
+        }
+    };
+    let workstreams = if workstreams.is_empty() {
+        emit_event(
+            artifacts,
+            "quality_bar_lead_fallback",
+            json!({"reason": "lead returned no usable workstreams", "recovery": "use deterministic workstreams"}),
+        )?;
+        default_workstreams()
+    } else {
+        workstreams
+    };
     append_decision(
         artifacts,
         "lead",
@@ -1031,8 +1482,24 @@ fn bootstrap_bar(
     })
 }
 
+fn default_workstreams() -> Vec<String> {
+    [
+        "Core gameplay and deterministic rules",
+        "Controls and mobile interaction",
+        "Visual identity and animation",
+        "HUD and player feedback",
+        "Enemy behavior and balance",
+        "Audio and presentation",
+        "Integration and release quality",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 fn provider_for_role(role: &GauntletRoleModel) -> CodexExecProvider {
-    let mut provider = CodexExecProvider::default();
+    let mut provider = CodexExecProvider::default()
+        .with_timeout(Duration::from_secs(u64::from(role.timeout_minutes) * 60));
     if let Some(model) = role.model.as_deref() {
         provider = provider.with_model(model);
     }
@@ -1040,6 +1507,76 @@ fn provider_for_role(role: &GauntletRoleModel) -> CodexExecProvider {
         provider = provider.with_reasoning_effort(reasoning_effort);
     }
     provider
+}
+
+#[allow(clippy::too_many_arguments)]
+fn call_structured_role<T: DeserializeOwned>(
+    role_name: &str,
+    prompt: &str,
+    schema: &Value,
+    primary: &GauntletRoleModel,
+    escalation: Option<&GauntletRoleModel>,
+    images: &[PathBuf],
+    web_search: bool,
+    model_calls: &mut u32,
+    model_call_limit: u32,
+    artifacts: &Path,
+    canceled: &AtomicBool,
+) -> Result<T, String> {
+    let attempts = [Some(primary), escalation];
+    let mut failures = Vec::new();
+    for (index, model) in attempts.into_iter().flatten().enumerate() {
+        if *model_calls >= model_call_limit {
+            break;
+        }
+        let attempt = if index == 0 { "primary" } else { "escalation" };
+        emit_event(
+            artifacts,
+            "role_attempt_started",
+            json!({
+                "role": role_name,
+                "attempt": attempt,
+                "model": model.model,
+                "reasoning_effort": model.reasoning_effort,
+                "timeout_minutes": model.timeout_minutes,
+            }),
+        )?;
+        let mut provider = provider_for_role(model)
+            .with_images(images.to_vec())
+            .with_web_search(web_search);
+        let result = provider.respond_structured(prompt, schema, canceled);
+        *model_calls = model_calls.saturating_add(provider.call_count());
+        append_provider_usage(artifacts, &mut provider)?;
+        match result {
+            Ok(value) => {
+                emit_event(
+                    artifacts,
+                    "role_attempt_completed",
+                    json!({"role": role_name, "attempt": attempt}),
+                )?;
+                return Ok(value);
+            }
+            Err(error) => {
+                emit_event(
+                    artifacts,
+                    "role_attempt_failed",
+                    json!({"role": role_name, "attempt": attempt, "error": error}),
+                )?;
+                failures.push(format!("{attempt}: {error}"));
+                if canceled.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{role_name} exhausted its bounded attempts{}",
+        if failures.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", failures.join("; "))
+        }
+    ))
 }
 
 fn lead_decision(
@@ -1050,17 +1587,28 @@ fn lead_decision(
     model_calls: &mut u32,
     artifacts: &Path,
     model: &GauntletRoleModel,
+    escalation: Option<&GauntletRoleModel>,
+    model_call_limit: u32,
     canceled: &AtomicBool,
 ) -> Result<LeadDecision, String> {
-    let mut provider = provider_for_role(model);
     let memory = decision_memory_snapshot(artifacts)?;
     let prompt = format!(
-        "Act as the fresh lead for a Stasis Gauntlet. Choose exactly one highest-value next work item from the frozen workstreams. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
+        "Act as the fresh lead for a Stasis Gauntlet. Choose exactly one highest-value next work item from the frozen workstreams. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
         bar.workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
     );
-    let decision: LeadDecision = provider.respond_structured(&prompt, &lead_schema(), canceled)?;
-    append_provider_usage(artifacts, &mut provider)?;
-    *model_calls = model_calls.saturating_add(provider.call_count());
+    let decision: LeadDecision = call_structured_role(
+        "lead",
+        &prompt,
+        &lead_schema(),
+        model,
+        escalation,
+        &[],
+        false,
+        model_calls,
+        model_call_limit,
+        artifacts,
+        canceled,
+    )?;
     if decision.rationale.trim().is_empty() || decision.next_step.trim().is_empty() {
         return Err("Gauntlet lead returned empty decision memory fields".to_string());
     }
@@ -1076,19 +1624,29 @@ fn blind_critic(
     model_calls: &mut u32,
     artifacts: &Path,
     model: &GauntletRoleModel,
+    escalation: Option<&GauntletRoleModel>,
+    model_call_limit: u32,
     canceled: &AtomicBool,
 ) -> Result<BlindCritique, String> {
     let mut images = vec![image_a.to_path_buf(), image_b.to_path_buf()];
     images.extend(references.iter().take(5).cloned());
-    let mut provider = provider_for_role(model).with_images(images);
     let prompt = format!(
-        "You are a fresh read-only visual/gameplay critic. The first two attached images are anonymously labeled A then B; any later images are hashed quality references. You do not know which candidate is newer. Compare A and B against the frozen brief and references. Prefer A, B, or neither. Scores are integers 0-100. Identify one largest remaining gap. Do not discuss source code and return only JSON.\n\nBrief:\n{goal}\n\nWorkstreams: {}\nHard gates already passed: {}",
+        "You are a fresh read-only visual critic. The first two attached images are anonymously labeled A then B; any later images are hashed quality references. You do not know which candidate is newer. Compare A and B relative to each other and against the frozen brief and references. Prefer a or b when one is visually better without an evidenced visual regression. Return equivalent when the images are materially indistinguishable; incompleteness against the full brief is not a reason to return neither. Return neither only when both candidates have different material visual regressions or the evidence is invalid. Scores are integers 0-100 and measure absolute quality against the frozen bar. Identify one largest remaining gap. Do not discuss source code and return only JSON.\n\nBrief:\n{goal}\n\nWorkstreams: {}\nHard gates already passed: {}",
         bar.workstreams.join(", "), bar.hard_gates.join(", ")
     );
-    let critique: BlindCritique =
-        provider.respond_structured(&prompt, &critic_schema(), canceled)?;
-    append_provider_usage(artifacts, &mut provider)?;
-    *model_calls = model_calls.saturating_add(provider.call_count());
+    let critique: BlindCritique = call_structured_role(
+        "visual_critic",
+        &prompt,
+        &critic_schema(),
+        model,
+        escalation,
+        &images,
+        false,
+        model_calls,
+        model_call_limit,
+        artifacts,
+        canceled,
+    )?;
     if !matches!(
         critique.preferred.as_str(),
         "a" | "b" | "neither" | "equivalent"
@@ -1134,19 +1692,29 @@ fn gameplay_critic(
     model_calls: &mut u32,
     artifacts: &Path,
     model: &GauntletRoleModel,
+    escalation: Option<&GauntletRoleModel>,
+    model_call_limit: u32,
     canceled: &AtomicBool,
 ) -> Result<BlindCritique, String> {
-    let mut provider = provider_for_role(model);
     let prompt = format!(
-        "You are a fresh read-only gameplay critic. Two anonymous candidates A and B were run from the same runtime snapshot for the same deterministic ticks. Judge only behavioral regressions and evidence relative to the brief. Prefer a, b, equivalent, or neither. Equivalent is appropriate when a visual-only improvement leaves gameplay intact. Return only JSON.\n\nBrief:\n{goal}\n\nRequired scenarios: {}\n\nA evidence:\n{}\n\nB evidence:\n{}",
+        "You are a fresh read-only gameplay critic. Two anonymous candidates A and B were run from the same runtime snapshot for the same deterministic ticks. Judge behavioral improvement and regression relative to each other; the absolute scores still measure progress against the complete brief. Prefer a or b when one has better behavioral evidence without an evidenced regression. Return equivalent whenever gameplay is materially unchanged, including when a visual-only improvement leaves gameplay intact or both remain equally incomplete. Never return neither merely because both fail the full brief. Return neither only when both have different material regressions or the evidence is invalid. Return only JSON.\n\nBrief:\n{goal}\n\nRequired scenarios: {}\n\nA evidence:\n{}\n\nB evidence:\n{}",
         serde_json::to_string(&bar.required_scenarios).map_err(|error| error.to_string())?,
         serde_json::to_string(state_a).map_err(|error| error.to_string())?,
         serde_json::to_string(state_b).map_err(|error| error.to_string())?,
     );
-    let critique: BlindCritique =
-        provider.respond_structured(&prompt, &critic_schema(), canceled)?;
-    append_provider_usage(artifacts, &mut provider)?;
-    *model_calls = model_calls.saturating_add(provider.call_count());
+    let critique: BlindCritique = call_structured_role(
+        "gameplay_critic",
+        &prompt,
+        &critic_schema(),
+        model,
+        escalation,
+        &[],
+        false,
+        model_calls,
+        model_call_limit,
+        artifacts,
+        canceled,
+    )?;
     if !matches!(
         critique.preferred.as_str(),
         "a" | "b" | "neither" | "equivalent"
@@ -1302,7 +1870,10 @@ fn capture_frame(
             && fs::metadata(&runtime_path).is_ok_and(|metadata| metadata.len() > 0)
         {
             let destination = artifacts.join("artifacts").join(id).join("frame.png");
-            fs::create_dir_all(destination.parent().expect("capture parent")).map_err(|error| {
+            let parent = destination
+                .parent()
+                .ok_or_else(|| "Gauntlet capture destination has no parent".to_string())?;
+            fs::create_dir_all(parent).map_err(|error| {
                 format!("failed creating candidate artifact directory: {error}")
             })?;
             fs::copy(&runtime_path, &destination)
@@ -1335,17 +1906,24 @@ fn request_live(
     command: LiveCommand,
 ) -> Result<LiveResponse, String> {
     client.submit(LiveRequest::new(request_id, command))?;
-    loop {
-        let response = client.receive_timeout(Duration::from_secs(300))?;
-        if response.request_id == request_id {
-            if response.ok {
-                return Ok(response);
+    let deadline = Instant::now() + MAX_LIVE_REQUEST_WAIT;
+    while Instant::now() < deadline {
+        if let Some(response) = client.try_receive()? {
+            if response.request_id == request_id {
+                if response.ok {
+                    return Ok(response);
+                }
+                return Err(response
+                    .error
+                    .unwrap_or_else(|| "live request failed".to_string()));
             }
-            return Err(response
-                .error
-                .unwrap_or_else(|| "live request failed".to_string()));
         }
+        thread::sleep(Duration::from_millis(10));
     }
+    Err(format!(
+        "live request {request_id} did not finish within {} seconds",
+        MAX_LIVE_REQUEST_WAIT.as_secs()
+    ))
 }
 
 fn checkpoint(root: &Path, candidate: &str, workstream: &str) -> Result<String, String> {
@@ -1426,7 +2004,11 @@ fn verify_harness_readiness(
     ))
 }
 
-fn run_final_gates(project_root: &Path, artifacts: &Path) -> Result<(), String> {
+fn run_final_gates(
+    project_root: &Path,
+    artifacts: &Path,
+    canceled: &AtomicBool,
+) -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("failed locating Stasis for final validation: {error}"))?;
     let commands: &[(&str, &[&str])] = &[
@@ -1443,7 +2025,7 @@ fn run_final_gates(project_root: &Path, artifacts: &Path) -> Result<(), String> 
     fs::create_dir_all(&logs)
         .map_err(|error| format!("failed creating final validation logs: {error}"))?;
     for (name, args) in commands {
-        if should_stop(artifacts) {
+        if should_stop(artifacts) || canceled.load(Ordering::Acquire) {
             return Err("stop requested during final validation".to_string());
         }
         let log_path = logs.join(format!("{name}.log"));
@@ -1470,7 +2052,10 @@ fn run_final_gates(project_root: &Path, artifacts: &Path) -> Result<(), String> 
             .map_err(|error| format!("failed starting final {name}: {error}"))?;
         let started = Instant::now();
         let status = loop {
-            if should_stop(artifacts) || started.elapsed() >= Duration::from_secs(900) {
+            if should_stop(artifacts)
+                || canceled.load(Ordering::Acquire)
+                || started.elapsed() >= Duration::from_secs(900)
+            {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
@@ -1544,6 +2129,7 @@ fn builder_agent_profile(
         .unwrap_or(stasis_ai::DEFAULT_AGENT_TURNS);
     profile.model = model.model.clone();
     profile.reasoning_effort = model.reasoning_effort.clone();
+    profile.request_timeout = Some(Duration::from_secs(u64::from(model.timeout_minutes) * 60));
     profile.compaction = config
         .execution
         .compaction
@@ -1600,7 +2186,11 @@ fn reject(
     emit_event(
         artifacts,
         "candidate_rejected",
-        json!({"candidate": candidate, "reason": reason}),
+        json!({
+            "candidate": candidate,
+            "reason": reason,
+            "consecutive_stalls": state.consecutive_stalls,
+        }),
     )?;
     append_decision(
         artifacts,
@@ -1628,15 +2218,6 @@ fn finish(
         json!({"phase": state.phase, "reason": reason}),
     )?;
     persist_state(artifacts, state)
-}
-
-fn fail_state<T>(
-    state: &mut GauntletRunStateV1,
-    artifacts: &Path,
-    reason: &str,
-) -> Result<T, String> {
-    finish(state, artifacts, GauntletRunPhase::Failed, reason)?;
-    Err(reason.to_string())
 }
 
 fn ensure_initial_commit(root: &Path) -> Result<(), String> {
@@ -2041,7 +2622,7 @@ fn unix_ms() -> u64 {
 }
 
 fn format_status(state: &GauntletRunStateV1, artifacts: &Path) -> String {
-    format!("Gauntlet {}: {:?}\nbranch: {}\nbest: {}\naccepted: {}, rejected: {}, model calls: {}\nworktree: {}\nreport: {}", state.run_id, state.phase, state.branch, state.best_commit.as_deref().unwrap_or("none"), state.accepted_candidates, state.rejected_candidates, state.model_calls, state.project_root, artifacts.join(REPORT_NAME).display())
+    format!("Gauntlet {}: {:?}\nbranch: {}\nbest: {}\naccepted: {}, rejected: {}, model calls: {}\nworkspace: {}\nreport: {}", state.run_id, state.phase, state.branch, state.best_commit.as_deref().unwrap_or("none"), state.accepted_candidates, state.rejected_candidates, state.model_calls, state.project_root, artifacts.join(REPORT_NAME).display())
 }
 
 fn scout_schema() -> Value {
@@ -2065,6 +2646,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn heartbeat_distinguishes_live_and_interrupted_runs() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis-gauntlet-heartbeat-{}-{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        fs::create_dir_all(&root).expect("heartbeat temp directory");
+        let path = root.join(HEARTBEAT_NAME);
+        write_heartbeat(&path).expect("fresh heartbeat");
+        assert!(heartbeat_is_fresh(&path));
+        fs::write(&path, br#"{"schema_version":1,"pid":1,"unix_ms":0}"#).expect("stale heartbeat");
+        assert!(!heartbeat_is_fresh(&path));
+        fs::remove_file(&path).expect("remove heartbeat");
+        fs::remove_dir(&root).expect("remove heartbeat directory");
+    }
+
+    #[test]
     fn run_ids_and_capture_artifacts_are_bounded() {
         assert!(validate_run_id("1234567890-deadbeef").is_ok());
         assert!(validate_run_id("../escape").is_err());
@@ -2082,6 +2680,47 @@ mod tests {
         let source = r#"{"preferred":"a","score_a":80,"score_b":60,"largest_gap":"audio","summary":"A is clearer","extra":true}"#;
         assert!(serde_json::from_str::<BlindCritique>(source).is_err());
         assert_eq!(critic_schema()["additionalProperties"], false);
+    }
+
+    #[test]
+    fn visual_first_and_gameplay_first_candidates_can_checkpoint() {
+        let critique = |preferred: &str, score_a: u32, score_b: u32| BlindCritique {
+            preferred: preferred.to_string(),
+            score_a,
+            score_b,
+            largest_gap: "next gap".to_string(),
+            summary: "bounded comparison".to_string(),
+        };
+
+        let visual_improvement = critique("a", 20, 5);
+        let unchanged_gameplay = critique("equivalent", 1, 1);
+        assert!(critics_allow_checkpoint(
+            &visual_improvement,
+            &unchanged_gameplay,
+            true
+        ));
+
+        let unchanged_visuals = critique("equivalent", 5, 5);
+        let gameplay_improvement = critique("b", 2, 25);
+        assert!(critics_allow_checkpoint(
+            &unchanged_visuals,
+            &gameplay_improvement,
+            false
+        ));
+
+        let insufficient_gameplay_evidence = critique("neither", 1, 1);
+        assert!(!critics_allow_checkpoint(
+            &visual_improvement,
+            &insufficient_gameplay_evidence,
+            true
+        ));
+
+        let gameplay_regression = critique("b", 1, 30);
+        assert!(!critics_allow_checkpoint(
+            &visual_improvement,
+            &gameplay_regression,
+            true
+        ));
     }
 
     #[test]
@@ -2176,6 +2815,7 @@ mod tests {
             accepted_candidates: 0,
             rejected_candidates: 5,
             consecutive_stalls: 5,
+            quality_acceptance_streak: 1,
             started_unix_ms: 1,
             updated_unix_ms: 2,
             terminal_reason: Some("consecutive candidate limit reached".to_string()),
@@ -2187,6 +2827,7 @@ mod tests {
         assert_eq!(state.consecutive_stalls, 0);
         assert_eq!(state.terminal_reason, None);
         assert_eq!(state.rejected_candidates, 5);
+        assert_eq!(state.quality_acceptance_streak, 1);
         assert_eq!(state.best_commit.as_deref(), Some("cafebabe"));
     }
 

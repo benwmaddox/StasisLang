@@ -17,6 +17,8 @@ const GAUNTLET_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MODEL_CALLS: u32 = 100;
 const DEFAULT_STALLED_CANDIDATES: u32 = 5;
 const DEFAULT_BUILDER_MAX_TURNS: u32 = 30;
+const DEFAULT_MODEL_TIMEOUT_MINUTES: u32 = 30;
+const MAX_MODEL_TIMEOUT_MINUTES: u32 = 120;
 const MAX_GOAL_BYTES: u64 = 256 * 1024;
 const MAX_REFERENCE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -135,11 +137,21 @@ pub(super) enum GauntletObserver {
     Jsonl,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum GauntletIsolation {
+    #[default]
+    InPlace,
+    Worktree,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GauntletExecution {
     pub autonomy: GauntletAutonomy,
     pub observer: GauntletObserver,
+    #[serde(default)]
+    pub isolation: GauntletIsolation,
     #[serde(default = "default_builder_max_turns")]
     pub builder_max_turns: u32,
     #[serde(default)]
@@ -194,19 +206,37 @@ pub(super) struct GauntletRoleModels {
     pub builder: GauntletRoleModel,
     #[serde(default = "default_builder_escalation_model")]
     pub builder_escalation: Option<GauntletRoleModel>,
+    #[serde(default = "default_builder_escalation_model")]
+    pub controller_escalation: Option<GauntletRoleModel>,
     #[serde(default)]
     pub visual_critic: GauntletRoleModel,
     #[serde(default)]
     pub gameplay_critic: GauntletRoleModel,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GauntletRoleModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default = "default_model_timeout_minutes")]
+    pub timeout_minutes: u32,
+}
+
+impl Default for GauntletRoleModel {
+    fn default() -> Self {
+        Self {
+            model: None,
+            reasoning_effort: None,
+            timeout_minutes: default_model_timeout_minutes(),
+        }
+    }
+}
+
+fn default_model_timeout_minutes() -> u32 {
+    DEFAULT_MODEL_TIMEOUT_MINUTES
 }
 
 impl Default for GauntletRoleModels {
@@ -216,6 +246,7 @@ impl Default for GauntletRoleModels {
             lead: GauntletRoleModel::default(),
             builder: default_luna_role_model(),
             builder_escalation: default_builder_escalation_model(),
+            controller_escalation: default_builder_escalation_model(),
             visual_critic: GauntletRoleModel::default(),
             gameplay_critic: GauntletRoleModel::default(),
         }
@@ -226,6 +257,7 @@ fn default_builder_escalation_model() -> Option<GauntletRoleModel> {
     Some(GauntletRoleModel {
         model: Some("gpt-5.6-sol".to_string()),
         reasoning_effort: Some("high".to_string()),
+        timeout_minutes: default_model_timeout_minutes(),
     })
 }
 
@@ -233,6 +265,7 @@ fn default_luna_role_model() -> GauntletRoleModel {
     GauntletRoleModel {
         model: Some("gpt-5.6-luna".to_string()),
         reasoning_effort: Some("max".to_string()),
+        timeout_minutes: default_model_timeout_minutes(),
     }
 }
 
@@ -270,6 +303,8 @@ pub(super) struct GauntletRunStateV1 {
     pub accepted_candidates: u32,
     pub rejected_candidates: u32,
     pub consecutive_stalls: u32,
+    #[serde(default)]
+    pub quality_acceptance_streak: u32,
     pub started_unix_ms: u64,
     pub updated_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -303,6 +338,7 @@ impl GauntletConfigV1 {
             execution: GauntletExecution {
                 autonomy: GauntletAutonomy::Full,
                 observer,
+                isolation: GauntletIsolation::InPlace,
                 builder_max_turns: DEFAULT_BUILDER_MAX_TURNS,
                 compaction: GauntletCompaction::default(),
             },
@@ -360,6 +396,9 @@ impl GauntletConfigV1 {
         if let Some(profile) = &self.models.builder_escalation {
             profile.validate("builder_escalation")?;
         }
+        if let Some(profile) = &self.models.controller_escalation {
+            profile.validate("controller_escalation")?;
+        }
         for reference in &self.quality_bar.references {
             validate_relative_path("reference path", Path::new(&reference.path))?;
             validate_sha256(&reference.sha256)?;
@@ -375,6 +414,11 @@ impl GauntletConfigV1 {
 
 impl GauntletRoleModel {
     fn validate(&self, role: &str) -> Result<(), String> {
+        if !(1..=MAX_MODEL_TIMEOUT_MINUTES).contains(&self.timeout_minutes) {
+            return Err(format!(
+                "Gauntlet models.{role}.timeout_minutes must be between 1 and {MAX_MODEL_TIMEOUT_MINUTES}"
+            ));
+        }
         for (field, value) in [
             ("model", self.model.as_deref()),
             ("reasoning_effort", self.reasoning_effort.as_deref()),
@@ -788,6 +832,7 @@ mod tests {
         assert_eq!(config.budget.model_calls, 100);
         assert_eq!(config.budget.stalled_candidates, 5);
         assert_eq!(config.execution.autonomy, GauntletAutonomy::Full);
+        assert_eq!(config.execution.isolation, GauntletIsolation::InPlace);
         assert_eq!(config.execution.builder_max_turns, 30);
         assert!(config.execution.compaction.enabled);
         assert_eq!(
@@ -797,6 +842,7 @@ mod tests {
         assert_eq!(config.execution.compaction.retain_recent_turns, 6);
         assert_eq!(config.models.scout.model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(config.models.scout.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(config.models.scout.timeout_minutes, 30);
         assert_eq!(config.models.builder.model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(
             config.models.builder.reasoning_effort.as_deref(),
@@ -809,6 +855,17 @@ mod tests {
             .expect("default builder escalation");
         assert_eq!(escalation.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(escalation.reasoning_effort.as_deref(), Some("high"));
+        let controller_escalation = config
+            .models
+            .controller_escalation
+            .as_ref()
+            .expect("default controller escalation");
+        assert_eq!(controller_escalation.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            controller_escalation.reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(controller_escalation.timeout_minutes, 30);
         assert!(config.models.lead.model.is_none());
         assert!(config.models.visual_critic.model.is_none());
         assert!(config.models.gameplay_critic.model.is_none());
@@ -844,6 +901,9 @@ mod tests {
         assert!(config.validate().is_err());
         config.execution.compaction = GauntletCompaction::default();
         config.models.scout.model = Some("bad model with spaces".to_string());
+        assert!(config.validate().is_err());
+        config.models.scout.model = Some("gpt-5.6-luna".to_string());
+        config.models.scout.timeout_minutes = 0;
         assert!(config.validate().is_err());
     }
 

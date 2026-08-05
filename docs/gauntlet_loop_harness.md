@@ -69,12 +69,15 @@ stasis gauntlet promote RUN_ID
 ```
 
 `new` creates a Git-backed graphical seed and starts its first run. `run`
-improves an existing project from `HEAD` in a linked isolated worktree.
+improves a clean existing project directly on its current branch by default.
+Set `execution.isolation` to `worktree` when a separate linked checkout is
+explicitly desired.
 Interactive terminals default to the human-readable terminal observer. `stop` cooperatively cancels
 the active model or test, rolls back a provisional candidate, and retains the
-best checkpoint. `promote` is the only operation that integrates an isolated
-result into the user's original branch; it refuses a dirty or ambiguous
-destination.
+best checkpoint. For the default in-place mode, accepted checkpoints are
+already on the project branch and `promote` is an idempotent confirmation. For
+explicit worktree isolation, `promote` fast-forwards the original clean branch
+and refuses a dirty or ambiguous destination.
 
 Convergence exits successfully. Budget exhaustion, stagnation, and an unmet
 bar exit nonzero while preserving the best playable checkpoint and reporting
@@ -101,6 +104,7 @@ The project root contains a strict, versioned `gauntlet.json`:
   "execution": {
     "autonomy": "full",
     "observer": "auto",
+    "isolation": "in_place",
     "builder_max_turns": 30,
     "compaction": {
       "enabled": true,
@@ -109,12 +113,13 @@ The project root contains a strict, versioned `gauntlet.json`:
     }
   },
   "models": {
-    "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
-    "lead": {},
-    "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
-    "builder_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
-    "visual_critic": {},
-    "gameplay_critic": {}
+    "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
+    "lead": {"timeout_minutes": 30},
+    "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
+    "builder_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+    "controller_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+    "visual_critic": {"timeout_minutes": 30},
+    "gameplay_critic": {"timeout_minutes": 30}
   }
 }
 ```
@@ -149,7 +154,9 @@ an auditable `context_compacted` trace event with before/after byte counts.
 Limits are 256 KiB through 16 MiB and 1 through 16 retained turns; the default
 is 2 MiB and six turns.
 
-Every role has an independent optional `model` and `reasoning_effort`. New
+Every role has an independent optional `model` and `reasoning_effort`, plus a
+`timeout_minutes` value that defaults to 30 and may be configured from 1
+through 120. New
 Gauntlet configurations default the scout and builder to `gpt-5.6-luna` with `max`
 reasoning. If the primary builder cannot finish, the same candidate receives one
 bounded rescue attempt from `gpt-5.6-sol` with `high` reasoning. Lead and both critics inherit `STASIS_AI_MODEL`,
@@ -160,22 +167,29 @@ supported there. A fully explicit configuration can use:
 
 ```json
 {
-  "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
-  "lead": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
-  "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
-  "builder_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
-  "visual_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "medium"},
-  "gameplay_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "high"}
+  "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
+  "lead": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+  "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
+  "builder_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+  "controller_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+  "visual_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "medium", "timeout_minutes": 30},
+  "gameplay_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30}
 }
 ```
 
 This default puts the discounted model on high-volume bounded work while the
 lead and independent critics remain on the stronger installed default. Projects
 can override any role when observed acceptance quality warrants it. Set
-`models.builder_escalation` to another `{model, reasoning_effort}` object to
+`models.builder_escalation` to another role object to
 change the rescue tier, use `{}` to inherit the installed defaults, or use
 `null` to disable builder escalation. Failed primary calls and rescue calls both
-count against the global model-call budget.
+count against the global model-call budget. `models.controller_escalation`
+provides the same one-shot recovery for scout, lead, and critic calls. If both
+critic attempts fail, the provisional candidate is rolled back and counted as
+a bounded stall; it is never accepted without independent evidence.
+The controller reserves two calls before starting or escalating a builder, one
+for each independent critic. It will end as `budget_exhausted` instead of
+spending the final calls on a candidate that can never be evaluated.
 
 Subscription-backed Codex is the first provider. Stasis does not request an API
 key or estimate a dollar cost. The [Codex non-interactive command
@@ -188,7 +202,7 @@ texture sheets. The current `codex exec` child transport accepts image inputs
 but does not expose the in-product ImageGen tool, so the core CLI never assumes
 it is present and never falls back to an API key. A host that can invoke
 the built-in ImageGen tool copies the selected project-bound output into the
-isolated worktree, then submits its PNG bytes plus provider/model/prompt
+selected project workspace, then submits its PNG bytes plus provider/model/prompt
 provenance to the same bounded PNG import transaction; it must not leave a
 referenced asset only in the host's generated-images directory. Both Gauntlet
 and the one-shot `stasis ai` command can use the import bridge; deterministic
@@ -238,19 +252,21 @@ not erase the current theory of the game.
 
 ## Execution architecture
 
-### Workspace isolation and seed
+### Workspace and seed
 
 For a new game, Stasis creates a target project with a real `main`, `tick`,
 `render`, and `on_code_swap`, a deterministic test, an empty v2 asset manifest,
-and a visible blank-canvas scene. It commits that seed and creates
-`stasis/gauntlet/<run-id>`.
+and a visible blank-canvas scene. It commits that seed and runs on that new
+repository's current branch.
 
-For an existing game, Stasis resolves `HEAD` and creates that branch in a linked
-worktree under the ignored `build/gauntlet/worktrees/` area. Dirty and
-untracked user files are never copied or overwritten. Every compiler, test,
-runtime, and agent action occurs inside the linked worktree. Each accepted
-improvement becomes a narrow Git checkpoint. Tracked files in the original
-checkout change only through explicit promotion.
+For an existing game, Stasis requires a clean checkout and operates directly
+on the current branch. Every accepted improvement becomes a narrow Git
+checkpoint, so the main project always shows the latest accepted source and
+assets. Rejected provisional edits are restored to that checkpoint. When
+`execution.isolation` is explicitly `worktree`, Stasis instead creates a
+`stasis/gauntlet/<run-id>` branch under the ignored
+`build/gauntlet/worktrees/` area and leaves the original checkout unchanged
+until promotion.
 
 ### Reference and bar bootstrap
 
@@ -335,8 +351,8 @@ files, prepared assets, state migration, code pointers, and renderer reload at
 a between-tick boundary. Any failure restores source, assets, manifest, code,
 and state.
 
-Full autonomy may apply a validated layout migration because the run is
-isolated and checkpointed. Existing `stasis ai` and TUI approval behavior does
+Full autonomy may apply a validated layout migration because the run starts
+clean and every accepted state is checkpointed. Existing `stasis ai` and TUI approval behavior does
 not change. Asset updates are synchronized into the prepared play bundle before
 the frame commit. New assets must be loaded by accepted code or
 `on_code_swap`.
@@ -358,9 +374,11 @@ For every selected work item:
    checks, performance budgets, and state/layout invariants.
 5. Run fresh visual and gameplay critics required by the workstream.
 6. Shuffle baseline/candidate labels for direct A/B comparison.
-7. Accept only when all hard gates pass, no required dimension materially
-   regresses, and the critics prefer the candidate or confirm that it closes a
-   frozen blocker.
+7. Accept an incremental checkpoint when all hard gates pass, neither critic
+   reports a regression, and at least one critic prefers the candidate. A
+   visual-first or gameplay-first slice may pair one preference with an
+   `equivalent` verdict from the unchanged dimension. Absolute scores still
+   control final convergence.
 8. Commit an accepted candidate as the next baseline.
 9. Roll back a regression completely and count it toward stagnation.
 10. Feed only the largest evidenced gap into the next lead decision.
@@ -373,6 +391,18 @@ candidates stop as `stalled`; eight hours or 100 model calls stop as
 
 Cancellation is observed between model calls, tool batches, tests, scenario
 steps, and commit boundaries.
+
+Each running controller writes a two-second heartbeat. `gauntlet status`
+reports `active`, `terminal`, or `interrupted; resume is safe`; `resume` refuses
+to start while a fresh heartbeat exists, preventing two controllers from
+mutating the same project workspace. A stale or missing heartbeat on a
+non-terminal phase is recoverable: resume restores the latest accepted Git
+checkpoint, retains the quality-acceptance streak and decision journal, clears
+the old stop request, and restarts the loop. Model timeouts, invalid structured
+responses, and transient role failures consume their real call budget and
+produce explicit attempt events. Scout/lead bootstrap has a bounded
+deterministic fallback; candidate capture or exhausted critic recovery rolls
+back safely and advances the stall counter.
 
 ## Delivery slices
 
@@ -419,9 +449,10 @@ checkpoint as a desktop executable.
 
 Provide an opt-in live-provider acceptance command that creates a small complete
 game, discovers references, accepts at least two workstreams, rejects one
-candidate, and leaves a playable checkpoint plus report. Each individual model
-or test command remains below 15 minutes; the eight-hour limit applies only to
-an explicitly started product run.
+candidate, and leaves a playable checkpoint plus report. Each model call
+defaults to a 30-minute deadline. Each individual test command remains below
+15 minutes; the run-wide limit applies only to an explicitly started product
+run and may be configured for day-long operation.
 
 Completion requires:
 
@@ -434,7 +465,9 @@ Completion requires:
 - web references have provenance and are never packaged;
 - stop, budget, stagnation, and recovery retain the best checkpoint;
 - the observer never blocks the game tick;
-- the original checkout remains untouched until promotion; and
+- in-place mode leaves the project at its latest accepted checkpoint, while
+  explicit worktree mode leaves the original checkout untouched until
+  promotion; and
 - the final checkpoint passes format, compile, tests, scenarios, desktop build,
   package, and executable smoke checks.
 
@@ -442,7 +475,9 @@ Completion requires:
 
 - Version one creates and improves complete 2D desktop games, not 3D or AAA
   engines.
-- Full autonomy applies only inside the isolated run branch/worktree.
+- Full autonomy requires a clean Git checkout and applies only inside the
+  selected project workspace; in-place is the default and worktree isolation
+  is opt-in.
 - Defaults are eight hours, 100 model calls, and five consecutive
   non-improving candidates.
 - Web discovery is enabled when local references are insufficient; automatic
