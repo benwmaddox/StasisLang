@@ -2624,7 +2624,12 @@ fn import_prior_run_lessons(
     let existing = read_decision_records(artifacts)?;
     let mut imported = existing
         .iter()
-        .filter(|record| record.get("kind").and_then(Value::as_str) == Some("prior_run_lesson"))
+        .filter(|record| {
+            matches!(
+                record.get("kind").and_then(Value::as_str),
+                Some("prior_run_lesson" | "prior_run_context")
+            )
+        })
         .filter_map(|record| {
             Some((
                 record.get("source_run_id")?.as_str()?.to_string(),
@@ -2663,6 +2668,14 @@ fn import_prior_run_lessons(
         if !imported.insert(identity) {
             continue;
         }
+        let imported_kind = if matches!(
+            lesson.source_kind.as_str(),
+            "candidate_accepted" | "pending_work_item"
+        ) {
+            "prior_run_context"
+        } else {
+            "prior_run_lesson"
+        };
         let record = json!({
             "schema_version": 1,
             "unix_ms": unix_ms(),
@@ -2671,7 +2684,7 @@ fn import_prior_run_lessons(
             "source_kind": bounded_decision_text(&lesson.source_kind),
             "audience": "lead_builder",
             "role": "controller",
-            "kind": "prior_run_lesson",
+            "kind": imported_kind,
             "summary": bounded_decision_text(&lesson.summary),
             "rationale": bounded_decision_text(&lesson.rationale),
             "evidence": bounded_decision_text(&lesson.evidence),
@@ -2703,10 +2716,44 @@ fn collect_prior_run_lessons(
     };
     let records = read_jsonl_records(&run_dir.join(DECISIONS_NAME), "prior decision memory")?;
     let mut has_builder_failure = false;
-    for record in records {
+    let mut latest_work_item = None;
+    let mut latest_work_outcome_unix_ms = 0_u64;
+    for record in &records {
         let Some(kind) = record.get("kind").and_then(Value::as_str) else {
             continue;
         };
+        let record_unix_ms = record.get("unix_ms").and_then(Value::as_u64).unwrap_or(0);
+        if kind == "work_item_selected" {
+            latest_work_item = Some((record_unix_ms, record));
+        }
+        if matches!(
+            kind,
+            "builder_completed"
+                | "builder_attempt_failed"
+                | "candidate_accepted"
+                | "candidate_rejected"
+        ) {
+            latest_work_outcome_unix_ms = latest_work_outcome_unix_ms.max(record_unix_ms);
+        }
+        if kind == "candidate_accepted" {
+            lessons.push(PriorRunLesson {
+                unix_ms: record_unix_ms,
+                source_run_id: source_run_id.to_string(),
+                source_kind: kind.to_string(),
+                summary: json_string(record, "summary", "A prior candidate was accepted"),
+                rationale: json_string(
+                    record,
+                    "rationale",
+                    "Accepted checkpoint behavior exists in the current workspace.",
+                ),
+                evidence: json_string(record, "evidence", "No acceptance evidence was recorded."),
+                next_step: json_string(
+                    record,
+                    "next_step",
+                    "Preserve the accepted checkpoint while selecting the next gap.",
+                ),
+            });
+        }
         if kind == "builder_attempt_failed" {
             has_builder_failure = true;
         }
@@ -2738,6 +2785,31 @@ fn collect_prior_run_lessons(
                 "Address this prior failure before repeating the same approach.",
             ),
         });
+    }
+    if let Some((selected_unix_ms, record)) = latest_work_item {
+        if selected_unix_ms > latest_work_outcome_unix_ms {
+            lessons.push(PriorRunLesson {
+                unix_ms: selected_unix_ms,
+                source_run_id: source_run_id.to_string(),
+                source_kind: "pending_work_item".to_string(),
+                summary: json_string(record, "summary", "A prior run selected pending work"),
+                rationale: json_string(
+                    record,
+                    "rationale",
+                    "The prior run selected this work but ended before a builder outcome.",
+                ),
+                evidence: json_string(
+                    record,
+                    "evidence",
+                    "No later builder outcome was recorded for this selection.",
+                ),
+                next_step: json_string(
+                    record,
+                    "next_step",
+                    "Re-evaluate this pending work against the current workspace.",
+                ),
+            });
+        }
     }
     if has_builder_failure {
         return Ok(());
@@ -3313,6 +3385,105 @@ mod tests {
         assert!(memory.contains(
             "completion_gate: live response transaction data was absent (repeated 2 times)"
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prior_run_lessons_import_accepted_checkpoint_and_only_pending_work() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_prior_progress_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let completed_run = root.join(RUNS_PATH).join("100-completed");
+        let pending_run = root.join(RUNS_PATH).join("200-pending");
+        let current_run = root.join(RUNS_PATH).join("300-current");
+        fs::create_dir_all(&completed_run).expect("completed run");
+        fs::create_dir_all(&pending_run).expect("pending run");
+        fs::create_dir_all(&current_run).expect("current run");
+
+        let completed_records = [
+            json!({
+                "schema_version": 1,
+                "unix_ms": 101,
+                "audience": "lead_builder",
+                "role": "lead",
+                "kind": "work_item_selected",
+                "summary": "Selected movement",
+                "rationale": "Movement was the largest gap.",
+                "evidence": "No accepted movement checkpoint.",
+                "next_step": "Implement movement."
+            }),
+            json!({
+                "schema_version": 1,
+                "unix_ms": 102,
+                "audience": "lead_builder",
+                "role": "controller",
+                "kind": "candidate_accepted",
+                "summary": "Accepted movement checkpoint",
+                "rationale": "Both critics allowed the checkpoint.",
+                "evidence": "commit=abc; gameplay_score=70",
+                "next_step": "Improve terrain art."
+            }),
+        ];
+        fs::write(
+            completed_run.join(DECISIONS_NAME),
+            completed_records
+                .iter()
+                .map(|record| serde_json::to_string(record).expect("record"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .expect("completed decisions");
+
+        let pending_records = [
+            json!({
+                "schema_version": 1,
+                "unix_ms": 201,
+                "audience": "lead_builder",
+                "role": "controller",
+                "kind": "candidate_accepted",
+                "summary": "Accepted state loop checkpoint",
+                "rationale": "The state loop passed independent evaluation.",
+                "evidence": "commit=def; gameplay_score=72",
+                "next_step": "Improve the sparse battlefield."
+            }),
+            json!({
+                "schema_version": 1,
+                "unix_ms": 202,
+                "audience": "lead_builder",
+                "role": "lead",
+                "kind": "work_item_selected",
+                "summary": "Selected medieval art",
+                "rationale": "Visual quality is now the largest gap.",
+                "evidence": "The run had no remaining builder budget.",
+                "next_step": "Build the medieval diorama."
+            }),
+        ];
+        fs::write(
+            pending_run.join(DECISIONS_NAME),
+            pending_records
+                .iter()
+                .map(|record| serde_json::to_string(record).expect("record"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .expect("pending decisions");
+
+        assert_eq!(
+            import_prior_run_lessons(&root, &current_run, "300-current").expect("progress import"),
+            3
+        );
+        let memory = decision_memory_snapshot(&current_run).expect("memory");
+        assert!(memory.contains("Accepted movement checkpoint"));
+        assert!(memory.contains("Accepted state loop checkpoint"));
+        assert!(memory.contains("Selected medieval art"));
+        assert!(memory.contains("pending_work_item"));
+        assert!(memory.contains("prior_run_context"));
+        assert!(!memory.contains("Selected movement"));
+
         let _ = fs::remove_dir_all(root);
     }
 
