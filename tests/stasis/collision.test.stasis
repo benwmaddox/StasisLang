@@ -9,14 +9,14 @@ global circle_a: Circle;
 global circle_b: Circle;
 
 test `collision predicates resolve by receiver type`(): bool {
-    box_a.min_x = 0.0;
-    box_a.min_y = 0.0;
-    box_a.max_x = 10.0;
-    box_a.max_y = 10.0;
-    box_b.min_x = 8.0;
-    box_b.min_y = 8.0;
-    box_b.max_x = 12.0;
-    box_b.max_y = 12.0;
+    box_a.minimum_x = 0.0;
+    box_a.minimum_y = 0.0;
+    box_a.maximum_x = 10.0;
+    box_a.maximum_y = 10.0;
+    box_b.minimum_x = 8.0;
+    box_b.minimum_y = 8.0;
+    box_b.maximum_x = 12.0;
+    box_b.maximum_y = 12.0;
 
     circle_a.x = 0.0;
     circle_a.y = 0.0;
@@ -41,14 +41,14 @@ test `collision predicates resolve by receiver type`(): bool {
 }
 
 test `collision predicates reject separated shapes and outside points`(): bool {
-    box_a.min_x = 0.0;
-    box_a.min_y = 0.0;
-    box_a.max_x = 2.0;
-    box_a.max_y = 2.0;
-    box_b.min_x = 3.0;
-    box_b.min_y = 3.0;
-    box_b.max_x = 4.0;
-    box_b.max_y = 4.0;
+    box_a.minimum_x = 0.0;
+    box_a.minimum_y = 0.0;
+    box_a.maximum_x = 2.0;
+    box_a.maximum_y = 2.0;
+    box_b.minimum_x = 3.0;
+    box_b.minimum_y = 3.0;
+    box_b.maximum_x = 4.0;
+    box_b.maximum_y = 4.0;
 
     circle_a.x = 0.0;
     circle_a.y = 0.0;
