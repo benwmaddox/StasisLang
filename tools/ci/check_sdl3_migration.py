@@ -30,6 +30,9 @@ PINNED = {
         'System.loadLibrary("SDL3")',
         'System.loadLibrary("SDL3_image")',
     ),
+    "mobile/shells/ios/StasisMobile/main.m": (
+        "#include <SDL3/SDL_main.h>",
+    ),
     "tools/ci/check_android_release_package.py": (
         '"libSDL3.so"',
         '"libSDL3_image.so"',
@@ -108,6 +111,15 @@ def validate(root: pathlib.Path = ROOT) -> list[str]:
             errors.append(
                 "runtime/stasis_graphics.c:"
                 f"{line}: SDL3 boolean return compared with SDL2 integer convention"
+            )
+    ios_main = root / "mobile/shells/ios/StasisMobile/main.m"
+    if ios_main.is_file():
+        ios_main_text = ios_main.read_text(encoding="utf-8")
+        if "SDL_UIKitRunApp" in ios_main_text:
+            errors.append("mobile/shells/ios/StasisMobile/main.m: obsolete SDL2 startup wrapper")
+        if ios_main_text.strip() != "#include <SDL3/SDL_main.h>":
+            errors.append(
+                "mobile/shells/ios/StasisMobile/main.m: SDL3 must own the iOS main wrapper"
             )
     return errors
 
