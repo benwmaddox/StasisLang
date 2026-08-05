@@ -10,7 +10,7 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 2. If the tree is dirty because a cross-repo inbox synced tracked docs, either commit that sync first or stop if the state is unsafe to modify.
 3. Run the baseline validation command: `tools/validate_repo.sh`.
 4. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
-5. Run `tools/install_git_hooks.ps1` once per clone. This repository's pre-commit hook blocks noncanonical staged Stasis source before running the Android Workshop JIT render-parity emulator gate; the arm64 release shell has its own package-content and device gates.
+5. Run `tools/install_git_hooks.ps1` once per clone. This repository's pre-commit hook blocks noncanonical staged Stasis source. Run the Android Workshop JIT render-parity emulator gate explicitly for rendering changes; the arm64 release shell has its own package-content and device gates.
 
 ## Choose work
 
