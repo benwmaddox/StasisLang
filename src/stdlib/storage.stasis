@@ -2,4 +2,5 @@
 // Scope and key must be 1..63 ASCII letters, digits, underscores, or hyphens.
 // Missing, invalid, or corrupt values return the caller-provided fallback.
 extern function storage_load_i32(scope: string, key: string, fallback: i32): i32;
+
 extern function storage_save_i32(scope: string, key: string, value: i32): bool;

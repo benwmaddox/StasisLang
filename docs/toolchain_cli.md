@@ -41,7 +41,9 @@ stasis inspect --capacity state.enemies=512
 ```
 
 `stasis init --name brick_game .` initializes an existing directory. The built-in template copies
-the version-matched standard library into `stdlib/`, so imports remain offline and project-local.
+the version-matched Stasis sources into `vendor/stasis/src/{stdlib,runtime}`, so imports remain
+offline and project-local. Generated source uses project-root imports such as
+`/vendor/stasis/src/stdlib/stdlib.stasis`, which resolve consistently from nested source files.
 Commands discover
 `stasis.json` by walking from the selected path toward the filesystem root, so they work from the
 project root and nested directories. `--workspace PATH` selects a project explicitly.
@@ -56,14 +58,29 @@ project root and nested directories. `--workspace PATH` selects a project explic
   "name": "brick_game",
   "entry": "src/main.stasis",
   "tests": "tests",
-  "output": "build"
+  "output": "build",
+  "vendor": {
+    "stasis": {
+      "release_id": "nightly-20260805-123",
+      "sha256": "<lowercase SHA-256>"
+    }
+  }
 }
 ```
 
+The vendor release and hash describe the exact checked-in `vendor/stasis/src` snapshot.
+`manifest_version` versions the JSON schema and is independent of the selected toolchain release.
+On every normal project command, Stasis verifies the on-disk tree against the selected executable.
+A mismatch stages its matching stdlib and runtime together and publishes the vendor tree and
+manifest as one rollback-capable transaction. This detects rebuilt development executables whose
+release ID did not change and repairs edited or missing vendor files. Stasis owns `vendor/stasis`;
+Git is the review and rollback mechanism, so synchronization does not prompt. Review and commit the
+vendor and manifest changes together with the compiler upgrade.
+
 Projects that should always use the standard library shipped with the selected toolchain can add
 `"stdlib": "toolchain"`. Before a workspace command starts, that exact stdlib and its matching
-runtime modules are synchronized transactionally into `.stasis_cache/toolchain/src/`; source under
-`src/` imports it with paths such as `../.stasis_cache/toolchain/src/stdlib/storage.stasis`. This keeps
+runtime modules are synchronized transactionally into `.stasis_cache/toolchain/src/`; source imports
+it with paths such as `/.stasis_cache/toolchain/src/stdlib/storage.stasis`. This keeps
 CLI, LSP, TUI, and VS Code play on one compiler/stdlib build without checking a dated toolchain
 archive into the project.
 
@@ -131,6 +148,9 @@ cloning a generated repository, reactivate the checked-in hook with
   JSON output includes the complete deterministic report; human output emphasizes totals,
   largest pools, projections, and warnings.
 - `version` and `env`: report installation, cache, and workspace locations.
+- `vendor status`: compare the manifest, checked-in vendor tree, and selected executable.
+- `vendor update`: transactionally restore `vendor/stasis` from the selected executable and update
+  its manifest identity immediately.
 
 `replay` and `verify` intentionally return deterministic unsupported diagnostics until the replay
 runtime contract lands; they do not fake successful behavior.

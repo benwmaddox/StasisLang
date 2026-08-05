@@ -22,6 +22,9 @@ final class WorkshopAiSymbolDiscovery {
     }
 
     static String resolveImport(String sourceFile, String importPath) {
+        if (importPath.replace('\\', '/').startsWith("/")) {
+            return normalize(importPath.substring(1));
+        }
         String normalizedSource = normalize(sourceFile);
         int slash = normalizedSource.lastIndexOf('/');
         String parent = slash < 0 ? "" : normalizedSource.substring(0, slash + 1);
