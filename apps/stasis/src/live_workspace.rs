@@ -1831,6 +1831,10 @@ impl LiveWorkspace {
             },
         );
         jit.accept_staged_candidate(prepared.candidate);
+        if swap_preview.layout_changed && self.validation_snapshot.is_some() {
+            self.validation_snapshot =
+                stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES).ok();
+        }
         self.source_items = source_items;
         self.completion_items = completion_items;
         self.source_files = source_files;
@@ -4468,6 +4472,234 @@ mod tests {
         assert!(fs::read_to_string(root.join("src/main.stasis"))
             .expect("source")
             .contains("score += 1"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn live_batch_can_add_and_call_a_helper_after_hot_swap() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                1,
+                LiveCommand::EditBatch {
+                    edits: vec![
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Update,
+                            target: LiveSymbolTarget {
+                                name: "tick".into(),
+                                kind: Some("function".into()),
+                                file: Some("src/main.stasis".into()),
+                                owner: None,
+                                signature: None,
+                            },
+                            source: Some(
+                                "function tick(): i32 { score = new_helper(); return 0; }".into(),
+                            ),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Add,
+                            target: LiveSymbolTarget {
+                                name: "new_helper".into(),
+                                kind: Some("function".into()),
+                                file: Some("src/main.stasis".into()),
+                                owner: None,
+                                signature: Some("new_helper(): i32".into()),
+                            },
+                            source: Some("function new_helper(): i32 { return 9; }".into()),
+                            expected_source_hash: None,
+                        },
+                    ],
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.kind, "edit_applied");
+
+        stasis_dynload::invoke_noarg_i32(tick_ptr as usize).expect("hot-swapped tick");
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(9)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn layout_hot_swap_keeps_validation_restore_and_new_helper_calls_safe() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "struct Game { ticks: i32; swaps: i32; }\nglobal game: Game;\nfunction main(): i32 { game.ticks = 0; game.swaps = 0; return 0; }\nfunction tick(): i32 { game.ticks += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { game.swaps += 1; return; }\n",
+        )
+        .expect("layout source");
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let snapshot = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(1, LiveCommand::ValidationSnapshot),
+        );
+        assert!(snapshot.ok, "{:?}", snapshot.error);
+
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                2,
+                LiveCommand::EditBatch {
+                    edits: vec![
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Update,
+                            target: LiveSymbolTarget {
+                                name: "Game".into(),
+                                kind: Some("struct".into()),
+                                file: Some("src/main.stasis".into()),
+                                owner: Some("Game".into()),
+                                signature: None,
+                            },
+                            source: Some(
+                                "struct Game { ticks: i32; swaps: i32; phase: i32; }".into(),
+                            ),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Update,
+                            target: LiveSymbolTarget {
+                                name: "tick".into(),
+                                kind: Some("function".into()),
+                                file: Some("src/main.stasis".into()),
+                                owner: None,
+                                signature: None,
+                            },
+                            source: Some(
+                                "function tick(): i32 { game.ticks += phase_value(); return 0; }"
+                                    .into(),
+                            ),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Add,
+                            target: LiveSymbolTarget {
+                                name: "phase_value".into(),
+                                kind: Some("function".into()),
+                                file: Some("src/main.stasis".into()),
+                                owner: None,
+                                signature: Some("phase_value(): i32".into()),
+                            },
+                            source: Some("function phase_value(): i32 { return 2; }".into()),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Update,
+                            target: LiveSymbolTarget {
+                                name: "render".into(),
+                                kind: Some("function".into()),
+                                file: Some("src/main.stasis".into()),
+                                owner: None,
+                                signature: None,
+                            },
+                            source: Some(
+                                "function render(): i32 { if (game.phase == phase_zero()) { game.phase = phase_one(); } if (game.phase == phase_two()) { game.phase = phase_three(); } if (game.phase == phase_four()) { game.phase = 0; } return 0; }"
+                                    .into(),
+                            ),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Add,
+                            target: LiveSymbolTarget { name: "phase_zero".into(), kind: Some("function".into()), file: Some("src/main.stasis".into()), owner: None, signature: Some("phase_zero(): i32".into()) },
+                            source: Some("function phase_zero(): i32 { return 0; }".into()),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Add,
+                            target: LiveSymbolTarget { name: "phase_one".into(), kind: Some("function".into()), file: Some("src/main.stasis".into()), owner: None, signature: Some("phase_one(): i32".into()) },
+                            source: Some("function phase_one(): i32 { return 1; }".into()),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Add,
+                            target: LiveSymbolTarget { name: "phase_two".into(), kind: Some("function".into()), file: Some("src/main.stasis".into()), owner: None, signature: Some("phase_two(): i32".into()) },
+                            source: Some("function phase_two(): i32 { return 2; }".into()),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Add,
+                            target: LiveSymbolTarget { name: "phase_three".into(), kind: Some("function".into()), file: Some("src/main.stasis".into()), owner: None, signature: Some("phase_three(): i32".into()) },
+                            source: Some("function phase_three(): i32 { return 3; }".into()),
+                            expected_source_hash: None,
+                        },
+                        stasis_runner::live::LiveEdit {
+                            operation: LiveEditOperation::Add,
+                            target: LiveSymbolTarget { name: "phase_four".into(), kind: Some("function".into()), file: Some("src/main.stasis".into()), owner: None, signature: Some("phase_four(): i32".into()) },
+                            source: Some("function phase_four(): i32 { return 4; }".into()),
+                            expected_source_hash: None,
+                        },
+                    ],
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        assert_eq!(preview.kind, "edit_preview");
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(3, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(applied.ok, "{:?}", applied.error);
+        let restored = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(4, LiveCommand::ValidationRestore),
+        );
+        assert!(restored.ok, "{:?}", restored.error);
+
+        stasis_dynload::invoke_noarg_i32(tick_ptr as usize).expect("hot-swapped tick");
+        assert_eq!(
+            jit.read_global_scalar("game.ticks"),
+            Ok(JitScalarValue::I32(2))
+        );
+        for (name, expected) in [
+            ("phase_zero", 0),
+            ("phase_one", 1),
+            ("phase_two", 2),
+            ("phase_three", 3),
+            ("phase_four", 4),
+        ] {
+            assert_eq!(jit.execute_i32_noarg_by_name(name), Ok(expected), "{name}");
+        }
+        stasis_dynload::invoke_noarg_i32(render_ptr as usize).expect("hot-swapped render");
+        assert_eq!(
+            jit.read_global_scalar("game.phase"),
+            Ok(JitScalarValue::I32(1))
+        );
         fs::remove_dir_all(root).ok();
     }
 
