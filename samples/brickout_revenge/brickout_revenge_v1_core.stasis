@@ -144,7 +144,7 @@ function brickout_ascii_append_i32(dst: ascii[], value: i32): void {
     let digit_step: i32 = 0;
     for (digit_step = 0; v > 0 && count < 12; digit_step = digit_step + 1) {
         let d: i32 = v % 10;
-        brickout_digits_tmp[count] = i32_to_u8_trunc(48 + d);
+        brickout_digits_tmp[count] = to_u8_trunc(48 + d);
         count = count + 1;
         v = v / 10;
     }

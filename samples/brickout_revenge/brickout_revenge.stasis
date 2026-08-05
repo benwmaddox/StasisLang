@@ -124,7 +124,7 @@ export function main(): i32 {
     state.sprites.brick_reflector_fx.load_sprite_from("assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == false) {
-        state.game.rng_state = time();
+        state.game.rng_state = get_time_ms();
         //init_game(true);
         //setup_default_bricks();
         //start_wave();
