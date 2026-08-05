@@ -642,22 +642,8 @@ fn controller_loop(
         );
         let run_builder =
             |model: &GauntletRoleModel, role: &str, instruction: &str, available_calls: u32| {
-                let profile = AgentProfile {
-                    role: role.to_string(),
-                    instruction: instruction.to_string(),
-                    max_turns: usize::try_from(
-                        available_calls.min(config.execution.builder_max_turns),
-                    )
-                    .unwrap_or(stasis_ai::DEFAULT_AGENT_TURNS),
-                    model: model.model.clone(),
-                    reasoning_effort: model.reasoning_effort.clone(),
-                    compaction: config.execution.compaction.enabled.then(|| {
-                        AgentCompactionPolicy {
-                            max_request_bytes: config.execution.compaction.max_request_bytes,
-                            retain_recent_turns: config.execution.compaction.retain_recent_turns,
-                        }
-                    }),
-                };
+                let profile =
+                    builder_agent_profile(&config, model, role, instruction, available_calls);
                 live_tui::run_scripted_ai_profile(
                     &client,
                     &project_root,
@@ -1473,6 +1459,32 @@ fn rollback_candidate(root: &Path, commit: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn builder_agent_profile(
+    config: &GauntletConfigV1,
+    model: &GauntletRoleModel,
+    role: &str,
+    instruction: &str,
+    available_calls: u32,
+) -> AgentProfile {
+    let mut profile = AgentProfile::default();
+    profile.role = role.to_string();
+    profile.instruction.push(' ');
+    profile.instruction.push_str(instruction);
+    profile.max_turns = usize::try_from(available_calls.min(config.execution.builder_max_turns))
+        .unwrap_or(stasis_ai::DEFAULT_AGENT_TURNS);
+    profile.model = model.model.clone();
+    profile.reasoning_effort = model.reasoning_effort.clone();
+    profile.compaction = config
+        .execution
+        .compaction
+        .enabled
+        .then(|| AgentCompactionPolicy {
+            max_request_bytes: config.execution.compaction.max_request_bytes,
+            retain_recent_turns: config.execution.compaction.retain_recent_turns,
+        });
+    profile
+}
+
 fn should_escalate_builder(failure: &live_tui::ScriptedAiFailure, canceled: &AtomicBool) -> bool {
     !canceled.load(Ordering::Acquire) && failure.message != "AI request canceled"
 }
@@ -2142,6 +2154,29 @@ mod tests {
         };
         canceled.store(false, Ordering::Release);
         assert!(!should_escalate_builder(&canceled_failure, &canceled));
+    }
+
+    #[test]
+    fn gauntlet_builder_keeps_the_virtual_stasis_tool_protocol() {
+        let config = GauntletConfigV1::new(false, Vec::new(), 8, 100, GauntletObserver::Jsonl)
+            .expect("config");
+        let profile = builder_agent_profile(
+            &config,
+            &config.models.builder,
+            "Fresh builder",
+            "Gauntlet-specific instruction.",
+            100,
+        );
+
+        assert!(profile
+            .instruction
+            .contains("first JSONL record is the immutable request header"));
+        assert!(profile
+            .instruction
+            .contains("Return exactly one JSON object matching the response contract"));
+        assert!(profile
+            .instruction
+            .contains("Gauntlet-specific instruction."));
     }
 
     #[test]
