@@ -183,14 +183,14 @@ fn default_compaction_retained_turns() -> usize {
     6
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GauntletRoleModels {
-    #[serde(default)]
+    #[serde(default = "default_luna_role_model")]
     pub scout: GauntletRoleModel,
     #[serde(default)]
     pub lead: GauntletRoleModel,
-    #[serde(default)]
+    #[serde(default = "default_luna_role_model")]
     pub builder: GauntletRoleModel,
     #[serde(default)]
     pub visual_critic: GauntletRoleModel,
@@ -205,6 +205,25 @@ pub(super) struct GauntletRoleModel {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+}
+
+impl Default for GauntletRoleModels {
+    fn default() -> Self {
+        Self {
+            scout: default_luna_role_model(),
+            lead: GauntletRoleModel::default(),
+            builder: default_luna_role_model(),
+            visual_critic: GauntletRoleModel::default(),
+            gameplay_critic: GauntletRoleModel::default(),
+        }
+    }
+}
+
+fn default_luna_role_model() -> GauntletRoleModel {
+    GauntletRoleModel {
+        model: Some("gpt-5.6-luna".to_string()),
+        reasoning_effort: Some("max".to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -763,7 +782,16 @@ mod tests {
             2 * 1024 * 1024
         );
         assert_eq!(config.execution.compaction.retain_recent_turns, 6);
-        assert!(config.models.builder.model.is_none());
+        assert_eq!(config.models.scout.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(config.models.scout.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(config.models.builder.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(
+            config.models.builder.reasoning_effort.as_deref(),
+            Some("max")
+        );
+        assert!(config.models.lead.model.is_none());
+        assert!(config.models.visual_critic.model.is_none());
+        assert!(config.models.gameplay_critic.model.is_none());
     }
 
     #[test]
