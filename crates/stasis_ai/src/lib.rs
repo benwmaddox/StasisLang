@@ -19,6 +19,7 @@ pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
 pub const MIN_COMPACTION_BYTES: usize = 256 * 1024;
 pub const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMPACTION_RETAINED_TURNS: usize = 16;
+const MAX_COMPLETION_REJECTIONS: usize = 3;
 const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. These are host-mediated virtual tools described by tool_specs in the immutable request header, not native Codex registry tools. Invoke them by returning mode=tool_calls with the requested calls in the structured response contract; never search for them in or reject them because of the native callable-tool registry. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Also use initial_context.stdlib_api as the completed catalog of public standard-library signatures; add the listed canonical_import when a needed module is not already imported, and do not spend turns rediscovering stdlib implementation files unless the catalog is ambiguous. Treat every listed project function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant project symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing project symbols before writing. For collision or geometry changes, use rendered rectangle bounds as the coordinate source of truth and derive contact test inputs after the update function's movement order instead of copying old collision constants. Put all related source and requested durable-test changes in one contiguous atomic write batch. The write compiles the batch and runs project tests; if it succeeds, return done immediately without a separate test call. If it fails, correct only the reported defect and retry atomically. Return exactly one JSON object matching the response contract.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +264,7 @@ where
     })
     .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
     let mut transcript = AgentTranscript::new(header);
+    let mut completion_rejections = 0_usize;
     for turn in 1..=profile.max_turns {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
@@ -285,9 +287,19 @@ where
         match response {
             ModelResponse::Done { summary, .. } => {
                 if let Err(error) = executor.validate_completion() {
+                    completion_rejections = completion_rejections.saturating_add(1);
                     let observations = vec![ToolObservation::error("completion_gate", error)];
                     emit(AgentEvent::Observations(observations.clone()));
                     transcript.append(&response_record, &observations)?;
+                    if completion_rejections >= MAX_COMPLETION_REJECTIONS {
+                        let reason = observations[0]
+                            .error
+                            .as_deref()
+                            .unwrap_or("completion validation failed");
+                        return Err(format!(
+                            "AI agent repeated an invalid completion {completion_rejections} times: {reason}"
+                        ));
+                    }
                     compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
                     continue;
                 }
@@ -1533,6 +1545,59 @@ mod tests {
         let header = serde_json::from_str::<Value>(provider.requests[1].lines().next().unwrap())
             .expect("request header");
         assert!(header.get("observations").is_none());
+    }
+
+    #[test]
+    fn repeated_invalid_completions_end_the_attempt_for_escalation() {
+        struct PrematureProvider {
+            calls: usize,
+        }
+        impl ModelProvider for PrematureProvider {
+            fn respond(
+                &mut self,
+                _request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.calls += 1;
+                Ok(ModelResponse::Done {
+                    working_notes:
+                        "Intent: finish. Observed: no write. Next: retry. Blocker: completion gate."
+                            .to_string(),
+                    summary: "finished without evidence".to_string(),
+                })
+            }
+        }
+
+        struct NeverReady;
+        impl ToolExecutor for NeverReady {
+            fn execute(
+                &mut self,
+                _calls: &[ToolCall],
+                _canceled: &AtomicBool,
+            ) -> Vec<ToolObservation> {
+                Vec::new()
+            }
+
+            fn validate_completion(&self) -> Result<(), String> {
+                Err("successful atomic write required".to_string())
+            }
+        }
+
+        let mut provider = PrematureProvider { calls: 0 };
+        let error = run_agent(
+            &mut provider,
+            &mut NeverReady,
+            "change",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect_err("repeated premature completion");
+
+        assert_eq!(provider.calls, MAX_COMPLETION_REJECTIONS);
+        assert!(error.contains("repeated an invalid completion 3 times"));
+        assert!(error.contains("successful atomic write required"));
     }
 
     #[test]
