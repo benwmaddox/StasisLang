@@ -40,15 +40,9 @@ if (-not $SkipBuild) {
   if (-not (Test-Path (Join-Path $vcpkgRoot "vcpkg.exe"))) {
     throw "vcpkg.exe was not found. Set VCPKG_INSTALLATION_ROOT."
   }
-  $vsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
-  $vsVersion = (& $vsWhere -latest -products * -property installationVersion).Trim()
-  if ($vsVersion.StartsWith("18.")) {
-    $generator = "Visual Studio 18 2026"
-  } elseif ($vsVersion.StartsWith("17.")) {
-    $generator = "Visual Studio 17 2022"
-  } else {
-    throw "A supported Visual Studio installation was not found."
-  }
+  $generatorScript = Join-Path $repoRoot "tools/windows/select-cmake-vs-generator.ps1"
+  $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $generatorScript).Trim()
+  if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
   # Some automation hosts inject both Path and PATH. MSBuild treats them as a
   # duplicate dictionary key when it launches cl.exe, so retain one canonical entry.
   $processPath = [Environment]::GetEnvironmentVariable("Path", "Process")
