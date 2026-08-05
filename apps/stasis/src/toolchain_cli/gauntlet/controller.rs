@@ -2230,6 +2230,12 @@ mod tests {
             .contains("first JSONL record is the immutable request header"));
         assert!(profile
             .instruction
+            .contains("host-mediated virtual tools described by tool_specs"));
+        assert!(profile.instruction.contains(
+            "never search for them in or reject them because of the native callable-tool registry"
+        ));
+        assert!(profile
+            .instruction
             .contains("Return exactly one JSON object matching the response contract"));
         assert!(profile
             .instruction
