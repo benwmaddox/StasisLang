@@ -896,4 +896,106 @@ mod tests {
         assert_eq!(restored.assets, manifest.assets);
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn obsolete_asset_can_be_replaced_under_the_same_id_and_rolled_back() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_replace_asset_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let old_source = root.join("assets/generated/unit-v1.png");
+        let new_source = root.join("assets/generated/unit-v2.png");
+        let old_prepared = root.join(".stasis_cache/play-assets/assets/generated/unit-v1.png");
+        let new_prepared = root.join(".stasis_cache/play-assets/assets/generated/unit-v2.png");
+        fs::create_dir_all(old_source.parent().expect("source parent")).expect("source dir");
+        fs::create_dir_all(old_prepared.parent().expect("prepared parent")).expect("prepared dir");
+        let old_png = render_png(16, 16, parse_color("#102030").unwrap(), &[]).unwrap();
+        fs::write(&old_source, &old_png).expect("old source asset");
+        fs::write(&old_prepared, &old_png).expect("old prepared asset");
+        let manifest = AssetManifest {
+            schema: "stasis-assets".to_string(),
+            version: 2,
+            display: None,
+            assets: vec![AssetEntry {
+                id: "unit".to_string(),
+                path: "assets/generated/unit-v1.png".to_string(),
+                content_sha256: sha256(&old_png),
+                prepared_from_sha256: None,
+                format: AssetFormat::Sprite {
+                    encoding: SpriteEncoding::Png,
+                    width: 16,
+                    height: 16,
+                },
+                prepare: None,
+                dependencies: Vec::new(),
+            }],
+        };
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec_pretty(&manifest).expect("manifest"),
+        )
+        .expect("manifest file");
+        let prepared_manifest = root
+            .join(".stasis_cache/play-assets")
+            .join(DEFAULT_ASSET_MANIFEST_PATH);
+        fs::create_dir_all(
+            prepared_manifest
+                .parent()
+                .expect("prepared manifest parent"),
+        )
+        .expect("prepared manifest dir");
+        fs::write(
+            &prepared_manifest,
+            serde_json::to_vec_pretty(&manifest).expect("prepared manifest"),
+        )
+        .expect("prepared manifest file");
+        let delete = ToolCall {
+            tool: "delete_asset".to_string(),
+            args: serde_json::json!({
+                "id": "unit",
+                "path": "assets/generated/unit-v1.png"
+            }),
+        };
+        let replace = ToolCall {
+            tool: "write_png_asset".to_string(),
+            args: serde_json::json!({
+                "id": "unit",
+                "path": "assets/generated/unit-v2.png",
+                "width": 24,
+                "height": 24,
+                "background": "#405060",
+                "shapes": []
+            }),
+        };
+
+        let transaction =
+            apply_asset_calls(&root, &[&delete, &replace]).expect("replacement transaction");
+        assert!(!old_source.exists());
+        assert!(!old_prepared.exists());
+        assert!(new_source.exists());
+        assert!(new_prepared.exists());
+        let updated: AssetManifest = serde_json::from_slice(
+            &fs::read(root.join(DEFAULT_ASSET_MANIFEST_PATH)).expect("updated manifest"),
+        )
+        .expect("updated manifest JSON");
+        assert_eq!(updated.assets.len(), 1);
+        assert_eq!(updated.assets[0].id, "unit");
+        assert_eq!(updated.assets[0].path, "assets/generated/unit-v2.png");
+
+        transaction.rollback().expect("rollback");
+        assert_eq!(fs::read(&old_source).expect("restored old source"), old_png);
+        assert_eq!(
+            fs::read(&old_prepared).expect("restored old prepared"),
+            old_png
+        );
+        assert!(!new_source.exists());
+        assert!(!new_prepared.exists());
+        let restored: AssetManifest = serde_json::from_slice(
+            &fs::read(root.join(DEFAULT_ASSET_MANIFEST_PATH)).expect("restored manifest"),
+        )
+        .expect("restored manifest JSON");
+        assert_eq!(restored.assets, manifest.assets);
+        let _ = fs::remove_dir_all(root);
+    }
 }
