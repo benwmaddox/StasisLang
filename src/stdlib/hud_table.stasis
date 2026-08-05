@@ -15,14 +15,14 @@ const HUD_RECT_W: i32 = 2;
 const HUD_RECT_H: i32 = 3;
 
 // Clamp utility (avoid extra imports).
-function hud_clamp(v: i32, min: i32, max: i32): i32 {
-    if (v < min) {
-        return min;
+function hud_clamp(value: i32, minimum: i32, maximum: i32): i32 {
+    if (value < minimum) {
+        return minimum;
     }
-    if (v > max) {
-        return max;
+    if (value > maximum) {
+        return maximum;
     }
-    return v;
+    return value;
 }
 
 function hud_rect_set(out_r: f32[], x: f32, y: f32, w: f32, h: f32): void {

@@ -10,6 +10,7 @@ struct SimulationState {
 }
 
 global state: SimulationState;
+
 global render_cmd_i32: i32[16];
 
 function main(): i32 {

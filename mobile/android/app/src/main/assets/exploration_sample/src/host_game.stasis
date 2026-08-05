@@ -2,7 +2,10 @@ import "systems/schedule.stasis";
 import "host_runtime.stasis";
 
 global ExplorationHostAssets {
-    player: Sprite; sun: Sprite; moon: Sprite; destination: Sprite;
+    player: Sprite;
+    sun: Sprite;
+    moon: Sprite;
+    destination: Sprite;
 }
 
 function exploration_host_load_assets(): void {
@@ -15,11 +18,59 @@ function exploration_host_load_assets(): void {
 function exploration_host_draw(): void {
     exploration_render_extract_system();
     exploration_host_begin_frame();
-    if (Render.command1_kind == 2) { exploration_host_sprite(ExplorationHostAssets.sun.handle, Render.command1_x, Render.command1_y, Render.command1_w, Render.command1_h, 0, 255); }
-    if (Render.command2_kind == 2) { exploration_host_sprite(ExplorationHostAssets.moon.handle, Render.command2_x, Render.command2_y, Render.command2_w, Render.command2_h, 0, 255); }
-    if (Render.command3_kind == 2) { exploration_host_sprite(ExplorationHostAssets.sun.handle, Render.command3_x, Render.command3_y, Render.command3_w, Render.command3_h, 0, 255); }
-    exploration_host_sprite(ExplorationHostAssets.player.handle, Render.command4_x, Render.command4_y, Render.command4_w, Render.command4_h, Render.command4_rotation_degrees, 255);
-    if (Render.command5_kind == 2) { exploration_host_sprite(ExplorationHostAssets.destination.handle, Render.command5_x, Render.command5_y, Render.command5_w, Render.command5_h, 0, 210); }
+    if (Render.command1_kind == 2) {
+        exploration_host_sprite(
+            ExplorationHostAssets.sun.handle,
+            Render.command1_x,
+            Render.command1_y,
+            Render.command1_w,
+            Render.command1_h,
+            0,
+            255
+        );
+    }
+    if (Render.command2_kind == 2) {
+        exploration_host_sprite(
+            ExplorationHostAssets.moon.handle,
+            Render.command2_x,
+            Render.command2_y,
+            Render.command2_w,
+            Render.command2_h,
+            0,
+            255
+        );
+    }
+    if (Render.command3_kind == 2) {
+        exploration_host_sprite(
+            ExplorationHostAssets.sun.handle,
+            Render.command3_x,
+            Render.command3_y,
+            Render.command3_w,
+            Render.command3_h,
+            0,
+            255
+        );
+    }
+    exploration_host_sprite(
+        ExplorationHostAssets.player.handle,
+        Render.command4_x,
+        Render.command4_y,
+        Render.command4_w,
+        Render.command4_h,
+        Render.command4_rotation_degrees,
+        255
+    );
+    if (Render.command5_kind == 2) {
+        exploration_host_sprite(
+            ExplorationHostAssets.destination.handle,
+            Render.command5_x,
+            Render.command5_y,
+            Render.command5_w,
+            Render.command5_h,
+            0,
+            210
+        );
+    }
     let sun_bar: i32 = 12 + Render.command6_w;
     let moon_bar: i32 = 12 + Render.command7_w;
     exploration_host_line(12, 20, sun_bar, 20, 1.0, 0.78, 0.22);

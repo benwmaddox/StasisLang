@@ -20,17 +20,6 @@ function menu_label_y_for(button_y: f32): f32 {
     return ui_place_y(button_y + 8.0, 40.0, 28.0, UiVertical.Center) + 1.0;
 }
 
-function menu_point_in_button(
-    point_x: f32,
-    point_y: f32,
-    button_x: f32,
-    button_y: f32,
-    button_w: f32,
-    button_h: f32
-): bool {
-    return
-        point_x >= button_x &&
-        point_x < button_x + button_w &&
-        point_y >= button_y &&
-        point_y < button_y + button_h;
+function menu_point_in_button(point_x: f32, point_y: f32, button_x: f32, button_y: f32, button_w: f32, button_h: f32): bool {
+    return point_x >= button_x && point_x < button_x + button_w && point_y >= button_y && point_y < button_y + button_h;
 }

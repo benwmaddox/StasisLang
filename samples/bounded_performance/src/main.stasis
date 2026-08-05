@@ -5,7 +5,9 @@ struct Particle {
 }
 
 global particles: Particle[32];
+
 global values: i32[5];
+
 global checksum: i32;
 
 extern function print_i32(value: i32): void;

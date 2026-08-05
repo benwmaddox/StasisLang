@@ -1,29 +1,53 @@
 import "../../src/stdlib/ui_axis_layout.stasis";
 
 test `ui place x aligns left center and right`(): bool {
-    if (ui_place_x(10.0, 101.0, 40.0, UiHorizontal.Left) != 10.0) { return false; }
-    if (ui_place_x(10.0, 101.0, 40.0, UiHorizontal.Center) != 40.5) { return false; }
-    if (ui_place_x(10.0, 101.0, 40.0, UiHorizontal.Right) != 71.0) { return false; }
+    if (ui_place_x(10.0, 101.0, 40.0, UiHorizontal.Left) != 10.0) {
+        return false;
+    }
+    if (ui_place_x(10.0, 101.0, 40.0, UiHorizontal.Center) != 40.5) {
+        return false;
+    }
+    if (ui_place_x(10.0, 101.0, 40.0, UiHorizontal.Right) != 71.0) {
+        return false;
+    }
     return true;
 }
 
 test `ui place y aligns top center and bottom`(): bool {
-    if (ui_place_y(20.0, 81.0, 30.0, UiVertical.Top) != 20.0) { return false; }
-    if (ui_place_y(20.0, 81.0, 30.0, UiVertical.Center) != 45.5) { return false; }
-    if (ui_place_y(20.0, 81.0, 30.0, UiVertical.Bottom) != 71.0) { return false; }
+    if (ui_place_y(20.0, 81.0, 30.0, UiVertical.Top) != 20.0) {
+        return false;
+    }
+    if (ui_place_y(20.0, 81.0, 30.0, UiVertical.Center) != 45.5) {
+        return false;
+    }
+    if (ui_place_y(20.0, 81.0, 30.0, UiVertical.Bottom) != 71.0) {
+        return false;
+    }
     return true;
 }
 
 test `ui axis placement preserves selected edge for oversized child`(): bool {
-    if (ui_place_x(10.0, 20.0, 40.0, UiHorizontal.Left) != 10.0) { return false; }
-    if (ui_place_x(10.0, 20.0, 40.0, UiHorizontal.Center) != 0.0) { return false; }
-    if (ui_place_x(10.0, 20.0, 40.0, UiHorizontal.Right) != -10.0) { return false; }
-    if (ui_place_y(10.0, 20.0, 40.0, UiVertical.Bottom) != -10.0) { return false; }
+    if (ui_place_x(10.0, 20.0, 40.0, UiHorizontal.Left) != 10.0) {
+        return false;
+    }
+    if (ui_place_x(10.0, 20.0, 40.0, UiHorizontal.Center) != 0.0) {
+        return false;
+    }
+    if (ui_place_x(10.0, 20.0, 40.0, UiHorizontal.Right) != -10.0) {
+        return false;
+    }
+    if (ui_place_y(10.0, 20.0, 40.0, UiVertical.Bottom) != -10.0) {
+        return false;
+    }
     return true;
 }
 
 test `ui axis placement accepts fractional regions`(): bool {
-    if (ui_place_x(0.25, 10.5, 2.0, UiHorizontal.Center) != 4.5) { return false; }
-    if (ui_place_y(1.25, 8.5, 2.0, UiVertical.Bottom) != 7.75) { return false; }
+    if (ui_place_x(0.25, 10.5, 2.0, UiHorizontal.Center) != 4.5) {
+        return false;
+    }
+    if (ui_place_y(1.25, 8.5, 2.0, UiVertical.Bottom) != 7.75) {
+        return false;
+    }
     return true;
 }

@@ -8,7 +8,7 @@ try {
     if ($configured -ne ".githooks") {
         throw "core.hooksPath verification failed: $configured"
     }
-    Write-Output "Installed blocking Stasis hooks from .githooks"
+    Write-Output "Installed Stasis source-format hooks from .githooks"
 } finally {
     Pop-Location
 }

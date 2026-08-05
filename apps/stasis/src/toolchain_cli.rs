@@ -1050,7 +1050,6 @@ fn create_project_with_options(
     }
     let root = absolute_path(&path)?;
     let bundled_stdlib = bundled_stdlib_dir()?;
-    let bundled_runtime = bundled_stasis_runtime_dir(&bundled_stdlib)?;
     let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
         format!(
             "bundled stdlib has no src parent: {}",
@@ -1111,7 +1110,6 @@ fn create_project_with_options(
     write_manifest(&manifest_path, &manifest)?;
     let vendor_source = root.join("vendor/stasis/src");
     copy_dir_if_exists(&bundled_stdlib, &vendor_source.join("stdlib"))?;
-    copy_dir_if_exists(&bundled_runtime, &vendor_source.join("runtime"))?;
     write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
     write_new_file(&root.join("CLAUDE.md"), PROJECT_CLAUDE_GUIDE)?;
     write_new_file(
@@ -4786,28 +4784,14 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
         executable_dir.join("../src/stdlib"),
         source_tree,
     ] {
-        if candidate.join("stdlib.stasis").is_file() {
+        if candidate.join("stdlib.stasis").is_file()
+            && candidate.join("internal/host_frame.stasis").is_file()
+            && candidate.join("internal/gfx_cmd.stasis").is_file()
+        {
             return Ok(candidate);
         }
     }
-    Err(
-        "installed toolchain is missing src/stdlib; reinstall the complete release archive"
-            .to_string(),
-    )
-}
-
-fn bundled_stasis_runtime_dir(stdlib: &Path) -> Result<PathBuf, String> {
-    let runtime = stdlib
-        .parent()
-        .ok_or_else(|| format!("bundled stdlib has no src parent: {}", stdlib.display()))?
-        .join("runtime");
-    if runtime.join("host_frame.stasis").is_file() && runtime.join("gfx_cmd.stasis").is_file() {
-        return Ok(runtime);
-    }
-    Err(format!(
-        "installed toolchain is missing src/runtime required by stdlib imports: {}",
-        runtime.display()
-    ))
+    Err("installed toolchain is missing the complete src/stdlib hierarchy; reinstall the complete release archive".to_string())
 }
 
 fn bundled_mobile_assets_dir() -> Result<PathBuf, String> {
@@ -6006,7 +5990,7 @@ mod tests {
             .join(".stasis_cache/toolchain/src/.toolchain-sha256")
             .is_file());
         assert!(root
-            .join(".stasis_cache/toolchain/src/runtime/gfx_cmd.stasis")
+            .join(".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis")
             .is_file());
 
         remove_temp(&root);

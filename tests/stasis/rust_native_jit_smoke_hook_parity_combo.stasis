@@ -1,4 +1,8 @@
-global State { hook_runs: i32; hook_branch: i32; hook_sin: f32; }
+global State {
+    hook_runs: i32;
+    hook_branch: i32;
+    hook_sin: f32;
+}
 
 function helper_add(delta: i32): void {
     State.hook_runs += delta;
@@ -21,4 +25,3 @@ function on_code_swap(): void {
 function main(): i32 {
     return 0;
 }
-

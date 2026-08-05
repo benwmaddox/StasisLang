@@ -48,33 +48,82 @@ function main(): i32 {
         word += 1;
     }
 
-    if (wrap_byte() != 0) { return 10; }
-    if (wrap_word() != 0) { return 11; }
-    if (high <= signed_max) { return 12; }
-    if (fixed32_to_i32(doubled) != 3) { return 13; }
-    if (negative != 0 - 1) { return 14; }
-    if (byte_value != 0) { return 15; }
-    if (word_value != 0) { return 16; }
-    if (wide_value <= signed_max) { return 17; }
-    if (byte_values[1] != 255) { return 18; }
-    if (word_values[1] != 65535) { return 19; }
-    if (wide_values[1] <= signed_max) { return 20; }
-    if (foreach_total != 65539) { return 21; }
-    if (foreach_words[0] != 2) { return 22; }
-    if (foreach_words[1] != 0) { return 23; }
-    if (foreach_words[2] != 4) { return 24; }
-    if ((high / 2) != signed_max) { return 25; }
-    if (identity_wide(4294967295) != high) { return 26; }
-    if (fixed32_to_i32(divided) != 0 - 1) { return 27; }
-    if (fixed32_to_i32(wrapped_fixed) != 0 - 32768) { return 28; }
-    if (wide_f32 < 4000000000.0) { return 29; }
-    if (wide_f64 < wide_floor) { return 30; }
+    if (wrap_byte() != 0) {
+        return 10;
+    }
+    if (wrap_word() != 0) {
+        return 11;
+    }
+    if (high <= signed_max) {
+        return 12;
+    }
+    if (fixed32_to_i32(doubled) != 3) {
+        return 13;
+    }
+    if (negative != 0 - 1) {
+        return 14;
+    }
+    if (byte_value != 0) {
+        return 15;
+    }
+    if (word_value != 0) {
+        return 16;
+    }
+    if (wide_value <= signed_max) {
+        return 17;
+    }
+    if (byte_values[1] != 255) {
+        return 18;
+    }
+    if (word_values[1] != 65535) {
+        return 19;
+    }
+    if (wide_values[1] <= signed_max) {
+        return 20;
+    }
+    if (foreach_total != 65539) {
+        return 21;
+    }
+    if (foreach_words[0] != 2) {
+        return 22;
+    }
+    if (foreach_words[1] != 0) {
+        return 23;
+    }
+    if (foreach_words[2] != 4) {
+        return 24;
+    }
+    if ((high / 2) != signed_max) {
+        return 25;
+    }
+    if (identity_wide(4294967295) != high) {
+        return 26;
+    }
+    if (fixed32_to_i32(divided) != 0 - 1) {
+        return 27;
+    }
+    if (fixed32_to_i32(wrapped_fixed) != 0 - 32768) {
+        return 28;
+    }
+    if (wide_f32 < 4000000000.0) {
+        return 29;
+    }
+    if (wide_f64 < wide_floor) {
+        return 30;
+    }
     return 0;
 }
+
 global byte_value: u8;
+
 global word_value: u16;
+
 global wide_value: u32;
+
 global byte_values: u8[2];
+
 global word_values: u16[2];
+
 global wide_values: u32[2];
+
 global foreach_words: u16[3];

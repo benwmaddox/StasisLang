@@ -3,14 +3,14 @@
 // Graphics/runtime bindings.
 //
 // Policy: Stasis does not call into the host on hot paths.
-// - Inputs/state are read from `src/runtime/host_frame.stasis` globals (written by the host once per tick).
-// - Rendering is written into `src/runtime/gfx_cmd.stasis` command buffers (read/executed by the host after `tick()`).
+// - Inputs/state are read from private HostFrame globals written by the host once per tick.
+// - Rendering is written into private command buffers read by the host after `tick()`.
 //
 // The remaining `extern` functions are intended for startup/asset loading (not per-tick).
 
-import "../runtime/host_frame.stasis";
-import "../runtime/gfx_cmd.stasis";
-import "../runtime/host_window_request.stasis";
+import "internal/host_frame.stasis";
+import "internal/gfx_cmd.stasis";
+import "internal/host_window_request.stasis";
 
 extern function time(): i32;
 

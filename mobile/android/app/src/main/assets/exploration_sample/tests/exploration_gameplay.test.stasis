@@ -2,93 +2,146 @@ import "../src/main.stasis";
 
 test `new touch edge sets one clamped destination`(): bool {
     exploration_start();
-    GameState.camera_x = 0; GameState.camera_y = 0;
-    Input.touch_x = -20; Input.touch_y = 1200; Input.touch_active = 1;
+    GameState.camera_x = 0;
+    GameState.camera_y = 0;
+    Input.touch_x = -20;
+    Input.touch_y = 1200;
+    Input.touch_active = 1;
     exploration_input_target_system();
-    if (World.destination_x[0] != 12 || World.destination_y[0] != 948) { return false; }
-    if (GameState.accepted_tap_count != 1) { return false; }
-    Input.touch_x = 200; Input.touch_y = 200;
+    if (World.destination_x[0] != 12 || World.destination_y[0] != 948) {
+        return false;
+    }
+    if (GameState.accepted_tap_count != 1) {
+        return false;
+    }
+    Input.touch_x = 200;
+    Input.touch_y = 200;
     exploration_input_target_system();
-    if (World.destination_x[0] != 12 || GameState.accepted_tap_count != 1) { return false; }
-    Input.touch_active = 0; exploration_input_target_system();
-    GameState.camera_x = 100; GameState.camera_y = 200;
-    Input.touch_active = 1; exploration_input_target_system();
-    return World.destination_x[0] == 300 && World.destination_y[0] == 400
-        && GameState.accepted_tap_count == 2;
+    if (World.destination_x[0] != 12 || GameState.accepted_tap_count != 1) {
+        return false;
+    }
+    Input.touch_active = 0;
+    exploration_input_target_system();
+    GameState.camera_x = 100;
+    GameState.camera_y = 200;
+    Input.touch_active = 1;
+    exploration_input_target_system();
+    return World.destination_x[0] == 300 && World.destination_y[0] == 400 && GameState.accepted_tap_count == 2;
 }
 
 test `movement is proportional deterministic and never overshoots`(): bool {
     exploration_start();
     World.destination_active[0] = 1;
-    World.destination_x[0] = 420; World.destination_y[0] = 630;
+    World.destination_x[0] = 420;
+    World.destination_y[0] = 630;
     exploration_movement_system();
-    if (World.position_x[0] != 366 || World.position_y[0] != 603) { return false; }
-    World.destination_x[0] = 369; World.destination_y[0] = 605;
+    if (World.position_x[0] != 366 || World.position_y[0] != 603) {
+        return false;
+    }
+    World.destination_x[0] = 369;
+    World.destination_y[0] = 605;
     exploration_movement_system();
-    return World.position_x[0] == 369 && World.position_y[0] == 605
-        && World.destination_active[0] == 0;
+    return World.position_x[0] == 369 && World.position_y[0] == 605 && World.destination_active[0] == 0;
 }
 
 test `collection at boundary becomes one inventory audio event`(): bool {
     exploration_start();
     World.position_x[1] = World.position_x[0] + PICKUP_RADIUS;
     World.position_y[1] = World.position_y[0];
-    exploration_collection_system(); exploration_inventory_system();
-    if (GameState.collected_count != 1 || World.inventory_count[1] != 1) { return false; }
-    if (ExplorationAudio.event_serial != 1 || ExplorationAudio.cue_kind != 1) { return false; }
-    exploration_collection_system(); exploration_inventory_system();
-    return GameState.collected_count == 1 && World.inventory_count[1] == 1
-        && World.collectible_active[1] == 0 && ExplorationAudio.event_serial == 1;
+    exploration_collection_system();
+    exploration_inventory_system();
+    if (GameState.collected_count != 1 || World.inventory_count[1] != 1) {
+        return false;
+    }
+    if (ExplorationAudio.event_serial != 1 || ExplorationAudio.cue_kind != 1) {
+        return false;
+    }
+    exploration_collection_system();
+    exploration_inventory_system();
+    return GameState.collected_count == 1 && World.inventory_count[1] == 1 && World.collectible_active[1] == 0 && ExplorationAudio.event_serial == 1;
 }
 
 test `tick schedule moves collects inventories and renders`(): bool {
     exploration_start();
-    World.position_x[0] = 90; World.position_y[0] = 210;
-    World.position_x[1] = 90; World.position_y[1] = 180;
-    GameState.camera_x = 0; GameState.camera_y = 0;
-    Input.touch_x = 90; Input.touch_y = 180; Input.touch_active = 1;
+    World.position_x[0] = 90;
+    World.position_y[0] = 210;
+    World.position_x[1] = 90;
+    World.position_y[1] = 180;
+    GameState.camera_x = 0;
+    GameState.camera_y = 0;
+    Input.touch_x = 90;
+    Input.touch_y = 180;
+    Input.touch_active = 1;
     let step: i32 = 0;
-    for (step = 0; step < 2; step = step + 1) { tick(); }
-    if (GameState.collected_count != 1 || GameState.tutorial_stage != 2) { return false; }
+    for (step = 0; step < 2; step = step + 1) {
+        tick();
+    }
+    if (GameState.collected_count != 1 || GameState.tutorial_stage != 2) {
+        return false;
+    }
     render();
-    return Render.command_count == 8 && Render.command1_kind == 0
-        && Render.command4_kind == 2 && Render.command4_asset == EXPLORATION_PLAYER_ASSET;
+    return Render.command_count == 8 && Render.command1_kind == 0 && Render.command4_kind == 2 && Render.command4_asset == EXPLORATION_PLAYER_ASSET;
 }
 
 test `camera follow is deterministic and bounded`(): bool {
     exploration_start();
-    World.position_x[0] = 0; World.position_y[0] = 0;
+    World.position_x[0] = 0;
+    World.position_y[0] = 0;
     let step: i32 = 0;
-    for (step = 0; step < 100; step = step + 1) { exploration_camera_follow_system(); }
-    if (GameState.camera_x != 0 || GameState.camera_y != 0) { return false; }
-    World.position_x[0] = WORLD_WIDTH; World.position_y[0] = WORLD_HEIGHT;
-    for (step = 0; step < 100; step = step + 1) { exploration_camera_follow_system(); }
-    return GameState.camera_x == WORLD_WIDTH - GameState.screen_w
-        && GameState.camera_y == WORLD_HEIGHT - GameState.screen_h;
+    for (step = 0; step < 100; step = step + 1) {
+        exploration_camera_follow_system();
+    }
+    if (GameState.camera_x != 0 || GameState.camera_y != 0) {
+        return false;
+    }
+    World.position_x[0] = WORLD_WIDTH;
+    World.position_y[0] = WORLD_HEIGHT;
+    for (step = 0; step < 100; step = step + 1) {
+        exploration_camera_follow_system();
+    }
+    return GameState.camera_x == WORLD_WIDTH - GameState.screen_w && GameState.camera_y == WORLD_HEIGHT - GameState.screen_h;
 }
 
 test `spawn capacity rejects player occupied and out of range slots`(): bool {
     exploration_start();
     let player_x: i32 = World.position_x[0];
-    if (exploration_spawn_collectible(0, 20, 20, 1)) { return false; }
-    if (exploration_spawn_collectible(MAX_ENTITIES, 20, 20, 1)) { return false; }
-    if (exploration_spawn_collectible(1, 20, 20, 1)) { return false; }
-    if (exploration_spawn_collectible(4, 20, 20, 3)) { return false; }
-    return World.position_x[0] == player_x && World.entity_alive[4] == 0
-        && GameState.collected_count == 0;
+    if (exploration_spawn_collectible(0, 20, 20, 1)) {
+        return false;
+    }
+    if (exploration_spawn_collectible(MAX_ENTITIES, 20, 20, 1)) {
+        return false;
+    }
+    if (exploration_spawn_collectible(1, 20, 20, 1)) {
+        return false;
+    }
+    if (exploration_spawn_collectible(4, 20, 20, 3)) {
+        return false;
+    }
+    return World.position_x[0] == player_x && World.entity_alive[4] == 0 && GameState.collected_count == 0;
 }
 
 test `overlapping collectibles resolve in ascending entity order`(): bool {
     exploration_start();
-    World.position_x[1] = World.position_x[0]; World.position_y[1] = World.position_y[0];
-    World.position_x[2] = World.position_x[0]; World.position_y[2] = World.position_y[0];
-    exploration_collection_system(); exploration_inventory_system();
-    if (GameState.collected_count != 2 || GameState.last_collected_entity_id != 3) { return false; }
-    if (World.inventory_count[1] != 1 || World.inventory_count[2] != 1) { return false; }
-    if (ExplorationAudio.event_serial != 2 || ExplorationAudio.cue_kind != 2) { return false; }
+    World.position_x[1] = World.position_x[0];
+    World.position_y[1] = World.position_y[0];
+    World.position_x[2] = World.position_x[0];
+    World.position_y[2] = World.position_y[0];
+    exploration_collection_system();
+    exploration_inventory_system();
+    if (GameState.collected_count != 2 || GameState.last_collected_entity_id != 3) {
+        return false;
+    }
+    if (World.inventory_count[1] != 1 || World.inventory_count[2] != 1) {
+        return false;
+    }
+    if (ExplorationAudio.event_serial != 2 || ExplorationAudio.cue_kind != 2) {
+        return false;
+    }
     World.entity_alive[3] = 0;
-    World.position_x[3] = World.position_x[0]; World.position_y[3] = World.position_y[0];
-    exploration_collection_system(); exploration_inventory_system();
+    World.position_x[3] = World.position_x[0];
+    World.position_y[3] = World.position_y[0];
+    exploration_collection_system();
+    exploration_inventory_system();
     return GameState.collected_count == 2;
 }
 
@@ -99,36 +152,59 @@ test `collection queue covers every collectible slot`(): bool {
         if (slot > 3 && !exploration_spawn_collectible(slot, World.position_x[0], World.position_y[0], 1)) {
             return false;
         }
-        World.position_x[slot] = World.position_x[0]; World.position_y[slot] = World.position_y[0];
+        World.position_x[slot] = World.position_x[0];
+        World.position_y[slot] = World.position_y[0];
     }
-    exploration_collection_system(); exploration_inventory_system();
-    if (GameState.collected_count != MAX_ENTITIES - 1) { return false; }
+    exploration_collection_system();
+    exploration_inventory_system();
+    if (GameState.collected_count != MAX_ENTITIES - 1) {
+        return false;
+    }
     for (slot = 1; slot < MAX_ENTITIES; slot = slot + 1) {
-        if (World.collectible_active[slot] != 0) { return false; }
+        if (World.collectible_active[slot] != 0) {
+            return false;
+        }
     }
     return true;
 }
 
 test `manifest handles flow from world data into render commands`(): bool {
-    exploration_start(); render();
-    if (World.sprite_handle[0] != EXPLORATION_PLAYER_ASSET) { return false; }
-    if (World.sprite_handle[1] != EXPLORATION_SUN_ASSET) { return false; }
-    if (World.sprite_handle[2] != EXPLORATION_MOON_ASSET) { return false; }
-    return Render.command1_asset == EXPLORATION_SUN_ASSET
-        && Render.command2_asset == EXPLORATION_MOON_ASSET
-        && Render.command5_asset == EXPLORATION_DESTINATION_ASSET;
+    exploration_start();
+    render();
+    if (World.sprite_handle[0] != EXPLORATION_PLAYER_ASSET) {
+        return false;
+    }
+    if (World.sprite_handle[1] != EXPLORATION_SUN_ASSET) {
+        return false;
+    }
+    if (World.sprite_handle[2] != EXPLORATION_MOON_ASSET) {
+        return false;
+    }
+    return Render.command1_asset == EXPLORATION_SUN_ASSET && Render.command2_asset == EXPLORATION_MOON_ASSET && Render.command5_asset == EXPLORATION_DESTINATION_ASSET;
 }
 
 test `tutorial stages advance from tap through garden completion`(): bool {
     exploration_start();
     exploration_tutorial_progress_system();
-    if (GameState.tutorial_stage != 0) { return false; }
-    Input.touch_x = 80; Input.touch_y = 200; Input.touch_active = 1;
-    exploration_input_target_system(); exploration_tutorial_progress_system();
-    if (GameState.tutorial_stage != 1) { return false; }
-    World.position_x[1] = World.position_x[0]; World.position_y[1] = World.position_y[0];
-    exploration_collection_system(); exploration_inventory_system(); exploration_tutorial_progress_system();
-    if (GameState.tutorial_stage != 2) { return false; }
+    if (GameState.tutorial_stage != 0) {
+        return false;
+    }
+    Input.touch_x = 80;
+    Input.touch_y = 200;
+    Input.touch_active = 1;
+    exploration_input_target_system();
+    exploration_tutorial_progress_system();
+    if (GameState.tutorial_stage != 1) {
+        return false;
+    }
+    World.position_x[1] = World.position_x[0];
+    World.position_y[1] = World.position_y[0];
+    exploration_collection_system();
+    exploration_inventory_system();
+    exploration_tutorial_progress_system();
+    if (GameState.tutorial_stage != 2) {
+        return false;
+    }
     GameState.collected_count = GameState.total_collectibles;
     exploration_tutorial_progress_system();
     return GameState.tutorial_stage == 3;

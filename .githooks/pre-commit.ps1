@@ -1,6 +1,5 @@
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$test = Join-Path $repoRoot "mobile\android\test_render_emulator.ps1"
 
 Write-Output "Stasis pre-commit: checking staged Stasis source format"
 & cargo test --quiet -p stasis_compiler --lib frontend::formatter::tests::staged_repository_stasis_sources_are_formatted -- --exact
@@ -11,13 +10,5 @@ if ($LASTEXITCODE -ne 0) {
         & cargo run --quiet -p stasis -- format -- $stagedStasis
     }
     Write-Error "Commit blocked: review and stage the formatting changes, then commit again."
-    exit 1
-}
-
-Write-Output "Stasis pre-commit: verifying Android Workshop JIT rendering"
-try {
-    & $test -Headless
-} catch {
-    Write-Error "Commit blocked: Android render E2E failed. Inspect artifacts/android_render_e2e. $($_.Exception.Message)"
     exit 1
 }

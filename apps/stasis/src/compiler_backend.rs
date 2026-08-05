@@ -6791,7 +6791,7 @@ mod tests {
         };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
-        // Indices from src/runtime/host_frame.stasis.
+        // Indices from src/stdlib/internal/host_frame.stasis.
         let t0_ms: i32 = 12345;
         store(0, t0_ms); // HOST_I_TIME_MS
         store_f32(50, 360.0); // HOST_F_LOGICAL_W
