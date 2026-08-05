@@ -43,6 +43,7 @@ pub(crate) fn apply_asset_calls(
     let mut manifest: AssetManifest = serde_json::from_slice(&manifest_source)
         .map_err(|error| format!("invalid asset manifest: {error}"))?;
     let mut writes = Vec::<(PathBuf, Vec<u8>)>::new();
+    let mut deletes = Vec::<PathBuf>::new();
     let mut touched = BTreeSet::new();
     for call in calls {
         let args = call
@@ -140,6 +141,41 @@ pub(crate) fn apply_asset_calls(
                 );
                 writes.push((path, bytes));
             }
+            "delete_asset" => {
+                let normalized = relative.replace('\\', "/");
+                let id = args
+                    .get("id")
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .ok_or_else(|| "delete_asset id must be a string".to_string())
+                            .and_then(controlled_id)
+                    })
+                    .transpose()?;
+                if let Some(id) = id.as_ref() {
+                    let entry = manifest
+                        .assets
+                        .iter()
+                        .find(|entry| &entry.id == id)
+                        .ok_or_else(|| format!("asset manifest has no id: {id}"))?;
+                    if entry.path != normalized {
+                        return Err(format!(
+                            "asset id {id} points to {}, not {normalized}",
+                            entry.path
+                        ));
+                    }
+                    manifest.assets.retain(|entry| &entry.id != id);
+                } else {
+                    manifest.assets.retain(|entry| entry.path != normalized);
+                }
+                let metadata = path
+                    .symlink_metadata()
+                    .map_err(|error| format!("failed reading obsolete asset: {error}"))?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err("delete_asset requires a regular non-symlink file".to_string());
+                }
+                deletes.push(path);
+            }
             "write_data_asset" => {
                 let source = required_string(args, "source")?;
                 if source.len() > MAX_TEXT_ASSET_BYTES {
@@ -185,7 +221,7 @@ pub(crate) fn apply_asset_calls(
         .map_err(|error| format!("failed encoding asset manifest: {error}"))?;
     manifest_bytes.push(b'\n');
     writes.push((manifest_path, manifest_bytes));
-    let mut backups = Vec::with_capacity(writes.len());
+    let mut backups = Vec::with_capacity(writes.len() + deletes.len());
     for (path, bytes) in &writes {
         if path
             .symlink_metadata()
@@ -208,6 +244,19 @@ pub(crate) fn apply_asset_calls(
             return Err(format!("failed staging asset {}: {error}", path.display()));
         }
     }
+    for path in &deletes {
+        let prior = fs::read(path).map_err(|error| {
+            format!("failed reading obsolete asset {}: {error}", path.display())
+        })?;
+        backups.push((path.clone(), Some(prior)));
+        if let Err(error) = fs::remove_file(path) {
+            restore(&backups)?;
+            return Err(format!(
+                "failed deleting obsolete asset {}: {error}",
+                path.display()
+            ));
+        }
+    }
     if let Err(error) = load_project_asset_manifest(project_root, AssetLimits::default()) {
         restore(&backups)?;
         return Err(format!("asset transaction validation failed: {error}"));
@@ -216,7 +265,48 @@ pub(crate) fn apply_asset_calls(
         restore(&backups)?;
         return Err(error);
     }
+    if let Err(error) = sync_deleted_assets(project_root, &deletes, &mut backups) {
+        restore(&backups)?;
+        return Err(error);
+    }
     Ok(AppliedAssetTransaction { backups })
+}
+
+fn sync_deleted_assets(
+    project_root: &Path,
+    deletes: &[PathBuf],
+    backups: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+) -> Result<(), String> {
+    let prepared = project_root.join(".stasis_cache/play-assets");
+    if !prepared.is_dir() {
+        return Ok(());
+    }
+    for source in deletes {
+        let relative = source
+            .strip_prefix(project_root)
+            .map_err(|_| "asset transaction escaped the project".to_string())?;
+        let destination = prepared.join(relative);
+        if !destination.exists() {
+            continue;
+        }
+        let metadata = destination
+            .symlink_metadata()
+            .map_err(|error| format!("failed reading prepared obsolete asset: {error}"))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err("prepared obsolete asset must be a regular non-symlink file".to_string());
+        }
+        backups.push((
+            destination.clone(),
+            Some(
+                fs::read(&destination).map_err(|error| {
+                    format!("failed backing up prepared obsolete asset: {error}")
+                })?,
+            ),
+        ));
+        fs::remove_file(&destination)
+            .map_err(|error| format!("failed deleting prepared obsolete asset: {error}"))?;
+    }
+    Ok(())
 }
 
 fn sync_prepared_assets(
@@ -280,6 +370,13 @@ fn controlled_asset_path(root: &Path, relative: &str, tool: &str) -> Result<Path
         "write_procedural_wav" => relative
             .extension()
             .is_some_and(|value| value.eq_ignore_ascii_case("wav")),
+        "delete_asset" => relative.extension().is_some_and(|value| {
+            value.eq_ignore_ascii_case("svg")
+                || value.eq_ignore_ascii_case("png")
+                || value.eq_ignore_ascii_case("json")
+                || value.eq_ignore_ascii_case("csv")
+                || value.eq_ignore_ascii_case("wav")
+        }),
         _ => false,
     };
     if !valid_extension {
@@ -719,5 +816,84 @@ mod tests {
         assert_eq!((width, height), (4, 3));
         assert_eq!(decoded.get_pixel(0, 0)[3], 0);
         assert_eq!(decoded.get_pixel(1, 1), &parse_color("#d08040").unwrap());
+    }
+
+    #[test]
+    fn obsolete_asset_deletion_updates_manifest_cache_and_rolls_back() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_delete_asset_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("assets/generated/old-unit.png");
+        let prepared = root.join(".stasis_cache/play-assets/assets/generated/old-unit.png");
+        fs::create_dir_all(source.parent().expect("source parent")).expect("source dir");
+        fs::create_dir_all(prepared.parent().expect("prepared parent")).expect("prepared dir");
+        let png = render_png(16, 16, parse_color("#102030").unwrap(), &[]).unwrap();
+        fs::write(&source, &png).expect("source asset");
+        fs::write(&prepared, &png).expect("prepared asset");
+        let manifest = AssetManifest {
+            schema: "stasis-assets".to_string(),
+            version: 2,
+            display: None,
+            assets: vec![AssetEntry {
+                id: "old-unit".to_string(),
+                path: "assets/generated/old-unit.png".to_string(),
+                content_sha256: sha256(&png),
+                prepared_from_sha256: None,
+                format: AssetFormat::Sprite {
+                    encoding: SpriteEncoding::Png,
+                    width: 16,
+                    height: 16,
+                },
+                prepare: None,
+                dependencies: Vec::new(),
+            }],
+        };
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec_pretty(&manifest).expect("manifest"),
+        )
+        .expect("manifest file");
+        let prepared_manifest = root
+            .join(".stasis_cache/play-assets")
+            .join(DEFAULT_ASSET_MANIFEST_PATH);
+        fs::create_dir_all(
+            prepared_manifest
+                .parent()
+                .expect("prepared manifest parent"),
+        )
+        .expect("prepared manifest dir");
+        fs::write(
+            &prepared_manifest,
+            serde_json::to_vec_pretty(&manifest).expect("prepared manifest"),
+        )
+        .expect("prepared manifest file");
+        let call = ToolCall {
+            tool: "delete_asset".to_string(),
+            args: serde_json::json!({
+                "id": "old-unit",
+                "path": "assets/generated/old-unit.png"
+            }),
+        };
+
+        let transaction = apply_asset_calls(&root, &[&call]).expect("delete transaction");
+        assert!(!source.exists());
+        assert!(!prepared.exists());
+        let updated: AssetManifest = serde_json::from_slice(
+            &fs::read(root.join(DEFAULT_ASSET_MANIFEST_PATH)).expect("updated manifest"),
+        )
+        .expect("updated manifest JSON");
+        assert!(updated.assets.is_empty());
+
+        transaction.rollback().expect("rollback");
+        assert_eq!(fs::read(&source).expect("restored source"), png);
+        assert_eq!(fs::read(&prepared).expect("restored prepared"), png);
+        let restored: AssetManifest = serde_json::from_slice(
+            &fs::read(root.join(DEFAULT_ASSET_MANIFEST_PATH)).expect("restored manifest"),
+        )
+        .expect("restored manifest JSON");
+        assert_eq!(restored.assets, manifest.assets);
+        let _ = fs::remove_dir_all(root);
     }
 }

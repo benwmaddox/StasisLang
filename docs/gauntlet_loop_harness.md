@@ -231,10 +231,18 @@ ImageGen inbox. The transactional import may
 copy it unchanged, crop it, or remove a flat background to create the tracked
 game asset without degrading the reusable source.
 
-ImageGen is a discretionary quality tool, not a mandatory acceptance gate. The
-agent decides whether it materially helps the current workstream. Primitive SVG
-and shape-composed PNG assets are usually better suited to basic UI, simple
-icons, selection/range overlays, and deterministic fallbacks than character art.
+When a replacement makes an older generated asset obsolete, the builder uses
+`delete_asset` in the same contiguous asset/source transaction. The tool removes
+the controlled file, its matching manifest entry, and any prepared-cache copy;
+all three are restored if the related source edit fails. Deletion precedes a
+replacement that reuses the same asset id.
+
+ImageGen is discretionary, but it is preferred over primitive SVG or
+shape-composed PNG for authored game art such as characters, units, buildings,
+terrain props, and decorative environments, even in early versions. Primitive
+shapes are primarily for basic UI, simple icons, selection/range overlays, and
+deterministic fallbacks. ImageGen remains optional for work that is purely logic
+or basic interface geometry.
 
 The request is stored under `build/gauntlet/imagegen/requests/`. The host places
 the selected PNG at the request's `output_path` under

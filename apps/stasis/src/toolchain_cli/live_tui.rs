@@ -88,7 +88,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     canceled: &AtomicBool,
 ) -> Result<(String, PathBuf, PathBuf), String> {
     let mut profile = AgentProfile::default();
-    profile.instruction.push_str(" You may request host-generated bitmap art with request_imagegen_asset when you judge that it materially improves the assigned work, then import its returned source_path with import_png_asset. Request one isolated subject per image; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Use judgment for each asset: primitive SVG and shape-composed PNGs are usually best suited to basic UI, simple icons, selection/range overlays, and deterministic fallbacks rather than character art, but ImageGen is not a mandatory gate. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
+    profile.instruction.push_str(" You may request host-generated bitmap art with request_imagegen_asset when you judge that it materially improves the assigned work, then import its returned source_path with import_png_asset. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when the task is purely logic or basic interface geometry. Request one isolated subject per image; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset obsolete; place deletion before a replacement that reuses the same id. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
     let outcome = run_scripted_ai_profile(
         client,
         project_root,
@@ -3060,6 +3060,7 @@ impl ToolExecutor for LiveAiTools {
                     "write_svg_asset"
                         | "write_png_asset"
                         | "import_png_asset"
+                        | "delete_asset"
                         | "write_data_asset"
                         | "write_procedural_wav"
                 )
