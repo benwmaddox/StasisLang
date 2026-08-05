@@ -1,8 +1,8 @@
 use super::{
-    hex_sha256, image_extension, import_references, read_bounded_bytes, read_bounded_utf8,
-    write_json, GauntletConfigV1, GauntletIsolation, GauntletObserver, GauntletReference,
-    GauntletRoleModel, GauntletRunPhase, GauntletRunStateV1, GAUNTLET_SCHEMA_VERSION,
-    MAX_GOAL_BYTES, MAX_REFERENCE_BYTES,
+    atomic_write_bytes, hex_sha256, image_extension, import_references, read_bounded_bytes,
+    read_bounded_utf8, write_json, GauntletConfigV1, GauntletIsolation, GauntletObserver,
+    GauntletReference, GauntletRoleModel, GauntletRunPhase, GauntletRunStateV1,
+    GAUNTLET_SCHEMA_VERSION, MAX_GOAL_BYTES, MAX_REFERENCE_BYTES,
 };
 use crate::toolchain_cli::live_tui;
 use crate::toolchain_cli::{CommandResult, Workspace};
@@ -128,6 +128,9 @@ impl RunHeartbeat {
         owner
             .write_all(&heartbeat_bytes()?)
             .map_err(|error| format!("failed writing Gauntlet heartbeat: {error}"))?;
+        owner
+            .sync_all()
+            .map_err(|error| format!("failed syncing Gauntlet heartbeat: {error}"))?;
         let worker = thread::spawn(move || {
             while !worker_done.load(Ordering::Acquire) {
                 thread::sleep(HEARTBEAT_INTERVAL);
@@ -155,7 +158,7 @@ impl Drop for RunHeartbeat {
 }
 
 fn write_heartbeat(path: &Path) -> Result<(), String> {
-    fs::write(path, heartbeat_bytes()?)
+    atomic_write_bytes(path, &heartbeat_bytes()?)
         .map_err(|error| format!("failed writing Gauntlet heartbeat: {error}"))
 }
 
@@ -173,15 +176,6 @@ fn heartbeat_unix_ms(path: &Path) -> Option<u64> {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|value| value.get("unix_ms").and_then(Value::as_u64))
-        .or_else(|| {
-            fs::metadata(path)
-                .ok()?
-                .modified()
-                .ok()?
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-        })
 }
 
 fn heartbeat_is_fresh(path: &Path) -> bool {
@@ -2937,6 +2931,9 @@ mod tests {
         let path = root.join(HEARTBEAT_NAME);
         write_heartbeat(&path).expect("fresh heartbeat");
         assert!(heartbeat_is_fresh(&path));
+        fs::write(&path, [0_u8; 55]).expect("torn heartbeat");
+        assert_eq!(heartbeat_unix_ms(&path), None);
+        assert!(!heartbeat_is_fresh(&path));
         fs::write(&path, br#"{"schema_version":1,"pid":1,"unix_ms":0}"#).expect("stale heartbeat");
         assert!(!heartbeat_is_fresh(&path));
         fs::remove_file(&path).expect("remove heartbeat");

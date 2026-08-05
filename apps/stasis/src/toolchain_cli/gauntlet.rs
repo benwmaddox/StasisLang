@@ -5,7 +5,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 pub(super) mod assets;
@@ -673,7 +673,17 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let mut bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| format!("failed serializing {}: {error}", path.display()))?;
     bytes.push(b'\n');
-    fs::write(path, bytes).map_err(|error| format!("failed writing {}: {error}", path.display()))
+    atomic_write_bytes(path, &bytes)
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = atomic_write_file::AtomicWriteFile::open(path)
+        .map_err(|error| format!("failed staging {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("failed staging {}: {error}", path.display()))?;
+    file.commit()
+        .map_err(|error| format!("failed committing {}: {error}", path.display()))
 }
 
 fn normalized_text_file(source: &str) -> String {

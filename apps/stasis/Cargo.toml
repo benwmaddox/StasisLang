@@ -20,6 +20,7 @@ stasis_dynload = { path = "../../crates/stasis_dynload" }
 stasis_assets = { path = "../../crates/stasis_assets" }
 stasis_ai = { path = "../../crates/stasis_ai" }
 image.workspace = true
+atomic-write-file.workspace = true
 
 [dev-dependencies]
 object = "0.36"
