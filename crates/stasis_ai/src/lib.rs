@@ -165,6 +165,10 @@ pub trait ToolExecutor {
     fn validate_completion(&self) -> Result<(), String> {
         Ok(())
     }
+
+    fn terminal_failure(&self) -> Option<String> {
+        None
+    }
 }
 
 pub fn run_agent<P, T, E>(
@@ -309,6 +313,9 @@ where
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 let observations = bound_observations(executor.execute(&tool_calls, canceled));
                 emit(AgentEvent::Observations(observations.clone()));
+                if let Some(error) = executor.terminal_failure() {
+                    return Err(error);
+                }
                 transcript.append(&response_record, &observations)?;
                 compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
             }
@@ -736,6 +743,7 @@ pub fn project_ai_tool_specs() -> Vec<ToolSpec> {
 pub fn gauntlet_tool_specs() -> Vec<ToolSpec> {
     let mut tools = project_ai_tool_specs();
     tools.push(spec("record_decision", "Persist one concise Gauntlet decision, rationale, evidence summary, and next step for future fresh agents. Record conclusions and tradeoffs, never hidden chain-of-thought.", &["kind", "summary", "rationale", "evidence", "next_step"], &[]));
+    tools.push(spec("report_blocked", "Immediately terminate this builder attempt when a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools. Do not use this for an ordinary code/test failure that can be corrected.", &["reason", "evidence", "next_step"], &[]));
     tools
 }
 
@@ -1470,6 +1478,74 @@ mod tests {
     }
 
     #[test]
+    fn terminal_tool_failure_ends_the_agent_without_another_turn() {
+        struct OneResponse {
+            calls: usize,
+        }
+        impl ModelProvider for OneResponse {
+            fn respond(
+                &mut self,
+                _request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.calls += 1;
+                Ok(ModelResponse::ToolCalls {
+                    working_notes:
+                        "Intent: stop. Observed: terminal blocker. Next: escalate. Blocker: environment."
+                            .to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: "report_blocked".to_string(),
+                        args: json!({
+                            "reason": "missing executable",
+                            "evidence": "staged test gate failed",
+                            "next_step": "provision the host"
+                        }),
+                    }],
+                })
+            }
+        }
+
+        #[derive(Default)]
+        struct BlockedTools {
+            failure: Option<String>,
+        }
+        impl ToolExecutor for BlockedTools {
+            fn execute(
+                &mut self,
+                calls: &[ToolCall],
+                _canceled: &AtomicBool,
+            ) -> Vec<ToolObservation> {
+                self.failure = Some("builder reported blocked: missing executable".to_string());
+                calls
+                    .iter()
+                    .map(|call| ToolObservation::result(&call.tool, json!({"status":"terminated"})))
+                    .collect()
+            }
+
+            fn terminal_failure(&self) -> Option<String> {
+                self.failure.clone()
+            }
+        }
+
+        let mut provider = OneResponse { calls: 0 };
+        let mut tools = BlockedTools::default();
+        let error = run_agent(
+            &mut provider,
+            &mut tools,
+            "attempt the change",
+            json!({}),
+            gauntlet_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect_err("terminal blocker");
+
+        assert_eq!(provider.calls, 1);
+        assert_eq!(error, "builder reported blocked: missing executable");
+    }
+
+    #[test]
     fn rejects_unknown_tools_before_execution() {
         let mut provider = Responses(vec![ModelResponse::ToolCalls {
             working_notes: "Intent: act. Observed: none. Next: shell. Blocker: none.".to_string(),
@@ -1523,9 +1599,13 @@ mod tests {
             assert!(project.iter().any(|tool| tool.tool == expected));
         }
         assert!(!project.iter().any(|tool| tool.tool == "record_decision"));
+        assert!(!project.iter().any(|tool| tool.tool == "report_blocked"));
         assert!(gauntlet_tool_specs()
             .iter()
             .any(|tool| tool.tool == "record_decision"));
+        assert!(gauntlet_tool_specs()
+            .iter()
+            .any(|tool| tool.tool == "report_blocked"));
     }
 
     #[test]

@@ -2522,18 +2522,30 @@ fn run_staged_tests(
 fn locate_stasis_executable() -> Result<Option<PathBuf>, String> {
     let current = std::env::current_exe()
         .map_err(|error| format!("failed locating stasis test executable: {error}"))?;
+    Ok(locate_stasis_executable_from(&current))
+}
+
+fn locate_stasis_executable_from(current: &Path) -> Option<PathBuf> {
     if current.file_stem().and_then(|stem| stem.to_str()) == Some("stasis") {
-        return Ok(Some(current));
+        return Some(current.to_path_buf());
+    }
+    let sibling = current.with_file_name(if cfg!(windows) {
+        "stasis.exe"
+    } else {
+        "stasis"
+    });
+    if sibling.is_file() {
+        return Some(sibling);
     }
     let Some(debug_directory) = current.parent().and_then(Path::parent) else {
-        return Ok(None);
+        return None;
     };
     let candidate = debug_directory.join(if cfg!(windows) {
         "stasis.exe"
     } else {
         "stasis"
     });
-    Ok(candidate.is_file().then_some(candidate))
+    candidate.is_file().then_some(candidate)
 }
 
 fn run_staged_test_process(
@@ -3559,6 +3571,34 @@ mod tests {
             MAX_STAGED_TEST_OUTPUT_BYTES + 1
         );
         assert!(overflow.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn renamed_release_host_finds_sibling_stasis_executable() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_executable_lookup_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        fs::create_dir_all(&root).expect("lookup root");
+        let executable_name = if cfg!(windows) {
+            "stasis.exe"
+        } else {
+            "stasis"
+        };
+        let sibling = root.join(executable_name);
+        fs::write(&sibling, b"test executable").expect("sibling executable");
+        let renamed = root.join(if cfg!(windows) {
+            "stasis-gauntlet-fixed.exe"
+        } else {
+            "stasis-gauntlet-fixed"
+        });
+
+        assert_eq!(locate_stasis_executable_from(&renamed), Some(sibling));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
