@@ -96,6 +96,19 @@ function Invoke-AdbQuiet([string[]]$Arguments) {
     if ($exitCode -ne 0) { throw "adb command failed: $($Arguments -join ' ')" }
 }
 
+function Find-PackageProcessId([string]$Package) {
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $result = @(& $adb -s $serial shell pidof $Package 2>$null)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($exitCode -ne 0 -or -not $result) { return "" }
+    return $result[0].ToString().Trim()
+}
+
 function Resolve-Gradle {
     $wrapper = Join-Path $scriptRoot "gradlew.bat"
     if (Test-Path $wrapper) { return $wrapper }
@@ -160,6 +173,31 @@ function Dismiss-EmulatorSystemAnr([xml]$Tree) {
 }
 
 function Read-SurfaceBounds([string]$Description, [string]$XmlPath) {
+    if (Test-Path -LiteralPath $XmlPath) {
+        [xml]$cachedTree = Get-Content -Raw -LiteralPath $XmlPath
+        $cachedNode = @($cachedTree.SelectNodes("//node")) |
+            Where-Object { $_.GetAttribute("content-desc") -eq $Description } |
+            Select-Object -First 1
+        if ($cachedNode) {
+            $cachedMatch = [regex]::Match(
+                $cachedNode.GetAttribute("bounds"),
+                '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$'
+            )
+            if ($cachedMatch.Success) {
+                $cachedLeft = [int]$cachedMatch.Groups[1].Value
+                $cachedTop = [int]$cachedMatch.Groups[2].Value
+                $cachedRight = [int]$cachedMatch.Groups[3].Value
+                $cachedBottom = [int]$cachedMatch.Groups[4].Value
+                return @(
+                    $cachedLeft,
+                    $cachedTop,
+                    ($cachedRight - $cachedLeft),
+                    ($cachedBottom - $cachedTop)
+                )
+            }
+        }
+    }
+
     $captured = $false
     for ($attempt = 1; $attempt -le 3 -and -not $captured; $attempt++) {
         Remove-Item -LiteralPath $XmlPath -Force -ErrorAction SilentlyContinue
@@ -242,8 +280,11 @@ function Assert-RenderedVariant(
     try {
         do {
             Start-Sleep -Seconds 2
-            $processId = (Invoke-Adb @("shell", "pidof", $Package) | Select-Object -First 1).Trim()
-            if (-not $processId) { throw "$Name exited before rendering" }
+            $processId = Find-PackageProcessId $Package
+            if (-not $processId) {
+                $lastFailure = "$Name process has not started"
+                continue
+            }
             try {
                 if (-not $viewportResolved) {
                     $surface = Read-SurfaceBounds $SurfaceDescription $uiTree
