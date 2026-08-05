@@ -80,6 +80,10 @@ independent critiques, even if doing so crosses the admission budget. The total
 counter still records every call, and the controller will not admit another
 candidate once the configured budget is exhausted. This prevents a primary
 builder from leaving only a token one-turn escalation or an unevaluated edit.
+`budget.wall_time_minutes` bounds one active controller session. `resume`
+starts a fresh wall-time session while preserving the original run start,
+model-call count, accepted checkpoint, critiques, and decision memory, so host
+downtime does not consume the working budget.
 
 Interactive terminals default to the human-readable terminal observer. `stop` cooperatively cancels
 the active model or test, rolls back a provisional candidate, and retains the
@@ -428,7 +432,10 @@ to start while a fresh heartbeat exists, preventing two controllers from
 mutating the same project workspace. A stale or missing heartbeat on a
 non-terminal phase is recoverable: resume restores the latest accepted Git
 checkpoint, retains the quality-acceptance streak and decision journal, clears
-the old stop request, and restarts the loop. Model timeouts, invalid structured
+the old stop request, opens a fresh wall-time session, and restarts the loop.
+Stopped, stalled, budget-exhausted, and failed runs are also explicitly
+resumable after their cause has been addressed; only a converged run is final.
+Model timeouts, invalid structured
 responses, and transient role failures consume their real call budget and
 produce explicit attempt events. Scout/lead bootstrap has a bounded
 deterministic fallback; candidate capture or exhausted critic recovery rolls

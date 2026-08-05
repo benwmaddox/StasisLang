@@ -194,6 +194,10 @@ fn is_terminal_phase(phase: &GauntletRunPhase) -> bool {
     )
 }
 
+fn phase_is_resumable(phase: &GauntletRunPhase) -> bool {
+    !matches!(phase, GauntletRunPhase::Converged)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FrozenBar {
@@ -382,6 +386,7 @@ pub(super) fn start(
         consecutive_stalls: 0,
         quality_acceptance_streak: 0,
         started_unix_ms: now,
+        session_started_unix_ms: now,
         updated_unix_ms: now,
         terminal_reason: None,
     };
@@ -454,7 +459,7 @@ pub(super) fn resume(
     validate_run_id(run_id)?;
     let artifacts = run_artifacts(&workspace.root, run_id);
     let mut state = load_state(&artifacts)?;
-    if matches!(state.phase, GauntletRunPhase::Converged) {
+    if !phase_is_resumable(&state.phase) {
         return status(workspace, run_id);
     }
     if heartbeat_is_fresh(&artifacts.join(HEARTBEAT_NAME)) {
@@ -482,7 +487,7 @@ pub(super) fn resume(
         fs::remove_file(&stop)
             .map_err(|error| format!("failed clearing prior stop request: {error}"))?;
     }
-    prepare_state_for_resume(&mut state);
+    prepare_state_for_resume(&mut state, unix_ms());
     persist_state(&artifacts, &mut state)?;
     emit_event(&artifacts, "run_resumed", json!({}))?;
     let imported = import_prior_run_lessons(&workspace.root, &artifacts, run_id)?;
@@ -496,10 +501,11 @@ pub(super) fn resume(
     run_persistent(workspace, config, state, artifacts)
 }
 
-fn prepare_state_for_resume(state: &mut GauntletRunStateV1) {
+fn prepare_state_for_resume(state: &mut GauntletRunStateV1, resumed_unix_ms: u64) {
     state.phase = GauntletRunPhase::Building;
     state.terminal_reason = None;
     state.consecutive_stalls = 0;
+    state.session_started_unix_ms = resumed_unix_ms;
 }
 
 pub(super) fn status(workspace: &Workspace, run_id: &str) -> Result<CommandResult, String> {
@@ -509,7 +515,7 @@ pub(super) fn status(workspace: &Workspace, run_id: &str) -> Result<CommandResul
     let heartbeat = heartbeat_unix_ms(&artifacts.join(HEARTBEAT_NAME));
     let active =
         heartbeat.is_some_and(|value| unix_ms().saturating_sub(value) <= HEARTBEAT_STALE_AFTER_MS);
-    let recoverable = !active && !is_terminal_phase(&state.phase);
+    let recoverable = !active && phase_is_resumable(&state.phase);
     let mut data = serde_json::to_value(&state).map_err(|error| error.to_string())?;
     data["health"] = json!({
         "active": active,
@@ -680,14 +686,7 @@ fn run_persistent(
 
 fn mark_failed_if_active(artifacts: &Path, reason: &str) -> Result<(), String> {
     let mut state = load_state(artifacts)?;
-    if !matches!(
-        state.phase,
-        GauntletRunPhase::Converged
-            | GauntletRunPhase::BudgetExhausted
-            | GauntletRunPhase::Stalled
-            | GauntletRunPhase::Canceled
-            | GauntletRunPhase::Failed
-    ) {
+    if !is_terminal_phase(&state.phase) {
         finish(&mut state, artifacts, GauntletRunPhase::Failed, reason)?;
     }
     Ok(())
@@ -702,7 +701,12 @@ fn controller_loop(
     let started = Instant::now();
     let canceled = Arc::new(AtomicBool::new(false));
     let wall_limit = Duration::from_secs(u64::from(config.budget.wall_time_minutes) * 60);
-    let elapsed_before = Duration::from_millis(unix_ms().saturating_sub(state.started_unix_ms));
+    let session_started_unix_ms = if state.session_started_unix_ms == 0 {
+        state.started_unix_ms
+    } else {
+        state.session_started_unix_ms
+    };
+    let elapsed_before = Duration::from_millis(unix_ms().saturating_sub(session_started_unix_ms));
     let _stop_watcher = StopWatcher::start(
         artifacts,
         Arc::clone(&canceled),
@@ -3184,11 +3188,12 @@ mod tests {
             consecutive_stalls: 5,
             quality_acceptance_streak: 1,
             started_unix_ms: 1,
+            session_started_unix_ms: 1,
             updated_unix_ms: 2,
             terminal_reason: Some("consecutive candidate limit reached".to_string()),
         };
 
-        prepare_state_for_resume(&mut state);
+        prepare_state_for_resume(&mut state, 99);
 
         assert_eq!(state.phase, GauntletRunPhase::Building);
         assert_eq!(state.consecutive_stalls, 0);
@@ -3196,6 +3201,20 @@ mod tests {
         assert_eq!(state.rejected_candidates, 5);
         assert_eq!(state.quality_acceptance_streak, 1);
         assert_eq!(state.best_commit.as_deref(), Some("cafebabe"));
+        assert_eq!(state.started_unix_ms, 1);
+        assert_eq!(state.session_started_unix_ms, 99);
+        assert!(phase_is_resumable(&GauntletRunPhase::Failed));
+        assert!(phase_is_resumable(&GauntletRunPhase::BudgetExhausted));
+        assert!(!phase_is_resumable(&GauntletRunPhase::Converged));
+
+        let mut legacy = serde_json::to_value(&state).expect("state JSON");
+        legacy
+            .as_object_mut()
+            .expect("state object")
+            .remove("session_started_unix_ms");
+        let restored: GauntletRunStateV1 =
+            serde_json::from_value(legacy).expect("legacy state remains readable");
+        assert_eq!(restored.session_started_unix_ms, 0);
     }
 
     #[test]

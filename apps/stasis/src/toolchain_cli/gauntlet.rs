@@ -306,6 +306,8 @@ pub(super) struct GauntletRunStateV1 {
     #[serde(default)]
     pub quality_acceptance_streak: u32,
     pub started_unix_ms: u64,
+    #[serde(default)]
+    pub session_started_unix_ms: u64,
     pub updated_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
