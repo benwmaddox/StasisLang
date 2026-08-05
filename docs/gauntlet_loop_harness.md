@@ -72,6 +72,15 @@ stasis gauntlet promote RUN_ID
 improves a clean existing project directly on its current branch by default.
 Set `execution.isolation` to `worktree` when a separate linked checkout is
 explicitly desired.
+
+`budget.model_calls` is an admission budget for starting new candidate cycles.
+After a candidate starts, a configured builder escalation receives a fresh
+`execution.builder_max_turns` allowance and the controller completes both
+independent critiques, even if doing so crosses the admission budget. The total
+counter still records every call, and the controller will not admit another
+candidate once the configured budget is exhausted. This prevents a primary
+builder from leaving only a token one-turn escalation or an unevaluated edit.
+
 Interactive terminals default to the human-readable terminal observer. `stop` cooperatively cancels
 the active model or test, rolls back a provisional candidate, and retains the
 best checkpoint. For the default in-place mode, accepted checkpoints are

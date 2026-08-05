@@ -44,7 +44,7 @@ pub(super) enum GauntletCommand {
         #[arg(long, default_value_t = DEFAULT_MODEL_CALLS)]
         max_model_calls: u32,
     },
-    /// Improve an existing Stasis project in an isolated run branch.
+    /// Improve an existing clean Stasis project in place unless worktree isolation is configured.
     Run {
         #[arg(long, value_name = "PATH", default_value = GAUNTLET_CONFIG_NAME)]
         config: PathBuf,

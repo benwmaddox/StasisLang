@@ -946,13 +946,11 @@ fn controller_loop(
                 &config.models.builder,
                 failure,
             )?;
-            let remaining_calls = config.budget.model_calls.saturating_sub(state.model_calls);
-            let escalation_calls = remaining_calls.saturating_sub(2);
             if let Some(escalation) = config
                 .models
                 .builder_escalation
                 .as_ref()
-                .filter(|_| should_escalate_builder(failure, &canceled) && escalation_calls > 0)
+                .filter(|_| should_escalate_builder(failure, &canceled))
             {
                 rollback_candidate(
                     &project_root,
@@ -966,6 +964,7 @@ fn controller_loop(
                         "from_model": config.models.builder.model,
                         "to_model": escalation.model,
                         "reason": failure.message,
+                        "fresh_turn_allowance": config.execution.builder_max_turns,
                     }),
                 )?;
                 append_decision(
@@ -982,7 +981,7 @@ fn controller_loop(
                     escalation,
                     "Escalated Stasis Gauntlet builder",
                     escalation_instruction,
-                    escalation_calls,
+                    fresh_builder_escalation_calls(&config),
                 );
                 if let Err(failure) = &outcome {
                     record_builder_attempt_failure(
@@ -1085,19 +1084,6 @@ fn controller_loop(
             largest_gap = "The previous work item produced no source or asset change.".to_string();
             continue;
         }
-        if config.budget.model_calls.saturating_sub(state.model_calls) < 2 {
-            rollback_candidate(
-                &project_root,
-                state.best_commit.as_deref().unwrap_or(&state.base_commit),
-            )?;
-            finish(
-                &mut state,
-                artifacts,
-                GauntletRunPhase::BudgetExhausted,
-                "model-call budget cannot fund both independent critics",
-            )?;
-            break;
-        }
         let candidate_is_a =
             hex_sha256(format!("{}:{candidate_id}", state.run_id).as_bytes()).as_bytes()[0] % 2
                 == 0;
@@ -1106,6 +1092,7 @@ fn controller_loop(
         } else {
             (&baseline, &candidate)
         };
+        let visual_call_limit = state.model_calls.saturating_add(2);
         let critique = blind_critic(
             &goal,
             &bar,
@@ -1116,7 +1103,7 @@ fn controller_loop(
             artifacts,
             &config.models.visual_critic,
             config.models.controller_escalation.as_ref(),
-            config.budget.model_calls.saturating_sub(1),
+            visual_call_limit,
             &canceled,
         );
         persist_state(artifacts, &mut state)?;
@@ -1153,24 +1140,12 @@ fn controller_loop(
         };
         let preferred_candidate = preference_selects_candidate(&critique, candidate_is_a);
         let candidate_score = score_for_candidate(&critique, candidate_is_a);
-        if state.model_calls >= config.budget.model_calls {
-            rollback_candidate(
-                &project_root,
-                state.best_commit.as_deref().unwrap_or(&state.base_commit),
-            )?;
-            finish(
-                &mut state,
-                artifacts,
-                GauntletRunPhase::BudgetExhausted,
-                "model-call budget exhausted before gameplay critique",
-            )?;
-            break;
-        }
         let (state_a, state_b) = if candidate_is_a {
             (&candidate_state, &baseline_state)
         } else {
             (&baseline_state, &candidate_state)
         };
+        let gameplay_call_limit = state.model_calls.saturating_add(2);
         let gameplay = gameplay_critic(
             &goal,
             &bar,
@@ -1180,7 +1155,7 @@ fn controller_loop(
             artifacts,
             &config.models.gameplay_critic,
             config.models.controller_escalation.as_ref(),
-            config.budget.model_calls,
+            gameplay_call_limit,
             &canceled,
         );
         persist_state(artifacts, &mut state)?;
@@ -2145,6 +2120,10 @@ fn should_escalate_builder(failure: &live_tui::ScriptedAiFailure, canceled: &Ato
     !canceled.load(Ordering::Acquire) && failure.message != "AI request canceled"
 }
 
+fn fresh_builder_escalation_calls(config: &GauntletConfigV1) -> u32 {
+    config.execution.builder_max_turns
+}
+
 fn record_builder_attempt_failure(
     state: &mut GauntletRunStateV1,
     artifacts: &Path,
@@ -2852,6 +2831,15 @@ mod tests {
         };
         canceled.store(false, Ordering::Release);
         assert!(!should_escalate_builder(&canceled_failure, &canceled));
+    }
+
+    #[test]
+    fn builder_escalation_gets_a_fresh_turn_allowance() {
+        let mut config = GauntletConfigV1::new(false, Vec::new(), 8, 12, GauntletObserver::Jsonl)
+            .expect("config");
+        config.execution.builder_max_turns = 30;
+
+        assert_eq!(fresh_builder_escalation_calls(&config), 30);
     }
 
     #[test]

@@ -310,7 +310,31 @@ where
                     ));
                 }
                 for call in &tool_calls {
-                    validate_tool_call(call, &tool_specs, &known_tools)?;
+                    if !known_tools.contains(call.tool.as_str()) {
+                        return Err(format!("unsupported AI tool: {}", call.tool));
+                    }
+                }
+                let validation_errors = tool_calls
+                    .iter()
+                    .filter_map(|call| validate_tool_call(call, &tool_specs, &known_tools).err())
+                    .collect::<Vec<_>>();
+                if !validation_errors.is_empty() {
+                    let detail = validation_errors.join("; ");
+                    let observations = tool_calls
+                        .iter()
+                        .map(|call| {
+                            ToolObservation::error(
+                                &call.tool,
+                                format!(
+                                    "tool-call batch rejected before execution: {detail}; correct the arguments and retry"
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    emit(AgentEvent::Observations(observations.clone()));
+                    transcript.append(&response_record, &observations)?;
+                    compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
+                    continue;
                 }
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 let observations = bound_observations(executor.execute(&tool_calls, canceled));
@@ -968,8 +992,9 @@ fn decode_codex_response(source: &str) -> Result<ModelResponse, String> {
                 continue;
             };
             if let Some(encoded) = args.as_str() {
-                *args = serde_json::from_str(encoded)
-                    .map_err(|error| format!("Codex returned invalid tool args JSON: {error}"))?;
+                if let Ok(decoded) = serde_json::from_str(encoded) {
+                    *args = decoded;
+                }
             }
         }
     }
@@ -1651,6 +1676,48 @@ mod tests {
             panic!("tool calls");
         };
         assert_eq!(tool_calls[0].args, json!({"name": "tick"}));
+    }
+
+    #[test]
+    fn malformed_json_encoded_tool_args_are_returned_for_correction() {
+        let malformed = decode_codex_response(
+            r#"{"mode":"tool_calls","working_notes":"Correct the malformed call next.","summary":"","tool_calls":[{"tool":"read_symbol","args":"{\"name\":\"tick\"} {\"extra\":true}"}]}"#,
+        )
+        .expect("transport preserves malformed args for the agent loop");
+        let mut provider = Responses(vec![
+            malformed,
+            ModelResponse::Done {
+                working_notes: "The rejected batch was corrected without executing it.".to_string(),
+                summary: "corrected".to_string(),
+            },
+        ]);
+        let mut tools = Tools::default();
+        let mut errors = Vec::new();
+
+        let result = run_agent(
+            &mut provider,
+            &mut tools,
+            "correct malformed tool arguments",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |event| {
+                if let AgentEvent::Observations(observations) = event {
+                    errors.extend(
+                        observations
+                            .into_iter()
+                            .filter_map(|observation| observation.error),
+                    );
+                }
+            },
+        )
+        .expect("agent retries after rejected transport args");
+
+        assert_eq!(result, "corrected");
+        assert_eq!(tools.0, 0);
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("batch rejected before execution")));
     }
 
     #[test]

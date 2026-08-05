@@ -2498,6 +2498,7 @@ impl LiveAiTools {
                     } else {
                         response
                     };
+                let response = preserve_truncated_applied_write_evidence(response);
                 let applied = response.ok && response.kind == "edit_applied";
                 if applied {
                     self.last_write = Some(response.clone());
@@ -2532,6 +2533,16 @@ impl LiveAiTools {
             }
         }
     }
+}
+
+fn preserve_truncated_applied_write_evidence(mut response: LiveResponse) -> LiveResponse {
+    if response.ok && response.kind == "edit_applied" && response.truncated {
+        response.data = Some(serde_json::json!({
+            "tests": "passed",
+            "response_truncated": true,
+        }));
+    }
+    response
 }
 
 fn failed_write_observations(calls: &[&ToolCall], error: String) -> Vec<ToolObservation> {
@@ -3437,6 +3448,29 @@ mod tests {
             second.result.as_ref().unwrap()["write_receipt"],
             "build/live-edits/receipt.json"
         );
+    }
+
+    #[test]
+    fn truncated_applied_write_preserves_test_evidence_for_completion() {
+        let response = LiveResponse::success(
+            7,
+            9,
+            "edit_applied",
+            json!({"tests": "passed", "plan": {"source": "x".repeat(4096)}}),
+        )
+        .bounded(256);
+        assert!(response.truncated);
+
+        let response = preserve_truncated_applied_write_evidence(response);
+
+        assert_eq!(response.data.as_ref().unwrap()["tests"], "passed");
+        assert_eq!(response.data.as_ref().unwrap()["response_truncated"], true);
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.last_write = Some(response);
+        tools
+            .validate_completion()
+            .expect("tested truncated write completes");
     }
 
     #[test]
