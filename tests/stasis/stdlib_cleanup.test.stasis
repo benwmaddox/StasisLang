@@ -1,0 +1,9 @@
+import "../../src/stdlib/stdlib.stasis";
+
+test `byte helpers use one character vocabulary`(): bool {
+    let digit: u8 = to_u8_trunc(305);
+    let ascii_max: u8 = to_u8_trunc(127);
+    let non_ascii: u8 = to_u8_trunc(128);
+
+    return to_i32(digit) == 49 && char_is_digit(digit) && char_is_ascii(ascii_max) && !char_is_ascii(non_ascii);
+}

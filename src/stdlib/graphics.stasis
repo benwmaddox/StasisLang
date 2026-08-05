@@ -12,8 +12,6 @@ import "internal/host_frame.stasis";
 import "internal/gfx_cmd.stasis";
 import "internal/host_window_request.stasis";
 
-extern function time(): i32;
-
 extern function sleep_ms(ms: i32): void;
 
 // Hot-path reads are HostFrame snapshot-only (no host calls).
@@ -69,21 +67,6 @@ function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): vo
         return;
     }
     gfx_cmd_text_cached(self.font, self.handle, x, y, r, g, b, a);
-}
-
-// Deprecated controls/debug: kept as stubs so older samples compile; host-owned behavior should move to snapshot/commands.
-function set_postfx(strength: f32, phase: f32, speed: f32, r: f32, g: f32, b: f32): void {
-}
-
-function gfx_debug_bake_hash(path: string): i32 {
-    return 0;
-}
-
-function gfx_debug_enable_hash(enabled: i32): void {
-}
-
-function gfx_debug_get_frame_hash(): i32 {
-    return 0;
 }
 
 function get_desktop_size(out_w: i32[], out_h: i32[]): void {
@@ -196,15 +179,6 @@ function is_key_down(scancode: i32): bool {
 
 function should_quit(): bool {
     return host_quit_requested();
-}
-
-// Legacy submit calls are no-ops in bulk mode (host pulls command buffers after tick).
-function gfx_submit(cmd_i32: i32[], cmd_f32: f32[]): void {
-    gfx_cmd_mark_present();
-}
-
-function gfx_submit_u8(cmd_i32: i32[], cmd_f32: f32[], cmd_u8: u8[]): void {
-    gfx_cmd_mark_present();
 }
 
 // Pointer/query wrappers over HostFrame

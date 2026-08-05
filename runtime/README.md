@@ -143,7 +143,7 @@ The library exports these functions for Stasis programs:
 
 `play` and the native runner use HostFrame bulk snapshots for per-tick input/state now.
 Application code should read keyboard/pointer/quit state through the public wrappers in
-`src/stdlib/graphics.stasis` and `src/stdlib/input.stasis`. The fixed HostFrame layout is
+`src/stdlib/graphics.stasis`. The fixed HostFrame layout is
 private to `src/stdlib/internal/host_frame.stasis`; integration tests may import it directly,
 while ordinary tests should use `src/stdlib/testing/input_testkit.stasis`.
 
