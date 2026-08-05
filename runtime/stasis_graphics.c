@@ -3173,6 +3173,16 @@ STASIS_EXPORT int stasis_gfx_dump_png(const char* path) {
     return stasis_gfx_dump_image(path, 1, 1);
 }
 
+STASIS_EXPORT int stasis_host_schedule_screenshot(const char* path) {
+    if (!path || !*path || strlen(path) >= sizeof(g_screenshot_path)) return 0;
+    strncpy(g_screenshot_path, path, sizeof(g_screenshot_path) - 1);
+    g_screenshot_path[sizeof(g_screenshot_path) - 1] = 0;
+    g_screenshot_frame = (int)(g_debug_frame_counter + 1);
+    g_screenshot_exit_after = 0;
+    g_screenshot_taken = false;
+    return 1;
+}
+
 static void capture_scheduled_screenshot(void) {
     if (g_screenshot_taken || g_screenshot_path[0] == 0 ||
         g_debug_frame_counter + 1 != g_screenshot_frame) {

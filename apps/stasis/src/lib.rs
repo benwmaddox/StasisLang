@@ -2194,6 +2194,9 @@ fn run_play_in_process_inner(
                 &mut host_f32,
             )?;
         }
+        if let Some(live) = live.as_ref() {
+            live.apply_input_override(&mut host_i32, &mut host_f32)?;
+        }
         gfx.host_bulk_apply_requests(
             &host_req_seq,
             &host_req_flags,
@@ -4378,6 +4381,18 @@ mod tests {
             STASIS_MOBILE_RUNTIME_SOURCE.contains("STASIS_RENDER_I32_COUNT")
                 && STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_gfx_submit_u8("),
             "mobile AOT should bind and submit the same command representation"
+        );
+    }
+
+    #[test]
+    fn live_runtime_exposes_repeatable_pre_present_png_capture() {
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("STASIS_EXPORT int stasis_host_schedule_screenshot(const char* path)")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("g_screenshot_frame = (int)(g_debug_frame_counter + 1);")
+                && STASIS_GRAPHICS_SOURCE.contains("capture_scheduled_screenshot();"),
+            "Gauntlet captures must arm the existing pre-present screenshot path"
         );
     }
 

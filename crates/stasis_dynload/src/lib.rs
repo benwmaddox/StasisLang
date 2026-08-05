@@ -1045,6 +1045,7 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_release_sprite: usize,
     stasis_gfx_dump_bmp: usize,
     stasis_gfx_dump_png: Option<usize>,
+    stasis_host_schedule_screenshot: Option<usize>,
     stasis_gfx_poll_reload: usize,
     stasis_load_font: usize,
     stasis_measure_text: usize,
@@ -1084,6 +1085,9 @@ impl StasisGraphicsAssetsApi {
             // PNG capture was added after the original asset ABI. Keep older runtimes usable for
             // all pre-existing calls and report PNG as unsupported.
             stasis_gfx_dump_png: lib.symbol_address("stasis_gfx_dump_png").ok(),
+            stasis_host_schedule_screenshot: lib
+                .symbol_address("stasis_host_schedule_screenshot")
+                .ok(),
             stasis_gfx_poll_reload: lib.symbol_address("stasis_gfx_poll_reload")?,
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
@@ -1098,6 +1102,24 @@ impl StasisGraphicsAssetsApi {
             _lib: lib,
         })
     }
+}
+
+pub fn schedule_runtime_screenshot(path: &Path) -> Result<(), String> {
+    let api = stasis_graphics_assets_api()?;
+    let address = api.stasis_host_schedule_screenshot.ok_or_else(|| {
+        "the loaded graphics runtime does not support dynamic screenshots".to_string()
+    })?;
+    let path = CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| "screenshot path contains an interior NUL byte".to_string())?;
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char) -> i32 = unsafe { std::mem::transmute(address) };
+    if callback(path.as_ptr()) == 0 {
+        return Err("graphics runtime rejected the screenshot path".to_string());
+    }
+    Ok(())
 }
 
 fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, String> {

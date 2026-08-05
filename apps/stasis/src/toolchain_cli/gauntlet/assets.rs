@@ -1,0 +1,622 @@
+use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use stasis_ai::ToolCall;
+use stasis_assets::{
+    load_project_asset_manifest, AssetEntry, AssetFormat, AssetLimits, AssetManifest,
+    AudioEncoding, SpriteEncoding, DEFAULT_ASSET_MANIFEST_PATH,
+};
+use std::collections::BTreeSet;
+use std::fs;
+use std::io::Cursor;
+use std::path::{Component, Path, PathBuf};
+
+const MAX_TEXT_ASSET_BYTES: usize = 256 * 1024;
+const MAX_PNG_ASSET_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(crate) struct AppliedAssetTransaction {
+    backups: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl AppliedAssetTransaction {
+    pub(crate) fn rollback(self) -> Result<(), String> {
+        for (path, prior) in self.backups.into_iter().rev() {
+            match prior {
+                Some(bytes) => fs::write(&path, bytes)
+                    .map_err(|error| format!("failed restoring {}: {error}", path.display()))?,
+                None if path.exists() => fs::remove_file(&path)
+                    .map_err(|error| format!("failed removing {}: {error}", path.display()))?,
+                None => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn apply_asset_calls(
+    project_root: &Path,
+    calls: &[&ToolCall],
+) -> Result<AppliedAssetTransaction, String> {
+    let manifest_path = project_root.join(DEFAULT_ASSET_MANIFEST_PATH);
+    let manifest_source = fs::read(&manifest_path)
+        .map_err(|error| format!("failed reading asset manifest: {error}"))?;
+    let mut manifest: AssetManifest = serde_json::from_slice(&manifest_source)
+        .map_err(|error| format!("invalid asset manifest: {error}"))?;
+    let mut writes = Vec::<(PathBuf, Vec<u8>)>::new();
+    let mut touched = BTreeSet::new();
+    for call in calls {
+        let args = call
+            .args
+            .as_object()
+            .ok_or_else(|| "asset args must be an object".to_string())?;
+        let relative = required_string(args, "path")?;
+        let path = controlled_asset_path(project_root, &relative, call.tool.as_str())?;
+        if !touched.insert(path.clone()) {
+            return Err(format!("asset path appears more than once: {relative}"));
+        }
+        match call.tool.as_str() {
+            "write_svg_asset" => {
+                let id = controlled_id(&required_string(args, "id")?)?;
+                let source = required_string(args, "source")?;
+                let width = required_u32(args, "width", 1, 4096)?;
+                let height = required_u32(args, "height", 1, 4096)?;
+                validate_svg(&source)?;
+                let bytes = source.into_bytes();
+                upsert_entry(
+                    &mut manifest,
+                    AssetEntry {
+                        id,
+                        path: relative.replace('\\', "/"),
+                        content_sha256: sha256(&bytes),
+                        prepared_from_sha256: None,
+                        format: AssetFormat::Sprite {
+                            encoding: SpriteEncoding::Svg,
+                            width,
+                            height,
+                        },
+                        prepare: None,
+                        dependencies: Vec::new(),
+                    },
+                );
+                writes.push((path, bytes));
+            }
+            "write_png_asset" => {
+                let id = controlled_id(&required_string(args, "id")?)?;
+                let width = required_u32(args, "width", 1, 2048)?;
+                let height = required_u32(args, "height", 1, 2048)?;
+                if u64::from(width) * u64::from(height) > 4_194_304 {
+                    return Err("PNG asset exceeds the 4,194,304-pixel limit".to_string());
+                }
+                let background = parse_color(&required_string(args, "background")?)?;
+                let shapes = args
+                    .get("shapes")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "PNG asset shapes must be an array".to_string())?;
+                if shapes.len() > 512 {
+                    return Err("PNG asset supports at most 512 shapes".to_string());
+                }
+                let bytes = render_png(width, height, background, shapes)?;
+                upsert_entry(
+                    &mut manifest,
+                    AssetEntry {
+                        id,
+                        path: relative.replace('\\', "/"),
+                        content_sha256: sha256(&bytes),
+                        prepared_from_sha256: None,
+                        format: AssetFormat::Sprite {
+                            encoding: SpriteEncoding::Png,
+                            width,
+                            height,
+                        },
+                        prepare: None,
+                        dependencies: Vec::new(),
+                    },
+                );
+                writes.push((path, bytes));
+            }
+            "import_png_asset" => {
+                let id = controlled_id(&required_string(args, "id")?)?;
+                let source = required_string(args, "source_path")?;
+                let (bytes, width, height) = load_imagegen_png(project_root, &source)?;
+                upsert_entry(
+                    &mut manifest,
+                    AssetEntry {
+                        id,
+                        path: relative.replace('\\', "/"),
+                        content_sha256: sha256(&bytes),
+                        prepared_from_sha256: None,
+                        format: AssetFormat::Sprite {
+                            encoding: SpriteEncoding::Png,
+                            width,
+                            height,
+                        },
+                        prepare: None,
+                        dependencies: Vec::new(),
+                    },
+                );
+                writes.push((path, bytes));
+            }
+            "write_data_asset" => {
+                let source = required_string(args, "source")?;
+                if source.len() > MAX_TEXT_ASSET_BYTES {
+                    return Err("data asset exceeds 256 KiB".to_string());
+                }
+                if path
+                    .extension()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+                {
+                    serde_json::from_str::<Value>(&source)
+                        .map_err(|error| format!("invalid JSON data asset: {error}"))?;
+                }
+                writes.push((path, source.into_bytes()));
+            }
+            "write_procedural_wav" => {
+                let id = controlled_id(&required_string(args, "id")?)?;
+                let frequency = required_u32(args, "frequency_hz", 20, 8_000)?;
+                let duration_ms = required_u32(args, "duration_ms", 20, 5_000)?;
+                let (bytes, frames) = procedural_wav(frequency, duration_ms);
+                upsert_entry(
+                    &mut manifest,
+                    AssetEntry {
+                        id,
+                        path: relative.replace('\\', "/"),
+                        content_sha256: sha256(&bytes),
+                        prepared_from_sha256: None,
+                        format: AssetFormat::Audio {
+                            encoding: AudioEncoding::Wav,
+                            sample_rate: 44_100,
+                            channels: 1,
+                            duration_frames: frames,
+                        },
+                        prepare: None,
+                        dependencies: Vec::new(),
+                    },
+                );
+                writes.push((path, bytes));
+            }
+            _ => return Err(format!("unsupported Gauntlet asset tool: {}", call.tool)),
+        }
+    }
+    let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("failed encoding asset manifest: {error}"))?;
+    manifest_bytes.push(b'\n');
+    writes.push((manifest_path, manifest_bytes));
+    let mut backups = Vec::with_capacity(writes.len());
+    for (path, bytes) in &writes {
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            restore(&backups)?;
+            return Err(format!(
+                "refusing to write through asset symlink: {}",
+                path.display()
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed creating asset directory: {error}"))?;
+        }
+        let prior = fs::read(path).ok();
+        backups.push((path.clone(), prior));
+        if let Err(error) = fs::write(path, bytes) {
+            restore(&backups)?;
+            return Err(format!("failed staging asset {}: {error}", path.display()));
+        }
+    }
+    if let Err(error) = load_project_asset_manifest(project_root, AssetLimits::default()) {
+        restore(&backups)?;
+        return Err(format!("asset transaction validation failed: {error}"));
+    }
+    if let Err(error) = sync_prepared_assets(project_root, &writes, &mut backups) {
+        restore(&backups)?;
+        return Err(error);
+    }
+    Ok(AppliedAssetTransaction { backups })
+}
+
+fn sync_prepared_assets(
+    project_root: &Path,
+    writes: &[(PathBuf, Vec<u8>)],
+    backups: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+) -> Result<(), String> {
+    let prepared = project_root.join(".stasis_cache/play-assets");
+    if !prepared.is_dir() {
+        return Ok(());
+    }
+    for (source, bytes) in writes {
+        let relative = source
+            .strip_prefix(project_root)
+            .map_err(|_| "asset transaction escaped the project".to_string())?;
+        let destination = prepared.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed creating prepared asset directory: {error}"))?;
+        }
+        backups.push((destination.clone(), fs::read(&destination).ok()));
+        fs::write(&destination, bytes)
+            .map_err(|error| format!("failed synchronizing prepared asset: {error}"))?;
+    }
+    Ok(())
+}
+
+fn restore(backups: &[(PathBuf, Option<Vec<u8>>)]) -> Result<(), String> {
+    for (path, prior) in backups.iter().rev() {
+        match prior {
+            Some(bytes) => fs::write(path, bytes)
+                .map_err(|error| format!("failed rolling back {}: {error}", path.display()))?,
+            None if path.exists() => fs::remove_file(path)
+                .map_err(|error| format!("failed rolling back {}: {error}", path.display()))?,
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+fn controlled_asset_path(root: &Path, relative: &str, tool: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !relative.starts_with("assets/generated")
+    {
+        return Err("Gauntlet assets must be normal paths under assets/generated".to_string());
+    }
+    let valid_extension = match tool {
+        "write_svg_asset" => relative
+            .extension()
+            .is_some_and(|value| value.eq_ignore_ascii_case("svg")),
+        "write_png_asset" | "import_png_asset" => relative
+            .extension()
+            .is_some_and(|value| value.eq_ignore_ascii_case("png")),
+        "write_data_asset" => relative.extension().is_some_and(|value| {
+            value.eq_ignore_ascii_case("json") || value.eq_ignore_ascii_case("csv")
+        }),
+        "write_procedural_wav" => relative
+            .extension()
+            .is_some_and(|value| value.eq_ignore_ascii_case("wav")),
+        _ => false,
+    };
+    if !valid_extension {
+        return Err(format!("invalid file extension for {tool}"));
+    }
+    Ok(root.join(relative))
+}
+
+fn load_imagegen_png(root: &Path, relative: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !(relative.starts_with("build/ai-assets/imagegen")
+            || relative.starts_with("build/gauntlet/imagegen"))
+        || !relative
+            .extension()
+            .is_some_and(|value| value.eq_ignore_ascii_case("png"))
+    {
+        return Err(
+            "ImageGen input must be a normal PNG path under build/ai-assets/imagegen or build/gauntlet/imagegen"
+                .to_string(),
+        );
+    }
+    let path = root.join(relative);
+    let metadata = path
+        .symlink_metadata()
+        .map_err(|error| format!("failed reading ImageGen PNG {}: {error}", path.display()))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_PNG_ASSET_BYTES
+    {
+        return Err(
+            "ImageGen PNG must be a regular non-symlink file no larger than 16 MiB".to_string(),
+        );
+    }
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("failed reading ImageGen PNG {}: {error}", path.display()))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    let mut reader = image::ImageReader::with_format(Cursor::new(&bytes), ImageFormat::Png);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|error| format!("invalid or oversized ImageGen PNG: {error}"))?;
+    let width = decoded.width();
+    let height = decoded.height();
+    if u64::from(width) * u64::from(height) > 4_194_304 {
+        return Err("ImageGen PNG exceeds the 4,194,304-pixel limit".to_string());
+    }
+    Ok((bytes, width, height))
+}
+
+fn render_png(
+    width: u32,
+    height: u32,
+    background: Rgba<u8>,
+    shapes: &[Value],
+) -> Result<Vec<u8>, String> {
+    let mut image = RgbaImage::from_pixel(width, height, background);
+    for (index, shape) in shapes.iter().enumerate() {
+        let shape = shape
+            .as_object()
+            .ok_or_else(|| format!("PNG shape {index} must be an object"))?;
+        let kind = shape
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("PNG shape {index} requires kind"))?;
+        let color = parse_color(
+            shape
+                .get("color")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("PNG shape {index} requires color"))?,
+        )?;
+        match kind {
+            "rect" => draw_rect(
+                &mut image,
+                shape_i32(shape, "x", index)?,
+                shape_i32(shape, "y", index)?,
+                shape_u32(shape, "width", index, 1, 4096)?,
+                shape_u32(shape, "height", index, 1, 4096)?,
+                color,
+            ),
+            "circle" => draw_circle(
+                &mut image,
+                shape_i32(shape, "x", index)?,
+                shape_i32(shape, "y", index)?,
+                shape_u32(shape, "radius", index, 1, 2048)? as i32,
+                color,
+            ),
+            "line" => draw_line(
+                &mut image,
+                shape_i32(shape, "x1", index)?,
+                shape_i32(shape, "y1", index)?,
+                shape_i32(shape, "x2", index)?,
+                shape_i32(shape, "y2", index)?,
+                shape_u32(shape, "thickness", index, 1, 128)? as i32,
+                color,
+            ),
+            _ => return Err(format!("PNG shape {index} has unsupported kind {kind}")),
+        }
+    }
+    let mut output = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(|error| format!("failed encoding PNG asset: {error}"))?;
+    Ok(output.into_inner())
+}
+
+fn draw_rect(image: &mut RgbaImage, x: i32, y: i32, width: u32, height: u32, color: Rgba<u8>) {
+    for py in y..y.saturating_add(height as i32) {
+        for px in x..x.saturating_add(width as i32) {
+            put_pixel_clipped(image, px, py, color);
+        }
+    }
+}
+
+fn draw_circle(image: &mut RgbaImage, x: i32, y: i32, radius: i32, color: Rgba<u8>) {
+    let radius_squared = i64::from(radius) * i64::from(radius);
+    for py in y.saturating_sub(radius)..=y.saturating_add(radius) {
+        for px in x.saturating_sub(radius)..=x.saturating_add(radius) {
+            let dx = i64::from(px) - i64::from(x);
+            let dy = i64::from(py) - i64::from(y);
+            if dx * dx + dy * dy <= radius_squared {
+                put_pixel_clipped(image, px, py, color);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_line(
+    image: &mut RgbaImage,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    thickness: i32,
+    color: Rgba<u8>,
+) {
+    let dx = x2.saturating_sub(x1);
+    let dy = y2.saturating_sub(y1);
+    let steps = dx.unsigned_abs().max(dy.unsigned_abs()).max(1);
+    for step in 0..=steps {
+        let t = f64::from(step) / f64::from(steps);
+        let x = (f64::from(x1) + f64::from(dx) * t).round() as i32;
+        let y = (f64::from(y1) + f64::from(dy) * t).round() as i32;
+        draw_circle(image, x, y, (thickness / 2).max(1), color);
+    }
+}
+
+fn put_pixel_clipped(image: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>) {
+    if x >= 0 && y >= 0 && (x as u32) < image.width() && (y as u32) < image.height() {
+        image.put_pixel(x as u32, y as u32, color);
+    }
+}
+
+fn parse_color(value: &str) -> Result<Rgba<u8>, String> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("PNG colors must be #RRGGBB or #RRGGBBAA".to_string());
+    }
+    let channel =
+        |start| u8::from_str_radix(&hex[start..start + 2], 16).map_err(|error| error.to_string());
+    Ok(Rgba([
+        channel(0)?,
+        channel(2)?,
+        channel(4)?,
+        if hex.len() == 8 { channel(6)? } else { 255 },
+    ]))
+}
+
+fn shape_i32(
+    shape: &serde_json::Map<String, Value>,
+    name: &str,
+    index: usize,
+) -> Result<i32, String> {
+    shape
+        .get(name)
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| (-4096..=4096).contains(value))
+        .ok_or_else(|| format!("PNG shape {index} arg {name} must be between -4096 and 4096"))
+}
+
+fn shape_u32(
+    shape: &serde_json::Map<String, Value>,
+    name: &str,
+    index: usize,
+    min: u32,
+    max: u32,
+) -> Result<u32, String> {
+    shape
+        .get(name)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| (*value >= min) && (*value <= max))
+        .ok_or_else(|| format!("PNG shape {index} arg {name} must be between {min} and {max}"))
+}
+
+fn controlled_id(value: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.len() > 80
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("asset id must contain 1..=80 ASCII letters, digits, '_' or '-'".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn validate_svg(source: &str) -> Result<(), String> {
+    if source.len() > MAX_TEXT_ASSET_BYTES || !source.trim_start().starts_with("<svg") {
+        return Err("SVG must start with <svg and be no larger than 256 KiB".to_string());
+    }
+    let lower = source.to_ascii_lowercase();
+    for forbidden in ["<script", "<!doctype", "href=\"http", "href='http"] {
+        if lower.contains(forbidden) {
+            return Err(format!("SVG contains forbidden content: {forbidden}"));
+        }
+    }
+    Ok(())
+}
+
+fn upsert_entry(manifest: &mut AssetManifest, entry: AssetEntry) {
+    if let Some(existing) = manifest
+        .assets
+        .iter_mut()
+        .find(|existing| existing.id == entry.id)
+    {
+        *existing = entry;
+    } else {
+        manifest.assets.push(entry);
+    }
+    manifest.assets.sort_by(|a, b| a.id.cmp(&b.id));
+}
+
+fn required_string(args: &serde_json::Map<String, Value>, name: &str) -> Result<String, String> {
+    args.get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("asset tool requires non-empty string arg: {name}"))
+}
+
+fn required_u32(
+    args: &serde_json::Map<String, Value>,
+    name: &str,
+    min: u32,
+    max: u32,
+) -> Result<u32, String> {
+    args.get(name)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| (*value >= min) && (*value <= max))
+        .ok_or_else(|| format!("asset arg {name} must be between {min} and {max}"))
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn procedural_wav(frequency: u32, duration_ms: u32) -> (Vec<u8>, u64) {
+    const RATE: u32 = 44_100;
+    let frames = u64::from(RATE) * u64::from(duration_ms) / 1_000;
+    let data_bytes = u32::try_from(frames.saturating_mul(2)).unwrap_or(u32::MAX);
+    let mut out = Vec::with_capacity(44 + data_bytes as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x01\0");
+    out.extend_from_slice(&RATE.to_le_bytes());
+    out.extend_from_slice(&(RATE * 2).to_le_bytes());
+    out.extend_from_slice(&2_u16.to_le_bytes());
+    out.extend_from_slice(&16_u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_bytes.to_le_bytes());
+    for frame in 0..frames {
+        let phase =
+            2.0 * std::f64::consts::PI * f64::from(frequency) * frame as f64 / f64::from(RATE);
+        let envelope = 1.0 - frame as f64 / frames.max(1) as f64;
+        let sample = (phase.sin() * envelope * 10_000.0) as i16;
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    (out, frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svg_rejects_active_and_remote_content() {
+        assert!(validate_svg("<svg><path d='M0 0'/></svg>").is_ok());
+        assert!(validate_svg("<svg><script>alert(1)</script></svg>").is_err());
+        assert!(validate_svg("<svg><image href=\"https://example.com/a.png\"/></svg>").is_err());
+    }
+
+    #[test]
+    fn wav_is_bounded_and_has_a_real_header() {
+        let (wav, frames) = procedural_wav(440, 100);
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(frames, 4_410);
+        assert_eq!(wav.len(), 44 + frames as usize * 2);
+    }
+
+    #[test]
+    fn png_renderer_produces_a_decodable_source_asset() {
+        let shapes = vec![serde_json::json!({
+            "kind": "circle",
+            "x": 8,
+            "y": 8,
+            "radius": 4,
+            "color": "#ff8844ff"
+        })];
+        let png = render_png(16, 16, parse_color("#102030").unwrap(), &shapes).unwrap();
+        let decoded = image::load_from_memory_with_format(&png, ImageFormat::Png).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (16, 16));
+    }
+
+    #[test]
+    fn imagegen_png_import_is_bounded_and_decodable() {
+        let root =
+            std::env::temp_dir().join(format!("stasis_gauntlet_imagegen_{}", std::process::id()));
+        let source = root.join("build/gauntlet/imagegen/ship.png");
+        fs::create_dir_all(source.parent().expect("imagegen parent")).expect("imagegen dir");
+        let png = render_png(32, 24, parse_color("#102030").unwrap(), &[]).unwrap();
+        fs::write(&source, &png).expect("imagegen input");
+        let (imported, width, height) =
+            load_imagegen_png(&root, "build/gauntlet/imagegen/ship.png").expect("import");
+        assert_eq!((width, height), (32, 24));
+        assert_eq!(imported, png);
+        assert!(load_imagegen_png(&root, "../ship.png").is_err());
+        let assisted = root.join("build/ai-assets/imagegen/ship.png");
+        fs::create_dir_all(assisted.parent().expect("assisted parent")).expect("assisted dir");
+        fs::write(&assisted, &png).expect("assisted input");
+        assert!(load_imagegen_png(&root, "build/ai-assets/imagegen/ship.png").is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+}
