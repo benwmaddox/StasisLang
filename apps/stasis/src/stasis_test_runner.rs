@@ -18,6 +18,7 @@ pub struct StasisTestRunSummary {
     pub tests_run: usize,
     pub tests_passed: usize,
     pub tests_failed: usize,
+    pub passed_tests: Vec<String>,
     pub failures: Vec<String>,
     pub timing_discovery_us: u64,
     pub timing_prepare_us: u64,
@@ -98,6 +99,7 @@ pub fn run_jit_tests_in_directory_with_project_root_and_session(
         tests_run: 0,
         tests_passed: 0,
         tests_failed: 0,
+        passed_tests: Vec::new(),
         failures: Vec::new(),
         timing_discovery_us,
         timing_prepare_us: 0,
@@ -239,6 +241,11 @@ fn run_discovered_tests(
         match process.execute_bool_noarg_by_name(&test.generated_function_name) {
             Ok(true) => {
                 summary.tests_passed += 1;
+                summary.passed_tests.push(format!(
+                    "{} :: {}",
+                    file_path.display(),
+                    test.display_name
+                ));
             }
             Ok(false) => {
                 summary.tests_failed += 1;
@@ -442,6 +449,8 @@ mod tests {
         assert_eq!(summary.tests_discovered, 1, "{summary:?}");
         assert_eq!(summary.tests_passed, 1, "{summary:?}");
         assert_eq!(summary.tests_failed, 0, "{summary:?}");
+        assert_eq!(summary.passed_tests.len(), 1, "{summary:?}");
+        assert!(summary.passed_tests[0].ends_with("good.test.stasis :: good"));
 
         fs::remove_dir_all(&root).ok();
     }

@@ -760,7 +760,9 @@ fn controller_loop(
         scenario_pointer,
         &mut next_request,
     )?;
-    let readiness = verify_harness_readiness(&project_root, artifacts, &canceled)?;
+    let (readiness, baseline_tests) =
+        verify_harness_readiness(&project_root, artifacts, &canceled)?;
+    baseline_state = gameplay_evidence(baseline_state, baseline_tests);
     emit_event(artifacts, "harness_ready", json!({"evidence": readiness}))?;
     append_decision(
         artifacts,
@@ -1122,7 +1124,7 @@ fn controller_loop(
             scenario_pointer,
             &mut next_request,
         );
-        let (candidate, candidate_state) = match candidate_capture {
+        let (candidate, candidate_runtime_state) = match candidate_capture {
             Ok(evidence) => evidence,
             Err(error) => {
                 rollback_candidate(
@@ -1141,6 +1143,43 @@ fn controller_loop(
                 continue;
             }
         };
+        let candidate_tests = match run_project_test_evidence(
+            &project_root,
+            &artifacts.join(format!("{candidate_id}-tests.log")),
+            &canceled,
+        ) {
+            Ok(evidence) => evidence,
+            Err(error) if canceled.load(Ordering::Acquire) => {
+                rollback_candidate(
+                    &project_root,
+                    state.best_commit.as_deref().unwrap_or(&state.base_commit),
+                )?;
+                finish_canceled_or_budget(&mut state, artifacts)?;
+                emit_event(
+                    artifacts,
+                    "role_interrupted",
+                    json!({"role": "candidate_tests", "error": error}),
+                )?;
+                break;
+            }
+            Err(error) => {
+                rollback_candidate(
+                    &project_root,
+                    state.best_commit.as_deref().unwrap_or(&state.base_commit),
+                )?;
+                reject(
+                    &mut state,
+                    artifacts,
+                    &candidate_id,
+                    &format!("candidate deterministic tests failed: {error}"),
+                )?;
+                largest_gap = format!(
+                    "The candidate could not be evaluated because its deterministic tests failed: {error}"
+                );
+                continue;
+            }
+        };
+        let candidate_state = gameplay_evidence(candidate_runtime_state, candidate_tests);
         let candidate_changed = !git_stdout(&project_root, &["status", "--porcelain"])?
             .trim()
             .is_empty();
@@ -1742,7 +1781,7 @@ fn gameplay_critic(
     canceled: &AtomicBool,
 ) -> Result<BlindCritique, String> {
     let prompt = format!(
-        "You are a fresh read-only gameplay critic. Two anonymous candidates A and B were run from the same runtime snapshot for the same deterministic ticks. Judge behavioral improvement and regression relative to each other; the absolute scores still measure progress against the complete brief. Prefer a or b when one has better behavioral evidence without an evidenced regression. Return equivalent whenever gameplay is materially unchanged, including when a visual-only improvement leaves gameplay intact or both remain equally incomplete. Never return neither merely because both fail the full brief. Return neither only when both have different material regressions or the evidence is invalid. Return only JSON.\n\nBrief:\n{goal}\n\nRequired scenarios: {}\n\nA evidence:\n{}\n\nB evidence:\n{}",
+        "You are a fresh read-only gameplay critic. Two anonymous candidates A and B were run from the same runtime snapshot for the same deterministic ticks, and the controller independently executed each candidate's durable Stasis tests. Judge behavioral improvement and regression relative to each other; the absolute scores still measure progress against the complete brief. Passing test names are behavioral evidence, not proof of the whole brief: weigh them with the runtime state, and do not infer behavior that neither source demonstrates. Prefer a or b when one has better behavioral evidence without an evidenced regression. Return equivalent whenever gameplay is materially unchanged, including when a visual-only improvement leaves gameplay intact or both remain equally incomplete. Never return neither merely because both fail the full brief. Return neither only when both have different material regressions or the evidence is invalid. Return only JSON.\n\nBrief:\n{goal}\n\nRequired scenarios: {}\n\nA evidence:\n{}\n\nB evidence:\n{}",
         serde_json::to_string(&bar.required_scenarios).map_err(|error| error.to_string())?,
         serde_json::to_string(state_a).map_err(|error| error.to_string())?,
         serde_json::to_string(state_b).map_err(|error| error.to_string())?,
@@ -1847,6 +1886,13 @@ fn capture_scenario(
     )?;
     *request_id = request_id.saturating_add(1);
     Ok((frame, inspection.data.unwrap_or(Value::Null)))
+}
+
+fn gameplay_evidence(runtime: Value, deterministic_tests: Value) -> Value {
+    json!({
+        "runtime": runtime,
+        "deterministic_tests": deterministic_tests,
+    })
 }
 
 fn logical_center(project_root: &Path) -> Option<(i32, i32)> {
@@ -1993,10 +2039,28 @@ fn verify_harness_readiness(
     project_root: &Path,
     artifacts: &Path,
     canceled: &AtomicBool,
-) -> Result<String, String> {
+) -> Result<(String, Value), String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("failed locating Stasis for harness readiness: {error}"))?;
     let log_path = artifacts.join("harness-readiness.log");
+    let evidence = run_project_test_evidence(project_root, &log_path, canceled)?;
+    Ok((
+        format!(
+            "{} ran the existing deterministic project tests successfully; log={}",
+            executable.display(),
+            log_path.display()
+        ),
+        evidence,
+    ))
+}
+
+fn run_project_test_evidence(
+    project_root: &Path,
+    log_path: &Path,
+    canceled: &AtomicBool,
+) -> Result<Value, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed locating Stasis for deterministic tests: {error}"))?;
     let stdout = fs::File::create(&log_path)
         .map_err(|error| format!("failed creating {}: {error}", log_path.display()))?;
     let stderr = stdout
@@ -2024,7 +2088,7 @@ fn verify_harness_readiness(
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
-                "harness readiness test was canceled or exceeded 300 seconds; see {}",
+                "deterministic tests were canceled or exceeded 300 seconds; see {}",
                 log_path.display()
             ));
         }
@@ -2038,15 +2102,27 @@ fn verify_harness_readiness(
     };
     if !status.success() {
         return Err(format!(
-            "harness readiness test exited with {status}; see {}",
+            "deterministic tests exited with {status}; see {}",
             log_path.display()
         ));
     }
-    Ok(format!(
-        "{} ran the existing deterministic project tests successfully; log={}",
-        executable.display(),
-        log_path.display()
-    ))
+    let source = fs::read_to_string(log_path)
+        .map_err(|error| format!("failed reading {}: {error}", log_path.display()))?;
+    parse_test_evidence_log(&source).ok_or_else(|| {
+        format!(
+            "deterministic tests produced no valid JSON evidence; see {}",
+            log_path.display()
+        )
+    })
+}
+
+fn parse_test_evidence_log(source: &str) -> Option<Value> {
+    source.lines().rev().find_map(|line| {
+        let envelope = serde_json::from_str::<Value>(line).ok()?;
+        (envelope.get("ok").and_then(Value::as_bool) == Some(true))
+            .then(|| envelope.get("result").cloned())
+            .flatten()
+    })
 }
 
 fn run_final_gates(
@@ -3074,6 +3150,24 @@ mod tests {
     #[test]
     fn html_report_content_is_escaped() {
         assert_eq!(escape_html("<script>&\""), "&lt;script&gt;&amp;&quot;");
+    }
+
+    #[test]
+    fn gameplay_evidence_includes_controller_verified_test_names() {
+        let source = concat!(
+            "diagnostic before JSON\n",
+            "{\"command\":\"test\",\"ok\":true,\"result\":{\"tests_passed\":2,",
+            "\"passed_tests\":[\"tests/main.test.stasis :: enemy turn completes\"]}}\n",
+        );
+        let tests = parse_test_evidence_log(source).expect("test evidence");
+        let evidence = gameplay_evidence(json!({"game": {"round": 2}}), tests);
+
+        assert_eq!(evidence["runtime"]["game"]["round"], 2);
+        assert_eq!(evidence["deterministic_tests"]["tests_passed"], 2);
+        assert_eq!(
+            evidence["deterministic_tests"]["passed_tests"][0],
+            "tests/main.test.stasis :: enemy turn completes"
+        );
     }
 
     #[test]
