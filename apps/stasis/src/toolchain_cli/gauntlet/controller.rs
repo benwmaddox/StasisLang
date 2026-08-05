@@ -962,6 +962,14 @@ fn controller_loop(
             )
         };
         let primary_instruction = "Use only the supplied Stasis live-workspace tools. Inspect relevant symbols and references, then make one contiguous atomic semantic edit batch. You may create bounded SVG, PNG, JSON/CSV, or procedural WAV assets; put one contiguous asset-tool group immediately before the related source writes in the same response. Use record_decision during exploration and after consequential tested choices to preserve concise conclusions, tradeoffs, evidence, and next steps for future agents; never record hidden chain-of-thought. The write must compile and run tests. Do not grade your own visual quality. Return done immediately after a successful tested write and decision record. If a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools, call report_blocked once; it terminates this attempt immediately. Never retry the same terminal failure.";
+        emit_builder_attempt_started(
+            artifacts,
+            &candidate_id,
+            "primary",
+            &config.models.builder,
+            builder_calls,
+        )?;
+        let mut completed_attempt = "primary";
         let mut outcome = run_builder(
             &config.models.builder,
             "Fresh Stasis Gauntlet builder",
@@ -1016,6 +1024,14 @@ fn controller_loop(
                 let rescue_prompt = format!(
                     "{prompt}\n\nPrimary builder failure evidence (do not repeat this failure):\n{primary_failure_evidence}\n\nUpdated durable decision memory:\n{rescue_memory}"
                 );
+                emit_builder_attempt_started(
+                    artifacts,
+                    &candidate_id,
+                    "escalation",
+                    escalation,
+                    fresh_builder_escalation_calls(&config),
+                )?;
+                completed_attempt = "escalation";
                 outcome = run_builder(
                     escalation,
                     "Escalated Stasis Gauntlet builder",
@@ -1040,6 +1056,16 @@ fn controller_loop(
                 state.model_calls = state.model_calls.saturating_add(outcome.model_calls);
                 persist_state(artifacts, &mut state)?;
                 append_usage_file(artifacts, &outcome.usage_trace)?;
+                emit_event(
+                    artifacts,
+                    "role_attempt_completed",
+                    json!({
+                        "role": "builder",
+                        "attempt": completed_attempt,
+                        "candidate": candidate_id,
+                        "model_calls": outcome.model_calls,
+                    }),
+                )?;
                 emit_event(
                     artifacts,
                     "builder_completed",
@@ -2166,6 +2192,28 @@ fn fresh_builder_escalation_calls(config: &GauntletConfigV1) -> u32 {
     config.execution.builder_max_turns
 }
 
+fn emit_builder_attempt_started(
+    artifacts: &Path,
+    candidate: &str,
+    attempt: &str,
+    model: &GauntletRoleModel,
+    max_turns: u32,
+) -> Result<(), String> {
+    emit_event(
+        artifacts,
+        "role_attempt_started",
+        json!({
+            "role": "builder",
+            "attempt": attempt,
+            "candidate": candidate,
+            "model": model.model,
+            "reasoning_effort": model.reasoning_effort,
+            "timeout_minutes": model.timeout_minutes,
+            "max_turns": max_turns,
+        }),
+    )
+}
+
 fn record_builder_attempt_failure(
     state: &mut GauntletRunStateV1,
     artifacts: &Path,
@@ -3247,6 +3295,34 @@ mod tests {
         config.execution.builder_max_turns = 30;
 
         assert_eq!(fresh_builder_escalation_calls(&config), 30);
+    }
+
+    #[test]
+    fn builder_attempt_start_is_visible_in_the_controller_event_stream() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis-gauntlet-builder-event-{}-{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        fs::create_dir_all(&root).expect("builder event temp directory");
+        let model = GauntletRoleModel {
+            model: Some("gpt-5.6-luna".to_string()),
+            reasoning_effort: Some("max".to_string()),
+            timeout_minutes: 30,
+        };
+
+        emit_builder_attempt_started(&root, "candidate-0001", "primary", &model, 17)
+            .expect("builder start event");
+
+        let events = read_jsonl_records(&root.join(EVENTS_NAME), "events").expect("event records");
+        let event = events.last().expect("builder event");
+        assert_eq!(event["kind"], "role_attempt_started");
+        assert_eq!(event["data"]["role"], "builder");
+        assert_eq!(event["data"]["candidate"], "candidate-0001");
+        assert_eq!(event["data"]["model"], "gpt-5.6-luna");
+        assert_eq!(event["data"]["reasoning_effort"], "max");
+        assert_eq!(event["data"]["max_turns"], 17);
+        fs::remove_dir_all(&root).expect("remove builder event temp directory");
     }
 
     #[test]
