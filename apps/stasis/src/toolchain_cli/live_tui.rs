@@ -16,7 +16,8 @@ use stasis_ai::{
 };
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
-    workshop_source_hash, WorkshopSourceItem, WorkshopSourceItemKind,
+    workshop_source_hash, workshop_symbols, WorkshopSourceFile, WorkshopSourceItem,
+    WorkshopSourceItemKind, WorkshopSymbolKind,
 };
 use stasis_runner::live::{
     CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEdit, LiveEditOperation,
@@ -37,6 +38,9 @@ const COMPLETION_LIMIT: usize = 64;
 const TUI_REQUEST_START: u64 = 1u64 << 61;
 const AI_REQUEST_START: u64 = 1u64 << 62;
 const MAX_DECISION_FIELD_CHARS: usize = 2_000;
+const MAX_STDLIB_API_FILES: usize = 16;
+const MAX_STDLIB_API_ITEMS: usize = 256;
+const MAX_STDLIB_API_FILE_BYTES: u64 = 512 * 1024;
 
 enum AiUiEvent {
     InitialContext(Value),
@@ -173,9 +177,10 @@ pub(super) fn run_scripted_ai_profile(
     } else {
         LiveAiTools::new(client.clone())
     };
-    let initial_context = load_ai_initial_context(&mut tools, canceled).map_err(|message| {
-        scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
-    })?;
+    let initial_context =
+        load_ai_initial_context(&mut tools, project_root, canceled).map_err(|message| {
+            scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
+        })?;
     audit
         .write(serde_json::json!({
             "event": "initial_context",
@@ -270,7 +275,7 @@ fn scripted_ai_failure(
     }
 }
 
-fn ai_initial_context(initial_symbols: Value) -> Value {
+fn ai_initial_context(initial_symbols: Value, stdlib_api: Value) -> Value {
     serde_json::json!({
         "language": "Stasis",
         "runtime": "live in-process JIT",
@@ -278,11 +283,14 @@ fn ai_initial_context(initial_symbols: Value) -> Value {
         "write_policy": "all writes in one model batch compile, test, and commit atomically",
         "initial_symbols": initial_symbols,
         "initial_symbols_instruction": "This is the completed default list_symbols result. Use it before requesting filtered or paged follow-up discovery.",
+        "stdlib_api": stdlib_api,
+        "stdlib_api_instruction": "This is the completed compact public standard-library catalog. Use these signatures and canonical_import paths directly; do not rediscover stdlib implementation files unless behavior is ambiguous.",
     })
 }
 
 fn load_ai_initial_context(
     tools: &mut LiveAiTools,
+    project_root: &Path,
     canceled: &AtomicBool,
 ) -> Result<Value, String> {
     let observations = tools.execute(
@@ -299,9 +307,116 @@ fn load_ai_initial_context(
     if let Some(error) = observation.error {
         return Err(format!("initial symbol discovery failed: {error}"));
     }
+    let stdlib_api = load_stdlib_api_catalog(project_root)?;
     Ok(ai_initial_context(
         observation.result.unwrap_or(Value::Null),
+        stdlib_api,
     ))
+}
+
+fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
+    let candidates = [
+        project_root.join("vendor/stasis/src/stdlib"),
+        project_root.join(".stasis_cache/toolchain/src/stdlib"),
+        project_root.join("stdlib"),
+    ];
+    let Some(root) = candidates
+        .into_iter()
+        .find(|path| path.join("stdlib.stasis").is_file())
+    else {
+        return Ok(serde_json::json!({
+            "available": false,
+            "modules": [],
+            "total": 0,
+        }));
+    };
+    let canonical_project = project_root
+        .canonicalize()
+        .map_err(|error| format!("failed resolving AI project root: {error}"))?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("failed resolving Stasis stdlib catalog: {error}"))?;
+    if !canonical_root.starts_with(&canonical_project) {
+        return Err("Stasis stdlib catalog resolved outside the project".to_string());
+    }
+
+    let mut files = fs::read_dir(&canonical_root)
+        .map_err(|error| format!("failed reading Stasis stdlib catalog: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed enumerating Stasis stdlib catalog: {error}"))?;
+    files.sort_by_key(|entry| entry.file_name());
+    let mut modules = Vec::new();
+    let mut total = 0_usize;
+    for entry in files.into_iter() {
+        if modules.len() >= MAX_STDLIB_API_FILES {
+            break;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed inspecting Stasis stdlib module: {error}"))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("failed inspecting Stasis stdlib module: {error}"))?;
+        let path = entry.path();
+        if metadata.len() > MAX_STDLIB_API_FILE_BYTES
+            || path.extension().and_then(|value| value.to_str()) != Some("stasis")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("failed reading Stasis stdlib module: {error}"))?;
+        let relative = path
+            .strip_prefix(&canonical_project)
+            .map_err(|_| "Stasis stdlib module resolved outside the project".to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file = WorkshopSourceFile {
+            path: relative.clone(),
+            source,
+        };
+        let mut items = Vec::new();
+        for symbol in workshop_symbols(&[file])? {
+            if total >= MAX_STDLIB_API_ITEMS {
+                break;
+            }
+            if !matches!(
+                symbol.kind,
+                WorkshopSymbolKind::Function
+                    | WorkshopSymbolKind::Struct
+                    | WorkshopSymbolKind::Constant
+            ) {
+                continue;
+            }
+            items.push(serde_json::json!({
+                "kind": symbol.kind,
+                "signature": symbol.signature,
+            }));
+            total = total.saturating_add(1);
+        }
+        if items.is_empty() {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "Stasis stdlib module name is not UTF-8".to_string())?;
+        modules.push(serde_json::json!({
+            "file": relative,
+            "canonical_import": format!("/vendor/stasis/src/stdlib/{file_name}"),
+            "items": items,
+        }));
+        if total >= MAX_STDLIB_API_ITEMS {
+            break;
+        }
+    }
+    Ok(serde_json::json!({
+        "available": true,
+        "modules": modules,
+        "total": total,
+    }))
 }
 
 fn audit_agent_event(event: &AgentEvent) -> Value {
@@ -1468,6 +1583,7 @@ impl LiveTui {
             }
         }
         let client = self.client.clone();
+        let project_root = self.project_root.clone();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = canceled.clone();
         let (events_tx, events_rx) = mpsc::channel();
@@ -1475,8 +1591,8 @@ impl LiveTui {
             let mut provider = CodexExecProvider::default();
             let mut tools = LiveAiTools::new(client);
             let progress = events_tx.clone();
-            let result =
-                load_ai_initial_context(&mut tools, &worker_canceled).and_then(|initial_context| {
+            let result = load_ai_initial_context(&mut tools, &project_root, &worker_canceled)
+                .and_then(|initial_context| {
                     let _ = progress.send(AiUiEvent::InitialContext(initial_context.clone()));
                     run_agent(
                         &mut provider,
@@ -3421,6 +3537,49 @@ fn write_at(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn initial_context_catalogs_public_stdlib_signatures() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_stdlib_catalog_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let stdlib = root.join("vendor/stasis/src/stdlib");
+        fs::create_dir_all(stdlib.join("internal")).expect("stdlib dirs");
+        fs::write(
+            stdlib.join("stdlib.stasis"),
+            "function print(value: i32): void { return; }\n",
+        )
+        .expect("stdlib umbrella");
+        fs::write(
+            stdlib.join("graphics.stasis"),
+            concat!(
+                "struct Sprite { handle: i32; }\n",
+                "global private_counter: i32;\n",
+                "function draw_line(x: f32, y: f32): void { return; }\n",
+            ),
+        )
+        .expect("graphics module");
+        fs::write(
+            stdlib.join("internal/host_frame.stasis"),
+            "function host_private(): i32 { return 0; }\n",
+        )
+        .expect("internal module");
+
+        let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
+
+        assert_eq!(catalog["available"], true);
+        assert_eq!(catalog["total"], 3);
+        let rendered = serde_json::to_string(&catalog).expect("catalog JSON");
+        assert!(rendered.contains("draw_line(x: f32, y: f32): void"));
+        assert!(rendered.contains("/vendor/stasis/src/stdlib/graphics.stasis"));
+        assert!(!rendered.contains("private_counter"));
+        assert!(!rendered.contains("host_private"));
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn root_prompt_submits_a_bare_expression_for_evaluation() {

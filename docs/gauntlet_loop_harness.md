@@ -357,6 +357,17 @@ may run concurrently over immutable evidence; production builders remain
 serialized because one live runtime and one transactional project state are
 authoritative.
 
+Every ordinary `stasis ai` agent and Gauntlet builder also receives two completed
+discovery payloads before its first model turn. `initial_symbols` contains compact
+signatures for the entry file and its direct imports. `stdlib_api` contains the
+bounded public API catalog for the project-matched Stasis standard library,
+including canonical import paths and function, struct, and constant signatures.
+The catalog includes top-level public modules such as graphics, audio, collision,
+layout, timing, storage, memory, and HUD helpers; it excludes internal host ABI,
+test-only modules, globals, and function bodies. Agents should use this catalog
+directly rather than spending turns rediscovering standard-library implementation
+files.
+
 Fresh leads and builders receive a compact chronological projection of the
 latest 48 decision records, capped at 32 KiB. Builders may call
 `record_decision` during exploration and after tested choices, so architectural

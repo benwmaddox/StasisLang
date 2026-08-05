@@ -72,6 +72,22 @@ const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
 const PROJECT_GIT_ATTRIBUTES: &str = "*.stasis text eol=crlf\n";
+const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/src/stdlib/stdlib.stasis";
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+import "/vendor/stasis/src/stdlib/audio.stasis";
+import "/vendor/stasis/src/stdlib/collision.stasis";
+import "/vendor/stasis/src/stdlib/flex_layout.stasis";
+import "/vendor/stasis/src/stdlib/frame_timer.stasis";
+import "/vendor/stasis/src/stdlib/hud_table.stasis";
+import "/vendor/stasis/src/stdlib/sdl_scancodes.stasis";
+import "/vendor/stasis/src/stdlib/storage.stasis";
+import "/vendor/stasis/src/stdlib/ui_axis_layout.stasis";
+import "/vendor/stasis/src/stdlib/ui_button_9slice.stasis";
+
+function main(): i32 {
+    return 0;
+}
+"#;
 const PROJECT_VSCODE_SETTINGS: &str = r#"{
   "[stasis]": {
     "editor.defaultFormatter": "stasislang.stasis",
@@ -1116,10 +1132,7 @@ fn create_project_with_options(
         &root.join(PROJECT_ARCHITECTURE_NAME),
         PROJECT_ARCHITECTURE_GUIDE,
     )?;
-    write_new_file(
-        &root.join("src/main.stasis"),
-        "import \"/vendor/stasis/src/stdlib/stdlib.stasis\";\r\n\r\nfunction main(): i32 {\r\n    return 0;\r\n}\r\n",
-    )?;
+    write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
     write_new_file(
         &root.join("tests/main.test.stasis"),
         "test `new project is ready`(): bool {\r\n    return 1 == 1;\r\n}\r\n",
@@ -5467,6 +5480,25 @@ mod tests {
     fn generated_project_checks_tests_and_runs_through_jit() {
         let root = temp_dir("smoke");
         create_project(root.clone(), "smoke".to_string()).expect("create project");
+        let source = fs::read_to_string(root.join("src/main.stasis")).expect("read main source");
+        for module in [
+            "stdlib",
+            "graphics",
+            "audio",
+            "collision",
+            "flex_layout",
+            "frame_timer",
+            "hud_table",
+            "sdl_scancodes",
+            "storage",
+            "ui_axis_layout",
+            "ui_button_9slice",
+        ] {
+            assert!(
+                source.contains(&format!("/vendor/stasis/src/stdlib/{module}.stasis")),
+                "missing default {module} import"
+            );
+        }
         let workspace = load_workspace(Some(&root)).expect("load workspace");
         check_workspace(&workspace).expect("check project");
         test_workspace(&workspace, None).expect("test project");
