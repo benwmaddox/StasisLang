@@ -291,11 +291,16 @@ pub(super) fn resume(
         fs::remove_file(&stop)
             .map_err(|error| format!("failed clearing prior stop request: {error}"))?;
     }
-    state.phase = GauntletRunPhase::Building;
-    state.terminal_reason = None;
+    prepare_state_for_resume(&mut state);
     persist_state(&artifacts, &mut state)?;
     emit_event(&artifacts, "run_resumed", json!({}))?;
     run_persistent(workspace, config, state, artifacts)
+}
+
+fn prepare_state_for_resume(state: &mut GauntletRunStateV1) {
+    state.phase = GauntletRunPhase::Building;
+    state.terminal_reason = None;
+    state.consecutive_stalls = 0;
 }
 
 pub(super) fn status(workspace: &Workspace, run_id: &str) -> Result<CommandResult, String> {
@@ -1981,6 +1986,36 @@ mod tests {
             fs::read(root.join(&references[0].path)).expect("frozen reference"),
             bytes
         );
+    }
+
+    #[test]
+    fn resume_reopens_the_stall_budget() {
+        let mut state = GauntletRunStateV1 {
+            schema_version: 1,
+            run_id: "123-deadbeef".to_string(),
+            phase: GauntletRunPhase::Stalled,
+            project_root: "worktree".to_string(),
+            original_root: "project".to_string(),
+            branch: "stasis/gauntlet/123-deadbeef".to_string(),
+            base_commit: "deadbeef".to_string(),
+            best_commit: Some("cafebabe".to_string()),
+            current_workstream: Some("battle rules".to_string()),
+            model_calls: 7,
+            accepted_candidates: 0,
+            rejected_candidates: 5,
+            consecutive_stalls: 5,
+            started_unix_ms: 1,
+            updated_unix_ms: 2,
+            terminal_reason: Some("consecutive candidate limit reached".to_string()),
+        };
+
+        prepare_state_for_resume(&mut state);
+
+        assert_eq!(state.phase, GauntletRunPhase::Building);
+        assert_eq!(state.consecutive_stalls, 0);
+        assert_eq!(state.terminal_reason, None);
+        assert_eq!(state.rejected_candidates, 5);
+        assert_eq!(state.best_commit.as_deref(), Some("cafebabe"));
     }
 
     #[test]

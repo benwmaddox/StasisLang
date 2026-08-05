@@ -109,9 +109,9 @@ The project root contains a strict, versioned `gauntlet.json`:
     }
   },
   "models": {
-    "scout": {},
+    "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
     "lead": {},
-    "builder": {},
+    "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
     "visual_critic": {},
     "gameplay_critic": {}
   }
@@ -141,26 +141,28 @@ an auditable `context_compacted` trace event with before/after byte counts.
 Limits are 256 KiB through 16 MiB and 1 through 16 retained turns; the default
 is 2 MiB and six turns.
 
-Every role has an independent optional `model` and `reasoning_effort`. Empty
-objects inherit `STASIS_AI_MODEL`, `STASIS_AI_REASONING_EFFORT`, and ultimately
-the installed defaults. Values are passed directly to the installed Codex
-CLI, so a model identifier must actually be supported there. For example, if
-that installation exposes `luna`, a cost-oriented configuration can use:
+Every role has an independent optional `model` and `reasoning_effort`. New
+Gauntlet configurations default the scout and builder to `gpt-5.6-luna` with `max`
+reasoning; lead and both critics inherit `STASIS_AI_MODEL`,
+`STASIS_AI_REASONING_EFFORT`, and ultimately the installed defaults. An explicit
+empty role object also selects that inherited behavior. Values are passed
+directly to the installed Codex CLI, so a model identifier must actually be
+supported there. A fully explicit configuration can use:
 
 ```json
 {
-  "scout": {"model": "luna", "reasoning_effort": "low"},
+  "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
   "lead": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
-  "builder": {"model": "luna", "reasoning_effort": "medium"},
+  "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
   "visual_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "medium"},
   "gameplay_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "high"}
 }
 ```
 
-This is policy rather than a hardcoded recommendation: cheaper models fit
-reference scouting and bounded implementation work only when their observed
-acceptance rate justifies it. The lead and independent critics can remain on a
-stronger model. Model-call accounting stays global across roles.
+This default puts the discounted model on high-volume bounded work while the
+lead and independent critics remain on the stronger installed default. Projects
+can override any role when observed acceptance quality warrants it. Model-call
+accounting stays global across roles.
 
 Subscription-backed Codex is the first provider. Stasis does not request an API
 key or estimate a dollar cost. The [Codex non-interactive command

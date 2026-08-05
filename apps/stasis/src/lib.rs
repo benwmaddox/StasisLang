@@ -3749,6 +3749,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_graphics.c"
     ));
+    const STASIS_GRAPHICS_EXPORTS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_graphics.def"
+    ));
     const STASIS_RUNNER_SOURCE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_runner.c"
@@ -4391,7 +4395,8 @@ mod tests {
                 .contains("STASIS_EXPORT int stasis_host_schedule_screenshot(const char* path)")
                 && STASIS_GRAPHICS_SOURCE
                     .contains("g_screenshot_frame = (int)(g_debug_frame_counter + 1);")
-                && STASIS_GRAPHICS_SOURCE.contains("capture_scheduled_screenshot();"),
+                && STASIS_GRAPHICS_SOURCE.contains("capture_scheduled_screenshot();")
+                && STASIS_GRAPHICS_EXPORTS.contains("stasis_host_schedule_screenshot"),
             "Gauntlet captures must arm the existing pre-present screenshot path"
         );
     }
