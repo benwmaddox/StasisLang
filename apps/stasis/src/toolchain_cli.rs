@@ -41,6 +41,7 @@ use std::thread;
 use std::time::Duration;
 
 mod dap;
+mod gauntlet;
 mod live_tui;
 
 const MANIFEST_NAME: &str = "stasis.json";
@@ -116,6 +117,7 @@ const COMMANDS: &[&str] = &[
     "check",
     "test",
     "ai",
+    "gauntlet",
     "validate",
     "run",
     "lsp",
@@ -199,6 +201,11 @@ enum ToolchainCommand {
     Ai {
         #[arg(value_name = "PROMPT")]
         prompt: String,
+    },
+    /// Create, run, observe, and recover an autonomous live-game Gauntlet.
+    Gauntlet {
+        #[command(subcommand)]
+        command: gauntlet::GauntletCommand,
     },
     /// Boot a fresh isolated runtime and validate one scalar requirement.
     Validate {
@@ -745,6 +752,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Check => "check",
         ToolchainCommand::Test { .. } => "test",
         ToolchainCommand::Ai { .. } => "ai",
+        ToolchainCommand::Gauntlet { .. } => "gauntlet",
         ToolchainCommand::Validate { .. } => "validate",
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
@@ -779,6 +787,9 @@ fn execute(
                 .unwrap_or("stasis_game")
                 .to_string();
             create_project(root, name.unwrap_or(inferred))
+        }
+        ToolchainCommand::Gauntlet { command } => {
+            gauntlet::execute(command, workspace_arg.as_deref(), json_output)
         }
         ToolchainCommand::Version => Ok(version_result()),
         ToolchainCommand::EditorInfo => editor_info_result(),
@@ -836,6 +847,9 @@ fn execute(
                     test_workspace(&workspace, path.as_deref())
                 }
                 ToolchainCommand::Ai { prompt } => run_workspace_ai(&workspace, &prompt),
+                ToolchainCommand::Gauntlet { .. } => {
+                    unreachable!("gauntlet commands route before workspace discovery")
+                }
                 ToolchainCommand::Validate {
                     path,
                     op,
@@ -1735,7 +1749,7 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
     let ai_canceled = Arc::clone(&canceled);
     let ai = thread::spawn(move || {
         let result =
-            live_tui::run_scripted_ai_with_cancel(&client, &ai_root, &prompt, &ai_canceled);
+            live_tui::run_scripted_project_ai_with_cancel(&client, &ai_root, &prompt, &ai_canceled);
         let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
         result
     });

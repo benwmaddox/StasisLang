@@ -67,6 +67,13 @@ pub enum LiveCommand {
         #[serde(default = "one_tick")]
         ticks: u32,
     },
+    CaptureFrame {
+        artifact: String,
+    },
+    SetInputState {
+        #[serde(default)]
+        pointers: Vec<LivePointerInput>,
+    },
     Cancel {
         request_id: u64,
     },
@@ -248,6 +255,20 @@ pub enum LiveCommand {
         #[serde(default = "default_true")]
         run_tests: bool,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LivePointerInput {
+    pub id: i32,
+    pub x: i32,
+    pub y: i32,
+    #[serde(default)]
+    pub is_down: bool,
+    #[serde(default)]
+    pub went_down: bool,
+    #[serde(default)]
+    pub went_up: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2079,6 +2100,30 @@ mod tests {
         };
         assert_eq!(request.request_id, 42);
         assert_eq!(request.command, LiveCommand::Status);
+    }
+
+    #[test]
+    fn gauntlet_capture_and_input_commands_have_stable_json() {
+        let capture: LiveRequest = serde_json::from_str(
+            r#"{"schema_version":1,"request_id":70,"type":"capture_frame","artifact":"candidate-0001"}"#,
+        )
+        .expect("capture request");
+        assert_eq!(
+            capture.command,
+            LiveCommand::CaptureFrame {
+                artifact: "candidate-0001".to_string()
+            }
+        );
+
+        let input: LiveRequest = serde_json::from_str(
+            r#"{"schema_version":1,"request_id":71,"type":"set_input_state","pointers":[{"id":0,"x":480,"y":270,"is_down":true,"went_down":true}]}"#,
+        )
+        .expect("input request");
+        assert!(matches!(
+            input.command,
+            LiveCommand::SetInputState { ref pointers }
+                if pointers.len() == 1 && pointers[0].x == 480 && pointers[0].went_down
+        ));
     }
 
     #[test]

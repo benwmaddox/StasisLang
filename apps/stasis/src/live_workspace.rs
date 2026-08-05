@@ -193,6 +193,7 @@ pub(crate) struct LiveWorkspace {
     session_id: String,
     language_service: LanguageService,
     language_paths: BTreeSet<String>,
+    input_override: Option<Vec<stasis_runner::live::LivePointerInput>>,
 }
 
 impl Drop for LiveWorkspace {
@@ -255,6 +256,7 @@ impl LiveWorkspace {
             session_id,
             language_service,
             language_paths: BTreeSet::new(),
+            input_override: None,
         };
         workspace.refresh_completion(jit)?;
         Ok(workspace)
@@ -443,6 +445,67 @@ impl LiveWorkspace {
         if self.paused && self.step_remaining > 0 {
             self.step_remaining -= 1;
         }
+        if let Some(pointers) = self.input_override.as_mut() {
+            for pointer in pointers {
+                pointer.went_down = false;
+                pointer.went_up = false;
+            }
+        }
+    }
+
+    pub(crate) fn apply_input_override(
+        &self,
+        host_i32: &mut [i32],
+        host_f32: &mut [f32],
+    ) -> Result<(), String> {
+        const I_COUNT: usize = 7;
+        const I_DROPPED: usize = 8;
+        const I_BASE: usize = 544;
+        const I_STRIDE: usize = 4;
+        const F_STRIDE: usize = 6;
+        const F_LOGICAL_W: usize = 50;
+        const F_LOGICAL_H: usize = 51;
+        let Some(pointers) = self.input_override.as_ref() else {
+            return Ok(());
+        };
+        if host_i32.len() < I_BASE + pointers.len() * I_STRIDE
+            || host_f32.len() < pointers.len() * F_STRIDE
+            || host_f32.len() <= F_LOGICAL_H
+        {
+            return Err("host frame buffers are too small for live input".to_string());
+        }
+        let width = host_f32[F_LOGICAL_W];
+        let height = host_f32[F_LOGICAL_H];
+        if width <= 0.0 || height <= 0.0 {
+            return Err("live input requires a positive logical viewport".to_string());
+        }
+        host_i32[I_COUNT] = pointers.len() as i32;
+        host_i32[I_DROPPED] = 0;
+        for (slot, pointer) in pointers.iter().enumerate() {
+            if pointer.x < 0
+                || pointer.y < 0
+                || pointer.x as f32 > width
+                || pointer.y as f32 > height
+            {
+                return Err(format!(
+                    "live pointer {} is outside the {}x{} viewport",
+                    pointer.id, width, height
+                ));
+            }
+            let ib = I_BASE + slot * I_STRIDE;
+            let fb = slot * F_STRIDE;
+            host_i32[ib] = pointer.id;
+            host_i32[ib + 1] = i32::from(pointer.is_down);
+            host_i32[ib + 2] = i32::from(pointer.went_down);
+            host_i32[ib + 3] = i32::from(pointer.went_up);
+            host_f32[fb] = pointer.x as f32;
+            host_f32[fb + 1] = pointer.y as f32;
+            host_f32[fb + 2] = 0.0;
+            host_f32[fb + 3] = 0.0;
+            host_f32[fb + 4] = (pointer.x as f32 / width).clamp(0.0, 1.0);
+            host_f32[fb + 5] = (pointer.y as f32 / height).clamp(0.0, 1.0);
+        }
+        Ok(())
     }
 
     pub(crate) fn should_quit(&self) -> bool {
@@ -633,6 +696,34 @@ impl LiveWorkspace {
                 Ok((
                     "step_scheduled",
                     json!({"ticks": ticks, "after_tick": tick}),
+                ))
+            }
+            LiveCommand::CaptureFrame { artifact } => {
+                let artifact = validate_capture_artifact(&artifact)?;
+                let directory = self
+                    .config
+                    .project_root
+                    .join(&self.config.output)
+                    .join("gauntlet-captures");
+                std::fs::create_dir_all(&directory)
+                    .map_err(|error| format!("failed creating live capture directory: {error}"))?;
+                let path = directory.join(format!("{artifact}.png"));
+                if path.exists() {
+                    std::fs::remove_file(&path)
+                        .map_err(|error| format!("failed replacing prior live capture: {error}"))?;
+                }
+                stasis_dynload::schedule_runtime_screenshot(&path)?;
+                Ok((
+                    "capture_scheduled",
+                    json!({"artifact": artifact, "path": path, "next_presented_frame": true}),
+                ))
+            }
+            LiveCommand::SetInputState { pointers } => {
+                validate_live_pointers(&pointers)?;
+                self.input_override = (!pointers.is_empty()).then_some(pointers);
+                Ok((
+                    "input_state_set",
+                    json!({"pointer_count": self.input_override.as_ref().map_or(0, Vec::len)}),
                 ))
             }
             LiveCommand::Cancel { .. } => unreachable!("cancellation handled before dispatch"),
@@ -1891,6 +1982,44 @@ impl LiveWorkspace {
     }
 }
 
+fn validate_capture_artifact(value: &str) -> Result<&str, String> {
+    if value.is_empty()
+        || value.len() > 80
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(
+            "capture artifact must contain 1..=80 ASCII letters, digits, '-' or '_'".to_string(),
+        );
+    }
+    Ok(value)
+}
+
+fn validate_live_pointers(
+    pointers: &[stasis_runner::live::LivePointerInput],
+) -> Result<(), String> {
+    if pointers.len() > 8 {
+        return Err("live input supports at most eight pointers".to_string());
+    }
+    let mut ids = BTreeSet::new();
+    for pointer in pointers {
+        if pointer.id < 0 || pointer.x < 0 || pointer.y < 0 {
+            return Err("live input ids and coordinates must be non-negative".to_string());
+        }
+        if !ids.insert(pointer.id) {
+            return Err(format!("duplicate live pointer id {}", pointer.id));
+        }
+        if pointer.went_down && (!pointer.is_down || pointer.went_up) {
+            return Err("went_down requires is_down and cannot coincide with went_up".to_string());
+        }
+        if pointer.went_up && pointer.is_down {
+            return Err("went_up requires is_down=false".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn is_static_type_field(item: &WorkshopCompletionItem) -> bool {
     item.kind == "field"
         && item.scope.is_none()
@@ -3073,6 +3202,34 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn gauntlet_capture_ids_and_input_edges_are_bounded() {
+        assert!(validate_capture_artifact("candidate-0001").is_ok());
+        assert!(validate_capture_artifact("../escape").is_err());
+        assert!(
+            validate_live_pointers(&[stasis_runner::live::LivePointerInput {
+                id: 0,
+                x: 480,
+                y: 270,
+                is_down: true,
+                went_down: true,
+                went_up: false,
+            }])
+            .is_ok()
+        );
+        assert!(
+            validate_live_pointers(&[stasis_runner::live::LivePointerInput {
+                id: 0,
+                x: 0,
+                y: 0,
+                is_down: false,
+                went_down: true,
+                went_up: false,
+            }])
+            .is_err()
+        );
+    }
 
     fn project() -> (PathBuf, LiveRunConfig) {
         // stasis_compiler is a dependency of this test binary, so its cfg(test) JIT isolation is

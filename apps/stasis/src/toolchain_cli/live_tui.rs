@@ -10,8 +10,9 @@ use crossterm::terminal::{
 };
 use serde_json::Value;
 use stasis_ai::{
-    live_tool_specs, run_agent, AgentEvent, CodexExecProvider, ToolCall, ToolExecutor,
-    ToolObservation, DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
+    gauntlet_tool_specs, live_tool_specs, project_ai_tool_specs, run_agent, run_agent_with_profile,
+    AgentEvent, AgentProfile, CodexExecProvider, ToolCall, ToolExecutor, ToolObservation,
+    DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
 };
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
@@ -35,6 +36,7 @@ const MAX_UNDO_STATES: usize = 100;
 const COMPLETION_LIMIT: usize = 64;
 const TUI_REQUEST_START: u64 = 1u64 << 61;
 const AI_REQUEST_START: u64 = 1u64 << 62;
+const MAX_DECISION_FIELD_CHARS: usize = 2_000;
 
 enum AiUiEvent {
     InitialContext(Value),
@@ -56,23 +58,113 @@ pub(super) fn run_scripted_ai_with_cancel(
     prompt: &str,
     canceled: &AtomicBool,
 ) -> Result<(String, PathBuf, PathBuf), String> {
-    let mut audit = AiAuditLog::create(project_root, prompt)?;
+    let outcome = run_scripted_ai_profile(
+        client,
+        project_root,
+        prompt,
+        AgentProfile::default(),
+        Vec::new(),
+        false,
+        false,
+        false,
+        None,
+        canceled,
+    )?;
+    Ok((outcome.summary, outcome.trace, outcome.usage_trace))
+}
+
+pub(super) fn run_scripted_project_ai_with_cancel(
+    client: &LiveSessionClient,
+    project_root: &Path,
+    prompt: &str,
+    canceled: &AtomicBool,
+) -> Result<(String, PathBuf, PathBuf), String> {
+    let mut profile = AgentProfile::default();
+    profile.instruction.push_str(" You may create or update project assets with write_svg_asset, write_png_asset, import_png_asset, write_data_asset, and write_procedural_wav. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
+    let outcome = run_scripted_ai_profile(
+        client,
+        project_root,
+        prompt,
+        profile,
+        Vec::new(),
+        false,
+        true,
+        false,
+        None,
+        canceled,
+    )?;
+    Ok((outcome.summary, outcome.trace, outcome.usage_trace))
+}
+
+pub(super) struct ScriptedAiOutcome {
+    pub summary: String,
+    pub trace: PathBuf,
+    pub usage_trace: PathBuf,
+    pub model_calls: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_scripted_ai_profile(
+    client: &LiveSessionClient,
+    project_root: &Path,
+    prompt: &str,
+    profile: AgentProfile,
+    images: Vec<PathBuf>,
+    web_search: bool,
+    allow_project_assets: bool,
+    auto_apply_layout: bool,
+    decision_log: Option<&Path>,
+    canceled: &AtomicBool,
+) -> Result<ScriptedAiOutcome, String> {
+    let mut audit = AiAuditLog::create_with_model(
+        project_root,
+        prompt,
+        profile.model.as_deref(),
+        profile.reasoning_effort.as_deref(),
+    )?;
     let trace_path = audit.path.clone();
     let usage_path = audit.usage_path.clone();
-    let mut provider = CodexExecProvider::default();
-    let mut tools = LiveAiTools::new(client.clone());
+    let mut provider = CodexExecProvider::default()
+        .with_images(images)
+        .with_web_search(web_search);
+    if let Some(model) = profile.model.as_deref() {
+        provider = provider.with_model(model);
+    }
+    if let Some(reasoning_effort) = profile.reasoning_effort.as_deref() {
+        provider = provider.with_reasoning_effort(reasoning_effort);
+    }
+    let mut tools = if allow_project_assets {
+        LiveAiTools::new_project_assets(
+            client.clone(),
+            project_root.to_path_buf(),
+            auto_apply_layout,
+            decision_log.map(Path::to_path_buf),
+            profile.role.clone(),
+        )
+    } else {
+        LiveAiTools::new(client.clone())
+    };
     let initial_context = load_ai_initial_context(&mut tools, canceled)?;
     audit.write(serde_json::json!({
         "event": "initial_context",
         "value": initial_context.clone(),
     }))?;
     let mut audit_error = None;
-    let result = run_agent(
+    let result = run_agent_with_profile(
         &mut provider,
         &mut tools,
+        &profile,
         prompt,
         initial_context,
-        live_tool_specs(),
+        if allow_project_assets {
+            if decision_log.is_some() {
+                gauntlet_tool_specs()
+            } else {
+                project_ai_tool_specs()
+            }
+        } else {
+            live_tool_specs()
+        },
         canceled,
         |event| {
             if audit_error.is_none() {
@@ -93,7 +185,12 @@ pub(super) fn run_scripted_ai_with_cancel(
                 "ok": true,
                 "summary": summary,
             }))?;
-            Ok((summary, trace_path, usage_path))
+            Ok(ScriptedAiOutcome {
+                summary,
+                trace: trace_path,
+                usage_trace: usage_path,
+                model_calls: provider.call_count(),
+            })
         }
         Err(error) => {
             audit.write(serde_json::json!({
@@ -157,6 +254,16 @@ fn audit_agent_event(event: &AgentEvent) -> Value {
             "event": "tool_observations",
             "observations": observations.iter().map(audit_observation).collect::<Vec<_>>(),
         }),
+        AgentEvent::ContextCompacted {
+            turns_compacted,
+            before_bytes,
+            after_bytes,
+        } => serde_json::json!({
+            "event": "context_compacted",
+            "turns_compacted": turns_compacted,
+            "before_bytes": before_bytes,
+            "after_bytes": after_bytes,
+        }),
         AgentEvent::Completed(summary) => {
             serde_json::json!({"event": "model_completed", "summary": summary})
         }
@@ -183,6 +290,15 @@ struct AiAuditLog {
 
 impl AiAuditLog {
     fn create(project_root: &Path, prompt: &str) -> Result<Self, String> {
+        Self::create_with_model(project_root, prompt, None, None)
+    }
+
+    fn create_with_model(
+        project_root: &Path,
+        prompt: &str,
+        model: Option<&str>,
+        reasoning_effort: Option<&str>,
+    ) -> Result<Self, String> {
         let directory = project_root.join("build/ai-traces");
         fs::create_dir_all(&directory)
             .map_err(|error| format!("failed creating AI trace directory: {error}"))?;
@@ -223,10 +339,10 @@ impl AiAuditLog {
         log.write(serde_json::json!({
             "event": "request",
             "provider": "installed_codex_subscription",
-            "model": std::env::var("STASIS_AI_MODEL")
-                .unwrap_or_else(|_| DEFAULT_CODEX_MODEL.to_string()),
-            "reasoning_effort": std::env::var("STASIS_AI_REASONING_EFFORT")
-                .unwrap_or_else(|_| DEFAULT_REASONING_EFFORT.to_string()),
+            "model": model.map(str::to_string).unwrap_or_else(|| std::env::var("STASIS_AI_MODEL")
+                .unwrap_or_else(|_| DEFAULT_CODEX_MODEL.to_string())),
+            "reasoning_effort": reasoning_effort.map(str::to_string).unwrap_or_else(|| std::env::var("STASIS_AI_REASONING_EFFORT")
+                .unwrap_or_else(|_| DEFAULT_REASONING_EFFORT.to_string())),
             "prompt": prompt,
             "payload_logging": "exact agent tool calls and observations; Codex transport envelope omitted",
         }))?;
@@ -273,6 +389,14 @@ impl AiAuditLog {
 
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 impl Drop for AiRun {
@@ -1371,6 +1495,21 @@ impl LiveTui {
                         "observations": observations.iter().map(audit_observation).collect::<Vec<_>>(),
                     }));
                 }
+                AiUiEvent::Progress(AgentEvent::ContextCompacted {
+                    turns_compacted,
+                    before_bytes,
+                    after_bytes,
+                }) => {
+                    self.status = format!(
+                        "AI compacted {turns_compacted} turns ({before_bytes} -> {after_bytes} bytes)"
+                    );
+                    self.audit(serde_json::json!({
+                        "event": "context_compacted",
+                        "turns_compacted": turns_compacted,
+                        "before_bytes": before_bytes,
+                        "after_bytes": after_bytes,
+                    }));
+                }
                 AiUiEvent::Progress(AgentEvent::Completed(summary)) => {
                     self.push_transcript(format!("AI: {summary}"));
                     self.audit(serde_json::json!({"event": "model_completed", "summary": summary}));
@@ -1962,6 +2101,11 @@ struct LiveAiTools {
     next_request_id: u64,
     last_write: Option<LiveResponse>,
     reference_search_ready: bool,
+    project_root: Option<PathBuf>,
+    asset_transaction: Option<super::gauntlet::assets::AppliedAssetTransaction>,
+    auto_apply_layout: bool,
+    decision_log: Option<PathBuf>,
+    decision_role: Option<String>,
 }
 
 impl LiveAiTools {
@@ -1971,6 +2115,117 @@ impl LiveAiTools {
             next_request_id: AI_REQUEST_START,
             last_write: None,
             reference_search_ready: false,
+            project_root: None,
+            asset_transaction: None,
+            auto_apply_layout: false,
+            decision_log: None,
+            decision_role: None,
+        }
+    }
+
+    fn new_project_assets(
+        client: LiveSessionClient,
+        project_root: PathBuf,
+        auto_apply_layout: bool,
+        decision_log: Option<PathBuf>,
+        decision_role: String,
+    ) -> Self {
+        Self {
+            project_root: Some(project_root),
+            auto_apply_layout,
+            decision_log,
+            decision_role: Some(decision_role),
+            ..Self::new(client)
+        }
+    }
+
+    fn record_decision(&self, call: &ToolCall) -> ToolObservation {
+        let Some(path) = self.decision_log.as_ref() else {
+            return ToolObservation::error(
+                &call.tool,
+                "decision memory is unavailable outside a Gauntlet run",
+            );
+        };
+        let Some(args) = call.args.as_object() else {
+            return ToolObservation::error(&call.tool, "decision args must be an object");
+        };
+        let read = |name: &str| -> Result<String, String> {
+            let value = args
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("record_decision requires non-empty string arg: {name}"))?;
+            if value.chars().count() > MAX_DECISION_FIELD_CHARS {
+                return Err(format!(
+                    "record_decision arg {name} exceeds {MAX_DECISION_FIELD_CHARS} characters"
+                ));
+            }
+            Ok(value.to_string())
+        };
+        let record = match (
+            read("kind"),
+            read("summary"),
+            read("rationale"),
+            read("evidence"),
+            read("next_step"),
+        ) {
+            (Ok(kind), Ok(summary), Ok(rationale), Ok(evidence), Ok(next_step)) => {
+                serde_json::json!({
+                    "schema_version": 1,
+                    "unix_ms": unix_ms(),
+                    "audience": "lead_builder",
+                    "role": self.decision_role.as_deref().unwrap_or("Gauntlet agent"),
+                    "kind": kind,
+                    "summary": summary,
+                    "rationale": rationale,
+                    "evidence": evidence,
+                    "next_step": next_step,
+                })
+            }
+            values => {
+                let error = [
+                    values.0.err(),
+                    values.1.err(),
+                    values.2.err(),
+                    values.3.err(),
+                    values.4.err(),
+                ]
+                .into_iter()
+                .flatten()
+                .next()
+                .unwrap_or_else(|| "invalid decision memory".to_string());
+                return ToolObservation::error(&call.tool, error);
+            }
+        };
+        let result = (|| -> Result<(), String> {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    format!("failed creating decision memory directory: {error}")
+                })?;
+            }
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|error| format!("failed opening decision memory: {error}"))?;
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&record).map_err(|error| error.to_string())?
+            )
+            .map_err(|error| format!("failed writing decision memory: {error}"))?;
+            file.flush()
+                .map_err(|error| format!("failed flushing decision memory: {error}"))?;
+            file.sync_data()
+                .map_err(|error| format!("failed syncing decision memory: {error}"))
+        })();
+        match result {
+            Ok(()) => ToolObservation::result(
+                &call.tool,
+                serde_json::json!({"status":"recorded","path":path}),
+            ),
+            Err(error) => ToolObservation::error(&call.tool, error),
         }
     }
 
@@ -2104,10 +2359,27 @@ impl LiveAiTools {
             canceled,
         ) {
             Ok(response) => {
+                let response =
+                    if self.auto_apply_layout && response.ok && response.kind == "edit_preview" {
+                        match self.request(LiveCommand::Apply { run_tests: true }, canceled) {
+                            Ok(applied) => applied,
+                            Err(error) => {
+                                if let Some(transaction) = self.asset_transaction.take() {
+                                    let _ = transaction.rollback();
+                                }
+                                return failed_write_observations(calls, error);
+                            }
+                        }
+                    } else {
+                        response
+                    };
                 let applied = response.ok && response.kind == "edit_applied";
                 if applied {
                     self.last_write = Some(response.clone());
                     self.reference_search_ready = false;
+                    self.asset_transaction.take();
+                } else if let Some(transaction) = self.asset_transaction.take() {
+                    let _ = transaction.rollback();
                 }
                 if applied {
                     calls
@@ -2127,7 +2399,12 @@ impl LiveAiTools {
                     failed_write_observations(calls, error)
                 }
             }
-            Err(error) => failed_write_observations(calls, error),
+            Err(error) => {
+                if let Some(transaction) = self.asset_transaction.take() {
+                    let _ = transaction.rollback();
+                }
+                failed_write_observations(calls, error)
+            }
         }
     }
 }
@@ -2219,10 +2496,67 @@ impl ToolExecutor for LiveAiTools {
                     .collect()
             }
         };
+        let asset_indexes = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, call)| {
+                matches!(
+                    call.tool.as_str(),
+                    "write_svg_asset"
+                        | "write_png_asset"
+                        | "import_png_asset"
+                        | "write_data_asset"
+                        | "write_procedural_wav"
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let asset_range = asset_indexes.first().copied().map(|first| {
+            let last = *asset_indexes.last().expect("asset index");
+            first..last + 1
+        });
+        if let Some(range) = asset_range.as_ref() {
+            let valid = asset_indexes.len() == range.len()
+                && write_range
+                    .as_ref()
+                    .is_some_and(|writes| range.end == writes.start)
+                && self.project_root.is_some();
+            if !valid {
+                return calls
+                    .iter()
+                    .map(|call| ToolObservation::error(
+                        &call.tool,
+                        "Gauntlet asset tools must be one contiguous batch immediately before related source writes",
+                    ))
+                    .collect();
+            }
+            let asset_calls = calls[range.clone()].iter().collect::<Vec<_>>();
+            match super::gauntlet::assets::apply_asset_calls(
+                self.project_root.as_ref().expect("validated project root"),
+                &asset_calls,
+            ) {
+                Ok(transaction) => self.asset_transaction = Some(transaction),
+                Err(error) => {
+                    return calls
+                        .iter()
+                        .map(|call| ToolObservation::error(&call.tool, error.clone()))
+                        .collect();
+                }
+            }
+        }
         let mut observations = Vec::with_capacity(calls.len());
         let mut index = 0;
         while index < calls.len() {
-            if write_range
+            if asset_range
+                .as_ref()
+                .is_some_and(|range| range.contains(&index))
+            {
+                observations.push(ToolObservation::result(
+                    &calls[index].tool,
+                    serde_json::json!({"status": "staged_for_atomic_source_commit"}),
+                ));
+                index += 1;
+            } else if write_range
                 .as_ref()
                 .is_some_and(|range| range.start == index)
             {
@@ -2230,6 +2564,9 @@ impl ToolExecutor for LiveAiTools {
                 let writes = calls[range.clone()].iter().collect::<Vec<_>>();
                 observations.extend(self.execute_writes(&writes, canceled));
                 index = range.end;
+            } else if calls[index].tool == "record_decision" {
+                observations.push(self.record_decision(&calls[index]));
+                index += 1;
             } else {
                 observations.push(self.execute_read(&calls[index], canceled));
                 index += 1;
@@ -3020,6 +3357,54 @@ mod tests {
             json!({"tests": "passed"}),
         ));
         tools.validate_completion().expect("tested write completes");
+    }
+
+    #[test]
+    fn gauntlet_agent_can_persist_bounded_decision_memory() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_decision_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let decision_log = root.join("decisions.jsonl");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            true,
+            Some(decision_log.clone()),
+            "Fresh builder".to_string(),
+        );
+        let observation = tools.record_decision(&ToolCall {
+            tool: "record_decision".to_string(),
+            args: json!({
+                "kind": "architecture",
+                "summary": "Keep movement tick-based",
+                "rationale": "Deterministic replay is a frozen runtime invariant.",
+                "evidence": "The live scenario advances exactly 30 ticks.",
+                "next_step": "Implement collision using the same tick order."
+            }),
+        });
+        assert!(observation.error.is_none());
+        let source = fs::read_to_string(decision_log).expect("decision memory");
+        let record: Value = serde_json::from_str(source.trim()).expect("decision record");
+        assert_eq!(record["role"], "Fresh builder");
+        assert_eq!(record["summary"], "Keep movement tick-based");
+        assert_eq!(record["audience"], "lead_builder");
+        let oversized = tools.record_decision(&ToolCall {
+            tool: "record_decision".to_string(),
+            args: json!({
+                "kind": "architecture",
+                "summary": "x".repeat(MAX_DECISION_FIELD_CHARS + 1),
+                "rationale": "bounded",
+                "evidence": "bounded",
+                "next_step": "bounded"
+            }),
+        });
+        assert!(oversized.error.is_some());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -88,6 +88,21 @@ batch. A built-in AI change cannot report completion until one such tested batch
 successful write receipt is the completion evidence, so the live AI does not run a second test or
 model-authored runtime-validation loop afterward.
 
+The one-shot `stasis ai` command also receives the controlled project-asset tools used by
+Gauntlet. It can reuse the SVG pipeline, compose deterministic PNG files, import a host-generated
+ImageGen PNG, write bounded JSON/CSV data, and synthesize bounded procedural WAV files. Asset calls
+must form one contiguous group immediately before the source writes that load them. Stasis derives
+the v2 manifest entries, validates the complete bundle, compiles and tests the related source, and
+rolls the asset and source sides back together on failure; the model never edits the manifest.
+
+For ImageGen, a capable host copies the selected project-bound PNG into
+`build/ai-assets/imagegen/`; `import_png_asset` then validates and copies it under
+`assets/generated/`. The installed `codex exec` child still cannot invoke the built-in ImageGen
+tool directly, so this is an explicit host bridge rather than an API-key fallback. Deterministic
+`write_png_asset` remains available without that host capability. One-shot AI does not inherit
+Gauntlet's autonomous layout migration: an asset/source edit requiring a layout change is left
+unapplied and reported as requiring the normal explicit approval workflow.
+
 Human commands intentionally cover every useful live AI capability:
 
 | AI tool | CLI / TUI equivalent |
@@ -96,6 +111,8 @@ Human commands intentionally cover every useful live AI capability:
 | `find_references` | `stasis symbol references SYMBOL` / `:references SYMBOL` |
 | `read_symbol` | `stasis symbol read SYMBOL` / `:read SYMBOL` |
 | `write_symbol`, `delete_symbol` | `stasis symbol add|update|delete` / `:add`, `:update`, `:delete` |
+| `write_svg_asset`, `write_png_asset`, `import_png_asset` | controlled `assets/generated/` transaction (`stasis ai` and Gauntlet) |
+| `write_data_asset`, `write_procedural_wav` | controlled data/audio transaction (`stasis ai` and Gauntlet) |
 | `inspect_runtime_state` | `:inspect`; `stasis validate` exposes fresh-run scalar evidence |
 | `run_frame` | `:step`; `stasis validate --frames N` in an isolated CLI run |
 
@@ -385,6 +402,22 @@ score = 0;
 edit path. Scratch text never silently becomes project source.
 
 ## Automation protocol
+
+Gauntlet adds two schema-v1 JSON commands without changing the human TUI:
+
+```json
+{"schema_version":1,"request_id":70,"type":"set_input_state","pointers":[{"id":0,"x":480,"y":270,"is_down":true,"went_down":true}]}
+{"schema_version":1,"request_id":71,"type":"capture_frame","artifact":"candidate-0001"}
+```
+
+`set_input_state` accepts at most eight logical pointers and overrides physical
+pointer data until replaced (an empty array clears the simulated pointers).
+Edge flags clear after one deterministic tick. `capture_frame` accepts only a
+bounded artifact identity and schedules a PNG for the next presented frame;
+the runtime chooses the path under the configured project output. Gauntlet
+combines these commands with pause, step, validation snapshot/restore, and
+state inspection to run repeatable scenarios. Callers cannot supply a capture
+filesystem path.
 
 Use `--live-json` to print schema-v1 response envelopes as JSON lines. A command file can mix the
 terminal spelling above with request JSON:

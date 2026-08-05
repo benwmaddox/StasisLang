@@ -19,10 +19,10 @@ crossterm = "0.28"
 stasis_dynload = { path = "../../crates/stasis_dynload" }
 stasis_assets = { path = "../../crates/stasis_assets" }
 stasis_ai = { path = "../../crates/stasis_ai" }
+image.workspace = true
 
 [dev-dependencies]
 object = "0.36"
-image.workspace = true
 
 [lib]
 path = "src/lib.rs"
