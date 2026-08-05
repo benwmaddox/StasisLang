@@ -577,6 +577,20 @@ fn write_graphical_seed(root: &Path) -> Result<(), String> {
             runtime_gfx.display()
         )
     })?;
+    let runtime_window_request = stdlib
+        .parent()
+        .ok_or_else(|| "bundled stdlib has no source parent".to_string())?
+        .join("runtime/host_window_request.stasis");
+    fs::copy(
+        &runtime_window_request,
+        root.join("runtime/host_window_request.stasis"),
+    )
+    .map_err(|error| {
+        format!(
+            "failed copying window-request module {}: {error}",
+            runtime_window_request.display()
+        )
+    })?;
     fs::write(root.join("src/main.stasis"), GAUNTLET_SEED_SOURCE)
         .map_err(|error| format!("failed writing Gauntlet seed source: {error}"))?;
     fs::write(root.join("tests/main.test.stasis"), GAUNTLET_SEED_TEST)
@@ -695,11 +709,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 
 const GAUNTLET_SEED_SOURCE: &str = r#"@link("stasis_graphics");
 import "../runtime/gfx_cmd.stasis";
-
-global host_req_flags: i32;
-global host_req_window_w_px: i32;
-global host_req_window_h_px: i32;
-global host_req_seq: i32;
+import "../runtime/host_window_request.stasis";
 
 struct Game {
     ticks: i32;
@@ -709,10 +719,7 @@ struct Game {
 global game: Game;
 
 function main(): i32 {
-    host_req_flags = 1;
-    host_req_window_w_px = 960;
-    host_req_window_h_px = 540;
-    host_req_seq += 1;
+    host_request_windowed(960, 540);
     game.ticks = 0;
     game.swaps = 0;
     return 0;
@@ -914,10 +921,13 @@ mod tests {
             "function tick(): i32",
             "function render(): i32",
             "function on_code_swap(): void",
+            "host_request_windowed(960, 540)",
             "gfx_cmd_mark_present()",
         ] {
             assert!(GAUNTLET_SEED_SOURCE.contains(required), "{required}");
         }
+        assert!(!GAUNTLET_SEED_SOURCE.contains("host_req_flags"));
+        assert!(!GAUNTLET_SEED_SOURCE.contains("host_req_seq"));
     }
 
     #[test]

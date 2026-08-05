@@ -2267,28 +2267,7 @@ impl LiveAiTools {
                 return ToolObservation::error(&call.tool, error);
             }
         };
-        let result = (|| -> Result<(), String> {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|error| {
-                    format!("failed creating decision memory directory: {error}")
-                })?;
-            }
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|error| format!("failed opening decision memory: {error}"))?;
-            writeln!(
-                file,
-                "{}",
-                serde_json::to_string(&record).map_err(|error| error.to_string())?
-            )
-            .map_err(|error| format!("failed writing decision memory: {error}"))?;
-            file.flush()
-                .map_err(|error| format!("failed flushing decision memory: {error}"))?;
-            file.sync_data()
-                .map_err(|error| format!("failed syncing decision memory: {error}"))
-        })();
+        let result = self.append_decision_record(path, &record);
         match result {
             Ok(()) => ToolObservation::result(
                 &call.tool,
@@ -2522,6 +2501,12 @@ impl LiveAiTools {
                     } else {
                         format_live_response(&response)
                     };
+                    self.record_durable_failure(
+                        "atomic_write_failed",
+                        "The builder's atomic write was rejected and rolled back",
+                        &error,
+                        "Correct the reported compile or test failure before attempting another atomic write.",
+                    );
                     failed_write_observations(calls, error)
                 }
             }
@@ -2529,9 +2514,74 @@ impl LiveAiTools {
                 if let Some(transaction) = self.asset_transaction.take() {
                     let _ = transaction.rollback();
                 }
+                self.record_durable_failure(
+                    "atomic_write_failed",
+                    "The builder's atomic write request failed before acceptance",
+                    &error,
+                    "Correct the reported live request failure before attempting another atomic write.",
+                );
                 failed_write_observations(calls, error)
             }
         }
+    }
+
+    fn append_decision_record(&self, path: &Path, record: &Value) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed creating decision memory directory: {error}"))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| format!("failed opening decision memory: {error}"))?;
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(record).map_err(|error| error.to_string())?
+        )
+        .map_err(|error| format!("failed writing decision memory: {error}"))?;
+        file.flush()
+            .map_err(|error| format!("failed flushing decision memory: {error}"))?;
+        file.sync_data()
+            .map_err(|error| format!("failed syncing decision memory: {error}"))
+    }
+
+    fn record_durable_failure(&self, kind: &str, summary: &str, evidence: &str, next_step: &str) {
+        let Some(path) = self.decision_log.as_ref() else {
+            return;
+        };
+        let bounded = |value: &str| {
+            value
+                .chars()
+                .take(MAX_DECISION_FIELD_CHARS)
+                .collect::<String>()
+        };
+        let evidence = bounded(evidence);
+        if fs::read_to_string(path).ok().is_some_and(|source| {
+            source
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str::<Value>(line).ok())
+                .is_some_and(|record| {
+                    record.get("kind").and_then(Value::as_str) == Some(kind)
+                        && record.get("evidence").and_then(Value::as_str) == Some(evidence.as_str())
+                })
+        }) {
+            return;
+        }
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "unix_ms": unix_ms(),
+            "audience": "lead_builder",
+            "role": "live_tool_gate",
+            "kind": bounded(kind),
+            "summary": bounded(summary),
+            "rationale": "Persist exact live-tool failures immediately so interruption, rescue, and later builders can change course.",
+            "evidence": evidence,
+            "next_step": bounded(next_step),
+        });
+        let _ = self.append_decision_record(path, &record);
     }
 }
 
@@ -2715,7 +2765,7 @@ impl ToolExecutor for LiveAiTools {
     }
 
     fn validate_completion(&self) -> Result<(), String> {
-        match &self.last_write {
+        let result = match &self.last_write {
             Some(response)
                 if response.ok
                     && response.kind == "edit_applied"
@@ -2728,11 +2778,37 @@ impl ToolExecutor for LiveAiTools {
             {
                 Ok(())
             }
-            _ => Err(
-                "complete the requested change with one atomic write that compiles and passes project tests"
+            None => Err("completion rejected: no atomic write was attempted".to_string()),
+            Some(response) if !response.ok => {
+                Err("completion rejected: the last atomic write failed".to_string())
+            }
+            Some(response) if response.kind != "edit_applied" => Err(format!(
+                "completion rejected: the last write returned {:?}, not edit_applied",
+                response.kind
+            )),
+            Some(response) if response.data.is_none() => Err(
+                "completion rejected: the successful edit_applied response contained no transaction data"
                     .to_string(),
             ),
+            Some(response) => Err(format!(
+                "completion rejected: the successful edit_applied transaction reported tests={}",
+                response
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("tests"))
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "missing".to_string())
+            )),
+        };
+        if let Err(error) = &result {
+            self.record_durable_failure(
+                "completion_gate_failed",
+                "The builder declared completion without a currently accepted tested write",
+                error,
+                "Perform one successful atomic write with passing tests before declaring completion.",
+            );
         }
+        result
     }
 
     fn terminal_failure(&self) -> Option<String> {
@@ -3474,6 +3550,47 @@ mod tests {
     }
 
     #[test]
+    fn completion_gate_reports_missing_transaction_data() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        let mut response = LiveResponse::success(7, 9, "edit_applied", json!({"tests": "passed"}));
+        response.data = None;
+        tools.last_write = Some(response);
+
+        assert_eq!(
+            tools.validate_completion().unwrap_err(),
+            "completion rejected: the successful edit_applied response contained no transaction data"
+        );
+    }
+
+    #[test]
+    fn gauntlet_completion_failure_is_durable_before_agent_retry() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_live_failure_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        fs::create_dir_all(&root).expect("failure memory root");
+        let decisions = root.join("decisions.jsonl");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            true,
+            Some(decisions.clone()),
+            "builder".to_string(),
+        );
+
+        let error = tools.validate_completion().expect_err("write required");
+        let memory = fs::read_to_string(decisions).expect("durable failure memory");
+
+        assert_eq!(error, "completion rejected: no atomic write was attempted");
+        assert!(memory.contains("completion_gate_failed"));
+        assert!(memory.contains("completion rejected: no atomic write was attempted"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn failed_atomic_batch_reports_details_once() {
         let calls = [
             ToolCall {
@@ -3503,10 +3620,10 @@ mod tests {
     fn live_ai_completion_requires_a_tested_atomic_write() {
         let (client, _server) = stasis_runner::live::live_session(1);
         let mut tools = LiveAiTools::new(client);
-        assert!(tools
-            .validate_completion()
-            .expect_err("write required")
-            .contains("compiles and passes project tests"));
+        assert_eq!(
+            tools.validate_completion().expect_err("write required"),
+            "completion rejected: no atomic write was attempted"
+        );
 
         tools.last_write = Some(LiveResponse::success(
             1,
@@ -3514,7 +3631,10 @@ mod tests {
             "edit_applied",
             json!({"tests": "skipped"}),
         ));
-        assert!(tools.validate_completion().is_err());
+        assert_eq!(
+            tools.validate_completion().unwrap_err(),
+            "completion rejected: the successful edit_applied transaction reported tests=\"skipped\""
+        );
 
         tools.last_write = Some(LiveResponse::success(
             2,

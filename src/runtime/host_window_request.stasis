@@ -6,10 +6,31 @@
 // Ordering: ABI order is the order of fields/globals declared here.
 
 const HOST_REQ_FLAG_WINDOWED: i32 = 1;
+
 const HOST_REQ_FLAG_FULLSCREEN: i32 = 2;
 
 global host_req_seq: i32;
+
 global host_req_flags: i32;
+
 global host_req_window_w_px: i32;
+
 global host_req_window_h_px: i32;
 
+// Publish window requests by updating the payload before advancing the sequence.
+// The host observes the sequence change as the commit point for the mailbox.
+function host_request_windowed(width: i32, height: i32): void {
+    host_req_flags = HOST_REQ_FLAG_WINDOWED;
+    host_req_window_w_px = width;
+    host_req_window_h_px = height;
+    host_req_seq = host_req_seq + 1;
+}
+
+function host_request_fullscreen(enabled: i32): void {
+    if (enabled != 0) {
+        host_req_flags = HOST_REQ_FLAG_FULLSCREEN;
+    } else {
+        host_req_flags = HOST_REQ_FLAG_WINDOWED;
+    }
+    host_req_seq = host_req_seq + 1;
+}

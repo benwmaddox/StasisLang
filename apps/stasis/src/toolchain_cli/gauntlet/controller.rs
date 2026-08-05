@@ -14,6 +14,7 @@ use stasis_ai::{AgentCompactionPolicy, AgentProfile, CodexExecProvider, ModelPro
 use stasis_runner::live::{
     live_session, LiveCommand, LivePointerInput, LiveRequest, LiveResponse, LiveSessionClient,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,10 @@ const FINAL_ACCEPTANCES: u32 = 2;
 const MAX_MEMORY_RECORDS: usize = 48;
 const MAX_MEMORY_CHARS: usize = 32 * 1024;
 const MAX_DECISION_FIELD_CHARS: usize = 2_000;
+const MAX_FAILURE_TRACE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_FAILURE_ERROR_KINDS: usize = 8;
+const MAX_PRIOR_RUNS: usize = 4;
+const MAX_PRIOR_RUN_LESSONS: usize = 12;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_STALE_AFTER_MS: u64 = 15_000;
 
@@ -249,6 +254,16 @@ struct BlindCritique {
     summary: String,
 }
 
+struct PriorRunLesson {
+    unix_ms: u64,
+    source_run_id: String,
+    source_kind: String,
+    summary: String,
+    rationale: String,
+    evidence: String,
+    next_step: String,
+}
+
 fn preference_selects_candidate(critique: &BlindCritique, candidate_is_a: bool) -> bool {
     matches!(
         (critique.preferred.as_str(), candidate_is_a),
@@ -387,6 +402,14 @@ pub(super) fn start(
             "isolation": config.execution.isolation,
         }),
     )?;
+    let imported = import_prior_run_lessons(&workspace.root, &artifacts, &run_id)?;
+    if imported > 0 {
+        emit_event(
+            &artifacts,
+            "prior_run_lessons_imported",
+            json!({"count": imported}),
+        )?;
+    }
     run_persistent(workspace, config, state, artifacts)
 }
 
@@ -468,6 +491,14 @@ pub(super) fn resume(
     prepare_state_for_resume(&mut state);
     persist_state(&artifacts, &mut state)?;
     emit_event(&artifacts, "run_resumed", json!({}))?;
+    let imported = import_prior_run_lessons(&workspace.root, &artifacts, run_id)?;
+    if imported > 0 {
+        emit_event(
+            &artifacts,
+            "prior_run_lessons_imported",
+            json!({"count": imported}),
+        )?;
+    }
     run_persistent(workspace, config, state, artifacts)
 }
 
@@ -913,32 +944,36 @@ fn controller_loop(
             "Frozen game brief:\n{goal}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
             decision.workstream, decision.builder_prompt
         );
-        let run_builder =
-            |model: &GauntletRoleModel, role: &str, instruction: &str, available_calls: u32| {
-                let profile =
-                    builder_agent_profile(&config, model, role, instruction, available_calls);
-                live_tui::run_scripted_ai_profile(
-                    &client,
-                    &project_root,
-                    &prompt,
-                    profile,
-                    vec![baseline.clone()],
-                    false,
-                    true,
-                    true,
-                    Some(&artifacts.join(DECISIONS_NAME)),
-                    &canceled,
-                )
-            };
+        let run_builder = |model: &GauntletRoleModel,
+                           role: &str,
+                           instruction: &str,
+                           agent_prompt: &str,
+                           available_calls: u32| {
+            let profile = builder_agent_profile(&config, model, role, instruction, available_calls);
+            live_tui::run_scripted_ai_profile(
+                &client,
+                &project_root,
+                agent_prompt,
+                profile,
+                vec![baseline.clone()],
+                false,
+                true,
+                true,
+                Some(&artifacts.join(DECISIONS_NAME)),
+                &canceled,
+            )
+        };
         let primary_instruction = "Use only the supplied Stasis live-workspace tools. Inspect relevant symbols and references, then make one contiguous atomic semantic edit batch. You may create bounded SVG, PNG, JSON/CSV, or procedural WAV assets; put one contiguous asset-tool group immediately before the related source writes in the same response. Use record_decision during exploration and after consequential tested choices to preserve concise conclusions, tradeoffs, evidence, and next steps for future agents; never record hidden chain-of-thought. The write must compile and run tests. Do not grade your own visual quality. Return done immediately after a successful tested write and decision record. If a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools, call report_blocked once; it terminates this attempt immediately. Never retry the same terminal failure.";
         let mut outcome = run_builder(
             &config.models.builder,
             "Fresh Stasis Gauntlet builder",
             primary_instruction,
+            &prompt,
             builder_calls,
         );
+        let mut latest_failure_evidence = None;
         if let Err(failure) = &outcome {
-            record_builder_attempt_failure(
+            let primary_failure_evidence = record_builder_attempt_failure(
                 &mut state,
                 artifacts,
                 &candidate_id,
@@ -946,6 +981,7 @@ fn controller_loop(
                 &config.models.builder,
                 failure,
             )?;
+            latest_failure_evidence = Some(primary_failure_evidence.clone());
             if let Some(escalation) = config
                 .models
                 .builder_escalation
@@ -964,6 +1000,7 @@ fn controller_loop(
                         "from_model": config.models.builder.model,
                         "to_model": escalation.model,
                         "reason": failure.message,
+                        "evidence": primary_failure_evidence,
                         "fresh_turn_allowance": config.execution.builder_max_turns,
                     }),
                 )?;
@@ -973,25 +1010,30 @@ fn controller_loop(
                     "builder_escalated",
                     &format!("Escalated {candidate_id} to the rescue builder"),
                     "The primary builder could not finish, so the configured one-shot escalation policy applies.",
-                    &failure.message,
+                    &primary_failure_evidence,
                     "Make one bounded rescue attempt, then either complete or preserve the terminal blocker.",
                 )?;
                 let escalation_instruction = "You are the one-shot rescue builder after the primary builder failed. Use the durable decision memory and current evidence to avoid repeating failed exploration. Make one bounded atomic correction that completes the assigned work. If the failure is environmental or otherwise non-recoverable from the supplied tools, call report_blocked once to terminate immediately. Never loop on the same failed operation.";
+                let rescue_memory = decision_memory_snapshot(artifacts)?;
+                let rescue_prompt = format!(
+                    "{prompt}\n\nPrimary builder failure evidence (do not repeat this failure):\n{primary_failure_evidence}\n\nUpdated durable decision memory:\n{rescue_memory}"
+                );
                 outcome = run_builder(
                     escalation,
                     "Escalated Stasis Gauntlet builder",
                     escalation_instruction,
+                    &rescue_prompt,
                     fresh_builder_escalation_calls(&config),
                 );
                 if let Err(failure) = &outcome {
-                    record_builder_attempt_failure(
+                    latest_failure_evidence = Some(record_builder_attempt_failure(
                         &mut state,
                         artifacts,
                         &candidate_id,
                         "escalation",
                         escalation,
                         failure,
-                    )?;
+                    )?);
                 }
             }
         }
@@ -1035,9 +1077,11 @@ fn controller_loop(
                     &candidate_id,
                     &format!("builder failed: {}", failure.message),
                 )?;
+                let evidence = latest_failure_evidence.unwrap_or_else(|| {
+                    builder_failure_evidence(&failure.message, failure.trace.as_deref())
+                });
                 largest_gap = format!(
-                    "The previous builder failed before producing a valid candidate: {}",
-                    failure.message
+                    "The previous builder failed before producing a valid candidate: {evidence}"
                 );
                 continue;
             }
@@ -2131,7 +2175,8 @@ fn record_builder_attempt_failure(
     attempt: &str,
     model: &GauntletRoleModel,
     failure: &live_tui::ScriptedAiFailure,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    let evidence = builder_failure_evidence(&failure.message, failure.trace.as_deref());
     state.model_calls = state.model_calls.saturating_add(failure.model_calls);
     persist_state(artifacts, state)?;
     if let Some(usage_trace) = failure.usage_trace.as_deref().filter(|path| path.is_file()) {
@@ -2146,11 +2191,77 @@ fn record_builder_attempt_failure(
             "model": model.model,
             "reasoning_effort": model.reasoning_effort,
             "reason": failure.message,
+            "evidence": evidence,
             "trace": failure.trace,
             "usage": failure.usage_trace,
             "model_calls": failure.model_calls,
         }),
-    )
+    )?;
+    append_decision(
+        artifacts,
+        "controller",
+        "builder_attempt_failed",
+        &format!("Builder {attempt} attempt failed for {candidate}"),
+        "Later attempts need the actual repeated tool or completion failure, not only the terminal turn-limit message.",
+        &evidence,
+        "Avoid repeating the evidenced failure; use a different bounded correction or report the blocker.",
+    )?;
+    Ok(evidence)
+}
+
+fn builder_failure_evidence(message: &str, trace: Option<&Path>) -> String {
+    let mut errors = BTreeMap::<String, (u32, usize)>::new();
+    let mut ordinal = 0_usize;
+    if let Some(trace) = trace {
+        if let Ok(source) = read_bounded_utf8(trace, MAX_FAILURE_TRACE_BYTES, "AI trace") {
+            for line in source.lines() {
+                let Ok(record) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if record.get("event").and_then(Value::as_str) != Some("tool_observations") {
+                    continue;
+                }
+                let Some(observations) = record.get("observations").and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                for observation in observations {
+                    let Some(error) = observation.get("error").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let tool = observation
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool");
+                    ordinal = ordinal.saturating_add(1);
+                    let detail = format!("{tool}: {error}");
+                    let entry = errors.entry(detail).or_insert((0, ordinal));
+                    entry.0 = entry.0.saturating_add(1);
+                    entry.1 = ordinal;
+                }
+            }
+        }
+    }
+    let mut errors = errors.into_iter().collect::<Vec<_>>();
+    errors.sort_by_key(|(_, (_, last_seen))| *last_seen);
+    let start = errors.len().saturating_sub(MAX_FAILURE_ERROR_KINDS);
+    let details = errors[start..]
+        .iter()
+        .map(|(detail, (count, _))| {
+            if *count > 1 {
+                format!("{detail} (repeated {count} times)")
+            } else {
+                detail.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let evidence = if details.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message}; observed errors: {details}")
+    };
+    bounded_decision_text(&evidence)
 }
 
 fn reject(
@@ -2377,6 +2488,220 @@ fn bounded_decision_text(value: &str) -> String {
     value.chars().take(MAX_DECISION_FIELD_CHARS).collect()
 }
 
+fn import_prior_run_lessons(
+    original_root: &Path,
+    artifacts: &Path,
+    current_run_id: &str,
+) -> Result<usize, String> {
+    let runs = original_root.join(RUNS_PATH);
+    if !runs.is_dir() {
+        return Ok(0);
+    }
+    let existing = read_decision_records(artifacts)?;
+    let mut imported = existing
+        .iter()
+        .filter(|record| record.get("kind").and_then(Value::as_str) == Some("prior_run_lesson"))
+        .filter_map(|record| {
+            Some((
+                record.get("source_run_id")?.as_str()?.to_string(),
+                record.get("source_kind")?.as_str()?.to_string(),
+                record.get("source_unix_ms")?.as_u64()?,
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut run_dirs = fs::read_dir(&runs)
+        .map_err(|error| format!("failed reading prior Gauntlet runs: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name != current_run_id && name != "worktrees"
+        })
+        .collect::<Vec<_>>();
+    run_dirs.sort_by_key(|entry| std::cmp::Reverse(run_sort_key(entry)));
+
+    let mut lessons = Vec::new();
+    for entry in run_dirs.into_iter().take(MAX_PRIOR_RUNS) {
+        collect_prior_run_lessons(original_root, &entry.path(), &mut lessons)?;
+    }
+    lessons.sort_by_key(|lesson| std::cmp::Reverse(lesson.unix_ms));
+    lessons.truncate(MAX_PRIOR_RUN_LESSONS);
+    lessons.reverse();
+
+    let mut appended = 0_usize;
+    for lesson in lessons {
+        let identity = (
+            lesson.source_run_id.clone(),
+            lesson.source_kind.clone(),
+            lesson.unix_ms,
+        );
+        if !imported.insert(identity) {
+            continue;
+        }
+        let record = json!({
+            "schema_version": 1,
+            "unix_ms": unix_ms(),
+            "source_unix_ms": lesson.unix_ms,
+            "source_run_id": bounded_decision_text(&lesson.source_run_id),
+            "source_kind": bounded_decision_text(&lesson.source_kind),
+            "audience": "lead_builder",
+            "role": "controller",
+            "kind": "prior_run_lesson",
+            "summary": bounded_decision_text(&lesson.summary),
+            "rationale": bounded_decision_text(&lesson.rationale),
+            "evidence": bounded_decision_text(&lesson.evidence),
+            "next_step": bounded_decision_text(&lesson.next_step),
+        });
+        append_decision_record(artifacts, &record)?;
+        appended = appended.saturating_add(1);
+    }
+    Ok(appended)
+}
+
+fn run_sort_key(entry: &fs::DirEntry) -> u64 {
+    entry
+        .file_name()
+        .to_string_lossy()
+        .split('-')
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn collect_prior_run_lessons(
+    original_root: &Path,
+    run_dir: &Path,
+    lessons: &mut Vec<PriorRunLesson>,
+) -> Result<(), String> {
+    let Some(source_run_id) = run_dir.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let records = read_jsonl_records(&run_dir.join(DECISIONS_NAME), "prior decision memory")?;
+    let mut has_builder_failure = false;
+    for record in records {
+        let Some(kind) = record.get("kind").and_then(Value::as_str) else {
+            continue;
+        };
+        if kind == "builder_attempt_failed" {
+            has_builder_failure = true;
+        }
+        if !matches!(
+            kind,
+            "builder_attempt_failed"
+                | "atomic_write_failed"
+                | "completion_gate_failed"
+                | "candidate_rejected"
+                | "largest_gap"
+                | "final_validation_failed"
+        ) {
+            continue;
+        }
+        lessons.push(PriorRunLesson {
+            unix_ms: record.get("unix_ms").and_then(Value::as_u64).unwrap_or(0),
+            source_run_id: source_run_id.to_string(),
+            source_kind: kind.to_string(),
+            summary: json_string(&record, "summary", kind),
+            rationale: json_string(
+                &record,
+                "rationale",
+                "Prior run evidence remains relevant until corrected.",
+            ),
+            evidence: json_string(&record, "evidence", "No detailed evidence was recorded."),
+            next_step: json_string(
+                &record,
+                "next_step",
+                "Address this prior failure before repeating the same approach.",
+            ),
+        });
+    }
+    if has_builder_failure {
+        return Ok(());
+    }
+
+    for event in read_jsonl_records(&run_dir.join(EVENTS_NAME), "prior event stream")? {
+        if event.get("kind").and_then(Value::as_str) != Some("builder_attempt_failed") {
+            continue;
+        }
+        let data = event.get("data").unwrap_or(&Value::Null);
+        let reason = json_string(data, "reason", "Builder attempt failed");
+        let trace = data
+            .get("trace")
+            .and_then(Value::as_str)
+            .and_then(|path| safe_prior_trace(original_root, Path::new(path)));
+        lessons.push(PriorRunLesson {
+            unix_ms: event.get("unix_ms").and_then(Value::as_u64).unwrap_or(0),
+            source_run_id: source_run_id.to_string(),
+            source_kind: "builder_attempt_failed".to_string(),
+            summary: format!(
+                "Builder {} attempt failed in prior run {source_run_id}",
+                json_string(data, "attempt", "unknown")
+            ),
+            rationale: "The next builder must receive the actual tool failure so it can change course instead of exhausting another allowance.".to_string(),
+            evidence: builder_failure_evidence(&reason, trace.as_deref()),
+            next_step: "Avoid repeating the evidenced failure; use a different bounded correction or report the blocker.".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn json_string(record: &Value, field: &str, fallback: &str) -> String {
+    record
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn safe_prior_trace(original_root: &Path, trace: &Path) -> Option<PathBuf> {
+    let trace = if trace.is_absolute() {
+        trace.to_path_buf()
+    } else {
+        original_root.join(trace)
+    };
+    let allowed = original_root.join("build/ai-traces").canonicalize().ok()?;
+    let trace = trace.canonicalize().ok()?;
+    trace.starts_with(allowed).then_some(trace)
+}
+
+fn read_jsonl_records(path: &Path, label: &str) -> Result<Vec<Value>, String> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let source = read_bounded_utf8(path, 8 * 1024 * 1024, label)?;
+    let lines = source
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let mut records = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        match serde_json::from_str::<Value>(line) {
+            Ok(record) => records.push(record),
+            Err(_) if index + 1 == lines.len() => break,
+            Err(error) => return Err(format!("invalid {label} record: {error}")),
+        }
+    }
+    Ok(records)
+}
+
+fn append_decision_record(artifacts: &Path, record: &Value) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(artifacts.join(DECISIONS_NAME))
+        .map_err(|error| format!("failed opening Gauntlet decision memory: {error}"))?;
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(record).map_err(|error| error.to_string())?
+    )
+    .map_err(|error| format!("failed writing Gauntlet decision memory: {error}"))?;
+    file.flush()
+        .map_err(|error| format!("failed flushing Gauntlet decision memory: {error}"))?;
+    file.sync_data()
+        .map_err(|error| format!("failed syncing Gauntlet decision memory: {error}"))
+}
+
 fn decision_memory_snapshot(artifacts: &Path) -> Result<String, String> {
     let records = read_decision_records(artifacts)?;
     let mut selected = Vec::new();
@@ -2404,30 +2729,7 @@ fn decision_memory_snapshot(artifacts: &Path) -> Result<String, String> {
 }
 
 fn read_decision_records(artifacts: &Path) -> Result<Vec<Value>, String> {
-    let path = artifacts.join(DECISIONS_NAME);
-    if !path.is_file() {
-        return Ok(Vec::new());
-    }
-    let metadata = fs::metadata(&path)
-        .map_err(|error| format!("failed reading Gauntlet decision memory: {error}"))?;
-    if metadata.len() > 8 * 1024 * 1024 {
-        return Err("Gauntlet decision memory exceeds the 8 MiB safety limit".to_string());
-    }
-    let source = fs::read_to_string(&path)
-        .map_err(|error| format!("failed reading Gauntlet decision memory: {error}"))?;
-    let lines = source
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>();
-    let mut records = Vec::with_capacity(lines.len());
-    for (index, line) in lines.iter().enumerate() {
-        match serde_json::from_str::<Value>(line) {
-            Ok(record) => records.push(record),
-            Err(_) if index + 1 == lines.len() => break,
-            Err(error) => return Err(format!("invalid Gauntlet decision record: {error}")),
-        }
-    }
-    Ok(records)
+    read_jsonl_records(&artifacts.join(DECISIONS_NAME), "Gauntlet decision memory")
 }
 
 fn emit_event(artifacts: &Path, kind: &str, data: Value) -> Result<(), String> {
@@ -2737,6 +3039,95 @@ mod tests {
             .expect("decision log")
             .write_all(b"{\"torn\":")
             .expect("torn final record");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn builder_failure_evidence_summarizes_repeated_tool_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_failure_evidence_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        fs::create_dir_all(&root).expect("trace root");
+        let trace = root.join("trace.jsonl");
+        let mut source = String::new();
+        for _ in 0..15 {
+            source.push_str(
+                &serde_json::to_string(&json!({
+                    "event": "tool_observations",
+                    "observations": [{
+                        "tool": "completion_gate",
+                        "error": "live response transaction data was absent"
+                    }]
+                }))
+                .expect("trace record"),
+            );
+            source.push('\n');
+        }
+        fs::write(&trace, source).expect("trace");
+
+        let evidence = builder_failure_evidence("AI agent reached the turn limit", Some(&trace));
+
+        assert!(evidence.contains(
+            "completion_gate: live response transaction data was absent (repeated 15 times)"
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prior_run_lessons_import_legacy_failure_detail_once() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_prior_lessons_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let old_run = root.join(RUNS_PATH).join("100-old");
+        let current_run = root.join(RUNS_PATH).join("200-current");
+        let traces = root.join("build/ai-traces");
+        fs::create_dir_all(&old_run).expect("old run");
+        fs::create_dir_all(&current_run).expect("current run");
+        fs::create_dir_all(&traces).expect("trace root");
+        let trace = traces.join("builder.jsonl");
+        let trace_record = serde_json::to_string(&json!({
+            "event": "tool_observations",
+            "observations": [{
+                "tool": "completion_gate",
+                "error": "live response transaction data was absent"
+            }]
+        }))
+        .expect("trace record");
+        fs::write(&trace, format!("{trace_record}\n{trace_record}\n")).expect("failure trace");
+        let event = json!({
+            "schema_version": 1,
+            "unix_ms": 101,
+            "kind": "builder_attempt_failed",
+            "data": {
+                "attempt": "primary",
+                "reason": "AI agent reached the turn limit",
+                "trace": trace
+            }
+        });
+        fs::write(
+            old_run.join(EVENTS_NAME),
+            format!("{}\n", serde_json::to_string(&event).expect("event")),
+        )
+        .expect("events");
+
+        assert_eq!(
+            import_prior_run_lessons(&root, &current_run, "200-current").expect("first import"),
+            1
+        );
+        assert_eq!(
+            import_prior_run_lessons(&root, &current_run, "200-current")
+                .expect("idempotent import"),
+            0
+        );
+        let memory = decision_memory_snapshot(&current_run).expect("memory");
+        assert!(memory.contains("100-old"));
+        assert!(memory.contains(
+            "completion_gate: live response transaction data was absent (repeated 2 times)"
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
