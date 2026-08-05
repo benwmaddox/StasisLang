@@ -148,6 +148,51 @@ Stasis renderer resources restored: backend=sdl surface_generation=5 renderer_ge
                     manifest, runtime_log, capture, evidence, "resource_restore"
                 )
 
+    def test_launch_stages_accept_initial_sdl3_resource_generation(self):
+        manifest = {"command_trace": 3891526461}
+        log = """Stasis display metrics: logical=800x600 native=800x600 drawable=800x600 scale=1.00
+gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=96x72 backend=sdl
+gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=96x72 backend=sdl
+gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=640x360 backend=sdl
+stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=24 scale=1.00 handle=1
+Stasis render contract v2 trace=3891526461 flags=3 lines=2 sprites=5 text=2
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "capture.png"
+            runtime_log = Path(directory) / "runtime.log"
+            evidence = Path(directory) / "evidence.json"
+            capture.write_bytes(b"captured frame")
+            for stage, frame in (("initial_launch", 1), ("second_frame", 2)):
+                with self.subTest(stage=stage):
+                    runtime_log.write_text(
+                        log
+                        + f"Stasis parity capture: stage={stage} path={capture} frame={frame} "
+                        "backend=sdl surface_generation=1 renderer_generation=1\n",
+                        encoding="utf-8",
+                    )
+                    write_stage_evidence(capture, runtime_log, stage, evidence)
+                    verify_runtime_evidence(
+                        manifest, runtime_log, capture, evidence, stage, True
+                    )
+            runtime_log.write_text(
+                log
+                + f"Stasis parity capture: stage=initial_launch path={capture} frame=2 "
+                "backend=sdl surface_generation=1 renderer_generation=1\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "wrong frame"):
+                write_stage_evidence(capture, runtime_log, "initial_launch", evidence)
+            runtime_log.write_text(
+                log
+                + "Stasis renderer resources restored: backend=sdl surface_generation=2 "
+                "renderer_generation=2 reason=foreground sprites=3\n"
+                + f"Stasis parity capture: stage=second_frame path={capture} frame=2 "
+                "backend=sdl surface_generation=1 renderer_generation=1\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unknown generations"):
+                write_stage_evidence(capture, runtime_log, "second_frame", evidence)
+
 
 if __name__ == "__main__":
     unittest.main()

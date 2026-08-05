@@ -13,6 +13,7 @@ PINNED = {
         "SHA256=12b34280415ec8418c864408b93d008a20a6530687ee613d60bfbd20411f2785",
         "SDL3_image-3.4.4.tar.gz",
         "SHA256=29751304a13d25ac513f24305fa25b06a6edd9607718c90129b8350d35fc5573",
+        "set(CMAKE_POSITION_INDEPENDENT_CODE ON)",
     ),
     "runtime/stasis_graphics.c": (
         "#include <SDL3/SDL.h>",

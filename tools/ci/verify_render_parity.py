@@ -21,6 +21,7 @@ ALLOWED_STAGES = {
     "resize_or_density_change",
     "resource_restore",
 }
+INITIAL_STAGE_FRAMES = {"initial_launch": 1, "second_frame": 2}
 
 
 def _read_bmp(path: Path) -> tuple[int, int, bytes]:
@@ -401,9 +402,9 @@ def verify_runtime_evidence(
             if actual[3] < logical_w or actual[4] < logical_h or actual[5] not in {"sdl", "gl"}:
                 raise ValueError(f"runtime evidence for {stage} has invalid raster/backend for {path}")
     restores = _restoration_events(log)
-    if not restores or any(backend not in {"sdl", "gl"} for backend, *_ in restores):
+    if any(backend not in {"sdl", "gl"} for backend, *_ in restores):
         raise ValueError(f"runtime evidence for {stage} lacks backend/resource restoration")
-    if max(entry[4] for entry in restores) < 3:
+    if restores and max(entry[4] for entry in restores) < 3:
         raise ValueError(f"runtime evidence for {stage} restored fewer than three SVG resources")
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     capture_hash = hashlib.sha256(capture_path.read_bytes()).hexdigest()
@@ -416,7 +417,15 @@ def verify_runtime_evidence(
         evidence.get("reason"),
         evidence.get("sprites"),
     )
-    if evidence_restore not in restores:
+    initial_load = (
+        stage in INITIAL_STAGE_FRAMES
+        and require_load_details
+        and not restores
+        and evidence.get("frame") == INITIAL_STAGE_FRAMES[stage]
+        and evidence_restore == (evidence.get("backend"), 1, 1, "initial", 3)
+        and len(actual_loads) == 3
+    )
+    if evidence_restore not in restores and not initial_load:
         raise ValueError(f"stage evidence for {stage} does not match a runtime restoration event")
     producer_events = re.findall(
         r"Stasis parity capture: stage=(\w+)\s+path=(.+?)\s+frame=(\d+)\s+"
@@ -426,6 +435,7 @@ def verify_runtime_evidence(
     producer_match = any(
         event[0] == stage
         and Path(event[1].replace("\\", "/")).name == capture_path.name
+        and int(event[2]) == evidence["frame"]
         and event[3] == evidence["backend"]
         and int(event[4]) == evidence["surface_generation"]
         and int(event[5]) == evidence["renderer_generation"]
@@ -460,12 +470,20 @@ def write_stage_evidence(capture_path: Path, log_path: Path, stage: str, output_
     _, logged_path, frame, backend, surface, renderer = candidates[-1]
     if Path(logged_path.replace("\\", "/")).name != capture_path.name:
         raise ValueError(f"capture producer evidence for {stage} names a different file")
+    if stage in INITIAL_STAGE_FRAMES and int(frame) != INITIAL_STAGE_FRAMES[stage]:
+        raise ValueError(f"capture producer evidence for {stage} has the wrong frame")
     restores = _restoration_events(log)
     matching_restores = [entry for entry in restores if entry[:3] == (backend, int(surface), int(renderer))]
-    if not matching_restores:
+    initial_load = (
+        stage in INITIAL_STAGE_FRAMES
+        and not restores
+        and (int(surface), int(renderer)) == (1, 1)
+        and len(re.findall(r"gfx_load_sprite: .*? backend=" + re.escape(backend), log)) == 3
+    )
+    if not matching_restores and not initial_load:
         raise ValueError(f"capture producer evidence for {stage} has unknown generations")
-    reason = matching_restores[-1][3]
-    sprites = matching_restores[-1][4]
+    reason = matching_restores[-1][3] if matching_restores else "initial"
+    sprites = matching_restores[-1][4] if matching_restores else 3
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(
