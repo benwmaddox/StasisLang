@@ -4195,16 +4195,10 @@ mod tests {
 
     #[test]
     fn windows_runtime_uses_physical_drawable_pixels_at_monitor_density() {
-        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
-        let dpi_hint = graphics_source
-            .find("SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, \"1\");")
-            .expect("Windows runtime should enable SDL DPI-scaled points");
-        let video_init = graphics_source
-            .find("SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)")
-            .expect("graphics runtime should initialize SDL video");
         assert!(
-            dpi_hint < video_init,
-            "Windows DPI policy must be set before SDL creates its video subsystem"
+            STASIS_GRAPHICS_SOURCE.contains("SDL_WINDOW_HIGH_PIXEL_DENSITY")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowSizeInPixels("),
+            "SDL3 runtime should request high-density windows and read physical pixels"
         );
         assert!(
             STASIS_RUNTIME_CMAKE
@@ -4300,8 +4294,7 @@ mod tests {
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("STASIS_EXPORT int stasis_mobile_poll_events(void)")
-                && STASIS_GRAPHICS_SOURCE
-                    .contains("SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0)"),
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_PauseAudioStreamDevice(g_audio_stream)"),
             "mobile pause should continue polling events and pause the audio device"
         );
         for required in [
@@ -4366,13 +4359,12 @@ mod tests {
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("stasis_render_v2_validate(cmd_i32, cmd_f32)")
                 && STASIS_GRAPHICS_SOURCE.contains("STASIS_RENDER_FLAG_PRESENT")
-                && STASIS_GRAPHICS_SOURCE
-                    .contains("SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, \"linear\")")
-                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderSetClipRect(g_renderer, NULL)")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_SetDefaultTextureScaleMode(")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_SetRenderClipRect(g_renderer, NULL)")
                 && STASIS_GRAPHICS_SOURCE.contains("if (a < 0) a = 0;")
                 && STASIS_GRAPHICS_SOURCE.contains("if (a > 255) a = 255;")
                 && STASIS_GRAPHICS_SOURCE.contains("SDL_BLENDMODE_BLEND")
-                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderCopyEx")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderTextureRotated")
                 && STASIS_GRAPHICS_SOURCE.contains("STASIS_PARITY_CAPTURE_STAGE")
                 && STASIS_GRAPHICS_SOURCE.contains("Stasis parity capture: stage=%s"),
             "desktop and mobile should enter the shared versioned command interpreter"

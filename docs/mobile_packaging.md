@@ -62,11 +62,11 @@ diagnostics report the release/development label, tag, commit, and renderer ABI.
 ## Android arm64
 
 Install JDK 17, Android SDK 35, NDK, CMake 3.22.1, Ninja, and Gradle 8.9. Keep
-local SDL2 and SDL2_image source checkouts and set:
+local SDL3 and SDL3_image source checkouts and set:
 
 ```text
-STASIS_SDL2_SOURCE=/absolute/path/to/SDL
-STASIS_SDL2_IMAGE_SOURCE=/absolute/path/to/SDL_image
+STASIS_SDL3_SOURCE=/absolute/path/to/SDL
+STASIS_SDL3_IMAGE_SOURCE=/absolute/path/to/SDL_image
 ```
 
 From the generated `android/` directory run `gradle :app:assembleDebug` or
@@ -92,8 +92,8 @@ and the generated release app.
 
 ## iOS arm64
 
-On macOS install Xcode and obtain device-capable `SDL2.xcframework` and
-`SDL2_image.xcframework` bundles in one directory. From generated `ios/` run:
+On macOS install Xcode and obtain device-capable `SDL3.xcframework` and
+`SDL3_image.xcframework` bundles in one directory. From generated `ios/` run:
 
 ```text
 xcodebuild -project StasisMobile.xcodeproj -scheme StasisMobile \

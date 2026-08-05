@@ -27,7 +27,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check Stasis src layout
-        run: python tools/ci/check_stasis_src_layout.py
+        run: |
+          python tools/ci/check_stasis_src_layout.py
+          python tools/ci/check_sdl3_migration.py
+          python -m unittest tools.ci.test_sdl3_migration
 
       - name: Test AI efficiency matrix
         run: python -m unittest tools.ci.test_stasis_ai_efficiency_matrix
@@ -73,10 +76,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
-          & (Join-Path $vcpkgRoot "vcpkg.exe") install sdl2:x64-windows-static sdl2-image:x64-windows-static --recurse
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $cmakeHelp = cmake --help | Out-String
           if ($cmakeHelp -match "Visual Studio 18 2026") {
             $generator = "Visual Studio 18 2026"
@@ -85,7 +84,7 @@ jobs:
           } else {
             throw "Supported Visual Studio CMake generator not found."
           }
-          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF
+          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/render-parity-runtime --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -151,7 +150,7 @@ jobs:
 
       - name: Install Linux graphics and display dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libsdl2-image-dev xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
 
       - name: Install macOS graphics dependencies
         if: runner.os == 'macOS'
@@ -233,18 +232,18 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Checkout SDL2
+      - name: Checkout SDL3
         uses: actions/checkout@v7
         with:
           repository: libsdl-org/SDL
-          ref: 5d249570393f7a37e037abf22cd6012a4cc56a71
+          ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
           path: target/android-link-deps/SDL
 
-      - name: Checkout SDL2_image
+      - name: Checkout SDL3_image
         uses: actions/checkout@v7
         with:
           repository: libsdl-org/SDL_image
-          ref: 12cb2e40330d256d9b1329647be8f366546d715c
+          ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
           path: target/android-link-deps/SDL_image
 
       - name: Install Rust
@@ -259,8 +258,8 @@ jobs:
       - name: Package and link generated Android game
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: "2"
-          STASIS_SDL2_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
-          STASIS_SDL2_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
+          STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
+          STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
         run: |
           cargo run -p stasis -- --workspace samples/mobile_storage_link package-mobile --target android-arm64 --out dist/android --development-build
           gradle -p samples/mobile_storage_link/dist/android/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain

@@ -11,6 +11,12 @@ import subprocess
 import tomllib
 
 
+PINNED_SDL_DEPENDENCIES = {
+    "sdl3": "3.4.10-static",
+    "sdl3_image": "3.4.4-static",
+}
+
+
 RUNTIME_FILES = (
     "CMakeLists.txt",
     "nanosvg.h",
@@ -110,6 +116,12 @@ def main() -> int:
         if not separator or not name or not version:
             parser.error(f"dependency must use NAME=VERSION: {item}")
         dependencies[name] = version
+    resolved_sdl = {name: dependencies.get(name) for name in PINNED_SDL_DEPENDENCIES}
+    if resolved_sdl != PINNED_SDL_DEPENDENCIES:
+        parser.error(
+            "release provenance requires sdl3=3.4.10-static and "
+            "sdl3_image=3.4.4-static"
+        )
     manifest = {
         "schema": "stasis.release_provenance.v1",
         "release_tag": args.release_tag,
@@ -123,7 +135,7 @@ def main() -> int:
         "runtime_sources": runtime_sources,
         "mobile_shell_sources": mobile_shell_sources,
         "command_buffer": {"name": "gfx_cmd", "version": 2},
-        "backends": ["sdl2"],
+        "backends": ["sdl3"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
         "dependencies": dependencies,
     }

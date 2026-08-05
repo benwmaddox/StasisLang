@@ -1,6 +1,6 @@
 # Stasis Graphics Runtime
 
-Native SDL2 graphics library for Stasis programs. Shipping desktop, Android,
+Native SDL3 graphics library for Stasis programs. Shipping desktop, Android,
 and iOS builds compile the same `stasis_graphics.c` command interpreter and SDL
 resource lifecycle. See `docs/shared_renderer_process.md` for the contract.
 
@@ -37,29 +37,19 @@ captures use the drawable resolution.
 ## Prerequisites
 
 - CMake 3.16+
-- vcpkg (for SDL2)
 - A C compiler (MSVC, Clang, or GCC)
+- Network access for the first configure, or a pre-populated CMake FetchContent cache
 
 ## Setup (Windows)
 
-1. Install vcpkg if not already installed:
-   ```cmd
-   git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
-   C:\vcpkg\bootstrap-vcpkg.bat
-   ```
-
-2. Set environment variable:
-   ```cmd
-   set VCPKG_ROOT=C:\vcpkg
-   ```
-
-3. Build the library:
+1. Build the library. CMake fetches and verifies SDL3 3.4.10 and SDL3_image
+   3.4.4 from their official release archives:
    ```cmd
    cd runtime
    build.bat
    ```
 
-4. Run an Asteroids demo:
+2. Run an Asteroids demo:
    ```cmd
    cd ..
    cargo run -p stasis --release -- play samples\asteroids.stasis
@@ -73,10 +63,10 @@ frame budget.
 
 Android uses the canonical SDL renderer process. `STASIS_GRAPHICS_SDL_ONLY`
 defaults to `ON` on every platform; release automation passes it explicitly.
-Use an NDK toolchain through direct CMake or vcpkg Android triplets.
+Use the NDK toolchain through direct CMake.
 
 Build helper:
-- `runtime/build_android.ps1` (requires `ANDROID_NDK_HOME` and vcpkg via `VCPKG_ROOT` or `C:\vcpkg`)
+- `runtime/build_android.ps1` (requires `ANDROID_NDK_HOME`, CMake, and Ninja)
 
 ## Shared mobile core
 
@@ -87,18 +77,21 @@ shim. See `docs/mobile_runtime_core.md` for the lifecycle ABI and CMake setup.
 Brickout Revenge debug APK workflow:
 - See `docs/brickout-android-debug-plan.md` and use `android/build_brickout_android_debug.ps1` + `android/install_brickout_android_debug.ps1`.
 
-## Manual Build (Alternative)
+## Manual Build
 
-If you prefer to build manually or vcpkg is unavailable:
+The same pinned dependency path is used on every host:
 
-1. Download SDL2 development libraries from https://github.com/libsdl-org/SDL/releases
-2. Extract and note the path to SDL2 include and lib directories
-3. Build with CMake:
+1. Configure with bundled SDL enabled.
+2. Build the requested runtime targets.
+
    ```cmd
    mkdir build && cd build
-   cmake .. -DSDL2_DIR=<path-to-sdl2>
+   cmake .. -DSTASIS_GRAPHICS_BUNDLE_SDL=ON
    cmake --build . --config Release
    ```
+
+Do not provide SDL2, `sdl2-compat`, or an unversioned system SDL package to a
+shipping build. See `docs/sdl3_migration.md` for the compatibility boundary.
 
 ## Legacy GL conformance
 

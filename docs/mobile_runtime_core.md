@@ -56,7 +56,7 @@ add_subdirectory(path/to/stasis/runtime stasis-runtime)
 target_link_libraries(my_mobile_shell PRIVATE stasis_mobile_runtime)
 ```
 
-The parent project may provide `SDL2::SDL2` and `SDL2_image::SDL2_image`
+The parent project may provide `SDL3::SDL3` and `SDL3_image::SDL3_image`
 targets directly. Otherwise the runtime resolves their CMake packages.
 
 Android's generated `published_aot_objects.cmake` includes the bindings source.
