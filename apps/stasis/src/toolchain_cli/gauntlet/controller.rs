@@ -771,8 +771,10 @@ fn controller_loop(
         &readiness,
         "Select the highest-value game implementation gap; the harness is ready and requires no builder investigation.",
     )?;
-    let mut largest_gap =
-        "The controller verified the Stasis executable and existing deterministic project tests. Select the highest-value game implementation gap; do not assign harness provisioning or CLI discovery to the builder.".to_string();
+    let mut largest_gap = match restore_largest_evidenced_gap(artifacts)? {
+        Some(gap) => gap,
+        None => "The controller verified the Stasis executable and existing deterministic project tests. Select the highest-value game implementation gap; do not assign harness provisioning or CLI discovery to the builder.".to_string(),
+    };
     loop {
         if should_stop(artifacts) {
             finish(
@@ -2774,6 +2776,22 @@ fn decision_memory_snapshot(artifacts: &Path) -> Result<String, String> {
     }
 }
 
+fn restore_largest_evidenced_gap(artifacts: &Path) -> Result<Option<String>, String> {
+    for record in read_decision_records(artifacts)?.into_iter().rev() {
+        let kind = record.get("kind").and_then(Value::as_str);
+        if !matches!(kind, Some("candidate_accepted" | "largest_gap")) {
+            continue;
+        }
+        let Some(gap) = record.get("next_step").and_then(Value::as_str) else {
+            continue;
+        };
+        if !gap.trim().is_empty() {
+            return Ok(Some(gap.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn read_decision_records(artifacts: &Path) -> Result<Vec<Value>, String> {
     read_jsonl_records(&artifacts.join(DECISIONS_NAME), "Gauntlet decision memory")
 }
@@ -3082,6 +3100,30 @@ mod tests {
         assert!(!snapshot.contains("decision-0\""));
         assert!(snapshot.contains("decision-54"));
         assert!(snapshot.lines().count() <= MAX_MEMORY_RECORDS);
+        append_decision(
+            &root,
+            "controller",
+            "candidate_accepted",
+            "accepted candidate",
+            "critic evidence persists",
+            "scores",
+            "No behavioral gameplay evidence is exposed.",
+        )
+        .expect("accepted gap");
+        append_decision(
+            &root,
+            "controller",
+            "harness_ready",
+            "harness ready",
+            "readiness is not a product gap",
+            "tests passed",
+            "Select the next work item.",
+        )
+        .expect("readiness decision");
+        assert_eq!(
+            restore_largest_evidenced_gap(&root).expect("restored gap"),
+            Some("No behavioral gameplay evidence is exposed.".to_string())
+        );
         OpenOptions::new()
             .append(true)
             .open(root.join(DECISIONS_NAME))

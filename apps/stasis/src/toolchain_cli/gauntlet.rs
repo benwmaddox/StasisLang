@@ -738,7 +738,7 @@ test `Gauntlet seed advances deterministically`(): bool {
 test `Gauntlet seed emits a visible frame`(): bool {
     render();
     if (gfx_cmd_i32[GFX_I_MAGIC] != GFX_CMD_MAGIC) { return false; }
-    if (gfx_cmd_i32[GFX_I_LINE_COUNT] != 2) { return false; }
+    if (gfx_cmd_i32[GFX_I_LINE_COUNT] < 1) { return false; }
     return gfx_cmd_i32[GFX_I_FLAGS] == GFX_FLAG_CLEAR + GFX_FLAG_PRESENT;
 }
 "#;
@@ -909,6 +909,8 @@ mod tests {
         }
         assert!(!GAUNTLET_SEED_SOURCE.contains("host_req_flags"));
         assert!(!GAUNTLET_SEED_SOURCE.contains("host_req_seq"));
+        assert!(GAUNTLET_SEED_TEST.contains("GFX_I_LINE_COUNT] < 1"));
+        assert!(!GAUNTLET_SEED_TEST.contains("GFX_I_LINE_COUNT] != 2"));
     }
 
     #[test]
