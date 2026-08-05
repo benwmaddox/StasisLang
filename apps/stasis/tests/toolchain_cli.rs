@@ -312,6 +312,20 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let created_json = json_stdout(&created);
     assert_eq!(created_json["ok"], true);
     assert_eq!(created_json["command"], "new");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(project.join("stasis.json")).expect("read generated manifest"),
+    )
+    .expect("parse generated manifest");
+    assert!(manifest["vendor"]["stasis"].get("update_policy").is_none());
+    assert_eq!(
+        manifest["vendor"]["stasis"]["sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    let vendor_status = stasis(&["--json", "vendor", "status"], &project);
+    assert_eq!(vendor_status.status.code(), Some(0));
+    assert_eq!(json_stdout(&vendor_status)["result"]["current"], true);
     let agent_guide = fs::read_to_string(project.join("AGENTS.md")).expect("read agent guide");
     assert!(agent_guide.contains("stasis --json symbol list"));
     assert!(agent_guide.contains("stasis --json symbol references SYMBOL"));
@@ -354,6 +368,28 @@ fn project_commands_emit_stable_json_from_nested_directories() {
             .expect("read generated VS Code recommendations"),
         "{\n  \"recommendations\": [\n    \"stasislang.stasis\"\n  ]\n}\n"
     );
+    assert!(project
+        .join("vendor/stasis/src/runtime/host_frame.stasis")
+        .is_file());
+    assert!(project
+        .join("vendor/stasis/src/runtime/gfx_cmd.stasis")
+        .is_file());
+
+    fs::create_dir_all(project.join("src/game")).expect("create nested game source directory");
+    fs::write(
+        project.join("src/main.stasis"),
+        crlf(
+            "import \"game/player.stasis\";\n\nfunction main(): i32 {\n    return player_ready();\n}\n",
+        ),
+    )
+    .expect("write generated-project package import smoke entry");
+    fs::write(
+        project.join("src/game/player.stasis"),
+        crlf(
+            "import \"/vendor/stasis/src/stdlib/graphics.stasis\";\n\nfunction player_ready(): i32 {\n    return 1;\n}\n",
+        ),
+    )
+    .expect("write nested generated-project package import smoke");
 
     let formatted = stasis(&["--json", "fmt", "--check"], &project);
     assert_eq!(formatted.status.code(), Some(0));

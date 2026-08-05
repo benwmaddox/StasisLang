@@ -24,7 +24,9 @@ function game_camera2d_set_center(cam: f32[], center_x: f32, center_y: f32): voi
 
 function game_camera2d_set_zoom(cam: f32[], zoom: f32): void {
     let z: f32 = zoom;
-    if (z <= 0.0001) { z = 0.0001; }
+    if (z <= 0.0001) {
+        z = 0.0001;
+    }
     cam[2] = z;
 }
 
@@ -33,55 +35,37 @@ function game_camera2d_set_viewport(cam: f32[], viewport_w_px: f32, viewport_h_p
     cam[4] = viewport_h_px;
 }
 
-function game_camera2d_world_to_screen(
-    cam: f32[],
-    world_x: f32,
-    world_y: f32,
-    out_screen_x: f32[],
-    out_screen_y: f32[]
-): void {
+function game_camera2d_world_to_screen(cam: f32[], world_x: f32, world_y: f32, out_screen_x: f32[], out_screen_y: f32[]): void {
     let cx: f32 = cam[0];
     let cy: f32 = cam[1];
     let z: f32 = cam[2];
     let vw: f32 = cam[3];
     let vh: f32 = cam[4];
 
-    out_screen_x[0] = (world_x - cx) * z + vw * 0.5;
-    out_screen_y[0] = (world_y - cy) * z + vh * 0.5;
+    out_screen_x[0] =(world_x - cx) * z + vw * 0.5;
+    out_screen_y[0] =(world_y - cy) * z + vh * 0.5;
 }
 
-function game_camera2d_screen_to_world(
-    cam: f32[],
-    screen_x: f32,
-    screen_y: f32,
-    out_world_x: f32[],
-    out_world_y: f32[]
-): void {
+function game_camera2d_screen_to_world(cam: f32[], screen_x: f32, screen_y: f32, out_world_x: f32[], out_world_y: f32[]): void {
     let cx: f32 = cam[0];
     let cy: f32 = cam[1];
     let z: f32 = cam[2];
     let vw: f32 = cam[3];
     let vh: f32 = cam[4];
 
-    out_world_x[0] = (screen_x - vw * 0.5) / z + cx;
-    out_world_y[0] = (screen_y - vh * 0.5) / z + cy;
+    out_world_x[0] =(screen_x - vw * 0.5) / z + cx;
+    out_world_y[0] =(screen_y - vh * 0.5) / z + cy;
 }
 
-function game_camera2d_world_to_screen_i32(
-    cam: f32[],
-    world_x: f32,
-    world_y: f32,
-    out_screen_x: i32[],
-    out_screen_y: i32[]
-): void {
+function game_camera2d_world_to_screen_i32(cam: f32[], world_x: f32, world_y: f32, out_screen_x: i32[], out_screen_y: i32[]): void {
     let cx: f32 = cam[0];
     let cy: f32 = cam[1];
     let z: f32 = cam[2];
     let vw: f32 = cam[3];
     let vh: f32 = cam[4];
 
-    let sx: f32 = (world_x - cx) * z + vw * 0.5;
-    let sy: f32 = (world_y - cy) * z + vh * 0.5;
+    let sx: f32 =(world_x - cx) * z + vw * 0.5;
+    let sy: f32 =(world_y - cy) * z + vh * 0.5;
     out_screen_x[0] = f32_to_i32(sx);
     out_screen_y[0] = f32_to_i32(sy);
 }

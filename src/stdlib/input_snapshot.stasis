@@ -2,6 +2,7 @@
 // Keep this struct in stdlib so multiple fixtures can share it.
 
 const INPUT_MAX_KEYS: i32 = 512;
+
 const INPUT_MAX_POINTERS: i32 = 8;
 
 struct InputSnapshot {

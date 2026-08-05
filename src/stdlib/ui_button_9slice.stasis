@@ -1,4 +1,5 @@
 import "graphics.stasis";
+
 // Shared 9-slice button helpers for sprite-based UI.
 // Background uses 9 sprites (3x3 grid). Icons are sprites; text uses the command buffer.
 
@@ -8,17 +9,23 @@ function ui_draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, a: i32): vo
 
 function ui_row_button_width(available_w: f32, count: i32, gap: f32): f32 {
     let safe_count: i32 = count;
-    if (safe_count < 1) { safe_count = 1; }
+    if (safe_count < 1) {
+        safe_count = 1;
+    }
     let gaps: f32 = gap * i32_to_f32(safe_count - 1);
-    let button_w: f32 = (available_w - gaps) / i32_to_f32(safe_count);
-    if (button_w < 0.0) { button_w = 0.0; }
+    let button_w: f32 =(available_w - gaps) / i32_to_f32(safe_count);
+    if (button_w < 0.0) {
+        button_w = 0.0;
+    }
     return button_w;
 }
 
 function ui_row_button_x(start_x: f32, index: i32, button_w: f32, gap: f32): f32 {
     let idx: i32 = index;
-    if (idx < 0) { idx = 0; }
-    return start_x + i32_to_f32(idx) * (button_w + gap);
+    if (idx < 0) {
+        idx = 0;
+    }
+    return start_x + i32_to_f32(idx) *(button_w + gap);
 }
 
 function ui_draw_9slice(
@@ -42,8 +49,12 @@ function ui_draw_9slice(
     let sh: f32 = slice_h;
     let mid_w: f32 = w - sw * 2.0;
     let mid_h: f32 = h - sh * 2.0;
-    if (mid_w < 0.0) { mid_w = 0.0; }
-    if (mid_h < 0.0) { mid_h = 0.0; }
+    if (mid_w < 0.0) {
+        mid_w = 0.0;
+    }
+    if (mid_h < 0.0) {
+        mid_h = 0.0;
+    }
 
     // Top row
     ui_draw_sprite(top_left, x, y, sw, sh, 255);
@@ -88,28 +99,27 @@ function ui_draw_button_9slice(
     icon_pad: f32,
     text_pad: f32
 ): void {
-    ui_draw_9slice(
-        top_left, top, top_right,
-        left, center, right,
-        bottom_left, bottom, bottom_right,
-        slice_w, slice_h,
-        x, y, w, h);
+    ui_draw_9slice(top_left, top, top_right, left, center, right, bottom_left, bottom, bottom_right, slice_w, slice_h, x, y, w, h);
 
     let content_x: f32 = x + text_pad;
     let content_w: f32 = w - text_pad * 2.0;
-    if (content_w < 0.0) { content_w = 0.0; }
+    if (content_w < 0.0) {
+        content_w = 0.0;
+    }
 
     if (icon_handle != 0) {
         let icon_h: f32 = h * 0.6;
         let icon_w: f32 = icon_h * icon_aspect;
         let icon_x: f32 = x + icon_pad;
-        let icon_y: f32 = y + (h - icon_h) * 0.5;
+        let icon_y: f32 = y +(h - icon_h) * 0.5;
         ui_draw_sprite(icon_handle, icon_x, icon_y, icon_w, icon_h, 255);
 
-        let used_w: f32 = (icon_x - x) + icon_w + icon_pad;
+        let used_w: f32 =(icon_x - x) + icon_w + icon_pad;
         content_x = x + used_w;
         content_w = w - used_w - text_pad;
-        if (content_w < 0.0) { content_w = 0.0; }
+        if (content_w < 0.0) {
+            content_w = 0.0;
+        }
     }
 
     if (font_handle == 0) {
@@ -117,7 +127,7 @@ function ui_draw_button_9slice(
     }
 
     let text_w: f32 = measure_text(font_handle, label);
-    let text_x: f32 = content_x + (content_w - text_w) * 0.5;
-    let text_y: f32 = y + (h * 0.55);
+    let text_x: f32 = content_x +(content_w - text_w) * 0.5;
+    let text_y: f32 = y +(h * 0.55);
     gfx_cmd_text(font_handle, label, text_x, text_y, text_r, text_g, text_b, text_a);
 }

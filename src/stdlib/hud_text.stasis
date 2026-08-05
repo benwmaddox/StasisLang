@@ -1,5 +1,5 @@
 // HUD helpers (pure formatting / buffer bridging).
-// Import explicitly: import "src/stdlib/hud_text.stasis";
+// From a generated project: import "/vendor/stasis/src/stdlib/hud_text.stasis";
 
 import "stdlib.stasis";
 
@@ -10,4 +10,3 @@ function hud_text_clear(tmp: ascii[]): void {
 function hud_text_commit(out: utf8[], tmp: ascii[], out_max: i32): i32 {
     return utf8_from_ascii(out, tmp, out_max);
 }
-
