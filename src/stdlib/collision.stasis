@@ -1,0 +1,59 @@
+// Typed collision predicates.
+
+struct Aabb {
+    min_x: f32;
+    min_y: f32;
+    max_x: f32;
+    max_y: f32;
+}
+
+struct Circle {
+    x: f32;
+    y: f32;
+    radius: f32;
+}
+
+function @inline intersects(self: Aabb, other: Aabb): bool {
+    if (self.max_x < other.min_x) {
+        return false;
+    }
+    if (self.min_x > other.max_x) {
+        return false;
+    }
+    if (self.max_y < other.min_y) {
+        return false;
+    }
+    if (self.min_y > other.max_y) {
+        return false;
+    }
+    return true;
+}
+
+function @inline contains_point(self: Aabb, x: f32, y: f32): bool {
+    if (x < self.min_x) {
+        return false;
+    }
+    if (x > self.max_x) {
+        return false;
+    }
+    if (y < self.min_y) {
+        return false;
+    }
+    if (y > self.max_y) {
+        return false;
+    }
+    return true;
+}
+
+function @inline intersects(self: Circle, other: Circle): bool {
+    let dx: f32 = self.x - other.x;
+    let dy: f32 = self.y - other.y;
+    let radius_sum: f32 = self.radius + other.radius;
+    return dx * dx + dy * dy <= radius_sum * radius_sum;
+}
+
+function @inline contains_point(self: Circle, x: f32, y: f32): bool {
+    let dx: f32 = x - self.x;
+    let dy: f32 = y - self.y;
+    return dx * dx + dy * dy <= self.radius * self.radius;
+}
