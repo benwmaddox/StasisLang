@@ -172,7 +172,51 @@ function Dismiss-EmulatorSystemAnr([xml]$Tree) {
     return $true
 }
 
-function Read-SurfaceBounds([string]$Description, [string]$XmlPath) {
+function Read-AppWindowBounds([string]$Package) {
+    $dump = @(& $adb -s $serial shell dumpsys window windows 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "window manager dump failed" }
+    $source = $dump -join "`n"
+    $packagePattern = [regex]::Escape($Package)
+    $match = [regex]::Match(
+        $source,
+        "(?ms)^\s*Window #\d+ Window\{[^\r\n]*$packagePattern/[^\r\n]*MainActivity\}:.*?^\s*Frames:.*?\bframe=\[(\d+),(\d+)\]\[(\d+),(\d+)\]"
+    )
+    if (-not $match.Success) { throw "Workshop app window bounds were absent from window manager state" }
+    $left = [int]$match.Groups[1].Value
+    $top = [int]$match.Groups[2].Value
+    $right = [int]$match.Groups[3].Value
+    $bottom = [int]$match.Groups[4].Value
+    if ($right -le $left -or $bottom -le $top) { throw "Workshop app window has invalid bounds" }
+    $displayDump = @(& $adb -s $serial shell dumpsys window displays 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "window display dump failed" }
+    $barMatches = [regex]::Matches(
+        ($displayDump -join "`n"),
+        'type=(?:statusBars|navigationBars) frame=\[(\d+),(\d+)\]\[(\d+),(\d+)\] visible=true'
+    )
+    $windowLeft = $left
+    $windowTop = $top
+    $windowRight = $right
+    $windowBottom = $bottom
+    foreach ($bar in $barMatches) {
+        $barLeft = [int]$bar.Groups[1].Value
+        $barTop = [int]$bar.Groups[2].Value
+        $barRight = [int]$bar.Groups[3].Value
+        $barBottom = [int]$bar.Groups[4].Value
+        if ($barLeft -le $windowLeft -and $barRight -ge $windowRight) {
+            if ($barTop -le $windowTop) { $top = [math]::Max($top, $barBottom) }
+            if ($barBottom -ge $windowBottom) { $bottom = [math]::Min($bottom, $barTop) }
+        }
+        if ($barTop -le $windowTop -and $barBottom -ge $windowBottom) {
+            if ($barLeft -le $windowLeft) { $left = [math]::Max($left, $barRight) }
+            if ($barRight -ge $windowRight) { $right = [math]::Min($right, $barLeft) }
+        }
+    }
+    if ($right -le $left -or $bottom -le $top) { throw "Workshop content window has invalid bounds" }
+    Write-Host "Accessibility hierarchy unavailable; using visible Workshop app window bounds"
+    return @($left, $top, ($right - $left), ($bottom - $top))
+}
+
+function Read-SurfaceBounds([string]$Description, [string]$XmlPath, [string]$Package) {
     if (Test-Path -LiteralPath $XmlPath) {
         [xml]$cachedTree = Get-Content -Raw -LiteralPath $XmlPath
         $cachedNode = @($cachedTree.SelectNodes("//node")) |
@@ -198,26 +242,17 @@ function Read-SurfaceBounds([string]$Description, [string]$XmlPath) {
         }
     }
 
-    $captured = $false
-    for ($attempt = 1; $attempt -le 3 -and -not $captured; $attempt++) {
-        Remove-Item -LiteralPath $XmlPath -Force -ErrorAction SilentlyContinue
-        try {
-            $dump = @(& $adb -s $serial exec-out uiautomator dump --compressed /dev/tty 2>$null)
-            if ($LASTEXITCODE -ne 0) { throw "uiautomator dump failed" }
-            $xmlMatch = [regex]::Match(($dump -join "`n"), '(?s)<\?xml.*</hierarchy>')
-            if (-not $xmlMatch.Success) { throw "uiautomator returned no XML hierarchy" }
-            [System.IO.File]::WriteAllText(
-                $XmlPath,
-                $xmlMatch.Value,
-                [System.Text.UTF8Encoding]::new($false)
-            )
-            $captured = $true
-        } catch {
-            if ($attempt -eq 3) { throw }
-            Start-Sleep -Seconds 1
-        }
+    Remove-Item -LiteralPath $XmlPath -Force -ErrorAction SilentlyContinue
+    $dump = @(& $adb -s $serial exec-out uiautomator dump --compressed /dev/tty 2>$null)
+    $xmlMatch = [regex]::Match(($dump -join "`n"), '(?s)<\?xml.*</hierarchy>')
+    if ($LASTEXITCODE -ne 0 -or -not $xmlMatch.Success) {
+        return Read-AppWindowBounds $Package
     }
-    if (-not $captured) { throw "Android UI hierarchy was not captured" }
+    [System.IO.File]::WriteAllText(
+        $XmlPath,
+        $xmlMatch.Value,
+        [System.Text.UTF8Encoding]::new($false)
+    )
     [xml]$tree = Get-Content -Raw -LiteralPath $XmlPath
     $node = @($tree.SelectNodes("//node")) |
         Where-Object { $_.GetAttribute("content-desc") -eq $Description } |
@@ -287,7 +322,7 @@ function Assert-RenderedVariant(
             }
             try {
                 if (-not $viewportResolved) {
-                    $surface = Read-SurfaceBounds $SurfaceDescription $uiTree
+                    $surface = Read-SurfaceBounds $SurfaceDescription $uiTree $Package
                     $viewport = Fit-LogicalViewport $surface
                     $viewportArg = ($viewport | ForEach-Object { $_.ToString() }) -join ","
                     $viewportResolved = $true
