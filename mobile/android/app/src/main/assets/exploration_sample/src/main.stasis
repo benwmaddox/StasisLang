@@ -1,6 +1,17 @@
 import "systems/schedule.stasis";
 
-function main(): void { exploration_start(); }
-function tick(): void { exploration_tick_schedule(); }
-function render(): void { exploration_render_extract_system(); }
-function on_code_swap(): void { render(); }
+function main(): void {
+    exploration_start();
+}
+
+function tick(): void {
+    exploration_tick_schedule();
+}
+
+function render(): void {
+    exploration_render_extract_system();
+}
+
+function on_code_swap(): void {
+    render();
+}

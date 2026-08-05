@@ -6,8 +6,7 @@ import "../../src/stdlib/graphics.stasis";
 // - Run with: `.\stasis.bat run samples\brickout_revenge\brickout_revenge.stasis --watch`
 // - Edit: `samples/brickout_revenge/data/config.json` (hot-reloaded between ticks)
 
-
-struct ScreenConfig { 
+struct ScreenConfig {
     width: i32;
     height: i32;
 }
@@ -16,7 +15,7 @@ struct GlobalConfig {
     screen: ScreenConfig;
 }
 
-struct Sprites {    
+struct Sprites {
     paddle: Sprite;
     ball: Sprite;
     brick_basic_base: Sprite;
@@ -27,7 +26,6 @@ struct Sprites {
     brick_armored_fx: Sprite;
     brick_reflector_base: Sprite;
     brick_reflector_fx: Sprite;
-
 }
 
 // Build render lists as pure data, then submit in bulk once per tick.
@@ -43,18 +41,19 @@ struct GfxState {
     line_count: i32;
 }
 
-struct GameState { 
-    rng_state : i32;
+struct GameState {
+    rng_state: i32;
 }
-struct GlobalState {     
-    game : GameState;
-    config : GlobalConfig;
-    sprites : Sprites;    
+
+struct GlobalState {
+    game: GameState;
+    config: GlobalConfig;
+    sprites: Sprites;
     gfx: GfxState;
     initialized: bool;
 }
 
-global state : GlobalState;
+global state: GlobalState;
 
 function render_begin(): void {
     state.gfx.sprite_count = 0;
@@ -63,7 +62,9 @@ function render_begin(): void {
 
 function render_push_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void {
     let i: i32 = state.gfx.sprite_count;
-    if (i >= 256) { return; }
+    if (i >= 256) {
+        return;
+    }
     let base_i: i32 = i * 3;
     let base_f: i32 = i * 4;
     state.gfx.sprites_i32[base_i + 0] = handle;
@@ -78,7 +79,9 @@ function render_push_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg
 
 function render_push_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
     let i: i32 = state.gfx.line_count;
-    if (i >= 512) { return; }
+    if (i >= 512) {
+        return;
+    }
     let base: i32 = i * 8;
     state.gfx.lines_f32[base + 0] = x1;
     state.gfx.lines_f32[base + 1] = y1;
@@ -91,10 +94,8 @@ function render_push_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b:
     state.gfx.line_count = i + 1;
 }
 
-
-function draw_drag_preview(): void 
-{
-  return;
+function draw_drag_preview(): void {
+    return;
 }
 
 export function main(): i32 {
@@ -109,7 +110,7 @@ export function main(): i32 {
     let init_ok: bool = init_window(state.config.screen.width, state.config.screen.height, "Brickout Revenge");
     if (!init_ok) {
         return 1;
-    }    
+    }
 
     state.sprites.paddle.load_sprite_from("assets/paddle.svg", 128, 24);
     state.sprites.ball.load_sprite_from("assets/ball.svg", 32, 32);
@@ -135,16 +136,13 @@ export function main(): i32 {
         state.initialized = true;
     }
 
-
     return 0;
 }
 
-function swap(){
-
+function swap() {
 }
 
 function draw_level() {
-
 }
 
 function tick(): i32 {
@@ -152,7 +150,7 @@ function tick(): i32 {
     if (quit) {
         return 1;
     }
-    
+
     render_begin();
 
     // Demo: batch build sprites/lines into arrays, then submit once.
@@ -172,7 +170,7 @@ function tick(): i32 {
 
     begin_frame();
     clear(0.05, 0.05, 0.15, 1.0);
-    
+
     //update_game(dt, delta_ms);
     gfx_draw_sprites(state.gfx.sprites_i32, state.gfx.sprites_f32, state.gfx.sprite_count);
     draw_lines(state.gfx.lines_f32, state.gfx.line_count);
@@ -181,7 +179,6 @@ function tick(): i32 {
     end_frame();
     return 0;
 }
-
 
 function draw_frame(): void {
     // Hot reload during development (no flags for now)
@@ -194,6 +191,3 @@ function draw_frame(): void {
     // draw_ui();
     // draw_tap_pulses();
 }
-
-
-

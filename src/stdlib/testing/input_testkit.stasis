@@ -1,4 +1,4 @@
-import "host_frame.stasis";
+import "../internal/host_frame.stasis";
 
 function input_testkit_reset(): void {
     let i: i32 = 0;

@@ -10,9 +10,10 @@ Stasis shipping packages use one renderer process on desktop, Android, and iOS:
    and present.
 
 `runtime/stasis_render_contract.h` is the C source of truth for magic, version,
-flags, capacities, offsets, and the backend-independent trace. The Stasis
-modules `src/runtime/gfx_cmd.stasis` and `src/stdlib/gfx_cmd.stasis` use the same
-layout. Unsupported magic or versions are rejected without drawing.
+flags, capacities, offsets, and the backend-independent trace. The single
+Stasis ABI implementation is `src/stdlib/internal/gfx_cmd.stasis`; public
+application code reaches it through `src/stdlib/graphics.stasis`. Unsupported
+magic or versions are rejected without drawing.
 
 ## Command contract
 

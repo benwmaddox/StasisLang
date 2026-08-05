@@ -108,18 +108,18 @@ parsing, stepping, or frame ownership.
 ### Active-toolchain dependency and nested play-root recovery
 
 - Good: reproducing the failure against ChessTD separated the LSP play-root bug from the project's
-  dated stdlib dependency and exposed the stdlib's matching runtime-module requirement.
+  dated stdlib dependency and exposed the stdlib's matching internal ABI requirement.
 - Bad: the first regression fixture used a synthetic vendored module and therefore did not exercise
-  the real `stdlib -> runtime` import edge.
+  the real `stdlib -> internal ABI` import edge.
 - Adjustment: full editor play fixtures opt into `"stdlib": "toolchain"` and import a real bundled
   graphics module from `.stasis_cache/toolchain/src`, while focused tests cover live project-root choice,
   transactional dependency synchronization, and generated filename aliases.
 
 Theory gained: the LSP workspace root is the source-identity and dependency boundary, while the
 entry parent is only a default watch location. A successful ChessTD graphical live session proves
-that the active executable can materialize its exact stdlib/runtime pair under that boundary and
+that the active executable can materialize its exact public stdlib and internal ABI pair under that boundary and
 compile an entry nested under `src`; this predicts any editor using the same executable and manifest
-will observe identical compiler, stdlib, runtime, diagnostics, and live-play behavior.
+will observe identical compiler, stdlib, host ABI, diagnostics, and live-play behavior.
 
 ### VS Code live-edit acceptance
 

@@ -1,24 +1,42 @@
-import "../../src/runtime/input_testkit.stasis";
+import "../../src/stdlib/testing/input_testkit.stasis";
 import "brickout_revenge_v1.stasis";
 
 test `brickout refresh input model maps testkit snapshot`(): bool {
     input_testkit_reset();
     input_testkit_set_quit_requested(false);
-    input_testkit_set_key_down(Scancode.Escape, true);
+    input_testkit_set_key_down(41, true);
     input_testkit_set_pointer_count(1);
     input_testkit_set_pointer(0, 17, true, true, false, 33.5, 44.5);
 
     refresh_input_model();
 
-    if (input_model.quit_requested) { return false; }
-    if (!input_model.escape_down) { return false; }
-    if (input_model.pointer_count != 1) { return false; }
-    if (input_model.pointers[0].id != 17) { return false; }
-    if (!input_model.pointers[0].is_down) { return false; }
-    if (!input_model.pointers[0].went_down) { return false; }
-    if (input_model.pointers[0].went_up) { return false; }
-    if (input_model.pointers[0].x_px < 33.4 || input_model.pointers[0].x_px > 33.6) { return false; }
-    if (input_model.pointers[0].y_px < 44.4 || input_model.pointers[0].y_px > 44.6) { return false; }
+    if (input_model.quit_requested) {
+        return false;
+    }
+    if (!input_model.escape_down) {
+        return false;
+    }
+    if (input_model.pointer_count != 1) {
+        return false;
+    }
+    if (input_model.pointers[0].id != 17) {
+        return false;
+    }
+    if (!input_model.pointers[0].is_down) {
+        return false;
+    }
+    if (!input_model.pointers[0].went_down) {
+        return false;
+    }
+    if (input_model.pointers[0].went_up) {
+        return false;
+    }
+    if (input_model.pointers[0].x_px < 33.4 || input_model.pointers[0].x_px > 33.6) {
+        return false;
+    }
+    if (input_model.pointers[0].y_px < 44.4 || input_model.pointers[0].y_px > 44.6) {
+        return false;
+    }
     return true;
 }
 
@@ -35,10 +53,18 @@ test `brickout record tap pulse uses refreshed input model`(): bool {
     refresh_input_model();
     record_tap_pulses();
 
-    if (state.tap_pulses[0].active != 1) { return false; }
-    if (state.tap_pulses[0].age_ms != 0) { return false; }
-    if (state.tap_pulses[0].x < 49.9 || state.tap_pulses[0].x > 50.1) { return false; }
-    if (state.tap_pulses[0].y < 69.9 || state.tap_pulses[0].y > 70.1) { return false; }
+    if (state.tap_pulses[0].active != 1) {
+        return false;
+    }
+    if (state.tap_pulses[0].age_ms != 0) {
+        return false;
+    }
+    if (state.tap_pulses[0].x < 49.9 || state.tap_pulses[0].x > 50.1) {
+        return false;
+    }
+    if (state.tap_pulses[0].y < 69.9 || state.tap_pulses[0].y > 70.1) {
+        return false;
+    }
     return true;
 }
 
@@ -56,12 +82,24 @@ test `brickout refresh input model clears inactive pointer slots`(): bool {
 
     refresh_input_model();
 
-    if (input_model.pointers[1].id != -1) { return false; }
-    if (input_model.pointers[1].is_down) { return false; }
-    if (input_model.pointers[1].went_down) { return false; }
-    if (input_model.pointers[1].went_up) { return false; }
-    if (input_model.pointers[1].x_px != 0.0) { return false; }
-    if (input_model.pointers[1].y_px != 0.0) { return false; }
+    if (input_model.pointers[1].id != -1) {
+        return false;
+    }
+    if (input_model.pointers[1].is_down) {
+        return false;
+    }
+    if (input_model.pointers[1].went_down) {
+        return false;
+    }
+    if (input_model.pointers[1].went_up) {
+        return false;
+    }
+    if (input_model.pointers[1].x_px != 0.0) {
+        return false;
+    }
+    if (input_model.pointers[1].y_px != 0.0) {
+        return false;
+    }
     return true;
 }
 
@@ -80,11 +118,21 @@ test `brickout record tap pulse skips occupied slot`(): bool {
     refresh_input_model();
     record_tap_pulses();
 
-    if (state.tap_pulses[0].x != 1000.0) { return false; }
-    if (state.tap_pulses[0].y != 1000.0) { return false; }
-    if (state.tap_pulses[1].active != 1) { return false; }
-    if (state.tap_pulses[1].x < 4.9 || state.tap_pulses[1].x > 5.1) { return false; }
-    if (state.tap_pulses[1].y < 5.9 || state.tap_pulses[1].y > 6.1) { return false; }
+    if (state.tap_pulses[0].x != 1000.0) {
+        return false;
+    }
+    if (state.tap_pulses[0].y != 1000.0) {
+        return false;
+    }
+    if (state.tap_pulses[1].active != 1) {
+        return false;
+    }
+    if (state.tap_pulses[1].x < 4.9 || state.tap_pulses[1].x > 5.1) {
+        return false;
+    }
+    if (state.tap_pulses[1].y < 5.9 || state.tap_pulses[1].y > 6.1) {
+        return false;
+    }
     return true;
 }
 
@@ -92,7 +140,9 @@ test `brickout refresh input model clamps negative pointer count`(): bool {
     input_testkit_reset();
     input_testkit_set_pointer_count_raw(-5);
     refresh_input_model();
-    if (input_model.pointer_count != 0) { return false; }
+    if (input_model.pointer_count != 0) {
+        return false;
+    }
     return true;
 }
 
@@ -101,8 +151,14 @@ test `brickout refresh input model clamps oversized pointer count`(): bool {
     input_testkit_set_pointer_count_raw(999);
     input_testkit_set_pointer(7, 77, true, true, false, 1.0, 2.0);
     refresh_input_model();
-    if (input_model.pointer_count != MAX_INPUT_POINTERS) { return false; }
-    if (input_model.pointers[7].id != 77) { return false; }
-    if (!input_model.pointers[7].is_down) { return false; }
+    if (input_model.pointer_count != MAX_INPUT_POINTERS) {
+        return false;
+    }
+    if (input_model.pointers[7].id != 77) {
+        return false;
+    }
+    if (!input_model.pointers[7].is_down) {
+        return false;
+    }
     return true;
 }

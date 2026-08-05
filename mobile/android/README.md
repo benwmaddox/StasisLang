@@ -128,13 +128,13 @@ Run the blocking render end-to-end gate directly with:
 
 This builds the canonical `samples/render_parity` fixture in Workshop with the real x86_64 development JIT. It captures the OpenGL surface, normalizes the letterboxed 640x360 viewport, and checks Android regions for the background, procedural fallback, opaque/translucent/rotated SVG sprites, crossing lines, direct text, and cached text. Three spaced captures, at least 30 rendered frames, and a successful non-empty JIT compile are required. Release packages are checked separately by `build_release.ps1` and can be run on an arm64 device with `validate_device.ps1 -Release`.
 
-Install the repository-owned blocking pre-commit hook once per clone:
+Install the repository-owned source-format pre-commit hook once per clone:
 
 ```powershell
 .\tools\install_git_hooks.ps1
 ```
 
-The hook runs the same headless Workshop gate for every local commit and returns nonzero on any failure. Production packaging uses the generic `android-arm64` release target.
+The hook blocks noncanonical staged Stasis source. The headless Workshop gate remains an explicit validation command for rendering changes rather than a requirement for every local commit. Production packaging uses the generic `android-arm64` release target.
 
 ## Host AI Run Review
 

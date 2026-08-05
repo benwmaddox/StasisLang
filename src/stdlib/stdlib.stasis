@@ -1,6 +1,6 @@
 // Stasis standard library (stub).
 // From a generated project: import "/vendor/stasis/src/stdlib/stdlib.stasis";
-// For runtime bindings, import "/vendor/stasis/src/stdlib/graphics.stasis" and/or
+// For host-backed APIs, import "/vendor/stasis/src/stdlib/graphics.stasis" and/or
 // "/vendor/stasis/src/stdlib/audio.stasis".
 
 import "memory.stasis";
@@ -8,17 +8,12 @@ import "memory.stasis";
 // Abort the current hot swap after on_code_swap restores any application invariants it can.
 extern function reject_code_swap(): void;
 
-// Rewrite V1 canonical integer print name.
-// Bootstrap currently provides `print_int`; this wrapper keeps source-level API aligned.
-function print_i32(value: i32): void {
+// Bootstrap provides type-specific host functions behind one source-level overload family.
+function print(value: i32): void {
     print_int(value);
 }
 
-function print_ascii(value: ascii[]): void {
-    print_string(value);
-}
-
-function print_utf8(value: utf8[]): void {
+function print(value: string): void {
     print_string(value);
 }
 

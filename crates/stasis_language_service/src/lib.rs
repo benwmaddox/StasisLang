@@ -3199,12 +3199,13 @@ mod tests {
         let source = include_str!("../../../vscode-stasis/test/fixture/src/main.stasis");
         fs::write(&path, source).expect("fixture source");
         let toolchain_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
-        for directory in ["runtime", "stdlib"] {
-            let cached_directory = root.join(".stasis_cache/toolchain/src").join(directory);
+        for directory in ["", "internal", "testing"] {
+            let source_directory = toolchain_source.join("stdlib").join(directory);
+            let cached_directory = root
+                .join(".stasis_cache/toolchain/src/stdlib")
+                .join(directory);
             fs::create_dir_all(&cached_directory).expect("toolchain cache directory");
-            for entry in std::fs::read_dir(toolchain_source.join(directory))
-                .expect("toolchain source directory")
-            {
+            for entry in std::fs::read_dir(source_directory).expect("toolchain source directory") {
                 let entry = entry.expect("toolchain source entry");
                 if entry.path().extension().and_then(|value| value.to_str()) != Some("stasis") {
                     continue;

@@ -6,11 +6,23 @@ function main(): i32 {
     let button_y: f32 = menu_button_y_for(0.0, 720.0);
     let label_x: f32 = menu_label_x_for(button_x, 64.0);
     let label_y: f32 = menu_label_y_for(button_y);
-    if (title_x != 90.0) { return 1; }
-    if (button_x != 20.0 || button_y != 140.0) { return 2; }
-    if (label_x != 78.0 || label_y != 155.0) { return 3; }
-    if (!menu_point_in_button(20.0, 140.0, button_x, button_y, 180.0, 56.0)) { return 4; }
-    if (!menu_point_in_button(199.999, 195.999, button_x, button_y, 180.0, 56.0)) { return 5; }
-    if (menu_point_in_button(200.0, 196.0, button_x, button_y, 180.0, 56.0)) { return 6; }
+    if (title_x != 90.0) {
+        return 1;
+    }
+    if (button_x != 20.0 || button_y != 140.0) {
+        return 2;
+    }
+    if (label_x != 78.0 || label_y != 155.0) {
+        return 3;
+    }
+    if (!menu_point_in_button(20.0, 140.0, button_x, button_y, 180.0, 56.0)) {
+        return 4;
+    }
+    if (!menu_point_in_button(199.999, 195.999, button_x, button_y, 180.0, 56.0)) {
+        return 5;
+    }
+    if (menu_point_in_button(200.0, 196.0, button_x, button_y, 180.0, 56.0)) {
+        return 6;
+    }
     return 0;
 }

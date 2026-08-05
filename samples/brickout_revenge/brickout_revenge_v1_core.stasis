@@ -4,7 +4,9 @@ import "../../src/stdlib/stdlib.stasis";
 // No graphics/audio/host dependencies.
 
 const BRICKOUT_LEVEL_MAX_EVENTS: i32 = 64;
+
 const BRICKOUT_LEVEL_MAX_SPAWNS_PER_TICK: i32 = 4;
+
 const BRICKOUT_LEVEL_COUNT: i32 = 3;
 
 enum BrickoutScreen {
@@ -21,18 +23,31 @@ enum BrickoutBallPreset {
 const BRICKOUT_LEVEL_EVENT_CAP: i32 = 192; // BRICKOUT_LEVEL_COUNT * BRICKOUT_LEVEL_MAX_EVENTS
 
 global brickout_levels_magic: i32;
+
 global brickout_level_name_0: utf8[32];
+
 global brickout_level_name_1: utf8[32];
+
 global brickout_level_name_2: utf8[32];
+
 global brickout_level_name_tmp: ascii[64];
+
 global brickout_level_initial_scraps: i32[3];
+
 global brickout_level_initial_power_cap: i32[3];
+
 global brickout_level_event_offset: i32[3];
+
 global brickout_level_event_count: i32[3];
+
 global brickout_level_event_tick: i32[192];
+
 global brickout_level_event_preset: BrickoutBallPreset[192];
+
 global brickout_level_tick: i32;
+
 global brickout_level_next_event_index: i32;
+
 global brickout_level_done: i32;
 
 struct BrickoutEconomy {
@@ -104,8 +119,12 @@ function brickout_shop_anim_step(anim: f32, open: i32, dt: f32, speed: f32): f32
     } else {
         a = a - dt * speed;
     }
-    if (a < 0.0) { a = 0.0; }
-    if (a > 1.0) { a = 1.0; }
+    if (a < 0.0) {
+        a = 0.0;
+    }
+    if (a > 1.0) {
+        a = 1.0;
+    }
     return a;
 }
 
@@ -136,14 +155,7 @@ function brickout_ascii_append_i32(dst: ascii[], value: i32): void {
     }
 }
 
-function brickout_ascii_write_scraps_power_line(
-    out: utf8[],
-    out_max: i32,
-    tmp_ascii: ascii[],
-    scraps: i32,
-    power_used: i32,
-    power_cap: i32
-): void {
+function brickout_ascii_write_scraps_power_line(out: utf8[], out_max: i32, tmp_ascii: ascii[], scraps: i32, power_used: i32, power_cap: i32): void {
     ascii_clear(tmp_ascii);
     ascii_append(tmp_ascii, "Scraps: ");
     brickout_ascii_append_i32(tmp_ascii, scraps);
@@ -153,6 +165,3 @@ function brickout_ascii_write_scraps_power_line(
     brickout_ascii_append_i32(tmp_ascii, power_cap);
     utf8_from_ascii(out, tmp_ascii, out_max);
 }
-
-
-

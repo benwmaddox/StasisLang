@@ -4,17 +4,27 @@ import "brickout_revenge_v1_levels.stasis";
 global test_spawn_buffer: BrickoutBallPreset[4];
 
 test `brickout can buy enforces scraps and power cap`(): bool {
-    if (!brickout_can_buy(20, 0, 5, 10, 2)) { return false; }
-    if (brickout_can_buy(5, 0, 5, 10, 2)) { return false; }
-    if (brickout_can_buy(20, 4, 5, 1, 2)) { return false; }
+    if (!brickout_can_buy(20, 0, 5, 10, 2)) {
+        return false;
+    }
+    if (brickout_can_buy(5, 0, 5, 10, 2)) {
+        return false;
+    }
+    if (brickout_can_buy(20, 4, 5, 1, 2)) {
+        return false;
+    }
     return true;
 }
 
 test `brickout shop anim step clamps open close range`(): bool {
     let opened: f32 = brickout_shop_anim_step(0.95, 1, 0.1, 1.0);
-    if (opened < 0.99 || opened > 1.0) { return false; }
+    if (opened < 0.99 || opened > 1.0) {
+        return false;
+    }
     let closed: f32 = brickout_shop_anim_step(0.05, 0, 0.2, 1.0);
-    if (closed != 0.0) { return false; }
+    if (closed != 0.0) {
+        return false;
+    }
     return true;
 }
 
@@ -23,9 +33,15 @@ test `brickout level reset zeros runtime counters`(): bool {
     brickout_level_next_event_index = 11;
     brickout_level_done = 1;
     brickout_level_reset();
-    if (brickout_level_tick != 0) { return false; }
-    if (brickout_level_next_event_index != 0) { return false; }
-    if (brickout_level_done != 0) { return false; }
+    if (brickout_level_tick != 0) {
+        return false;
+    }
+    if (brickout_level_next_event_index != 0) {
+        return false;
+    }
+    if (brickout_level_done != 0) {
+        return false;
+    }
     return true;
 }
 
@@ -35,10 +51,18 @@ test `brickout consume spawns emits expected event at matching tick`(): bool {
     brickout_level_next_event_index = 0;
     brickout_level_done = 0;
     let count: i32 = brickout_level_consume_spawns(0, test_spawn_buffer, 4);
-    if (count != 1) { return false; }
-    if (test_spawn_buffer[0] != BrickoutBallPreset.Normal) { return false; }
-    if (brickout_level_tick != 121) { return false; }
-    if (brickout_level_next_event_index != 1) { return false; }
+    if (count != 1) {
+        return false;
+    }
+    if (test_spawn_buffer[0] != BrickoutBallPreset.Normal) {
+        return false;
+    }
+    if (brickout_level_tick != 121) {
+        return false;
+    }
+    if (brickout_level_next_event_index != 1) {
+        return false;
+    }
     return true;
 }
 
@@ -48,9 +72,17 @@ test `brickout consume spawns marks done after last event`(): bool {
     brickout_level_next_event_index = 11;
     brickout_level_done = 0;
     let count: i32 = brickout_level_consume_spawns(0, test_spawn_buffer, 4);
-    if (count != 1) { return false; }
-    if (test_spawn_buffer[0] != BrickoutBallPreset.Normal) { return false; }
-    if (brickout_level_next_event_index != 12) { return false; }
-    if (brickout_level_done != 1) { return false; }
+    if (count != 1) {
+        return false;
+    }
+    if (test_spawn_buffer[0] != BrickoutBallPreset.Normal) {
+        return false;
+    }
+    if (brickout_level_next_event_index != 12) {
+        return false;
+    }
+    if (brickout_level_done != 1) {
+        return false;
+    }
     return true;
 }

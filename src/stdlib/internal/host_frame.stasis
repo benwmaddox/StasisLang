@@ -1,4 +1,4 @@
-// Host frame snapshot (prototype)
+// Host frame snapshot ABI.
 //
 // Practical hybrid approach:
 // - Reads: host writes a single deterministic snapshot once per tick via bulk host mode.
