@@ -111,37 +111,85 @@ function Resolve-Gradle {
 }
 
 function Save-Screenshot([string]$Path) {
-    $process = Start-Process -FilePath $adb -ArgumentList @(
-        "-s", $serial, "exec-out", "screencap", "-p"
-    ) -RedirectStandardOutput $Path -RedirectStandardError "$Path.stderr" -NoNewWindow -PassThru -Wait
-    if ($process.ExitCode -ne 0 -or -not (Test-Path $Path)) {
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $adb
+    $startInfo.Arguments = "-s $serial exec-out screencap -p"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "Android screenshot capture could not start for $serial" }
+    $errorTask = $process.StandardError.ReadToEndAsync()
+    $output = [System.IO.File]::Create($Path)
+    try {
+        $process.StandardOutput.BaseStream.CopyTo($output)
+    } finally {
+        $output.Dispose()
+    }
+    $process.WaitForExit()
+    $errorTask.Result | Set-Content -LiteralPath "$Path.stderr" -Encoding UTF8
+    if ($process.ExitCode -ne 0 -or -not (Test-Path $Path) -or (Get-Item $Path).Length -eq 0) {
         throw "Android screenshot capture failed for $serial"
     }
 }
 
+function Dismiss-EmulatorSystemAnr([xml]$Tree) {
+    $title = @($Tree.SelectNodes("//node[@resource-id='android:id/alertTitle']")) |
+        Where-Object {
+            $_.GetAttribute("text") -in @(
+                "Pixel Launcher isn't responding",
+                "System UI isn't responding"
+            )
+        } |
+        Select-Object -First 1
+    if (-not $title) { return $false }
+
+    $close = @($Tree.SelectNodes("//node[@resource-id='android:id/aerr_close']")) |
+        Select-Object -First 1
+    if (-not $close) { return $false }
+    $match = [regex]::Match($close.GetAttribute("bounds"), '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$')
+    if (-not $match.Success) { return $false }
+
+    $x = [int][math]::Floor(([int]$match.Groups[1].Value + [int]$match.Groups[3].Value) / 2)
+    $y = [int][math]::Floor(([int]$match.Groups[2].Value + [int]$match.Groups[4].Value) / 2)
+    Invoke-AdbQuiet @("shell", "input", "tap", "$x", "$y")
+    Write-Host "Dismissed unrelated emulator-system ANR; continuing render acceptance"
+    return $true
+}
+
 function Read-SurfaceBounds([string]$Description, [string]$XmlPath) {
-    $deviceXml = "/data/local/tmp/stasis-render-window.xml"
-    $pulled = $false
-    for ($attempt = 1; $attempt -le 3 -and -not $pulled; $attempt++) {
+    $captured = $false
+    for ($attempt = 1; $attempt -le 3 -and -not $captured; $attempt++) {
         Remove-Item -LiteralPath $XmlPath -Force -ErrorAction SilentlyContinue
-        Invoke-AdbQuiet @("shell", "rm", "-f", $deviceXml)
         try {
-            Invoke-AdbQuiet @("shell", "uiautomator", "dump", $deviceXml)
-            Invoke-AdbQuiet @("pull", $deviceXml, $XmlPath)
-            $pulled = (Test-Path -LiteralPath $XmlPath) -and
-                    (Get-Item -LiteralPath $XmlPath).Length -gt 0
+            $dump = @(& $adb -s $serial exec-out uiautomator dump --compressed /dev/tty 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw "uiautomator dump failed" }
+            $xmlMatch = [regex]::Match(($dump -join "`n"), '(?s)<\?xml.*</hierarchy>')
+            if (-not $xmlMatch.Success) { throw "uiautomator returned no XML hierarchy" }
+            [System.IO.File]::WriteAllText(
+                $XmlPath,
+                $xmlMatch.Value,
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $captured = $true
         } catch {
             if ($attempt -eq 3) { throw }
             Start-Sleep -Seconds 1
         }
     }
-    if (-not $pulled) { throw "Android UI hierarchy was not captured" }
-    Invoke-Adb @("shell", "rm", "-f", $deviceXml) | Out-Null
+    if (-not $captured) { throw "Android UI hierarchy was not captured" }
     [xml]$tree = Get-Content -Raw -LiteralPath $XmlPath
     $node = @($tree.SelectNodes("//node")) |
         Where-Object { $_.GetAttribute("content-desc") -eq $Description } |
         Select-Object -First 1
-    if (-not $node) { throw "render surface '$Description' was absent from the Android UI tree" }
+    if (-not $node) {
+        if (Dismiss-EmulatorSystemAnr $tree) {
+            throw "unrelated emulator-system ANR was dismissed; waiting for the render surface"
+        }
+        throw "render surface '$Description' was absent from the Android UI tree"
+    }
     $match = [regex]::Match($node.GetAttribute("bounds"), '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$')
     if (-not $match.Success) { throw "render surface has invalid bounds: $($node.GetAttribute('bounds'))" }
     $left = [int]$match.Groups[1].Value
@@ -188,6 +236,7 @@ function Assert-RenderedVariant(
     $stableCaptures = 0
     $processId = ""
     $viewportArg = ""
+    $viewportResolved = $false
     $logFile = Join-Path $artifactRoot "$Name-logcat.txt"
     $log = @()
     try {
@@ -196,10 +245,11 @@ function Assert-RenderedVariant(
             $processId = (Invoke-Adb @("shell", "pidof", $Package) | Select-Object -First 1).Trim()
             if (-not $processId) { throw "$Name exited before rendering" }
             try {
-                if (-not $viewportArg) {
+                if (-not $viewportResolved) {
                     $surface = Read-SurfaceBounds $SurfaceDescription $uiTree
                     $viewport = Fit-LogicalViewport $surface
                     $viewportArg = ($viewport | ForEach-Object { $_.ToString() }) -join ","
+                    $viewportResolved = $true
                 }
                 Write-Host "$Name viewport=$viewportArg"
                 Save-Screenshot $capture
@@ -219,6 +269,10 @@ function Assert-RenderedVariant(
             } catch {
                 $stableCaptures = 0
                 $lastFailure = $_.Exception.Message
+                if ($lastFailure -eq "unrelated emulator-system ANR was dismissed; waiting for the render surface") {
+                    Invoke-Adb @("shell", "am", "start", "-W", "-n",
+                        "$Package/com.stasislang.workshop.MainActivity") | Out-Null
+                }
             }
         } while ((Get-Date) -lt $deadline)
     } finally {

@@ -27,20 +27,35 @@ if (-not $env:ANDROID_AVD_HOME -and $env:USERPROFILE) {
 $serial = "emulator-$Port"
 $deviceLines = @(& $adb devices)
 $isRunning = [bool]($deviceLines | Where-Object { $_ -match "^$([regex]::Escape($serial))\s+device(?:\s|$)" })
+$emulatorProcess = $null
+$launchAttempts = 0
 if (-not $isRunning) {
     $availableAvds = @(& $emulator -list-avds)
     if ($availableAvds -notcontains $AvdName) {
         throw "Android virtual device '$AvdName' was not found. Create the API 35 x86_64 AVD described in README.md."
     }
     $emulatorArgs = @("-avd", $AvdName, "-port", "$Port", "-no-audio", "-no-boot-anim", "-netdelay", "none", "-netspeed", "full")
-    if ($Headless) { $emulatorArgs += "-no-window" }
+    if ($Headless) { $emulatorArgs += @("-no-window", "-no-snapshot") }
     if ($WipeData) { $emulatorArgs += "-wipe-data" }
-    Start-Process -FilePath $emulator -ArgumentList $emulatorArgs | Out-Null
-    Write-Host "Started $AvdName as $serial"
 }
 
 $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
 do {
+    if (-not $isRunning -and ($null -eq $emulatorProcess -or $emulatorProcess.HasExited)) {
+        if ($launchAttempts -ge 2) {
+            $exitCode = if ($null -ne $emulatorProcess) { $emulatorProcess.ExitCode } else { "unknown" }
+            throw "Android emulator exited before boot after $launchAttempts attempts (exit $exitCode)"
+        }
+        $launchAttempts += 1
+        if ($launchAttempts -gt 1) { Start-Sleep -Seconds 2 }
+        if ($Headless) {
+            $emulatorProcess = Start-Process -FilePath $emulator -ArgumentList $emulatorArgs `
+                -WindowStyle Hidden -PassThru
+        } else {
+            $emulatorProcess = Start-Process -FilePath $emulator -ArgumentList $emulatorArgs -PassThru
+        }
+        Write-Host "Started $AvdName as $serial (attempt $launchAttempts/2)"
+    }
     $deviceLines = @(& $adb devices)
     $deviceReady = [bool]($deviceLines | Where-Object { $_ -match "^$([regex]::Escape($serial))\s+device(?:\s|$)" })
     $booted = if ($deviceReady) {
