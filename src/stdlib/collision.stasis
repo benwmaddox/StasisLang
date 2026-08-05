@@ -1,59 +1,55 @@
-// Typed collision predicates.
+// Collision predicates accept scalar components so callers do not need temporary shape structs.
 
-struct Aabb {
-    minimum_x: f32;
-    minimum_y: f32;
-    maximum_x: f32;
-    maximum_y: f32;
-}
-
-struct Circle {
-    x: f32;
-    y: f32;
-    radius: f32;
-}
-
-function @inline intersects(self: Aabb, other: Aabb): bool {
-    if (self.maximum_x < other.minimum_x) {
+function @inline aabb_intersects(
+    minimum_x: f32,
+    minimum_y: f32,
+    maximum_x: f32,
+    maximum_y: f32,
+    other_minimum_x: f32,
+    other_minimum_y: f32,
+    other_maximum_x: f32,
+    other_maximum_y: f32
+): bool {
+    if (maximum_x < other_minimum_x) {
         return false;
     }
-    if (self.minimum_x > other.maximum_x) {
+    if (minimum_x > other_maximum_x) {
         return false;
     }
-    if (self.maximum_y < other.minimum_y) {
+    if (maximum_y < other_minimum_y) {
         return false;
     }
-    if (self.minimum_y > other.maximum_y) {
+    if (minimum_y > other_maximum_y) {
         return false;
     }
     return true;
 }
 
-function @inline contains_point(self: Aabb, x: f32, y: f32): bool {
-    if (x < self.minimum_x) {
+function @inline aabb_contains_point(minimum_x: f32, minimum_y: f32, maximum_x: f32, maximum_y: f32, point_x: f32, point_y: f32): bool {
+    if (point_x < minimum_x) {
         return false;
     }
-    if (x > self.maximum_x) {
+    if (point_x > maximum_x) {
         return false;
     }
-    if (y < self.minimum_y) {
+    if (point_y < minimum_y) {
         return false;
     }
-    if (y > self.maximum_y) {
+    if (point_y > maximum_y) {
         return false;
     }
     return true;
 }
 
-function @inline intersects(self: Circle, other: Circle): bool {
-    let dx: f32 = self.x - other.x;
-    let dy: f32 = self.y - other.y;
-    let radius_sum: f32 = self.radius + other.radius;
-    return dx * dx + dy * dy <= radius_sum * radius_sum;
+function @inline circle_intersects(x: f32, y: f32, radius: f32, other_x: f32, other_y: f32, other_radius: f32): bool {
+    let delta_x: f32 = x - other_x;
+    let delta_y: f32 = y - other_y;
+    let radius_sum: f32 = radius + other_radius;
+    return delta_x * delta_x + delta_y * delta_y <= radius_sum * radius_sum;
 }
 
-function @inline contains_point(self: Circle, x: f32, y: f32): bool {
-    let dx: f32 = x - self.x;
-    let dy: f32 = y - self.y;
-    return dx * dx + dy * dy <= self.radius * self.radius;
+function @inline circle_contains_point(x: f32, y: f32, radius: f32, point_x: f32, point_y: f32): bool {
+    let delta_x: f32 = point_x - x;
+    let delta_y: f32 = point_y - y;
+    return delta_x * delta_x + delta_y * delta_y <= radius * radius;
 }

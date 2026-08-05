@@ -1,72 +1,32 @@
 import "../../src/stdlib/collision.stasis";
 
-global box_a: Aabb;
-
-global box_b: Aabb;
-
-global circle_a: Circle;
-
-global circle_b: Circle;
-
-test `collision predicates resolve by receiver type`(): bool {
-    box_a.minimum_x = 0.0;
-    box_a.minimum_y = 0.0;
-    box_a.maximum_x = 10.0;
-    box_a.maximum_y = 10.0;
-    box_b.minimum_x = 8.0;
-    box_b.minimum_y = 8.0;
-    box_b.maximum_x = 12.0;
-    box_b.maximum_y = 12.0;
-
-    circle_a.x = 0.0;
-    circle_a.y = 0.0;
-    circle_a.radius = 5.0;
-    circle_b.x = 8.0;
-    circle_b.y = 0.0;
-    circle_b.radius = 4.0;
-
-    if (!box_a.intersects(box_b)) {
+test `collision predicates accept scalar shape components`(): bool {
+    if (!aabb_intersects(0.0, 0.0, 10.0, 10.0, 8.0, 8.0, 12.0, 12.0)) {
         return false;
     }
-    if (!box_a.contains_point(5.0, 5.0)) {
+    if (!aabb_contains_point(0.0, 0.0, 10.0, 10.0, 5.0, 5.0)) {
         return false;
     }
-    if (!circle_a.intersects(circle_b)) {
+    if (!circle_intersects(0.0, 0.0, 5.0, 8.0, 0.0, 4.0)) {
         return false;
     }
-    if (!circle_a.contains_point(3.0, 4.0)) {
+    if (!circle_contains_point(0.0, 0.0, 5.0, 3.0, 4.0)) {
         return false;
     }
     return true;
 }
 
 test `collision predicates reject separated shapes and outside points`(): bool {
-    box_a.minimum_x = 0.0;
-    box_a.minimum_y = 0.0;
-    box_a.maximum_x = 2.0;
-    box_a.maximum_y = 2.0;
-    box_b.minimum_x = 3.0;
-    box_b.minimum_y = 3.0;
-    box_b.maximum_x = 4.0;
-    box_b.maximum_y = 4.0;
-
-    circle_a.x = 0.0;
-    circle_a.y = 0.0;
-    circle_a.radius = 1.0;
-    circle_b.x = 3.0;
-    circle_b.y = 0.0;
-    circle_b.radius = 1.0;
-
-    if (box_a.intersects(box_b)) {
+    if (aabb_intersects(0.0, 0.0, 2.0, 2.0, 3.0, 0.0, 4.0, 1.0)) {
         return false;
     }
-    if (box_a.contains_point(3.0, 1.0)) {
+    if (aabb_contains_point(0.0, 0.0, 2.0, 2.0, 3.0, 1.0)) {
         return false;
     }
-    if (circle_a.intersects(circle_b)) {
+    if (circle_intersects(0.0, 0.0, 1.0, 3.0, 0.0, 1.0)) {
         return false;
     }
-    if (circle_a.contains_point(1.0, 1.0)) {
+    if (circle_contains_point(0.0, 0.0, 1.0, 1.0, 1.0)) {
         return false;
     }
     return true;
