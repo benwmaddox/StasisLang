@@ -106,9 +106,9 @@ Gauntlet's autonomous layout migration: an asset/source edit requiring a layout 
 unapplied and reported as requiring the normal explicit approval workflow.
 Request one isolated subject per PNG. Masters default to 1024x1024 and may be increased to
 2048x2048 when the agent needs extra detail or crop latitude.
-Character and unit art should use existing authored sprites or ImageGen by default. Primitive
-SVG and shape-composed PNG output is reserved for basic UI, simple icons, selection/range overlays,
-and deterministic fallbacks.
+ImageGen is discretionary rather than a mandatory gate. Primitive SVG and shape-composed PNG
+output is usually better suited to basic UI, simple icons, selection/range overlays, and
+deterministic fallbacks than character art.
 
 Human commands intentionally cover every useful live AI capability:
 
