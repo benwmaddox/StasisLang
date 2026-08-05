@@ -942,9 +942,15 @@ fn controller_loop(
             state.accepted_candidates + state.rejected_candidates + 1
         );
         let memory = decision_memory_snapshot(artifacts)?;
+        let require_imagegen = requires_authored_imagegen(&decision.workstream);
+        let asset_guidance = if require_imagegen {
+            "This is an authored visual-art workstream. You must request, fulfill, and transactionally import at least one ImageGen PNG before completion. Primitive vectors may supplement the bitmap only for basic UI, selection/range overlays, or a deterministic fallback after an actual ImageGen blocker."
+        } else {
+            "ImageGen is optional for this logic or basic-interface workstream. Use primitive vectors for basic UI, simple icons, selection/range overlays, and deterministic fallbacks."
+        };
         let prompt = format!(
-            "Frozen game brief:\n{goal}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nAsset guidance: prefer ImageGen over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when this workstream is purely logic or basic interface geometry.\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
-            decision.workstream, decision.builder_prompt
+            "Frozen game brief:\n{goal}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nAsset guidance: {asset_guidance}\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
+            decision.workstream, decision.builder_prompt,
         );
         let run_builder = |model: &GauntletRoleModel,
                            role: &str,
@@ -962,10 +968,11 @@ fn controller_loop(
                 true,
                 true,
                 Some(&artifacts.join(DECISIONS_NAME)),
+                require_imagegen,
                 &canceled,
             )
         };
-        let primary_instruction = "Use only the supplied Stasis live-workspace tools. Inspect relevant symbols and references, then make one contiguous atomic semantic edit batch. Prefer request_imagegen_asset over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when the assigned work is purely logic or basic interface geometry. Request one isolated subject per PNG rather than an atlas. Use the 1024x1024 master default; request up to 2048x2048 only when extra detail or crop latitude is needed. The tool persists the request and waits for the host PNG, then returns the source_path for import_png_asset crop/background-removal. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset obsolete; place deletion before a replacement that reuses the same id. You may also create JSON/CSV or procedural WAV assets. Put one contiguous asset-tool group immediately before the related source writes in the same response. Use record_decision during exploration and after consequential tested choices to preserve concise conclusions, tradeoffs, evidence, and next steps for future agents; never record hidden chain-of-thought. The write must compile and run tests. Do not grade your own visual quality. Return done immediately after a successful tested write and decision record. If a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools, call report_blocked once; it terminates this attempt immediately. Never retry the same terminal failure.";
+        let primary_instruction = "Use only the supplied Stasis live-workspace tools. Inspect relevant symbols and references, then make one contiguous atomic semantic edit batch. Authored visual-art workstreams require request_imagegen_asset plus a transactionally imported PNG; the completion gate enforces it. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional for pure logic or basic interface geometry. Request one isolated subject per PNG rather than an atlas. Use the 1024x1024 master default; request up to 2048x2048 only when extra detail or crop latitude is needed. The tool persists the request and waits for the host PNG, then returns the source_path for import_png_asset crop/background-removal. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset obsolete; place deletion before a replacement that reuses the same id. You may also create JSON/CSV or procedural WAV assets. Put one contiguous asset-tool group immediately before the related source writes in the same response. Use record_decision during exploration and after consequential tested choices to preserve concise conclusions, tradeoffs, evidence, and next steps for future agents; never record hidden chain-of-thought. The write must compile and run tests. Do not grade your own visual quality. Return done immediately after a successful tested write and decision record. If a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools, call report_blocked once; it terminates this attempt immediately. Never retry the same terminal failure.";
         emit_builder_attempt_started(
             artifacts,
             &candidate_id,
@@ -1023,7 +1030,7 @@ fn controller_loop(
                     &primary_failure_evidence,
                     "Make one bounded rescue attempt, then either complete or preserve the terminal blocker.",
                 )?;
-                let escalation_instruction = "You are the one-shot rescue builder after the primary builder failed. Use the durable decision memory and current evidence to avoid repeating failed exploration. Make one bounded atomic correction that completes the assigned work. Prefer request_imagegen_asset for authored game art even in an early version; reserve primitive shapes primarily for basic UI and overlays. If generated bitmap art is the missing input, request it once and import the returned source_path transactionally. If the failure is environmental or otherwise non-recoverable from the supplied tools, call report_blocked once to terminate immediately. Never loop on the same failed operation.";
+                let escalation_instruction = "You are the one-shot rescue builder after the primary builder failed. Use the durable decision memory and current evidence to avoid repeating failed exploration. Make one bounded atomic correction that completes the assigned work. Authored visual-art workstreams require request_imagegen_asset plus a transactionally imported PNG; the completion gate enforces it. Reserve primitive shapes primarily for basic UI and overlays. If generated bitmap art is the missing input, request it once and import the returned source_path transactionally. If the failure is environmental or otherwise non-recoverable from the supplied tools, call report_blocked once to terminate immediately. Never loop on the same failed operation.";
                 let rescue_memory = decision_memory_snapshot(artifacts)?;
                 let rescue_prompt = format!(
                     "{prompt}\n\nPrimary builder failure evidence (do not repeat this failure):\n{primary_failure_evidence}\n\nUpdated durable decision memory:\n{rescue_memory}"
@@ -1579,6 +1586,20 @@ fn default_workstreams() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn requires_authored_imagegen(workstream: &str) -> bool {
+    let workstream = workstream.to_ascii_lowercase();
+    [
+        "art",
+        "visual",
+        "graphics",
+        "sprite",
+        "illustration",
+        "animation",
+    ]
+    .iter()
+    .any(|keyword| workstream.contains(keyword))
 }
 
 fn provider_for_role(role: &GauntletRoleModel) -> CodexExecProvider {
@@ -3137,6 +3158,16 @@ fn critic_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_visual_workstreams_require_imagegen() {
+        assert!(requires_authored_imagegen(
+            "Medieval world art and animation"
+        ));
+        assert!(requires_authored_imagegen("Rendered-frame visual polish"));
+        assert!(!requires_authored_imagegen("Grid movement and terrain"));
+        assert!(!requires_authored_imagegen("Mobile controls and HUD"));
+    }
 
     #[test]
     fn heartbeat_distinguishes_live_and_interrupted_runs() {

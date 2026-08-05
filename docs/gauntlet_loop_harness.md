@@ -210,8 +210,10 @@ surface](https://learn.chatgpt.com/docs/developer-commands#codex-exec) supplies
 JSONL events, structured output, web search for the reference scout, and image
 attachments for fresh critics.
 
-ImageGen is an optional host capability for concept art, backgrounds, and
-texture sheets. The current `codex exec` child transport accepts image inputs
+ImageGen is a host capability for authored game art. Gauntlet requires at least
+one fulfilled and transactionally imported ImageGen PNG whenever the selected
+workstream is explicitly art, visual, graphics, sprite, illustration, or
+animation work. The current `codex exec` child transport accepts image inputs
 but does not expose the in-product ImageGen tool directly. An agent instead
 calls `request_imagegen_asset`; Stasis persists the exact prompt and intended
 use under the project-bound ImageGen inbox and waits up to 30 minutes for a
@@ -237,12 +239,12 @@ the controlled file, its matching manifest entry, and any prepared-cache copy;
 all three are restored if the related source edit fails. Deletion precedes a
 replacement that reuses the same asset id.
 
-ImageGen is discretionary, but it is preferred over primitive SVG or
-shape-composed PNG for authored game art such as characters, units, buildings,
-terrain props, and decorative environments, even in early versions. Primitive
-shapes are primarily for basic UI, simple icons, selection/range overlays, and
-deterministic fallbacks. ImageGen remains optional for work that is purely logic
-or basic interface geometry.
+For those authored-art workstreams, Gauntlet hides primitive SVG and
+shape-composed PNG tools and rejects completion until an ImageGen request has
+been fulfilled and its PNG imported through the atomic asset/source transaction.
+Primitive rendering remains appropriate for basic UI, simple icons,
+selection/range overlays, and deterministic fallbacks. ImageGen remains optional
+for work that is purely logic or basic interface geometry.
 
 The request is stored under `build/gauntlet/imagegen/requests/`. The host places
 the selected PNG at the request's `output_path` under

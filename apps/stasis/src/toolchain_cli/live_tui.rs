@@ -75,6 +75,7 @@ pub(super) fn run_scripted_ai_with_cancel(
         false,
         false,
         None,
+        false,
         canceled,
     )
     .map_err(|error| error.message)?;
@@ -99,6 +100,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
         true,
         false,
         None,
+        false,
         canceled,
     )
     .map_err(|error| error.message)?;
@@ -147,6 +149,7 @@ pub(super) fn run_scripted_ai_profile(
     allow_project_assets: bool,
     auto_apply_layout: bool,
     decision_log: Option<&Path>,
+    require_imagegen: bool,
     canceled: &AtomicBool,
 ) -> Result<ScriptedAiOutcome, ScriptedAiFailure> {
     let mut audit = AiAuditLog::create_with_model(
@@ -176,6 +179,7 @@ pub(super) fn run_scripted_ai_profile(
             auto_apply_layout,
             decision_log.map(Path::to_path_buf),
             profile.role.clone(),
+            require_imagegen,
         )
     } else {
         LiveAiTools::new(client.clone())
@@ -193,21 +197,26 @@ pub(super) fn run_scripted_ai_profile(
             scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
         })?;
     let mut audit_error = None;
+    let mut tool_specs = if allow_project_assets {
+        if decision_log.is_some() {
+            gauntlet_tool_specs()
+        } else {
+            project_ai_tool_specs()
+        }
+    } else {
+        live_tool_specs()
+    };
+    if require_imagegen {
+        tool_specs
+            .retain(|spec| !matches!(spec.tool.as_str(), "write_svg_asset" | "write_png_asset"));
+    }
     let result = run_agent_with_profile(
         &mut provider,
         &mut tools,
         &profile,
         prompt,
         initial_context,
-        if allow_project_assets {
-            if decision_log.is_some() {
-                gauntlet_tool_specs()
-            } else {
-                project_ai_tool_specs()
-            }
-        } else {
-            live_tool_specs()
-        },
+        tool_specs,
         canceled,
         |event| {
             if audit_error.is_none() {
@@ -2320,6 +2329,10 @@ struct LiveAiTools {
     decision_log: Option<PathBuf>,
     decision_role: Option<String>,
     terminal_blocker: Option<String>,
+    require_imagegen: bool,
+    imagegen_ready: bool,
+    imagegen_staged: bool,
+    imagegen_committed: bool,
 }
 
 impl LiveAiTools {
@@ -2335,6 +2348,10 @@ impl LiveAiTools {
             decision_log: None,
             decision_role: None,
             terminal_blocker: None,
+            require_imagegen: false,
+            imagegen_ready: false,
+            imagegen_staged: false,
+            imagegen_committed: false,
         }
     }
 
@@ -2344,12 +2361,14 @@ impl LiveAiTools {
         auto_apply_layout: bool,
         decision_log: Option<PathBuf>,
         decision_role: String,
+        require_imagegen: bool,
     ) -> Self {
         Self {
             project_root: Some(project_root),
             auto_apply_layout,
             decision_log,
             decision_role: Some(decision_role),
+            require_imagegen,
             ..Self::new(client)
         }
     }
@@ -2423,7 +2442,11 @@ impl LiveAiTools {
         }
     }
 
-    fn request_imagegen_asset(&self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
+    fn request_imagegen_asset(
+        &mut self,
+        call: &ToolCall,
+        canceled: &AtomicBool,
+    ) -> ToolObservation {
         let Some(project_root) = self.project_root.as_ref() else {
             return ToolObservation::error(
                 &call.tool,
@@ -2611,6 +2634,7 @@ impl LiveAiTools {
                     Ok((_, actual_width, actual_height))
                         if Some(actual_width) == width && Some(actual_height) == height =>
                     {
+                        self.imagegen_ready = true;
                         return ToolObservation::result(
                             &call.tool,
                             serde_json::json!({
@@ -2620,7 +2644,7 @@ impl LiveAiTools {
                                 "height": actual_height,
                                 "request_path": request_path,
                             }),
-                        )
+                        );
                     }
                     Ok((_, actual_width, actual_height)) => {
                         last_validation_error = Some(format!(
@@ -2838,6 +2862,7 @@ impl LiveAiTools {
                             Ok(applied) => applied,
                             Err(error) => {
                                 if let Some(transaction) = self.asset_transaction.take() {
+                                    self.imagegen_staged = false;
                                     let _ = transaction.rollback();
                                 }
                                 return failed_write_observations(calls, error);
@@ -2851,8 +2876,11 @@ impl LiveAiTools {
                 if applied {
                     self.last_write = Some(response.clone());
                     self.reference_search_ready = false;
+                    self.imagegen_committed |= self.imagegen_staged;
+                    self.imagegen_staged = false;
                     self.asset_transaction.take();
                 } else if let Some(transaction) = self.asset_transaction.take() {
+                    self.imagegen_staged = false;
                     let _ = transaction.rollback();
                 }
                 if applied {
@@ -2881,6 +2909,7 @@ impl LiveAiTools {
             }
             Err(error) => {
                 if let Some(transaction) = self.asset_transaction.take() {
+                    self.imagegen_staged = false;
                     let _ = transaction.rollback();
                 }
                 self.record_durable_failure(
@@ -3091,7 +3120,16 @@ impl ToolExecutor for LiveAiTools {
                 self.project_root.as_ref().expect("validated project root"),
                 &asset_calls,
             ) {
-                Ok(transaction) => self.asset_transaction = Some(transaction),
+                Ok(transaction) => {
+                    self.asset_transaction = Some(transaction);
+                    if self.imagegen_ready
+                        && asset_calls
+                            .iter()
+                            .any(|call| call.tool == "import_png_asset")
+                    {
+                        self.imagegen_staged = true;
+                    }
+                }
                 Err(error) => {
                     return calls
                         .iter()
@@ -3173,6 +3211,13 @@ impl ToolExecutor for LiveAiTools {
                     .unwrap_or_else(|| "missing".to_string())
             )),
         };
+        let result = result.and_then(|()| {
+            if self.require_imagegen && !self.imagegen_committed {
+                Err("completion rejected: this authored visual workstream requires a fulfilled and transactionally imported ImageGen PNG".to_string())
+            } else {
+                Ok(())
+            }
+        });
         if let Err(error) = &result {
             self.record_durable_failure(
                 "completion_gate_failed",
@@ -4028,6 +4073,7 @@ mod tests {
             true,
             Some(decisions.clone()),
             "builder".to_string(),
+            false,
         );
 
         let error = tools.validate_completion().expect_err("write required");
@@ -4095,6 +4141,29 @@ mod tests {
     }
 
     #[test]
+    fn authored_visual_completion_requires_committed_imagegen_import() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.require_imagegen = true;
+        tools.last_write = Some(LiveResponse::success(
+            1,
+            0,
+            "edit_applied",
+            json!({"tests": "passed"}),
+        ));
+
+        assert_eq!(
+            tools.validate_completion().unwrap_err(),
+            "completion rejected: this authored visual workstream requires a fulfilled and transactionally imported ImageGen PNG"
+        );
+
+        tools.imagegen_committed = true;
+        tools
+            .validate_completion()
+            .expect("tested visual write with ImageGen completes");
+    }
+
+    #[test]
     fn gauntlet_agent_can_persist_bounded_decision_memory() {
         let root = std::env::temp_dir().join(format!(
             "stasis_gauntlet_decision_{}",
@@ -4111,6 +4180,7 @@ mod tests {
             true,
             Some(decision_log.clone()),
             "Fresh builder".to_string(),
+            false,
         );
         let observation = tools.record_decision(&ToolCall {
             tool: "record_decision".to_string(),
@@ -4159,6 +4229,7 @@ mod tests {
             true,
             Some(decision_log.clone()),
             "Fresh builder".to_string(),
+            false,
         );
 
         let observation = tools.report_blocked(&ToolCall {
@@ -4202,12 +4273,13 @@ mod tests {
         fs::write(&output, png.into_inner()).expect("host PNG");
         let decision_log = root.join("decisions.jsonl");
         let (client, _server) = stasis_runner::live::live_session(1);
-        let tools = LiveAiTools::new_project_assets(
+        let mut tools = LiveAiTools::new_project_assets(
             client,
             root.clone(),
             true,
             Some(decision_log.clone()),
             "Fresh builder".to_string(),
+            false,
         );
 
         let observation = tools.request_imagegen_asset(
@@ -4260,12 +4332,13 @@ mod tests {
         .expect("encode AI imagegen fixture");
         fs::write(&output, png.into_inner()).expect("host PNG");
         let (client, _server) = stasis_runner::live::live_session(1);
-        let tools = LiveAiTools::new_project_assets(
+        let mut tools = LiveAiTools::new_project_assets(
             client,
             root.clone(),
             false,
             None,
             "Stasis AI agent".to_string(),
+            false,
         );
 
         let observation = tools.request_imagegen_asset(
