@@ -769,6 +769,9 @@ test `Gauntlet seed emits a visible frame`(): bool {
     render();
     if (gfx_cmd_i32[GFX_I_MAGIC] != GFX_CMD_MAGIC) { return false; }
     if (gfx_cmd_i32[GFX_I_LINE_COUNT] < 1) { return false; }
+    if (gfx_cmd_text_bytes_used() < 15) { return false; }
+    if (gfx_cmd_u8[0] != 83) { return false; }
+    if (gfx_cmd_u8[1] != 84) { return false; }
     return gfx_cmd_i32[GFX_I_FLAGS] == GFX_FLAG_CLEAR + GFX_FLAG_PRESENT;
 }
 "#;
