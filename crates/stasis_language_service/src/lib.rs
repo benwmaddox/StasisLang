@@ -1299,8 +1299,9 @@ impl LanguageService {
         let document = snapshot
             .document(path)
             .ok_or_else(|| format!("navigation document is not indexed: '{path}'"))?;
-        let symbol = reference_symbol_at(&document.text, byte_offset)
-            .ok_or_else(|| "no Stasis symbol at navigation position".to_string())?;
+        let Some(symbol) = reference_symbol_at(&document.text, byte_offset) else {
+            return Ok(Vec::new());
+        };
         let project_root = self.project_root.clone();
         if let Some(locations) = self.language_index.as_ref().and_then(|index| {
             index
@@ -3728,6 +3729,11 @@ function main(): i32 {
     #[test]
     fn navigation_and_symbols_share_compiler_owned_spans() {
         let (mut service, path, source) = intelligence_service();
+        let punctuation = source.find('{').expect("struct body");
+        assert!(service
+            .definition(&path, punctuation)
+            .expect("definition miss")
+            .is_empty());
         let call = source.find("spawn_enemy(1").expect("function call") + 2;
         let definitions = service.definition(&path, call).expect("definition");
         assert_eq!(definitions.len(), 1);
