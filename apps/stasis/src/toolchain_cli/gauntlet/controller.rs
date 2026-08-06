@@ -919,7 +919,7 @@ fn controller_loop(
     );
     let scenario_pointer = logical_center(&project_root);
     request_live(&client, 1, LiveCommand::Pause)?;
-    request_live(&client, 2, LiveCommand::ValidationSnapshot)?;
+    request_live(&client, 2, LiveCommand::ValidationReinitialize)?;
     let mut next_request = 3_u64;
     let mut baseline = capture_scenario(
         &client,

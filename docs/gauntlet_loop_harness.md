@@ -163,15 +163,15 @@ frozen bar cannot be weakened after editing begins. Tests or stricter checks
 may be added, but accepted requirements cannot be removed.
 
 Required scenarios remain gameplay requirements when `taps` is omitted. Up to
-four scenarios may also contain one to eight deterministic pointer taps. The
-controller runs the newly active candidate's `main()` followed by one
-input-free startup tick after its tested builder transaction, then replaces the
-validation snapshot before capture. It restores that candidate-specific
-input-ready snapshot before each scenario, replays the taps in order, and
-captures the final rendered frame for both the accepted checkpoint and every
-candidate. This makes new globals, asset loads, initialization, and render paths
-observable rather than preserving a migrated baseline from the prior candidate
-or letting a one-time startup transition consume the first scenario tap.
+four scenarios may also contain one to eight deterministic pointer taps. For
+both the accepted baseline and each newly active candidate, the controller runs
+`main()` followed by one input-free startup tick, then replaces the validation
+snapshot before capture. It restores that candidate-specific input-ready
+snapshot before each scenario, replays the taps in order, and captures the final
+rendered frame for both the accepted checkpoint and every candidate. This makes
+new globals, asset loads, initialization, and render paths observable rather
+than preserving a migrated baseline from the prior candidate or letting a
+one-time startup transition consume the first scenario tap.
 `ticks_after` defaults to 1 and may be 1-300,
 allowing staged movement or feedback to settle without wall-clock timing. Leads
 and blind critics receive identically ordered, named scenario frames alongside
