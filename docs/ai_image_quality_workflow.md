@@ -39,3 +39,11 @@ Render and inspect the result at its smallest gameplay size as well as a large r
 The demo below is a compact vector scene made from the same bounded primitives recommended for Stasis assets. Zoom it or open the source to review the paths and gradients; it remains resolution-independent.
 
 ![Moonlit sentinel vector demo](demos/ai_svg_quality_demo.svg)
+
+## Consistency-first character demo
+
+The [Hearthguard man-at-arms package](demos/man_at_arms/README.md) demonstrates the stronger production workflow: approve a raster model sheet, preserve it through reference-based pose and game-asset passes, then encode the accepted identity as palette/proportion tokens and named vector layers.
+
+![Hearthguard man-at-arms model sheet](demos/man_at_arms/man_at_arms_model_sheet.png)
+
+The canonical model, action, and asset-family sheets remain the quality anchors. The layered SVG is the reusable consistency mechanism; it should be iteratively art-directed toward those anchors rather than treated as a one-shot conversion.
