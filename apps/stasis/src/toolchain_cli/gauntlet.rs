@@ -1,4 +1,7 @@
-use super::{absolute_path, create_new_project, load_workspace, CommandResult, Workspace};
+use super::{
+    absolute_path, create_new_project, load_workspace, load_workspace_with_vendor_gate,
+    CommandResult, VendorGate, Workspace,
+};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -476,7 +479,7 @@ pub(super) fn execute(
             max_hours,
             max_model_calls,
         } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             start_existing(
                 &workspace,
                 &config,
@@ -488,19 +491,19 @@ pub(super) fn execute(
             )
         }
         GauntletCommand::Resume { run_id, tui, jsonl } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             resume(&workspace, &run_id, selected_observer(tui, jsonl))
         }
         GauntletCommand::Status { run_id } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             status(&workspace, &run_id)
         }
         GauntletCommand::Stop { run_id } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             stop(&workspace, &run_id)
         }
         GauntletCommand::Promote { run_id } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             promote(&workspace, &run_id, json_output)
         }
     }
@@ -814,6 +817,8 @@ fn promote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -873,6 +878,84 @@ mod tests {
         let without_escalation: GauntletConfigV1 =
             serde_json::from_value(value).expect("disabled escalation");
         assert!(without_escalation.models.builder_escalation.is_none());
+    }
+
+    #[test]
+    fn gauntlet_vendor_sync_becomes_a_clean_setup_checkpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_vendor_sync_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        create_new_project(root.clone(), "vendor_sync".to_string()).expect("create project");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "--all"]);
+        git(&[
+            "-c",
+            "user.name=Gauntlet Test",
+            "-c",
+            "user.email=gauntlet-test@stasis.local",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            "initial",
+        ]);
+
+        let manifest_path = root.join("stasis.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read generated manifest"))
+                .expect("parse generated manifest");
+        manifest["vendor"]["stasis"]["release_id"] = Value::String("older-toolchain".into());
+        write_json(&manifest_path, &manifest).expect("record older toolchain");
+        git(&["add", "stasis.json"]);
+        git(&[
+            "-c",
+            "user.name=Gauntlet Test",
+            "-c",
+            "user.email=gauntlet-test@stasis.local",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            "record older vendor",
+        ]);
+
+        let workspace = load_workspace_with_vendor_gate(Some(&root), VendorGate::Inspect)
+            .expect("inspect without mutating vendor");
+        assert!(git(&["status", "--porcelain"]).is_empty());
+        controller::sync_vendor_checkpoint(&workspace).expect("checkpoint vendor sync");
+
+        assert!(git(&["status", "--porcelain"]).is_empty());
+        assert_eq!(
+            git(&["log", "-1", "--format=%s"]),
+            "chore: sync Stasis vendor"
+        );
+        let updated: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read synchronized manifest"))
+                .expect("parse synchronized manifest");
+        assert_eq!(
+            updated["vendor"]["stasis"]["release_id"],
+            super::super::current_release_id()
+        );
+        fs::remove_dir_all(root).expect("remove vendor sync fixture");
     }
 
     #[test]

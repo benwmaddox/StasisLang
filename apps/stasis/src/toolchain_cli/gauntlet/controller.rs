@@ -329,6 +329,8 @@ pub(super) fn start(
 
     ensure_initial_commit(&workspace.root)?;
     require_clean_checkout(&workspace.root)?;
+    sync_vendor_checkpoint(workspace)?;
+    require_clean_checkout(&workspace.root)?;
     let base_commit = git_stdout(&workspace.root, &["rev-parse", "HEAD"])?;
     let run_id = new_run_id(&base_commit);
     let artifacts = run_artifacts(&workspace.root, &run_id);
@@ -2471,6 +2473,27 @@ fn ensure_initial_commit(root: &Path) -> Result<(), String> {
             "--no-verify",
             "-m",
             "feat: initialize Stasis game",
+        ],
+    )
+}
+
+pub(super) fn sync_vendor_checkpoint(workspace: &Workspace) -> Result<(), String> {
+    let mut manifest = workspace.manifest.clone();
+    if !super::super::update_vendor_snapshot(&workspace.root, &mut manifest)? {
+        return Ok(());
+    }
+    git_ok(&workspace.root, &["add", "stasis.json", "vendor/stasis"])?;
+    git_ok(
+        &workspace.root,
+        &[
+            "-c",
+            "user.name=Stasis Gauntlet",
+            "-c",
+            "user.email=gauntlet@stasis.local",
+            "commit",
+            "--no-verify",
+            "-m",
+            "chore: sync Stasis vendor",
         ],
     )
 }
