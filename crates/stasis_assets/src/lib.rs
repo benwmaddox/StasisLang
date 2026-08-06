@@ -170,6 +170,37 @@ impl ResolvedAssetManifest {
     pub fn by_handle(&self, handle: AssetHandle) -> Option<&ResolvedAsset> {
         self.assets.iter().find(|asset| asset.handle == handle)
     }
+
+    pub fn retain_paths(&self, paths: &BTreeSet<String>) -> Self {
+        let mut retained_ids = self
+            .assets
+            .iter()
+            .filter(|asset| paths.contains(&asset.entry.path))
+            .map(|asset| asset.entry.id.clone())
+            .collect::<BTreeSet<_>>();
+        loop {
+            let dependency_ids = self
+                .assets
+                .iter()
+                .filter(|asset| retained_ids.contains(&asset.entry.id))
+                .flat_map(|asset| asset.entry.dependencies.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            let before = retained_ids.len();
+            retained_ids.extend(dependency_ids);
+            if retained_ids.len() == before {
+                break;
+            }
+        }
+        Self {
+            manifest_path: self.manifest_path.clone(),
+            assets: self
+                .assets
+                .iter()
+                .filter(|asset| retained_ids.contains(&asset.entry.id))
+                .cloned()
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +388,9 @@ pub fn prepare_asset_bundle(
         .iter()
         .map(|asset| (asset.entry.id.as_str(), asset))
         .collect::<BTreeMap<_, _>>();
+    manifest
+        .assets
+        .retain(|entry| by_id.contains_key(entry.id.as_str()));
     let mut summary = PreparedAssetSummary {
         copied_assets: 0,
         resized_assets: 0,
@@ -1030,6 +1064,57 @@ mod tests {
         assert_eq!(
             resolved.by_handle(expected_handle).unwrap().byte_length,
             ball.len() as u64
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn retained_paths_include_dependencies_and_prepare_only_the_subset() {
+        let root = project("retained_paths");
+        let ball = b"ball png";
+        let paddle = b"paddle png";
+        let unused = b"unused png";
+        fs::write(root.join("assets/images/ball.png"), ball).unwrap();
+        fs::write(root.join("assets/images/paddle.png"), paddle).unwrap();
+        fs::write(root.join("assets/images/unused.png"), unused).unwrap();
+        let mut paddle_entry = sprite("paddle", "assets/images/paddle.png", paddle);
+        paddle_entry.dependencies.push("ball".to_string());
+        write_manifest(
+            &root,
+            vec![
+                sprite("ball", "assets/images/ball.png", ball),
+                paddle_entry,
+                sprite("unused", "assets/images/unused.png", unused),
+            ],
+        );
+
+        let resolved = load_project_asset_manifest(&root, AssetLimits::default()).unwrap();
+        let retained =
+            resolved.retain_paths(&BTreeSet::from(["assets/images/paddle.png".to_string()]));
+        assert_eq!(
+            retained
+                .assets
+                .iter()
+                .map(|asset| asset.entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ball", "paddle"]
+        );
+
+        let output = root.join("output");
+        prepare_asset_bundle(&retained, &output, root.join("cache")).unwrap();
+        assert!(output.join("assets/images/ball.png").is_file());
+        assert!(output.join("assets/images/paddle.png").is_file());
+        assert!(!output.join("assets/images/unused.png").exists());
+        let output_manifest: AssetManifest =
+            serde_json::from_slice(&fs::read(output.join(DEFAULT_ASSET_MANIFEST_PATH)).unwrap())
+                .unwrap();
+        assert_eq!(
+            output_manifest
+                .assets
+                .iter()
+                .map(|asset| asset.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ball", "paddle"]
         );
         fs::remove_dir_all(root).ok();
     }

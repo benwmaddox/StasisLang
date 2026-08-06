@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
+mod release_assets;
 mod toolchain_cli;
 
 use std::collections::BTreeSet;
@@ -1603,7 +1604,11 @@ fn write_mobile_aot_engine_bundle(
     } else {
         None
     };
-    let asset_dir = write_mobile_asset_bundle(target, project_dir, output_dir, &sources)?;
+    let source_base_dir = entry_file
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new("."));
+    let asset_dir =
+        write_mobile_asset_bundle(target, project_dir, source_base_dir, output_dir, &sources)?;
     let package_manifest = write_mobile_aot_package_manifest(
         target,
         &bundle.manifest_path,
@@ -1630,11 +1635,18 @@ fn write_mobile_aot_engine_bundle(
 fn write_mobile_asset_bundle(
     target: MobileAotTarget,
     project_dir: &Path,
+    source_base_dir: &Path,
     output_dir: &Path,
     sources: &[(String, String)],
 ) -> Result<PathBuf, String> {
     let resolved = load_project_asset_manifest(project_dir, AssetLimits::default())
         .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
+    let resolved = release_assets::retain_source_referenced_assets(
+        project_dir,
+        source_base_dir,
+        sources,
+        &resolved,
+    )?;
     let asset_root = output_dir.join(target.asset_root_dir());
     if asset_root.exists() {
         fs::remove_dir_all(&asset_root).map_err(|error| {
@@ -2971,6 +2983,7 @@ mod tests {
         let asset_root = write_mobile_asset_bundle(
             MobileAotTarget::AndroidArm64,
             &project_dir,
+            Path::new("src"),
             &output_dir,
             &sources,
         )
@@ -2980,6 +2993,70 @@ mod tests {
         assert!(!asset_root
             .join("stasis_game/assets/fonts/unused.ttf")
             .exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mobile_asset_bundle_packages_only_reachable_manifest_assets_for_both_targets() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_mobile_asset_closure_{stamp}"));
+        let project_dir = root.join("project");
+        let src_dir = project_dir.join("src");
+        let svg_dir = project_dir.join("assets/svg");
+        std::fs::create_dir_all(&src_dir).expect("mkdir src");
+        std::fs::create_dir_all(&svg_dir).expect("mkdir svg");
+        let used_svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"/>"#;
+        let unused_svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path d="M0 0"/></svg>"#;
+        std::fs::write(svg_dir.join("used.svg"), used_svg).expect("write used svg");
+        std::fs::write(svg_dir.join("unused.svg"), unused_svg).expect("write unused svg");
+        std::fs::write(
+            project_dir.join("assets/manifest.json"),
+            format!(
+                r#"{{
+  "schema": "stasis-assets",
+  "version": 2,
+  "assets": [
+    {{"id":"used","path":"assets/svg/used.svg","content_sha256":"{}","format":{{"kind":"sprite","encoding":"svg","width":32,"height":32}},"dependencies":[]}},
+    {{"id":"unused","path":"assets/svg/unused.svg","content_sha256":"{}","format":{{"kind":"sprite","encoding":"svg","width":32,"height":32}},"dependencies":[]}}
+  ]
+}}
+"#,
+                stasis_assets::sha256_bytes(used_svg),
+                stasis_assets::sha256_bytes(unused_svg)
+            ),
+        )
+        .expect("write manifest");
+        let sources = vec![(
+            "src/main.stasis".to_string(),
+            r#"function main(): void { hero.load_sprite_from("../assets/svg/used.svg", 32, 32); }
+"#
+            .to_string(),
+        )];
+
+        for target in [MobileAotTarget::AndroidArm64, MobileAotTarget::IosArm64] {
+            let output_dir = root.join(target.as_str());
+            let asset_root = write_mobile_asset_bundle(
+                target,
+                &project_dir,
+                Path::new("src"),
+                &output_dir,
+                &sources,
+            )
+            .expect("package filtered assets");
+            let game_root = asset_root.join("stasis_game");
+            assert!(game_root.join("assets/svg/used.svg").is_file());
+            assert!(!game_root.join("assets/svg/unused.svg").exists());
+            let packaged: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(game_root.join("assets/manifest.json"))
+                    .expect("read packaged manifest"),
+            )
+            .expect("parse packaged manifest");
+            assert_eq!(packaged["assets"].as_array().expect("assets").len(), 1);
+            assert_eq!(packaged["assets"][0]["id"], "used");
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 
