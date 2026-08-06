@@ -49,3 +49,5 @@ The [Hearthguard man-at-arms package](demos/man_at_arms/README.md) demonstrates 
 The canonical model, action, and asset-family sheets remain the quality anchors. The layered SVG is the reusable consistency mechanism; it should be iteratively art-directed toward those anchors rather than treated as a one-shot conversion.
 
 For small tactical units, prefer a reference-anchored raster spritesheet over automatic vector reconstruction. The [man-at-arms 128 px sheet](demos/man_at_arms/man_at_arms_spritesheet_128.png) uses an exact 3 x 2 grid, fixed camera and scale, aggressive small-size simplification, chroma-key extraction, and named 128 x 128 cell exports. Its [sprite manifest](demos/man_at_arms/sprite_manifest.json) records the layout and content hashes.
+
+The same transparent master also produces a [192 px sheet](demos/man_at_arms/man_at_arms_spritesheet_192.png) for a 4K presentation with approximately 15 gameplay cells across the non-UI portion of the screen. Those exports are reduced directly from 512 px source cells rather than enlarged from 128 px runtime sprites.

@@ -13,6 +13,16 @@
     "cell_height": 128,
     "sha256": "48321635f87acdf79d0e689056783083d85e8d8654fa41e7c6395cc4e21cd864"
   },
+  "sheet_192": {
+    "path": "man_at_arms_spritesheet_192.png",
+    "width": 576,
+    "height": 384,
+    "columns": 3,
+    "rows": 2,
+    "cell_width": 192,
+    "cell_height": 192,
+    "sha256": "883c1a911da469fe70b179c578485c84e88d69072608fe5430e213a60b33714e"
+  },
   "source_master": {
     "path": "man_at_arms_spritesheet_master.png",
     "width": 1536,
@@ -62,6 +72,50 @@
       "y": 128,
       "path": "sprites_128/man_at_arms_victory.png",
       "sha256": "d8c500b2c677e11165641ae09f155214448f32c04462f2d304530ea43bad6302"
+    }
+  ],
+  "cells_192": [
+    {
+      "name": "idle",
+      "x": 0,
+      "y": 0,
+      "path": "sprites_192/man_at_arms_idle.png",
+      "sha256": "422c50c9d2092a934d79fe81579816ef03dbeeddb788d2e738cc3cc611642ae2"
+    },
+    {
+      "name": "walk",
+      "x": 192,
+      "y": 0,
+      "path": "sprites_192/man_at_arms_walk.png",
+      "sha256": "ccd3d67c8abc2b796e87b8e6fa73d6f7a0c8f383926d73c83e93194c5c3ece67"
+    },
+    {
+      "name": "spear_thrust",
+      "x": 384,
+      "y": 0,
+      "path": "sprites_192/man_at_arms_spear_thrust.png",
+      "sha256": "25425c90417e3ba79a36192c26f2624173976f14bfce937332dff4b58b2317f9"
+    },
+    {
+      "name": "shield_brace",
+      "x": 0,
+      "y": 192,
+      "path": "sprites_192/man_at_arms_shield_brace.png",
+      "sha256": "047ef5d557b38ec23df544373251ee0b4bd215ff1dceed4f18ce0c925e3713eb"
+    },
+    {
+      "name": "hurt",
+      "x": 192,
+      "y": 192,
+      "path": "sprites_192/man_at_arms_hurt.png",
+      "sha256": "feb69ad1428231f60e2913c44bd4db54e10522f78fc4144ddd69d44ead00415c"
+    },
+    {
+      "name": "victory",
+      "x": 384,
+      "y": 192,
+      "path": "sprites_192/man_at_arms_victory.png",
+      "sha256": "c38224ba01110efa65c737a0448b5a98b107f450ef39c8ee6f440ffea276cf7d"
     }
   ]
 }

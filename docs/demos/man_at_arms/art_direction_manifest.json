@@ -44,6 +44,12 @@
       "role": "runtime_sprite_sheet",
       "derived_from": ["transparent_sprite_master"],
       "sha256": "48321635f87acdf79d0e689056783083d85e8d8654fa41e7c6395cc4e21cd864"
+    },
+    {
+      "path": "man_at_arms_spritesheet_192.png",
+      "role": "runtime_sprite_sheet_4k",
+      "derived_from": ["transparent_sprite_master"],
+      "sha256": "883c1a911da469fe70b179c578485c84e88d69072608fe5430e213a60b33714e"
     }
   ],
   "required_generation_inputs": ["canonical_identity"],

@@ -13,6 +13,7 @@ This package turns one original character concept into a reusable visual identit
 7. [Art-direction manifest](art_direction_manifest.json) - immutable reference roles, hashes, derivation chain, and locked traits.
 8. [128 px spritesheet](man_at_arms_spritesheet_128.png) - six production poses in an exact 3 x 2 grid.
 9. [Sprite manifest](sprite_manifest.json) - cell coordinates, semantic names, files, hashes, and source lineage.
+10. [192 px spritesheet](man_at_arms_spritesheet_192.png) - 4K-oriented exports derived directly from the 512 px source cells.
 
 Rendered checks from the vector master are included at [review size](man_at_arms_rig_review.png), [96 px](man_at_arms_rig_96.png), and [64 px](man_at_arms_rig_64.png). The emblem also has a [192 px review render](tower_emblem_192.png).
 
@@ -60,6 +61,8 @@ The checked-in runtime sheet is exactly 384 x 256 pixels. It contains six 128 x 
 | 2 | shield brace | hurt | victory |
 
 The individual transparent sprites live under `sprites_128/`. They are deliberate single-pose gameplay states rather than an interpolated walk or attack animation. The 1536 x 1024 transparent master remains available for future reslicing and cleanup.
+
+For a 4K layout with a quarter-width UI and roughly 15 map cells across, use the 192 px exports under `sprites_192/`. Each was cropped from its 512 x 512 source-master cell and then reduced directly to 192 x 192 with Lanczos filtering. The 192 px set is not an enlargement of the 128 px set.
 
 The sprite prompt fixes the camera, character scale, cell boundaries, identity invariants, and small-size simplification rules. Preserve those constraints when regenerating. Do not ask ImageGen for a generic character sheet and infer the grid afterward.
 
