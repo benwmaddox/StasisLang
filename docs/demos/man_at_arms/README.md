@@ -14,6 +14,7 @@ This package turns one original character concept into a reusable visual identit
 8. [128 px spritesheet](man_at_arms_spritesheet_128.png) - six production poses in an exact 3 x 2 grid.
 9. [Sprite manifest](sprite_manifest.json) - cell coordinates, semantic names, files, hashes, and source lineage.
 10. [192 px spritesheet](man_at_arms_spritesheet_192.png) - 4K-oriented exports derived directly from the 512 px source cells.
+11. [ImageGen walk-cycle experiment](animations/walk_cycle/README.md) - six registered 192 px keyframes with animated WebP and GIF reviews.
 
 Rendered checks from the vector master are included at [review size](man_at_arms_rig_review.png), [96 px](man_at_arms_rig_96.png), and [64 px](man_at_arms_rig_64.png). The emblem also has a [192 px review render](tower_emblem_192.png).
 
