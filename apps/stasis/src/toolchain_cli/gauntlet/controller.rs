@@ -1311,6 +1311,30 @@ fn controller_loop(
         }
         state.phase = GauntletRunPhase::Evaluating;
         persist_state(artifacts, &mut state)?;
+        if let Err(error) = request_live(&client, next_request, LiveCommand::ValidationReinitialize)
+        {
+            next_request = next_request.saturating_add(1);
+            rollback_candidate(
+                &project_root,
+                state.best_commit.as_deref().unwrap_or(&state.base_commit),
+            )?;
+            reject(
+                &mut state,
+                artifacts,
+                &candidate_id,
+                &format!("candidate runtime reinitialization failed: {error}"),
+            )?;
+            largest_gap = format!(
+                "The candidate could not be evaluated because the newly active runtime did not reinitialize: {error}"
+            );
+            continue;
+        }
+        next_request = next_request.saturating_add(1);
+        emit_event(
+            artifacts,
+            "candidate_runtime_reinitialized",
+            json!({"candidate": candidate_id}),
+        )?;
         let candidate_capture = capture_scenario(
             &client,
             &project_root,

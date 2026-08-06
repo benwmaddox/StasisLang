@@ -3077,7 +3077,14 @@ fn validate_ai_font_paths(project_root: &Path, edits: &[LiveEdit]) -> Result<(),
 }
 
 fn preserve_truncated_applied_write_evidence(mut response: LiveResponse) -> LiveResponse {
-    if response.ok && response.kind == "edit_applied" && response.truncated {
+    if response.ok
+        && response.kind == "edit_applied"
+        && response.truncated
+        && response.data.as_ref().is_none_or(|data| {
+            data.pointer("/plan/reload")
+                .is_none_or(serde_json::Value::is_null)
+        })
+    {
         response.data = Some(serde_json::json!({
             "tests": "passed",
             "response_truncated": true,
