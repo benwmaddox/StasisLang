@@ -106,6 +106,9 @@ Gauntlet's autonomous layout migration: an asset/source edit requiring a layout 
 unapplied and reported as requiring the normal explicit approval workflow.
 Request one isolated subject per PNG. Masters default to 1024x1024 and may be increased to
 2048x2048 when the agent needs extra detail or crop latitude.
+Flat-background removal tolerates small provider color variation observed along
+the padded image border and fails atomically if the border remains opaque or the
+subject is nearly erased.
 ImageGen is discretionary, but it is preferred over primitive SVG or
 shape-composed PNG for authored game art such as characters, units, buildings,
 terrain props, and decorative environments, including in early versions.

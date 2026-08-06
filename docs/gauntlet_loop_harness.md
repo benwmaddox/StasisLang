@@ -308,8 +308,11 @@ copies it under `assets/generated/` and derives the manifest entry. Imports
 must be real PNG files, non-symlinks, at most 16 MiB, at most 2048 pixels per
 edge, and at most 4,194,304 pixels total. `import_png_asset` can copy the image
 unchanged, crop a bounded rectangle, and remove a caller-selected flat background
-color with a bounded tolerance before saving the project PNG. This bridge is inert when the running
-host has no ImageGen capability. One-shot `stasis ai` uses the equivalent
+color with a bounded tolerance before saving the project PNG. For the padded,
+isolated-subject contract, import adapts that tolerance to small ImageGen color
+variation observed around the border. It rejects an opaque border or a nearly
+erased subject instead of silently committing a broken sprite. This bridge is
+inert when the running host has no ImageGen capability. One-shot `stasis ai` uses the equivalent
 `build/ai-assets/imagegen/` inbox.
 
 ### Run records
