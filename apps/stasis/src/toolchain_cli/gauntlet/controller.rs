@@ -1643,41 +1643,53 @@ fn bootstrap_bar(
             )?,
         }
     }
-    let prompt = format!(
-        "Act as the creative director for an autonomous Stasis 2D game build. Turn the immutable brief into a durable direction bible that fresh agents can follow without drifting. Define the narrative promise and player fantasy; 3-8 concrete rule pillars; 3-8 visual-language rules covering hierarchy, faction/role/terrain recognition, authored imagery, motion, and mobile scale; 3-8 interaction-grammar rules covering visible current state, available actions, selection, legal movement/attack, feedback, end turn, and cancel/reselect; 2-6 progression/pacing rules; and 3-8 non-negotiables. Make these project-specific and operational rather than aspirational. Then decompose the direction into 4-10 independently improvable workstreams using short noun phrases. This direction is authoritative for the run and may not be silently rewritten by later builders. Return only the requested JSON.\n\n{goal}"
-    );
-    let bootstrap = call_structured_role::<LeadBootstrap>(
-        "quality_bar_lead",
-        &prompt,
-        &bootstrap_schema(),
-        &config.models.lead,
-        config.models.controller_escalation.as_ref(),
-        &[],
-        false,
-        &mut state.model_calls,
-        config.budget.model_calls,
-        artifacts,
-        canceled,
-    );
-    persist_state(artifacts, state)?;
-    let (creative_direction, workstreams) = match bootstrap {
-        Ok(bootstrap) => (
-            bootstrap.creative_direction,
-            bootstrap
-                .workstreams
-                .into_iter()
-                .filter(|value| !value.trim().is_empty())
-                .take(10)
-                .collect::<Vec<_>>(),
-        ),
-        Err(error) if canceled.load(Ordering::Acquire) => return Err(error),
-        Err(error) => {
-            emit_event(
-                artifacts,
-                "quality_bar_lead_fallback",
-                json!({"reason": error, "recovery": "use deterministic workstreams"}),
-            )?;
-            (CreativeDirection::default(), default_workstreams())
+    let prior_direction = restore_prior_creative_direction(artifacts, goal)?;
+    let (creative_direction, workstreams) = if let Some((source_run, direction, workstreams)) =
+        prior_direction
+    {
+        emit_event(
+            artifacts,
+            "creative_direction_reused",
+            json!({"source_run_id": source_run, "goal_sha256": hex_sha256(goal.as_bytes())}),
+        )?;
+        (direction, workstreams)
+    } else {
+        let prompt = format!(
+            "Act as the creative director for an autonomous Stasis 2D game build. Turn the immutable brief into a durable direction bible that fresh agents can follow without drifting. Define the narrative promise and player fantasy; 3-8 concrete rule pillars; 3-8 visual-language rules covering hierarchy, faction/role/terrain recognition, authored imagery, motion, and mobile scale; 3-8 interaction-grammar rules covering visible current state, available actions, selection, legal movement/attack, feedback, end turn, and cancel/reselect; 2-6 progression/pacing rules; and 3-8 non-negotiables. Make these project-specific and operational rather than aspirational. Then decompose the direction into 4-10 independently improvable workstreams using short noun phrases. This direction is authoritative for the run and may not be silently rewritten by later builders. Return only the requested JSON.\n\n{goal}"
+        );
+        let bootstrap = call_structured_role::<LeadBootstrap>(
+            "quality_bar_lead",
+            &prompt,
+            &bootstrap_schema(),
+            &config.models.lead,
+            config.models.controller_escalation.as_ref(),
+            &[],
+            false,
+            &mut state.model_calls,
+            config.budget.model_calls,
+            artifacts,
+            canceled,
+        );
+        persist_state(artifacts, state)?;
+        match bootstrap {
+            Ok(bootstrap) => (
+                bootstrap.creative_direction,
+                bootstrap
+                    .workstreams
+                    .into_iter()
+                    .filter(|value| !value.trim().is_empty())
+                    .take(10)
+                    .collect::<Vec<_>>(),
+            ),
+            Err(error) if canceled.load(Ordering::Acquire) => return Err(error),
+            Err(error) => {
+                emit_event(
+                    artifacts,
+                    "quality_bar_lead_fallback",
+                    json!({"reason": error, "recovery": "use deterministic workstreams"}),
+                )?;
+                (CreativeDirection::default(), default_workstreams())
+            }
         }
     };
     let workstreams = if workstreams.is_empty() {
@@ -1700,7 +1712,7 @@ fn bootstrap_bar(
         "Select the highest-value workstream from runtime evidence.",
     )?;
     Ok(FrozenBar {
-        schema_version: 1,
+        schema_version: 2,
         goal_sha256: hex_sha256(goal.as_bytes()),
         goal: goal.to_string(),
         creative_direction,
@@ -1736,6 +1748,41 @@ fn default_workstreams() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn restore_prior_creative_direction(
+    artifacts: &Path,
+    goal: &str,
+) -> Result<Option<(String, CreativeDirection, Vec<String>)>, String> {
+    let Some(runs) = artifacts.parent() else {
+        return Ok(None);
+    };
+    if !runs.is_dir() {
+        return Ok(None);
+    }
+    let goal_sha256 = hex_sha256(goal.as_bytes());
+    let mut run_dirs = fs::read_dir(runs)
+        .map_err(|error| format!("failed reading prior Gauntlet directions: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| entry.path() != artifacts && entry.file_name() != "worktrees")
+        .collect::<Vec<_>>();
+    run_dirs.sort_by_key(|entry| std::cmp::Reverse(run_sort_key(entry)));
+    for entry in run_dirs.into_iter().take(MAX_PRIOR_RUNS) {
+        let bar_path = entry.path().join(QUALITY_BAR_NAME);
+        if !bar_path.is_file() {
+            continue;
+        }
+        let Ok(bar) = read_json::<FrozenBar>(&bar_path) else {
+            continue;
+        };
+        if bar.schema_version < 2 || bar.goal_sha256 != goal_sha256 || bar.workstreams.is_empty() {
+            continue;
+        }
+        let source_run = entry.file_name().to_string_lossy().to_string();
+        return Ok(Some((source_run, bar.creative_direction, bar.workstreams)));
+    }
+    Ok(None)
 }
 
 fn write_creative_direction(artifacts: &Path, direction: &CreativeDirection) -> Result<(), String> {
@@ -3580,6 +3627,46 @@ mod tests {
         assert!(!restored.creative_direction.interaction_grammar.is_empty());
         fs::remove_file(root.join(CREATIVE_DIRECTION_NAME)).expect("remove direction");
         fs::remove_dir(root).expect("remove direction root");
+    }
+
+    #[test]
+    fn identical_goal_reuses_the_latest_versioned_creative_direction() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_prior_direction_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let prior = root.join("100-prior");
+        let current = root.join("200-current");
+        fs::create_dir_all(&prior).expect("prior run");
+        fs::create_dir_all(&current).expect("current run");
+        let goal = "same immutable goal";
+        let bar = FrozenBar {
+            schema_version: 2,
+            goal_sha256: hex_sha256(goal.as_bytes()),
+            goal: goal.to_string(),
+            creative_direction: CreativeDirection {
+                title: "Remembered direction".to_string(),
+                ..CreativeDirection::default()
+            },
+            workstreams: vec!["Readable turns".to_string()],
+            hard_gates: Vec::new(),
+            required_scenarios: Vec::new(),
+            references: Vec::new(),
+            web_sources: Vec::new(),
+            acceptance_score: 65,
+        };
+        write_json(&prior.join(QUALITY_BAR_NAME), &bar).expect("prior bar");
+        let (source, direction, workstreams) = restore_prior_creative_direction(&current, goal)
+            .expect("restore direction")
+            .expect("matching direction");
+        assert_eq!(source, "100-prior");
+        assert_eq!(direction.title, "Remembered direction");
+        assert_eq!(workstreams, vec!["Readable turns"]);
+        assert!(restore_prior_creative_direction(&current, "different goal")
+            .expect("different goal lookup")
+            .is_none());
+        fs::remove_dir_all(root).expect("remove direction runs");
     }
 
     #[test]

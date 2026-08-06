@@ -353,8 +353,11 @@ controller-owned direction bible. The run stores the same direction in
 narrative promise, player fantasy, rule pillars, visual language, interaction
 grammar, progression/pacing, and non-negotiables. It is authoritative for the
 run, survives resume and fresh-agent boundaries, and is supplied to every lead,
-builder, and critic. Builders may implement or refine it but cannot silently
-rewrite the game's identity to make a local task easier.
+builder, and critic. A later run with the identical goal hash reuses the newest
+version-two direction and workstream decomposition, so a budget boundary does
+not cause creative drift or spend another director call. Builders may implement
+or refine it but cannot silently rewrite the game's identity to make a local
+task easier.
 
 The director also freezes workstreams, rubric dimensions, required scenes,
 input scenarios, state assertions, and completion thresholds. If the scout
