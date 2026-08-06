@@ -347,7 +347,16 @@ images: discovered pages establish the bar, while only user-supplied local
 images become frozen visual evidence. References are never packaged or offered
 as builder assets.
 
-A fresh lead then freezes workstreams, rubric dimensions, required scenes,
+A creative-director bootstrap first turns the immutable goal into a structured,
+controller-owned direction bible. The run stores the same direction in
+`quality-bar.json` and a human-readable `creative-direction.md`; it covers the
+narrative promise, player fantasy, rule pillars, visual language, interaction
+grammar, progression/pacing, and non-negotiables. It is authoritative for the
+run, survives resume and fresh-agent boundaries, and is supplied to every lead,
+builder, and critic. Builders may implement or refine it but cannot silently
+rewrite the game's identity to make a local task easier.
+
+The director also freezes workstreams, rubric dimensions, required scenes,
 input scenarios, state assertions, and completion thresholds. If the scout
 cannot establish at least one usable visual reference and one measurable
 gameplay bar, the run stops before production modification.
@@ -374,8 +383,9 @@ acceptance path. Ordinary rendering allocates no capture framebuffer.
 ### Agent roles and context separation
 
 - The **reference scout** is read-only and web-enabled.
-- The **lead** is also the playability and visual-coherence director. It
-  inspects the latest accepted frame after the deterministic interaction probe,
+- The **lead** operationalizes the frozen creative direction as the
+  playability and visual-coherence director. It inspects paired initial and
+  post-probe frames,
   compact runtime/test evidence, references, and critic outcomes before choosing
   the single highest-value next work item. Its required playability guidance
   identifies which board relationships are unclear and tells the builder how a
@@ -386,8 +396,12 @@ acceptance path. Ordinary rendering allocates no capture framebuffer.
   critic's largest gap. It also receives the lead's playability guidance as a
   distinct instruction so visual polish cannot silently obscure the board's
   interaction grammar. It changes the project through controlled tools only.
-- A **visual critic** receives shuffled candidate images, references, and the
-  frozen visual rubric. It receives no source or write tools.
+- A **visual critic** receives shuffled initial/post-input image pairs,
+  references, the frozen direction, and the visual rubric. In addition to the
+  relative A/B verdict, it must separately record whether pixels affirmatively
+  communicate current state, available actions, board semantics, and action
+  feedback, with observed evidence for each anonymous candidate. It receives no
+  source or write tools.
 - A **gameplay critic** receives deterministic scenarios, captures, state
   traces, and the gameplay rubric, but no production write tools.
 - An **integration critic** periodically checks that the independently improved
@@ -455,10 +469,11 @@ assets are not part of version one.
 
 For every selected work item:
 
-1. Capture the best accepted baseline using the relevant deterministic
-   scenarios.
+1. Capture initial and post-input frames for the best accepted baseline using
+   the relevant deterministic scenarios.
 2. Run one fresh builder and apply its tested patch provisionally.
-3. Capture the candidate with identical inputs and initial state.
+3. Capture matching initial and post-input candidate frames with identical
+   inputs and initial state.
 4. Run compile/tests, scenario assertions, renderer diagnostics, missing-asset
    checks, performance budgets, and state/layout invariants.
 5. Run fresh visual and gameplay critics required by the workstream.
@@ -473,8 +488,12 @@ For every selected work item:
 10. Feed only the largest evidenced gap into the next lead decision.
 
 Convergence requires all hard gates plus two separate final evaluations that
-mark every required rubric dimension as meeting the frozen bar. A merely
-improved result is not labeled converged. Five consecutive non-improving
+mark every required rubric dimension as meeting the frozen bar. Each final
+evaluation must also affirm from the captured pixels that current state,
+available actions, board semantics, and the result of the fixed input probe are
+clear. These absolute comprehension gates do not prevent a genuinely improved
+candidate from becoming the next incremental checkpoint. A merely improved
+result is not labeled converged. Five consecutive non-improving
 candidates stop as `stalled`; eight hours or 100 model calls stop as
 `budget_exhausted`. Both retain the best checkpoint.
 

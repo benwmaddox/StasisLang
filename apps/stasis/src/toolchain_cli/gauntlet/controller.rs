@@ -35,6 +35,7 @@ const REPORT_NAME: &str = "index.html";
 const STOP_NAME: &str = "stop.request";
 const HEARTBEAT_NAME: &str = "heartbeat.json";
 const QUALITY_BAR_NAME: &str = "quality-bar.json";
+const CREATIVE_DIRECTION_NAME: &str = "creative-direction.md";
 const MAX_CAPTURE_WAIT: Duration = Duration::from_secs(10);
 const MAX_LIVE_REQUEST_WAIT: Duration = Duration::from_secs(30);
 const FINAL_ACCEPTANCES: u32 = 2;
@@ -204,12 +205,56 @@ struct FrozenBar {
     schema_version: u32,
     goal_sha256: String,
     goal: String,
+    #[serde(default)]
+    creative_direction: CreativeDirection,
     workstreams: Vec<String>,
     hard_gates: Vec<String>,
     required_scenarios: Vec<Value>,
     references: Vec<GauntletReference>,
     web_sources: Vec<ScoutSource>,
     acceptance_score: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreativeDirection {
+    title: String,
+    narrative_promise: String,
+    player_fantasy: String,
+    rule_pillars: Vec<String>,
+    visual_language: Vec<String>,
+    interaction_grammar: Vec<String>,
+    progression_and_pacing: Vec<String>,
+    non_negotiables: Vec<String>,
+}
+
+impl Default for CreativeDirection {
+    fn default() -> Self {
+        Self {
+            title: "Coherent playable game direction".to_string(),
+            narrative_promise: "Preserve the project brief's setting and player-facing promise."
+                .to_string(),
+            player_fantasy: "Make every turn feel intentional, legible, and consequential."
+                .to_string(),
+            rule_pillars: vec![
+                "Rules must be deterministic, teachable, and visible in play.".to_string(),
+            ],
+            visual_language: vec![
+                "Visual hierarchy must communicate gameplay before decoration.".to_string(),
+            ],
+            interaction_grammar: vec![
+                "The screen must show current state, available actions, and action results."
+                    .to_string(),
+            ],
+            progression_and_pacing: vec![
+                "Each turn should present a readable decision and visible consequence.".to_string(),
+            ],
+            non_negotiables: vec![
+                "Do not trade playability, deterministic behavior, or coherence for polish."
+                    .to_string(),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +274,7 @@ struct ScoutSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LeadBootstrap {
+    creative_direction: CreativeDirection,
     workstreams: Vec<String>,
 }
 
@@ -251,6 +297,44 @@ struct BlindCritique {
     score_b: u32,
     largest_gap: String,
     summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenComprehension {
+    current_state_clear: bool,
+    available_actions_clear: bool,
+    board_semantics_clear: bool,
+    action_feedback_clear: bool,
+    evidence: String,
+}
+
+impl ScreenComprehension {
+    fn passes(&self) -> bool {
+        self.current_state_clear
+            && self.available_actions_clear
+            && self.board_semantics_clear
+            && self.action_feedback_clear
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VisualCritique {
+    preferred: String,
+    score_a: u32,
+    score_b: u32,
+    screen_a: ScreenComprehension,
+    screen_b: ScreenComprehension,
+    largest_gap: String,
+    summary: String,
+}
+
+#[derive(Debug, Clone)]
+struct ScenarioCapture {
+    initial_frame: PathBuf,
+    action_frame: PathBuf,
+    state: Value,
 }
 
 struct PriorRunLesson {
@@ -282,14 +366,55 @@ fn score_for_candidate(critique: &BlindCritique, candidate_is_a: bool) -> u32 {
     }
 }
 
+fn visual_preference_selects_candidate(critique: &VisualCritique, candidate_is_a: bool) -> bool {
+    matches!(
+        (critique.preferred.as_str(), candidate_is_a),
+        ("a", true) | ("b", false)
+    )
+}
+
+fn visual_preference_supports_candidate(critique: &VisualCritique, candidate_is_a: bool) -> bool {
+    visual_preference_selects_candidate(critique, candidate_is_a)
+        || critique.preferred == "equivalent"
+}
+
+fn visual_score_for_candidate(critique: &VisualCritique, candidate_is_a: bool) -> u32 {
+    if candidate_is_a {
+        critique.score_a
+    } else {
+        critique.score_b
+    }
+}
+
+fn screen_for_candidate(critique: &VisualCritique, candidate_is_a: bool) -> &ScreenComprehension {
+    if candidate_is_a {
+        &critique.screen_a
+    } else {
+        &critique.screen_b
+    }
+}
+
+fn candidate_meets_quality_bar(
+    checkpoint_passes: bool,
+    visual_score: u32,
+    gameplay_score: u32,
+    acceptance_score: u32,
+    screen: &ScreenComprehension,
+) -> bool {
+    checkpoint_passes
+        && visual_score >= acceptance_score
+        && gameplay_score >= acceptance_score
+        && screen.passes()
+}
+
 fn critics_allow_checkpoint(
-    visual: &BlindCritique,
+    visual: &VisualCritique,
     gameplay: &BlindCritique,
     candidate_is_a: bool,
 ) -> bool {
-    preference_supports_candidate(visual, candidate_is_a)
+    visual_preference_supports_candidate(visual, candidate_is_a)
         && preference_supports_candidate(gameplay, candidate_is_a)
-        && (preference_selects_candidate(visual, candidate_is_a)
+        && (visual_preference_selects_candidate(visual, candidate_is_a)
             || preference_selects_candidate(gameplay, candidate_is_a))
 }
 
@@ -746,6 +871,7 @@ fn controller_loop(
         )?;
         bar
     };
+    write_creative_direction(artifacts, &bar.creative_direction)?;
     let reference_images = resolve_reference_images(
         &bar.references,
         &project_root,
@@ -755,7 +881,7 @@ fn controller_loop(
     request_live(&client, 1, LiveCommand::Pause)?;
     request_live(&client, 2, LiveCommand::ValidationSnapshot)?;
     let mut next_request = 3_u64;
-    let (mut baseline, mut baseline_state) = capture_scenario(
+    let mut baseline = capture_scenario(
         &client,
         &project_root,
         artifacts,
@@ -765,7 +891,7 @@ fn controller_loop(
     )?;
     let (readiness, baseline_tests) =
         verify_harness_readiness(&project_root, artifacts, &canceled)?;
-    baseline_state = gameplay_evidence(baseline_state, baseline_tests);
+    baseline.state = gameplay_evidence(baseline.state, baseline_tests);
     emit_event(artifacts, "harness_ready", json!({"evidence": readiness}))?;
     append_decision(
         artifacts,
@@ -825,7 +951,6 @@ fn controller_loop(
             &bar,
             &largest_gap,
             &baseline,
-            &baseline_state,
             &reference_images,
             &state,
             &mut model_calls,
@@ -956,8 +1081,10 @@ fn controller_loop(
         } else {
             "ImageGen is optional for this logic or basic-interface workstream. Use primitive vectors for basic UI, simple icons, selection/range overlays, and deterministic fallbacks."
         };
+        let creative_direction = serde_json::to_string(&bar.creative_direction)
+            .map_err(|error| format!("failed encoding creative direction: {error}"))?;
         let prompt = format!(
-            "Frozen game brief:\n{goal}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nPlayability and visual-coherence direction for the accepted frame:\n{}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nAsset guidance: {asset_guidance}\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
+            "Frozen game brief:\n{goal}\n\nAuthoritative creative direction (do not silently revise):\n{creative_direction}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nPlayability and visual-coherence direction for the accepted frame:\n{}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nAsset guidance: {asset_guidance}\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
             decision.workstream, decision.builder_prompt, decision.playability_guidance,
         );
         let run_builder = |model: &GauntletRoleModel,
@@ -971,7 +1098,10 @@ fn controller_loop(
                 &project_root,
                 agent_prompt,
                 profile,
-                vec![baseline.clone()],
+                vec![
+                    baseline.initial_frame.clone(),
+                    baseline.action_frame.clone(),
+                ],
                 false,
                 true,
                 true,
@@ -1139,7 +1269,7 @@ fn controller_loop(
             scenario_pointer,
             &mut next_request,
         );
-        let (candidate, candidate_runtime_state) = match candidate_capture {
+        let mut candidate = match candidate_capture {
             Ok(evidence) => evidence,
             Err(error) => {
                 rollback_candidate(
@@ -1194,7 +1324,7 @@ fn controller_loop(
                 continue;
             }
         };
-        let candidate_state = gameplay_evidence(candidate_runtime_state, candidate_tests);
+        candidate.state = gameplay_evidence(candidate.state, candidate_tests);
         let candidate_changed = !git_stdout(&project_root, &["status", "--porcelain"])?
             .trim()
             .is_empty();
@@ -1262,12 +1392,12 @@ fn controller_loop(
                 continue;
             }
         };
-        let preferred_candidate = preference_selects_candidate(&critique, candidate_is_a);
-        let candidate_score = score_for_candidate(&critique, candidate_is_a);
+        let preferred_candidate = visual_preference_selects_candidate(&critique, candidate_is_a);
+        let candidate_score = visual_score_for_candidate(&critique, candidate_is_a);
         let (state_a, state_b) = if candidate_is_a {
-            (&candidate_state, &baseline_state)
+            (&candidate.state, &baseline.state)
         } else {
-            (&baseline_state, &candidate_state)
+            (&baseline.state, &candidate.state)
         };
         let gameplay_call_limit = state.model_calls.saturating_add(2);
         let gameplay = gameplay_critic(
@@ -1314,13 +1444,19 @@ fn controller_loop(
                 continue;
             }
         };
-        let visual_passes = preference_supports_candidate(&critique, candidate_is_a);
+        let visual_passes = visual_preference_supports_candidate(&critique, candidate_is_a);
         let gameplay_passes = preference_supports_candidate(&gameplay, candidate_is_a);
         let checkpoint_passes = critics_allow_checkpoint(&critique, &gameplay, candidate_is_a);
         let gameplay_score = score_for_candidate(&gameplay, candidate_is_a);
-        let quality_bar_passes = checkpoint_passes
-            && candidate_score >= bar.acceptance_score
-            && gameplay_score >= bar.acceptance_score;
+        let screen_comprehension = screen_for_candidate(&critique, candidate_is_a);
+        let screen_comprehension_passes = screen_comprehension.passes();
+        let quality_bar_passes = candidate_meets_quality_bar(
+            checkpoint_passes,
+            candidate_score,
+            gameplay_score,
+            bar.acceptance_score,
+            screen_comprehension,
+        );
         emit_event(
             artifacts,
             "critic_completed",
@@ -1333,6 +1469,8 @@ fn controller_loop(
                 "gameplay": gameplay,
                 "gameplay_passes": gameplay_passes,
                 "gameplay_score": gameplay_score,
+                "screen_comprehension": screen_comprehension,
+                "screen_comprehension_passes": screen_comprehension_passes,
                 "checkpoint_passes": checkpoint_passes,
                 "quality_bar_passes": quality_bar_passes,
             }),
@@ -1350,7 +1488,6 @@ fn controller_loop(
                 state.quality_acceptance_streak = 0;
             }
             baseline = candidate;
-            baseline_state = candidate_state;
             largest_gap = if gameplay_score < candidate_score {
                 gameplay.largest_gap.clone()
             } else {
@@ -1507,7 +1644,7 @@ fn bootstrap_bar(
         }
     }
     let prompt = format!(
-        "Act as the lead for an autonomous Stasis 2D game build. Decompose this immutable brief into 4-10 independently improvable workstreams. Use short noun phrases. Return only the requested JSON.\n\n{goal}"
+        "Act as the creative director for an autonomous Stasis 2D game build. Turn the immutable brief into a durable direction bible that fresh agents can follow without drifting. Define the narrative promise and player fantasy; 3-8 concrete rule pillars; 3-8 visual-language rules covering hierarchy, faction/role/terrain recognition, authored imagery, motion, and mobile scale; 3-8 interaction-grammar rules covering visible current state, available actions, selection, legal movement/attack, feedback, end turn, and cancel/reselect; 2-6 progression/pacing rules; and 3-8 non-negotiables. Make these project-specific and operational rather than aspirational. Then decompose the direction into 4-10 independently improvable workstreams using short noun phrases. This direction is authoritative for the run and may not be silently rewritten by later builders. Return only the requested JSON.\n\n{goal}"
     );
     let bootstrap = call_structured_role::<LeadBootstrap>(
         "quality_bar_lead",
@@ -1523,13 +1660,16 @@ fn bootstrap_bar(
         canceled,
     );
     persist_state(artifacts, state)?;
-    let workstreams = match bootstrap {
-        Ok(bootstrap) => bootstrap
-            .workstreams
-            .into_iter()
-            .filter(|value| !value.trim().is_empty())
-            .take(10)
-            .collect::<Vec<_>>(),
+    let (creative_direction, workstreams) = match bootstrap {
+        Ok(bootstrap) => (
+            bootstrap.creative_direction,
+            bootstrap
+                .workstreams
+                .into_iter()
+                .filter(|value| !value.trim().is_empty())
+                .take(10)
+                .collect::<Vec<_>>(),
+        ),
         Err(error) if canceled.load(Ordering::Acquire) => return Err(error),
         Err(error) => {
             emit_event(
@@ -1537,7 +1677,7 @@ fn bootstrap_bar(
                 "quality_bar_lead_fallback",
                 json!({"reason": error, "recovery": "use deterministic workstreams"}),
             )?;
-            default_workstreams()
+            (CreativeDirection::default(), default_workstreams())
         }
     };
     let workstreams = if workstreams.is_empty() {
@@ -1563,6 +1703,7 @@ fn bootstrap_bar(
         schema_version: 1,
         goal_sha256: hex_sha256(goal.as_bytes()),
         goal: goal.to_string(),
+        creative_direction,
         workstreams,
         hard_gates: vec![
             "project compiles".to_string(),
@@ -1595,6 +1736,38 @@ fn default_workstreams() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn write_creative_direction(artifacts: &Path, direction: &CreativeDirection) -> Result<(), String> {
+    fn section(markdown: &mut String, heading: &str, values: &[String]) {
+        markdown.push_str(&format!("## {heading}\n\n"));
+        for value in values {
+            markdown.push_str(&format!("- {}\n", value.trim()));
+        }
+        markdown.push('\n');
+    }
+
+    let mut markdown = format!(
+        "# {}\n\nThis controller-owned direction is authoritative for this Gauntlet run. Builders may refine implementation, but must not silently change these commitments.\n\n## Narrative promise\n\n{}\n\n## Player fantasy\n\n{}\n\n",
+        direction.title.trim(),
+        direction.narrative_promise.trim(),
+        direction.player_fantasy.trim(),
+    );
+    section(&mut markdown, "Rule pillars", &direction.rule_pillars);
+    section(&mut markdown, "Visual language", &direction.visual_language);
+    section(
+        &mut markdown,
+        "Interaction grammar",
+        &direction.interaction_grammar,
+    );
+    section(
+        &mut markdown,
+        "Progression and pacing",
+        &direction.progression_and_pacing,
+    );
+    section(&mut markdown, "Non-negotiables", &direction.non_negotiables);
+    fs::write(artifacts.join(CREATIVE_DIRECTION_NAME), markdown)
+        .map_err(|error| format!("failed writing Gauntlet creative direction: {error}"))
 }
 
 fn requires_authored_imagegen(workstream: &str) -> bool {
@@ -1697,8 +1870,7 @@ fn lead_decision(
     goal: &str,
     bar: &FrozenBar,
     largest_gap: &str,
-    accepted_frame: &Path,
-    accepted_state: &Value,
+    accepted: &ScenarioCapture,
     references: &[PathBuf],
     state: &GauntletRunStateV1,
     model_calls: &mut u32,
@@ -1709,13 +1881,18 @@ fn lead_decision(
     canceled: &AtomicBool,
 ) -> Result<LeadDecision, String> {
     let memory = decision_memory_snapshot(artifacts)?;
-    let runtime_evidence = serde_json::to_string(accepted_state)
+    let runtime_evidence = serde_json::to_string(&accepted.state)
         .map_err(|error| format!("failed encoding accepted runtime evidence: {error}"))?;
+    let creative_direction = serde_json::to_string(&bar.creative_direction)
+        .map_err(|error| format!("failed encoding creative direction: {error}"))?;
     let prompt = format!(
-        "Act as the fresh playability and visual-coherence director for a Stasis Gauntlet. The first attached image is the latest accepted playable frame after the controller's deterministic interaction probe; later images are optional quality references. Use the attached frame together with the controller-owned runtime state and passing-test evidence below. First produce playability_guidance that teaches the next builder exactly how a new player should parse the grid and complete one turn: board and cell boundaries, meaningful terrain, faction and unit-role recognition, selection, legal movement, attack/counterattack preview, objective and economy, turn ownership, end turn, and cancel/reselect. Identify which of those relationships are currently unclear from evidence; do not invent mechanics. Then choose exactly one highest-value next work item from the frozen workstreams whose builder prompt improves that comprehension and preserves already-readable relationships. Visual polish is valuable only when it strengthens this hierarchy. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nAccepted runtime and deterministic-test evidence:\n{runtime_evidence}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
+        "Act as the fresh playability and visual-coherence director for a Stasis Gauntlet. The first two attached images are the latest accepted initial frame and its frame after the controller's fixed interaction probe; later images are optional quality references. The controller-owned creative direction below is authoritative: enforce and interpret it, but do not silently rewrite it. Use both frames together with runtime and passing-test evidence. First produce playability_guidance that teaches the next builder exactly how a new player should parse the grid and complete one turn: board and cell boundaries, meaningful terrain, faction and unit-role recognition, selection, legal movement, attack/counterattack preview, objective and economy, turn ownership, end turn, and cancel/reselect. Identify which relationships are unclear from evidence and whether the probe's result is visibly understandable; do not invent mechanics. Then choose exactly one highest-value next work item from the frozen workstreams whose builder prompt improves that comprehension and preserves already-readable relationships. Visual polish is valuable only when it strengthens this hierarchy. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{creative_direction}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nAccepted runtime and deterministic-test evidence:\n{runtime_evidence}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
         bar.workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
     );
-    let mut images = vec![accepted_frame.to_path_buf()];
+    let mut images = vec![
+        accepted.initial_frame.clone(),
+        accepted.action_frame.clone(),
+    ];
     images.extend(references.iter().take(4).cloned());
     let decision: LeadDecision = call_structured_role(
         "lead",
@@ -1742,8 +1919,8 @@ fn lead_decision(
 fn blind_critic(
     goal: &str,
     bar: &FrozenBar,
-    image_a: &Path,
-    image_b: &Path,
+    scenario_a: &ScenarioCapture,
+    scenario_b: &ScenarioCapture,
     references: &[PathBuf],
     model_calls: &mut u32,
     artifacts: &Path,
@@ -1751,17 +1928,26 @@ fn blind_critic(
     escalation: Option<&GauntletRoleModel>,
     model_call_limit: u32,
     canceled: &AtomicBool,
-) -> Result<BlindCritique, String> {
-    let mut images = vec![image_a.to_path_buf(), image_b.to_path_buf()];
+) -> Result<VisualCritique, String> {
+    let mut images = vec![
+        scenario_a.initial_frame.clone(),
+        scenario_a.action_frame.clone(),
+        scenario_b.initial_frame.clone(),
+        scenario_b.action_frame.clone(),
+    ];
     images.extend(references.iter().take(5).cloned());
     let prompt = format!(
-        "You are a fresh read-only visual critic. The first two attached images are anonymously labeled A then B; any later images are hashed quality references. You do not know which candidate is newer. Compare A and B relative to each other and against the frozen brief and references. Prefer a or b when one is visually better without an evidenced visual regression. Return equivalent when the images are materially indistinguishable; incompleteness against the full brief is not a reason to return neither. Return neither only when both candidates have different material visual regressions or the evidence is invalid. Scores are integers 0-100 and measure absolute quality against the frozen bar. Identify one largest remaining gap. Do not discuss source code and return only JSON.\n\nBrief:\n{goal}\n\nWorkstreams: {}\nHard gates already passed: {}",
-        bar.workstreams.join(", "), bar.hard_gates.join(", ")
+        "You are a fresh read-only visual and screen-comprehension critic. The first four attached images are anonymous pairs in this exact order: A initial state, A after the controller's fixed input probe, B initial state, B after the same probe. Any later images are hashed quality references. You do not know which candidate is newer. Compare A and B relative to each other and against the frozen brief, authoritative creative direction, and references. Prefer a or b when one is visually better without an evidenced visual regression. Return equivalent when the image pairs are materially indistinguishable; incompleteness against the full brief is not a reason to return neither. Return neither only when both have different material regressions or the evidence is invalid. Scores are integers 0-100 and measure absolute quality against the frozen bar.\n\nFor each pair, independently answer four release-gate questions. current_state_clear means a new player can identify turn/faction, selection, relevant resources/objective, and important ownership or board state. available_actions_clear means the screen itself distinguishes selectable things and the next legal actions, including movement, attack, end turn, and cancel/reselect when relevant. board_semantics_clear means cells, traversable terrain, obstacles, factions, unit roles, structures, and tactical overlays have an understandable hierarchy. action_feedback_clear means comparison of initial and after-input frames makes the result of the fixed probe visible; if the probe caused no meaningful state change, the no-op or unchanged state must still be understandable rather than silently ambiguous. Set a boolean true only when the attached pixels provide affirmative evidence, not merely because runtime behavior may exist. Put concise observed evidence in each assessment. Identify one largest remaining gap that prioritizes failed comprehension questions over decorative polish. Do not discuss source code and return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{}\n\nWorkstreams: {}\nHard gates already passed: {}\n\nA runtime evidence after probe:\n{}\n\nB runtime evidence after probe:\n{}",
+        serde_json::to_string(&bar.creative_direction).map_err(|error| error.to_string())?,
+        bar.workstreams.join(", "),
+        bar.hard_gates.join(", "),
+        serde_json::to_string(&scenario_a.state).map_err(|error| error.to_string())?,
+        serde_json::to_string(&scenario_b.state).map_err(|error| error.to_string())?,
     );
-    let critique: BlindCritique = call_structured_role(
+    let critique: VisualCritique = call_structured_role(
         "visual_critic",
         &prompt,
-        &critic_schema(),
+        &visual_critic_schema(),
         model,
         escalation,
         &images,
@@ -1776,6 +1962,8 @@ fn blind_critic(
         "a" | "b" | "neither" | "equivalent"
     ) || critique.score_a > 100
         || critique.score_b > 100
+        || critique.screen_a.evidence.trim().is_empty()
+        || critique.screen_b.evidence.trim().is_empty()
         || critique.largest_gap.trim().is_empty()
     {
         return Err("critic returned an invalid preference, score, or gap".to_string());
@@ -1821,7 +2009,8 @@ fn gameplay_critic(
     canceled: &AtomicBool,
 ) -> Result<BlindCritique, String> {
     let prompt = format!(
-        "You are a fresh read-only gameplay critic. Two anonymous candidates A and B were run from the same runtime snapshot for the same deterministic ticks, and the controller independently executed each candidate's durable Stasis tests. Judge behavioral improvement and regression relative to each other; the absolute scores still measure progress against the complete brief. Passing test names are behavioral evidence, not proof of the whole brief: weigh them with the runtime state, and do not infer behavior that neither source demonstrates. Prefer a or b when one has better behavioral evidence without an evidenced regression. Return equivalent whenever gameplay is materially unchanged, including when a visual-only improvement leaves gameplay intact or both remain equally incomplete. Never return neither merely because both fail the full brief. Return neither only when both have different material regressions or the evidence is invalid. Return only JSON.\n\nBrief:\n{goal}\n\nRequired scenarios: {}\n\nA evidence:\n{}\n\nB evidence:\n{}",
+        "You are a fresh read-only gameplay critic. Two anonymous candidates A and B were run from the same runtime snapshot for the same deterministic ticks, and the controller independently executed each candidate's durable Stasis tests. Judge behavioral improvement and regression relative to each other and the authoritative creative direction; the absolute scores still measure progress against the complete brief. Passing test names are behavioral evidence, not proof of the whole brief: weigh them with the runtime state, and do not infer behavior that neither source demonstrates. Prefer a or b when one has better behavioral evidence without an evidenced regression. Return equivalent whenever gameplay is materially unchanged, including when a visual-only improvement leaves gameplay intact or both remain equally incomplete. Never return neither merely because both fail the full brief. Return neither only when both have different material regressions or the evidence is invalid. Return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{}\n\nRequired scenarios: {}\n\nA evidence:\n{}\n\nB evidence:\n{}",
+        serde_json::to_string(&bar.creative_direction).map_err(|error| error.to_string())?,
         serde_json::to_string(&bar.required_scenarios).map_err(|error| error.to_string())?,
         serde_json::to_string(state_a).map_err(|error| error.to_string())?,
         serde_json::to_string(state_b).map_err(|error| error.to_string())?,
@@ -1857,9 +2046,16 @@ fn capture_scenario(
     id: &str,
     pointer: Option<(i32, i32)>,
     request_id: &mut u64,
-) -> Result<(PathBuf, Value), String> {
+) -> Result<ScenarioCapture, String> {
     request_live(client, *request_id, LiveCommand::ValidationRestore)?;
     *request_id = request_id.saturating_add(1);
+    let initial_frame = capture_frame(
+        client,
+        project_root,
+        artifacts,
+        &format!("{id}-initial"),
+        request_id,
+    )?;
     if let Some((x, y)) = pointer {
         request_live(
             client,
@@ -1904,7 +2100,7 @@ fn capture_scenario(
     )?;
     *request_id = request_id.saturating_add(1);
     wait_for_steps(client, request_id)?;
-    let frame = capture_frame(client, project_root, artifacts, id, request_id)?;
+    let action_frame = capture_frame(client, project_root, artifacts, id, request_id)?;
     let inspection = request_live(
         client,
         *request_id,
@@ -1925,7 +2121,11 @@ fn capture_scenario(
         },
     )?;
     *request_id = request_id.saturating_add(1);
-    Ok((frame, inspection.data.unwrap_or(Value::Null)))
+    Ok(ScenarioCapture {
+        initial_frame,
+        action_frame,
+        state: inspection.data.unwrap_or(Value::Null),
+    })
 }
 
 fn gameplay_evidence(runtime: Value, deterministic_tests: Value) -> Value {
@@ -3091,6 +3291,8 @@ fn generate_report(
     bar: &FrozenBar,
 ) -> Result<(), String> {
     let bar_json = serde_json::to_string_pretty(bar).map_err(|error| error.to_string())?;
+    let creative_direction = fs::read_to_string(artifacts.join(CREATIVE_DIRECTION_NAME))
+        .unwrap_or_else(|_| "Creative direction is unavailable.".to_string());
     let events = fs::read_to_string(artifacts.join(EVENTS_NAME)).unwrap_or_default();
     let decisions = fs::read_to_string(artifacts.join(DECISIONS_NAME)).unwrap_or_default();
     let mut captures = String::new();
@@ -3110,7 +3312,7 @@ fn generate_report(
         }
     }
     let html = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Stasis Gauntlet {}</title><style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;background:#0b1020;color:#e8eefc}}pre{{white-space:pre-wrap;background:#151d33;padding:16px;border-radius:10px}}figure{{display:inline-block;width:46%;vertical-align:top}}img{{max-width:100%;border-radius:10px}}</style><h1>Stasis Gauntlet {}</h1><p>Phase: {:?} &middot; accepted {} &middot; rejected {} &middot; model calls {}</p><h2>Captures</h2>{}<h2>Frozen quality bar</h2><pre>{}</pre><h2>Decision memory</h2><pre>{}</pre><h2>Event stream</h2><pre>{}</pre>",
+        "<!doctype html><meta charset=\"utf-8\"><title>Stasis Gauntlet {}</title><style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;background:#0b1020;color:#e8eefc}}pre{{white-space:pre-wrap;background:#151d33;padding:16px;border-radius:10px}}figure{{display:inline-block;width:46%;vertical-align:top}}img{{max-width:100%;border-radius:10px}}</style><h1>Stasis Gauntlet {}</h1><p>Phase: {:?} &middot; accepted {} &middot; rejected {} &middot; model calls {}</p><h2>Captures</h2>{}<h2>Authoritative creative direction</h2><pre>{}</pre><h2>Frozen quality bar</h2><pre>{}</pre><h2>Decision memory</h2><pre>{}</pre><h2>Event stream</h2><pre>{}</pre>",
         escape_html(&state.run_id),
         escape_html(&state.run_id),
         state.phase,
@@ -3118,6 +3320,7 @@ fn generate_report(
         state.rejected_candidates,
         state.model_calls,
         captures,
+        escape_html(&creative_direction),
         escape_html(&bar_json),
         escape_html(&decisions),
         escape_html(&events)
@@ -3184,7 +3387,35 @@ fn scout_schema() -> Value {
 }
 
 fn bootstrap_schema() -> Value {
-    json!({"type":"object","required":["workstreams"],"properties":{"workstreams":{"type":"array","minItems":4,"maxItems":10,"items":{"type":"string"}}},"additionalProperties":false})
+    let bounded_rules = json!({
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 8,
+        "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+    });
+    json!({
+        "type": "object",
+        "required": ["creative_direction", "workstreams"],
+        "properties": {
+            "creative_direction": {
+                "type": "object",
+                "required": ["title", "narrative_promise", "player_fantasy", "rule_pillars", "visual_language", "interaction_grammar", "progression_and_pacing", "non_negotiables"],
+                "properties": {
+                    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "narrative_promise": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "player_fantasy": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "rule_pillars": bounded_rules.clone(),
+                    "visual_language": bounded_rules.clone(),
+                    "interaction_grammar": bounded_rules.clone(),
+                    "progression_and_pacing": bounded_rules.clone(),
+                    "non_negotiables": bounded_rules
+                },
+                "additionalProperties": false
+            },
+            "workstreams": {"type":"array","minItems":4,"maxItems":10,"items":{"type":"string", "minLength": 1, "maxLength": 200}}
+        },
+        "additionalProperties": false
+    })
 }
 
 fn lead_schema() -> Value {
@@ -3193,6 +3424,41 @@ fn lead_schema() -> Value {
 
 fn critic_schema() -> Value {
     json!({"type":"object","required":["preferred","score_a","score_b","largest_gap","summary"],"properties":{"preferred":{"type":"string","enum":["a","b","neither","equivalent"]},"score_a":{"type":"integer","minimum":0,"maximum":100},"score_b":{"type":"integer","minimum":0,"maximum":100},"largest_gap":{"type":"string"},"summary":{"type":"string"}},"additionalProperties":false})
+}
+
+fn visual_critic_schema() -> Value {
+    let screen = json!({
+        "type": "object",
+        "required": [
+            "current_state_clear",
+            "available_actions_clear",
+            "board_semantics_clear",
+            "action_feedback_clear",
+            "evidence"
+        ],
+        "properties": {
+            "current_state_clear": {"type": "boolean"},
+            "available_actions_clear": {"type": "boolean"},
+            "board_semantics_clear": {"type": "boolean"},
+            "action_feedback_clear": {"type": "boolean"},
+            "evidence": {"type": "string", "maxLength": 4000}
+        },
+        "additionalProperties": false
+    });
+    json!({
+        "type": "object",
+        "required": ["preferred", "score_a", "score_b", "screen_a", "screen_b", "largest_gap", "summary"],
+        "properties": {
+            "preferred": {"type": "string", "enum": ["a", "b", "neither", "equivalent"]},
+            "score_a": {"type": "integer", "minimum": 0, "maximum": 100},
+            "score_b": {"type": "integer", "minimum": 0, "maximum": 100},
+            "screen_a": screen.clone(),
+            "screen_b": screen,
+            "largest_gap": {"type": "string", "maxLength": 4000},
+            "summary": {"type": "string", "maxLength": 4000}
+        },
+        "additionalProperties": false
+    })
 }
 
 #[cfg(test)]
@@ -3247,6 +3513,14 @@ mod tests {
         let source = r#"{"preferred":"a","score_a":80,"score_b":60,"largest_gap":"audio","summary":"A is clearer","extra":true}"#;
         assert!(serde_json::from_str::<BlindCritique>(source).is_err());
         assert_eq!(critic_schema()["additionalProperties"], false);
+        assert!(bootstrap_schema()["required"]
+            .as_array()
+            .expect("bootstrap required fields")
+            .contains(&json!("creative_direction")));
+        assert!(visual_critic_schema()["required"]
+            .as_array()
+            .expect("visual critic required fields")
+            .contains(&json!("screen_a")));
         assert!(lead_schema()["required"]
             .as_array()
             .expect("lead required fields")
@@ -3256,6 +3530,7 @@ mod tests {
                 schema_version: 1,
                 goal_sha256: "0".repeat(64),
                 goal: "game".to_string(),
+                creative_direction: CreativeDirection::default(),
                 workstreams: vec!["HUD".to_string()],
                 hard_gates: Vec::new(),
                 required_scenarios: Vec::new(),
@@ -3270,39 +3545,98 @@ mod tests {
     }
 
     #[test]
+    fn screen_comprehension_is_an_absolute_quality_gate() {
+        let mut screen = ScreenComprehension {
+            current_state_clear: true,
+            available_actions_clear: true,
+            board_semantics_clear: true,
+            action_feedback_clear: false,
+            evidence: "The input result is not visible.".to_string(),
+        };
+        assert!(!candidate_meets_quality_bar(true, 90, 90, 65, &screen));
+        screen.action_feedback_clear = true;
+        assert!(candidate_meets_quality_bar(true, 90, 90, 65, &screen));
+        assert!(!candidate_meets_quality_bar(false, 90, 90, 65, &screen));
+    }
+
+    #[test]
+    fn creative_direction_is_durable_and_old_bars_get_a_safe_default() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_direction_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        fs::create_dir_all(&root).expect("direction root");
+        let direction = CreativeDirection::default();
+        write_creative_direction(&root, &direction).expect("write direction");
+        let markdown =
+            fs::read_to_string(root.join(CREATIVE_DIRECTION_NAME)).expect("read direction");
+        assert!(markdown.contains("## Narrative promise"));
+        assert!(markdown.contains("## Interaction grammar"));
+        assert!(markdown.contains("## Non-negotiables"));
+
+        let old_bar = r#"{"schema_version":1,"goal_sha256":"old","goal":"game","workstreams":[],"hard_gates":[],"required_scenarios":[],"references":[],"web_sources":[],"acceptance_score":65}"#;
+        let restored: FrozenBar = serde_json::from_str(old_bar).expect("old bar restores");
+        assert!(!restored.creative_direction.interaction_grammar.is_empty());
+        fs::remove_file(root.join(CREATIVE_DIRECTION_NAME)).expect("remove direction");
+        fs::remove_dir(root).expect("remove direction root");
+    }
+
+    #[test]
     fn visual_first_and_gameplay_first_candidates_can_checkpoint() {
-        let critique = |preferred: &str, score_a: u32, score_b: u32| BlindCritique {
+        let gameplay = |preferred: &str, score_a: u32, score_b: u32| BlindCritique {
             preferred: preferred.to_string(),
             score_a,
             score_b,
             largest_gap: "next gap".to_string(),
             summary: "bounded comparison".to_string(),
         };
+        let visual = |preferred: &str, score_a: u32, score_b: u32| VisualCritique {
+            preferred: preferred.to_string(),
+            score_a,
+            score_b,
+            screen_a: ScreenComprehension {
+                current_state_clear: false,
+                available_actions_clear: false,
+                board_semantics_clear: false,
+                action_feedback_clear: false,
+                evidence: "screen A evidence".to_string(),
+            },
+            screen_b: ScreenComprehension {
+                current_state_clear: false,
+                available_actions_clear: false,
+                board_semantics_clear: false,
+                action_feedback_clear: false,
+                evidence: "screen B evidence".to_string(),
+            },
+            largest_gap: "next gap".to_string(),
+            summary: "bounded comparison".to_string(),
+        };
 
-        let visual_improvement = critique("a", 20, 5);
-        let unchanged_gameplay = critique("equivalent", 1, 1);
+        let visual_improvement = visual("a", 20, 5);
+        let unchanged_gameplay = gameplay("equivalent", 1, 1);
         assert!(critics_allow_checkpoint(
             &visual_improvement,
             &unchanged_gameplay,
             true
         ));
 
-        let unchanged_visuals = critique("equivalent", 5, 5);
-        let gameplay_improvement = critique("b", 2, 25);
+        let unchanged_visuals = visual("equivalent", 5, 5);
+        let gameplay_improvement = gameplay("b", 2, 25);
         assert!(critics_allow_checkpoint(
             &unchanged_visuals,
             &gameplay_improvement,
             false
         ));
 
-        let insufficient_gameplay_evidence = critique("neither", 1, 1);
+        let insufficient_gameplay_evidence = gameplay("neither", 1, 1);
         assert!(!critics_allow_checkpoint(
             &visual_improvement,
             &insufficient_gameplay_evidence,
             true
         ));
 
-        let gameplay_regression = critique("b", 1, 30);
+        let gameplay_regression = gameplay("b", 1, 30);
         assert!(!critics_allow_checkpoint(
             &visual_improvement,
             &gameplay_regression,
