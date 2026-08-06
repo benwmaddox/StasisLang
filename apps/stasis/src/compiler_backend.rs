@@ -7879,6 +7879,46 @@ echo "signed" > "$1.signed"
     }
 
     #[test]
+    fn self_host_aot_cli_links_standalone_storage_for_non_engine_globals() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_storage_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let project_dir = temp_root.join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(
+            project_dir.join("main.stasis"),
+            "global count: i32;\nfunction main(): i32 { count = 7; return count; }\n",
+        )
+        .expect("write source");
+
+        let linker = write_fake_linker(&temp_root);
+        let mut backend = new_self_host_test_backend(temp_root.join("aot_artifacts"), linker);
+        let output_exe = if cfg!(windows) {
+            temp_root.join("program.exe")
+        } else {
+            temp_root.join("program.out")
+        };
+
+        let summary = run_self_host_aot_cli_with_backend_and_options(
+            &mut backend,
+            &project_dir,
+            &output_exe,
+            &SelfHostedAotCliOptions::default(),
+        )
+        .expect("non-engine globals should link through standalone storage");
+        assert_eq!(summary.entry_symbol, "stasis_aot_standalone_entry");
+        assert!(summary
+            .object_file_names
+            .iter()
+            .any(|name| name == "direct_storage.obj"));
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn self_host_aot_cli_invokes_signer_when_configured() {
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
@@ -8262,7 +8302,6 @@ fn run_self_host_aot_cli_with_backend_and_options(
             options.entry_file.as_deref(),
         )?
     } else {
-        let compile = backend.compile_aot_non_engine_artifacts_from_process(candidate, 1)?;
         let main_entries: Vec<_> = function_entries
             .iter()
             .filter(|entry| entry.name == "main")
@@ -8273,18 +8312,37 @@ fn run_self_host_aot_cli_with_backend_and_options(
                 main_entries.len()
             ));
         }
+        let main_artifact = candidate
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_id == main_entries[0].fn_id.0)
+            .ok_or_else(|| "missing compiled artifact for function main(): i32".to_string())?;
+        let standalone_storage =
+            candidate.compile_standalone_storage_object(&main_artifact.symbol_name)?;
+        let compile = backend.compile_aot_non_engine_artifacts_from_process(candidate, 1)?;
         let Some((entry_symbol, _)) = compile
             .object_paths_by_function
             .get(&main_entries[0].fn_id.0)
         else {
             return Err("missing function main(): i32".to_string());
         };
-        let entry_symbol = entry_symbol.clone();
-        let object_paths: Vec<PathBuf> = compile
+        let mut entry_symbol = entry_symbol.clone();
+        let mut object_paths: Vec<PathBuf> = compile
             .object_paths_by_function
             .values()
             .map(|(_, path)| path.clone())
             .collect();
+        if let Some((storage_bytes, wrapper_symbol)) = standalone_storage {
+            let storage_path = compile.output_dir.join("direct_storage.obj");
+            std::fs::write(&storage_path, storage_bytes).map_err(|error| {
+                format!(
+                    "failed to write standalone AOT storage object {}: {error}",
+                    storage_path.display()
+                )
+            })?;
+            object_paths.push(storage_path);
+            entry_symbol = wrapper_symbol;
+        }
         let mut link_config = backend.aot_link_config.clone();
         let mut dynload_link_library = None;
         if should_link_stasis_dynload(&link_config.target) {
