@@ -329,7 +329,6 @@ typedef struct {
     uint32_t surface_generation;
     uint32_t renderer_generation;
     char source_path[1024];
-    uint64_t source_mtime;
     uint64_t source_size;
 } StasisFont;
 
@@ -1848,17 +1847,6 @@ static uint64_t get_file_mtime(const char* path) {
     if (stat(probe, &st) != 0) return 0;
     return (uint64_t)st.st_mtime;
 #endif
-}
-
-static uint64_t get_file_size(const char* path) {
-#if defined(_WIN32)
-    struct _stat st;
-    if (_stat(path, &st) != 0 || st.st_size < 0) return 0;
-#else
-    struct stat st;
-    if (stat(path, &st) != 0 || st.st_size < 0) return 0;
-#endif
-    return (uint64_t)st.st_size;
 }
 
 static char* stasis_strdup(const char* s) {
@@ -6123,8 +6111,39 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
         return 0;
     }
 
-    uint64_t source_mtime = get_file_mtime(resolved);
-    uint64_t source_size = get_file_size(resolved);
+    /* Read first so reuse is based on the bytes that build the retained atlas,
+       not filesystem timestamp granularity. */
+    FILE* f = fopen(resolved, "rb");
+    if (!f) {
+        stasis_report_runtime_errorf("Font failed to open: %s", path);
+        SDL_Log("stasis_load_font: failed to open %s", resolved);
+        return 0;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (file_size <= 0) {
+        fclose(f);
+        stasis_report_runtime_errorf("Font data is empty: %s", path);
+        SDL_Log("stasis_load_font: empty font %s", resolved);
+        return 0;
+    }
+    size_t size = (size_t)file_size;
+    unsigned char* ttf_buffer = (unsigned char*)malloc(size);
+    if (!ttf_buffer) {
+        fclose(f);
+        SDL_Log("stasis_load_font: malloc failed");
+        return 0;
+    }
+    if (fread(ttf_buffer, 1, size, f) != size) {
+        fclose(f);
+        free(ttf_buffer);
+        stasis_report_runtime_errorf("Font data could not be read: %s", path);
+        SDL_Log("stasis_load_font: short read for %s", resolved);
+        return 0;
+    }
+    fclose(f);
 
     /* Reuse an identical load. If the file changed in place, retain the stable
        handle while replacing its backing resources. */
@@ -6132,8 +6151,9 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     for (int i = 0; i < MAX_FONTS; i++) {
         if (g_fonts[i].active && g_fonts[i].font_size == font_size &&
             strcmp(g_fonts[i].source_path, resolved) == 0) {
-            if (g_fonts[i].source_mtime == source_mtime &&
-                g_fonts[i].source_size == source_size) {
+            if (g_fonts[i].source_size == (uint64_t)size && g_fonts[i].ttf_buffer &&
+                memcmp(g_fonts[i].ttf_buffer, ttf_buffer, size) == 0) {
+                free(ttf_buffer);
                 return i + 1;
             }
             stasis_release_font(&g_fonts[i]);
@@ -6154,31 +6174,10 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     }
 
     if (slot == -1) {
+        free(ttf_buffer);
         SDL_Log("stasis_load_font: no free font slots");
         return 0;
     }
-
-    /* Read font file */
-    FILE* f = fopen(resolved, "rb");
-    if (!f) {
-        stasis_report_runtime_errorf("Font failed to open: %s", path);
-        SDL_Log("stasis_load_font: failed to open %s", resolved);
-        return 0;
-    }
-
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    unsigned char* ttf_buffer = (unsigned char*)malloc(size);
-    if (!ttf_buffer) {
-        fclose(f);
-        SDL_Log("stasis_load_font: malloc failed");
-        return 0;
-    }
-
-    fread(ttf_buffer, 1, size, f);
-    fclose(f);
 
     /* Initialize font */
     StasisFont* font = &g_fonts[slot];
@@ -6193,8 +6192,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     font->ttf_buffer = ttf_buffer;
     font->font_size = font_size;
     snprintf(font->source_path, sizeof(font->source_path), "%s", resolved);
-    font->source_mtime = source_mtime;
-    font->source_size = source_size;
+    font->source_size = (uint64_t)size;
     stbtt_GetFontVMetrics(&font->font_info, &font->ascent, &font->descent, &font->line_gap);
     font->active = true;
     if (!stasis_build_font_atlas(font)) {

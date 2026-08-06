@@ -508,6 +508,29 @@ impl LiveWorkspace {
         Ok(())
     }
 
+    fn clear_runtime_pointer_input(&self) -> Result<(), String> {
+        const I_COUNT: usize = 7;
+        const I_DROPPED: usize = 8;
+        const I_BASE: usize = 544;
+        const I_STRIDE: usize = 4;
+        const MAX_POINTERS: usize = 8;
+        let host_i32_hash = crate::hash_global_path("host_i32");
+        stasis_dynload::fill_registered_global_i32_array(
+            host_i32_hash,
+            0,
+            I_BASE,
+            MAX_POINTERS * I_STRIDE,
+            0,
+        )?;
+        stasis_dynload::fill_registered_global_i32_array(
+            host_i32_hash,
+            0,
+            I_COUNT,
+            I_DROPPED - I_COUNT + 1,
+            0,
+        )
+    }
+
     pub(crate) fn should_quit(&self) -> bool {
         self.quit
     }
@@ -803,6 +826,7 @@ impl LiveWorkspace {
                     Err(format!("guest main() returned non-zero status {main_rc}"))
                 } else {
                     self.input_override = Some(Vec::new());
+                    self.clear_runtime_pointer_input()?;
                     let startup_tick_status = jit.execute_i32_noarg_by_name("tick")?;
                     self.validation_snapshot =
                         Some(stasis_dynload::snapshot_jit_runtime_state_bounded(
@@ -4063,6 +4087,22 @@ mod tests {
     #[test]
     fn validation_reinitialize_runs_current_main_and_startup_tick_before_snapshot() {
         let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global score: i32;\nglobal host_i32: i32[768];\nfunction main(): i32 { score = 1; return 0; }\nfunction tick(): i32 { score += 1 + host_i32[7]; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("input-sensitive source");
+        let mut host_i32 = vec![0; 768];
+        host_i32[7] = 1;
+        host_i32[544] = 7;
+        host_i32[545] = 1;
+        host_i32[546] = 1;
+        stasis_dynload::register_global_i32_array(
+            crate::hash_global_path("host_i32"),
+            0,
+            host_i32.as_mut_ptr(),
+            host_i32.len(),
+        );
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
         let (client, server) = stasis_runner::live::live_session(8);
@@ -4086,6 +4126,8 @@ mod tests {
         assert_eq!(reinitialized_data["main_status"], 0);
         assert_eq!(reinitialized_data["startup_tick_status"], 0);
         assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(2)));
+        assert_eq!(host_i32[7], 0);
+        assert!(host_i32[544..576].iter().all(|value| *value == 0));
 
         jit.write_global_scalar("score", JitScalarValue::I32(7))
             .expect("mutate score again");
