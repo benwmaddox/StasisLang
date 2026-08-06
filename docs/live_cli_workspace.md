@@ -91,7 +91,7 @@ model-authored runtime-validation loop afterward.
 The one-shot `stasis ai` command also receives the controlled project-asset tools used by
 Gauntlet. It can reuse the SVG pipeline, compose deterministic PNG files, import a host-generated
 ImageGen PNG, write bounded JSON/CSV data, and synthesize bounded procedural WAV files. Asset calls
-must form one contiguous group immediately before the source writes that load them. Stasis derives
+must form one contiguous group immediately before the source writes that load and use them. Stasis derives
 the v2 manifest entries, validates the complete bundle, compiles and tests the related source, and
 rolls the asset and source sides back together on failure; the model never edits the manifest.
 

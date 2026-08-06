@@ -2330,8 +2330,9 @@ struct LiveAiTools {
     decision_role: Option<String>,
     terminal_blocker: Option<String>,
     require_imagegen: bool,
-    imagegen_ready: bool,
+    imagegen_ready_paths: Vec<String>,
     imagegen_staged: bool,
+    imagegen_staged_paths: Vec<String>,
     imagegen_committed: bool,
 }
 
@@ -2349,8 +2350,9 @@ impl LiveAiTools {
             decision_role: None,
             terminal_blocker: None,
             require_imagegen: false,
-            imagegen_ready: false,
+            imagegen_ready_paths: Vec::new(),
             imagegen_staged: false,
+            imagegen_staged_paths: Vec::new(),
             imagegen_committed: false,
         }
     }
@@ -2634,7 +2636,9 @@ impl LiveAiTools {
                     Ok((_, actual_width, actual_height))
                         if Some(actual_width) == width && Some(actual_height) == height =>
                     {
-                        self.imagegen_ready = true;
+                        if !self.imagegen_ready_paths.contains(&relative_png) {
+                            self.imagegen_ready_paths.push(relative_png.clone());
+                        }
                         return ToolObservation::result(
                             &call.tool,
                             serde_json::json!({
@@ -2863,6 +2867,7 @@ impl LiveAiTools {
                             Err(error) => {
                                 if let Some(transaction) = self.asset_transaction.take() {
                                     self.imagegen_staged = false;
+                                    self.imagegen_staged_paths.clear();
                                     let _ = transaction.rollback();
                                 }
                                 return failed_write_observations(calls, error);
@@ -2876,11 +2881,19 @@ impl LiveAiTools {
                 if applied {
                     self.last_write = Some(response.clone());
                     self.reference_search_ready = false;
-                    self.imagegen_committed |= self.imagegen_staged;
+                    self.imagegen_committed |= self.imagegen_staged
+                        && self.project_root.as_ref().is_some_and(|project_root| {
+                            imported_imagegen_is_used_by_project_source(
+                                project_root,
+                                &self.imagegen_staged_paths,
+                            )
+                        });
                     self.imagegen_staged = false;
+                    self.imagegen_staged_paths.clear();
                     self.asset_transaction.take();
                 } else if let Some(transaction) = self.asset_transaction.take() {
                     self.imagegen_staged = false;
+                    self.imagegen_staged_paths.clear();
                     let _ = transaction.rollback();
                 }
                 if applied {
@@ -2910,6 +2923,7 @@ impl LiveAiTools {
             Err(error) => {
                 if let Some(transaction) = self.asset_transaction.take() {
                     self.imagegen_staged = false;
+                    self.imagegen_staged_paths.clear();
                     let _ = transaction.rollback();
                 }
                 self.record_durable_failure(
@@ -3122,12 +3136,32 @@ impl ToolExecutor for LiveAiTools {
             ) {
                 Ok(transaction) => {
                     self.asset_transaction = Some(transaction);
-                    if self.imagegen_ready
-                        && asset_calls
-                            .iter()
-                            .any(|call| call.tool == "import_png_asset")
-                    {
+                    let fulfilled_imports = asset_calls
+                        .iter()
+                        .filter(|call| call.tool == "import_png_asset")
+                        .filter(|call| {
+                            call.args
+                                .get("source_path")
+                                .and_then(Value::as_str)
+                                .is_some_and(|source_path| {
+                                    let normalized = source_path.replace('\\', "/");
+                                    self.imagegen_ready_paths
+                                        .iter()
+                                        .any(|ready| ready.replace('\\', "/") == normalized)
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                    if !fulfilled_imports.is_empty() {
                         self.imagegen_staged = true;
+                        self.imagegen_staged_paths = fulfilled_imports
+                            .iter()
+                            .filter_map(|call| {
+                                call.args
+                                    .get("path")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .collect();
                     }
                 }
                 Err(error) => {
@@ -3213,18 +3247,24 @@ impl ToolExecutor for LiveAiTools {
         };
         let result = result.and_then(|()| {
             if self.require_imagegen && !self.imagegen_committed {
-                Err("completion rejected: this authored visual workstream requires a fulfilled and transactionally imported ImageGen PNG".to_string())
+                Err("completion rejected: this authored visual workstream requires a fulfilled, transactionally imported, and visibly used ImageGen PNG; project Stasis source must load the imported path and emit it through a sprite draw path".to_string())
             } else {
                 Ok(())
             }
         });
         if let Err(error) = &result {
-            self.record_durable_failure(
-                "completion_gate_failed",
-                "The builder declared completion without a currently accepted tested write",
-                error,
-                "Perform one successful atomic write with passing tests before declaring completion.",
-            );
+            let missing_imagegen_use = self.require_imagegen && !self.imagegen_committed;
+            let summary = if missing_imagegen_use {
+                "The builder declared authored-art completion without visibly using its generated PNG"
+            } else {
+                "The builder declared completion without a currently accepted tested write"
+            };
+            let next_step = if missing_imagegen_use {
+                "In the next atomic write, load the fulfilled imported PNG from its project path and emit it through a sprite draw path; an unused manifest entry is insufficient."
+            } else {
+                "Perform one successful atomic write with passing tests before declaring completion."
+            };
+            self.record_durable_failure("completion_gate_failed", summary, error, next_step);
         }
         result
     }
@@ -3232,6 +3272,48 @@ impl ToolExecutor for LiveAiTools {
     fn terminal_failure(&self) -> Option<String> {
         self.terminal_blocker.clone()
     }
+}
+
+fn imported_imagegen_is_used_by_project_source(
+    project_root: &Path,
+    imported_paths: &[String],
+) -> bool {
+    if imported_paths.is_empty() {
+        return false;
+    }
+    let mut source = String::new();
+    let Ok(entries) = fs::read_dir(project_root.join("src")) else {
+        return false;
+    };
+    let mut pending = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            let Ok(entries) = fs::read_dir(path) else {
+                return false;
+            };
+            pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
+        } else if path.extension().and_then(|value| value.to_str()) == Some("stasis") {
+            let Ok(contents) = fs::read_to_string(path) else {
+                return false;
+            };
+            source.push_str(&contents.replace('\\', "/"));
+            source.push('\n');
+        }
+    }
+    let loads_import = imported_paths.iter().any(|path| {
+        let normalized = path.replace('\\', "/");
+        source.contains(&normalized)
+            || Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|filename| source.contains(filename))
+    });
+    loads_import
+        && source.contains("load_sprite_from(")
+        && (source.contains("gfx_cmd_sprite(") || source.contains(".draw("))
 }
 
 fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<String> {
@@ -4154,13 +4236,69 @@ mod tests {
 
         assert_eq!(
             tools.validate_completion().unwrap_err(),
-            "completion rejected: this authored visual workstream requires a fulfilled and transactionally imported ImageGen PNG"
+            "completion rejected: this authored visual workstream requires a fulfilled, transactionally imported, and visibly used ImageGen PNG; project Stasis source must load the imported path and emit it through a sprite draw path"
         );
 
         tools.imagegen_committed = true;
         tools
             .validate_completion()
             .expect("tested visual write with ImageGen completes");
+    }
+
+    #[test]
+    fn imported_imagegen_must_be_loaded_and_drawn_by_project_source() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_imagegen_usage_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).expect("create source directory");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            true,
+            None,
+            "Fresh builder".to_string(),
+            true,
+        );
+        tools
+            .imagegen_staged_paths
+            .push("assets/generated/oak.png".to_string());
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "function tick(): i32 { gfx_cmd_line(0, 0, 1, 1, 1, 1, 1, 1); return 0; }\n",
+        )
+        .expect("write unused source");
+        assert!(!imported_imagegen_is_used_by_project_source(
+            &root,
+            &tools.imagegen_staged_paths,
+        ));
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "global oak: Sprite;\nfunction main(): i32 { oak.load_sprite_from(\"assets/generated/oak.png\", 64, 64); return 0; }\nfunction tick(): i32 { return 0; }\n",
+        )
+        .expect("write loaded but undrawn source");
+        assert!(!imported_imagegen_is_used_by_project_source(
+            &root,
+            &tools.imagegen_staged_paths,
+        ));
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "global oak: Sprite;\nfunction main(): i32 { oak.load_sprite_from(\"assets/generated/oak.png\", 64, 64); return 0; }\nfunction tick(): i32 { oak.draw(10, 10, 255, 0); return 0; }\n",
+        )
+        .expect("write used source");
+        assert!(imported_imagegen_is_used_by_project_source(
+            &root,
+            &tools.imagegen_staged_paths,
+        ));
+
+        fs::remove_dir_all(root).expect("remove imagegen usage fixture");
     }
 
     #[test]
@@ -4301,6 +4439,10 @@ mod tests {
             observation.result.as_ref().unwrap()["source_path"],
             "build/gauntlet/imagegen/terrain.png"
         );
+        assert_eq!(
+            tools.imagegen_ready_paths,
+            vec!["build/gauntlet/imagegen/terrain.png".to_string()]
+        );
         let request =
             fs::read_to_string(root.join("build/gauntlet/imagegen/requests/terrain.png.json"))
                 .expect("persisted request");
@@ -4359,6 +4501,10 @@ mod tests {
         assert_eq!(
             observation.result.as_ref().unwrap()["source_path"],
             "build/ai-assets/imagegen/unit.png"
+        );
+        assert_eq!(
+            tools.imagegen_ready_paths,
+            vec!["build/ai-assets/imagegen/unit.png".to_string()]
         );
         assert!(root
             .join("build/ai-assets/imagegen/requests/unit.png.json")

@@ -211,7 +211,7 @@ JSONL events, structured output, web search for the reference scout, and image
 attachments for fresh critics.
 
 ImageGen is a host capability for authored game art. Gauntlet requires at least
-one fulfilled and transactionally imported ImageGen PNG whenever the selected
+one fulfilled, transactionally imported, loaded, and visibly drawn ImageGen PNG whenever the selected
 workstream is explicitly art, visual, graphics, sprite, illustration, or
 animation work. The current `codex exec` child transport accepts image inputs
 but does not expose the in-product ImageGen tool directly. An agent instead
@@ -241,7 +241,9 @@ replacement that reuses the same asset id.
 
 For those authored-art workstreams, Gauntlet hides primitive SVG and
 shape-composed PNG tools and rejects completion until an ImageGen request has
-been fulfilled and its PNG imported through the atomic asset/source transaction.
+been fulfilled and its PNG imported through the atomic asset/source transaction,
+referenced by project Stasis source, loaded, and emitted through a sprite draw
+path. Merely adding an unused PNG to the manifest does not satisfy the gate.
 Primitive rendering remains appropriate for basic UI, simple icons,
 selection/range overlays, and deterministic fallbacks. ImageGen remains optional
 for work that is purely logic or basic interface geometry.
