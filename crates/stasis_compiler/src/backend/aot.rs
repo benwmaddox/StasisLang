@@ -481,7 +481,9 @@ impl AotProcess {
         Ok(function)
     }
 
-    fn compile_standalone_storage_object(
+    /// Builds the storage definitions and entry wrapper required when a
+    /// standalone executable references program globals directly.
+    pub fn compile_standalone_storage_object(
         &self,
         entry_symbol: &str,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
