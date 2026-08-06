@@ -12,6 +12,7 @@ pub struct ParsedParam {
 pub struct ParsedLocalBinding {
     pub function_name: String,
     pub name: String,
+    pub name_range: Range<usize>,
     pub type_name: String,
     pub visibility_range: Range<usize>,
 }
@@ -142,6 +143,7 @@ pub fn parse_typed_local_bindings(source: &str) -> Result<Vec<ParsedLocalBinding
         bindings.push(ParsedLocalBinding {
             function_name: declaration.function_name,
             name: declaration.name,
+            name_range: declaration.name_range,
             type_name,
             visibility_range: declaration.visibility_range,
         });
@@ -165,6 +167,7 @@ pub fn parse_local_declarations(source: &str) -> Result<Vec<ParsedLocalDeclarati
     for function in parse_top_level_functions(source)? {
         let scope_ranges = lexical_scope_ranges(&tokens, function.body_range.clone());
         let loop_ranges = for_scope_ranges(source, &tokens, function.body_range.clone());
+        declarations.extend(foreach_local_declarations(source, &tokens, &function));
         let mut cursor = tokens.partition_point(|token| token.start < function.body_range.start);
         while let Some(token) = tokens.get(cursor).copied() {
             if token.start >= function.body_range.end || token.kind == TokenKind::Eof {
@@ -181,6 +184,13 @@ pub fn parse_local_declarations(source: &str) -> Result<Vec<ParsedLocalDeclarati
                 cursor += 1;
                 continue;
             }
+            if declarations
+                .iter()
+                .any(|declaration| declaration.name_range == (name.start..name.end))
+            {
+                cursor += 2;
+                continue;
+            }
             let scope_end = scope_ranges
                 .iter()
                 .chain(loop_ranges.iter())
@@ -188,16 +198,105 @@ pub fn parse_local_declarations(source: &str) -> Result<Vec<ParsedLocalDeclarati
                 .min_by_key(|range| range.end.saturating_sub(range.start))
                 .map(|range| range.end)
                 .unwrap_or(function.body_range.end);
+            let Some(visible_from) = tokens[cursor + 2..]
+                .iter()
+                .take_while(|candidate| candidate.start < scope_end)
+                .find(|candidate| candidate.kind == TokenKind::Semicolon)
+                .map(|semicolon| semicolon.end)
+            else {
+                cursor += 2;
+                continue;
+            };
             declarations.push(ParsedLocalDeclaration {
                 function_name: function.name.clone(),
                 name: token_text(source, name).to_string(),
                 name_range: name.start..name.end,
-                visibility_range: name.end..scope_end,
+                visibility_range: visible_from..scope_end,
             });
             cursor += 2;
         }
     }
+    declarations.sort_by_key(|declaration| declaration.name_range.start);
+    declarations.dedup_by_key(|declaration| declaration.name_range.clone());
     Ok(declarations)
+}
+
+fn foreach_local_declarations(
+    source: &str,
+    tokens: &[Token],
+    function: &ParsedFunctionSignature,
+) -> Vec<ParsedLocalDeclaration> {
+    let mut declarations = Vec::new();
+    let mut cursor = tokens.partition_point(|token| token.start < function.body_range.start);
+    while let Some(token) = tokens.get(cursor).copied() {
+        if token.start >= function.body_range.end || token.kind == TokenKind::Eof {
+            break;
+        }
+        if token.kind != TokenKind::Identifier || token_text(source, token) != "foreach" {
+            cursor += 1;
+            continue;
+        }
+        let Some(header_open_index) = tokens
+            .get(cursor + 1)
+            .filter(|token| token.kind == TokenKind::LParen)
+            .map(|_| cursor + 1)
+        else {
+            cursor += 1;
+            continue;
+        };
+        let Some(header_close_index) = matching_token_index(
+            tokens,
+            header_open_index,
+            TokenKind::LParen,
+            TokenKind::RParen,
+        ) else {
+            cursor += 1;
+            continue;
+        };
+        let Some(body_open_index) = tokens
+            .get(header_close_index + 1)
+            .filter(|token| token.kind == TokenKind::LBrace)
+            .map(|_| header_close_index + 1)
+        else {
+            cursor += 1;
+            continue;
+        };
+        let Some(body_close_index) = matching_token_index(
+            tokens,
+            body_open_index,
+            TokenKind::LBrace,
+            TokenKind::RBrace,
+        ) else {
+            cursor += 1;
+            continue;
+        };
+        let header = &tokens[header_open_index + 1..header_close_index];
+        if !header.first().is_some_and(|token| {
+            token.kind == TokenKind::Identifier && token_text(source, *token) == "let"
+        }) {
+            cursor += 1;
+            continue;
+        }
+        let binding_tokens = header
+            .iter()
+            .copied()
+            .skip(1)
+            .take_while(|token| {
+                token.kind != TokenKind::Identifier || token_text(source, *token) != "in"
+            })
+            .filter(|token| token.kind == TokenKind::Identifier)
+            .collect::<Vec<_>>();
+        for binding in binding_tokens.into_iter().take(2) {
+            declarations.push(ParsedLocalDeclaration {
+                function_name: function.name.clone(),
+                name: token_text(source, binding).to_string(),
+                name_range: binding.start..binding.end,
+                visibility_range: tokens[body_open_index].start..tokens[body_close_index].end,
+            });
+        }
+        cursor = body_close_index + 1;
+    }
+    declarations
 }
 
 pub fn completion_expected_type(source: &str, cursor: usize) -> Result<Option<String>, String> {
@@ -1445,6 +1544,35 @@ function tick(): i32 {
                 .find(|binding| binding.name == name)
                 .expect("loop binding");
             assert!(binding.visibility_range.end < after_start);
+        }
+    }
+
+    #[test]
+    fn local_declaration_visibility_excludes_initializers_and_ends_with_foreach() {
+        let source = r#"
+function tick(): i32 {
+    let value = value + 1;
+    foreach (let enemy, index in enemies) {
+        value += enemy + index;
+    }
+    return value;
+}
+"#;
+        let declarations = parse_local_declarations(source).expect("local declarations");
+        let value = declarations
+            .iter()
+            .find(|declaration| declaration.name == "value")
+            .expect("value declaration");
+        assert!(value.visibility_range.start > source.find("value + 1").expect("initializer"));
+
+        let after_loop = source.find("return value").expect("after loop");
+        for name in ["enemy", "index"] {
+            let declaration = declarations
+                .iter()
+                .find(|declaration| declaration.name == name)
+                .expect("foreach declaration");
+            assert!(declaration.visibility_range.start <= source.find("value +=").expect("body"));
+            assert!(declaration.visibility_range.end < after_loop);
         }
     }
 

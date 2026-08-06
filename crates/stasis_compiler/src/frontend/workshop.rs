@@ -1045,6 +1045,10 @@ pub struct WorkshopCompletionScope {
     pub owner_signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_end: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration_from: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration_to: Option<usize>,
     pub visible_from: usize,
     pub visible_to: usize,
 }
@@ -2022,7 +2026,10 @@ fn rename_completion_visible(
     if scope.visible_from <= token.start && token.end <= scope.visible_to {
         return true;
     }
-    if item.kind == "local" && token.end == scope.visible_from {
+    if item.kind == "local"
+        && scope_declaration_range(scope)
+            .is_some_and(|range| range.start <= token.start && token.end <= range.end)
+    {
         return true;
     }
     if item.kind == "parameter" {
@@ -2074,6 +2081,10 @@ fn reject_workshop_rename_collision(
     } else {
         Ok(())
     }
+}
+
+fn scope_declaration_range(scope: &WorkshopCompletionScope) -> Option<Range<usize>> {
+    Some(scope.declaration_from?..scope.declaration_to?)
 }
 
 fn rename_target_references(
@@ -2153,7 +2164,9 @@ fn scoped_binding_references(
         if token.kind != TokenKind::Identifier || token_text(&file.source, token) != target.name {
             continue;
         }
-        let is_local_definition = target.kind == "local" && token.end == scope.visible_from;
+        let is_local_definition = target.kind == "local"
+            && scope_declaration_range(scope)
+                .is_some_and(|range| range.start <= token.start && token.end <= range.end);
         let is_parameter_definition = target.kind == "parameter"
             && token.end <= scope.visible_from
             && functions.iter().any(|function| {
@@ -2486,6 +2499,8 @@ pub fn workshop_completion_items(
                     file: file.path.clone(),
                     owner_signature: Some(format!("struct {}", definition.name)),
                     owner_end: Some(definition.definition_range.end),
+                    declaration_from: None,
+                    declaration_to: None,
                     visible_from: definition.definition_range.start,
                     visible_to: definition.definition_range.end,
                 },
@@ -2663,6 +2678,8 @@ pub fn workshop_completion_items(
                     file: file.path.clone(),
                     owner_signature: Some(owner_signature.clone()),
                     owner_end: Some(function.body_range.end),
+                    declaration_from: None,
+                    declaration_to: None,
                     visible_from: function.body_range.start,
                     visible_to: function.body_range.end,
                 };
@@ -2706,6 +2723,8 @@ pub fn workshop_completion_items(
                 file: file.path.clone(),
                 owner_signature: Some(owner_signature.clone()),
                 owner_end: Some(owner_range.end),
+                declaration_from: Some(local.name_range.start),
+                declaration_to: Some(local.name_range.end),
                 visible_from: local.visibility_range.start,
                 visible_to: local.visibility_range.end,
             };
@@ -2755,6 +2774,8 @@ pub fn workshop_completion_items(
                     file: file.path.clone(),
                     owner_signature: Some(owner_signature.clone()),
                     owner_end: Some(owner_range.end),
+                    declaration_from: Some(local.name_range.start),
+                    declaration_to: Some(local.name_range.end),
                     visible_from: local.visibility_range.start,
                     visible_to: local.visibility_range.end,
                 },

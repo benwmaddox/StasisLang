@@ -2665,11 +2665,11 @@ fn scoped_binding_declaration_range(
         return Ok(None);
     };
     if item.kind == "local" {
-        let start = scope.visible_from.saturating_sub(item.text.len());
-        return Ok(
-            (source.get(start..scope.visible_from) == Some(item.text.as_str()))
-                .then_some(start..scope.visible_from),
-        );
+        let (Some(start), Some(end)) = (scope.declaration_from, scope.declaration_to) else {
+            return Ok(None);
+        };
+        let range = start..end;
+        return Ok((source.get(range.clone()) == Some(item.text.as_str())).then_some(range));
     }
     let Some(owner_end) = scope.owner_end else {
         return Ok(None);
@@ -3918,6 +3918,56 @@ function main(): i32 {
             outer[0].range.start,
             source.find("let value").expect("outer declaration") + "let ".len()
         );
+    }
+
+    #[test]
+    fn local_initializer_and_foreach_navigation_respect_binding_lifetimes() {
+        let root = std::env::temp_dir().join("stasis-language-service-loop-local-navigation");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "global value: i32;\nglobal enemy: i32;\nglobal index: i32;\nglobal enemies: i32[2];\nfunction main(): i32 {\n    let value = value + 1;\n    foreach (let enemy, index in enemies) {\n        value += enemy + index;\n    }\n    return value + enemy + index;\n}\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+
+        let initializer_use = source.find("= value").expect("initializer use") + 2;
+        let initializer_definition = service
+            .definition(&path_text, initializer_use)
+            .expect("initializer definition");
+        assert_eq!(initializer_definition.len(), 1);
+        assert_eq!(
+            initializer_definition[0].range.start,
+            source.find("global value").expect("global value") + "global ".len()
+        );
+
+        for name in ["enemy", "index"] {
+            let body_use = source
+                .find(&format!("{name} +"))
+                .unwrap_or_else(|| source.find("index;").expect("index body use"));
+            let body_definition = service
+                .definition(&path_text, body_use)
+                .expect("foreach definition");
+            assert_eq!(body_definition.len(), 1);
+            assert_eq!(
+                body_definition[0].range.start,
+                source.find(&format!("let enemy, {name}")).map_or_else(
+                    || source.find("let enemy").expect("enemy declaration") + "let ".len(),
+                    |start| start + "let enemy, ".len(),
+                )
+            );
+
+            let after_use = source.rfind(name).expect("after-loop use");
+            let after_definition = service
+                .definition(&path_text, after_use)
+                .expect("after-loop definition");
+            assert_eq!(after_definition.len(), 1);
+            assert_eq!(
+                after_definition[0].range.start,
+                source
+                    .find(&format!("global {name}"))
+                    .expect("global declaration")
+                    + "global ".len()
+            );
+        }
     }
 
     #[test]
