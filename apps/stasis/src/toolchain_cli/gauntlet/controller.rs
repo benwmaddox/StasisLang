@@ -5,7 +5,9 @@ use super::{
     GauntletScenarioRequirement, GAUNTLET_SCHEMA_VERSION, MAX_GOAL_BYTES, MAX_REFERENCE_BYTES,
 };
 use crate::toolchain_cli::live_tui;
-use crate::toolchain_cli::{CommandResult, Workspace};
+use crate::toolchain_cli::{
+    load_workspace_with_vendor_gate, CommandResult, VendorGate, Workspace,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -624,6 +626,24 @@ pub(super) fn resume(
         &project_root,
         state.best_commit.as_deref().unwrap_or(&state.base_commit),
     )?;
+    let accepted_before_vendor_sync = state.best_commit.clone();
+    let resumed_workspace =
+        load_workspace_with_vendor_gate(Some(&project_root), VendorGate::Inspect)?;
+    sync_vendor_checkpoint(&resumed_workspace)?;
+    require_clean_checkout(&project_root)?;
+    let resumed_checkpoint = git_stdout(&project_root, &["rev-parse", "HEAD"])?;
+    if accepted_before_vendor_sync.as_deref() != Some(resumed_checkpoint.as_str()) {
+        state.best_commit = Some(resumed_checkpoint.clone());
+        emit_event(
+            &artifacts,
+            "vendor_checkpoint_advanced",
+            json!({
+                "previous_commit": accepted_before_vendor_sync,
+                "commit": resumed_checkpoint,
+                "reason": "resume synchronized the controller-owned Stasis vendor snapshot",
+            }),
+        )?;
+    }
     let stop = artifacts.join(STOP_NAME);
     if stop.exists() {
         fs::remove_file(&stop)

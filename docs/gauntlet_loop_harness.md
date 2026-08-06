@@ -162,6 +162,14 @@ override one run without rewriting the project configuration. The goal and
 frozen bar cannot be weakened after editing begins. Tests or stricter checks
 may be added, but accepted requirements cannot be removed.
 
+Fresh runs and resumed runs synchronize the controller-owned vendored Stasis
+snapshot before agent work. When a resume uses a newer toolchain, Gauntlet
+commits that vendor update, advances `best_commit` to the infrastructure
+checkpoint, and verifies the checkout is clean before running project tests.
+Later rejection therefore restores both the last accepted game and the exact
+vendor used to evaluate it instead of leaving `stasis.json` dirty or rolling
+back across a toolchain upgrade.
+
 Required scenarios remain gameplay requirements when `taps` is omitted. Up to
 four scenarios may also contain one to eight deterministic pointer taps. For
 both the accepted baseline and each newly active candidate, the controller runs
