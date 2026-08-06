@@ -20,6 +20,9 @@ const DEFAULT_STALLED_CANDIDATES: u32 = 5;
 const DEFAULT_BUILDER_MAX_TURNS: u32 = 30;
 const DEFAULT_MODEL_TIMEOUT_MINUTES: u32 = 30;
 const MAX_MODEL_TIMEOUT_MINUTES: u32 = 120;
+const MAX_CAPTURE_SCENARIOS: usize = 4;
+const MAX_SCENARIO_TAPS: usize = 8;
+const MAX_SCENARIO_TICKS_AFTER: u32 = 300;
 const MAX_GOAL_BYTES: u64 = 256 * 1024;
 const MAX_REFERENCE_BYTES: u64 = 16 * 1024 * 1024;
 const GAUNTLET_UI_FONT_BYTES: &[u8] =
@@ -117,6 +120,21 @@ pub(super) struct GauntletReference {
 pub(super) struct GauntletScenarioRequirement {
     pub id: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taps: Vec<GauntletScenarioTap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GauntletScenarioTap {
+    pub x: i32,
+    pub y: i32,
+    #[serde(default = "default_scenario_ticks_after")]
+    pub ticks_after: u32,
+}
+
+const fn default_scenario_ticks_after() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -409,9 +427,53 @@ impl GauntletConfigV1 {
             validate_relative_path("reference path", Path::new(&reference.path))?;
             validate_sha256(&reference.sha256)?;
         }
+        let capture_scenarios = self
+            .quality_bar
+            .required_scenarios
+            .iter()
+            .filter(|scenario| !scenario.taps.is_empty())
+            .count();
+        if capture_scenarios > MAX_CAPTURE_SCENARIOS {
+            return Err(format!(
+                "Gauntlet supports at most {MAX_CAPTURE_SCENARIOS} required scenarios with capture taps"
+            ));
+        }
+        let mut scenario_ids = std::collections::HashSet::new();
         for scenario in &self.quality_bar.required_scenarios {
             if scenario.id.trim().is_empty() || scenario.description.trim().is_empty() {
                 return Err("Gauntlet scenarios require non-empty id and description".to_string());
+            }
+            if scenario.id.len() > 64
+                || !scenario.id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                })
+            {
+                return Err(
+                    "Gauntlet scenario ids must be portable ASCII names up to 64 characters"
+                        .to_string(),
+                );
+            }
+            if !scenario_ids.insert(scenario.id.as_str()) {
+                return Err("Gauntlet scenario ids must be unique".to_string());
+            }
+            if scenario.taps.len() > MAX_SCENARIO_TAPS {
+                return Err(format!(
+                    "Gauntlet scenario {} exceeds {MAX_SCENARIO_TAPS} taps",
+                    scenario.id
+                ));
+            }
+            for tap in &scenario.taps {
+                if tap.x < 0
+                    || tap.y < 0
+                    || tap.x > 16_384
+                    || tap.y > 16_384
+                    || !(1..=MAX_SCENARIO_TICKS_AFTER).contains(&tap.ticks_after)
+                {
+                    return Err(format!(
+                        "Gauntlet scenario {} taps require coordinates between 0 and 16384 and ticks_after between 1 and {MAX_SCENARIO_TICKS_AFTER}",
+                        scenario.id
+                    ));
+                }
             }
         }
         Ok(())
@@ -1014,6 +1076,50 @@ mod tests {
         config.models.scout.model = Some("gpt-5.6-luna".to_string());
         config.models.scout.timeout_minutes = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_validates_deterministic_capture_scenarios() {
+        let mut config = GauntletConfigV1::new(true, Vec::new(), 8, 100, GauntletObserver::Auto)
+            .expect("config");
+        config.quality_bar.required_scenarios = vec![GauntletScenarioRequirement {
+            id: "select-unit".to_string(),
+            description: "Select a ready friendly unit".to_string(),
+            taps: vec![GauntletScenarioTap {
+                x: 150,
+                y: 382,
+                ticks_after: 2,
+            }],
+        }];
+        assert!(config.validate().is_ok());
+
+        config
+            .quality_bar
+            .required_scenarios
+            .push(config.quality_bar.required_scenarios[0].clone());
+        assert!(config
+            .validate()
+            .expect_err("duplicate scenario")
+            .contains("unique"));
+        config.quality_bar.required_scenarios.pop();
+
+        config.quality_bar.required_scenarios[0].taps[0].ticks_after = 0;
+        assert!(config
+            .validate()
+            .expect_err("zero ticks")
+            .contains("ticks_after"));
+        config.quality_bar.required_scenarios[0].taps[0].ticks_after = 1;
+        config.quality_bar.required_scenarios[0].taps[0].x = -1;
+        assert!(config
+            .validate()
+            .expect_err("negative coordinate")
+            .contains("coordinates"));
+        config.quality_bar.required_scenarios[0].taps[0].x = 150;
+        config.quality_bar.required_scenarios[0].id = "../select".to_string();
+        assert!(config
+            .validate()
+            .expect_err("nonportable id")
+            .contains("portable ASCII"));
     }
 
     #[test]

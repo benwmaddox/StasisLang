@@ -112,7 +112,21 @@ The project root contains a strict, versioned `gauntlet.json`:
   "quality_bar": {
     "allow_web_discovery": true,
     "references": [],
-    "required_scenarios": []
+    "required_scenarios": [
+      {
+        "id": "select-unit",
+        "description": "A ready friendly unit is selected and legal movement is visible.",
+        "taps": [{"x": 150, "y": 382, "ticks_after": 2}]
+      },
+      {
+        "id": "move-unit",
+        "description": "The selected unit moves to a legal destination and feedback remains visible.",
+        "taps": [
+          {"x": 150, "y": 382, "ticks_after": 1},
+          {"x": 235, "y": 382, "ticks_after": 8}
+        ]
+      }
+    ]
   },
   "budget": {
     "wall_time_minutes": 480,
@@ -147,6 +161,17 @@ and invalid references fail before starting a model call. CLI budget flags
 override one run without rewriting the project configuration. The goal and
 frozen bar cannot be weakened after editing begins. Tests or stricter checks
 may be added, but accepted requirements cannot be removed.
+
+Required scenarios remain gameplay requirements when `taps` is omitted. Up to
+four scenarios may also contain one to eight deterministic pointer taps. The
+controller restores the same validation snapshot before each scenario, replays
+the taps in order, and captures the final rendered frame for both the accepted
+checkpoint and every candidate. `ticks_after` defaults to 1 and may be 1-300,
+allowing staged movement or feedback to settle without wall-clock timing. Leads
+and blind critics receive identically ordered, named scenario frames alongside
+the initial and fixed-probe pair, so selection, movement, targeting, endings,
+and other project-specific states can be judged from pixels rather than inferred
+from tests.
 
 Ordinary `stasis ai` retains its 15-turn default. Gauntlet builders default to
 30 turns and may be configured from 1 through 48, still bounded by the run's
@@ -291,6 +316,9 @@ build/gauntlet/<run-id>/
   usage.jsonl
   references/manifest.json
   artifacts/<candidate-id>/
+    frame.png
+  artifacts/<candidate-id>-scenario-<scenario-id>/
+    frame.png
   checkpoints.json
   index.html
   stop.request
