@@ -8,9 +8,7 @@ function @extern("stasis_jit_render_v2_trace") native_render_trace(
 ): i32;
 
 global cmd_i32: i32[34608];
-
 global cmd_f32: f32[108676];
-
 global cmd_u8: u8[65536];
 
 function main(): i32 {

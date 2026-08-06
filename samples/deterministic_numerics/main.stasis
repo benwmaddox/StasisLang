@@ -115,15 +115,9 @@ function main(): i32 {
 }
 
 global byte_value: u8;
-
 global word_value: u16;
-
 global wide_value: u32;
-
 global byte_values: u8[2];
-
 global word_values: u16[2];
-
 global wide_values: u32[2];
-
 global foreach_words: u16[3];

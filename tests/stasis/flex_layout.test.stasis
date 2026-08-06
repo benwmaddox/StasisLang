@@ -1,13 +1,9 @@
 import "../../src/stdlib/flex_layout.stasis";
 
 global parent: f32[4];
-
 global rects: f32[16];
-
 global widths: f32[4];
-
 global heights: f32[4];
-
 global size: f32[2];
 
 function reset_parent(x: f32, y: f32, w: f32, h: f32): void {

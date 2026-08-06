@@ -8,29 +8,17 @@ import "stdlib.stasis";
 import "graphics.stasis";
 
 const FLEX_RECT_STRIDE: i32 = 4;
-
 const FLEX_RECT_X: i32 = 0;
-
 const FLEX_RECT_Y: i32 = 1;
-
 const FLEX_RECT_W: i32 = 2;
-
 const FLEX_RECT_H: i32 = 3;
-
 const FLEX_JUSTIFY_START: i32 = 0;
-
 const FLEX_JUSTIFY_CENTER: i32 = 1;
-
 const FLEX_JUSTIFY_END: i32 = 2;
-
 const FLEX_JUSTIFY_SPACE_BETWEEN: i32 = 3;
-
 const FLEX_ALIGN_START: i32 = 0;
-
 const FLEX_ALIGN_CENTER: i32 = 1;
-
 const FLEX_ALIGN_END: i32 = 2;
-
 const FLEX_ALIGN_STRETCH: i32 = 3;
 
 function flex_max_f32(a: f32, b: f32): f32 {

@@ -7,11 +7,8 @@
 //
 // Rect layout: [x, y, w, h]
 const HUD_RECT_X: i32 = 0;
-
 const HUD_RECT_Y: i32 = 1;
-
 const HUD_RECT_W: i32 = 2;
-
 const HUD_RECT_H: i32 = 3;
 
 // Clamp utility (avoid extra imports).

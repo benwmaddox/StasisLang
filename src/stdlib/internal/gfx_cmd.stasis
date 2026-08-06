@@ -13,106 +13,66 @@ const GFX_CMD_VERSION: i32 = 3;
 
 // i32 header indices
 const GFX_I_MAGIC: i32 = 0;
-
 const GFX_I_VERSION: i32 = 1;
-
 const GFX_I_FLAGS: i32 = 2;
-
 const GFX_I_LINE_COUNT: i32 = 3;
-
 const GFX_I_SPRITE_COUNT: i32 = 4;
-
 const GFX_I_DROPPED_LINES: i32 = 5;
-
 const GFX_I_DROPPED_SPRITES: i32 = 6;
-
 const GFX_I_TEXT_COUNT: i32 = 7;
-
 const GFX_I_DROPPED_TEXT: i32 = 8;
-
 const GFX_I_TEXT_BYTES_USED: i32 = 9;
 
 // Host-populated display metadata. Guest frame construction leaves these
 // reserved slots untouched; they are not part of the command trace.
 const GFX_I_LOGICAL_W: i32 = 10;
-
 const GFX_I_LOGICAL_H: i32 = 11;
-
 const GFX_I_NATIVE_W: i32 = 12;
-
 const GFX_I_NATIVE_H: i32 = 13;
-
 const GFX_I_DRAWABLE_W: i32 = 14;
-
 const GFX_I_DRAWABLE_H: i32 = 15;
-
 const GFX_I_SAFE_X: i32 = 16;
-
 const GFX_I_SAFE_Y: i32 = 17;
-
 const GFX_I_SAFE_W: i32 = 18;
-
 const GFX_I_SAFE_H: i32 = 19;
-
 const GFX_I_DISPLAY_GENERATION: i32 = 20;
-
 const GFX_I_DENSITY_GENERATION: i32 = 21;
-
 const GFX_I_ORDER_COUNT: i32 = 22;
-
 const GFX_I_DROPPED_ORDER: i32 = 23;
-
 const GFX_I_SPRITE_BASE: i32 = 32;
-
 const GFX_I_ORDER_BASE: i32 = 18464;
 
 // flags
 const GFX_FLAG_CLEAR: i32 = 1;
-
 const GFX_FLAG_PRESENT: i32 = 2;
 
 // capacities (must match runtime clamp in `stasis_gfx_submit`)
 const GFX_MAX_LINES: i32 = 10000;
-
 const GFX_LINE_STRIDE_F32: i32 = 8;
-
 const GFX_MAX_SPRITES: i32 = 4096;
-
 const GFX_SPRITE_STRIDE_I32: i32 = 3; // handle,rot_deg,a
 
 const GFX_SPRITE_STRIDE_F32: i32 = 4; // x,y,w,h
 
 const GFX_MAX_TEXT: i32 = 2048;
-
 const GFX_TEXT_STRIDE_I32: i32 = 3; // font, byte_offset, byte_len
 
 const GFX_TEXT_STRIDE_F32: i32 = 6; // x,y,r,g,b,a
 
 const GFX_TEXT_MAX_BYTES: i32 = 65536;
-
 const GFX_MAX_ORDER: i32 = 16144;
-
 const GFX_ORDER_KIND_SCALE: i32 = 16384;
-
 const GFX_ORDER_LINE: i32 = 1;
-
 const GFX_ORDER_SPRITE: i32 = 2;
-
 const GFX_ORDER_TEXT: i32 = 3;
 
 // f32 layout
 const GFX_F_CLEAR_R: i32 = 0;
-
 const GFX_F_CLEAR_G: i32 = 1;
-
 const GFX_F_CLEAR_B: i32 = 2;
-
 const GFX_F_CLEAR_A: i32 = 3;
-
 const GFX_F_LINE_BASE: i32 = 4;
-
 const GFX_F_SPRITE_BASE: i32 = 80004;
-
 const GFX_F_TEXT_BASE: i32 = 96388;
 
 // NOTE: Array sizes must be integer literals in Stasis today.
@@ -122,9 +82,7 @@ const GFX_F_TEXT_BASE: i32 = 96388;
 const GFX_I_TEXT_BASE: i32 = 12320;
 
 global gfx_cmd_i32: i32[34608];
-
 global gfx_cmd_f32: f32[108676];
-
 global gfx_cmd_u8: u8[65536];
 
 // Begin a new frame, resetting all counts (typical immediate-mode usage).

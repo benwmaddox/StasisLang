@@ -1,7 +1,6 @@
 import "../../src/stdlib/stdlib.stasis";
 
 global ascii_msg: ascii[32];
-
 global utf8_msg: utf8[32];
 
 function main(): i32 {

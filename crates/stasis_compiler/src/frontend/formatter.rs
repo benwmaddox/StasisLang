@@ -38,6 +38,7 @@ impl Token {
 enum BraceKind {
     Block,
     Enum,
+    Function,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -491,6 +492,7 @@ fn matched_operator_width(bytes: &[u8]) -> usize {
 fn render(tokens: &[Token]) -> Result<String, String> {
     let mut writer = Writer::default();
     let mut braces = Vec::<BraceKind>::new();
+    let mut brace_content = Vec::<bool>::new();
     let mut parens = Vec::<ParenContext>::new();
     let mut bracket_depth = 0usize;
     let mut last_significant: Option<&Token> = None;
@@ -499,14 +501,36 @@ fn render(tokens: &[Token]) -> Result<String, String> {
     let mut enum_member_started = false;
     let mut top_level_kind: Option<String> = None;
     let mut top_level_has_enum = false;
+    let mut top_level_has_function_body = false;
 
     let mut index = 0usize;
     while index < tokens.len() {
         let token = &tokens[index];
 
-        if token.blank_before && !writer.line_is_empty() && token.is_comment() {
+        let inside_function = braces.contains(&BraceKind::Function);
+        let between_function_items = inside_function && brace_content.last() == Some(&true);
+        let top_level_comment_boundary = braces.is_empty()
+            && token.blank_before
+            && (token.is_comment()
+                || index
+                    .checked_sub(1)
+                    .and_then(|previous| tokens.get(previous))
+                    .is_some_and(Token::is_comment));
+        if !token.is_symbol("}") {
+            if let Some(content) = brace_content.last_mut() {
+                *content = true;
+            }
+        }
+        if top_level_comment_boundary {
             writer.blank_line();
-        } else if token.blank_before
+        } else if between_function_items
+            && token.blank_before
+            && !writer.line_is_empty()
+            && token.is_comment()
+        {
+            writer.blank_line();
+        } else if between_function_items
+            && token.blank_before
             && !token.is_symbol("}")
             && writer.line_is_empty()
             && !writer.output.ends_with("\n\n")
@@ -527,10 +551,11 @@ fn render(tokens: &[Token]) -> Result<String, String> {
                 && last_significant
                     .is_some_and(|previous| previous.is_symbol(";") || previous.is_symbol("}"))
             {
-                if !keeps_import_group(tokens, index + 1, top_level_kind.as_deref()) {
+                if !keeps_top_level_group(tokens, index + 1, top_level_kind.as_deref()) {
                     writer.blank_line();
                     top_level_kind = None;
                     top_level_has_enum = false;
+                    top_level_has_function_body = false;
                 }
             } else if last_significant.is_some_and(is_operator) {
                 writer.extra_indent_once = 1;
@@ -563,10 +588,11 @@ fn render(tokens: &[Token]) -> Result<String, String> {
                     && last_significant
                         .is_some_and(|previous| previous.is_symbol(";") || previous.is_symbol("}"))
                 {
-                    if !keeps_import_group(tokens, index + 1, top_level_kind.as_deref()) {
+                    if !keeps_top_level_group(tokens, index + 1, top_level_kind.as_deref()) {
                         writer.blank_line();
                         top_level_kind = None;
                         top_level_has_enum = false;
+                        top_level_has_function_body = false;
                     }
                 }
             } else {
@@ -595,6 +621,13 @@ fn render(tokens: &[Token]) -> Result<String, String> {
         if braces.is_empty() && parens.is_empty() && bracket_depth == 0 && token.is_word("enum") {
             top_level_has_enum = true;
         }
+        if braces.is_empty()
+            && parens.is_empty()
+            && bracket_depth == 0
+            && (token.is_word("function") || token.is_word("test"))
+        {
+            top_level_has_function_body = true;
+        }
 
         if token.is_symbol("{") {
             if !writer.line_is_empty() {
@@ -605,10 +638,13 @@ fn render(tokens: &[Token]) -> Result<String, String> {
             let kind = if top_level_has_enum && braces.is_empty() {
                 enum_member_started = false;
                 BraceKind::Enum
+            } else if braces.is_empty() && top_level_has_function_body {
+                BraceKind::Function
             } else {
                 BraceKind::Block
             };
             braces.push(kind);
+            brace_content.push(false);
             if !has_attached_line_comment(tokens, index + 1) {
                 writer.newline();
             }
@@ -625,6 +661,12 @@ fn render(tokens: &[Token]) -> Result<String, String> {
             let closed = braces
                 .pop()
                 .ok_or_else(|| "unmatched closing brace".to_string())?;
+            brace_content
+                .pop()
+                .ok_or_else(|| "unmatched closing brace content".to_string())?;
+            if let Some(content) = brace_content.last_mut() {
+                *content = true;
+            }
             writer.write("}");
             if closed == BraceKind::Enum {
                 enum_member_started = false;
@@ -638,6 +680,7 @@ fn render(tokens: &[Token]) -> Result<String, String> {
                         writer.blank_line();
                         top_level_kind = None;
                         top_level_has_enum = false;
+                        top_level_has_function_body = false;
                     } else {
                         writer.newline();
                     }
@@ -720,14 +763,12 @@ fn render(tokens: &[Token]) -> Result<String, String> {
             } else if !has_attached_comment(tokens, index + 1) {
                 writer.newline();
                 if braces.is_empty() {
-                    let next_kind = next_top_level_word(tokens, index + 1);
-                    let keep_grouped = matches!(top_level_kind.as_deref(), Some("import"))
-                        && next_kind.as_deref() == Some("import");
-                    if !keep_grouped {
+                    if !keeps_top_level_group(tokens, index + 1, top_level_kind.as_deref()) {
                         writer.blank_line();
                     }
                     top_level_kind = None;
                     top_level_has_enum = false;
+                    top_level_has_function_body = false;
                 }
             }
             last_significant = Some(token);
@@ -819,15 +860,30 @@ fn has_attached_line_comment(tokens: &[Token], index: usize) -> bool {
         .is_some_and(|token| token.kind == TokenKind::LineComment && !token.newline_before)
 }
 
-fn next_top_level_word(tokens: &[Token], start: usize) -> Option<String> {
-    next_significant(tokens, start)
-        .filter(|token| token.kind == TokenKind::Word)
-        .map(|token| token.text.clone())
-}
-
-fn keeps_import_group(tokens: &[Token], start: usize, top_level_kind: Option<&str>) -> bool {
-    top_level_kind == Some("import")
-        && next_top_level_word(tokens, start).as_deref() == Some("import")
+fn keeps_top_level_group(tokens: &[Token], start: usize, current_kind: Option<&str>) -> bool {
+    let Some(current_kind) = current_kind else {
+        return false;
+    };
+    let mut next = tokens
+        .iter()
+        .enumerate()
+        .skip(start)
+        .filter(|(_, token)| !token.is_comment());
+    let Some((_, first)) = next.next() else {
+        return false;
+    };
+    if first.kind != TokenKind::Word || first.text != current_kind {
+        return false;
+    }
+    for (_, token) in next {
+        if token.is_symbol("{") {
+            return false;
+        }
+        if token.is_symbol(";") {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_unary_operator(token: &Token, previous: Option<&Token>) -> bool {
@@ -1028,6 +1084,14 @@ mod tests {
         let expected = windows_line_endings(
             "enum Phase {\n    Ready,\n    Running = 4, // active\n    Finished, /* done */\n}\n",
         );
+        assert_eq!(format_source(source).expect("format"), expected);
+        assert_eq!(format_source(&expected).expect("reformat"), expected);
+    }
+
+    #[test]
+    fn groups_globals_and_fields_and_keeps_braced_items_separated() {
+        let source = "global first:i32;\n\n\nglobal second:i32;\n\nstruct Pair {\n    left:i32;\n\n    right:i32;\n}\n\n// entry\n\nexport function main():i32 {\n\n    // setup\n\n    let value:i32=first;\n\n\n    value+=second;\n\n    return value;\n\n}\n\ntest `pair total`():bool {\n    let total:i32=main();\n\n    if(total>0){\n\n        return true;\n    }\n\n\n    return total>=0;\n}\n";
+        let expected = windows_line_endings("global first: i32;\nglobal second: i32;\n\nstruct Pair {\n    left: i32;\n    right: i32;\n}\n\n// entry\n\nexport function main(): i32 {\n    // setup\n\n    let value: i32 = first;\n\n    value += second;\n\n    return value;\n}\n\ntest `pair total`(): bool {\n    let total: i32 = main();\n\n    if (total > 0) {\n        return true;\n    }\n\n    return total >= 0;\n}\n");
         assert_eq!(format_source(source).expect("format"), expected);
         assert_eq!(format_source(&expected).expect("reformat"), expected);
     }

@@ -1,19 +1,12 @@
 import "placement.stasis";
 
 global menu_title_x: f32;
-
 global menu_title_y: f32;
-
 global menu_button_x: f32;
-
 global menu_button_y: f32;
-
 global menu_button_w: f32;
-
 global menu_button_h: f32;
-
 global menu_label_x: f32;
-
 global menu_label_y: f32;
 
 function menu_layout(safe_x: f32, safe_y: f32, safe_w: f32, safe_h: f32, title_w: f32, label_w: f32): void {

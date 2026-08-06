@@ -35,7 +35,6 @@ struct GfxState {
     sprites_i32: i32[768];
     sprites_f32: f32[1024];
     sprite_count: i32;
-
     // Packed line stream: [x1,y1,x2,y2,r,g,b,a] * 512
     lines_f32: f32[4096];
     line_count: i32;

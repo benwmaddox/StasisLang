@@ -2179,10 +2179,8 @@ mod tests {
     fn standard_inlay_hints_return_inferred_types_and_parameter_names() {
         let (mut server, uri, main_path) = test_server("inlay-hints");
         let (server_connection, client_connection) = Connection::memory();
-        server.service.set_disk_document(
-            &main_path,
-            "function add(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { let total = add(1, 2); return total; }\n",
-        );
+        let source = "struct Player { score: i32; }\nglobal player: Player;\nfunction boost(self: Player, amount: i32, bonus: i32): void { self.score += amount + bonus; }\nfunction main(): i32 { let total = 0; player.boost(1, 2); return total; }\n";
+        server.service.set_disk_document(&main_path, source);
         server
             .handle_request(
                 &server_connection,
@@ -2193,7 +2191,7 @@ mod tests {
                         "textDocument": {"uri": uri},
                         "range": {
                             "start": {"line": 0, "character": 0},
-                            "end": {"line": 2, "character": 0}
+                            "end": {"line": 4, "character": 0}
                         }
                     }),
                 ),
@@ -2218,6 +2216,18 @@ mod tests {
             hint.kind == Some(InlayHintKind::PARAMETER)
                 && matches!(&hint.label, InlayHintLabel::String(label) if label == "bonus:")
         }));
+        let call_line = source.lines().nth(3).expect("receiver call line");
+        let call_start = call_line.find("player.boost(").expect("receiver call");
+        for (relative, label) in [
+            ("player.boost(".len(), "amount:"),
+            ("player.boost(1, ".len(), "bonus:"),
+        ] {
+            let character = (call_start + relative) as u32;
+            assert!(hints.iter().any(|hint| {
+                hint.position == lsp_types::Position::new(3, character)
+                    && matches!(&hint.label, InlayHintLabel::String(actual) if actual == label)
+            }));
+        }
     }
 
     #[test]
