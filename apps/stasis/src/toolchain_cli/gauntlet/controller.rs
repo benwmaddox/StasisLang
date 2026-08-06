@@ -1080,8 +1080,7 @@ fn controller_loop(
         state.phase = GauntletRunPhase::Building;
         state.current_workstream = Some(decision.workstream.clone());
         persist_state(artifacts, &mut state)?;
-        let remaining_calls = config.budget.model_calls.saturating_sub(state.model_calls);
-        let builder_calls = remaining_calls.saturating_sub(2);
+        let builder_calls = builder_turn_allowance(&config, state.model_calls);
         if builder_calls == 0 {
             finish(
                 &mut state,
@@ -1157,12 +1156,13 @@ fn controller_loop(
                 failure,
             )?;
             latest_failure_evidence = Some(primary_failure_evidence.clone());
-            if let Some(escalation) = config
+            let rescue_calls = builder_turn_allowance(&config, state.model_calls);
+            let escalation = config
                 .models
                 .builder_escalation
                 .as_ref()
-                .filter(|_| should_escalate_builder(failure, &canceled))
-            {
+                .filter(|_| should_escalate_builder(failure, &canceled));
+            if let Some(escalation) = escalation.filter(|_| rescue_calls > 0) {
                 rollback_candidate(
                     &project_root,
                     state.best_commit.as_deref().unwrap_or(&state.base_commit),
@@ -1176,7 +1176,7 @@ fn controller_loop(
                         "to_model": escalation.model,
                         "reason": failure.message,
                         "evidence": primary_failure_evidence,
-                        "fresh_turn_allowance": config.execution.builder_max_turns,
+                        "fresh_turn_allowance": rescue_calls,
                     }),
                 )?;
                 append_decision(
@@ -1198,7 +1198,7 @@ fn controller_loop(
                     &candidate_id,
                     "escalation",
                     escalation,
-                    fresh_builder_escalation_calls(&config),
+                    rescue_calls,
                 )?;
                 completed_attempt = "escalation";
                 outcome = run_builder(
@@ -1206,7 +1206,7 @@ fn controller_loop(
                     "Escalated Stasis Gauntlet builder",
                     escalation_instruction,
                     &rescue_prompt,
-                    fresh_builder_escalation_calls(&config),
+                    rescue_calls,
                 );
                 if let Err(failure) = &outcome {
                     latest_failure_evidence = Some(record_builder_attempt_failure(
@@ -1218,6 +1218,16 @@ fn controller_loop(
                         failure,
                     )?);
                 }
+            } else if escalation.is_some() && rescue_calls == 0 {
+                emit_event(
+                    artifacts,
+                    "builder_escalation_skipped",
+                    json!({
+                        "candidate": candidate_id,
+                        "reason": "model-call budget cannot fund a rescue builder plus both independent critics",
+                        "remaining_calls": config.budget.model_calls.saturating_sub(state.model_calls),
+                    }),
+                )?;
             }
         }
         match outcome {
@@ -2701,8 +2711,13 @@ fn should_escalate_builder(failure: &live_tui::ScriptedAiFailure, canceled: &Ato
     !canceled.load(Ordering::Acquire) && failure.message != "AI request canceled"
 }
 
-fn fresh_builder_escalation_calls(config: &GauntletConfigV1) -> u32 {
-    config.execution.builder_max_turns
+fn builder_turn_allowance(config: &GauntletConfigV1, used_calls: u32) -> u32 {
+    config
+        .budget
+        .model_calls
+        .saturating_sub(used_calls)
+        .saturating_sub(2)
+        .min(config.execution.builder_max_turns)
 }
 
 fn emit_builder_attempt_started(
@@ -4319,11 +4334,21 @@ mod tests {
 
     #[test]
     fn builder_escalation_gets_a_fresh_turn_allowance() {
+        let mut config = GauntletConfigV1::new(false, Vec::new(), 8, 100, GauntletObserver::Jsonl)
+            .expect("config");
+        config.execution.builder_max_turns = 30;
+
+        assert_eq!(builder_turn_allowance(&config, 40), 30);
+    }
+
+    #[test]
+    fn builder_allowance_reserves_both_critic_calls() {
         let mut config = GauntletConfigV1::new(false, Vec::new(), 8, 12, GauntletObserver::Jsonl)
             .expect("config");
         config.execution.builder_max_turns = 30;
 
-        assert_eq!(fresh_builder_escalation_calls(&config), 30);
+        assert_eq!(builder_turn_allowance(&config, 7), 3);
+        assert_eq!(builder_turn_allowance(&config, 10), 0);
     }
 
     #[test]
