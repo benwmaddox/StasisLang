@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stasis::{run_live_in_process, LiveRunConfig};
 use stasis_ai::{AgentCompactionPolicy, AgentProfile, CodexExecProvider, ModelProvider};
+use stasis_assets::{
+    load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
+};
 use stasis_runner::live::{
     live_session, LiveCommand, LivePointerInput, LiveRequest, LiveResponse, LiveSessionClient,
 };
@@ -2661,7 +2664,7 @@ fn rollback_candidate(root: &Path, commit: &str) -> Result<(), String> {
             ".",
         ],
     )?;
-    clear_rejected_runtime_cache(root)?;
+    resync_accepted_runtime_assets(root)?;
     let untracked = git_stdout(root, &["ls-files", "--others", "--exclude-standard"])?;
     for relative in untracked.lines().filter(|line| !line.trim().is_empty()) {
         let path = root.join(relative);
@@ -2681,17 +2684,13 @@ fn rollback_candidate(root: &Path, commit: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn clear_rejected_runtime_cache(root: &Path) -> Result<(), String> {
+fn resync_accepted_runtime_assets(root: &Path) -> Result<(), String> {
     let prepared = root.join(".stasis_cache/play-assets");
-    if prepared.exists() {
-        fs::remove_dir_all(&prepared).map_err(|error| {
-            format!(
-                "failed clearing rejected prepared assets {}: {error}",
-                prepared.display()
-            )
-        })?;
-    }
-    Ok(())
+    let resolved = load_project_asset_manifest(root, AssetLimits::default())
+        .map_err(|error| format!("failed resolving accepted assets after rollback: {error}"))?;
+    prepare_asset_bundle(&resolved, &prepared, root.join(".stasis_cache/assets"))
+        .map(|_| ())
+        .map_err(|error| format!("failed restoring accepted prepared assets: {error}"))
 }
 
 fn builder_agent_profile(
@@ -3690,13 +3689,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn candidate_rollback_clears_only_the_prepared_runtime_cache() {
+    fn candidate_rollback_resyncs_prepared_manifest_without_deleting_live_cache() {
         let root = std::env::temp_dir().join(format!(
             "stasis_gauntlet_rollback_cache_{}_{}",
             std::process::id(),
             unix_ms()
         ));
         let prepared_asset = root.join(".stasis_cache/play-assets/assets/generated/rejected.png");
+        let project_manifest = root.join(DEFAULT_ASSET_MANIFEST_PATH);
+        let prepared_manifest = root
+            .join(".stasis_cache/play-assets")
+            .join(DEFAULT_ASSET_MANIFEST_PATH);
         let toolchain_marker = root.join(".stasis_cache/toolchain/keep.txt");
         fs::create_dir_all(prepared_asset.parent().expect("prepared parent"))
             .expect("prepared directory");
@@ -3704,10 +3707,23 @@ mod tests {
             .expect("toolchain directory");
         fs::write(&prepared_asset, b"rejected").expect("prepared asset");
         fs::write(&toolchain_marker, b"keep").expect("toolchain marker");
+        fs::create_dir_all(project_manifest.parent().expect("manifest parent"))
+            .expect("manifest directory");
+        fs::write(
+            &project_manifest,
+            br#"{"schema":"stasis-assets","version":2,"assets":[]}"#,
+        )
+        .expect("project manifest");
+        fs::write(&prepared_manifest, b"rejected manifest").expect("prepared manifest");
 
-        clear_rejected_runtime_cache(&root).expect("clear rejected cache");
+        resync_accepted_runtime_assets(&root).expect("resync accepted cache");
 
-        assert!(!root.join(".stasis_cache/play-assets").exists());
+        assert!(prepared_asset.exists());
+        let restored: Value = serde_json::from_slice(
+            &fs::read(prepared_manifest).expect("restored prepared manifest"),
+        )
+        .expect("prepared manifest JSON");
+        assert_eq!(restored["assets"], json!([]));
         assert!(toolchain_marker.exists());
         let _ = fs::remove_dir_all(root);
     }
