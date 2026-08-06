@@ -283,7 +283,9 @@ When a replacement makes an older generated asset obsolete, the builder uses
 `delete_asset` in the same contiguous asset/source transaction. The tool removes
 the controlled file, its matching manifest entry, and any prepared-cache copy;
 all three are restored if the related source edit fails. Deletion precedes a
-replacement that reuses the same asset id.
+replacement that reuses the same asset id only when the obsolete path differs.
+A replacement at the same stable path is imported directly; the atomic write
+overwrites its file and manifest entry without a redundant delete call.
 
 For those authored-art workstreams, Gauntlet hides primitive SVG and
 shape-composed PNG tools and rejects completion until an ImageGen request has

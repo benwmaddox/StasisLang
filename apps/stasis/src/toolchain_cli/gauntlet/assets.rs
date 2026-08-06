@@ -53,7 +53,9 @@ pub(crate) fn apply_asset_calls(
         let relative = required_string(args, "path")?;
         let path = controlled_asset_path(project_root, &relative, call.tool.as_str())?;
         if !touched.insert(path.clone()) {
-            return Err(format!("asset path appears more than once: {relative}"));
+            return Err(format!(
+                "asset path appears more than once: {relative}; import directly when replacing the same stable path, and use delete_asset only when the obsolete path differs"
+            ));
         }
         match call.tool.as_str() {
             "write_svg_asset" => {
