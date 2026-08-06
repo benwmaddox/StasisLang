@@ -143,6 +143,21 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
     .expect("write LSP manifest");
     let source_path = project.join("src/main.stasis");
     fs::write(&source_path, "function main(): i32 { return 0; }\n").expect("write LSP source");
+    let stale_cache = project.join(".stasis_cache/toolchain/stale.bin");
+    fs::create_dir_all(stale_cache.parent().expect("stale cache parent"))
+        .expect("create stale cache fixture");
+    fs::write(&stale_cache, "stale").expect("write stale cache fixture");
+    let stale_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    fs::File::options()
+        .write(true)
+        .open(&stale_cache)
+        .expect("open stale cache fixture")
+        .set_times(
+            fs::FileTimes::new()
+                .set_accessed(stale_time)
+                .set_modified(stale_time),
+        )
+        .expect("age stale cache fixture");
     let uri = file_uri(&source_path);
     let fixed_source = "// Adds two values.\nfunction add_score(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { return add_score(1, 2); }\n";
     let input = [
@@ -220,6 +235,15 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         })),
         lsp_frame(json!({
             "jsonrpc": "2.0",
+            "id": 7,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 0 }
+            }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
             "id": 2,
             "method": "shutdown",
             "params": null
@@ -241,6 +265,7 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         String::from_utf8_lossy(&output.stderr)
     );
     let messages = lsp_messages(&output.stdout);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cache_cleanup_removed_files=1"));
     assert_eq!(messages[0]["id"], 1);
     assert_eq!(
         messages[0]["result"]["capabilities"]["positionEncoding"],
@@ -295,6 +320,12 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         hints.iter().any(|hint| hint["label"] == "amount:")
             && hints.iter().any(|hint| hint["label"] == "bonus:")
     }));
+    let definition_miss = messages
+        .iter()
+        .find(|message| message["id"] == 7)
+        .expect("definition response");
+    assert_eq!(definition_miss["result"], Value::Null);
+    assert!(definition_miss.get("error").is_none());
     assert!(messages
         .iter()
         .any(|message| message["id"] == 2 && message["result"].is_null()));
