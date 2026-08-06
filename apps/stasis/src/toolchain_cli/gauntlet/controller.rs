@@ -36,6 +36,7 @@ const STOP_NAME: &str = "stop.request";
 const HEARTBEAT_NAME: &str = "heartbeat.json";
 const QUALITY_BAR_NAME: &str = "quality-bar.json";
 const CREATIVE_DIRECTION_NAME: &str = "creative-direction.md";
+const PROJECT_CREATIVE_DIRECTION_NAME: &str = "CREATIVE_DIRECTION.md";
 const MAX_CAPTURE_WAIT: Duration = Duration::from_secs(10);
 const MAX_LIVE_REQUEST_WAIT: Duration = Duration::from_secs(30);
 const FINAL_ACCEPTANCES: u32 = 2;
@@ -205,6 +206,10 @@ struct FrozenBar {
     schema_version: u32,
     goal_sha256: String,
     goal: String,
+    #[serde(default)]
+    direction_source_markdown: String,
+    #[serde(default)]
+    direction_source_sha256: String,
     #[serde(default)]
     creative_direction: CreativeDirection,
     workstreams: Vec<String>,
@@ -848,7 +853,14 @@ fn controller_loop(
     let bar = if artifacts.join(QUALITY_BAR_NAME).is_file() {
         read_json(&artifacts.join(QUALITY_BAR_NAME))?
     } else {
-        let bar = match bootstrap_bar(&goal, &config, &mut state, artifacts, &canceled) {
+        let bar = match bootstrap_bar(
+            &goal,
+            &project_root,
+            &config,
+            &mut state,
+            artifacts,
+            &canceled,
+        ) {
             Ok(bar) => bar,
             Err(error) if canceled.load(Ordering::Acquire) => {
                 finish_canceled_or_budget(&mut state, artifacts)?;
@@ -871,7 +883,7 @@ fn controller_loop(
         )?;
         bar
     };
-    write_creative_direction(artifacts, &bar.creative_direction)?;
+    write_creative_direction(artifacts, &bar)?;
     let reference_images = resolve_reference_images(
         &bar.references,
         &project_root,
@@ -1081,8 +1093,7 @@ fn controller_loop(
         } else {
             "ImageGen is optional for this logic or basic-interface workstream. Use primitive vectors for basic UI, simple icons, selection/range overlays, and deterministic fallbacks."
         };
-        let creative_direction = serde_json::to_string(&bar.creative_direction)
-            .map_err(|error| format!("failed encoding creative direction: {error}"))?;
+        let creative_direction = creative_direction_context(&bar)?;
         let prompt = format!(
             "Frozen game brief:\n{goal}\n\nAuthoritative creative direction (do not silently revise):\n{creative_direction}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nPlayability and visual-coherence direction for the accepted frame:\n{}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nAsset guidance: {asset_guidance}\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
             decision.workstream, decision.builder_prompt, decision.playability_guidance,
@@ -1595,11 +1606,27 @@ fn finish_canceled_or_budget(
 
 fn bootstrap_bar(
     goal: &str,
+    project_root: &Path,
     config: &GauntletConfigV1,
     state: &mut GauntletRunStateV1,
     artifacts: &Path,
     canceled: &AtomicBool,
 ) -> Result<FrozenBar, String> {
+    let direction_path = project_root.join(PROJECT_CREATIVE_DIRECTION_NAME);
+    let direction_source_markdown = if direction_path.is_file() {
+        read_bounded_utf8(
+            &direction_path,
+            MAX_GOAL_BYTES,
+            "project creative direction",
+        )?
+    } else {
+        String::new()
+    };
+    let direction_source_sha256 = if direction_source_markdown.is_empty() {
+        String::new()
+    } else {
+        hex_sha256(direction_source_markdown.as_bytes())
+    };
     let mut web_sources = Vec::new();
     if config.quality_bar.allow_web_discovery
         && config.budget.model_calls.saturating_sub(state.model_calls) >= 2
@@ -1643,7 +1670,8 @@ fn bootstrap_bar(
             )?,
         }
     }
-    let prior_direction = restore_prior_creative_direction(artifacts, goal)?;
+    let prior_direction =
+        restore_prior_creative_direction(artifacts, goal, &direction_source_sha256)?;
     let (creative_direction, workstreams) = if let Some((source_run, direction, workstreams)) =
         prior_direction
     {
@@ -1654,8 +1682,13 @@ fn bootstrap_bar(
         )?;
         (direction, workstreams)
     } else {
+        let source_instruction = if direction_source_markdown.is_empty() {
+            "No project-authored CREATIVE_DIRECTION.md was supplied; derive the direction faithfully from the immutable brief.".to_string()
+        } else {
+            format!("The project-authored CREATIVE_DIRECTION.md below is authoritative user direction. Produce a faithful structured operational digest; resolve omissions from the immutable brief but never contradict or weaken the source document.\n\n{direction_source_markdown}")
+        };
         let prompt = format!(
-            "Act as the creative director for an autonomous Stasis 2D game build. Turn the immutable brief into a durable direction bible that fresh agents can follow without drifting. Define the narrative promise and player fantasy; 3-8 concrete rule pillars; 3-8 visual-language rules covering hierarchy, faction/role/terrain recognition, authored imagery, motion, and mobile scale; 3-8 interaction-grammar rules covering visible current state, available actions, selection, legal movement/attack, feedback, end turn, and cancel/reselect; 2-6 progression/pacing rules; and 3-8 non-negotiables. Make these project-specific and operational rather than aspirational. Then decompose the direction into 4-10 independently improvable workstreams using short noun phrases. This direction is authoritative for the run and may not be silently rewritten by later builders. Return only the requested JSON.\n\n{goal}"
+            "Act as the creative director for an autonomous Stasis 2D game build. Turn the immutable brief and any project-authored direction into a durable direction bible that fresh agents can follow without drifting. Define the narrative promise and player fantasy; 3-8 concrete rule pillars; 3-8 visual-language rules covering hierarchy, faction/role/terrain recognition, authored imagery, motion, and mobile scale; 3-8 interaction-grammar rules covering visible current state, available actions, selection, legal movement/attack, feedback, end turn, and cancel/reselect; 2-6 progression/pacing rules; and 3-8 non-negotiables. Make these project-specific and operational rather than aspirational. Then decompose the direction into 4-10 independently improvable workstreams using short noun phrases. This direction is authoritative for the run and may not be silently rewritten by later builders. Return only the requested JSON.\n\nImmutable game brief:\n{goal}\n\n{source_instruction}"
         );
         let bootstrap = call_structured_role::<LeadBootstrap>(
             "quality_bar_lead",
@@ -1712,9 +1745,11 @@ fn bootstrap_bar(
         "Select the highest-value workstream from runtime evidence.",
     )?;
     Ok(FrozenBar {
-        schema_version: 2,
+        schema_version: 3,
         goal_sha256: hex_sha256(goal.as_bytes()),
         goal: goal.to_string(),
+        direction_source_markdown,
+        direction_source_sha256,
         creative_direction,
         workstreams,
         hard_gates: vec![
@@ -1753,6 +1788,7 @@ fn default_workstreams() -> Vec<String> {
 fn restore_prior_creative_direction(
     artifacts: &Path,
     goal: &str,
+    direction_source_sha256: &str,
 ) -> Result<Option<(String, CreativeDirection, Vec<String>)>, String> {
     let Some(runs) = artifacts.parent() else {
         return Ok(None);
@@ -1776,7 +1812,11 @@ fn restore_prior_creative_direction(
         let Ok(bar) = read_json::<FrozenBar>(&bar_path) else {
             continue;
         };
-        if bar.schema_version < 2 || bar.goal_sha256 != goal_sha256 || bar.workstreams.is_empty() {
+        if bar.schema_version < 2
+            || bar.goal_sha256 != goal_sha256
+            || bar.direction_source_sha256 != direction_source_sha256
+            || bar.workstreams.is_empty()
+        {
             continue;
         }
         let source_run = entry.file_name().to_string_lossy().to_string();
@@ -1785,7 +1825,7 @@ fn restore_prior_creative_direction(
     Ok(None)
 }
 
-fn write_creative_direction(artifacts: &Path, direction: &CreativeDirection) -> Result<(), String> {
+fn write_creative_direction(artifacts: &Path, bar: &FrozenBar) -> Result<(), String> {
     fn section(markdown: &mut String, heading: &str, values: &[String]) {
         markdown.push_str(&format!("## {heading}\n\n"));
         for value in values {
@@ -1794,27 +1834,60 @@ fn write_creative_direction(artifacts: &Path, direction: &CreativeDirection) -> 
         markdown.push('\n');
     }
 
-    let mut markdown = format!(
-        "# {}\n\nThis controller-owned direction is authoritative for this Gauntlet run. Builders may refine implementation, but must not silently change these commitments.\n\n## Narrative promise\n\n{}\n\n## Player fantasy\n\n{}\n\n",
+    let direction = &bar.creative_direction;
+    let mut markdown = "# Gauntlet Creative Direction Record\n\nThis controller-owned record is authoritative for this Gauntlet run. Builders may refine implementation, but must not silently change these commitments.\n\n".to_string();
+    if !bar.direction_source_markdown.is_empty() {
+        markdown.push_str("## Project-authored authority (verbatim)\n\n");
+        markdown.push_str(bar.direction_source_markdown.trim());
+        markdown.push_str("\n\n---\n\n");
+    }
+    markdown.push_str(&format!(
+        "## Structured director digest: {}\n\n### Narrative promise\n\n{}\n\n### Player fantasy\n\n{}\n\n",
         direction.title.trim(),
         direction.narrative_promise.trim(),
         direction.player_fantasy.trim(),
-    );
-    section(&mut markdown, "Rule pillars", &direction.rule_pillars);
-    section(&mut markdown, "Visual language", &direction.visual_language);
+    ));
     section(
         &mut markdown,
-        "Interaction grammar",
+        "Digest: rule pillars",
+        &direction.rule_pillars,
+    );
+    section(
+        &mut markdown,
+        "Digest: visual language",
+        &direction.visual_language,
+    );
+    section(
+        &mut markdown,
+        "Digest: interaction grammar",
         &direction.interaction_grammar,
     );
     section(
         &mut markdown,
-        "Progression and pacing",
+        "Digest: progression and pacing",
         &direction.progression_and_pacing,
     );
-    section(&mut markdown, "Non-negotiables", &direction.non_negotiables);
+    section(
+        &mut markdown,
+        "Digest: non-negotiables",
+        &direction.non_negotiables,
+    );
     fs::write(artifacts.join(CREATIVE_DIRECTION_NAME), markdown)
         .map_err(|error| format!("failed writing Gauntlet creative direction: {error}"))
+}
+
+fn creative_direction_context(bar: &FrozenBar) -> Result<String, String> {
+    let digest = serde_json::to_string(&bar.creative_direction)
+        .map_err(|error| format!("failed encoding creative direction: {error}"))?;
+    if bar.direction_source_markdown.is_empty() {
+        Ok(format!("Structured director digest:\n{digest}"))
+    } else {
+        Ok(format!(
+            "Project-authored authority (verbatim; sha256={}):\n{}\n\nStructured director digest:\n{digest}",
+            bar.direction_source_sha256,
+            bar.direction_source_markdown.trim(),
+        ))
+    }
 }
 
 fn requires_authored_imagegen(workstream: &str) -> bool {
@@ -1930,8 +2003,7 @@ fn lead_decision(
     let memory = decision_memory_snapshot(artifacts)?;
     let runtime_evidence = serde_json::to_string(&accepted.state)
         .map_err(|error| format!("failed encoding accepted runtime evidence: {error}"))?;
-    let creative_direction = serde_json::to_string(&bar.creative_direction)
-        .map_err(|error| format!("failed encoding creative direction: {error}"))?;
+    let creative_direction = creative_direction_context(bar)?;
     let prompt = format!(
         "Act as the fresh playability and visual-coherence director for a Stasis Gauntlet. The first two attached images are the latest accepted initial frame and its frame after the controller's fixed interaction probe; later images are optional quality references. The controller-owned creative direction below is authoritative: enforce and interpret it, but do not silently rewrite it. Use both frames together with runtime and passing-test evidence. First produce playability_guidance that teaches the next builder exactly how a new player should parse the grid and complete one turn: board and cell boundaries, meaningful terrain, faction and unit-role recognition, selection, legal movement, attack/counterattack preview, objective and economy, turn ownership, end turn, and cancel/reselect. Identify which relationships are unclear from evidence and whether the probe's result is visibly understandable; do not invent mechanics. Then choose exactly one highest-value next work item from the frozen workstreams whose builder prompt improves that comprehension and preserves already-readable relationships. Visual polish is valuable only when it strengthens this hierarchy. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{creative_direction}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nAccepted runtime and deterministic-test evidence:\n{runtime_evidence}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
         bar.workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
@@ -1985,7 +2057,7 @@ fn blind_critic(
     images.extend(references.iter().take(5).cloned());
     let prompt = format!(
         "You are a fresh read-only visual and screen-comprehension critic. The first four attached images are anonymous pairs in this exact order: A initial state, A after the controller's fixed input probe, B initial state, B after the same probe. Any later images are hashed quality references. You do not know which candidate is newer. Compare A and B relative to each other and against the frozen brief, authoritative creative direction, and references. Prefer a or b when one is visually better without an evidenced visual regression. Return equivalent when the image pairs are materially indistinguishable; incompleteness against the full brief is not a reason to return neither. Return neither only when both have different material regressions or the evidence is invalid. Scores are integers 0-100 and measure absolute quality against the frozen bar.\n\nFor each pair, independently answer four release-gate questions. current_state_clear means a new player can identify turn/faction, selection, relevant resources/objective, and important ownership or board state. available_actions_clear means the screen itself distinguishes selectable things and the next legal actions, including movement, attack, end turn, and cancel/reselect when relevant. board_semantics_clear means cells, traversable terrain, obstacles, factions, unit roles, structures, and tactical overlays have an understandable hierarchy. action_feedback_clear means comparison of initial and after-input frames makes the result of the fixed probe visible; if the probe caused no meaningful state change, the no-op or unchanged state must still be understandable rather than silently ambiguous. Set a boolean true only when the attached pixels provide affirmative evidence, not merely because runtime behavior may exist. Put concise observed evidence in each assessment. Identify one largest remaining gap that prioritizes failed comprehension questions over decorative polish. Do not discuss source code and return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{}\n\nWorkstreams: {}\nHard gates already passed: {}\n\nA runtime evidence after probe:\n{}\n\nB runtime evidence after probe:\n{}",
-        serde_json::to_string(&bar.creative_direction).map_err(|error| error.to_string())?,
+        creative_direction_context(bar)?,
         bar.workstreams.join(", "),
         bar.hard_gates.join(", "),
         serde_json::to_string(&scenario_a.state).map_err(|error| error.to_string())?,
@@ -2057,7 +2129,7 @@ fn gameplay_critic(
 ) -> Result<BlindCritique, String> {
     let prompt = format!(
         "You are a fresh read-only gameplay critic. Two anonymous candidates A and B were run from the same runtime snapshot for the same deterministic ticks, and the controller independently executed each candidate's durable Stasis tests. Judge behavioral improvement and regression relative to each other and the authoritative creative direction; the absolute scores still measure progress against the complete brief. Passing test names are behavioral evidence, not proof of the whole brief: weigh them with the runtime state, and do not infer behavior that neither source demonstrates. Prefer a or b when one has better behavioral evidence without an evidenced regression. Return equivalent whenever gameplay is materially unchanged, including when a visual-only improvement leaves gameplay intact or both remain equally incomplete. Never return neither merely because both fail the full brief. Return neither only when both have different material regressions or the evidence is invalid. Return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{}\n\nRequired scenarios: {}\n\nA evidence:\n{}\n\nB evidence:\n{}",
-        serde_json::to_string(&bar.creative_direction).map_err(|error| error.to_string())?,
+        creative_direction_context(bar)?,
         serde_json::to_string(&bar.required_scenarios).map_err(|error| error.to_string())?,
         serde_json::to_string(state_a).map_err(|error| error.to_string())?,
         serde_json::to_string(state_b).map_err(|error| error.to_string())?,
@@ -3577,6 +3649,8 @@ mod tests {
                 schema_version: 1,
                 goal_sha256: "0".repeat(64),
                 goal: "game".to_string(),
+                direction_source_markdown: String::new(),
+                direction_source_sha256: String::new(),
                 creative_direction: CreativeDirection::default(),
                 workstreams: vec!["HUD".to_string()],
                 hard_gates: Vec::new(),
@@ -3614,13 +3688,28 @@ mod tests {
             unix_ms()
         ));
         fs::create_dir_all(&root).expect("direction root");
-        let direction = CreativeDirection::default();
-        write_creative_direction(&root, &direction).expect("write direction");
+        let bar = FrozenBar {
+            schema_version: 3,
+            goal_sha256: "goal".to_string(),
+            goal: "game".to_string(),
+            direction_source_markdown: "# Authored direction\n\nKeep the board readable."
+                .to_string(),
+            direction_source_sha256: "source".to_string(),
+            creative_direction: CreativeDirection::default(),
+            workstreams: Vec::new(),
+            hard_gates: Vec::new(),
+            required_scenarios: Vec::new(),
+            references: Vec::new(),
+            web_sources: Vec::new(),
+            acceptance_score: 65,
+        };
+        write_creative_direction(&root, &bar).expect("write direction");
         let markdown =
             fs::read_to_string(root.join(CREATIVE_DIRECTION_NAME)).expect("read direction");
-        assert!(markdown.contains("## Narrative promise"));
-        assert!(markdown.contains("## Interaction grammar"));
-        assert!(markdown.contains("## Non-negotiables"));
+        assert!(markdown.contains("## Project-authored authority (verbatim)"));
+        assert!(markdown.contains("Keep the board readable."));
+        assert!(markdown.contains("### Narrative promise"));
+        assert!(markdown.contains("## Digest: interaction grammar"));
 
         let old_bar = r#"{"schema_version":1,"goal_sha256":"old","goal":"game","workstreams":[],"hard_gates":[],"required_scenarios":[],"references":[],"web_sources":[],"acceptance_score":65}"#;
         let restored: FrozenBar = serde_json::from_str(old_bar).expect("old bar restores");
@@ -3642,9 +3731,11 @@ mod tests {
         fs::create_dir_all(&current).expect("current run");
         let goal = "same immutable goal";
         let bar = FrozenBar {
-            schema_version: 2,
+            schema_version: 3,
             goal_sha256: hex_sha256(goal.as_bytes()),
             goal: goal.to_string(),
+            direction_source_markdown: "# Stable source".to_string(),
+            direction_source_sha256: "same-source".to_string(),
             creative_direction: CreativeDirection {
                 title: "Remembered direction".to_string(),
                 ..CreativeDirection::default()
@@ -3657,15 +3748,23 @@ mod tests {
             acceptance_score: 65,
         };
         write_json(&prior.join(QUALITY_BAR_NAME), &bar).expect("prior bar");
-        let (source, direction, workstreams) = restore_prior_creative_direction(&current, goal)
-            .expect("restore direction")
-            .expect("matching direction");
+        let (source, direction, workstreams) =
+            restore_prior_creative_direction(&current, goal, "same-source")
+                .expect("restore direction")
+                .expect("matching direction");
         assert_eq!(source, "100-prior");
         assert_eq!(direction.title, "Remembered direction");
         assert_eq!(workstreams, vec!["Readable turns"]);
-        assert!(restore_prior_creative_direction(&current, "different goal")
-            .expect("different goal lookup")
-            .is_none());
+        assert!(
+            restore_prior_creative_direction(&current, "different goal", "same-source")
+                .expect("different goal lookup")
+                .is_none()
+        );
+        assert!(
+            restore_prior_creative_direction(&current, goal, "changed-source")
+                .expect("changed source lookup")
+                .is_none()
+        );
         fs::remove_dir_all(root).expect("remove direction runs");
     }
 

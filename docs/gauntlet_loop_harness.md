@@ -347,9 +347,13 @@ images: discovered pages establish the bar, while only user-supplied local
 images become frozen visual evidence. References are never packaged or offered
 as builder assets.
 
-A creative-director bootstrap first turns the immutable goal into a structured,
-controller-owned direction bible. The run stores the same direction in
-`quality-bar.json` and a human-readable `creative-direction.md`; it covers the
+A project may provide an authoritative `CREATIVE_DIRECTION.md` beside
+`stasis.json`. The controller reads it with the same bounded-text protections as
+the goal, freezes its hash and verbatim contents, and rejects cross-run reuse if
+the source changes. A creative-director bootstrap turns that source plus the
+immutable goal into a structured, controller-owned operational digest. The run
+stores the source and digest in `quality-bar.json` and combines them in a
+human-readable `creative-direction.md`; together they cover the
 narrative promise, player fantasy, rule pillars, visual language, interaction
 grammar, progression/pacing, and non-negotiables. It is authoritative for the
 run, survives resume and fresh-agent boundaries, and is supplied to every lead,
