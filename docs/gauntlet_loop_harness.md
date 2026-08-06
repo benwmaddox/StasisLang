@@ -116,14 +116,14 @@ The project root contains a strict, versioned `gauntlet.json`:
       {
         "id": "select-unit",
         "description": "A ready friendly unit is selected and legal movement is visible.",
-        "taps": [{"x": 150, "y": 382, "ticks_after": 2}]
+        "taps": [{"x": 147, "y": 466, "ticks_after": 2}]
       },
       {
         "id": "move-unit",
         "description": "The selected unit moves to a legal destination and feedback remains visible.",
         "taps": [
-          {"x": 150, "y": 382, "ticks_after": 1},
-          {"x": 235, "y": 382, "ticks_after": 8}
+          {"x": 147, "y": 466, "ticks_after": 1},
+          {"x": 232, "y": 382, "ticks_after": 8}
         ]
       }
     ]
