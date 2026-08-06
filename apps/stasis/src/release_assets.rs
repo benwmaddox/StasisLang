@@ -41,13 +41,11 @@ pub(crate) fn retain_source_referenced_assets(
                 })?;
             let absolute_path = [source_base.join(&literal), project_root.join(&literal)]
                 .into_iter()
-                .find_map(|candidate| candidate.canonicalize().ok());
+                .filter_map(|candidate| candidate.canonicalize().ok())
+                .find(|candidate| candidate.is_file() && candidate.starts_with(&asset_root));
             let Some(absolute_path) = absolute_path else {
                 continue;
             };
-            if !absolute_path.is_file() || !absolute_path.starts_with(&asset_root) {
-                continue;
-            }
             paths.insert(
                 absolute_path
                     .strip_prefix(&project_root)
@@ -184,6 +182,34 @@ mod tests {
                 "hero.load_sprite_from(\"assets/svg/used.svg\", 32, 32); }"
             )
             .to_string(),
+        )];
+
+        let retained =
+            retain_source_referenced_assets(&root, Path::new("src"), &sources, &manifest).unwrap();
+        assert_eq!(retained.assets.len(), 1);
+        assert_eq!(retained.assets[0].entry.id, "used");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn project_root_literal_skips_existing_non_asset_source_candidate() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_release_asset_shadow_{stamp}"));
+        std::fs::create_dir_all(root.join("assets/svg")).unwrap();
+        std::fs::create_dir_all(root.join("src/assets/svg")).unwrap();
+        std::fs::write(root.join("assets/svg/used.svg"), "project asset").unwrap();
+        std::fs::write(root.join("src/assets/svg/used.svg"), "source shadow").unwrap();
+        let manifest = ResolvedAssetManifest {
+            manifest_path: root.join("assets/manifest.json"),
+            assets: vec![resolved(&root, "used", "assets/svg/used.svg")],
+        };
+        let sources = vec![(
+            "src/main.stasis".to_string(),
+            "function main(): void { hero.load_sprite_from(\"assets/svg/used.svg\", 32, 32); }"
+                .to_string(),
         )];
 
         let retained =
