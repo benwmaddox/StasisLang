@@ -328,9 +328,31 @@ typedef struct {
     int needs_reraster;
     uint32_t surface_generation;
     uint32_t renderer_generation;
+    char source_path[1024];
+    uint64_t source_mtime;
+    uint64_t source_size;
 } StasisFont;
 
 static StasisFont g_fonts[MAX_FONTS];
+
+static void stasis_release_font(StasisFont* font) {
+    if (!font) return;
+    if (font->sdl_texture) {
+        SDL_DestroyTexture(font->sdl_texture);
+        font->sdl_texture = NULL;
+    }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (font->atlas_texture) {
+        glDeleteTextures(1, &font->atlas_texture);
+        font->atlas_texture = 0;
+    }
+#endif
+    if (font->ttf_buffer) {
+        free(font->ttf_buffer);
+        font->ttf_buffer = NULL;
+    }
+    memset(font, 0, sizeof(*font));
+}
 
 static const char* stasis_renderer_reason_name(StasisRendererResourceReason reason) {
     switch (reason) {
@@ -1826,6 +1848,17 @@ static uint64_t get_file_mtime(const char* path) {
     if (stat(probe, &st) != 0) return 0;
     return (uint64_t)st.st_mtime;
 #endif
+}
+
+static uint64_t get_file_size(const char* path) {
+#if defined(_WIN32)
+    struct _stat st;
+    if (_stat(path, &st) != 0 || st.st_size < 0) return 0;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0 || st.st_size < 0) return 0;
+#endif
+    return (uint64_t)st.st_size;
 }
 
 static char* stasis_strdup(const char* s) {
@@ -5450,23 +5483,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
     g_sprite_fallback.page_index = -1;
 
     for (int i = 0; i < MAX_FONTS; i++) {
-        if (g_fonts[i].active) {
-            if (g_fonts[i].sdl_texture) {
-                SDL_DestroyTexture(g_fonts[i].sdl_texture);
-                g_fonts[i].sdl_texture = NULL;
-            }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-            if (g_fonts[i].atlas_texture) {
-                glDeleteTextures(1, &g_fonts[i].atlas_texture);
-                g_fonts[i].atlas_texture = 0;
-            }
-#endif
-            if (g_fonts[i].ttf_buffer) {
-                free(g_fonts[i].ttf_buffer);
-                g_fonts[i].ttf_buffer = NULL;
-            }
-            g_fonts[i].active = false;
-        }
+        stasis_release_font(&g_fonts[i]);
     }
     stasis_reset_text_cache();
     if (g_renderer) {
@@ -6106,12 +6123,33 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
         return 0;
     }
 
-    /* Find free slot */
+    uint64_t source_mtime = get_file_mtime(resolved);
+    uint64_t source_size = get_file_size(resolved);
+
+    /* Reuse an identical load. If the file changed in place, retain the stable
+       handle while replacing its backing resources. */
     int slot = -1;
     for (int i = 0; i < MAX_FONTS; i++) {
-        if (!g_fonts[i].active) {
+        if (g_fonts[i].active && g_fonts[i].font_size == font_size &&
+            strcmp(g_fonts[i].source_path, resolved) == 0) {
+            if (g_fonts[i].source_mtime == source_mtime &&
+                g_fonts[i].source_size == source_size) {
+                return i + 1;
+            }
+            stasis_release_font(&g_fonts[i]);
+            stasis_reset_text_cache();
             slot = i;
             break;
+        }
+    }
+
+    /* Find free slot */
+    if (slot == -1) {
+        for (int i = 0; i < MAX_FONTS; i++) {
+            if (!g_fonts[i].active) {
+                slot = i;
+                break;
+            }
         }
     }
 
@@ -6154,6 +6192,9 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
 
     font->ttf_buffer = ttf_buffer;
     font->font_size = font_size;
+    snprintf(font->source_path, sizeof(font->source_path), "%s", resolved);
+    font->source_mtime = source_mtime;
+    font->source_size = source_size;
     stbtt_GetFontVMetrics(&font->font_info, &font->ascent, &font->descent, &font->line_gap);
     font->active = true;
     if (!stasis_build_font_atlas(font)) {
