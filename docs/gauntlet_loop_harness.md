@@ -374,10 +374,18 @@ acceptance path. Ordinary rendering allocates no capture framebuffer.
 ### Agent roles and context separation
 
 - The **reference scout** is read-only and web-enabled.
-- The **lead** chooses the single highest-value next work item from the frozen
-  bar, compact project state, and critic outcomes.
+- The **lead** is also the playability and visual-coherence director. It
+  inspects the latest accepted frame after the deterministic interaction probe,
+  compact runtime/test evidence, references, and critic outcomes before choosing
+  the single highest-value next work item. Its required playability guidance
+  identifies which board relationships are unclear and tells the builder how a
+  new player should recognize cells, terrain, factions, unit roles, selection,
+  movement, combat previews, objectives, economy, turn ownership, end turn, and
+  cancel/reselect without inventing unsupported mechanics.
 - A **builder** receives one work item, relevant captures, and the prior
-  critic's largest gap. It changes the project through controlled tools only.
+  critic's largest gap. It also receives the lead's playability guidance as a
+  distinct instruction so visual polish cannot silently obscure the board's
+  interaction grammar. It changes the project through controlled tools only.
 - A **visual critic** receives shuffled candidate images, references, and the
   frozen visual rubric. It receives no source or write tools.
 - A **gameplay critic** receives deterministic scenarios, captures, state

@@ -238,6 +238,7 @@ struct LeadDecision {
     done: bool,
     workstream: String,
     builder_prompt: String,
+    playability_guidance: String,
     rationale: String,
     next_step: String,
 }
@@ -823,6 +824,9 @@ fn controller_loop(
             &goal,
             &bar,
             &largest_gap,
+            &baseline,
+            &baseline_state,
+            &reference_images,
             &state,
             &mut model_calls,
             artifacts,
@@ -865,8 +869,10 @@ fn controller_loop(
             &format!("Selected workstream {}", decision.workstream),
             &decision.rationale,
             &format!(
-                "Accepted {} candidates and rejected {}; largest gap: {largest_gap}",
-                state.accepted_candidates, state.rejected_candidates
+                "Accepted {} candidates and rejected {}; largest gap: {largest_gap}; playability guidance: {}",
+                state.accepted_candidates,
+                state.rejected_candidates,
+                decision.playability_guidance
             ),
             &decision.next_step,
         )?;
@@ -951,8 +957,8 @@ fn controller_loop(
             "ImageGen is optional for this logic or basic-interface workstream. Use primitive vectors for basic UI, simple icons, selection/range overlays, and deterministic fallbacks."
         };
         let prompt = format!(
-            "Frozen game brief:\n{goal}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nAsset guidance: {asset_guidance}\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
-            decision.workstream, decision.builder_prompt,
+            "Frozen game brief:\n{goal}\n\nWorkstream: {}\nTask: {}\nLargest evidenced gap: {largest_gap}\n\nPlayability and visual-coherence direction for the accepted frame:\n{}\n\nDurable decision memory (explicit conclusions only):\n{memory}\n\nAsset guidance: {asset_guidance}\n\nMake one coherent, end-to-end improvement. Preserve deterministic tick semantics. Add or update durable Stasis tests in the same atomic write when behavior changes. Use record_decision for consequential choices and finish after the tested write succeeds.",
+            decision.workstream, decision.builder_prompt, decision.playability_guidance,
         );
         let run_builder = |model: &GauntletRoleModel,
                            role: &str,
@@ -1423,6 +1429,7 @@ fn fallback_lead_decision(bar: &FrozenBar, largest_gap: &str) -> LeadDecision {
         builder_prompt: format!(
             "Make one bounded, tested improvement that directly addresses this evidenced gap: {largest_gap}"
         ),
+        playability_guidance: "Make the board teach its rules visually: establish unmistakable cell boundaries and terrain categories, show the selected unit and its legal destinations, distinguish attack targets from movement, keep turn/objective information visible, and ensure every action has an obvious next tap and cancel path without obscuring the grid.".to_string(),
         rationale: "The configured lead exhausted its bounded attempts, so the controller selected a deterministic recovery task from the frozen bar.".to_string(),
         next_step: "Produce one compiler-tested candidate, then return it to independent evaluation.".to_string(),
     }
@@ -1690,6 +1697,9 @@ fn lead_decision(
     goal: &str,
     bar: &FrozenBar,
     largest_gap: &str,
+    accepted_frame: &Path,
+    accepted_state: &Value,
+    references: &[PathBuf],
     state: &GauntletRunStateV1,
     model_calls: &mut u32,
     artifacts: &Path,
@@ -1699,24 +1709,31 @@ fn lead_decision(
     canceled: &AtomicBool,
 ) -> Result<LeadDecision, String> {
     let memory = decision_memory_snapshot(artifacts)?;
+    let runtime_evidence = serde_json::to_string(accepted_state)
+        .map_err(|error| format!("failed encoding accepted runtime evidence: {error}"))?;
     let prompt = format!(
-        "Act as the fresh lead for a Stasis Gauntlet. Choose exactly one highest-value next work item from the frozen workstreams. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
+        "Act as the fresh playability and visual-coherence director for a Stasis Gauntlet. The first attached image is the latest accepted playable frame after the controller's deterministic interaction probe; later images are optional quality references. Use the attached frame together with the controller-owned runtime state and passing-test evidence below. First produce playability_guidance that teaches the next builder exactly how a new player should parse the grid and complete one turn: board and cell boundaries, meaningful terrain, faction and unit-role recognition, selection, legal movement, attack/counterattack preview, objective and economy, turn ownership, end turn, and cancel/reselect. Identify which of those relationships are currently unclear from evidence; do not invent mechanics. Then choose exactly one highest-value next work item from the frozen workstreams whose builder prompt improves that comprehension and preserves already-readable relationships. Visual polish is valuable only when it strengthens this hierarchy. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nAccepted runtime and deterministic-test evidence:\n{runtime_evidence}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
         bar.workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
     );
+    let mut images = vec![accepted_frame.to_path_buf()];
+    images.extend(references.iter().take(4).cloned());
     let decision: LeadDecision = call_structured_role(
         "lead",
         &prompt,
         &lead_schema(),
         model,
         escalation,
-        &[],
+        &images,
         false,
         model_calls,
         model_call_limit,
         artifacts,
         canceled,
     )?;
-    if decision.rationale.trim().is_empty() || decision.next_step.trim().is_empty() {
+    if decision.playability_guidance.trim().is_empty()
+        || decision.rationale.trim().is_empty()
+        || decision.next_step.trim().is_empty()
+    {
         return Err("Gauntlet lead returned empty decision memory fields".to_string());
     }
     Ok(decision)
@@ -3171,7 +3188,7 @@ fn bootstrap_schema() -> Value {
 }
 
 fn lead_schema() -> Value {
-    json!({"type":"object","required":["done","workstream","builder_prompt","rationale","next_step"],"properties":{"done":{"type":"boolean"},"workstream":{"type":"string","maxLength":2000},"builder_prompt":{"type":"string","maxLength":2000},"rationale":{"type":"string","maxLength":2000},"next_step":{"type":"string","maxLength":2000}},"additionalProperties":false})
+    json!({"type":"object","required":["done","workstream","builder_prompt","playability_guidance","rationale","next_step"],"properties":{"done":{"type":"boolean"},"workstream":{"type":"string","maxLength":2000},"builder_prompt":{"type":"string","maxLength":2000},"playability_guidance":{"type":"string","maxLength":2000},"rationale":{"type":"string","maxLength":2000},"next_step":{"type":"string","maxLength":2000}},"additionalProperties":false})
 }
 
 fn critic_schema() -> Value {
@@ -3230,6 +3247,26 @@ mod tests {
         let source = r#"{"preferred":"a","score_a":80,"score_b":60,"largest_gap":"audio","summary":"A is clearer","extra":true}"#;
         assert!(serde_json::from_str::<BlindCritique>(source).is_err());
         assert_eq!(critic_schema()["additionalProperties"], false);
+        assert!(lead_schema()["required"]
+            .as_array()
+            .expect("lead required fields")
+            .contains(&json!("playability_guidance")));
+        let fallback = fallback_lead_decision(
+            &FrozenBar {
+                schema_version: 1,
+                goal_sha256: "0".repeat(64),
+                goal: "game".to_string(),
+                workstreams: vec!["HUD".to_string()],
+                hard_gates: Vec::new(),
+                required_scenarios: Vec::new(),
+                references: Vec::new(),
+                web_sources: Vec::new(),
+                acceptance_score: 65,
+            },
+            "The grid is difficult to parse.",
+        );
+        assert!(fallback.playability_guidance.contains("cell boundaries"));
+        assert!(fallback.playability_guidance.contains("cancel"));
     }
 
     #[test]
