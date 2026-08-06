@@ -432,6 +432,14 @@ input scenarios, state assertions, and completion thresholds. If the scout
 cannot establish at least one usable visual reference and one measurable
 gameplay bar, the run stops before production modification.
 
+Only game-owned workstreams are assignable to builders. The controller removes
+standalone Gauntlet, toolchain, test-harness, and acceptance-evidence repair
+workstreams both when a bar is created and when an older run resumes. Builders
+still add tests alongside gameplay changes, but deterministic scenario drivers,
+capture timing, harness provisioning, and evaluator integrity remain controller
+responsibilities. A lead decision naming a removed or unknown workstream is
+rejected and recovered through the first eligible frozen game workstream.
+
 ### Persistent runtime and live protocol
 
 The controller owns one in-process graphical JIT runtime and one live-session

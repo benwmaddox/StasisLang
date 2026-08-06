@@ -859,7 +859,7 @@ fn controller_loop(
     let goal = read_bounded_utf8(&goal_path, MAX_GOAL_BYTES, "Gauntlet goal")?;
     state.phase = GauntletRunPhase::DiscoveringBar;
     persist_state(artifacts, &mut state)?;
-    let bar = if artifacts.join(QUALITY_BAR_NAME).is_file() {
+    let mut bar = if artifacts.join(QUALITY_BAR_NAME).is_file() {
         read_json(&artifacts.join(QUALITY_BAR_NAME))?
     } else {
         let bar = match bootstrap_bar(
@@ -892,6 +892,25 @@ fn controller_loop(
         )?;
         bar
     };
+    let builder_workstreams = sanitize_builder_workstreams(&bar.workstreams);
+    if builder_workstreams != bar.workstreams {
+        let removed = bar
+            .workstreams
+            .iter()
+            .filter(|workstream| !builder_workstreams.contains(workstream))
+            .cloned()
+            .collect::<Vec<_>>();
+        bar.workstreams = builder_workstreams;
+        write_json(&artifacts.join(QUALITY_BAR_NAME), &bar)?;
+        emit_event(
+            artifacts,
+            "controller_workstreams_removed",
+            json!({
+                "removed": removed,
+                "reason": "Gauntlet infrastructure, harness, and acceptance-evidence repair are controller-owned",
+            }),
+        )?;
+    }
     write_creative_direction(artifacts, &bar)?;
     let reference_images = resolve_reference_images(
         &bar.references,
@@ -1587,10 +1606,9 @@ fn controller_loop(
 }
 
 fn fallback_lead_decision(bar: &FrozenBar, largest_gap: &str) -> LeadDecision {
-    let workstream = bar
-        .workstreams
-        .first()
-        .cloned()
+    let workstream = sanitize_builder_workstreams(&bar.workstreams)
+        .into_iter()
+        .next()
         .unwrap_or_else(|| "Integration and release quality".to_string());
     LeadDecision {
         done: false,
@@ -1746,6 +1764,7 @@ fn bootstrap_bar(
             }
         }
     };
+    let workstreams = sanitize_builder_workstreams(&workstreams);
     let workstreams = if workstreams.is_empty() {
         emit_event(
             artifacts,
@@ -1804,6 +1823,33 @@ fn default_workstreams() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn sanitize_builder_workstreams(workstreams: &[String]) -> Vec<String> {
+    let mut sanitized = Vec::new();
+    for workstream in workstreams {
+        let trimmed = workstream.trim();
+        if trimmed.is_empty() || is_controller_owned_workstream(trimmed) {
+            continue;
+        }
+        if !sanitized
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+        {
+            sanitized.push(trimmed.to_string());
+        }
+    }
+    sanitized
+}
+
+fn is_controller_owned_workstream(workstream: &str) -> bool {
+    let normalized = workstream.to_ascii_lowercase();
+    normalized.contains("gauntlet")
+        || normalized.contains("toolchain")
+        || normalized.contains("test harness")
+        || normalized.contains("acceptance evidence")
+        || normalized.contains("stasis test")
+        || (normalized.contains("acceptance") && normalized.contains("test"))
 }
 
 fn restore_prior_creative_direction(
@@ -2021,6 +2067,10 @@ fn lead_decision(
     model_call_limit: u32,
     canceled: &AtomicBool,
 ) -> Result<LeadDecision, String> {
+    let workstreams = sanitize_builder_workstreams(&bar.workstreams);
+    if workstreams.is_empty() {
+        return Err("Gauntlet has no game-owned builder workstreams".to_string());
+    }
     let memory = decision_memory_snapshot(artifacts)?;
     let runtime_evidence = serde_json::to_string(&accepted.state)
         .map_err(|error| format!("failed encoding accepted runtime evidence: {error}"))?;
@@ -2028,7 +2078,7 @@ fn lead_decision(
     let accepted_image_order = capture_image_order("accepted", accepted);
     let prompt = format!(
         "Act as the fresh playability and visual-coherence director for a Stasis Gauntlet. The attached images begin with the latest accepted initial frame, its frame after the controller's fixed interaction probe, and any configured deterministic scenario frames; later images are optional quality references. Accepted image order: {accepted_image_order}. The controller-owned creative direction below is authoritative: enforce and interpret it, but do not silently rewrite it. Use every supplied scenario frame together with runtime and passing-test evidence. First produce playability_guidance that teaches the next builder exactly how a new player should parse the grid and complete one turn: board and cell boundaries, meaningful terrain, faction and unit-role recognition, selection, legal movement, attack/counterattack preview, objective and economy, turn ownership, end turn, and cancel/reselect. Identify which relationships are unclear from evidence and whether each exercised interaction's result is visibly understandable; do not invent mechanics. Then choose exactly one highest-value next work item from the frozen workstreams whose builder prompt improves that comprehension and preserves already-readable relationships. Visual polish is valuable only when it strengthens this hierarchy. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{creative_direction}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nAccepted runtime and deterministic-test evidence:\n{runtime_evidence}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
-        bar.workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
+        workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
     );
     let mut images = capture_images(accepted);
     images.extend(references.iter().take(4).cloned());
@@ -2050,6 +2100,15 @@ fn lead_decision(
         || decision.next_step.trim().is_empty()
     {
         return Err("Gauntlet lead returned empty decision memory fields".to_string());
+    }
+    if !workstreams
+        .iter()
+        .any(|workstream| workstream.eq_ignore_ascii_case(decision.workstream.trim()))
+    {
+        return Err(format!(
+            "Gauntlet lead selected non-builder or unknown workstream {:?}",
+            decision.workstream
+        ));
     }
     Ok(decision)
 }
@@ -4005,6 +4064,52 @@ mod tests {
             &gameplay_regression,
             true
         ));
+    }
+
+    #[test]
+    fn controller_owned_workstreams_are_not_assignable_to_builders() {
+        let workstreams = vec![
+            "Mobile interaction grammar".to_string(),
+            "Stasis tests and acceptance evidence".to_string(),
+            "Gauntlet harness recovery".to_string(),
+            "Toolchain diagnostics".to_string(),
+            "mobile interaction grammar".to_string(),
+            "Faction and unit art".to_string(),
+        ];
+
+        assert_eq!(
+            sanitize_builder_workstreams(&workstreams),
+            vec![
+                "Mobile interaction grammar".to_string(),
+                "Faction and unit art".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_lead_uses_the_first_game_owned_workstream() {
+        let bar = FrozenBar {
+            schema_version: 3,
+            goal_sha256: "goal".to_string(),
+            goal: "game".to_string(),
+            direction_source_markdown: String::new(),
+            direction_source_sha256: String::new(),
+            creative_direction: CreativeDirection::default(),
+            workstreams: vec![
+                "Acceptance evidence and tests".to_string(),
+                "Economy capture and recruitment".to_string(),
+            ],
+            hard_gates: Vec::new(),
+            required_scenarios: Vec::new(),
+            references: Vec::new(),
+            web_sources: Vec::new(),
+            acceptance_score: 65,
+        };
+
+        assert_eq!(
+            fallback_lead_decision(&bar, "gap").workstream,
+            "Economy capture and recruitment"
+        );
     }
 
     #[test]
