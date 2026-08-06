@@ -11,6 +11,8 @@ This package turns one original character concept into a reusable visual identit
 5. [Tower emblem](tower_emblem.svg) - reusable faction/unit symbol.
 6. [Style tokens](style_tokens.json) - palette, strokes, proportions, sizes, and rendering rules.
 7. [Art-direction manifest](art_direction_manifest.json) - immutable reference roles, hashes, derivation chain, and locked traits.
+8. [128 px spritesheet](man_at_arms_spritesheet_128.png) - six production poses in an exact 3 x 2 grid.
+9. [Sprite manifest](sprite_manifest.json) - cell coordinates, semantic names, files, hashes, and source lineage.
 
 Rendered checks from the vector master are included at [review size](man_at_arms_rig_review.png), [96 px](man_at_arms_rig_96.png), and [64 px](man_at_arms_rig_64.png). The emblem also has a [192 px review render](tower_emblem_192.png).
 
@@ -47,6 +49,19 @@ At 64 px, retain only the helmet brim, face/moustache block, teal torso, cream s
 Start from `man_at_arms_rig.svg`. Preserve the named groups and transform the large masses first: torso, head, limbs, shield, and spear. Correct the silhouette before adjusting facial features or secondary details. For a new AI pose reference, attach the canonical model sheet and repeat every identity invariant in the prompt.
 
 Recommended core states are idle, march, attack anticipation, spear thrust, shield brace, damage, victory, and low health. Use the action sheet as direction, not geometry to auto-trace.
+
+## Raster spritesheet
+
+The checked-in runtime sheet is exactly 384 x 256 pixels. It contains six 128 x 128 cells in this order:
+
+| Row | Column 1 | Column 2 | Column 3 |
+| --- | --- | --- | --- |
+| 1 | idle | walk | spear thrust |
+| 2 | shield brace | hurt | victory |
+
+The individual transparent sprites live under `sprites_128/`. They are deliberate single-pose gameplay states rather than an interpolated walk or attack animation. The 1536 x 1024 transparent master remains available for future reslicing and cleanup.
+
+The sprite prompt fixes the camera, character scale, cell boundaries, identity invariants, and small-size simplification rules. Preserve those constraints when regenerating. Do not ask ImageGen for a generic character sheet and infer the grid afterward.
 
 ## Faction variants
 

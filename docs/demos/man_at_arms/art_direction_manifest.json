@@ -32,6 +32,18 @@
       "role": "canonical_emblem",
       "derived_from": ["canonical_identity"],
       "sha256": "0508f30081e76fc3282856c05d98cb3af00a951fd512b256f041c68421e7e7a9"
+    },
+    {
+      "path": "man_at_arms_spritesheet_master.png",
+      "role": "transparent_sprite_master",
+      "derived_from": ["canonical_identity", "approved_pose_language"],
+      "sha256": "b5929a7cca0868330fef97bdb7c6cdeb712de95f7bf0823d01c10a3d123a5bc0"
+    },
+    {
+      "path": "man_at_arms_spritesheet_128.png",
+      "role": "runtime_sprite_sheet",
+      "derived_from": ["transparent_sprite_master"],
+      "sha256": "48321635f87acdf79d0e689056783083d85e8d8654fa41e7c6395cc4e21cd864"
     }
   ],
   "required_generation_inputs": ["canonical_identity"],

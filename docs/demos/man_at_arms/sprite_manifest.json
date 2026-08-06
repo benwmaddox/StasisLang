@@ -1,0 +1,67 @@
+{
+  "schema": "stasis-spritesheet",
+  "version": 1,
+  "character_id": "hearthguard_man_at_arms",
+  "identity_revision": 1,
+  "sheet": {
+    "path": "man_at_arms_spritesheet_128.png",
+    "width": 384,
+    "height": 256,
+    "columns": 3,
+    "rows": 2,
+    "cell_width": 128,
+    "cell_height": 128,
+    "sha256": "48321635f87acdf79d0e689056783083d85e8d8654fa41e7c6395cc4e21cd864"
+  },
+  "source_master": {
+    "path": "man_at_arms_spritesheet_master.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "b5929a7cca0868330fef97bdb7c6cdeb712de95f7bf0823d01c10a3d123a5bc0"
+  },
+  "reference_roles": ["canonical_identity", "approved_pose_language"],
+  "cells": [
+    {
+      "name": "idle",
+      "x": 0,
+      "y": 0,
+      "path": "sprites_128/man_at_arms_idle.png",
+      "sha256": "ebd8aed3c7b9b99cd8ec7d02456acf9515535fe79a26263239eafaa5d1d0f608"
+    },
+    {
+      "name": "walk",
+      "x": 128,
+      "y": 0,
+      "path": "sprites_128/man_at_arms_walk.png",
+      "sha256": "570522f5655275ae098cfa4ea485dd4491d3ca6abc2deef8e321b51c2ed19523"
+    },
+    {
+      "name": "spear_thrust",
+      "x": 256,
+      "y": 0,
+      "path": "sprites_128/man_at_arms_spear_thrust.png",
+      "sha256": "51e61e7921d780c66cf2bf1623404e35c91a443852cb12b4c62c5102a8fe257d"
+    },
+    {
+      "name": "shield_brace",
+      "x": 0,
+      "y": 128,
+      "path": "sprites_128/man_at_arms_shield_brace.png",
+      "sha256": "1bf9c4bbcea830d8d48b1c0bc9efeae4bd624b4631d956f077d830afe64cdb74"
+    },
+    {
+      "name": "hurt",
+      "x": 128,
+      "y": 128,
+      "path": "sprites_128/man_at_arms_hurt.png",
+      "sha256": "dc535e7653436362d08c145e62a0d90e9b61c1b5358f28ef069b6026fcc5d21a"
+    },
+    {
+      "name": "victory",
+      "x": 256,
+      "y": 128,
+      "path": "sprites_128/man_at_arms_victory.png",
+      "sha256": "d8c500b2c677e11165641ae09f155214448f32c04462f2d304530ea43bad6302"
+    }
+  ]
+}
