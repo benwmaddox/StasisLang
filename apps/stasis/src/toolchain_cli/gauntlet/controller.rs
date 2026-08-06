@@ -2,7 +2,7 @@ use super::{
     atomic_write_bytes, hex_sha256, image_extension, import_references, read_bounded_bytes,
     read_bounded_utf8, write_json, GauntletConfigV1, GauntletIsolation, GauntletObserver,
     GauntletReference, GauntletRoleModel, GauntletRunPhase, GauntletRunStateV1,
-    GAUNTLET_SCHEMA_VERSION, MAX_GOAL_BYTES, MAX_REFERENCE_BYTES,
+    GauntletScenarioRequirement, GAUNTLET_SCHEMA_VERSION, MAX_GOAL_BYTES, MAX_REFERENCE_BYTES,
 };
 use crate::toolchain_cli::live_tui;
 use crate::toolchain_cli::{CommandResult, Workspace};
@@ -339,7 +339,15 @@ struct VisualCritique {
 struct ScenarioCapture {
     initial_frame: PathBuf,
     action_frame: PathBuf,
+    required_frames: Vec<RequiredScenarioFrame>,
     state: Value,
+}
+
+#[derive(Debug, Clone)]
+struct RequiredScenarioFrame {
+    id: String,
+    description: String,
+    frame: PathBuf,
 }
 
 struct PriorRunLesson {
@@ -899,6 +907,7 @@ fn controller_loop(
         artifacts,
         "baseline",
         scenario_pointer,
+        &config.quality_bar.required_scenarios,
         &mut next_request,
     )?;
     let (readiness, baseline_tests) =
@@ -1071,8 +1080,7 @@ fn controller_loop(
         state.phase = GauntletRunPhase::Building;
         state.current_workstream = Some(decision.workstream.clone());
         persist_state(artifacts, &mut state)?;
-        let remaining_calls = config.budget.model_calls.saturating_sub(state.model_calls);
-        let builder_calls = remaining_calls.saturating_sub(2);
+        let builder_calls = builder_turn_allowance(&config, state.model_calls);
         if builder_calls == 0 {
             finish(
                 &mut state,
@@ -1148,12 +1156,13 @@ fn controller_loop(
                 failure,
             )?;
             latest_failure_evidence = Some(primary_failure_evidence.clone());
-            if let Some(escalation) = config
+            let rescue_calls = builder_turn_allowance(&config, state.model_calls);
+            let escalation = config
                 .models
                 .builder_escalation
                 .as_ref()
-                .filter(|_| should_escalate_builder(failure, &canceled))
-            {
+                .filter(|_| should_escalate_builder(failure, &canceled));
+            if let Some(escalation) = escalation.filter(|_| rescue_calls > 0) {
                 rollback_candidate(
                     &project_root,
                     state.best_commit.as_deref().unwrap_or(&state.base_commit),
@@ -1167,7 +1176,7 @@ fn controller_loop(
                         "to_model": escalation.model,
                         "reason": failure.message,
                         "evidence": primary_failure_evidence,
-                        "fresh_turn_allowance": config.execution.builder_max_turns,
+                        "fresh_turn_allowance": rescue_calls,
                     }),
                 )?;
                 append_decision(
@@ -1189,7 +1198,7 @@ fn controller_loop(
                     &candidate_id,
                     "escalation",
                     escalation,
-                    fresh_builder_escalation_calls(&config),
+                    rescue_calls,
                 )?;
                 completed_attempt = "escalation";
                 outcome = run_builder(
@@ -1197,7 +1206,7 @@ fn controller_loop(
                     "Escalated Stasis Gauntlet builder",
                     escalation_instruction,
                     &rescue_prompt,
-                    fresh_builder_escalation_calls(&config),
+                    rescue_calls,
                 );
                 if let Err(failure) = &outcome {
                     latest_failure_evidence = Some(record_builder_attempt_failure(
@@ -1209,6 +1218,16 @@ fn controller_loop(
                         failure,
                     )?);
                 }
+            } else if escalation.is_some() && rescue_calls == 0 {
+                emit_event(
+                    artifacts,
+                    "builder_escalation_skipped",
+                    json!({
+                        "candidate": candidate_id,
+                        "reason": "model-call budget cannot fund a rescue builder plus both independent critics",
+                        "remaining_calls": config.budget.model_calls.saturating_sub(state.model_calls),
+                    }),
+                )?;
             }
         }
         match outcome {
@@ -1278,6 +1297,7 @@ fn controller_loop(
             artifacts,
             &candidate_id,
             scenario_pointer,
+            &config.quality_bar.required_scenarios,
             &mut next_request,
         );
         let mut candidate = match candidate_capture {
@@ -2004,14 +2024,12 @@ fn lead_decision(
     let runtime_evidence = serde_json::to_string(&accepted.state)
         .map_err(|error| format!("failed encoding accepted runtime evidence: {error}"))?;
     let creative_direction = creative_direction_context(bar)?;
+    let accepted_image_order = capture_image_order("accepted", accepted);
     let prompt = format!(
-        "Act as the fresh playability and visual-coherence director for a Stasis Gauntlet. The first two attached images are the latest accepted initial frame and its frame after the controller's fixed interaction probe; later images are optional quality references. The controller-owned creative direction below is authoritative: enforce and interpret it, but do not silently rewrite it. Use both frames together with runtime and passing-test evidence. First produce playability_guidance that teaches the next builder exactly how a new player should parse the grid and complete one turn: board and cell boundaries, meaningful terrain, faction and unit-role recognition, selection, legal movement, attack/counterattack preview, objective and economy, turn ownership, end turn, and cancel/reselect. Identify which relationships are unclear from evidence and whether the probe's result is visibly understandable; do not invent mechanics. Then choose exactly one highest-value next work item from the frozen workstreams whose builder prompt improves that comprehension and preserves already-readable relationships. Visual polish is valuable only when it strengthens this hierarchy. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{creative_direction}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nAccepted runtime and deterministic-test evidence:\n{runtime_evidence}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
+        "Act as the fresh playability and visual-coherence director for a Stasis Gauntlet. The attached images begin with the latest accepted initial frame, its frame after the controller's fixed interaction probe, and any configured deterministic scenario frames; later images are optional quality references. Accepted image order: {accepted_image_order}. The controller-owned creative direction below is authoritative: enforce and interpret it, but do not silently rewrite it. Use every supplied scenario frame together with runtime and passing-test evidence. First produce playability_guidance that teaches the next builder exactly how a new player should parse the grid and complete one turn: board and cell boundaries, meaningful terrain, faction and unit-role recognition, selection, legal movement, attack/counterattack preview, objective and economy, turn ownership, end turn, and cancel/reselect. Identify which relationships are unclear from evidence and whether each exercised interaction's result is visibly understandable; do not invent mechanics. Then choose exactly one highest-value next work item from the frozen workstreams whose builder prompt improves that comprehension and preserves already-readable relationships. Visual polish is valuable only when it strengthens this hierarchy. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{creative_direction}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nAccepted runtime and deterministic-test evidence:\n{runtime_evidence}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
         bar.workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
     );
-    let mut images = vec![
-        accepted.initial_frame.clone(),
-        accepted.action_frame.clone(),
-    ];
+    let mut images = capture_images(accepted);
     images.extend(references.iter().take(4).cloned());
     let decision: LeadDecision = call_structured_role(
         "lead",
@@ -2048,15 +2066,13 @@ fn blind_critic(
     model_call_limit: u32,
     canceled: &AtomicBool,
 ) -> Result<VisualCritique, String> {
-    let mut images = vec![
-        scenario_a.initial_frame.clone(),
-        scenario_a.action_frame.clone(),
-        scenario_b.initial_frame.clone(),
-        scenario_b.action_frame.clone(),
-    ];
+    let mut images = capture_images(scenario_a);
+    images.extend(capture_images(scenario_b));
     images.extend(references.iter().take(5).cloned());
+    let a_image_order = capture_image_order("A", scenario_a);
+    let b_image_order = capture_image_order("B", scenario_b);
     let prompt = format!(
-        "You are a fresh read-only visual and screen-comprehension critic. The first four attached images are anonymous pairs in this exact order: A initial state, A after the controller's fixed input probe, B initial state, B after the same probe. Any later images are hashed quality references. You do not know which candidate is newer. Compare A and B relative to each other and against the frozen brief, authoritative creative direction, and references. Prefer a or b when one is visually better without an evidenced visual regression. Return equivalent when the image pairs are materially indistinguishable; incompleteness against the full brief is not a reason to return neither. Return neither only when both have different material regressions or the evidence is invalid. Scores are integers 0-100 and measure absolute quality against the frozen bar.\n\nFor each pair, independently answer four release-gate questions. current_state_clear means a new player can identify turn/faction, selection, relevant resources/objective, and important ownership or board state. available_actions_clear means the screen itself distinguishes selectable things and the next legal actions, including movement, attack, end turn, and cancel/reselect when relevant. board_semantics_clear means cells, traversable terrain, obstacles, factions, unit roles, structures, and tactical overlays have an understandable hierarchy. action_feedback_clear means comparison of initial and after-input frames makes the result of the fixed probe visible; if the probe caused no meaningful state change, the no-op or unchanged state must still be understandable rather than silently ambiguous. Set a boolean true only when the attached pixels provide affirmative evidence, not merely because runtime behavior may exist. Put concise observed evidence in each assessment. Identify one largest remaining gap that prioritizes failed comprehension questions over decorative polish. Do not discuss source code and return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{}\n\nWorkstreams: {}\nHard gates already passed: {}\n\nA runtime evidence after probe:\n{}\n\nB runtime evidence after probe:\n{}",
+        "You are a fresh read-only visual and screen-comprehension critic. The attached images contain anonymous, identically exercised scenario sets. Image order for A: {a_image_order}. Image order for B: {b_image_order}. Any later images are hashed quality references. You do not know which candidate is newer. Compare every corresponding A/B frame relative to each other and against the frozen brief, authoritative creative direction, and references. Prefer a or b when one is visually better without an evidenced visual regression. Return equivalent when the scenario sets are materially indistinguishable; incompleteness against the full brief is not a reason to return neither. Return neither only when both have different material regressions or the evidence is invalid. Scores are integers 0-100 and measure absolute quality against the frozen bar.\n\nFor each scenario set, independently answer four release-gate questions. current_state_clear means a new player can identify turn/faction, selection, relevant resources/objective, and important ownership or board state. available_actions_clear means the screen itself distinguishes selectable things and the next legal actions, including movement, attack, end turn, and cancel/reselect when relevant. board_semantics_clear means cells, traversable terrain, obstacles, factions, unit roles, structures, and tactical overlays have an understandable hierarchy. action_feedback_clear means the exercised frames visibly communicate the result of each configured interaction; if an interaction caused no meaningful state change, the no-op or unchanged state must still be understandable rather than silently ambiguous. Set a boolean true only when the attached pixels provide affirmative evidence, not merely because runtime behavior may exist. Put concise observed evidence in each assessment. Identify one largest remaining gap that prioritizes failed comprehension questions over decorative polish. Do not discuss source code and return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{}\n\nWorkstreams: {}\nHard gates already passed: {}\n\nA runtime evidence after probe:\n{}\n\nB runtime evidence after probe:\n{}",
         creative_direction_context(bar)?,
         bar.workstreams.join(", "),
         bar.hard_gates.join(", "),
@@ -2088,6 +2104,31 @@ fn blind_critic(
         return Err("critic returned an invalid preference, score, or gap".to_string());
     }
     Ok(critique)
+}
+
+fn capture_images(capture: &ScenarioCapture) -> Vec<PathBuf> {
+    let mut images = vec![capture.initial_frame.clone(), capture.action_frame.clone()];
+    images.extend(
+        capture
+            .required_frames
+            .iter()
+            .map(|scenario| scenario.frame.clone()),
+    );
+    images
+}
+
+fn capture_image_order(label: &str, capture: &ScenarioCapture) -> String {
+    let mut order = vec![
+        format!("{label} initial state"),
+        format!("{label} after fixed interaction probe"),
+    ];
+    order.extend(capture.required_frames.iter().map(|scenario| {
+        format!(
+            "{label} scenario {} ({})",
+            scenario.id, scenario.description
+        )
+    }));
+    order.join("; ")
 }
 
 fn resolve_reference_images(
@@ -2164,6 +2205,7 @@ fn capture_scenario(
     artifacts: &Path,
     id: &str,
     pointer: Option<(i32, i32)>,
+    required_scenarios: &[GauntletScenarioRequirement],
     request_id: &mut u64,
 ) -> Result<ScenarioCapture, String> {
     request_live(client, *request_id, LiveCommand::ValidationRestore)?;
@@ -2176,49 +2218,12 @@ fn capture_scenario(
         request_id,
     )?;
     if let Some((x, y)) = pointer {
-        request_live(
-            client,
-            *request_id,
-            LiveCommand::SetInputState {
-                pointers: vec![LivePointerInput {
-                    id: 0,
-                    x,
-                    y,
-                    is_down: true,
-                    went_down: true,
-                    went_up: false,
-                }],
-            },
-        )?;
-        *request_id = request_id.saturating_add(1);
-        request_live(client, *request_id, LiveCommand::Step { ticks: 1 })?;
+        apply_pointer_tap(client, request_id, x, y, 29)?;
+    } else {
+        request_live(client, *request_id, LiveCommand::Step { ticks: 30 })?;
         *request_id = request_id.saturating_add(1);
         wait_for_steps(client, request_id)?;
-        request_live(
-            client,
-            *request_id,
-            LiveCommand::SetInputState {
-                pointers: vec![LivePointerInput {
-                    id: 0,
-                    x,
-                    y,
-                    is_down: false,
-                    went_down: false,
-                    went_up: true,
-                }],
-            },
-        )?;
-        *request_id = request_id.saturating_add(1);
     }
-    request_live(
-        client,
-        *request_id,
-        LiveCommand::Step {
-            ticks: if pointer.is_some() { 29 } else { 30 },
-        },
-    )?;
-    *request_id = request_id.saturating_add(1);
-    wait_for_steps(client, request_id)?;
     let action_frame = capture_frame(client, project_root, artifacts, id, request_id)?;
     let inspection = request_live(
         client,
@@ -2230,6 +2235,37 @@ fn capture_scenario(
         },
     )?;
     *request_id = request_id.saturating_add(1);
+    let mut required_frames = Vec::new();
+    for scenario in required_scenarios
+        .iter()
+        .filter(|scenario| !scenario.taps.is_empty())
+    {
+        request_live(client, *request_id, LiveCommand::ValidationRestore)?;
+        *request_id = request_id.saturating_add(1);
+        request_live(
+            client,
+            *request_id,
+            LiveCommand::SetInputState {
+                pointers: Vec::new(),
+            },
+        )?;
+        *request_id = request_id.saturating_add(1);
+        for tap in &scenario.taps {
+            apply_pointer_tap(client, request_id, tap.x, tap.y, tap.ticks_after)?;
+        }
+        let frame = capture_frame(
+            client,
+            project_root,
+            artifacts,
+            &format!("{id}-scenario-{}", scenario.id),
+            request_id,
+        )?;
+        required_frames.push(RequiredScenarioFrame {
+            id: scenario.id.clone(),
+            description: scenario.description.clone(),
+            frame,
+        });
+    }
     request_live(client, *request_id, LiveCommand::ValidationRestore)?;
     *request_id = request_id.saturating_add(1);
     request_live(
@@ -2243,8 +2279,58 @@ fn capture_scenario(
     Ok(ScenarioCapture {
         initial_frame,
         action_frame,
+        required_frames,
         state: inspection.data.unwrap_or(Value::Null),
     })
+}
+
+fn apply_pointer_tap(
+    client: &LiveSessionClient,
+    request_id: &mut u64,
+    x: i32,
+    y: i32,
+    ticks_after: u32,
+) -> Result<(), String> {
+    request_live(
+        client,
+        *request_id,
+        LiveCommand::SetInputState {
+            pointers: vec![LivePointerInput {
+                id: 0,
+                x,
+                y,
+                is_down: true,
+                went_down: true,
+                went_up: false,
+            }],
+        },
+    )?;
+    *request_id = request_id.saturating_add(1);
+    request_live(client, *request_id, LiveCommand::Step { ticks: 1 })?;
+    *request_id = request_id.saturating_add(1);
+    wait_for_steps(client, request_id)?;
+    request_live(
+        client,
+        *request_id,
+        LiveCommand::SetInputState {
+            pointers: vec![LivePointerInput {
+                id: 0,
+                x,
+                y,
+                is_down: false,
+                went_down: false,
+                went_up: true,
+            }],
+        },
+    )?;
+    *request_id = request_id.saturating_add(1);
+    request_live(
+        client,
+        *request_id,
+        LiveCommand::Step { ticks: ticks_after },
+    )?;
+    *request_id = request_id.saturating_add(1);
+    wait_for_steps(client, request_id)
 }
 
 fn gameplay_evidence(runtime: Value, deterministic_tests: Value) -> Value {
@@ -2625,8 +2711,13 @@ fn should_escalate_builder(failure: &live_tui::ScriptedAiFailure, canceled: &Ato
     !canceled.load(Ordering::Acquire) && failure.message != "AI request canceled"
 }
 
-fn fresh_builder_escalation_calls(config: &GauntletConfigV1) -> u32 {
-    config.execution.builder_max_turns
+fn builder_turn_allowance(config: &GauntletConfigV1, used_calls: u32) -> u32 {
+    config
+        .budget
+        .model_calls
+        .saturating_sub(used_calls)
+        .saturating_sub(2)
+        .min(config.execution.builder_max_turns)
 }
 
 fn emit_builder_attempt_started(
@@ -3595,6 +3686,41 @@ mod tests {
     }
 
     #[test]
+    fn scenario_images_and_labels_keep_the_same_deterministic_order() {
+        let capture = ScenarioCapture {
+            initial_frame: PathBuf::from("initial.png"),
+            action_frame: PathBuf::from("fixed.png"),
+            required_frames: vec![
+                RequiredScenarioFrame {
+                    id: "select".to_string(),
+                    description: "Select a ready unit".to_string(),
+                    frame: PathBuf::from("select.png"),
+                },
+                RequiredScenarioFrame {
+                    id: "move".to_string(),
+                    description: "Move to a legal cell".to_string(),
+                    frame: PathBuf::from("move.png"),
+                },
+            ],
+            state: Value::Null,
+        };
+
+        assert_eq!(
+            capture_images(&capture),
+            vec![
+                PathBuf::from("initial.png"),
+                PathBuf::from("fixed.png"),
+                PathBuf::from("select.png"),
+                PathBuf::from("move.png"),
+            ]
+        );
+        assert_eq!(
+            capture_image_order("A", &capture),
+            "A initial state; A after fixed interaction probe; A scenario select (Select a ready unit); A scenario move (Move to a legal cell)"
+        );
+    }
+
+    #[test]
     fn heartbeat_distinguishes_live_and_interrupted_runs() {
         let root = std::env::temp_dir().join(format!(
             "stasis-gauntlet-heartbeat-{}-{}",
@@ -4208,11 +4334,21 @@ mod tests {
 
     #[test]
     fn builder_escalation_gets_a_fresh_turn_allowance() {
+        let mut config = GauntletConfigV1::new(false, Vec::new(), 8, 100, GauntletObserver::Jsonl)
+            .expect("config");
+        config.execution.builder_max_turns = 30;
+
+        assert_eq!(builder_turn_allowance(&config, 40), 30);
+    }
+
+    #[test]
+    fn builder_allowance_reserves_both_critic_calls() {
         let mut config = GauntletConfigV1::new(false, Vec::new(), 8, 12, GauntletObserver::Jsonl)
             .expect("config");
         config.execution.builder_max_turns = 30;
 
-        assert_eq!(fresh_builder_escalation_calls(&config), 30);
+        assert_eq!(builder_turn_allowance(&config, 7), 3);
+        assert_eq!(builder_turn_allowance(&config, 10), 0);
     }
 
     #[test]

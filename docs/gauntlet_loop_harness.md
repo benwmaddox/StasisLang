@@ -112,7 +112,21 @@ The project root contains a strict, versioned `gauntlet.json`:
   "quality_bar": {
     "allow_web_discovery": true,
     "references": [],
-    "required_scenarios": []
+    "required_scenarios": [
+      {
+        "id": "select-unit",
+        "description": "A ready friendly unit is selected and legal movement is visible.",
+        "taps": [{"x": 147, "y": 466, "ticks_after": 2}]
+      },
+      {
+        "id": "move-unit",
+        "description": "The selected unit moves to a legal destination and feedback remains visible.",
+        "taps": [
+          {"x": 147, "y": 466, "ticks_after": 1},
+          {"x": 232, "y": 382, "ticks_after": 8}
+        ]
+      }
+    ]
   },
   "budget": {
     "wall_time_minutes": 480,
@@ -148,6 +162,17 @@ override one run without rewriting the project configuration. The goal and
 frozen bar cannot be weakened after editing begins. Tests or stricter checks
 may be added, but accepted requirements cannot be removed.
 
+Required scenarios remain gameplay requirements when `taps` is omitted. Up to
+four scenarios may also contain one to eight deterministic pointer taps. The
+controller restores the same validation snapshot before each scenario, replays
+the taps in order, and captures the final rendered frame for both the accepted
+checkpoint and every candidate. `ticks_after` defaults to 1 and may be 1-300,
+allowing staged movement or feedback to settle without wall-clock timing. Leads
+and blind critics receive identically ordered, named scenario frames alongside
+the initial and fixed-probe pair, so selection, movement, targeting, endings,
+and other project-specific states can be judged from pixels rather than inferred
+from tests.
+
 Ordinary `stasis ai` retains its 15-turn default. Gauntlet builders default to
 30 turns and may be configured from 1 through 48, still bounded by the run's
 total model-call and wall-time budgets. This gives a difficult workstream room
@@ -160,6 +185,14 @@ next step, then terminates the attempt in the same turn. The controller can
 immediately apply the configured one-shot builder escalation. If the rescue
 builder reports the same non-recoverable condition, the candidate is rejected
 without consuming the rest of its turn allowance.
+
+Stasis also stops an attempt automatically when the same atomic-write outcome
+is rejected three times in a row. Volatile paths are removed from test-failure
+identity, so retries of the same named test and result count together even when
+the candidate workspace changes. A different failure or a successful write
+resets the count. The third rejection is stored in decision memory as
+`builder_repeated_write_failure`, terminates the attempt, and gives the rescue
+builder fresh turns plus the repeated-failure evidence.
 
 When compaction is enabled, a builder request is compacted after it exceeds
 the configured byte ceiling. Stasis retains up to the configured number of
@@ -238,6 +271,14 @@ ImageGen inbox. The transactional import may
 copy it unchanged, crop it, or remove a flat background to create the tracked
 game asset without degrading the reusable source.
 
+The requested width and height are generation targets rather than a reason to
+stall on an otherwise valid provider result. The bridge accepts any decodable
+PNG within the bounded import limits and returns both its actual and requested
+dimensions plus `dimension_adjusted`. The builder can then crop or scale its
+runtime presentation deliberately instead of waiting 30 minutes for an exact
+provider size that some host generators do not guarantee. Invalid, oversized,
+or non-PNG results remain rejected.
+
 When a replacement makes an older generated asset obsolete, the builder uses
 `delete_asset` in the same contiguous asset/source transaction. The tool removes
 the controlled file, its matching manifest entry, and any prepared-cache copy;
@@ -283,6 +324,9 @@ build/gauntlet/<run-id>/
   usage.jsonl
   references/manifest.json
   artifacts/<candidate-id>/
+    frame.png
+  artifacts/<candidate-id>-scenario-<scenario-id>/
+    frame.png
   checkpoints.json
   index.html
   stop.request
@@ -299,7 +343,9 @@ rejected candidates, and the largest remaining gap.
 chain-of-thought. The `record_decision` tool stores bounded explicit
 conclusions: kind, summary, concise rationale, evidence, and next step. The
 `report_blocked` tool writes the same durable evidence before terminating an
-impossible builder attempt. The
+impossible builder attempt. Three consecutive identical atomic-write failures
+produce the same terminal handoff automatically rather than relying on the
+builder to recognize the loop. The
 controller also records lead choices, accepted/rejected checkpoints, and final
 gate failures. Each append is flushed and synced so interruption or resume does
 not erase the current theory of the game. A failed builder attempt extracts a
