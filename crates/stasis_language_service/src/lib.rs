@@ -9,7 +9,7 @@ use std::sync::Arc;
 use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
-use stasis_compiler::frontend::parser::completion_expected_type;
+use stasis_compiler::frontend::parser::{completion_expected_type, parse_top_level_functions};
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, organize_workshop_imports, plan_workshop_rename,
     prepare_workshop_rename, workshop_call_hierarchy, workshop_completion_items,
@@ -1303,17 +1303,42 @@ impl LanguageService {
             return Ok(Vec::new());
         };
         let project_root = self.project_root.clone();
-        if let Some(locations) = self.language_index.as_ref().and_then(|index| {
-            index
-                .definitions
-                .definition(&symbol)
-                .and_then(|resolution| {
-                    remap_definition_locations(&project_root, &snapshot, index, &resolution)
-                })
-        }) {
-            return Ok(locations);
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let has_scoped_candidate = self.language_index.as_ref().is_some_and(|index| {
+            index.workshop_items.iter().any(|item| {
+                item.text == symbol
+                    && matches!(item.kind.as_str(), "local" | "parameter")
+                    && item
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.file == relative)
+            })
+        });
+        if !has_scoped_candidate {
+            if let Some(locations) = self.language_index.as_ref().and_then(|index| {
+                index
+                    .definitions
+                    .definition(&symbol)
+                    .and_then(|resolution| {
+                        remap_definition_locations(&project_root, &snapshot, index, &resolution)
+                    })
+            }) {
+                return Ok(locations);
+            }
         }
+        let context = self.query_context(&relative, byte_offset, &document.text)?;
         let index = self.language_index()?;
+        if let Some(location) = scoped_binding_definition(
+            &project_root,
+            index,
+            &relative,
+            &document.text,
+            byte_offset,
+            &symbol,
+            &context,
+        )? {
+            return Ok(vec![location]);
+        }
         if let Some(resolution) = index.definitions.definition(&symbol) {
             if let Some(locations) =
                 remap_definition_locations(&project_root, &snapshot, index, &resolution)
@@ -2572,6 +2597,109 @@ fn workshop_completion_specificity<'a>(
     }
 }
 
+fn scoped_binding_definition(
+    project_root: &str,
+    index: &LanguageIndex,
+    relative_path: &str,
+    source: &str,
+    byte_offset: usize,
+    symbol: &str,
+    context: &CompletionContext,
+) -> Result<Option<LanguageLocation>, String> {
+    let Some(file) = index.files.iter().find(|file| file.path == relative_path) else {
+        return Ok(None);
+    };
+    let mut matches = index
+        .workshop_items
+        .iter()
+        .filter(|item| {
+            item.text == symbol
+                && matches!(item.kind.as_str(), "local" | "parameter")
+                && scoped_completion_owner_matches(item, context)
+        })
+        .filter_map(|item| {
+            let declaration = scoped_binding_declaration_range(&file.source, item).ok()??;
+            let visible = item.scope.as_ref().is_some_and(|scope| {
+                scope.visible_from <= byte_offset && byte_offset <= scope.visible_to
+            });
+            let on_declaration = declaration.start <= byte_offset && byte_offset <= declaration.end;
+            (visible || on_declaration).then_some((item, declaration))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(item, _)| workshop_completion_specificity(item, context));
+    let Some((_, indexed_range)) = matches.first() else {
+        return Ok(None);
+    };
+    let Some(range) = UnchangedRegions::new(&file.source, source).remap(
+        &file.source,
+        source,
+        indexed_range.clone(),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(LanguageLocation {
+        path: absolute_source_path(project_root, relative_path),
+        range,
+    }))
+}
+
+fn scoped_completion_owner_matches(
+    item: &WorkshopCompletionItem,
+    context: &CompletionContext,
+) -> bool {
+    let Some(scope) = item.scope.as_ref() else {
+        return false;
+    };
+    context.owner.as_deref() == Some(scope.owner.as_str())
+        && context.file.as_deref() == Some(scope.file.as_str())
+        && context
+            .owner_signature
+            .as_deref()
+            .is_none_or(|signature| scope.owner_signature.as_deref() == Some(signature))
+}
+
+fn scoped_binding_declaration_range(
+    source: &str,
+    item: &WorkshopCompletionItem,
+) -> Result<Option<Range<usize>>, String> {
+    let Some(scope) = item.scope.as_ref() else {
+        return Ok(None);
+    };
+    if item.kind == "local" {
+        let (Some(start), Some(end)) = (scope.declaration_from, scope.declaration_to) else {
+            return Ok(None);
+        };
+        let range = start..end;
+        return Ok((source.get(range.clone()) == Some(item.text.as_str())).then_some(range));
+    }
+    let Some(owner_end) = scope.owner_end else {
+        return Ok(None);
+    };
+    let Some(function) = parse_top_level_functions(source)?
+        .into_iter()
+        .find(|function| function.name == scope.owner && function.body_range.end == owner_end)
+    else {
+        return Ok(None);
+    };
+    let tokens = lex(source)?;
+    Ok(tokens
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, token)| {
+            function.signature_range.start <= token.start
+                && token.end <= function.signature_range.end
+                && token.kind == TokenKind::Identifier
+                && token_text(source, *token) == item.text
+        })
+        .find(|(index, _)| {
+            tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind == TokenKind::Colon)
+        })
+        .map(|(_, token)| token.start..token.end))
+}
+
 fn item_signature(item: &WorkshopCompletionItem) -> Option<String> {
     item.signature
         .clone()
@@ -3758,6 +3886,94 @@ function main(): i32 {
             .expect("workspace symbols");
         assert_eq!(workspace.len(), 1);
         assert_eq!(workspace[0].name, "spawn_enemy");
+    }
+
+    #[test]
+    fn same_function_bindings_navigate_to_the_lexically_visible_declaration() {
+        let root = std::env::temp_dir().join("stasis-language-service-local-navigation");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "global value: i32;\nfunction compute(seed: i32): i32 {\n    let value = seed;\n    {\n        let value: i32 = 2;\n        value += 1;\n    }\n    return value;\n}\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+
+        let parameter_use = source.find("= seed").expect("parameter use") + 3;
+        let parameter = service
+            .definition(&path_text, parameter_use)
+            .expect("parameter definition");
+        assert_eq!(parameter.len(), 1);
+        assert_eq!(&source[parameter[0].range.clone()], "seed");
+        assert!(parameter[0].range.start < source.find('{').expect("function body"));
+
+        let inner_use = source.find("value += 1").expect("inner local use") + 2;
+        let inner = service
+            .definition(&path_text, inner_use)
+            .expect("inner local definition");
+        assert_eq!(inner.len(), 1);
+        assert_eq!(
+            inner[0].range.start,
+            source.rfind("let value").expect("inner declaration") + "let ".len()
+        );
+
+        let outer_use = source.rfind("return value").expect("outer local use") + "return ".len();
+        let outer = service
+            .definition(&path_text, outer_use)
+            .expect("outer local definition");
+        assert_eq!(outer.len(), 1);
+        assert_eq!(
+            outer[0].range.start,
+            source.find("let value").expect("outer declaration") + "let ".len()
+        );
+    }
+
+    #[test]
+    fn local_initializer_and_foreach_navigation_respect_binding_lifetimes() {
+        let root = std::env::temp_dir().join("stasis-language-service-loop-local-navigation");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "global value: i32;\nglobal enemy: i32;\nglobal index: i32;\nglobal enemies: i32[2];\nfunction main(): i32 {\n    let value = value + 1;\n    foreach (let enemy, index in enemies) {\n        value += enemy + index;\n    }\n    return value + enemy + index;\n}\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+
+        let initializer_use = source.find("= value").expect("initializer use") + 2;
+        let initializer_definition = service
+            .definition(&path_text, initializer_use)
+            .expect("initializer definition");
+        assert_eq!(initializer_definition.len(), 1);
+        assert_eq!(
+            initializer_definition[0].range.start,
+            source.find("global value").expect("global value") + "global ".len()
+        );
+
+        for name in ["enemy", "index"] {
+            let body_use = source
+                .find(&format!("{name} +"))
+                .unwrap_or_else(|| source.find("index;").expect("index body use"));
+            let body_definition = service
+                .definition(&path_text, body_use)
+                .expect("foreach definition");
+            assert_eq!(body_definition.len(), 1);
+            assert_eq!(
+                body_definition[0].range.start,
+                source.find(&format!("let enemy, {name}")).map_or_else(
+                    || source.find("let enemy").expect("enemy declaration") + "let ".len(),
+                    |start| start + "let enemy, ".len(),
+                )
+            );
+
+            let after_use = source.rfind(name).expect("after-loop use");
+            let after_definition = service
+                .definition(&path_text, after_use)
+                .expect("after-loop definition");
+            assert_eq!(after_definition.len(), 1);
+            assert_eq!(
+                after_definition[0].range.start,
+                source
+                    .find(&format!("global {name}"))
+                    .expect("global declaration")
+                    + "global ".len()
+            );
+        }
     }
 
     #[test]

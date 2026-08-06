@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 use crate::compiler::{source_workshop_items, Compiler};
 use crate::data_flow::CompilerLocalType;
 use crate::frontend::lexer::{lex, Token, TokenKind};
-use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
+use crate::frontend::parser::{
+    parse_local_declarations, parse_top_level_functions, parse_top_level_type_layout,
+};
 use crate::identity::{
     canonical_source_path, overload_discriminator, CanonicalSourcePath, SymbolId,
 };
@@ -1043,6 +1045,10 @@ pub struct WorkshopCompletionScope {
     pub owner_signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_end: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration_from: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration_to: Option<usize>,
     pub visible_from: usize,
     pub visible_to: usize,
 }
@@ -2020,7 +2026,10 @@ fn rename_completion_visible(
     if scope.visible_from <= token.start && token.end <= scope.visible_to {
         return true;
     }
-    if item.kind == "local" && token.end == scope.visible_from {
+    if item.kind == "local"
+        && scope_declaration_range(scope)
+            .is_some_and(|range| range.start <= token.start && token.end <= range.end)
+    {
         return true;
     }
     if item.kind == "parameter" {
@@ -2072,6 +2081,10 @@ fn reject_workshop_rename_collision(
     } else {
         Ok(())
     }
+}
+
+fn scope_declaration_range(scope: &WorkshopCompletionScope) -> Option<Range<usize>> {
+    Some(scope.declaration_from?..scope.declaration_to?)
 }
 
 fn rename_target_references(
@@ -2151,7 +2164,9 @@ fn scoped_binding_references(
         if token.kind != TokenKind::Identifier || token_text(&file.source, token) != target.name {
             continue;
         }
-        let is_local_definition = target.kind == "local" && token.end == scope.visible_from;
+        let is_local_definition = target.kind == "local"
+            && scope_declaration_range(scope)
+                .is_some_and(|range| range.start <= token.start && token.end <= range.end);
         let is_parameter_definition = target.kind == "parameter"
             && token.end <= scope.visible_from
             && functions.iter().any(|function| {
@@ -2452,19 +2467,20 @@ pub fn workshop_completion_items(
     let parsed_files = files
         .iter()
         .map(|file| {
-            source_workshop_items(&file.source).map(|records| {
-                (
-                    file,
-                    records.layout,
-                    records.functions,
-                    records.typed_local_bindings,
-                    records.structs,
-                )
-            })
+            let records = source_workshop_items(&file.source)?;
+            let local_declarations = parse_local_declarations(&file.source)?;
+            Ok((
+                file,
+                records.layout,
+                records.functions,
+                records.typed_local_bindings,
+                local_declarations,
+                records.structs,
+            ))
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut struct_scopes = BTreeMap::<(String, String), WorkshopCompletionScope>::new();
-    for (file, layout, _, _, ranges) in &parsed_files {
+    for (file, layout, _, _, _, ranges) in &parsed_files {
         for definition in &layout.structs {
             struct_fields.insert(
                 definition.name.clone(),
@@ -2483,6 +2499,8 @@ pub fn workshop_completion_items(
                     file: file.path.clone(),
                     owner_signature: Some(format!("struct {}", definition.name)),
                     owner_end: Some(definition.definition_range.end),
+                    declaration_from: None,
+                    declaration_to: None,
                     visible_from: definition.definition_range.start,
                     visible_to: definition.definition_range.end,
                 },
@@ -2526,7 +2544,7 @@ pub fn workshop_completion_items(
     }
 
     let mut typed_bindings = Vec::<WorkshopTypedBinding>::new();
-    for (file, layout, functions, locals, _) in parsed_files {
+    for (file, layout, functions, locals, local_declarations, _) in parsed_files {
         for definition in layout.structs {
             let struct_scope = struct_scopes
                 .get(&(file.path.clone(), definition.name.clone()))
@@ -2638,6 +2656,16 @@ pub fn workshop_completion_items(
                 )
             })
             .collect::<Vec<_>>();
+        let inferred_local_declarations = local_declarations
+            .into_iter()
+            .filter(|declaration| {
+                !locals.iter().any(|local| {
+                    local.function_name == declaration.function_name
+                        && local.name == declaration.name
+                        && local.visibility_range == declaration.visibility_range
+                })
+            })
+            .collect::<Vec<_>>();
         for function in functions {
             let owner_signature = format_function_signature(
                 &function.name,
@@ -2650,6 +2678,8 @@ pub fn workshop_completion_items(
                     file: file.path.clone(),
                     owner_signature: Some(owner_signature.clone()),
                     owner_end: Some(function.body_range.end),
+                    declaration_from: None,
+                    declaration_to: None,
                     visible_from: function.body_range.start,
                     visible_to: function.body_range.end,
                 };
@@ -2693,6 +2723,8 @@ pub fn workshop_completion_items(
                 file: file.path.clone(),
                 owner_signature: Some(owner_signature.clone()),
                 owner_end: Some(owner_range.end),
+                declaration_from: Some(local.name_range.start),
+                declaration_to: Some(local.name_range.end),
                 visible_from: local.visibility_range.start,
                 visible_to: local.visibility_range.end,
             };
@@ -2716,6 +2748,38 @@ pub fn workshop_completion_items(
                 file: file.path.clone(),
                 scope: Some(scope),
             });
+        }
+        for local in inferred_local_declarations {
+            let (owner_range, owner_signature) = function_scopes
+                .iter()
+                .find(|(range, _)| {
+                    range.start <= local.visibility_range.start
+                        && local.visibility_range.start <= range.end
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "local {} has no containing function in {}",
+                        local.name, file.path
+                    )
+                })?;
+            items.push(scoped_completion_catalog_item(
+                &local.name,
+                "local",
+                &format!("local in {} [{}]", local.function_name, file.path),
+                &file.path,
+                Some(local.function_name.clone()),
+                None,
+                WorkshopCompletionScope {
+                    owner: local.function_name,
+                    file: file.path.clone(),
+                    owner_signature: Some(owner_signature.clone()),
+                    owner_end: Some(owner_range.end),
+                    declaration_from: Some(local.name_range.start),
+                    declaration_to: Some(local.name_range.end),
+                    visible_from: local.visibility_range.start,
+                    visible_to: local.visibility_range.end,
+                },
+            ));
         }
     }
 
