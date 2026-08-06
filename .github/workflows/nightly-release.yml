@@ -381,7 +381,13 @@ jobs:
       - name: Extract and probe nightly toolchain
         shell: pwsh
         run: |
-          tar -xf "target/vscode-nightly/${{ matrix.archive }}.${{ matrix.ext }}" -C target/vscode-nightly
+          $extractRoot = if ($env:RUNNER_OS -eq "Windows") {
+            $env:STASIS_TOOLCHAIN_DIR
+          } else {
+            "target/vscode-nightly"
+          }
+          New-Item -ItemType Directory -Force $extractRoot | Out-Null
+          tar -xf "target/vscode-nightly/${{ matrix.archive }}.${{ matrix.ext }}" -C $extractRoot
           if (-not (Test-Path $env:STASIS_E2E_EXECUTABLE)) { throw "toolchain executable missing" }
           & $env:STASIS_E2E_EXECUTABLE --json editor-info
 
