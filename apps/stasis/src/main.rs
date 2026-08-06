@@ -1598,7 +1598,7 @@ fn write_mobile_aot_engine_bundle(
         MobileAotTarget::AndroidArm64 | MobileAotTarget::AndroidX86_64
     ) {
         let path = output_dir.join("published_aot_objects.cmake");
-        write_android_aot_cmake_file(&bundle.object_paths_by_function, &path)?;
+        write_android_aot_cmake_file(&bundle.object_paths_by_function_id, &path)?;
         Some(path)
     } else {
         None
@@ -1607,8 +1607,9 @@ fn write_mobile_aot_engine_bundle(
     let package_manifest = write_mobile_aot_package_manifest(
         target,
         &bundle.manifest_path,
+        &manifest_json,
         &asset_dir,
-        &bundle.object_paths_by_function,
+        &bundle.object_paths_by_function_id,
         &symbols_header,
         &bindings_source,
         cmake_file.as_deref(),
@@ -1617,7 +1618,7 @@ fn write_mobile_aot_engine_bundle(
     Ok(MobileAotBundleSummary {
         target,
         bundle_dir: bundle.output_dir,
-        object_count: bundle.object_paths_by_function.len(),
+        object_count: bundle.object_paths_by_function_id.len(),
         symbols_header,
         bindings_source,
         cmake_file,
@@ -2089,18 +2090,30 @@ fn mobile_aot_c_return_type(function: &serde_json::Value) -> Result<&'static str
 fn write_mobile_aot_package_manifest(
     target: MobileAotTarget,
     engine_manifest_path: &Path,
+    engine_manifest: &serde_json::Value,
     asset_dir: &Path,
-    object_paths_by_function: &std::collections::BTreeMap<String, PathBuf>,
+    object_paths_by_function_id: &std::collections::BTreeMap<u32, PathBuf>,
     symbols_header: &Path,
     bindings_source: &Path,
     cmake_file: Option<&Path>,
     output_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let objects = object_paths_by_function
+    let manifest_functions = engine_manifest["functions"]
+        .as_array()
+        .ok_or_else(|| "mobile AOT engine manifest missing functions".to_string())?;
+    let objects = object_paths_by_function_id
         .iter()
-        .map(|(name, path)| {
+        .map(|(function_id, path)| {
+            let name = manifest_functions
+                .iter()
+                .find(|function| function["function_id"].as_u64() == Some(u64::from(*function_id)))
+                .and_then(|function| function["name"].as_str())
+                .ok_or_else(|| {
+                    format!("mobile AOT engine manifest missing function id {function_id}")
+                })?;
             Ok(serde_json::json!({
                 "function": name,
+                "function_id": function_id,
                 "path": mobile_aot_relative_path(output_dir, path)?
             }))
         })
@@ -2153,7 +2166,7 @@ fn mobile_aot_relative_path(output_dir: &Path, path: &Path) -> Result<String, St
 }
 
 fn write_android_aot_cmake_file(
-    object_paths_by_function: &std::collections::BTreeMap<String, PathBuf>,
+    object_paths_by_function_id: &std::collections::BTreeMap<u32, PathBuf>,
     output_path: &Path,
 ) -> Result<(), String> {
     let output_dir = output_path.parent().ok_or_else(|| {
@@ -2164,7 +2177,7 @@ fn write_android_aot_cmake_file(
     })?;
     let mut out = String::new();
     out.push_str("set(STASIS_PUBLISHED_AOT_OBJECTS\n");
-    for path in object_paths_by_function.values() {
+    for path in object_paths_by_function_id.values() {
         let relative = mobile_aot_relative_path(output_dir, path)?;
         out.push_str(&format!("  \"${{CMAKE_CURRENT_LIST_DIR}}/{relative}\"\n"));
     }

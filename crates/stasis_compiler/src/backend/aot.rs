@@ -56,6 +56,17 @@ pub struct AotEngineBundle {
     pub optimization_profile: AotOptimizationProfile,
 }
 
+impl AotEngineBundle {
+    /// Enumerates every emitted object by its canonical function identity.
+    ///
+    /// `object_paths_by_function` is only a convenience lookup for unique source
+    /// names. Ambiguous overload names are intentionally absent from that map, so
+    /// whole-bundle link and package paths must enumerate this FnId-backed map.
+    pub fn object_paths(&self) -> impl ExactSizeIterator<Item = &PathBuf> {
+        self.object_paths_by_function_id.values()
+    }
+}
+
 impl AotProcess {
     pub fn new() -> Self {
         Self::with_optimization_profile(AotOptimizationProfile::Speed)
@@ -389,8 +400,9 @@ impl AotProcess {
                     )
                 })?;
             let object_path = object_dir.join(format!(
-                "{}_{}.obj",
+                "{}_fn{}_{}.obj",
                 sanitize_file_token(&artifact_function.name),
+                artifact_function.id,
                 artifact.object_index
             ));
             fs::write(&object_path, object_bytes).map_err(|error| {
@@ -728,8 +740,9 @@ impl AotProcess {
                     )
                 })?;
             let object_file_name = format!(
-                "{}_{}.{}",
+                "{}_fn{}_{}.{}",
                 sanitize_file_token(&function.name),
+                function.id,
                 artifact.object_index,
                 object_file_extension(&self.target)
             );
@@ -862,8 +875,9 @@ impl AotProcess {
                 })?;
 
             let object_file_name = format!(
-                "{}_{}.{}",
+                "{}_fn{}_{}.{}",
                 sanitize_file_token(&function.name),
+                function.id,
                 artifact.object_index,
                 object_file_extension(&self.target)
             );
@@ -2353,7 +2367,7 @@ mod tests {
         let mut process = AotProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function draw(value: i32): i32 { return value; }\nfunction draw(value: f32): i32 { return 2; }\nfunction tick(): void { let first: i32 = draw(1); let second: i32 = draw(1.0); return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+            "struct Sprite { handle: i32; }\nstruct TextRun { handle: i32; }\nglobal sprite: Sprite;\nglobal text: TextRun;\nfunction draw(self: Sprite, value: i32): void { self.handle = value; }\nfunction draw(self: TextRun, value: i32): void { self.handle = value + 7; }\nfunction main(): i32 { sprite.draw(30); text.draw(5); return sprite.handle + text.handle; }\nfunction tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
         );
         process.compile().expect("compile overload bundle");
 
@@ -2371,8 +2385,76 @@ mod tests {
             "both draw overload objects must remain in the bundle"
         );
         assert!(!bundle.object_paths_by_function.contains_key("draw"));
+        assert_eq!(bundle.object_paths().len(), process.artifacts().len());
+        let draw_objects = bundle
+            .object_paths()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .filter(|name| name.starts_with("draw_fn"))
+            .collect::<Vec<_>>();
+        assert_eq!(draw_objects.len(), 2);
+        assert_ne!(draw_objects[0], draw_objects[1]);
 
         let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_engine_bundle_links_and_executes_same_named_receiver_methods() {
+        let Some(mut link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let source = "function draw(self: i32, value: i32): i32 { return value; }\nfunction draw(self: f32, value: i32): i32 { return value + 7; }\nfunction main(): i32 { let sprite: i32 = 1; let text: f32 = 1.0; return sprite.draw(30) + text.draw(5); }\nfunction tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n";
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", source);
+        process.compile().expect("compile receiver overload bundle");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_receiver_bundle_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &temp_root)
+            .expect("write receiver overload bundle");
+        let main_id = process
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function")
+            .id;
+        let main_symbol = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_id == main_id)
+            .expect("main artifact")
+            .symbol_name
+            .clone();
+
+        let deps_dir = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("Cargo deps directory")
+            .to_path_buf();
+        let (import_library, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
+        link_config.runtime_lib_paths.push(import_library);
+        fs::copy(&runtime_dll, temp_root.join("stasis_dynload.dll"))
+            .expect("copy AOT test runtime");
+        let executable = temp_root.join("receiver_bundle.exe");
+        let object_paths = bundle.object_paths().cloned().collect::<Vec<_>>();
+        stasis_jit::link_objects_to_executable(
+            &object_paths,
+            &executable,
+            &main_symbol,
+            &link_config,
+        )
+        .expect("link every receiver overload object");
+        let status = Command::new(&executable)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", executable.display()));
+        assert_eq!(status.code(), Some(42));
+
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]

@@ -4246,8 +4246,7 @@ fn package_engine_bundle_release(
         &function_aliases,
         &string_literals,
     )?;
-    let mut object_paths: Vec<PathBuf> =
-        bundle.object_paths_by_function.values().cloned().collect();
+    let mut object_paths: Vec<PathBuf> = bundle.object_paths().cloned().collect();
     object_paths.push(bridge_object);
     let export_symbols: Vec<String> = export_symbols.into_iter().collect();
     let initial_link = link_objects_to_dynamic_library(
@@ -6727,8 +6726,7 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> =
-            bundle.object_paths_by_function.values().cloned().collect();
+        let object_paths: Vec<PathBuf> = bundle.object_paths().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -7599,11 +7597,7 @@ mod tests {
             &[],
         )
         .expect("compile direct storage bridge");
-        let mut objects = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut objects = bundle.object_paths().cloned().collect::<Vec<_>>();
         objects.push(bridge);
         let linked = temp_root.join("direct_storage.dll");
         let dynload = ensure_stasis_dynload_link_library().expect("stasis dynload link library");
@@ -7705,11 +7699,7 @@ mod tests {
             &[],
         )
         .expect("compile runtime bridge");
-        let mut objects = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut objects = bundle.object_paths().cloned().collect::<Vec<_>>();
         objects.push(bridge);
         let linked = temp_root.join("bounded_performance.dll");
         let dynload = ensure_stasis_dynload_link_library().expect("stasis dynload link library");
