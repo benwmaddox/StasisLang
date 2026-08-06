@@ -46,7 +46,7 @@ const GFX_F_LINE_BASE: i32 = 4;
 
 const GFX_F_SPRITE_BASE: i32 = 80004;
 
-global gfx_cmd_i32: i32[18464];
+global gfx_cmd_i32: i32[34608];
 
 global gfx_cmd_f32: f32[108676];
 

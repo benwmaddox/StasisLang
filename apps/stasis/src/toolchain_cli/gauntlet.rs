@@ -444,9 +444,10 @@ impl GauntletConfigV1 {
                 return Err("Gauntlet scenarios require non-empty id and description".to_string());
             }
             if scenario.id.len() > 64
-                || !scenario.id.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-                })
+                || !scenario
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
             {
                 return Err(
                     "Gauntlet scenario ids must be portable ASCII names up to 64 characters"
@@ -831,6 +832,7 @@ test `Gauntlet seed emits a visible frame`(): bool {
     render();
     if (gfx_cmd_i32[GFX_I_MAGIC] != GFX_CMD_MAGIC) { return false; }
     if (gfx_cmd_i32[GFX_I_LINE_COUNT] < 1) { return false; }
+    if (gfx_cmd_order_count() < 3) { return false; }
     if (gfx_cmd_text_bytes_used() < 15) { return false; }
     if (gfx_cmd_u8[0] != 83) { return false; }
     if (gfx_cmd_u8[1] != 84) { return false; }

@@ -39,7 +39,8 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(12_320, StasisPreviewRenderer.I_TEXT_BASE);
         assertEquals(80_004, StasisPreviewRenderer.F_SPRITE_BASE);
         assertEquals(96_388, StasisPreviewRenderer.F_TEXT_BASE);
-        assertEquals(18_464, StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        assertEquals(18_464, StasisPreviewRenderer.I_ORDER_BASE);
+        assertEquals(34_608, StasisPreviewRenderer.FRAME_I32_CAPACITY);
         assertEquals(108_676, StasisPreviewRenderer.FRAME_F32_CAPACITY);
         assertEquals(65_536, StasisPreviewRenderer.TEXT_U8_CAPACITY);
     }
@@ -96,10 +97,31 @@ public final class StasisPreviewRendererSchemaTest {
         assertFalse(StasisPreviewRenderer.shouldPresent(frame));
         frame.put(StasisPreviewRenderer.I_FLAGS, StasisPreviewRenderer.FLAG_PRESENT);
         assertTrue(StasisPreviewRenderer.shouldPresent(frame));
+        frame.put(1, StasisPreviewRenderer.RENDER_V2_VERSION);
+        assertTrue(StasisPreviewRenderer.isValidFrame(frame));
         frame.put(1, 1);
         assertFalse(StasisPreviewRenderer.isValidFrame(frame));
         assertFalse(StasisPreviewRenderer.shouldPresent(frame));
         assertFalse(StasisPreviewRenderer.isValidFrame(IntBuffer.allocate(10)));
+    }
+
+    @Test
+    public void orderedSchemaRepresentsOppositePerGameLayerOrders() {
+        int line = StasisPreviewRenderer.ORDER_LINE * StasisPreviewRenderer.ORDER_KIND_SCALE;
+        int sprite = StasisPreviewRenderer.ORDER_SPRITE * StasisPreviewRenderer.ORDER_KIND_SCALE;
+        int text = StasisPreviewRenderer.ORDER_TEXT * StasisPreviewRenderer.ORDER_KIND_SCALE;
+
+        int[] backgroundFirst = {sprite, line, text};
+        int[] overlayFirst = {line, text, sprite};
+
+        assertEquals(StasisPreviewRenderer.ORDER_SPRITE,
+                StasisPreviewRenderer.orderKind(backgroundFirst[0]));
+        assertEquals(StasisPreviewRenderer.ORDER_LINE,
+                StasisPreviewRenderer.orderKind(overlayFirst[0]));
+        assertEquals(StasisPreviewRenderer.ORDER_TEXT,
+                StasisPreviewRenderer.orderKind(backgroundFirst[2]));
+        assertEquals(0, StasisPreviewRenderer.orderIndex(backgroundFirst[0]));
+        assertEquals(-1, StasisPreviewRenderer.orderIndex(-1));
     }
 
     @Test
@@ -182,6 +204,9 @@ public final class StasisPreviewRendererSchemaTest {
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_LOGICAL_W, 360);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DRAWABLE_H, 2400);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DENSITY_GENERATION, 7);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_ORDER_COUNT, 1);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_ORDER_BASE,
+                StasisPreviewRenderer.ORDER_SPRITE * StasisPreviewRenderer.ORDER_KIND_SCALE);
         renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_LINE_BASE, 12.5f);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_BASE, 77);
         renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_SPRITE_BASE, 19.25f);
@@ -210,6 +235,9 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(42.0f, snapshot.textValues[0], 0.0f);
         assertEquals(4, snapshot.textBytes.length);
         assertEquals('C', snapshot.textBytes[2]);
+        assertEquals(1, snapshot.order.length);
+        assertEquals(StasisPreviewRenderer.ORDER_SPRITE,
+                StasisPreviewRenderer.orderKind(snapshot.order[0]));
     }
 
     @Test

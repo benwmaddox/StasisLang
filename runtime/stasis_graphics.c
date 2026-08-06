@@ -4388,9 +4388,9 @@ STASIS_EXPORT void stasis_draw_lines_f32(const float* lines, int line_count) {
  * Command-buffer submission (v2).
  *
  * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
- * clear -> lines -> sprites -> text -> present.
+ * Flush category-local batches before a later command category draws.
  */
-static void flush_lines_before_later_layers(void) {
+static void flush_ordered_lines(void) {
     if (g_line_count == 0) return;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
@@ -4416,20 +4416,75 @@ static void flush_lines_before_later_layers(void) {
 #endif
 }
 
-static void flush_sprites_before_text(void) {
+static void flush_ordered_sprites(void) {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!g_use_sdl_renderer) flush_sprites();
 #endif
 }
 
+static void stasis_draw_ordered_sprite(
+    const int32_t* cmd_i32,
+    const float* cmd_f32,
+    int32_t index
+) {
+    const int32_t* sprite_i32 = cmd_i32 + STASIS_RENDER_I_SPRITE_BASE;
+    const float* sprite_f32 = cmd_f32 + STASIS_RENDER_F_SPRITE_BASE;
+    const int base_i = index * STASIS_RENDER_SPRITE_I32_STRIDE;
+    const int base_f = index * STASIS_RENDER_SPRITE_F32_STRIDE;
+    stasis_gfx_draw_sprite_internal(
+        sprite_i32[base_i + 0],
+        sprite_f32[base_f + 0],
+        sprite_f32[base_f + 1],
+        sprite_f32[base_f + 2],
+        sprite_f32[base_f + 3],
+        sprite_i32[base_i + 1],
+        sprite_i32[base_i + 2],
+        g_debug_hash_enabled);
+}
+
+static void stasis_draw_ordered_text(
+    const int32_t* cmd_i32,
+    const float* cmd_f32,
+    const uint8_t* cmd_u8,
+    int32_t text_bytes_used,
+    int32_t index
+) {
+    const int base_i = STASIS_RENDER_I_TEXT_BASE +
+        index * STASIS_RENDER_TEXT_I32_STRIDE;
+    const int font = cmd_i32[base_i + 0];
+    const int byte_off = cmd_i32[base_i + 1];
+    const int byte_len = cmd_i32[base_i + 2];
+    if (font <= 0) return;
+
+    const int base_f = STASIS_RENDER_F_TEXT_BASE +
+        index * STASIS_RENDER_TEXT_F32_STRIDE;
+    const float x = cmd_f32[base_f + 0];
+    const float y = cmd_f32[base_f + 1];
+    const float r = cmd_f32[base_f + 2];
+    const float g = cmd_f32[base_f + 3];
+    const float b = cmd_f32[base_f + 4];
+    const float a = cmd_f32[base_f + 5];
+    if (byte_off < 0) {
+        if (byte_off != INT32_MIN) {
+            stasis_gfx_draw_text_cached(-byte_off, x, y, r, g, b, a);
+        }
+        return;
+    }
+    if (!cmd_u8 || text_bytes_used <= 0 ||
+        !stasis_render_text_span_is_valid(byte_off, byte_len, text_bytes_used)) {
+        return;
+    }
+    stasis_draw_text(font, (const char*)(cmd_u8 + byte_off), x, y, r, g, b, a);
+}
+
 static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     static int contract_logged = 0;
-    StasisRenderV2Validation validation = stasis_render_v2_validate(cmd_i32, cmd_f32);
-    if (validation != STASIS_RENDER_V2_VALID) {
+    StasisRenderValidation validation = stasis_render_validate(cmd_i32, cmd_f32);
+    if (validation != STASIS_RENDER_VALID) {
         if (!contract_logged) {
             SDL_Log(
                 "Stasis renderer rejected frame: stage=command_header failure=%s magic=%d version=%d backend=%s surface_generation=%u renderer_generation=%u",
-                stasis_render_v2_validation_name(validation),
+                stasis_render_validation_name(validation),
                 cmd_i32 ? cmd_i32[STASIS_RENDER_I_MAGIC] : 0,
                 cmd_i32 ? cmd_i32[STASIS_RENDER_I_VERSION] : 0,
                 g_use_sdl_renderer ? "sdl" : "gl",
@@ -4465,8 +4520,8 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
     if (!contract_logged) {
         SDL_Log(
             "Stasis render contract v%d trace=%u flags=%d lines=%d sprites=%d text=%d",
-            STASIS_RENDER_V2_VERSION,
-            (unsigned int)stasis_render_v2_trace(cmd_i32, cmd_f32, cmd_u8),
+            cmd_i32[STASIS_RENDER_I_VERSION],
+            (unsigned int)stasis_render_trace(cmd_i32, cmd_f32, cmd_u8),
             flags,
             line_count,
             sprite_count,
@@ -4480,79 +4535,50 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
     }
 
-    /* lines: f32 header is 4 (clear rgba), then line payload */
-    if (line_count > 0) {
-        stasis_draw_lines_f32(cmd_f32 + 4, line_count);
-    }
-
-    /* Lines are buffered on both backends. Flush before sprites so later layers
-     * cannot cover text after text has already been drawn. */
-    flush_lines_before_later_layers();
-
-    /* sprites: identity/state in i32, logical geometry in f32 */
-    if (sprite_count > 0) {
-        const int32_t* sprite_i32 = cmd_i32 + STASIS_RENDER_I_SPRITE_BASE;
-        const float* sprite_f32 = cmd_f32 + STASIS_RENDER_F_SPRITE_BASE;
-        for (int i = 0; i < sprite_count; i++) {
-            const int base_i = i * STASIS_RENDER_SPRITE_I32_STRIDE;
-            const int base_f = i * STASIS_RENDER_SPRITE_F32_STRIDE;
-            stasis_gfx_draw_sprite_internal(
-                sprite_i32[base_i + 0],
-                sprite_f32[base_f + 0],
-                sprite_f32[base_f + 1],
-                sprite_f32[base_f + 2],
-                sprite_f32[base_f + 3],
-                sprite_i32[base_i + 1],
-                sprite_i32[base_i + 2],
-                g_debug_hash_enabled);
-        }
-    }
-
-    /* OpenGL sprites are batched. Native text draws immediately, so commit the
-     * sprite batch first to preserve the documented line -> sprite -> text order. */
-    flush_sprites_before_text();
-
-    /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
-    /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
-    if (text_count > 0) {
-        const int32_t text_i32_base = STASIS_RENDER_I_TEXT_BASE;
-        const int32_t text_f32_base = STASIS_RENDER_F_TEXT_BASE;
-        const int32_t* text_meta = cmd_i32 + text_i32_base;
-
-        for (int i = 0; i < text_count; i++) {
-            const int base_i = i * 3;
-            const int font = text_meta[base_i + 0];
-            const int byte_off = text_meta[base_i + 1];
-            const int byte_len = text_meta[base_i + 2];
-
-            if (font <= 0) continue;
-            if (byte_off < 0) {
-                const int run = -byte_off;
-                const int base_f = text_f32_base + i * 6;
-                const float x = cmd_f32[base_f + 0];
-                const float y = cmd_f32[base_f + 1];
-                const float r = cmd_f32[base_f + 2];
-                const float g = cmd_f32[base_f + 3];
-                const float b = cmd_f32[base_f + 4];
-                const float a = cmd_f32[base_f + 5];
-                stasis_gfx_draw_text_cached(run, x, y, r, g, b, a);
-                continue;
+    const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
+    const int32_t order_count = version == STASIS_RENDER_V3_VERSION
+        ? stasis_render_clamp_count(
+            cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER)
+        : 0;
+    if (order_count > 0) {
+        int32_t pending_kind = 0;
+        for (int32_t order_index = 0; order_index < order_count; order_index++) {
+            const int32_t entry = cmd_i32[STASIS_RENDER_I_ORDER_BASE + order_index];
+            if (entry < 0) continue;
+            const int32_t kind = entry / STASIS_RENDER_ORDER_KIND_SCALE;
+            const int32_t index = entry % STASIS_RENDER_ORDER_KIND_SCALE;
+            if (kind == STASIS_RENDER_ORDER_LINE && index < line_count) {
+                if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
+                stasis_draw_lines_f32(
+                    cmd_f32 + STASIS_RENDER_F_LINE_BASE +
+                        index * STASIS_RENDER_LINE_F32_STRIDE,
+                    1);
+                pending_kind = kind;
+            } else if (kind == STASIS_RENDER_ORDER_SPRITE && index < sprite_count) {
+                if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
+                stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
+                pending_kind = kind;
+            } else if (kind == STASIS_RENDER_ORDER_TEXT && index < text_count) {
+                if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
+                if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
+                stasis_draw_ordered_text(
+                    cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
+                pending_kind = kind;
             }
-            if (!cmd_u8 || text_bytes_used <= 0) continue;
-            if (!stasis_render_v2_text_span_is_valid(
-                    byte_off, byte_len, text_bytes_used)) continue;
-
-            const char* text = (const char*)(cmd_u8 + byte_off);
-
-            const int base_f = text_f32_base + i * 6;
-            const float x = cmd_f32[base_f + 0];
-            const float y = cmd_f32[base_f + 1];
-            const float r = cmd_f32[base_f + 2];
-            const float g = cmd_f32[base_f + 3];
-            const float b = cmd_f32[base_f + 4];
-            const float a = cmd_f32[base_f + 5];
-
-            stasis_draw_text(font, text, x, y, r, g, b, a);
+        }
+        if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
+        if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
+    } else {
+        if (line_count > 0) {
+            stasis_draw_lines_f32(cmd_f32 + STASIS_RENDER_F_LINE_BASE, line_count);
+            flush_ordered_lines();
+        }
+        for (int32_t index = 0; index < sprite_count; index++) {
+            stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
+        }
+        if (sprite_count > 0) flush_ordered_sprites();
+        for (int32_t index = 0; index < text_count; index++) {
+            stasis_draw_ordered_text(cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
         }
     }
 

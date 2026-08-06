@@ -310,12 +310,12 @@ Primitive rendering remains appropriate for basic UI, simple icons,
 selection/range overlays, and deterministic fallbacks. ImageGen remains optional
 for work that is purely logic or basic interface geometry.
 
-The current render-v2 category order is clear, line primitives, sprites, then
-text. An opaque full-board sprite therefore covers a battlefield that is still
-drawn with lines. Until a project has a verified sprite-first background path,
-agents request isolated foreground subjects on flat removable backgrounds and
-use bounded crop/background removal during import. This keeps generated units,
-buildings, and props above the board while preserving grid and tactical overlays.
+The render-v3 command stream preserves game submission order across line
+primitives, sprites, and text. An opaque full-board sprite should therefore be
+submitted before gameplay primitives and overlays when it is a background.
+Agents still request isolated foreground subjects on flat removable backgrounds
+and use bounded crop/background removal during import when the asset is a unit,
+building, or prop rather than a backdrop.
 
 The request is stored under `build/gauntlet/imagegen/requests/`. The host places
 the selected PNG at the request's `output_path` under

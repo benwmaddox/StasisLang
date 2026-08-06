@@ -6,7 +6,7 @@ extern function load_font(path: string, size: i32): i32;
 
 function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
 
-global gfx_cmd_i32: i32[18464];
+global gfx_cmd_i32: i32[34608];
 
 global gfx_cmd_f32: f32[108676];
 

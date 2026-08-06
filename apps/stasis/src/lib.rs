@@ -1892,7 +1892,7 @@ fn run_play_in_process_inner(
     // Allocate and register all global buffers used by HostFrame / gfx_cmd + window requests.
     let mut host_i32: Vec<i32> = vec![0; 768];
     let mut host_f32: Vec<f32> = vec![0.0; 64];
-    let mut gfx_cmd_i32: Vec<i32> = vec![0; 18464];
+    let mut gfx_cmd_i32: Vec<i32> = vec![0; 34608];
     let mut gfx_cmd_f32: Vec<f32> = vec![0.0; 108676];
     let mut gfx_cmd_u8: Vec<u8> = vec![0; 65536];
 
@@ -4343,13 +4343,19 @@ mod tests {
         for required in [
             "STASIS_RENDER_V2_MAGIC 0x47584631",
             "STASIS_RENDER_V2_VERSION 2",
+            "STASIS_RENDER_V3_VERSION 3",
+            "STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V3_VERSION",
             "STASIS_RENDER_V2_TRACE_VERSION 2",
+            "STASIS_RENDER_V3_TRACE_VERSION 3",
+            "STASIS_RENDER_I_ORDER_BASE",
+            "STASIS_RENDER_MAX_ORDER",
             "STASIS_RENDER_SPRITE_F32_STRIDE 4",
             "STASIS_RENDER_I32_COUNT",
             "STASIS_RENDER_F32_COUNT",
-            "stasis_render_v2_validate",
-            "stasis_render_v2_validation_name",
-            "stasis_render_v2_is_valid",
+            "stasis_render_validate",
+            "stasis_render_validation_name",
+            "stasis_render_is_valid",
+            "stasis_render_trace",
             "stasis_render_v2_trace",
         ] {
             assert!(
@@ -4364,7 +4370,7 @@ mod tests {
             "shipping runtime should default to the canonical SDL backend"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_render_v2_validate(cmd_i32, cmd_f32)")
+            STASIS_GRAPHICS_SOURCE.contains("stasis_render_validate(cmd_i32, cmd_f32)")
                 && STASIS_GRAPHICS_SOURCE.contains("STASIS_RENDER_FLAG_PRESENT")
                 && STASIS_GRAPHICS_SOURCE.contains("SDL_SetDefaultTextureScaleMode(")
                 && STASIS_GRAPHICS_SOURCE.contains("SDL_SetRenderClipRect(g_renderer, NULL)")
