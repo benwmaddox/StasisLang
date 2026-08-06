@@ -164,13 +164,15 @@ may be added, but accepted requirements cannot be removed.
 
 Required scenarios remain gameplay requirements when `taps` is omitted. Up to
 four scenarios may also contain one to eight deterministic pointer taps. The
-controller runs the newly active candidate's `main()` after its tested builder
-transaction and replaces the validation snapshot before capture. It then
-restores that candidate-specific snapshot before each scenario, replays the taps
-in order, and captures the final rendered frame for both the accepted checkpoint
-and every candidate. This makes new globals, asset loads, initialization, and
-render paths observable rather than preserving a migrated baseline from the
-prior candidate. `ticks_after` defaults to 1 and may be 1-300,
+controller runs the newly active candidate's `main()` followed by one
+input-free startup tick after its tested builder transaction, then replaces the
+validation snapshot before capture. It restores that candidate-specific
+input-ready snapshot before each scenario, replays the taps in order, and
+captures the final rendered frame for both the accepted checkpoint and every
+candidate. This makes new globals, asset loads, initialization, and render paths
+observable rather than preserving a migrated baseline from the prior candidate
+or letting a one-time startup transition consume the first scenario tap.
+`ticks_after` defaults to 1 and may be 1-300,
 allowing staged movement or feedback to settle without wall-clock timing. Leads
 and blind critics receive identically ordered, named scenario frames alongside
 the initial and fixed-probe pair, so selection, movement, targeting, endings,
@@ -456,8 +458,9 @@ The version-one live protocol gains three additive primitives:
   overrides physical input during deterministic scenarios.
 - `capture_frame` schedules a PNG for the next presented frame using a
   controller-generated artifact identity.
-- `validation_reinitialize` runs the active candidate's `main()` and replaces
-  the deterministic validation snapshot before candidate capture.
+- `validation_reinitialize` runs the active candidate's `main()`, executes one
+  input-free startup tick, and replaces the deterministic validation snapshot
+  at the first input-ready state before candidate capture.
 
 The controller composes existing `snapshot`, `step`, `inspect`, and `restore`
 commands with those primitives into deterministic scenarios. Input is limited

@@ -803,13 +803,18 @@ impl LiveWorkspace {
                     Err(format!("guest main() returned non-zero status {main_rc}"))
                 } else {
                     self.input_override = Some(Vec::new());
+                    let startup_tick_status = jit.execute_i32_noarg_by_name("tick")?;
                     self.validation_snapshot =
                         Some(stasis_dynload::snapshot_jit_runtime_state_bounded(
                             MAX_STATE_SNAPSHOT_BYTES,
                         )?);
                     Ok((
                         "validation_reinitialized",
-                        json!({"main_status": main_rc, "captured": true}),
+                        json!({
+                            "main_status": main_rc,
+                            "startup_tick_status": startup_tick_status,
+                            "captured": true,
+                        }),
                     ))
                 }
             }
@@ -4056,7 +4061,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_reinitialize_runs_current_main_and_replaces_the_baseline() {
+    fn validation_reinitialize_runs_current_main_and_startup_tick_before_snapshot() {
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -4077,7 +4082,10 @@ mod tests {
         );
         assert!(reinitialized.ok, "{:?}", reinitialized.error);
         assert_eq!(reinitialized.kind, "validation_reinitialized");
-        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(1)));
+        let reinitialized_data = reinitialized.data.expect("reinitialize data");
+        assert_eq!(reinitialized_data["main_status"], 0);
+        assert_eq!(reinitialized_data["startup_tick_status"], 0);
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(2)));
 
         jit.write_global_scalar("score", JitScalarValue::I32(7))
             .expect("mutate score again");
@@ -4090,7 +4098,7 @@ mod tests {
             LiveRequest::new(45, LiveCommand::ValidationRestore),
         );
         assert!(restored.ok, "{:?}", restored.error);
-        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(1)));
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(2)));
         fs::remove_dir_all(root).ok();
     }
 
