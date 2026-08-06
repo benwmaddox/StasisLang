@@ -91,7 +91,7 @@ impl AotTarget {
     }
 
     pub fn requires_position_independent_code(&self) -> bool {
-        !matches!(self, Self::Native)
+        !matches!(self, Self::Native) || cfg!(target_os = "macos")
     }
 }
 
@@ -797,7 +797,10 @@ echo "fake-shared" > "$OUT"
 
     #[test]
     fn aot_target_reports_position_independent_code_requirement() {
-        assert!(!AotTarget::Native.requires_position_independent_code());
+        assert_eq!(
+            AotTarget::Native.requires_position_independent_code(),
+            cfg!(target_os = "macos")
+        );
         assert!(AotTarget::android_arm64_default().requires_position_independent_code());
         assert!(AotTarget::android_x86_64_default().requires_position_independent_code());
         assert!(AotTarget::ios_arm64_default().requires_position_independent_code());
