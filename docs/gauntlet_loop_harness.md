@@ -186,6 +186,14 @@ immediately apply the configured one-shot builder escalation. If the rescue
 builder reports the same non-recoverable condition, the candidate is rejected
 without consuming the rest of its turn allowance.
 
+Stasis also stops an attempt automatically when the same atomic-write outcome
+is rejected three times in a row. Volatile paths are removed from test-failure
+identity, so retries of the same named test and result count together even when
+the candidate workspace changes. A different failure or a successful write
+resets the count. The third rejection is stored in decision memory as
+`builder_repeated_write_failure`, terminates the attempt, and gives the rescue
+builder fresh turns plus the repeated-failure evidence.
+
 When compaction is enabled, a builder request is compacted after it exceeds
 the configured byte ceiling. Stasis retains up to the configured number of
 recent raw turns and replaces older turns with deterministic summaries of
@@ -335,7 +343,9 @@ rejected candidates, and the largest remaining gap.
 chain-of-thought. The `record_decision` tool stores bounded explicit
 conclusions: kind, summary, concise rationale, evidence, and next step. The
 `report_blocked` tool writes the same durable evidence before terminating an
-impossible builder attempt. The
+impossible builder attempt. Three consecutive identical atomic-write failures
+produce the same terminal handoff automatically rather than relying on the
+builder to recognize the loop. The
 controller also records lead choices, accepted/rejected checkpoints, and final
 gate failures. Each append is flushed and synced so interruption or resume does
 not erase the current theory of the game. A failed builder attempt extracts a

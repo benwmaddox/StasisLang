@@ -41,6 +41,7 @@ const COMPLETION_LIMIT: usize = 64;
 const TUI_REQUEST_START: u64 = 1u64 << 61;
 const AI_REQUEST_START: u64 = 1u64 << 62;
 const MAX_DECISION_FIELD_CHARS: usize = 2_000;
+const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
 const MAX_STDLIB_API_FILES: usize = 16;
 const MAX_STDLIB_API_ITEMS: usize = 256;
 const MAX_STDLIB_API_FILE_BYTES: u64 = 512 * 1024;
@@ -2330,6 +2331,8 @@ struct LiveAiTools {
     decision_log: Option<PathBuf>,
     decision_role: Option<String>,
     terminal_blocker: Option<String>,
+    last_write_failure_key: Option<String>,
+    consecutive_write_failures: u32,
     require_imagegen: bool,
     imagegen_ready_paths: Vec<String>,
     imagegen_staged: bool,
@@ -2350,6 +2353,8 @@ impl LiveAiTools {
             decision_log: None,
             decision_role: None,
             terminal_blocker: None,
+            last_write_failure_key: None,
+            consecutive_write_failures: 0,
             require_imagegen: false,
             imagegen_ready_paths: Vec::new(),
             imagegen_staged: false,
@@ -2811,15 +2816,9 @@ impl LiveAiTools {
         canceled: &AtomicBool,
     ) -> Vec<ToolObservation> {
         if !self.reference_search_ready {
-            return calls
-                .iter()
-                .map(|call| {
-                    ToolObservation::error(
-                        &call.tool,
-                        "run find_references for a behavior-bearing symbol before a live AI write",
-                    )
-                })
-                .collect();
+            let error = "run find_references for a behavior-bearing symbol before a live AI write";
+            self.note_write_failure(error);
+            return failed_write_observations(calls, error.to_string());
         }
         let edits: Vec<LiveEdit> = calls
             .iter()
@@ -2848,6 +2847,7 @@ impl LiveAiTools {
             .collect();
         if let Some(project_root) = self.project_root.as_ref() {
             if let Err(error) = validate_ai_font_paths(project_root, &edits) {
+                self.note_write_failure(&error);
                 return failed_write_observations(calls, error);
             }
         }
@@ -2880,6 +2880,8 @@ impl LiveAiTools {
                 let applied = response.ok && response.kind == "edit_applied";
                 if applied {
                     self.last_write = Some(response.clone());
+                    self.last_write_failure_key = None;
+                    self.consecutive_write_failures = 0;
                     self.reference_search_ready = false;
                     self.imagegen_committed |= self.imagegen_staged
                         && self.project_root.as_ref().is_some_and(|project_root| {
@@ -2917,6 +2919,7 @@ impl LiveAiTools {
                         &error,
                         "Correct the reported compile or test failure before attempting another atomic write.",
                     );
+                    self.note_write_failure(&error);
                     failed_write_observations(calls, error)
                 }
             }
@@ -2932,9 +2935,35 @@ impl LiveAiTools {
                     &error,
                     "Correct the reported live request failure before attempting another atomic write.",
                 );
+                self.note_write_failure(&error);
                 failed_write_observations(calls, error)
             }
         }
+    }
+
+    fn note_write_failure(&mut self, error: &str) {
+        let key = stable_write_failure_key(error);
+        if self.last_write_failure_key.as_deref() == Some(key.as_str()) {
+            self.consecutive_write_failures = self.consecutive_write_failures.saturating_add(1);
+        } else {
+            self.last_write_failure_key = Some(key.clone());
+            self.consecutive_write_failures = 1;
+        }
+        if self.consecutive_write_failures < MAX_CONSECUTIVE_WRITE_FAILURES
+            || self.terminal_blocker.is_some()
+        {
+            return;
+        }
+        let blocker = format!(
+            "builder stopped after the same atomic write failure repeated {MAX_CONSECUTIVE_WRITE_FAILURES} times: {key}"
+        );
+        self.terminal_blocker = Some(blocker.clone());
+        self.record_durable_failure(
+            "builder_repeated_write_failure",
+            "The builder repeated the same rejected atomic write outcome",
+            &blocker,
+            "Escalate with fresh turns and the repeated failure evidence; do not retry the same approach.",
+        );
     }
 
     fn append_decision_record(&self, path: &Path, record: &Value) -> Result<(), String> {
@@ -3055,6 +3084,20 @@ fn preserve_truncated_applied_write_evidence(mut response: LiveResponse) -> Live
         }));
     }
     response
+}
+
+fn stable_write_failure_key(error: &str) -> String {
+    if let Some((before_result, result)) = error.rsplit_once(" :: returned ") {
+        if let Some((_, test_name)) = before_result.rsplit_once(" :: ") {
+            let result = result
+                .split(['"', ',', '\r', '\n'])
+                .next()
+                .unwrap_or(result)
+                .trim();
+            return format!("test {test_name} returned {result}");
+        }
+    }
+    error.chars().take(512).collect()
 }
 
 fn failed_write_observations(calls: &[&ToolCall], error: String) -> Vec<ToolObservation> {
@@ -4307,6 +4350,68 @@ mod tests {
             observations[1].error.as_deref(),
             Some("atomic write batch failed; see the first write observation")
         );
+    }
+
+    #[test]
+    fn stable_write_failure_key_ignores_volatile_test_paths() {
+        let first = r#"tests failed at C:\temp\candidate-a\tests\main.test.stasis :: Combat preview equals resolution and requires confirmation :: returned false"#;
+        let second = r#"tests failed at D:\other\candidate-b\tests\main.test.stasis :: Combat preview equals resolution and requires confirmation :: returned false, transaction rolled back"#;
+
+        assert_eq!(
+            stable_write_failure_key(first),
+            stable_write_failure_key(second)
+        );
+        assert_eq!(
+            stable_write_failure_key(first),
+            "test Combat preview equals resolution and requires confirmation returned false"
+        );
+    }
+
+    #[test]
+    fn repeated_atomic_write_failure_terminates_on_third_identical_outcome() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_repeated_write_failure_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        fs::create_dir_all(&root).expect("failure memory root");
+        let decisions = root.join("decisions.jsonl");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            true,
+            Some(decisions.clone()),
+            "builder".to_string(),
+            false,
+        );
+        let failure = "tests/main.test.stasis :: preview remains deterministic :: returned false";
+
+        tools.note_write_failure(failure);
+        tools.note_write_failure(failure);
+        assert!(tools.terminal_blocker.is_none());
+        tools.note_write_failure(failure);
+
+        let blocker = tools.terminal_blocker.as_deref().expect("terminal blocker");
+        assert!(blocker.contains("repeated 3 times"));
+        assert!(blocker.contains("test preview remains deterministic returned false"));
+        let memory = fs::read_to_string(decisions).expect("durable failure memory");
+        assert!(memory.contains("builder_repeated_write_failure"));
+        assert!(memory.contains("Escalate with fresh turns"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changed_atomic_write_failure_resets_the_repetition_count() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+
+        tools.note_write_failure("tests/main.test.stasis :: first test :: returned false");
+        tools.note_write_failure("tests/main.test.stasis :: first test :: returned false");
+        tools.note_write_failure("tests/main.test.stasis :: second test :: returned false");
+
+        assert_eq!(tools.consecutive_write_failures, 1);
+        assert!(tools.terminal_blocker.is_none());
     }
 
     #[test]
