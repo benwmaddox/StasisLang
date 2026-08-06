@@ -2536,6 +2536,7 @@ fn run_staged_tests(
     fs::create_dir_all(&root)
         .map_err(|error| format!("failed creating live test overlay: {error}"))?;
     let result = (|| {
+        stage_live_test_assets(&config.project_root, &root)?;
         let manifest = config.project_root.join("stasis.json");
         if manifest.is_file() {
             fs::copy(&manifest, root.join("stasis.json"))
@@ -2566,6 +2567,44 @@ fn run_staged_tests(
         (Ok(()), Err(error)) => Err(format!("failed cleaning live test overlay: {error}")),
         (Ok(()), Ok(())) => Ok(()),
     }
+}
+
+fn stage_live_test_assets(project_root: &Path, overlay_root: &Path) -> Result<(), String> {
+    let source = project_root.join("assets");
+    if !source.exists() {
+        return Ok(());
+    }
+    copy_live_test_asset_directory(&source, &overlay_root.join("assets"))
+}
+
+fn copy_live_test_asset_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("failed creating {}: {error}", destination.display()))?;
+    let mut entries = fs::read_dir(source)
+        .map_err(|error| format!("failed reading {}: {error}", source.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed enumerating {}: {error}", source.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed inspecting {}: {error}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_live_test_asset_directory(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target).map_err(|error| {
+                format!(
+                    "failed staging live test asset {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn locate_stasis_executable() -> Result<Option<PathBuf>, String> {
@@ -3327,6 +3366,32 @@ mod tests {
             PathBuf::from("build"),
         );
         (root, config)
+    }
+
+    #[test]
+    fn staged_live_tests_receive_project_assets() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project_root = std::env::temp_dir().join(format!("stasis_live_assets_project_{stamp}"));
+        let overlay_root = std::env::temp_dir().join(format!("stasis_live_assets_overlay_{stamp}"));
+        fs::create_dir_all(project_root.join("assets/generated")).expect("generated assets");
+        fs::write(project_root.join("assets/manifest.json"), b"manifest").expect("manifest");
+        fs::write(project_root.join("assets/generated/unit.png"), b"png").expect("png");
+
+        stage_live_test_assets(&project_root, &overlay_root).expect("stage assets");
+
+        assert_eq!(
+            fs::read(overlay_root.join("assets/manifest.json")).expect("staged manifest"),
+            b"manifest"
+        );
+        assert_eq!(
+            fs::read(overlay_root.join("assets/generated/unit.png")).expect("staged png"),
+            b"png"
+        );
+        fs::remove_dir_all(project_root).ok();
+        fs::remove_dir_all(overlay_root).ok();
     }
 
     fn compile(config: &LiveRunConfig) -> (JitProcess, JitEnginePackage) {
