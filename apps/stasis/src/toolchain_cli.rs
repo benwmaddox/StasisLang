@@ -3745,9 +3745,9 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
     if value["schema"] != "stasis.release_provenance.v1"
         || value["development_build"] != false
         || value["dirty_state"] != false
-        || value["command_buffer"]["version"] != 2
+        || value["command_buffer"]["version"] != 3
     {
-        return Err("release provenance is not a clean official gfx_cmd v2 build".to_string());
+        return Err("release provenance is not a clean official gfx_cmd v3 build".to_string());
     }
     let release_tag = provenance_string_field(&value, "release_tag")?;
     let source_commit = provenance_string_field(&value, "source_commit")?;
@@ -3862,7 +3862,7 @@ fn development_provenance() -> Result<Value, String> {
         },
         "runtime_sources": sources,
         "mobile_shell_sources": content_hashes(&mobile_shells, "mobile/shells")?,
-        "command_buffer": {"name": "gfx_cmd", "version": 2},
+        "command_buffer": {"name": "gfx_cmd", "version": 3},
         "backends": ["sdl3"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
         "dependencies": {
@@ -5746,7 +5746,7 @@ mod tests {
             },
             "runtime_sources": runtime_sources,
             "mobile_shell_sources": mobile_shell_sources,
-            "command_buffer": {"name": "gfx_cmd", "version": 2},
+            "command_buffer": {"name": "gfx_cmd", "version": 3},
             "backends": ["sdl3"],
             "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
             "dependencies": {

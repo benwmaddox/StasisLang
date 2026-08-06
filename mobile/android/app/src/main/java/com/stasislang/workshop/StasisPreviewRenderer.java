@@ -13,7 +13,8 @@ import java.nio.IntBuffer;
 final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final String LOG_TAG = "StasisRenderer";
     static final int RENDER_MAGIC = 0x47584631;
-    static final int RENDER_VERSION = 2;
+    static final int RENDER_V2_VERSION = 2;
+    static final int RENDER_VERSION = 3;
     static final int FLAG_CLEAR = 1;
     static final int FLAG_PRESENT = 2;
 
@@ -34,6 +35,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int I_SAFE_H = 19;
     static final int I_DISPLAY_GENERATION = 20;
     static final int I_DENSITY_GENERATION = 21;
+    static final int I_ORDER_COUNT = 22;
     static final int I_SPRITE_BASE = 32;
     static final int F_LINE_BASE = 4;
     static final int MAX_LINES = 10_000;
@@ -45,10 +47,16 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int TEXT_I32_STRIDE = 3;
     static final int TEXT_F32_STRIDE = 6;
     static final int TEXT_U8_CAPACITY = 65_536;
+    static final int MAX_ORDER = MAX_LINES + MAX_SPRITES + MAX_TEXT;
+    static final int ORDER_KIND_SCALE = 16_384;
+    static final int ORDER_LINE = 1;
+    static final int ORDER_SPRITE = 2;
+    static final int ORDER_TEXT = 3;
     static final int I_TEXT_BASE = I_SPRITE_BASE + MAX_SPRITES * SPRITE_I32_STRIDE;
     static final int F_SPRITE_BASE = F_LINE_BASE + MAX_LINES * LINE_F32_STRIDE;
     static final int F_TEXT_BASE = F_SPRITE_BASE + MAX_SPRITES * SPRITE_F32_STRIDE;
-    static final int FRAME_I32_CAPACITY = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
+    static final int I_ORDER_BASE = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
+    static final int FRAME_I32_CAPACITY = I_ORDER_BASE + MAX_ORDER;
     static final int FRAME_F32_CAPACITY = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
 
     private static final int CAPTURE_HEADER_I32S = I_DENSITY_GENERATION + 1;
@@ -129,9 +137,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         final int[] textMetadata;
         final float[] textValues;
         final byte[] textBytes;
+        final int[] order;
 
         LogicalFrameSnapshot(int[] header, float[] lines, int[] sprites, float[] spriteValues,
-                int[] textMetadata, float[] textValues, byte[] textBytes) {
+                int[] textMetadata, float[] textValues, byte[] textBytes, int[] order) {
             this.header = header;
             this.lines = lines;
             this.sprites = sprites;
@@ -139,6 +148,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             this.textMetadata = textMetadata;
             this.textValues = textValues;
             this.textBytes = textBytes;
+            this.order = order;
         }
     }
 
@@ -249,7 +259,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (pendingCapture != null) {
             pendingCapture.onCaptured(null, "a newer preview capture replaced this request",
                     new LogicalFrameSnapshot(new int[0], new float[0], new int[0],
-                            new float[0], new int[0], new float[0], new byte[0]));
+                            new float[0], new int[0], new float[0], new byte[0], new int[0]));
         }
         pendingCapture = callback;
     }
@@ -423,10 +433,41 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
             GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         }
-        drawLines(clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES));
-        drawSprites(clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES));
-        drawText(clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT),
-                clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY));
+        int lineCount = clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES);
+        int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
+        int textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
+        int textBytes = clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY);
+        int orderCount = frameI32.get(1) == RENDER_VERSION
+                ? clampCount(frameI32.get(I_ORDER_COUNT), MAX_ORDER) : 0;
+        if (orderCount == 0) {
+            drawLines(0, lineCount);
+            drawSprites(0, spriteCount);
+            drawText(0, textCount, textBytes);
+            return;
+        }
+        int position = 0;
+        while (position < orderCount) {
+            int entry = frameI32.get(I_ORDER_BASE + position);
+            int kind = orderKind(entry);
+            int index = orderIndex(entry);
+            int limit = kind == ORDER_LINE ? lineCount
+                    : kind == ORDER_SPRITE ? spriteCount
+                    : kind == ORDER_TEXT ? textCount : 0;
+            if (entry < 0 || index >= limit) {
+                position += 1;
+                continue;
+            }
+            int run = 1;
+            while (position + run < orderCount && index + run < limit) {
+                int next = frameI32.get(I_ORDER_BASE + position + run);
+                if (orderKind(next) != kind || orderIndex(next) != index + run) break;
+                run += 1;
+            }
+            if (kind == ORDER_LINE) drawLines(index, run);
+            else if (kind == ORDER_SPRITE) drawSprites(index, run);
+            else drawText(index, run, textBytes);
+            position += run;
+        }
     }
 
     private void prepareFrameResources() {
@@ -534,15 +575,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return texture != 0 && glError == GLES20.GL_NO_ERROR;
     }
 
-    private void drawLines(int count) {
-        int first = 0;
-        while (first < count) {
-            int horizontalRun = horizontalRunLength(frameF32, first, count);
+    private void drawLines(int first, int count) {
+        int end = first + count;
+        while (first < end) {
+            int horizontalRun = horizontalRunLength(frameF32, first, end);
             if (horizontalRun >= 2) {
                 lineVertices.clear();
                 int quadCount = 0;
-                while (first < count && quadCount < LINE_CHUNK_SIZE / 3) {
-                    horizontalRun = horizontalRunLength(frameF32, first, count);
+                while (first < end && quadCount < LINE_CHUNK_SIZE / 3) {
+                    horizontalRun = horizontalRunLength(frameF32, first, end);
                     if (horizontalRun < 2) break;
                     int base = F_LINE_BASE + first * LINE_F32_STRIDE;
                     appendColorQuad(lineVertices,
@@ -558,9 +599,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                         quadCount * VERTICES_PER_QUAD, GLES20.GL_TRIANGLES);
                 continue;
             }
-            int chunk = Math.min(LINE_CHUNK_SIZE, count - first);
+            int chunk = Math.min(LINE_CHUNK_SIZE, end - first);
             for (int offset = 1; offset < chunk; offset += 1) {
-                if (horizontalRunLength(frameF32, first + offset, count) >= 2) {
+                if (horizontalRunLength(frameF32, first + offset, end) >= 2) {
                     chunk = offset;
                     break;
                 }
@@ -621,11 +662,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 .put(frameF32.get(lineBase + 6)).put(frameF32.get(lineBase + 7));
     }
 
-    private void drawSprites(int count) {
+    private void drawSprites(int first, int count) {
         if (count == 0) return;
         beginTextureBatches(spriteVertices);
-        int index = 0;
-        while (index < count) {
+        int index = first;
+        int end = first + count;
+        while (index < end) {
             int base = I_SPRITE_BASE + index * SPRITE_I32_STRIDE;
             int handle = frameI32.get(base);
             int texture = spriteTextureFor(handle);
@@ -633,7 +675,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             spriteVertices.clear();
             appendSprite(base);
             int chunk = 1;
-            while (index + chunk < count && chunk < SPRITE_CHUNK_SIZE) {
+            while (index + chunk < end && chunk < SPRITE_CHUNK_SIZE) {
                 int next = I_SPRITE_BASE + (index + chunk) * SPRITE_I32_STRIDE;
                 int nextHandle = frameI32.get(next);
                 if (spriteTextureFor(nextHandle) != texture || textures.filterFor(nextHandle) != filter) break;
@@ -673,10 +715,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return texture == 0 ? textures.fallbackTexture() : texture;
     }
 
-    private void drawText(int count, int bytesUsed) {
+    private void drawText(int first, int count, int bytesUsed) {
         if (count == 0) return;
         beginTextureBatches(textVertices);
-        for (int index = 0; index < count; index += 1) {
+        int end = first + count;
+        for (int index = first; index < end; index += 1) {
             int meta = I_TEXT_BASE + index * TEXT_I32_STRIDE;
             int font = frameI32.get(meta);
             int offset = frameI32.get(meta + 1);
@@ -777,9 +820,18 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return Math.max(0, Math.min(maximum, value));
     }
 
+    static int orderKind(int entry) {
+        return entry < 0 ? 0 : entry / ORDER_KIND_SCALE;
+    }
+
+    static int orderIndex(int entry) {
+        return entry < 0 ? -1 : entry % ORDER_KIND_SCALE;
+    }
+
     static boolean isValidFrame(IntBuffer values) {
         return values != null && values.capacity() >= FRAME_I32_CAPACITY
-                && values.get(0) == RENDER_MAGIC && values.get(1) == RENDER_VERSION;
+                && values.get(0) == RENDER_MAGIC
+                && (values.get(1) == RENDER_V2_VERSION || values.get(1) == RENDER_VERSION);
     }
 
     static boolean shouldPresent(IntBuffer values) {
@@ -855,8 +907,14 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         for (int index = 0; index < textBytes.length; index += 1) {
             textBytes[index] = frameU8Bytes.get(index);
         }
+        int orderCount = frameI32.get(1) == RENDER_VERSION
+                ? clampCount(frameI32.get(I_ORDER_COUNT), MAX_ORDER) : 0;
+        int[] order = new int[orderCount];
+        for (int index = 0; index < order.length; index += 1) {
+            order[index] = frameI32.get(I_ORDER_BASE + index);
+        }
         return new LogicalFrameSnapshot(
-                header, lines, sprites, spriteValues, textMetadata, textValues, textBytes);
+                header, lines, sprites, spriteValues, textMetadata, textValues, textBytes, order);
     }
 
     private static ByteBuffer directBytes(int capacity) {

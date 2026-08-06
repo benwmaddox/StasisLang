@@ -34,9 +34,9 @@ pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
 pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 13;
 pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER_SIZE
     + ANDROID_RENDER_COMMAND_CAPACITY * ANDROID_RENDER_COMMAND_STRIDE;
-pub const ANDROID_RENDER_V2_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_I32_COUNT;
-pub const ANDROID_RENDER_V2_F32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_F32_COUNT;
-pub const ANDROID_RENDER_V2_U8_CAPACITY: usize = stasis_dynload::STASIS_RENDER_U8_COUNT;
+pub const ANDROID_RENDER_GFX_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_I32_COUNT;
+pub const ANDROID_RENDER_GFX_F32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_F32_COUNT;
+pub const ANDROID_RENDER_GFX_U8_CAPACITY: usize = stasis_dynload::STASIS_RENDER_U8_COUNT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AndroidBridgeTickInput {
@@ -2418,9 +2418,9 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
     if out_i32.is_null()
         || out_f32.is_null()
         || out_u8.is_null()
-        || out_i32_len < ANDROID_RENDER_V2_I32_CAPACITY
-        || out_f32_len < ANDROID_RENDER_V2_F32_CAPACITY
-        || out_u8_len < ANDROID_RENDER_V2_U8_CAPACITY
+        || out_i32_len < ANDROID_RENDER_GFX_I32_CAPACITY
+        || out_f32_len < ANDROID_RENDER_GFX_F32_CAPACITY
+        || out_u8_len < ANDROID_RENDER_GFX_U8_CAPACITY
     {
         return -1;
     }
@@ -2449,7 +2449,7 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
         let i32_values = std::slice::from_raw_parts_mut(out_i32, out_i32_len);
         let f32_values = std::slice::from_raw_parts_mut(out_f32, out_f32_len);
         let u8_values = std::slice::from_raw_parts_mut(out_u8, out_u8_len);
-        stasis_dynload::copy_jit_render_v2_active(i32_values, f32_values, u8_values)?;
+        stasis_dynload::copy_jit_render_active(i32_values, f32_values, u8_values)?;
         write_android_display_metadata(i32_values)
     }));
     match result {
@@ -4182,19 +4182,20 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
 global host_f32: f32[64];
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
-global gfx_cmd_i32: i32[18464];
+global gfx_cmd_i32: i32[34608];
 global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
 function render(): void {
   gfx_cmd_i32[0] = 1196967473;
-  gfx_cmd_i32[1] = 2;
+  gfx_cmd_i32[1] = 3;
   gfx_cmd_i32[2] = 3;
   gfx_cmd_i32[3] = 1;
   gfx_cmd_i32[4] = 1;
   gfx_cmd_i32[7] = 1;
   gfx_cmd_i32[9] = 2;
+  gfx_cmd_i32[22] = 3;
   gfx_cmd_f32[0] = 0.1;
   gfx_cmd_f32[4] = host_f32[0];
   gfx_cmd_f32[5] = host_f32[1];
@@ -4207,6 +4208,9 @@ function render(): void {
   gfx_cmd_i32[12320] = 5;
   gfx_cmd_i32[12321] = 0;
   gfx_cmd_i32[12322] = 1;
+  gfx_cmd_i32[18464] = 32768;
+  gfx_cmd_i32[18465] = 16384;
+  gfx_cmd_i32[18466] = 49152;
   gfx_cmd_f32[80004] = 10.25;
   gfx_cmd_f32[80005] = 20.5;
   gfx_cmd_f32[80006] = 30.75;
@@ -4220,9 +4224,9 @@ function render(): void {
         .expect("write production source");
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("src/main.stasis").expect("entry cstr");
-        let mut frame_i32 = vec![0i32; ANDROID_RENDER_V2_I32_CAPACITY];
-        let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_V2_F32_CAPACITY];
-        let mut frame_u8 = vec![0u8; ANDROID_RENDER_V2_U8_CAPACITY];
+        let mut frame_i32 = vec![0i32; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut frame_u8 = vec![0u8; ANDROID_RENDER_GFX_U8_CAPACITY];
         let status = stasis_android_bridge_run_tick_frame_v2(
             root_c.as_ptr(),
             entry_c.as_ptr(),
@@ -4239,13 +4243,15 @@ function render(): void {
             frame_u8.len(),
         );
         assert_eq!(status, 0);
-        assert_eq!(&frame_i32[..5], &[1196967473, 2, 3, 1, 1]);
+        assert_eq!(&frame_i32[..5], &[1196967473, 3, 3, 1, 1]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
         assert_eq!(&frame_i32[20..22], &[1, 1]);
+        assert_eq!(frame_i32[22], 3);
         assert_eq!(frame_i32[32], 77);
         assert_eq!(frame_i32[33], 11);
         assert_eq!(&frame_i32[12320..12323], &[5, 0, 1]);
+        assert_eq!(&frame_i32[18464..18467], &[32768, 16384, 49152]);
         assert_eq!(frame_f32[4], 180.0);
         assert_eq!(frame_f32[5], 360.0);
         assert_eq!(&frame_f32[80004..80008], &[10.25, 20.5, 30.75, 40.125]);
@@ -4264,7 +4270,7 @@ function render(): void {
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 global host_i32: i32[768];
 global host_f32: f32[64];
-global gfx_cmd_i32: i32[18464];
+global gfx_cmd_i32: i32[34608];
 global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
 function main(): void { gfx_load_sprite(\"../assets/missing.svg\", 32, 32); }
@@ -4275,9 +4281,9 @@ function render(): void {}
         .expect("write source");
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("src/main.stasis").expect("entry cstr");
-        let mut i32_values = vec![0; ANDROID_RENDER_V2_I32_CAPACITY];
-        let mut f32_values = vec![0.0; ANDROID_RENDER_V2_F32_CAPACITY];
-        let mut u8_values = vec![0; ANDROID_RENDER_V2_U8_CAPACITY];
+        let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
         let status = stasis_android_bridge_run_tick_frame_v2(
             root_c.as_ptr(),
             entry_c.as_ptr(),

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "fixture": "samples/render_parity/main.stasis",
   "trace_fixture": "samples/render_parity/trace.stasis",
-  "command_trace": 3891526461,
+  "command_trace": 3298812902,
   "font_sha256": "17ec668bd0cd62e934f97563287ed72a4a8599ae716d20c1a93c82f1876dde47",
   "logical_size": [640, 360],
   "required_commands": {
