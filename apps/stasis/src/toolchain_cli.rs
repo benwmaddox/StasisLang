@@ -4007,28 +4007,28 @@ fn symbol_workspace(
         SymbolCommand::List {
             query,
             kind,
-            file: files,
+            file: requested_files,
             owner,
             page,
             limit,
         } => {
             let limit = limit.clamp(1, 200);
             let mut items = workshop_source_items(&editable_files)?;
-            if files.len() > 16 {
+            if requested_files.len() > 16 {
                 return Err("symbol list accepts at most 16 --file values".to_string());
             }
-            let default_scope = files.is_empty();
+            let default_scope = requested_files.is_empty();
             let mut scope_files = if default_scope {
                 vec![normalize_symbol_file(&workspace.manifest.entry)]
             } else {
-                files
+                requested_files
                     .iter()
                     .map(|file| normalize_symbol_file(file))
                     .collect::<Vec<_>>()
             };
             if default_scope {
                 scope_files.extend(workshop_direct_import_files(
-                    &editable_files,
+                    &files,
                     Path::new(&workspace.manifest.entry),
                 )?);
             }
@@ -4047,7 +4047,7 @@ fn symbol_workspace(
                 .map(|file| {
                     Ok((
                         file.clone(),
-                        workshop_direct_import_files(&editable_files, Path::new(file))?,
+                        workshop_direct_import_files(&files, Path::new(file))?,
                     ))
                 })
                 .collect::<Result<BTreeMap<_, _>, String>>()?;
