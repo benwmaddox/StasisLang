@@ -32,80 +32,48 @@ import "../../src/stdlib/audio.stasis";
 
 // Pool sizes (compile-time; keep in sync with the array sizes below)
 const MAX_BRICKS: i32 = 50;
-
 const MAX_BALLS: i32 = 90;
-
 const MAX_TAP_PULSES: i32 = 16;
-
 const GRID_COLS: i32 = 6;
-
 const GRID_ROWS: i32 = 6;
-
 const UI_MENU_PAD: f32 = 10.0;
-
 const UI_MENU_HEADER_H: f32 = 26.0;
-
 const UI_MENU_SLOT_H: f32 = 30.0;
-
 const UI_MENU_SLOT_GAP: f32 = 10.0;
-
 const SFX_MAX_VOICES: i32 = 12;
-
 const AUDIO_FRAMES_PER_PUSH: i32 = 256;
-
 const PI2: f32 = 6.28318;
-
 const SFX_SELECT: i32 = 1;
-
 const SFX_DRAG_START: i32 = 2;
-
 const SFX_DRAG_PLACE: i32 = 3;
-
 const SFX_DRAG_INVALID: i32 = 4;
-
 const SFX_SHOT: i32 = 5;
-
 const SFX_BOUNCE: i32 = 6;
-
 const SFX_BRICK_BREAK: i32 = 7;
-
 const TAP_PULSE_DURATION_MS: i32 = 2000;
-
 const UI_SIDE_MIN_W: f32 = 220.0;
-
 const UI_BOTTOM_MIN_H: f32 = 160.0;
-
 const UI_PANEL_PAD: f32 = 12.0;
-
 const UI_PANEL_GAP: f32 = 12.0;
 
 // Non-interactive benchmark harness:
 // - Runs for a fixed number of ticks, prints average `tick_time_ms`, then exits.
 // - `tick_time_ms` excludes `end_frame()` (swap/vsync) by design in this sample.
 const BENCH_AUTO_EXIT: i32 = 1;
-
 const BENCH_WARMUP_FRAMES: i32 = 200;
-
 const BENCH_TOTAL_FRAMES: i32 = 2000;
-
 const BENCH_SKIP_MAXIMIZE: i32 = 1;
 
 global bench_frame: i32;
-
 global bench_sum_ms: i32;
-
 global bench_sum_us: i32;
-
 global bench_count: i32;
 
 // Virtual resolution + safe gameplay area.
 // The bottom UI region is reserved for a slide-up menu (and should not be used for gameplay placement).
 const VIRTUAL_W: f32 = 360.0;
-
 const VIRTUAL_H: f32 = 720.0;
-
 const UI_RESERVED_H: f32 = 96.0;
-
 const GAME_H: f32 = 624.0;
 
 enum BrickType {
@@ -351,17 +319,11 @@ struct GameState {
 }
 
 global state: GameState;
-
 global audio_buf: f32[512];
-
 global audio_ready: bool;
-
 global audio_sr: i32;
-
 global sfx_voices: SoundVoice[12];
-
 global desktop_size_w: i32[1];
-
 global desktop_size_h: i32[1];
 
 // RNG functions

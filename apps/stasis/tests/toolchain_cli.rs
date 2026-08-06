@@ -518,7 +518,7 @@ fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
     let entry = project.join("src/main.stasis");
     fs::write(
         &entry,
-        "struct Player{health:i32;active:bool;}enum Mode{Menu Playing}global player:Player;function update(amount:i32):void{if(amount>0){player.health+=amount;}else{player.health=0;}}function main():i32{update(1);return player.health;}\n",
+        "struct Player{health:i32;active:bool;}enum Mode{Menu Playing}global score:i32;global player:Player;function update(amount:i32):void{if(amount>0){player.health+=amount;}else{player.health=0;}}function main():i32{update(1);return player.health;}\n",
     )
     .expect("write unformatted fixture");
 
@@ -534,7 +534,7 @@ fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
     assert_eq!(json_stdout(&formatted)["command"], "fmt");
     assert_eq!(
         fs::read_to_string(&entry).expect("read formatted fixture"),
-        crlf("struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu,\n    Playing,\n}\n\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n")
+        crlf("struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu,\n    Playing,\n}\n\nglobal score: i32;\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n")
     );
 
     let fixed_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);

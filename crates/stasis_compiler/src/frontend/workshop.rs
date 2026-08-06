@@ -1982,6 +1982,7 @@ fn resolve_workshop_rename_target(
     candidates.sort_by_key(|item| {
         let scope = item.scope.as_ref();
         (
+            usize::from(item.text != semantic_path),
             usize::from(scope.is_none()),
             scope
                 .map(|scope| scope.visible_to.saturating_sub(scope.visible_from))
@@ -5415,6 +5416,37 @@ mod workshop_contract_tests {
         assert!(rendered.contains(&("1", WorkshopInlayHintKind::Parameter, "amount:")));
         assert!(rendered.contains(&("5", WorkshopInlayHintKind::Parameter, "bonus:")));
         assert!(!rendered.contains(&("amount", WorkshopInlayHintKind::Parameter, "amount:")));
+    }
+
+    #[test]
+    fn inlay_hints_align_receiver_and_function_call_arguments() {
+        let source = "struct Player { score: i32; }\nglobal player: Player;\nfunction boost(self: Player, amount: i32, bonus: i32): void { self.score += amount + bonus; }\nfunction main(): i32 { player.boost(1, 2); boost(player, 3, 4); return player.score; }\n";
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+        let rendered = workshop_inlay_hints(&files)
+            .expect("inlay hints")
+            .into_iter()
+            .filter(|hint| hint.kind == WorkshopInlayHintKind::Parameter)
+            .map(|hint| {
+                (
+                    source[hint.source_span.start as usize..hint.source_span.end as usize]
+                        .to_string(),
+                    hint.label,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                ("1".to_string(), "amount:".to_string()),
+                ("2".to_string(), "bonus:".to_string()),
+                ("player".to_string(), "self:".to_string()),
+                ("3".to_string(), "amount:".to_string()),
+                ("4".to_string(), "bonus:".to_string()),
+            ]
+        );
     }
 
     #[test]

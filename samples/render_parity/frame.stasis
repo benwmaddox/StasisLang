@@ -1,25 +1,14 @@
 const PARITY_WINDOW_W: i32 = 640;
-
 const PARITY_WINDOW_H: i32 = 360;
-
 const PARITY_GFX_MAGIC: i32 = 1196967473;
-
 const PARITY_GFX_VERSION: i32 = 3;
-
 const PARITY_GFX_FLAG_CLEAR: i32 = 1;
-
 const PARITY_GFX_FLAG_PRESENT: i32 = 2;
-
 const PARITY_GFX_I_SPRITE_BASE: i32 = 32;
-
 const PARITY_GFX_I_TEXT_BASE: i32 = 12320;
-
 const PARITY_GFX_I_ORDER_BASE: i32 = 18464;
-
 const PARITY_GFX_ORDER_SCALE: i32 = 16384;
-
 const PARITY_GFX_F_SPRITE_BASE: i32 = 80004;
-
 const PARITY_GFX_F_TEXT_BASE: i32 = 96388;
 
 function parity_add_sprite(cmd_i32: i32[], handle: i32, rotation: i32, alpha: i32): void {

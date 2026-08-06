@@ -1,7 +1,6 @@
 import "../../src/stdlib/stdlib.stasis";
 
 global print_ascii_value: ascii[16];
-
 global print_utf8_value: utf8[16];
 
 test `print resolves by value type`(): bool {

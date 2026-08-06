@@ -66,17 +66,14 @@ struct GameState {
     bucket_target_x: i32;
     catches: i32;
     misses: i32;
-
     // Keep this in sync with MAX_BALLS.
     balls: Ball[500];
     spawn_timer_ticks: i32;
-
     ui_font: i32;
     bucket_sprite: Sprite;
     ball_sprite: Sprite;
     ui_ascii: ascii[64];
     ui_text: utf8[64];
-
     rng_state: i32;
 }
 

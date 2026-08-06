@@ -4,9 +4,7 @@ import "../../src/stdlib/stdlib.stasis";
 // No graphics/audio/host dependencies.
 
 const BRICKOUT_LEVEL_MAX_EVENTS: i32 = 64;
-
 const BRICKOUT_LEVEL_MAX_SPAWNS_PER_TICK: i32 = 4;
-
 const BRICKOUT_LEVEL_COUNT: i32 = 3;
 
 enum BrickoutScreen {
@@ -23,31 +21,18 @@ enum BrickoutBallPreset {
 const BRICKOUT_LEVEL_EVENT_CAP: i32 = 192; // BRICKOUT_LEVEL_COUNT * BRICKOUT_LEVEL_MAX_EVENTS
 
 global brickout_levels_magic: i32;
-
 global brickout_level_name_0: utf8[32];
-
 global brickout_level_name_1: utf8[32];
-
 global brickout_level_name_2: utf8[32];
-
 global brickout_level_name_tmp: ascii[64];
-
 global brickout_level_initial_scraps: i32[3];
-
 global brickout_level_initial_power_cap: i32[3];
-
 global brickout_level_event_offset: i32[3];
-
 global brickout_level_event_count: i32[3];
-
 global brickout_level_event_tick: i32[192];
-
 global brickout_level_event_preset: BrickoutBallPreset[192];
-
 global brickout_level_tick: i32;
-
 global brickout_level_next_event_index: i32;
-
 global brickout_level_done: i32;
 
 struct BrickoutEconomy {

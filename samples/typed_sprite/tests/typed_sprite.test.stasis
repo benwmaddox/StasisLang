@@ -1,7 +1,6 @@
 import "../../../src/stdlib/graphics.stasis";
 
 global tested_sprite: Sprite;
-
 global tested_text: TextRun;
 
 test `invalid sprite replacement preserves receiver atomically`(): bool {

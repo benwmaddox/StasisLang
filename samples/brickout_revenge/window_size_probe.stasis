@@ -2,7 +2,6 @@ import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/graphics.stasis";
 
 const VIRTUAL_W: f32 = 360.0;
-
 const VIRTUAL_H: f32 = 720.0;
 
 struct ProbeState {
@@ -10,9 +9,7 @@ struct ProbeState {
 }
 
 global state: ProbeState;
-
 global desktop_w: i32[1];
-
 global desktop_h: i32[1];
 
 function maximize_window_for_desktop(): void {

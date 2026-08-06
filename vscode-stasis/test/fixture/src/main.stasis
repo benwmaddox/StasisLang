@@ -1,11 +1,8 @@
 import "../.stasis_cache/toolchain/src/stdlib/graphics.stasis";
 
 global gfx_cmd_i32: i32[34608];
-
 global gfx_cmd_f32: f32[108676];
-
 global gfx_cmd_u8: u8[65536];
-
 global score: i32;
 
 struct Enemy {
