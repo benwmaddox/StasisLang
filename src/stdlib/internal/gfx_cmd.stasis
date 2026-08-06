@@ -260,13 +260,10 @@ function gfx_cmd_lines_from(lines: f32[], count: i32): void {
     let total: i32 = n * GFX_LINE_STRIDE_F32;
     sys_memcpy_f32(gfx_cmd_f32, dst, lines, 0, total);
     let order_i: i32 = 0;
-    while(order_i < n) {
+    for (order_i = 0; order_i < n; order_i = order_i + 1) {
         if (!gfx_cmd_append_order(GFX_ORDER_LINE, start + order_i)) {
             gfx_cmd_i32[GFX_I_DROPPED_LINES] = gfx_cmd_i32[GFX_I_DROPPED_LINES] +(n - order_i);
             n = order_i;
-            order_i = n;
-        } else {
-            order_i = order_i + 1;
         }
     }
     gfx_cmd_i32[GFX_I_LINE_COUNT] = start + n;
@@ -295,13 +292,10 @@ function gfx_cmd_sprites_from(cmd_i32: i32[], cmd_f32: f32[], count: i32): void 
     let total_f: i32 = n * GFX_SPRITE_STRIDE_F32;
     sys_memcpy_f32(gfx_cmd_f32, dst_f, cmd_f32, 0, total_f);
     let order_i: i32 = 0;
-    while(order_i < n) {
+    for (order_i = 0; order_i < n; order_i = order_i + 1) {
         if (!gfx_cmd_append_order(GFX_ORDER_SPRITE, start + order_i)) {
             gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] +(n - order_i);
             n = order_i;
-            order_i = n;
-        } else {
-            order_i = order_i + 1;
         }
     }
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = start + n;
