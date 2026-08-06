@@ -571,12 +571,12 @@ fn render_png(
         let kind = shape
             .get("kind")
             .and_then(Value::as_str)
-            .ok_or_else(|| format!("PNG shape {index} requires kind"))?;
+            .ok_or_else(|| png_shape_error(index, "requires kind"))?;
         let color = parse_color(
             shape
                 .get("color")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("PNG shape {index} requires color"))?,
+                .ok_or_else(|| png_shape_error(index, "requires color"))?,
         )?;
         match kind {
             "rect" => draw_rect(
@@ -603,7 +603,12 @@ fn render_png(
                 shape_u32(shape, "thickness", index, 1, 128)? as i32,
                 color,
             ),
-            _ => return Err(format!("PNG shape {index} has unsupported kind {kind}")),
+            _ => {
+                return Err(png_shape_error(
+                    index,
+                    &format!("has unsupported kind {kind}"),
+                ))
+            }
         }
     }
     let mut output = Cursor::new(Vec::new());
@@ -611,6 +616,12 @@ fn render_png(
         .write_to(&mut output, ImageFormat::Png)
         .map_err(|error| format!("failed encoding PNG asset: {error}"))?;
     Ok(output.into_inner())
+}
+
+fn png_shape_error(index: usize, problem: &str) -> String {
+    format!(
+        "PNG shape {index} {problem}; supported filled shapes are rect(kind,color,x,y,width,height), circle(kind,color,x,y,radius), and line(kind,color,x1,y1,x2,y2,thickness); fill, stroke, stroke_width, cx/cy, and line width are unsupported"
+    )
 }
 
 fn draw_rect(image: &mut RgbaImage, x: i32, y: i32, width: u32, height: u32, color: Rgba<u8>) {
@@ -686,7 +697,9 @@ fn shape_i32(
         .and_then(Value::as_i64)
         .and_then(|value| i32::try_from(value).ok())
         .filter(|value| (-4096..=4096).contains(value))
-        .ok_or_else(|| format!("PNG shape {index} arg {name} must be between -4096 and 4096"))
+        .ok_or_else(|| {
+            png_shape_error(index, &format!("arg {name} must be between -4096 and 4096"))
+        })
 }
 
 fn shape_u32(
@@ -701,7 +714,12 @@ fn shape_u32(
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| (*value >= min) && (*value <= max))
-        .ok_or_else(|| format!("PNG shape {index} arg {name} must be between {min} and {max}"))
+        .ok_or_else(|| {
+            png_shape_error(
+                index,
+                &format!("arg {name} must be between {min} and {max}"),
+            )
+        })
 }
 
 fn controlled_id(value: &str) -> Result<String, String> {
@@ -823,6 +841,23 @@ mod tests {
         let png = render_png(16, 16, parse_color("#102030").unwrap(), &shapes).unwrap();
         let decoded = image::load_from_memory_with_format(&png, ImageFormat::Png).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (16, 16));
+    }
+
+    #[test]
+    fn png_renderer_reports_the_complete_shape_contract() {
+        let error = render_png(
+            16,
+            16,
+            parse_color("#102030").unwrap(),
+            &[serde_json::json!({"kind": "circle", "cx": 8, "cy": 8})],
+        )
+        .expect_err("invalid shape");
+
+        assert!(error.contains("requires color"));
+        assert!(error.contains("rect(kind,color,x,y,width,height)"));
+        assert!(error.contains("circle(kind,color,x,y,radius)"));
+        assert!(error.contains("line(kind,color,x1,y1,x2,y2,thickness)"));
+        assert!(error.contains("cx/cy"));
     }
 
     #[test]
