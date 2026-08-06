@@ -893,11 +893,17 @@ impl CodexExecProvider {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
+        let provider_job = ProviderProcessJob::new()?;
         let mut child = command.spawn().map_err(|error| {
             format!(
                 "failed starting Codex; install/sign in to Codex or set STASIS_CODEX_EXE: {error}"
             )
         })?;
+        if let Err(error) = provider_job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let stdout = child
             .stdout
             .take()
@@ -955,6 +961,90 @@ impl CodexExecProvider {
             .map_err(|_| "Codex usage reader panicked".to_string())??;
         fs::read_to_string(&run.output)
             .map_err(|error| format!("Codex did not produce a final response: {error}"))
+    }
+}
+
+#[cfg(not(windows))]
+struct ProviderProcessJob;
+
+#[cfg(not(windows))]
+impl ProviderProcessJob {
+    fn new() -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    fn assign(&self, _child: &std::process::Child) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+struct ProviderProcessJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ProviderProcessJob {
+    fn new() -> Result<Self, String> {
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(format!(
+                "failed creating Codex provider job object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            return Err(format!(
+                "failed configuring Codex provider job object: {error}"
+            ));
+        }
+        Ok(Self(handle))
+    }
+
+    fn assign(&self, child: &std::process::Child) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let assigned = unsafe {
+            AssignProcessToJobObject(
+                self.0,
+                child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            )
+        };
+        if assigned == 0 {
+            return Err(format!(
+                "failed assigning Codex provider to its cleanup job: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProviderProcessJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
     }
 }
 
@@ -1081,6 +1171,30 @@ pub fn contract_json() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_job_terminates_an_assigned_child_when_dropped() {
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .spawn()
+            .expect("long-lived child");
+        let job = ProviderProcessJob::new().expect("provider job");
+        job.assign(&child).expect("assign child");
+
+        drop(job);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().expect("child status").is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "assigned child survived job closure"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
     use std::sync::atomic::AtomicBool;
 
     struct Responses(Vec<ModelResponse>);
