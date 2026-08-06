@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stasis::{run_live_in_process, LiveRunConfig};
 use stasis_ai::{AgentCompactionPolicy, AgentProfile, CodexExecProvider, ModelProvider};
-use stasis_assets::{
-    load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
-};
+use stasis_assets::{load_project_asset_manifest, prepare_asset_bundle, AssetLimits};
 use stasis_runner::live::{
     live_session, LiveCommand, LivePointerInput, LiveRequest, LiveResponse, LiveSessionClient,
 };
@@ -3696,10 +3694,10 @@ mod tests {
             unix_ms()
         ));
         let prepared_asset = root.join(".stasis_cache/play-assets/assets/generated/rejected.png");
-        let project_manifest = root.join(DEFAULT_ASSET_MANIFEST_PATH);
+        let project_manifest = root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH);
         let prepared_manifest = root
             .join(".stasis_cache/play-assets")
-            .join(DEFAULT_ASSET_MANIFEST_PATH);
+            .join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH);
         let toolchain_marker = root.join(".stasis_cache/toolchain/keep.txt");
         fs::create_dir_all(prepared_asset.parent().expect("prepared parent"))
             .expect("prepared directory");
