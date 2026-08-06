@@ -6,9 +6,11 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.Test;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Collections;
 
@@ -70,6 +72,81 @@ public final class AndroidAiQueueTest {
         assertTrue(recoveredCancellation.detail.contains("project was restored"));
     }
 
+    @Test
+    public void queuePersistsTheExactImageGenerationProfile() throws Exception {
+        File filesDir = Files.createTempDirectory("workshop-ai-queue-image-profile").toFile();
+        AndroidAiQueue.Entry queued = AndroidAiQueue.enqueue(filesDir, "alpha", "text", "make art",
+                new JSONArray(), null, WorkshopImageGenerationProfile.FINAL_PORTRAIT_ID,
+                null, 0, 0);
+
+        AndroidAiQueue.Entry restored = AndroidAiQueue.list(filesDir, "alpha").get(0);
+
+        assertTrue(queued.imageGeneration);
+        assertEquals(WorkshopImageGenerationProfile.FINAL_PORTRAIT_ID,
+                restored.imageGenerationProfile);
+        assertEquals(queued.requestFingerprint(), restored.requestFingerprint());
+    }
+
+    @Test
+    public void versionOneImageGenerationFlagMigratesToDraftProfile() throws Exception {
+        File filesDir = Files.createTempDirectory("workshop-ai-queue-image-profile-v1").toFile();
+        File root = new File(filesDir, "workshop_ai_queue");
+        assertTrue(root.mkdirs());
+        JSONObject item = new JSONObject()
+                .put("id", "00000000-0000-0000-0000-000000000001")
+                .put("project_id", "alpha")
+                .put("source", "text")
+                .put("prompt", "legacy art")
+                .put("created_at_ms", 1L)
+                .put("state", AndroidAiQueue.PENDING)
+                .put("phase", WorkshopAiRunPhase.QUEUED.wireValue())
+                .put("image_attachments", new JSONArray())
+                .put("image_generation", true)
+                .put("detail", "")
+                .put("preview_file", "")
+                .put("preview_width", 0)
+                .put("preview_height", 0)
+                .put("preview_bytes", 0)
+                .put("preview_sha256", "");
+        JSONObject document = new JSONObject()
+                .put("format_version", 1)
+                .put("project_id", "alpha")
+                .put("items", new JSONArray().put(item));
+        Files.write(new File(root, "alpha.json").toPath(),
+                document.toString().getBytes(StandardCharsets.UTF_8));
+
+        AndroidAiQueue.Entry restored = AndroidAiQueue.list(filesDir, "alpha").get(0);
+
+        assertEquals(WorkshopImageGenerationProfile.DRAFT_SQUARE_ID,
+                restored.imageGenerationProfile);
+        assertEquals(1, restored.requestFingerprintVersion);
+        JSONObject legacyFingerprintRequest = new JSONObject()
+                .put("project_id", "alpha")
+                .put("source", "text")
+                .put("prompt", "legacy art")
+                .put("image_attachments", new JSONArray())
+                .put("image_generation", true)
+                .put("preview_sha256", "");
+        assertEquals(sha256(legacyFingerprintRequest.toString()), restored.requestFingerprint());
+    }
+
+    @Test
+    public void freshRetryPreservesFinalImageProfile() throws Exception {
+        File filesDir = Files.createTempDirectory("workshop-ai-queue-image-retry").toFile();
+        AndroidAiQueue.Entry queued = AndroidAiQueue.enqueue(filesDir, "alpha", "text", "make art",
+                new JSONArray(), null, WorkshopImageGenerationProfile.FINAL_LANDSCAPE_ID,
+                null, 0, 0);
+        assertEquals(queued.id, AndroidAiQueue.claimNext(filesDir, "alpha").id);
+        assertTrue(AndroidAiQueue.finish(filesDir, "alpha", queued.id,
+                AndroidAiQueue.COMPLETED, "done"));
+        AndroidAiQueue.Entry terminal = AndroidAiQueue.list(filesDir, "alpha").get(0);
+
+        AndroidAiQueue.Entry retried = AndroidAiQueue.retryTerminal(filesDir, terminal);
+
+        assertEquals(WorkshopImageGenerationProfile.FINAL_LANDSCAPE_ID,
+                retried.imageGenerationProfile);
+    }
+
     private static AndroidAiQueue.Entry claimOnly(
             File filesDir, String projectId, String prompt) throws Exception {
         AndroidAiQueue.Entry queued = enqueue(filesDir, projectId, prompt);
@@ -80,6 +157,14 @@ public final class AndroidAiQueueTest {
     private static AndroidAiQueue.Entry enqueue(
             File filesDir, String projectId, String prompt) throws Exception {
         return AndroidAiQueue.enqueue(filesDir, projectId, "text", prompt,
-                new JSONArray(), null, false, null, 0, 0);
+                new JSONArray(), null, WorkshopImageGenerationProfile.OFF_ID, null, 0, 0);
+    }
+
+    private static String sha256(String source) throws Exception {
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(source.getBytes(StandardCharsets.UTF_8));
+        StringBuilder result = new StringBuilder();
+        for (byte value : digest) result.append(String.format("%02x", value & 0xff));
+        return result.toString();
     }
 }
