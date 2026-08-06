@@ -14,9 +14,13 @@ use stasis_ai::{
     AgentEvent, AgentProfile, CodexExecProvider, ToolCall, ToolExecutor, ToolObservation,
     DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
 };
-use stasis_compiler::frontend::parser::completion_expected_type;
+use stasis_compiler::frontend::lexer::{lex, TokenKind};
+use stasis_compiler::frontend::parser::{
+    completion_expected_type, parse_top_level_extern_functions,
+};
 use stasis_compiler::frontend::workshop::{
-    workshop_source_hash, WorkshopSourceItem, WorkshopSourceItemKind,
+    workshop_source_hash, workshop_symbols, WorkshopSourceFile, WorkshopSourceItem,
+    WorkshopSourceItemKind, WorkshopSymbolKind,
 };
 use stasis_runner::live::{
     CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEdit, LiveEditOperation,
@@ -37,6 +41,10 @@ const COMPLETION_LIMIT: usize = 64;
 const TUI_REQUEST_START: u64 = 1u64 << 61;
 const AI_REQUEST_START: u64 = 1u64 << 62;
 const MAX_DECISION_FIELD_CHARS: usize = 2_000;
+const MAX_STDLIB_API_FILES: usize = 16;
+const MAX_STDLIB_API_ITEMS: usize = 256;
+const MAX_STDLIB_API_FILE_BYTES: u64 = 512 * 1024;
+const DEFAULT_IMAGEGEN_WAIT_SECONDS: u64 = 30 * 60;
 
 enum AiUiEvent {
     InitialContext(Value),
@@ -68,6 +76,7 @@ pub(super) fn run_scripted_ai_with_cancel(
         false,
         false,
         None,
+        false,
         canceled,
     )
     .map_err(|error| error.message)?;
@@ -81,7 +90,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     canceled: &AtomicBool,
 ) -> Result<(String, PathBuf, PathBuf), String> {
     let mut profile = AgentProfile::default();
-    profile.instruction.push_str(" You may create or update project assets with write_svg_asset, write_png_asset, import_png_asset, write_data_asset, and write_procedural_wav. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
+    profile.instruction.push_str(" New Gauntlet projects include the project-local assets/gauntlet-ui.ttf font. Use that exact project-local path with load_font for readable UI text; absolute and system font paths are invalid and the atomic write gate rejects them. Preserve or replace the seeded font transactionally. You may request host-generated bitmap art with request_imagegen_asset when you judge that it materially improves the assigned work, then import its returned source_path with import_png_asset. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when the task is purely logic or basic interface geometry. Request one isolated foreground subject per image on a flat removable background; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Render contract v2 draws line primitives before sprites, so do not place an opaque full-board sprite over line-rendered gameplay unless the project already has a verified sprite-first background path. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset obsolete; place deletion before a replacement that reuses the same id. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
     let outcome = run_scripted_ai_profile(
         client,
         project_root,
@@ -92,6 +101,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
         true,
         false,
         None,
+        false,
         canceled,
     )
     .map_err(|error| error.message)?;
@@ -140,6 +150,7 @@ pub(super) fn run_scripted_ai_profile(
     allow_project_assets: bool,
     auto_apply_layout: bool,
     decision_log: Option<&Path>,
+    require_imagegen: bool,
     canceled: &AtomicBool,
 ) -> Result<ScriptedAiOutcome, ScriptedAiFailure> {
     let mut audit = AiAuditLog::create_with_model(
@@ -169,13 +180,15 @@ pub(super) fn run_scripted_ai_profile(
             auto_apply_layout,
             decision_log.map(Path::to_path_buf),
             profile.role.clone(),
+            require_imagegen,
         )
     } else {
         LiveAiTools::new(client.clone())
     };
-    let initial_context = load_ai_initial_context(&mut tools, canceled).map_err(|message| {
-        scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
-    })?;
+    let initial_context =
+        load_ai_initial_context(&mut tools, project_root, canceled).map_err(|message| {
+            scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
+        })?;
     audit
         .write(serde_json::json!({
             "event": "initial_context",
@@ -185,21 +198,26 @@ pub(super) fn run_scripted_ai_profile(
             scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
         })?;
     let mut audit_error = None;
+    let mut tool_specs = if allow_project_assets {
+        if decision_log.is_some() {
+            gauntlet_tool_specs()
+        } else {
+            project_ai_tool_specs()
+        }
+    } else {
+        live_tool_specs()
+    };
+    if require_imagegen {
+        tool_specs
+            .retain(|spec| !matches!(spec.tool.as_str(), "write_svg_asset" | "write_png_asset"));
+    }
     let result = run_agent_with_profile(
         &mut provider,
         &mut tools,
         &profile,
         prompt,
         initial_context,
-        if allow_project_assets {
-            if decision_log.is_some() {
-                gauntlet_tool_specs()
-            } else {
-                project_ai_tool_specs()
-            }
-        } else {
-            live_tool_specs()
-        },
+        tool_specs,
         canceled,
         |event| {
             if audit_error.is_none() {
@@ -270,7 +288,7 @@ fn scripted_ai_failure(
     }
 }
 
-fn ai_initial_context(initial_symbols: Value) -> Value {
+fn ai_initial_context(initial_symbols: Value, stdlib_api: Value) -> Value {
     serde_json::json!({
         "language": "Stasis",
         "runtime": "live in-process JIT",
@@ -278,11 +296,14 @@ fn ai_initial_context(initial_symbols: Value) -> Value {
         "write_policy": "all writes in one model batch compile, test, and commit atomically",
         "initial_symbols": initial_symbols,
         "initial_symbols_instruction": "This is the completed default list_symbols result. Use it before requesting filtered or paged follow-up discovery.",
+        "stdlib_api": stdlib_api,
+        "stdlib_api_instruction": "This is the completed compact public standard-library catalog. Use these signatures and canonical_import paths directly; do not rediscover stdlib implementation files unless behavior is ambiguous.",
     })
 }
 
 fn load_ai_initial_context(
     tools: &mut LiveAiTools,
+    project_root: &Path,
     canceled: &AtomicBool,
 ) -> Result<Value, String> {
     let observations = tools.execute(
@@ -299,9 +320,143 @@ fn load_ai_initial_context(
     if let Some(error) = observation.error {
         return Err(format!("initial symbol discovery failed: {error}"));
     }
+    let stdlib_api = load_stdlib_api_catalog(project_root)?;
     Ok(ai_initial_context(
         observation.result.unwrap_or(Value::Null),
+        stdlib_api,
     ))
+}
+
+fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
+    let candidates = [
+        (
+            project_root.join("vendor/stasis/src/stdlib"),
+            "/vendor/stasis/src/stdlib",
+        ),
+        (
+            project_root.join(".stasis_cache/toolchain/src/stdlib"),
+            "/.stasis_cache/toolchain/src/stdlib",
+        ),
+        (project_root.join("stdlib"), "/stdlib"),
+    ];
+    let Some((root, import_prefix)) = candidates
+        .into_iter()
+        .find(|(path, _)| path.join("stdlib.stasis").is_file())
+    else {
+        return Ok(serde_json::json!({
+            "available": false,
+            "modules": [],
+            "total": 0,
+        }));
+    };
+    let canonical_project = project_root
+        .canonicalize()
+        .map_err(|error| format!("failed resolving AI project root: {error}"))?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("failed resolving Stasis stdlib catalog: {error}"))?;
+    if !canonical_root.starts_with(&canonical_project) {
+        return Err("Stasis stdlib catalog resolved outside the project".to_string());
+    }
+
+    let mut files = fs::read_dir(&canonical_root)
+        .map_err(|error| format!("failed reading Stasis stdlib catalog: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed enumerating Stasis stdlib catalog: {error}"))?;
+    files.sort_by_key(|entry| entry.file_name());
+    let mut modules = Vec::new();
+    let mut total = 0_usize;
+    for entry in files.into_iter() {
+        if modules.len() >= MAX_STDLIB_API_FILES {
+            break;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed inspecting Stasis stdlib module: {error}"))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("failed inspecting Stasis stdlib module: {error}"))?;
+        let path = entry.path();
+        if metadata.len() > MAX_STDLIB_API_FILE_BYTES
+            || path.extension().and_then(|value| value.to_str()) != Some("stasis")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("failed reading Stasis stdlib module: {error}"))?;
+        let relative = path
+            .strip_prefix(&canonical_project)
+            .map_err(|_| "Stasis stdlib module resolved outside the project".to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let extern_functions = parse_top_level_extern_functions(&source)?;
+        let file = WorkshopSourceFile {
+            path: relative.clone(),
+            source,
+        };
+        let mut items = Vec::new();
+        for symbol in workshop_symbols(&[file])? {
+            if total >= MAX_STDLIB_API_ITEMS {
+                break;
+            }
+            if !matches!(
+                symbol.kind,
+                WorkshopSymbolKind::Function
+                    | WorkshopSymbolKind::Struct
+                    | WorkshopSymbolKind::Constant
+            ) {
+                continue;
+            }
+            items.push(serde_json::json!({
+                "kind": symbol.kind,
+                "signature": symbol.signature,
+            }));
+            total = total.saturating_add(1);
+        }
+        for external in extern_functions {
+            if total >= MAX_STDLIB_API_ITEMS {
+                break;
+            }
+            let params = external
+                .params
+                .iter()
+                .map(|param| format!("{}: {}", param.name, param.type_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            items.push(serde_json::json!({
+                "kind": "function",
+                "signature": format!(
+                    "{}({params}): {}",
+                    external.name, external.return_type_name
+                ),
+                "extern": true,
+            }));
+            total = total.saturating_add(1);
+        }
+        if items.is_empty() {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "Stasis stdlib module name is not UTF-8".to_string())?;
+        modules.push(serde_json::json!({
+            "file": relative,
+            "canonical_import": format!("{import_prefix}/{file_name}"),
+            "items": items,
+        }));
+        if total >= MAX_STDLIB_API_ITEMS {
+            break;
+        }
+    }
+    Ok(serde_json::json!({
+        "available": true,
+        "modules": modules,
+        "total": total,
+    }))
 }
 
 fn audit_agent_event(event: &AgentEvent) -> Value {
@@ -1468,6 +1623,7 @@ impl LiveTui {
             }
         }
         let client = self.client.clone();
+        let project_root = self.project_root.clone();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = canceled.clone();
         let (events_tx, events_rx) = mpsc::channel();
@@ -1475,8 +1631,8 @@ impl LiveTui {
             let mut provider = CodexExecProvider::default();
             let mut tools = LiveAiTools::new(client);
             let progress = events_tx.clone();
-            let result =
-                load_ai_initial_context(&mut tools, &worker_canceled).and_then(|initial_context| {
+            let result = load_ai_initial_context(&mut tools, &project_root, &worker_canceled)
+                .and_then(|initial_context| {
                     let _ = progress.send(AiUiEvent::InitialContext(initial_context.clone()));
                     run_agent(
                         &mut provider,
@@ -2174,6 +2330,11 @@ struct LiveAiTools {
     decision_log: Option<PathBuf>,
     decision_role: Option<String>,
     terminal_blocker: Option<String>,
+    require_imagegen: bool,
+    imagegen_ready_paths: Vec<String>,
+    imagegen_staged: bool,
+    imagegen_staged_paths: Vec<String>,
+    imagegen_committed: bool,
 }
 
 impl LiveAiTools {
@@ -2189,6 +2350,11 @@ impl LiveAiTools {
             decision_log: None,
             decision_role: None,
             terminal_blocker: None,
+            require_imagegen: false,
+            imagegen_ready_paths: Vec::new(),
+            imagegen_staged: false,
+            imagegen_staged_paths: Vec::new(),
+            imagegen_committed: false,
         }
     }
 
@@ -2198,12 +2364,14 @@ impl LiveAiTools {
         auto_apply_layout: bool,
         decision_log: Option<PathBuf>,
         decision_role: String,
+        require_imagegen: bool,
     ) -> Self {
         Self {
             project_root: Some(project_root),
             auto_apply_layout,
             decision_log,
             decision_role: Some(decision_role),
+            require_imagegen,
             ..Self::new(client)
         }
     }
@@ -2274,6 +2442,236 @@ impl LiveAiTools {
                 serde_json::json!({"status":"recorded","path":path}),
             ),
             Err(error) => ToolObservation::error(&call.tool, error),
+        }
+    }
+
+    fn request_imagegen_asset(
+        &mut self,
+        call: &ToolCall,
+        canceled: &AtomicBool,
+    ) -> ToolObservation {
+        let Some(project_root) = self.project_root.as_ref() else {
+            return ToolObservation::error(
+                &call.tool,
+                "ImageGen requests require a project workspace",
+            );
+        };
+        let Some(args) = call.args.as_object() else {
+            return ToolObservation::error(&call.tool, "ImageGen request args must be an object");
+        };
+        let read = |name: &str| -> Result<String, String> {
+            let value = args
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!("request_imagegen_asset requires non-empty string arg: {name}")
+                })?;
+            if value.chars().count() > MAX_DECISION_FIELD_CHARS {
+                return Err(format!(
+                    "request_imagegen_asset arg {name} exceeds {MAX_DECISION_FIELD_CHARS} characters"
+                ));
+            }
+            Ok(value.to_string())
+        };
+        let (filename, prompt, purpose) = match (read("filename"), read("prompt"), read("purpose"))
+        {
+            (Ok(filename), Ok(prompt), Ok(purpose)) => (filename, prompt, purpose),
+            values => {
+                let error = [values.0.err(), values.1.err(), values.2.err()]
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .unwrap_or_else(|| "invalid ImageGen request".to_string());
+                return ToolObservation::error(&call.tool, error);
+            }
+        };
+        let filename_path = Path::new(&filename);
+        let valid_filename = filename_path.components().count() == 1
+            && filename_path
+                .extension()
+                .is_some_and(|value| value.eq_ignore_ascii_case("png"))
+            && filename
+                .chars()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | '.'));
+        if !valid_filename {
+            return ToolObservation::error(
+                &call.tool,
+                "ImageGen filename must be one portable .png basename",
+            );
+        }
+        let read_dimension = |name: &str| -> Result<Option<u32>, String> {
+            let Some(value) = args.get(name) else {
+                return Ok(None);
+            };
+            let value = value
+                .as_u64()
+                .filter(|value| (1..=2048).contains(value))
+                .ok_or_else(|| {
+                    format!("request_imagegen_asset {name} must be an integer from 1 to 2048")
+                })?;
+            Ok(Some(value as u32))
+        };
+        let (mut width, mut height) = match (read_dimension("width"), read_dimension("height")) {
+            (Ok(width), Ok(height)) => (width, height),
+            (Err(error), _) | (_, Err(error)) => return ToolObservation::error(&call.tool, error),
+        };
+        if width.is_some() != height.is_some() {
+            return ToolObservation::error(
+                &call.tool,
+                "ImageGen width and height must be supplied together",
+            );
+        }
+        if width.is_none() {
+            width = Some(1024);
+            height = Some(1024);
+        }
+        if width
+            .zip(height)
+            .is_some_and(|(width, height)| u64::from(width) * u64::from(height) > 4_194_304)
+        {
+            return ToolObservation::error(
+                &call.tool,
+                "ImageGen request exceeds the 4,194,304-pixel import limit",
+            );
+        }
+        let inbox = if self.decision_log.is_some() {
+            "build/gauntlet/imagegen"
+        } else {
+            "build/ai-assets/imagegen"
+        };
+        let relative_png = format!("{inbox}/{filename}");
+        let png_path = project_root.join(&relative_png);
+        let requests = project_root.join(inbox).join("requests");
+        if let Err(error) = fs::create_dir_all(&requests) {
+            return ToolObservation::error(
+                &call.tool,
+                format!("failed creating ImageGen request inbox: {error}"),
+            );
+        }
+        let request_path = requests.join(format!("{filename}.json"));
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "unix_ms": unix_ms(),
+            "role": self.decision_role.as_deref().unwrap_or("Stasis AI agent"),
+            "prompt": prompt,
+            "purpose": purpose,
+            "width": width,
+            "height": height,
+            "output_path": relative_png,
+        });
+        let encoded = match serde_json::to_vec_pretty(&request) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                return ToolObservation::error(
+                    &call.tool,
+                    format!("failed encoding ImageGen request: {error}"),
+                )
+            }
+        };
+        if request_path.is_file() {
+            match fs::read(&request_path)
+                .ok()
+                .and_then(|source| serde_json::from_slice::<Value>(&source).ok())
+            {
+                Some(existing)
+                    if existing.get("prompt") == request.get("prompt")
+                        && existing.get("purpose") == request.get("purpose")
+                        && existing.get("output_path") == request.get("output_path") => {}
+                Some(_) => {
+                    return ToolObservation::error(
+                        &call.tool,
+                        "ImageGen request filename is already bound to a different prompt; choose a unique filename",
+                    )
+                }
+                None => {
+                    return ToolObservation::error(
+                        &call.tool,
+                        "existing ImageGen request is invalid; choose a unique filename",
+                    )
+                }
+            }
+        } else {
+            let temporary = request_path.with_extension("json.tmp");
+            if let Err(error) =
+                fs::write(&temporary, encoded).and_then(|()| fs::rename(&temporary, &request_path))
+            {
+                let _ = fs::remove_file(&temporary);
+                return ToolObservation::error(
+                    &call.tool,
+                    format!("failed persisting ImageGen request: {error}"),
+                );
+            }
+        }
+        if let Some(path) = self.decision_log.as_ref() {
+            let decision = serde_json::json!({
+                "schema_version": 1,
+                "unix_ms": unix_ms(),
+                "audience": "lead_builder",
+                "role": self.decision_role.as_deref().unwrap_or("Gauntlet agent"),
+                "kind": "imagegen_requested",
+                "summary": purpose,
+                "rationale": "Generated bitmap art materially improves the assigned visual workstream.",
+                "evidence": format!("request={}; output={relative_png}", request_path.display()),
+                "next_step": "Import the fulfilled PNG with import_png_asset in the same atomic batch as source that uses it.",
+            });
+            if let Err(error) = self.append_decision_record(path, &decision) {
+                return ToolObservation::error(&call.tool, error);
+            }
+        }
+        let wait_seconds = std::env::var("STASIS_IMAGEGEN_WAIT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_IMAGEGEN_WAIT_SECONDS)
+            .min(DEFAULT_IMAGEGEN_WAIT_SECONDS);
+        let deadline = Instant::now() + Duration::from_secs(wait_seconds);
+        let mut last_validation_error = None;
+        loop {
+            if canceled.load(Ordering::Acquire) {
+                return ToolObservation::error(&call.tool, "ImageGen request canceled");
+            }
+            if png_path.is_file() {
+                match super::gauntlet::assets::load_imagegen_png(project_root, &relative_png) {
+                    Ok((_, actual_width, actual_height))
+                        if Some(actual_width) == width && Some(actual_height) == height =>
+                    {
+                        if !self.imagegen_ready_paths.contains(&relative_png) {
+                            self.imagegen_ready_paths.push(relative_png.clone());
+                        }
+                        return ToolObservation::result(
+                            &call.tool,
+                            serde_json::json!({
+                                "status": "ready",
+                                "source_path": relative_png,
+                                "width": actual_width,
+                                "height": actual_height,
+                                "request_path": request_path,
+                            }),
+                        );
+                    }
+                    Ok((_, actual_width, actual_height)) => {
+                        last_validation_error = Some(format!(
+                        "host PNG dimensions are {actual_width}x{actual_height}, expected {}x{}",
+                        width.unwrap_or(1024),
+                        height.unwrap_or(1024)
+                    ))
+                    }
+                    Err(error) => last_validation_error = Some(error),
+                }
+            }
+            if Instant::now() >= deadline {
+                return ToolObservation::error(
+                    &call.tool,
+                    format!(
+                        "ImageGen request timed out after {wait_seconds} seconds; request remains at {}; last PNG validation error: {}",
+                        request_path.display(),
+                        last_validation_error.as_deref().unwrap_or("no PNG was supplied")
+                    ),
+                );
+            }
+            thread::sleep(Duration::from_millis(250));
         }
     }
 
@@ -2429,7 +2827,7 @@ impl LiveAiTools {
                 })
                 .collect();
         }
-        let edits = calls
+        let edits: Vec<LiveEdit> = calls
             .iter()
             .map(|call| {
                 let args = call.args.as_object().expect("validated tool args");
@@ -2454,6 +2852,11 @@ impl LiveAiTools {
                 }
             })
             .collect();
+        if let Some(project_root) = self.project_root.as_ref() {
+            if let Err(error) = validate_ai_font_paths(project_root, &edits) {
+                return failed_write_observations(calls, error);
+            }
+        }
         match self.request(
             LiveCommand::EditBatch {
                 edits,
@@ -2469,6 +2872,8 @@ impl LiveAiTools {
                             Ok(applied) => applied,
                             Err(error) => {
                                 if let Some(transaction) = self.asset_transaction.take() {
+                                    self.imagegen_staged = false;
+                                    self.imagegen_staged_paths.clear();
                                     let _ = transaction.rollback();
                                 }
                                 return failed_write_observations(calls, error);
@@ -2482,8 +2887,19 @@ impl LiveAiTools {
                 if applied {
                     self.last_write = Some(response.clone());
                     self.reference_search_ready = false;
+                    self.imagegen_committed |= self.imagegen_staged
+                        && self.project_root.as_ref().is_some_and(|project_root| {
+                            imported_imagegen_is_used_by_project_source(
+                                project_root,
+                                &self.imagegen_staged_paths,
+                            )
+                        });
+                    self.imagegen_staged = false;
+                    self.imagegen_staged_paths.clear();
                     self.asset_transaction.take();
                 } else if let Some(transaction) = self.asset_transaction.take() {
+                    self.imagegen_staged = false;
+                    self.imagegen_staged_paths.clear();
                     let _ = transaction.rollback();
                 }
                 if applied {
@@ -2512,6 +2928,8 @@ impl LiveAiTools {
             }
             Err(error) => {
                 if let Some(transaction) = self.asset_transaction.take() {
+                    self.imagegen_staged = false;
+                    self.imagegen_staged_paths.clear();
                     let _ = transaction.rollback();
                 }
                 self.record_durable_failure(
@@ -2583,6 +3001,56 @@ impl LiveAiTools {
         });
         let _ = self.append_decision_record(path, &record);
     }
+}
+
+fn validate_ai_font_paths(project_root: &Path, edits: &[LiveEdit]) -> Result<(), String> {
+    for edit in edits {
+        let Some(source) = edit.source.as_deref() else {
+            continue;
+        };
+        for token in
+            lex(source).map_err(|error| format!("failed to scan AI font paths: {error}"))?
+        {
+            if token.kind != TokenKind::StringLiteral {
+                continue;
+            }
+            let literal: String = serde_json::from_str(&source[token.start..token.end])
+                .map_err(|error| format!("failed to decode AI string literal: {error}"))?;
+            let is_font = Path::new(&literal)
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    value.eq_ignore_ascii_case("ttf") || value.eq_ignore_ascii_case("otf")
+                });
+            if !is_font {
+                continue;
+            }
+            if Path::new(&literal).is_absolute()
+                || literal
+                    .as_bytes()
+                    .get(1)
+                    .is_some_and(|value| *value == b':')
+            {
+                return Err(format!(
+                    "AI font path must be a project-local asset: {literal}; system and absolute font paths are not portable, so use assets/gauntlet-ui.ttf when available"
+                ));
+            }
+            let asset_root = project_root.join("assets").canonicalize().map_err(|_| {
+                "AI font paths require an existing project assets directory".to_string()
+            })?;
+            let font = project_root.join(&literal).canonicalize().map_err(|_| {
+                format!(
+                    "AI font path must name an existing project-local asset: {literal}; use assets/gauntlet-ui.ttf when available"
+                )
+            })?;
+            if !font.is_file() || !font.starts_with(&asset_root) {
+                return Err(format!(
+                    "AI font path must stay under the project assets directory: {literal}; system and absolute font paths are not portable"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn preserve_truncated_applied_write_evidence(mut response: LiveResponse) -> LiveResponse {
@@ -2691,6 +3159,7 @@ impl ToolExecutor for LiveAiTools {
                     "write_svg_asset"
                         | "write_png_asset"
                         | "import_png_asset"
+                        | "delete_asset"
                         | "write_data_asset"
                         | "write_procedural_wav"
                 )
@@ -2721,7 +3190,36 @@ impl ToolExecutor for LiveAiTools {
                 self.project_root.as_ref().expect("validated project root"),
                 &asset_calls,
             ) {
-                Ok(transaction) => self.asset_transaction = Some(transaction),
+                Ok(transaction) => {
+                    self.asset_transaction = Some(transaction);
+                    let fulfilled_imports = asset_calls
+                        .iter()
+                        .filter(|call| call.tool == "import_png_asset")
+                        .filter(|call| {
+                            call.args
+                                .get("source_path")
+                                .and_then(Value::as_str)
+                                .is_some_and(|source_path| {
+                                    let normalized = source_path.replace('\\', "/");
+                                    self.imagegen_ready_paths
+                                        .iter()
+                                        .any(|ready| ready.replace('\\', "/") == normalized)
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                    if !fulfilled_imports.is_empty() {
+                        self.imagegen_staged = true;
+                        self.imagegen_staged_paths = fulfilled_imports
+                            .iter()
+                            .filter_map(|call| {
+                                call.args
+                                    .get("path")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .collect();
+                    }
+                }
                 Err(error) => {
                     return calls
                         .iter()
@@ -2752,6 +3250,9 @@ impl ToolExecutor for LiveAiTools {
                 index = range.end;
             } else if calls[index].tool == "record_decision" {
                 observations.push(self.record_decision(&calls[index]));
+                index += 1;
+            } else if calls[index].tool == "request_imagegen_asset" {
+                observations.push(self.request_imagegen_asset(&calls[index], canceled));
                 index += 1;
             } else if calls[index].tool == "report_blocked" {
                 observations.push(self.report_blocked(&calls[index]));
@@ -2800,13 +3301,26 @@ impl ToolExecutor for LiveAiTools {
                     .unwrap_or_else(|| "missing".to_string())
             )),
         };
+        let result = result.and_then(|()| {
+            if self.require_imagegen && !self.imagegen_committed {
+                Err("completion rejected: this authored visual workstream requires a fulfilled, transactionally imported, and visibly used ImageGen PNG; project Stasis source must load the imported path and emit it through a sprite draw path".to_string())
+            } else {
+                Ok(())
+            }
+        });
         if let Err(error) = &result {
-            self.record_durable_failure(
-                "completion_gate_failed",
-                "The builder declared completion without a currently accepted tested write",
-                error,
-                "Perform one successful atomic write with passing tests before declaring completion.",
-            );
+            let missing_imagegen_use = self.require_imagegen && !self.imagegen_committed;
+            let summary = if missing_imagegen_use {
+                "The builder declared authored-art completion without visibly using its generated PNG"
+            } else {
+                "The builder declared completion without a currently accepted tested write"
+            };
+            let next_step = if missing_imagegen_use {
+                "In the next atomic write, load the fulfilled imported PNG from its project path and emit it through a sprite draw path; an unused manifest entry is insufficient."
+            } else {
+                "Perform one successful atomic write with passing tests before declaring completion."
+            };
+            self.record_durable_failure("completion_gate_failed", summary, error, next_step);
         }
         result
     }
@@ -2814,6 +3328,48 @@ impl ToolExecutor for LiveAiTools {
     fn terminal_failure(&self) -> Option<String> {
         self.terminal_blocker.clone()
     }
+}
+
+fn imported_imagegen_is_used_by_project_source(
+    project_root: &Path,
+    imported_paths: &[String],
+) -> bool {
+    if imported_paths.is_empty() {
+        return false;
+    }
+    let mut source = String::new();
+    let Ok(entries) = fs::read_dir(project_root.join("src")) else {
+        return false;
+    };
+    let mut pending = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            let Ok(entries) = fs::read_dir(path) else {
+                return false;
+            };
+            pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
+        } else if path.extension().and_then(|value| value.to_str()) == Some("stasis") {
+            let Ok(contents) = fs::read_to_string(path) else {
+                return false;
+            };
+            source.push_str(&contents.replace('\\', "/"));
+            source.push('\n');
+        }
+    }
+    let loads_import = imported_paths.iter().any(|path| {
+        let normalized = path.replace('\\', "/");
+        source.contains(&normalized)
+            || Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|filename| source.contains(filename))
+    });
+    loads_import
+        && source.contains("load_sprite_from(")
+        && (source.contains("gfx_cmd_sprite(") || source.contains(".draw("))
 }
 
 fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<String> {
@@ -3422,6 +3978,148 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn font_path_edit(source: &str) -> LiveEdit {
+        LiveEdit {
+            operation: LiveEditOperation::Update,
+            target: LiveSymbolTarget {
+                name: "main".to_string(),
+                kind: Some("function".to_string()),
+                file: Some("src/main.stasis".to_string()),
+                owner: None,
+                signature: None,
+            },
+            source: Some(source.to_string()),
+            expected_source_hash: None,
+        }
+    }
+
+    fn font_path_test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "stasis_ai_font_path_{name}_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn ai_font_path_accepts_existing_project_asset() {
+        let root = font_path_test_root("project_asset");
+        fs::create_dir_all(root.join("assets")).expect("assets dir");
+        fs::write(root.join("assets/gauntlet-ui.ttf"), b"font").expect("font asset");
+        let edits = [font_path_edit(
+            "function main(): void { load_font(\"assets/gauntlet-ui.ttf\", 18); }",
+        )];
+
+        validate_ai_font_paths(&root, &edits).expect("project font should pass");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ai_font_path_rejects_absolute_system_font() {
+        let root = font_path_test_root("system_font");
+        fs::create_dir_all(root.join("assets")).expect("assets dir");
+        let edits = [font_path_edit(
+            "function main(): void { load_font(\"C:/Windows/Fonts/arialbd.ttf\", 18); }",
+        )];
+
+        let error = validate_ai_font_paths(&root, &edits).expect_err("system font should fail");
+        assert!(error.contains("project-local asset"));
+        assert!(error.contains("assets/gauntlet-ui.ttf"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ai_font_path_rejects_missing_project_asset() {
+        let root = font_path_test_root("missing_font");
+        fs::create_dir_all(root.join("assets")).expect("assets dir");
+        let edits = [font_path_edit(
+            "function main(): void { load_font(\"assets/missing.ttf\", 18); }",
+        )];
+
+        let error = validate_ai_font_paths(&root, &edits).expect_err("missing font should fail");
+        assert!(error.contains("existing project-local asset"));
+        assert!(error.contains("assets/gauntlet-ui.ttf"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn initial_context_catalogs_public_stdlib_signatures() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_stdlib_catalog_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let stdlib = root.join("vendor/stasis/src/stdlib");
+        fs::create_dir_all(stdlib.join("internal")).expect("stdlib dirs");
+        fs::write(
+            stdlib.join("stdlib.stasis"),
+            "function print(value: i32): void { return; }\n",
+        )
+        .expect("stdlib umbrella");
+        fs::write(
+            stdlib.join("graphics.stasis"),
+            concat!(
+                "struct Sprite { handle: i32; }\n",
+                "global private_counter: i32;\n",
+                "extern function load_font(path: string, size: i32): i32;\n",
+                "function @extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\n",
+                "function draw_line(x: f32, y: f32): void { return; }\n",
+            ),
+        )
+        .expect("graphics module");
+        fs::write(
+            stdlib.join("internal/host_frame.stasis"),
+            "function host_private(): i32 { return 0; }\n",
+        )
+        .expect("internal module");
+
+        let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
+
+        assert_eq!(catalog["available"], true);
+        assert_eq!(catalog["total"], 5);
+        let rendered = serde_json::to_string(&catalog).expect("catalog JSON");
+        assert!(rendered.contains("draw_line(x: f32, y: f32): void"));
+        assert!(rendered.contains("load_font(path: string, size: i32): i32"));
+        assert!(rendered.contains(
+            "load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool"
+        ));
+        assert!(rendered.contains("\"extern\":true"));
+        assert!(rendered.contains("/vendor/stasis/src/stdlib/graphics.stasis"));
+        assert!(!rendered.contains("private_counter"));
+        assert!(!rendered.contains("host_private"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn initial_context_uses_the_matched_legacy_stdlib_import_root() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_legacy_stdlib_catalog_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let stdlib = root.join("stdlib");
+        fs::create_dir_all(&stdlib).expect("stdlib dir");
+        fs::write(
+            stdlib.join("stdlib.stasis"),
+            "function print(value: i32): void { return; }\n",
+        )
+        .expect("stdlib module");
+
+        let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
+
+        assert_eq!(
+            catalog["modules"][0]["canonical_import"],
+            "/stdlib/stdlib.stasis"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn root_prompt_submits_a_bare_expression_for_evaluation() {
         let (client, server) = stasis_runner::live::live_session(8);
@@ -3579,6 +4277,7 @@ mod tests {
             true,
             Some(decisions.clone()),
             "builder".to_string(),
+            false,
         );
 
         let error = tools.validate_completion().expect_err("write required");
@@ -3646,6 +4345,85 @@ mod tests {
     }
 
     #[test]
+    fn authored_visual_completion_requires_committed_imagegen_import() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.require_imagegen = true;
+        tools.last_write = Some(LiveResponse::success(
+            1,
+            0,
+            "edit_applied",
+            json!({"tests": "passed"}),
+        ));
+
+        assert_eq!(
+            tools.validate_completion().unwrap_err(),
+            "completion rejected: this authored visual workstream requires a fulfilled, transactionally imported, and visibly used ImageGen PNG; project Stasis source must load the imported path and emit it through a sprite draw path"
+        );
+
+        tools.imagegen_committed = true;
+        tools
+            .validate_completion()
+            .expect("tested visual write with ImageGen completes");
+    }
+
+    #[test]
+    fn imported_imagegen_must_be_loaded_and_drawn_by_project_source() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_imagegen_usage_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).expect("create source directory");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            true,
+            None,
+            "Fresh builder".to_string(),
+            true,
+        );
+        tools
+            .imagegen_staged_paths
+            .push("assets/generated/oak.png".to_string());
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "function tick(): i32 { gfx_cmd_line(0, 0, 1, 1, 1, 1, 1, 1); return 0; }\n",
+        )
+        .expect("write unused source");
+        assert!(!imported_imagegen_is_used_by_project_source(
+            &root,
+            &tools.imagegen_staged_paths,
+        ));
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "global oak: Sprite;\nfunction main(): i32 { oak.load_sprite_from(\"assets/generated/oak.png\", 64, 64); return 0; }\nfunction tick(): i32 { return 0; }\n",
+        )
+        .expect("write loaded but undrawn source");
+        assert!(!imported_imagegen_is_used_by_project_source(
+            &root,
+            &tools.imagegen_staged_paths,
+        ));
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "global oak: Sprite;\nfunction main(): i32 { oak.load_sprite_from(\"assets/generated/oak.png\", 64, 64); return 0; }\nfunction tick(): i32 { oak.draw(10, 10, 255, 0); return 0; }\n",
+        )
+        .expect("write used source");
+        assert!(imported_imagegen_is_used_by_project_source(
+            &root,
+            &tools.imagegen_staged_paths,
+        ));
+
+        fs::remove_dir_all(root).expect("remove imagegen usage fixture");
+    }
+
+    #[test]
     fn gauntlet_agent_can_persist_bounded_decision_memory() {
         let root = std::env::temp_dir().join(format!(
             "stasis_gauntlet_decision_{}",
@@ -3662,6 +4440,7 @@ mod tests {
             true,
             Some(decision_log.clone()),
             "Fresh builder".to_string(),
+            false,
         );
         let observation = tools.record_decision(&ToolCall {
             tool: "record_decision".to_string(),
@@ -3710,6 +4489,7 @@ mod tests {
             true,
             Some(decision_log.clone()),
             "Fresh builder".to_string(),
+            false,
         );
 
         let observation = tools.report_blocked(&ToolCall {
@@ -3728,6 +4508,130 @@ mod tests {
             .contains("Required executable is unavailable"));
         let source = fs::read_to_string(decision_log).expect("blocked decision");
         assert!(source.contains("builder_blocked"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gauntlet_agent_can_request_and_receive_a_host_imagegen_png() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_imagegen_request_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let output = root.join("build/gauntlet/imagegen/terrain.png");
+        fs::create_dir_all(output.parent().expect("imagegen inbox")).expect("imagegen inbox");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            16,
+            12,
+            image::Rgba([20, 40, 60, 255]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encode imagegen fixture");
+        fs::write(&output, png.into_inner()).expect("host PNG");
+        let decision_log = root.join("decisions.jsonl");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            true,
+            Some(decision_log.clone()),
+            "Fresh builder".to_string(),
+            false,
+        );
+
+        let observation = tools.request_imagegen_asset(
+            &ToolCall {
+                tool: "request_imagegen_asset".to_string(),
+                args: json!({
+                    "filename": "terrain.png",
+                    "prompt": "One original warm medieval keep on a flat chroma background, without text.",
+                    "purpose": "Replace the placeholder board with readable bitmap terrain.",
+                    "width": 16,
+                    "height": 12
+                }),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert!(observation.error.is_none());
+        assert_eq!(
+            observation.result.as_ref().unwrap()["source_path"],
+            "build/gauntlet/imagegen/terrain.png"
+        );
+        assert_eq!(
+            tools.imagegen_ready_paths,
+            vec!["build/gauntlet/imagegen/terrain.png".to_string()]
+        );
+        let request =
+            fs::read_to_string(root.join("build/gauntlet/imagegen/requests/terrain.png.json"))
+                .expect("persisted request");
+        assert!(request.contains("One original warm medieval keep"));
+        assert!(fs::read_to_string(decision_log)
+            .expect("decision memory")
+            .contains("imagegen_requested"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn one_shot_ai_uses_its_own_imagegen_inbox_with_the_same_request_contract() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_imagegen_request_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let output = root.join("build/ai-assets/imagegen/unit.png");
+        fs::create_dir_all(output.parent().expect("AI ImageGen inbox")).expect("AI ImageGen inbox");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            10,
+            10,
+            image::Rgba([80, 30, 20, 255]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encode AI imagegen fixture");
+        fs::write(&output, png.into_inner()).expect("host PNG");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new_project_assets(
+            client,
+            root.clone(),
+            false,
+            None,
+            "Stasis AI agent".to_string(),
+            false,
+        );
+
+        let observation = tools.request_imagegen_asset(
+            &ToolCall {
+                tool: "request_imagegen_asset".to_string(),
+                args: json!({
+                    "filename": "unit.png",
+                    "prompt": "One original medieval unit on a flat chroma background.",
+                    "purpose": "Add a readable unit sprite.",
+                    "width": 10,
+                    "height": 10
+                }),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert!(observation.error.is_none());
+        assert_eq!(
+            observation.result.as_ref().unwrap()["source_path"],
+            "build/ai-assets/imagegen/unit.png"
+        );
+        assert_eq!(
+            tools.imagegen_ready_paths,
+            vec!["build/ai-assets/imagegen/unit.png".to_string()]
+        );
+        assert!(root
+            .join("build/ai-assets/imagegen/requests/unit.png.json")
+            .is_file());
+        assert!(!root.join("build/gauntlet/imagegen").exists());
         let _ = fs::remove_dir_all(root);
     }
 

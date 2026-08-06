@@ -3001,7 +3001,7 @@ pub unsafe extern "C" fn stasis_jit_render_v2_trace(
 }
 
 fn jit_text_buffer_is_registered(value_id: i32) -> bool {
-    if stasis_jit_collection_i32_load(value_id, 2) > 0 {
+    if jit_collection_runtime_metadata_is_registered(value_id) {
         return true;
     }
     if registered_u8_arrays()
@@ -3688,6 +3688,25 @@ fn fnv1a_extend_u32(mut hash: u32, suffix: &[u8]) -> u32 {
     hash
 }
 
+fn jit_i32_slot_is_registered(path_hash: i32) -> bool {
+    if registered_i32_ptrs()
+        .lock()
+        .expect("registered i32 ptr table mutex poisoned")
+        .contains_key(&path_hash)
+    {
+        return true;
+    }
+    jit_i32_global_table()
+        .lock()
+        .expect("jit global table mutex poisoned")
+        .contains_key(&path_hash)
+}
+
+fn jit_collection_runtime_metadata_is_registered(collection_hash: i32) -> bool {
+    let max_length_hash = fnv1a_extend_u32(collection_hash as u32, b".max_length") as i32;
+    jit_i32_slot_is_registered(max_length_hash)
+}
+
 fn stasis_meta_suffix_bytes(meta_kind: i32) -> Option<&'static [u8]> {
     // NOTE: These are intentionally hardcoded so Stasis can access collection header-like
     // fields (length/max_length/char_length) via a simple i32 handle (the base path hash)
@@ -3706,7 +3725,21 @@ pub extern "C" fn stasis_jit_collection_i32_load(collection_hash: i32, meta_kind
         return 0;
     };
     let derived = fnv1a_extend_u32(collection_hash as u32, suffix) as i32;
-    stasis_jit_global_i32_load(derived)
+    if jit_i32_slot_is_registered(derived) {
+        return stasis_jit_global_i32_load(derived);
+    }
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    let Some(text) = guard.get(&collection_hash) else {
+        return 0;
+    };
+    match meta_kind {
+        1 | 2 => i32::try_from(text.len()).unwrap_or(i32::MAX),
+        3 => i32::try_from(text.chars().count()).unwrap_or(i32::MAX),
+        _ => 0,
+    }
 }
 
 #[no_mangle]
@@ -4115,6 +4148,28 @@ pub extern "C" fn stasis_jit_sys_memcpy_u8(
     count: i32,
 ) {
     if count <= 0 {
+        return;
+    }
+    let literal_bytes = if jit_text_buffer_is_registered(src) {
+        None
+    } else {
+        jit_string_literal_table()
+            .lock()
+            .expect("jit string literal table mutex poisoned")
+            .get(&src)
+            .map(|text| text.as_bytes().to_vec())
+    };
+    if let Some(bytes) = literal_bytes {
+        for offset in 0..count {
+            let source_index = src_index.saturating_add(offset);
+            let value = usize::try_from(source_index)
+                .ok()
+                .and_then(|index| bytes.get(index))
+                .copied()
+                .unwrap_or_default();
+            let index = dst_index.saturating_add(offset);
+            stasis_jit_global_i32_array_store(dst, 0, index, i32::from(value));
+        }
         return;
     }
     let mut values: Vec<i32> = Vec::with_capacity(count as usize);
@@ -4709,6 +4764,54 @@ mod tests {
         upsert_jit_string_literal(1234, "hello");
 
         assert_eq!(jit_text_arg_bytes(1234), Some(b"hello".to_vec()));
+        assert_eq!(stasis_jit_collection_i32_load(1234, 1), 5);
+        assert_eq!(stasis_jit_collection_i32_load(1234, 2), 5);
+        assert_eq!(stasis_jit_collection_i32_load(1234, 3), 5);
+    }
+
+    #[test]
+    fn jit_memcpy_u8_copies_string_literal_bytes() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+
+        let source = 0x1234_5678i32;
+        let destination = 0x2345_6789i32;
+        let mut bytes = [0u8; 8];
+        upsert_jit_string_literal(source, "field");
+        register_global_u8_array(destination, 0, bytes.as_mut_ptr(), bytes.len());
+
+        stasis_jit_sys_memcpy_u8(destination, 1, source, 1, 3);
+
+        assert_eq!(&bytes, b"\0iel\0\0\0\0");
+        clear_registered_global_memory();
+        clear_jit_string_literal_table();
+    }
+
+    #[test]
+    fn jit_memcpy_u8_preserves_raw_array_copying() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_string_literal_table();
+
+        let source = 0x3456_789ai32;
+        let destination = 0x4567_89abi32;
+        let mut source_bytes = *b"raw-data";
+        let mut destination_bytes = [0u8; 8];
+        register_global_u8_array(source, 0, source_bytes.as_mut_ptr(), source_bytes.len());
+        register_global_u8_array(
+            destination,
+            0,
+            destination_bytes.as_mut_ptr(),
+            destination_bytes.len(),
+        );
+
+        stasis_jit_sys_memcpy_u8(destination, 0, source, 0, 8);
+
+        assert_eq!(&destination_bytes, b"raw-data");
+        clear_registered_global_memory();
     }
 
     #[test]
@@ -4776,6 +4879,9 @@ mod tests {
         stasis_jit_global_i32_array_store(shared_id, 0, 5, i32::from(b'r'));
 
         assert_eq!(jit_text_arg_bytes(shared_id), Some(b"buffer".to_vec()));
+        assert_eq!(stasis_jit_collection_i32_load(shared_id, 1), 6);
+        assert_eq!(stasis_jit_collection_i32_load(shared_id, 2), 8);
+        assert_eq!(stasis_jit_collection_i32_load(shared_id, 3), 6);
     }
 
     extern "C" fn host_entry_one() -> i32 {

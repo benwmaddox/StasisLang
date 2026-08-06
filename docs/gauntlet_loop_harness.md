@@ -73,6 +73,11 @@ improves a clean existing project directly on its current branch by default.
 Set `execution.isolation` to `worktree` when a separate linked checkout is
 explicitly desired.
 
+The graphical seed includes `assets/gauntlet-ui.ttf`, its SIL Open Font License,
+and a manifest declaration. The seed loads and renders that project-local font,
+so builders can create readable HUD text without relying on machine-specific
+system font paths.
+
 `budget.model_calls` is an admission budget for starting new candidate cycles.
 After a candidate starts, a configured builder escalation receives a fresh
 `execution.builder_max_turns` allowance and the controller completes both
@@ -210,23 +215,59 @@ surface](https://learn.chatgpt.com/docs/developer-commands#codex-exec) supplies
 JSONL events, structured output, web search for the reference scout, and image
 attachments for fresh critics.
 
-ImageGen is an optional host capability for concept art, backgrounds, and
-texture sheets. The current `codex exec` child transport accepts image inputs
-but does not expose the in-product ImageGen tool, so the core CLI never assumes
-it is present and never falls back to an API key. A host that can invoke
-the built-in ImageGen tool copies the selected project-bound output into the
-selected project workspace, then submits its PNG bytes plus provider/model/prompt
-provenance to the same bounded PNG import transaction; it must not leave a
-referenced asset only in the host's generated-images directory. Both Gauntlet
-and the one-shot `stasis ai` command can use the import bridge; deterministic
-raster composition remains their always-available fallback. In either case, a
-critic judges the rendered in-game result, not the generator's preview.
+ImageGen is a host capability for authored game art. Gauntlet requires at least
+one fulfilled, transactionally imported, loaded, and visibly drawn ImageGen PNG whenever the selected
+workstream is explicitly art, visual, graphics, sprite, illustration, or
+animation work. The current `codex exec` child transport accepts image inputs
+but does not expose the in-product ImageGen tool directly. An agent instead
+calls `request_imagegen_asset`; Stasis persists the exact prompt and intended
+use under the project-bound ImageGen inbox and waits up to 30 minutes for a
+capable host to save the requested PNG. The observation returns the validated
+`source_path`, which the same agent passes to `import_png_asset` in its later
+atomic asset/source write batch. The core CLI never assumes a provider or falls
+back to an API key. A host must not leave a referenced asset only in its own
+generated-images directory. Both Gauntlet and the one-shot `stasis ai` command
+use this handshake; deterministic raster composition remains their
+always-available fallback. In either case, a critic judges the rendered in-game
+result, not the generator's preview.
 
-The host bridge is `import_png_asset`: the host places a selected PNG under
+Request one isolated asset or subject per generated image, not a multi-item
+atlas. Masters default to 1024x1024; an agent may request up to 2048x2048 when
+extra detail or crop latitude is justified. Leave that master in the ignored
+ImageGen inbox. The transactional import may
+copy it unchanged, crop it, or remove a flat background to create the tracked
+game asset without degrading the reusable source.
+
+When a replacement makes an older generated asset obsolete, the builder uses
+`delete_asset` in the same contiguous asset/source transaction. The tool removes
+the controlled file, its matching manifest entry, and any prepared-cache copy;
+all three are restored if the related source edit fails. Deletion precedes a
+replacement that reuses the same asset id.
+
+For those authored-art workstreams, Gauntlet hides primitive SVG and
+shape-composed PNG tools and rejects completion until an ImageGen request has
+been fulfilled and its PNG imported through the atomic asset/source transaction,
+referenced by project Stasis source, loaded, and emitted through a sprite draw
+path. Merely adding an unused PNG to the manifest does not satisfy the gate.
+Primitive rendering remains appropriate for basic UI, simple icons,
+selection/range overlays, and deterministic fallbacks. ImageGen remains optional
+for work that is purely logic or basic interface geometry.
+
+The current render-v2 category order is clear, line primitives, sprites, then
+text. An opaque full-board sprite therefore covers a battlefield that is still
+drawn with lines. Until a project has a verified sprite-first background path,
+agents request isolated foreground subjects on flat removable backgrounds and
+use bounded crop/background removal during import. This keeps generated units,
+buildings, and props above the board while preserving grid and tactical overlays.
+
+The request is stored under `build/gauntlet/imagegen/requests/`. The host places
+the selected PNG at the request's `output_path` under
 `build/gauntlet/imagegen/`, then the same contiguous asset/source transaction
 copies it under `assets/generated/` and derives the manifest entry. Imports
 must be real PNG files, non-symlinks, at most 16 MiB, at most 2048 pixels per
-edge, and at most 4,194,304 pixels total. This bridge is inert when the running
+edge, and at most 4,194,304 pixels total. `import_png_asset` can copy the image
+unchanged, crop a bounded rectangle, and remove a caller-selected flat background
+color with a bounded tolerance before saving the project PNG. This bridge is inert when the running
 host has no ImageGen capability. One-shot `stasis ai` uses the equivalent
 `build/ai-assets/imagegen/` inbox.
 
@@ -311,7 +352,23 @@ images: discovered pages establish the bar, while only user-supplied local
 images become frozen visual evidence. References are never packaged or offered
 as builder assets.
 
-A fresh lead then freezes workstreams, rubric dimensions, required scenes,
+A project may provide an authoritative `CREATIVE_DIRECTION.md` beside
+`stasis.json`. The controller reads it with the same bounded-text protections as
+the goal, freezes its hash and verbatim contents, and rejects cross-run reuse if
+the source changes. A creative-director bootstrap turns that source plus the
+immutable goal into a structured, controller-owned operational digest. The run
+stores the source and digest in `quality-bar.json` and combines them in a
+human-readable `creative-direction.md`; together they cover the
+narrative promise, player fantasy, rule pillars, visual language, interaction
+grammar, progression/pacing, and non-negotiables. It is authoritative for the
+run, survives resume and fresh-agent boundaries, and is supplied to every lead,
+builder, and critic. A later run with the identical goal hash reuses the newest
+version-two direction and workstream decomposition, so a budget boundary does
+not cause creative drift or spend another director call. Builders may implement
+or refine it but cannot silently rewrite the game's identity to make a local
+task easier.
+
+The director also freezes workstreams, rubric dimensions, required scenes,
 input scenarios, state assertions, and completion thresholds. If the scout
 cannot establish at least one usable visual reference and one measurable
 gameplay bar, the run stops before production modification.
@@ -338,12 +395,25 @@ acceptance path. Ordinary rendering allocates no capture framebuffer.
 ### Agent roles and context separation
 
 - The **reference scout** is read-only and web-enabled.
-- The **lead** chooses the single highest-value next work item from the frozen
-  bar, compact project state, and critic outcomes.
+- The **lead** operationalizes the frozen creative direction as the
+  playability and visual-coherence director. It inspects paired initial and
+  post-probe frames,
+  compact runtime/test evidence, references, and critic outcomes before choosing
+  the single highest-value next work item. Its required playability guidance
+  identifies which board relationships are unclear and tells the builder how a
+  new player should recognize cells, terrain, factions, unit roles, selection,
+  movement, combat previews, objectives, economy, turn ownership, end turn, and
+  cancel/reselect without inventing unsupported mechanics.
 - A **builder** receives one work item, relevant captures, and the prior
-  critic's largest gap. It changes the project through controlled tools only.
-- A **visual critic** receives shuffled candidate images, references, and the
-  frozen visual rubric. It receives no source or write tools.
+  critic's largest gap. It also receives the lead's playability guidance as a
+  distinct instruction so visual polish cannot silently obscure the board's
+  interaction grammar. It changes the project through controlled tools only.
+- A **visual critic** receives shuffled initial/post-input image pairs,
+  references, the frozen direction, and the visual rubric. In addition to the
+  relative A/B verdict, it must separately record whether pixels affirmatively
+  communicate current state, available actions, board semantics, and action
+  feedback, with observed evidence for each anonymous candidate. It receives no
+  source or write tools.
 - A **gameplay critic** receives deterministic scenarios, captures, state
   traces, and the gameplay rubric, but no production write tools.
 - An **integration critic** periodically checks that the independently improved
@@ -356,6 +426,17 @@ builder reasoning or learn which shuffled candidate is newer. Read-only critics
 may run concurrently over immutable evidence; production builders remain
 serialized because one live runtime and one transactional project state are
 authoritative.
+
+Every ordinary `stasis ai` agent and Gauntlet builder also receives two completed
+discovery payloads before its first model turn. `initial_symbols` contains compact
+signatures for the entry file and its direct imports. `stdlib_api` contains the
+bounded public API catalog for the project-matched Stasis standard library,
+including canonical import paths and function, struct, and constant signatures.
+The catalog includes top-level public modules such as graphics, audio, collision,
+layout, timing, storage, memory, and HUD helpers; it excludes internal host ABI,
+test-only modules, globals, and function bodies. Agents should use this catalog
+directly rather than spending turns rediscovering standard-library implementation
+files.
 
 Fresh leads and builders receive a compact chronological projection of the
 latest 48 decision records, capped at 32 KiB. Builders may call
@@ -400,10 +481,11 @@ assets are not part of version one.
 
 For every selected work item:
 
-1. Capture the best accepted baseline using the relevant deterministic
-   scenarios.
+1. Capture initial and post-input frames for the best accepted baseline using
+   the relevant deterministic scenarios.
 2. Run one fresh builder and apply its tested patch provisionally.
-3. Capture the candidate with identical inputs and initial state.
+3. Capture matching initial and post-input candidate frames with identical
+   inputs and initial state.
 4. Run compile/tests, scenario assertions, renderer diagnostics, missing-asset
    checks, performance budgets, and state/layout invariants.
 5. Run fresh visual and gameplay critics required by the workstream.
@@ -418,8 +500,12 @@ For every selected work item:
 10. Feed only the largest evidenced gap into the next lead decision.
 
 Convergence requires all hard gates plus two separate final evaluations that
-mark every required rubric dimension as meeting the frozen bar. A merely
-improved result is not labeled converged. Five consecutive non-improving
+mark every required rubric dimension as meeting the frozen bar. Each final
+evaluation must also affirm from the captured pixels that current state,
+available actions, board semantics, and the result of the fixed input probe are
+clear. These absolute comprehension gates do not prevent a genuinely improved
+candidate from becoming the next incremental checkpoint. A merely improved
+result is not labeled converged. Five consecutive non-improving
 candidates stop as `stalled`; eight hours or 100 model calls stop as
 `budget_exhausted`. Both retain the best checkpoint.
 

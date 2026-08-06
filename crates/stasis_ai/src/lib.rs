@@ -19,7 +19,8 @@ pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
 pub const MIN_COMPACTION_BYTES: usize = 256 * 1024;
 pub const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMPACTION_RETAINED_TURNS: usize = 16;
-const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. These are host-mediated virtual tools described by tool_specs in the immutable request header, not native Codex registry tools. Invoke them by returning mode=tool_calls with the requested calls in the structured response contract; never search for them in or reject them because of the native callable-tool registry. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Treat every listed function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing symbols before writing. For collision or geometry changes, use rendered rectangle bounds as the coordinate source of truth and derive contact test inputs after the update function's movement order instead of copying old collision constants. Put all related source and requested durable-test changes in one contiguous atomic write batch. The write compiles the batch and runs project tests; if it succeeds, return done immediately without a separate test call. If it fails, correct only the reported defect and retry atomically. Return exactly one JSON object matching the response contract.";
+const MAX_COMPLETION_REJECTIONS: usize = 3;
+const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. These are host-mediated virtual tools described by tool_specs in the immutable request header, not native Codex registry tools. Invoke them by returning mode=tool_calls with the requested calls in the structured response contract; never search for them in or reject them because of the native callable-tool registry. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Also use initial_context.stdlib_api as the completed catalog of public standard-library signatures; add the listed canonical_import when a needed module is not already imported, and do not spend turns rediscovering stdlib implementation files unless the catalog is ambiguous. Treat every listed project function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant project symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing project symbols before writing. For collision or geometry changes, use rendered rectangle bounds as the coordinate source of truth and derive contact test inputs after the update function's movement order instead of copying old collision constants. Put all related source and requested durable-test changes in one contiguous atomic write batch. The write compiles the batch and runs project tests; if it succeeds, return done immediately without a separate test call. If it fails, correct only the reported defect and retry atomically. Return exactly one JSON object matching the response contract.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -263,6 +264,7 @@ where
     })
     .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
     let mut transcript = AgentTranscript::new(header);
+    let mut completion_rejections = 0_usize;
     for turn in 1..=profile.max_turns {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
@@ -285,9 +287,19 @@ where
         match response {
             ModelResponse::Done { summary, .. } => {
                 if let Err(error) = executor.validate_completion() {
+                    completion_rejections = completion_rejections.saturating_add(1);
                     let observations = vec![ToolObservation::error("completion_gate", error)];
                     emit(AgentEvent::Observations(observations.clone()));
                     transcript.append(&response_record, &observations)?;
+                    if completion_rejections >= MAX_COMPLETION_REJECTIONS {
+                        let reason = observations[0]
+                            .error
+                            .as_deref()
+                            .unwrap_or("completion validation failed");
+                        return Err(format!(
+                            "AI agent repeated an invalid completion {completion_rejections} times: {reason}"
+                        ));
+                    }
                     compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
                     continue;
                 }
@@ -759,9 +771,11 @@ impl Default for CodexExecProvider {
 pub fn project_ai_tool_specs() -> Vec<ToolSpec> {
     let mut tools = live_tool_specs();
     tools.extend([
-        spec("write_svg_asset", "Stage one bounded SVG under assets/generated and derive its v2 manifest entry. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "source", "width", "height"], &[]),
-        spec("write_png_asset", "Generate and stage one deterministic PNG under assets/generated from a background and bounded rect/circle/line shape array, then derive its v2 manifest entry. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "width", "height", "background", "shapes"], &[]),
-        spec("import_png_asset", "Import a host-generated PNG from build/ai-assets/imagegen or build/gauntlet/imagegen into assets/generated, validate its dimensions and bytes, and derive its v2 manifest entry. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "source_path"], &[]),
+        spec("request_imagegen_asset", "Request one host-generated PNG containing one isolated foreground asset or subject on a flat removable background, not an atlas. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art, including early versions; primitive shapes remain appropriate for basic UI and overlays. Render contract v2 draws line primitives before sprites, so never request an opaque full-board sprite for a line-rendered battlefield unless the project already has a verified sprite-first background path. The master defaults to 1024x1024; request up to 2048x2048 only when extra detail or crop latitude is needed. Keep it in the controlled ImageGen inbox and derive the game copy later with import_png_asset crop/background-removal options. The host persists the prompt and this call waits for the PNG, then returns its source_path. Request before the atomic asset/source write batch.", &["filename", "prompt", "purpose"], &["width", "height"]),
+        spec("write_svg_asset", "Stage one bounded SVG under assets/generated and derive its v2 manifest entry. Prefer this for basic UI, simple icons, markers, and overlays; do not use primitive vector construction for characters or units by default. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "source", "width", "height"], &[]),
+        spec("write_png_asset", "Generate and stage one deterministic PNG from bounded rect/circle/line shapes, then derive its v2 manifest entry. Prefer it for basic UI and deterministic overlays or a capability fallback; do not use primitive-shape characters or units by default. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "width", "height", "background", "shapes"], &[]),
+        spec("import_png_asset", "Copy a host-generated PNG from build/ai-assets/imagegen or build/gauntlet/imagegen into assets/generated, optionally crop it and remove a flat background color, validate the result, and derive its v2 manifest entry. Supply all four crop fields together. transparent_color is #RRGGBB; transparent_tolerance defaults to 12. Render-v2 sprites appear above line primitives, so preserve tactical content by importing isolated foreground subjects rather than opaque full-board backgrounds unless a verified sprite-first path exists. It must be in the same tool batch immediately before source writes that load and visibly draw it; importing an unused PNG does not satisfy an authored-art completion gate.", &["id", "path", "source_path"], &["crop_x", "crop_y", "crop_width", "crop_height", "transparent_color", "transparent_tolerance"]),
+        spec("delete_asset", "Delete one obsolete file under assets/generated and remove its matching manifest entry in the same rollback-safe transaction as source updates and replacement assets. Supply id for manifest-backed sprites or audio; omit it only for generated JSON/CSV files that have no manifest entry. Place deletion before a replacement that reuses the same id.", &["path"], &["id"]),
         spec("write_data_asset", "Stage bounded JSON or CSV data under assets/generated. It must be in the same tool batch immediately before related source writes.", &["path", "source"], &[]),
         spec("write_procedural_wav", "Stage deterministic mono PCM audio under assets/generated and derive its v2 manifest entry. It must be in the same tool batch immediately before related source writes.", &["id", "path", "frequency_hz", "duration_ms"], &[]),
     ]);
@@ -879,11 +893,17 @@ impl CodexExecProvider {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
+        let provider_job = ProviderProcessJob::new()?;
         let mut child = command.spawn().map_err(|error| {
             format!(
                 "failed starting Codex; install/sign in to Codex or set STASIS_CODEX_EXE: {error}"
             )
         })?;
+        if let Err(error) = provider_job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let stdout = child
             .stdout
             .take()
@@ -941,6 +961,90 @@ impl CodexExecProvider {
             .map_err(|_| "Codex usage reader panicked".to_string())??;
         fs::read_to_string(&run.output)
             .map_err(|error| format!("Codex did not produce a final response: {error}"))
+    }
+}
+
+#[cfg(not(windows))]
+struct ProviderProcessJob;
+
+#[cfg(not(windows))]
+impl ProviderProcessJob {
+    fn new() -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    fn assign(&self, _child: &std::process::Child) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+struct ProviderProcessJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ProviderProcessJob {
+    fn new() -> Result<Self, String> {
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(format!(
+                "failed creating Codex provider job object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            return Err(format!(
+                "failed configuring Codex provider job object: {error}"
+            ));
+        }
+        Ok(Self(handle))
+    }
+
+    fn assign(&self, child: &std::process::Child) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let assigned = unsafe {
+            AssignProcessToJobObject(
+                self.0,
+                child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            )
+        };
+        if assigned == 0 {
+            return Err(format!(
+                "failed assigning Codex provider to its cleanup job: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProviderProcessJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
     }
 }
 
@@ -1067,6 +1171,30 @@ pub fn contract_json() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_job_terminates_an_assigned_child_when_dropped() {
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .spawn()
+            .expect("long-lived child");
+        let job = ProviderProcessJob::new().expect("provider job");
+        job.assign(&child).expect("assign child");
+
+        drop(job);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().expect("child status").is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "assigned child survived job closure"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
     use std::sync::atomic::AtomicBool;
 
     struct Responses(Vec<ModelResponse>);
@@ -1536,6 +1664,59 @@ mod tests {
     }
 
     #[test]
+    fn repeated_invalid_completions_end_the_attempt_for_escalation() {
+        struct PrematureProvider {
+            calls: usize,
+        }
+        impl ModelProvider for PrematureProvider {
+            fn respond(
+                &mut self,
+                _request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.calls += 1;
+                Ok(ModelResponse::Done {
+                    working_notes:
+                        "Intent: finish. Observed: no write. Next: retry. Blocker: completion gate."
+                            .to_string(),
+                    summary: "finished without evidence".to_string(),
+                })
+            }
+        }
+
+        struct NeverReady;
+        impl ToolExecutor for NeverReady {
+            fn execute(
+                &mut self,
+                _calls: &[ToolCall],
+                _canceled: &AtomicBool,
+            ) -> Vec<ToolObservation> {
+                Vec::new()
+            }
+
+            fn validate_completion(&self) -> Result<(), String> {
+                Err("successful atomic write required".to_string())
+            }
+        }
+
+        let mut provider = PrematureProvider { calls: 0 };
+        let error = run_agent(
+            &mut provider,
+            &mut NeverReady,
+            "change",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect_err("repeated premature completion");
+
+        assert_eq!(provider.calls, MAX_COMPLETION_REJECTIONS);
+        assert!(error.contains("repeated an invalid completion 3 times"));
+        assert!(error.contains("successful atomic write required"));
+    }
+
+    #[test]
     fn terminal_tool_failure_ends_the_agent_without_another_turn() {
         struct OneResponse {
             calls: usize,
@@ -1648,9 +1829,11 @@ mod tests {
     fn project_ai_gets_assets_without_gauntlet_decision_memory() {
         let project = project_ai_tool_specs();
         for expected in [
+            "request_imagegen_asset",
             "write_svg_asset",
             "write_png_asset",
             "import_png_asset",
+            "delete_asset",
             "write_data_asset",
             "write_procedural_wav",
         ] {
@@ -1658,6 +1841,14 @@ mod tests {
         }
         assert!(!project.iter().any(|tool| tool.tool == "record_decision"));
         assert!(!project.iter().any(|tool| tool.tool == "report_blocked"));
+        assert!(project
+            .iter()
+            .find(|tool| tool.tool == "request_imagegen_asset")
+            .is_some_and(|tool| tool.purpose.contains("including early versions")));
+        assert!(project
+            .iter()
+            .find(|tool| tool.tool == "request_imagegen_asset")
+            .is_some_and(|tool| tool.purpose.contains("line primitives before sprites")));
         assert!(gauntlet_tool_specs()
             .iter()
             .any(|tool| tool.tool == "record_decision"));

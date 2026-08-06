@@ -42,6 +42,10 @@ PINNED = {
         "libx11-dev",
         "libxrandr-dev",
     ),
+    "scripts/build_local_editor_release.ps1": (
+        "STASIS_GRAPHICS_BUNDLE_SDL=ON",
+        "STASIS_GRAPHICS_SDL_ONLY=ON",
+    ),
     "docs/sdl3_migration.md": (
         "There is no SDL2 or `sdl2-compat` fallback.",
         "Windows x64",
@@ -63,6 +67,7 @@ NO_SDL2_PATHS = (
     "tools/ci/check_android_release_package.py",
     "tools/ci/check_android_shell.py",
     ".github/workflows",
+    "scripts/build_local_editor_release.ps1",
     "docs/mobile_packaging.md",
     "docs/mobile_runtime_core.md",
     "docs/release_provenance.md",

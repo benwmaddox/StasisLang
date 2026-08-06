@@ -1,4 +1,7 @@
-use super::{absolute_path, create_new_project, load_workspace, CommandResult, Workspace};
+use super::{
+    absolute_path, create_new_project, load_workspace, load_workspace_with_vendor_gate,
+    CommandResult, VendorGate, Workspace,
+};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,6 +22,9 @@ const DEFAULT_MODEL_TIMEOUT_MINUTES: u32 = 30;
 const MAX_MODEL_TIMEOUT_MINUTES: u32 = 120;
 const MAX_GOAL_BYTES: u64 = 256 * 1024;
 const MAX_REFERENCE_BYTES: u64 = 16 * 1024 * 1024;
+const GAUNTLET_UI_FONT_BYTES: &[u8] =
+    include_bytes!("../../assets/gauntlet-font/Basic-Regular.ttf");
+const GAUNTLET_UI_FONT_LICENSE: &str = include_str!("../../assets/gauntlet-font/OFL.txt");
 
 #[derive(Debug, Subcommand)]
 pub(super) enum GauntletCommand {
@@ -476,7 +482,7 @@ pub(super) fn execute(
             max_hours,
             max_model_calls,
         } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             start_existing(
                 &workspace,
                 &config,
@@ -488,19 +494,19 @@ pub(super) fn execute(
             )
         }
         GauntletCommand::Resume { run_id, tui, jsonl } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             resume(&workspace, &run_id, selected_observer(tui, jsonl))
         }
         GauntletCommand::Status { run_id } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             status(&workspace, &run_id)
         }
         GauntletCommand::Stop { run_id } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             stop(&workspace, &run_id)
         }
         GauntletCommand::Promote { run_id } => {
-            let workspace = load_workspace(workspace_arg)?;
+            let workspace = load_workspace_with_vendor_gate(workspace_arg, VendorGate::Inspect)?;
             promote(&workspace, &run_id, json_output)
         }
     }
@@ -568,7 +574,18 @@ fn write_graphical_seed(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed writing Gauntlet seed source: {error}"))?;
     fs::write(root.join("tests/main.test.stasis"), GAUNTLET_SEED_TEST)
         .map_err(|error| format!("failed writing Gauntlet seed test: {error}"))?;
-    fs::write(root.join("assets/manifest.json"), EMPTY_ASSET_MANIFEST)
+    fs::write(root.join("assets/gauntlet-ui.ttf"), GAUNTLET_UI_FONT_BYTES)
+        .map_err(|error| format!("failed writing Gauntlet UI font: {error}"))?;
+    fs::write(
+        root.join("assets/gauntlet-ui-OFL.txt"),
+        GAUNTLET_UI_FONT_LICENSE,
+    )
+    .map_err(|error| format!("failed writing Gauntlet UI font license: {error}"))?;
+    let manifest = GAUNTLET_ASSET_MANIFEST.replace(
+        "__GAUNTLET_UI_FONT_SHA256__",
+        &hex_sha256(GAUNTLET_UI_FONT_BYTES),
+    );
+    fs::write(root.join("assets/manifest.json"), manifest)
         .map_err(|error| format!("failed writing Gauntlet asset manifest: {error}"))?;
     Ok(())
 }
@@ -690,7 +707,17 @@ fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-const GAUNTLET_SEED_SOURCE: &str = r#"import "/vendor/stasis/src/stdlib/graphics.stasis";
+const GAUNTLET_SEED_SOURCE: &str = r#"import "/vendor/stasis/src/stdlib/stdlib.stasis";
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+import "/vendor/stasis/src/stdlib/audio.stasis";
+import "/vendor/stasis/src/stdlib/collision.stasis";
+import "/vendor/stasis/src/stdlib/flex_layout.stasis";
+import "/vendor/stasis/src/stdlib/frame_timer.stasis";
+import "/vendor/stasis/src/stdlib/hud_table.stasis";
+import "/vendor/stasis/src/stdlib/sdl_scancodes.stasis";
+import "/vendor/stasis/src/stdlib/storage.stasis";
+import "/vendor/stasis/src/stdlib/ui_axis_layout.stasis";
+import "/vendor/stasis/src/stdlib/ui_button_9slice.stasis";
 
 struct Game {
     ticks: i32;
@@ -698,9 +725,11 @@ struct Game {
 }
 
 global game: Game;
+global gauntlet_ui_font: i32;
 
 function main(): i32 {
     host_request_windowed(960, 540);
+    gauntlet_ui_font = load_font("assets/gauntlet-ui.ttf", 20);
     game.ticks = 0;
     game.swaps = 0;
     return 0;
@@ -716,6 +745,7 @@ function render(): i32 {
     gfx_cmd_clear(0.025, 0.035, 0.06, 1.0);
     gfx_cmd_line(320.0, 270.0, 640.0, 270.0, 0.18, 0.72, 0.92, 1.0);
     gfx_cmd_line(480.0, 190.0, 480.0, 350.0, 0.18, 0.72, 0.92, 1.0);
+    gfx_cmd_text(gauntlet_ui_font, "STASIS GAUNTLET", 392.0, 390.0, 0.86, 0.92, 1.0, 1.0);
     gfx_cmd_mark_present();
     return 0;
 }
@@ -739,11 +769,14 @@ test `Gauntlet seed emits a visible frame`(): bool {
     render();
     if (gfx_cmd_i32[GFX_I_MAGIC] != GFX_CMD_MAGIC) { return false; }
     if (gfx_cmd_i32[GFX_I_LINE_COUNT] < 1) { return false; }
+    if (gfx_cmd_text_bytes_used() < 15) { return false; }
+    if (gfx_cmd_u8[0] != 83) { return false; }
+    if (gfx_cmd_u8[1] != 84) { return false; }
     return gfx_cmd_i32[GFX_I_FLAGS] == GFX_FLAG_CLEAR + GFX_FLAG_PRESENT;
 }
 "#;
 
-const EMPTY_ASSET_MANIFEST: &str = r#"{
+const GAUNTLET_ASSET_MANIFEST: &str = r#"{
   "schema": "stasis-assets",
   "version": 2,
   "display": {
@@ -753,7 +786,15 @@ const EMPTY_ASSET_MANIFEST: &str = r#"{
     "max_physical_height": 1080,
     "scale_mode": "fit"
   },
-  "assets": []
+  "assets": [
+    {
+      "id": "gauntlet_ui_font",
+      "path": "assets/gauntlet-ui.ttf",
+      "content_sha256": "__GAUNTLET_UI_FONT_SHA256__",
+      "format": {"kind": "font", "encoding": "ttf"},
+      "dependencies": []
+    }
+  ]
 }
 "#;
 
@@ -804,6 +845,8 @@ fn promote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -866,6 +909,84 @@ mod tests {
     }
 
     #[test]
+    fn gauntlet_vendor_sync_becomes_a_clean_setup_checkpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_vendor_sync_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        create_new_project(root.clone(), "vendor_sync".to_string()).expect("create project");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "--all"]);
+        git(&[
+            "-c",
+            "user.name=Gauntlet Test",
+            "-c",
+            "user.email=gauntlet-test@stasis.local",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            "initial",
+        ]);
+
+        let manifest_path = root.join("stasis.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read generated manifest"))
+                .expect("parse generated manifest");
+        manifest["vendor"]["stasis"]["release_id"] = Value::String("older-toolchain".into());
+        write_json(&manifest_path, &manifest).expect("record older toolchain");
+        git(&["add", "stasis.json"]);
+        git(&[
+            "-c",
+            "user.name=Gauntlet Test",
+            "-c",
+            "user.email=gauntlet-test@stasis.local",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            "record older vendor",
+        ]);
+
+        let workspace = load_workspace_with_vendor_gate(Some(&root), VendorGate::Inspect)
+            .expect("inspect without mutating vendor");
+        assert!(git(&["status", "--porcelain"]).is_empty());
+        controller::sync_vendor_checkpoint(&workspace).expect("checkpoint vendor sync");
+
+        assert!(git(&["status", "--porcelain"]).is_empty());
+        assert_eq!(
+            git(&["log", "-1", "--format=%s"]),
+            "chore: sync Stasis vendor"
+        );
+        let updated: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read synchronized manifest"))
+                .expect("parse synchronized manifest");
+        assert_eq!(
+            updated["vendor"]["stasis"]["release_id"],
+            super::super::current_release_id()
+        );
+        fs::remove_dir_all(root).expect("remove vendor sync fixture");
+    }
+
+    #[test]
     fn config_rejects_unknown_fields_and_zero_budgets() {
         let source = r#"{
             "schema_version":1,
@@ -898,6 +1019,17 @@ mod tests {
     #[test]
     fn seed_has_the_required_graphical_lifecycle() {
         for required in [
+            "/vendor/stasis/src/stdlib/stdlib.stasis",
+            "/vendor/stasis/src/stdlib/graphics.stasis",
+            "/vendor/stasis/src/stdlib/audio.stasis",
+            "/vendor/stasis/src/stdlib/collision.stasis",
+            "/vendor/stasis/src/stdlib/flex_layout.stasis",
+            "/vendor/stasis/src/stdlib/frame_timer.stasis",
+            "/vendor/stasis/src/stdlib/hud_table.stasis",
+            "/vendor/stasis/src/stdlib/sdl_scancodes.stasis",
+            "/vendor/stasis/src/stdlib/storage.stasis",
+            "/vendor/stasis/src/stdlib/ui_axis_layout.stasis",
+            "/vendor/stasis/src/stdlib/ui_button_9slice.stasis",
             "function main(): i32",
             "function tick(): i32",
             "function render(): i32",
@@ -934,6 +1066,17 @@ mod tests {
         create_new_project(root.clone(), "gauntlet_seed_test".to_string())
             .expect("create seed project");
         write_graphical_seed(&root).expect("write graphical seed");
+        assert_eq!(
+            fs::read(root.join("assets/gauntlet-ui.ttf")).expect("read seeded font"),
+            GAUNTLET_UI_FONT_BYTES
+        );
+        assert!(fs::read_to_string(root.join("assets/gauntlet-ui-OFL.txt"))
+            .expect("read seeded font license")
+            .contains("SIL OPEN FONT LICENSE Version 1.1"));
+        let manifest =
+            fs::read_to_string(root.join("assets/manifest.json")).expect("read seeded manifest");
+        assert!(manifest.contains(&hex_sha256(GAUNTLET_UI_FONT_BYTES)));
+        assert!(manifest.contains("assets/gauntlet-ui.ttf"));
         let workspace = load_workspace(Some(&root)).expect("load seed workspace");
         super::super::check_workspace(&workspace).expect("seed compiles through JIT");
         super::super::test_workspace(&workspace, None).expect("seed tests execute through JIT");
