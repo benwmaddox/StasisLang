@@ -14,6 +14,7 @@ use stasis_ai::{
     AgentEvent, AgentProfile, CodexExecProvider, ToolCall, ToolExecutor, ToolObservation,
     DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
 };
+use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::parser::{
     completion_expected_type, parse_top_level_extern_functions,
 };
@@ -89,7 +90,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     canceled: &AtomicBool,
 ) -> Result<(String, PathBuf, PathBuf), String> {
     let mut profile = AgentProfile::default();
-    profile.instruction.push_str(" New Gauntlet projects include the project-local assets/gauntlet-ui.ttf font; load it with load_font and preserve or replace it transactionally when readable UI text is required. You may request host-generated bitmap art with request_imagegen_asset when you judge that it materially improves the assigned work, then import its returned source_path with import_png_asset. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when the task is purely logic or basic interface geometry. Request one isolated foreground subject per image on a flat removable background; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Render contract v2 draws line primitives before sprites, so do not place an opaque full-board sprite over line-rendered gameplay unless the project already has a verified sprite-first background path. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset obsolete; place deletion before a replacement that reuses the same id. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
+    profile.instruction.push_str(" New Gauntlet projects include the project-local assets/gauntlet-ui.ttf font. Use that exact project-local path with load_font for readable UI text; absolute and system font paths are invalid and the atomic write gate rejects them. Preserve or replace the seeded font transactionally. You may request host-generated bitmap art with request_imagegen_asset when you judge that it materially improves the assigned work, then import its returned source_path with import_png_asset. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when the task is purely logic or basic interface geometry. Request one isolated foreground subject per image on a flat removable background; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Render contract v2 draws line primitives before sprites, so do not place an opaque full-board sprite over line-rendered gameplay unless the project already has a verified sprite-first background path. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset obsolete; place deletion before a replacement that reuses the same id. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
     let outcome = run_scripted_ai_profile(
         client,
         project_root,
@@ -2826,7 +2827,7 @@ impl LiveAiTools {
                 })
                 .collect();
         }
-        let edits = calls
+        let edits: Vec<LiveEdit> = calls
             .iter()
             .map(|call| {
                 let args = call.args.as_object().expect("validated tool args");
@@ -2851,6 +2852,11 @@ impl LiveAiTools {
                 }
             })
             .collect();
+        if let Some(project_root) = self.project_root.as_ref() {
+            if let Err(error) = validate_ai_font_paths(project_root, &edits) {
+                return failed_write_observations(calls, error);
+            }
+        }
         match self.request(
             LiveCommand::EditBatch {
                 edits,
@@ -2995,6 +3001,56 @@ impl LiveAiTools {
         });
         let _ = self.append_decision_record(path, &record);
     }
+}
+
+fn validate_ai_font_paths(project_root: &Path, edits: &[LiveEdit]) -> Result<(), String> {
+    for edit in edits {
+        let Some(source) = edit.source.as_deref() else {
+            continue;
+        };
+        for token in
+            lex(source).map_err(|error| format!("failed to scan AI font paths: {error}"))?
+        {
+            if token.kind != TokenKind::StringLiteral {
+                continue;
+            }
+            let literal: String = serde_json::from_str(&source[token.start..token.end])
+                .map_err(|error| format!("failed to decode AI string literal: {error}"))?;
+            let is_font = Path::new(&literal)
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    value.eq_ignore_ascii_case("ttf") || value.eq_ignore_ascii_case("otf")
+                });
+            if !is_font {
+                continue;
+            }
+            if Path::new(&literal).is_absolute()
+                || literal
+                    .as_bytes()
+                    .get(1)
+                    .is_some_and(|value| *value == b':')
+            {
+                return Err(format!(
+                    "AI font path must be a project-local asset: {literal}; system and absolute font paths are not portable, so use assets/gauntlet-ui.ttf when available"
+                ));
+            }
+            let asset_root = project_root.join("assets").canonicalize().map_err(|_| {
+                "AI font paths require an existing project assets directory".to_string()
+            })?;
+            let font = project_root.join(&literal).canonicalize().map_err(|_| {
+                format!(
+                    "AI font path must name an existing project-local asset: {literal}; use assets/gauntlet-ui.ttf when available"
+                )
+            })?;
+            if !font.is_file() || !font.starts_with(&asset_root) {
+                return Err(format!(
+                    "AI font path must stay under the project assets directory: {literal}; system and absolute font paths are not portable"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn preserve_truncated_applied_write_evidence(mut response: LiveResponse) -> LiveResponse {
@@ -3921,6 +3977,72 @@ fn write_at(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn font_path_edit(source: &str) -> LiveEdit {
+        LiveEdit {
+            operation: LiveEditOperation::Update,
+            target: LiveSymbolTarget {
+                name: "main".to_string(),
+                kind: Some("function".to_string()),
+                file: Some("src/main.stasis".to_string()),
+                owner: None,
+                signature: None,
+            },
+            source: Some(source.to_string()),
+            expected_source_hash: None,
+        }
+    }
+
+    fn font_path_test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "stasis_ai_font_path_{name}_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn ai_font_path_accepts_existing_project_asset() {
+        let root = font_path_test_root("project_asset");
+        fs::create_dir_all(root.join("assets")).expect("assets dir");
+        fs::write(root.join("assets/gauntlet-ui.ttf"), b"font").expect("font asset");
+        let edits = [font_path_edit(
+            "function main(): void { load_font(\"assets/gauntlet-ui.ttf\", 18); }",
+        )];
+
+        validate_ai_font_paths(&root, &edits).expect("project font should pass");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ai_font_path_rejects_absolute_system_font() {
+        let root = font_path_test_root("system_font");
+        fs::create_dir_all(root.join("assets")).expect("assets dir");
+        let edits = [font_path_edit(
+            "function main(): void { load_font(\"C:/Windows/Fonts/arialbd.ttf\", 18); }",
+        )];
+
+        let error = validate_ai_font_paths(&root, &edits).expect_err("system font should fail");
+        assert!(error.contains("project-local asset"));
+        assert!(error.contains("assets/gauntlet-ui.ttf"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ai_font_path_rejects_missing_project_asset() {
+        let root = font_path_test_root("missing_font");
+        fs::create_dir_all(root.join("assets")).expect("assets dir");
+        let edits = [font_path_edit(
+            "function main(): void { load_font(\"assets/missing.ttf\", 18); }",
+        )];
+
+        let error = validate_ai_font_paths(&root, &edits).expect_err("missing font should fail");
+        assert!(error.contains("existing project-local asset"));
+        assert!(error.contains("assets/gauntlet-ui.ttf"));
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn initial_context_catalogs_public_stdlib_signatures() {
