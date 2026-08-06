@@ -2661,6 +2661,7 @@ fn rollback_candidate(root: &Path, commit: &str) -> Result<(), String> {
             ".",
         ],
     )?;
+    clear_rejected_runtime_cache(root)?;
     let untracked = git_stdout(root, &["ls-files", "--others", "--exclude-standard"])?;
     for relative in untracked.lines().filter(|line| !line.trim().is_empty()) {
         let path = root.join(relative);
@@ -2676,6 +2677,19 @@ fn rollback_candidate(root: &Path, commit: &str) -> Result<(), String> {
                 )
             })?;
         }
+    }
+    Ok(())
+}
+
+fn clear_rejected_runtime_cache(root: &Path) -> Result<(), String> {
+    let prepared = root.join(".stasis_cache/play-assets");
+    if prepared.exists() {
+        fs::remove_dir_all(&prepared).map_err(|error| {
+            format!(
+                "failed clearing rejected prepared assets {}: {error}",
+                prepared.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -3674,6 +3688,29 @@ fn visual_critic_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_rollback_clears_only_the_prepared_runtime_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_rollback_cache_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let prepared_asset = root.join(".stasis_cache/play-assets/assets/generated/rejected.png");
+        let toolchain_marker = root.join(".stasis_cache/toolchain/keep.txt");
+        fs::create_dir_all(prepared_asset.parent().expect("prepared parent"))
+            .expect("prepared directory");
+        fs::create_dir_all(toolchain_marker.parent().expect("toolchain parent"))
+            .expect("toolchain directory");
+        fs::write(&prepared_asset, b"rejected").expect("prepared asset");
+        fs::write(&toolchain_marker, b"keep").expect("toolchain marker");
+
+        clear_rejected_runtime_cache(&root).expect("clear rejected cache");
+
+        assert!(!root.join(".stasis_cache/play-assets").exists());
+        assert!(toolchain_marker.exists());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn authored_visual_workstreams_require_imagegen() {

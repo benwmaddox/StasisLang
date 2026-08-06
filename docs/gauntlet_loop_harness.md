@@ -342,6 +342,12 @@ and powers both the terminal observer and static report. The report shows refere
 provenance, before/current captures, rubric scores, tests, usage, checkpoints,
 rejected candidates, and the largest remaining gap.
 
+Rejecting a candidate restores the accepted Git checkpoint, removes its
+untracked files, and clears only `.stasis_cache/play-assets/`. The next builder
+therefore cannot inherit rejected prepared sprites or manifests; toolchain and
+other project caches remain intact and the normal capture path rebuilds the
+accepted prepared assets.
+
 `decisions.jsonl` is durable model working memory, not a dump of private
 chain-of-thought. The `record_decision` tool stores bounded explicit
 conclusions: kind, summary, concise rationale, evidence, and next step. The
