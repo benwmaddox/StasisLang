@@ -22,6 +22,9 @@ const DEFAULT_MODEL_TIMEOUT_MINUTES: u32 = 30;
 const MAX_MODEL_TIMEOUT_MINUTES: u32 = 120;
 const MAX_GOAL_BYTES: u64 = 256 * 1024;
 const MAX_REFERENCE_BYTES: u64 = 16 * 1024 * 1024;
+const GAUNTLET_UI_FONT_BYTES: &[u8] =
+    include_bytes!("../../assets/gauntlet-font/Basic-Regular.ttf");
+const GAUNTLET_UI_FONT_LICENSE: &str = include_str!("../../assets/gauntlet-font/OFL.txt");
 
 #[derive(Debug, Subcommand)]
 pub(super) enum GauntletCommand {
@@ -571,7 +574,18 @@ fn write_graphical_seed(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed writing Gauntlet seed source: {error}"))?;
     fs::write(root.join("tests/main.test.stasis"), GAUNTLET_SEED_TEST)
         .map_err(|error| format!("failed writing Gauntlet seed test: {error}"))?;
-    fs::write(root.join("assets/manifest.json"), EMPTY_ASSET_MANIFEST)
+    fs::write(root.join("assets/gauntlet-ui.ttf"), GAUNTLET_UI_FONT_BYTES)
+        .map_err(|error| format!("failed writing Gauntlet UI font: {error}"))?;
+    fs::write(
+        root.join("assets/gauntlet-ui-OFL.txt"),
+        GAUNTLET_UI_FONT_LICENSE,
+    )
+    .map_err(|error| format!("failed writing Gauntlet UI font license: {error}"))?;
+    let manifest = GAUNTLET_ASSET_MANIFEST.replace(
+        "__GAUNTLET_UI_FONT_SHA256__",
+        &hex_sha256(GAUNTLET_UI_FONT_BYTES),
+    );
+    fs::write(root.join("assets/manifest.json"), manifest)
         .map_err(|error| format!("failed writing Gauntlet asset manifest: {error}"))?;
     Ok(())
 }
@@ -711,9 +725,11 @@ struct Game {
 }
 
 global game: Game;
+global gauntlet_ui_font: i32;
 
 function main(): i32 {
     host_request_windowed(960, 540);
+    gauntlet_ui_font = load_font("assets/gauntlet-ui.ttf", 20);
     game.ticks = 0;
     game.swaps = 0;
     return 0;
@@ -729,6 +745,7 @@ function render(): i32 {
     gfx_cmd_clear(0.025, 0.035, 0.06, 1.0);
     gfx_cmd_line(320.0, 270.0, 640.0, 270.0, 0.18, 0.72, 0.92, 1.0);
     gfx_cmd_line(480.0, 190.0, 480.0, 350.0, 0.18, 0.72, 0.92, 1.0);
+    gfx_cmd_text(gauntlet_ui_font, "STASIS GAUNTLET", 392.0, 390.0, 0.86, 0.92, 1.0, 1.0);
     gfx_cmd_mark_present();
     return 0;
 }
@@ -756,7 +773,7 @@ test `Gauntlet seed emits a visible frame`(): bool {
 }
 "#;
 
-const EMPTY_ASSET_MANIFEST: &str = r#"{
+const GAUNTLET_ASSET_MANIFEST: &str = r#"{
   "schema": "stasis-assets",
   "version": 2,
   "display": {
@@ -766,7 +783,15 @@ const EMPTY_ASSET_MANIFEST: &str = r#"{
     "max_physical_height": 1080,
     "scale_mode": "fit"
   },
-  "assets": []
+  "assets": [
+    {
+      "id": "gauntlet_ui_font",
+      "path": "assets/gauntlet-ui.ttf",
+      "content_sha256": "__GAUNTLET_UI_FONT_SHA256__",
+      "format": {"kind": "font", "encoding": "ttf"},
+      "dependencies": []
+    }
+  ]
 }
 "#;
 
@@ -1038,6 +1063,17 @@ mod tests {
         create_new_project(root.clone(), "gauntlet_seed_test".to_string())
             .expect("create seed project");
         write_graphical_seed(&root).expect("write graphical seed");
+        assert_eq!(
+            fs::read(root.join("assets/gauntlet-ui.ttf")).expect("read seeded font"),
+            GAUNTLET_UI_FONT_BYTES
+        );
+        assert!(fs::read_to_string(root.join("assets/gauntlet-ui-OFL.txt"))
+            .expect("read seeded font license")
+            .contains("SIL OPEN FONT LICENSE Version 1.1"));
+        let manifest =
+            fs::read_to_string(root.join("assets/manifest.json")).expect("read seeded manifest");
+        assert!(manifest.contains(&hex_sha256(GAUNTLET_UI_FONT_BYTES)));
+        assert!(manifest.contains("assets/gauntlet-ui.ttf"));
         let workspace = load_workspace(Some(&root)).expect("load seed workspace");
         super::super::check_workspace(&workspace).expect("seed compiles through JIT");
         super::super::test_workspace(&workspace, None).expect("seed tests execute through JIT");

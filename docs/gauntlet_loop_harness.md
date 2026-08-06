@@ -73,6 +73,11 @@ improves a clean existing project directly on its current branch by default.
 Set `execution.isolation` to `worktree` when a separate linked checkout is
 explicitly desired.
 
+The graphical seed includes `assets/gauntlet-ui.ttf`, its SIL Open Font License,
+and a manifest declaration. The seed loads and renders that project-local font,
+so builders can create readable HUD text without relying on machine-specific
+system font paths.
+
 `budget.model_calls` is an admission budget for starting new candidate cycles.
 After a candidate starts, a configured builder escalation receives a fresh
 `execution.builder_max_turns` allowance and the controller completes both
