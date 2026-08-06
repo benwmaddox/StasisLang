@@ -238,6 +238,14 @@ ImageGen inbox. The transactional import may
 copy it unchanged, crop it, or remove a flat background to create the tracked
 game asset without degrading the reusable source.
 
+The requested width and height are generation targets rather than a reason to
+stall on an otherwise valid provider result. The bridge accepts any decodable
+PNG within the bounded import limits and returns both its actual and requested
+dimensions plus `dimension_adjusted`. The builder can then crop or scale its
+runtime presentation deliberately instead of waiting 30 minutes for an exact
+provider size that some host generators do not guarantee. Invalid, oversized,
+or non-PNG results remain rejected.
+
 When a replacement makes an older generated asset obsolete, the builder uses
 `delete_asset` in the same contiguous asset/source transaction. The tool removes
 the controlled file, its matching manifest entry, and any prepared-cache copy;

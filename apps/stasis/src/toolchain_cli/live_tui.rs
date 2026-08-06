@@ -2634,9 +2634,7 @@ impl LiveAiTools {
             }
             if png_path.is_file() {
                 match super::gauntlet::assets::load_imagegen_png(project_root, &relative_png) {
-                    Ok((_, actual_width, actual_height))
-                        if Some(actual_width) == width && Some(actual_height) == height =>
-                    {
+                    Ok((_, actual_width, actual_height)) => {
                         if !self.imagegen_ready_paths.contains(&relative_png) {
                             self.imagegen_ready_paths.push(relative_png.clone());
                         }
@@ -2647,16 +2645,12 @@ impl LiveAiTools {
                                 "source_path": relative_png,
                                 "width": actual_width,
                                 "height": actual_height,
+                                "requested_width": width,
+                                "requested_height": height,
+                                "dimension_adjusted": Some(actual_width) != width || Some(actual_height) != height,
                                 "request_path": request_path,
                             }),
                         );
-                    }
-                    Ok((_, actual_width, actual_height)) => {
-                        last_validation_error = Some(format!(
-                        "host PNG dimensions are {actual_width}x{actual_height}, expected {}x{}",
-                        width.unwrap_or(1024),
-                        height.unwrap_or(1024)
-                    ))
                     }
                     Err(error) => last_validation_error = Some(error),
                 }
@@ -4524,8 +4518,8 @@ mod tests {
         fs::create_dir_all(output.parent().expect("imagegen inbox")).expect("imagegen inbox");
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            16,
-            12,
+            19,
+            15,
             image::Rgba([20, 40, 60, 255]),
         ))
         .write_to(&mut png, image::ImageFormat::Png)
@@ -4561,6 +4555,13 @@ mod tests {
             observation.result.as_ref().unwrap()["source_path"],
             "build/gauntlet/imagegen/terrain.png"
         );
+        assert_eq!(observation.result.as_ref().unwrap()["width"], 19);
+        assert_eq!(observation.result.as_ref().unwrap()["height"], 15);
+        assert_eq!(observation.result.as_ref().unwrap()["requested_width"], 16);
+        assert_eq!(observation.result.as_ref().unwrap()["requested_height"], 12);
+        assert!(observation.result.as_ref().unwrap()["dimension_adjusted"]
+            .as_bool()
+            .expect("dimension adjustment flag"));
         assert_eq!(
             tools.imagegen_ready_paths,
             vec!["build/gauntlet/imagegen/terrain.png".to_string()]
@@ -4588,8 +4589,8 @@ mod tests {
         fs::create_dir_all(output.parent().expect("AI ImageGen inbox")).expect("AI ImageGen inbox");
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            10,
-            10,
+            12,
+            9,
             image::Rgba([80, 30, 20, 255]),
         ))
         .write_to(&mut png, image::ImageFormat::Png)
@@ -4624,6 +4625,11 @@ mod tests {
             observation.result.as_ref().unwrap()["source_path"],
             "build/ai-assets/imagegen/unit.png"
         );
+        assert_eq!(observation.result.as_ref().unwrap()["width"], 12);
+        assert_eq!(observation.result.as_ref().unwrap()["height"], 9);
+        assert!(observation.result.as_ref().unwrap()["dimension_adjusted"]
+            .as_bool()
+            .expect("dimension adjustment flag"));
         assert_eq!(
             tools.imagegen_ready_paths,
             vec!["build/ai-assets/imagegen/unit.png".to_string()]
