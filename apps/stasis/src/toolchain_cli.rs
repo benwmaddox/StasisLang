@@ -3214,6 +3214,8 @@ fn build_workspace(
                         receipt.display()
                     )
                 })?,
+                Path::new("."),
+                None,
             )?;
             Ok(CommandResult::success(
                 format!("built JIT development image: {}", receipt.display()),
@@ -3235,6 +3237,10 @@ fn build_workspace(
                 None,
                 Some(Path::new(&workspace.manifest.entry)),
             )?;
+            let sources = crate::release_assets::load_entry_sources(
+                &workspace.root,
+                Path::new(&workspace.manifest.entry),
+            )?;
             stage_workspace_assets(
                 workspace,
                 summary.linked_image_path.parent().ok_or_else(|| {
@@ -3243,6 +3249,10 @@ fn build_workspace(
                         summary.linked_image_path.display()
                     )
                 })?,
+                Path::new(&workspace.manifest.entry)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(".")),
+                Some(&sources),
             )?;
             Ok(CommandResult::success(
                 format!(
@@ -3358,12 +3368,27 @@ fn package_workspace(
     ))
 }
 
-fn stage_workspace_assets(workspace: &Workspace, destination_root: &Path) -> Result<(), String> {
+fn stage_workspace_assets(
+    workspace: &Workspace,
+    destination_root: &Path,
+    source_base_dir: &Path,
+    sources: Option<&[(String, String)]>,
+) -> Result<(), String> {
     let assets = workspace.root.join("assets");
     validate_workspace_destination(workspace, "assets directory", &assets)?;
     if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
         let resolved = load_project_asset_manifest(&workspace.root, AssetLimits::default())
             .map_err(|error| format!("failed to resolve desktop build assets: {error}"))?;
+        let resolved = if let Some(sources) = sources {
+            crate::release_assets::retain_source_referenced_assets(
+                &workspace.root,
+                source_base_dir,
+                sources,
+                &resolved,
+            )?
+        } else {
+            resolved
+        };
         prepare_asset_bundle(
             &resolved,
             destination_root,
@@ -5921,6 +5946,8 @@ mod tests {
         assert!(java.contains("nativeReadRuntimeError"));
         assert!(java.contains("tick avg="));
         assert!(java.contains("verifyAssetManifest(staging)"));
+        assert!(java.contains("manifestVersion != 1 && manifestVersion != 2"));
+        assert!(java.contains("Asset verification failed before runtime startup"));
         assert!(java.contains("setOnApplyWindowInsetsListener"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))

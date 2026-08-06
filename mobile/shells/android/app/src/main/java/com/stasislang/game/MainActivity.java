@@ -6,6 +6,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -64,6 +65,7 @@ public final class MainActivity extends SDLActivity {
                 throw new IOException("Unable to publish " + root);
             }
         } catch (IOException error) {
+            Log.e("Stasis", "Asset verification failed before runtime startup", error);
             try {
                 deleteTree(staging);
             } catch (IOException ignored) {
@@ -243,8 +245,9 @@ public final class MainActivity extends SDLActivity {
         byte[] manifestBytes = readBounded(manifestFile, MAX_MANIFEST_BYTES);
         try {
             JSONObject manifest = new JSONObject(new String(manifestBytes, "UTF-8"));
+            int manifestVersion = manifest.optInt("version", -1);
             if (!"stasis-assets".equals(manifest.optString("schema"))
-                    || manifest.optInt("version", -1) != 1) {
+                    || (manifestVersion != 1 && manifestVersion != 2)) {
                 throw new IOException("Unsupported packaged asset manifest");
             }
             JSONArray assets = manifest.getJSONArray("assets");

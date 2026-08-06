@@ -58,7 +58,9 @@ preparation metadata is not valid for fonts.
 
 Preparation writes only beneath the build output; project masters and the source manifest are never changed. The packaged manifest records the prepared dimensions and content hash. A resized entry also records `prepared_from_sha256`, which is the master hash. Preparation cache identity includes the master hash, algorithm version, and output dimensions, so unchanged assets can be reused deterministically.
 
-`stasis play` prepares the same bundle beneath `.stasis_cache/play-assets` before guest startup and mirrors the source directory's position relative to the project root. Existing source-relative paths such as `../assets/images/hero.png` therefore resolve to prepared output without source rewriting. Resized cache hits do not decode the master again. Both development and release `stasis build` commands stage the same prepared bundle beside their build output.
+`stasis play` prepares the same bundle beneath `.stasis_cache/play-assets` before guest startup and mirrors the source directory's position relative to the project root. Existing source-relative paths such as `../assets/images/hero.png` therefore resolve to prepared output without source rewriting. Resized cache hits do not decode the master again. Development builds stage the complete declared manifest so iterative and optional paths remain available.
+
+Release builds and mobile packages scan the entry module's reachable import graph and stage only declared assets named by string literals that resolve beneath the project `assets/` directory, plus their transitive manifest dependencies. Paths such as `../assets/images/hero.png` resolve relative to the selected entry file's directory, including when the literal appears in an imported module; project-root paths such as `assets/images/hero.png` are also accepted. These are the same resolution rules used at runtime. The generated manifest is rewritten to the same exact subset. Runtime asset paths therefore need to be static string literals in reachable production source; dynamically constructed paths are not a supported release-packaging contract. Test-only and unreachable modules do not enlarge a release package.
 
 Once a project has an asset manifest, every runtime-loaded asset must be declared. Source-only provenance files may remain elsewhere in the project, but undeclared files are not copied into prepared play or build output.
 
@@ -78,6 +80,7 @@ The package contains only the selected display envelope's output, not multiple r
 ## Mobile packaging
 
 - The AOT bundle command resolves and verifies the source manifest, then invokes the shared `stasis_assets` preparation path and packages the generated manifest and files under `assets/stasis_game/`.
+- Android and iOS apply the same reachable-source asset closure as desktop release builds; platform packaging does not carry unused manifest entries or alternate prepared sizes.
 - Declared fonts use the shared manifest path. As a compatibility supplement for projects that
   have not declared their path-based `load_font` assets yet, mobile packaging also scans compiled
   `.stasis` source string literals for `.ttf` and `.otf` paths and copies only referenced regular
