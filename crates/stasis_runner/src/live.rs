@@ -145,6 +145,7 @@ pub enum LiveCommand {
         frames: u32,
     },
     ValidationSnapshot,
+    ValidationReinitialize,
     ValidationRestore,
     ValidationClear,
     Complete {
@@ -446,6 +447,42 @@ impl LiveResponse {
         };
         if encoded.len() <= max_bytes {
             return self;
+        }
+        if self.ok && self.kind == "edit_applied" {
+            if let Some(data) = self.data.as_ref() {
+                let changed_files = data
+                    .pointer("/plan/changed_files")
+                    .and_then(Value::as_array)
+                    .map(|files| {
+                        files
+                            .iter()
+                            .map(|file| {
+                                serde_json::json!({
+                                    "file": file.get("file").cloned().unwrap_or(Value::Null),
+                                    "before_hash": file.get("before_hash").cloned().unwrap_or(Value::Null),
+                                    "after_hash": file.get("after_hash").cloned().unwrap_or(Value::Null),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                self.data = Some(serde_json::json!({
+                    "receipt": data.get("receipt").cloned().unwrap_or(Value::Null),
+                    "tests": data.get("tests").cloned().unwrap_or(Value::Null),
+                    "plan": {
+                        "changed_files": changed_files,
+                        "reload": data.pointer("/plan/reload").cloned().unwrap_or(Value::Null),
+                    },
+                    "swap": data.get("swap").cloned().unwrap_or(Value::Null),
+                    "jit_patch": data.get("jit_patch").cloned().unwrap_or(Value::Null),
+                    "response_compacted": true,
+                    "original_bytes": encoded.len(),
+                }));
+                self.truncated = true;
+                if serde_json::to_vec(&self).is_ok_and(|value| value.len() <= max_bytes) {
+                    return self;
+                }
+            }
         }
         self.data = Some(serde_json::json!({
             "message": "live response exceeded the configured output limit",
@@ -1594,6 +1631,49 @@ mod tests {
     }
 
     #[test]
+    fn oversized_applied_edit_preserves_reload_and_receipt_evidence() {
+        let response = LiveResponse::success(
+            8,
+            10,
+            "edit_applied",
+            serde_json::json!({
+                "receipt": "build/live-edits/receipt.json",
+                "tests": "passed",
+                "plan": {
+                    "changed_files": [{
+                        "file": "src/main.stasis",
+                        "before_hash": "before",
+                        "after_hash": "after",
+                        "before_source": "x".repeat(4096),
+                        "after_source": "y".repeat(4096),
+                    }],
+                    "reload": {"expected_reload": "ResetRequired"},
+                },
+                "swap": {"state_layout_compatible": true},
+                "jit_patch": {"revision": 7},
+            }),
+        )
+        .bounded(2048);
+
+        assert!(response.truncated);
+        let data = response.data.expect("compacted data");
+        assert_eq!(
+            data.pointer("/plan/reload/expected_reload"),
+            Some(&Value::String("ResetRequired".to_string()))
+        );
+        assert_eq!(
+            data.get("receipt").and_then(Value::as_str),
+            Some("build/live-edits/receipt.json")
+        );
+        assert_eq!(
+            data.pointer("/plan/changed_files/0/file")
+                .and_then(Value::as_str),
+            Some("src/main.stasis")
+        );
+        assert!(data.pointer("/plan/changed_files/0/after_source").is_none());
+    }
+
+    #[test]
     fn terminal_multiline_edit_preserves_inline_source() {
         let mut terminal = TerminalBuffer::new();
         assert!(matches!(
@@ -2124,6 +2204,12 @@ mod tests {
             LiveCommand::SetInputState { ref pointers }
                 if pointers.len() == 1 && pointers[0].x == 480 && pointers[0].went_down
         ));
+
+        let reinitialize: LiveRequest = serde_json::from_str(
+            r#"{"schema_version":1,"request_id":72,"type":"validation_reinitialize"}"#,
+        )
+        .expect("reinitialize request");
+        assert_eq!(reinitialize.command, LiveCommand::ValidationReinitialize);
     }
 
     #[test]

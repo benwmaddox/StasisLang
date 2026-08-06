@@ -2493,6 +2493,36 @@ pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mu
     );
 }
 
+pub fn fill_registered_global_i32_array(
+    collection_hash: i32,
+    field_hash: i32,
+    start: usize,
+    len: usize,
+    value: i32,
+) -> Result<(), String> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| "registered i32 array range overflowed".to_string())?;
+    let table = registered_i32_arrays();
+    let guard = table
+        .lock()
+        .map_err(|_| "registered i32 array table mutex poisoned".to_string())?;
+    let (ptr, registered_len) = guard
+        .get(&(collection_hash, field_hash))
+        .copied()
+        .ok_or_else(|| "registered i32 array was not found".to_string())?;
+    if end > registered_len {
+        return Err(format!(
+            "registered i32 array range {start}..{end} exceeds length {registered_len}"
+        ));
+    }
+    // Registration owns the pointer lifetime, and the table lock prevents a
+    // rebind while this bounded range is written.
+    let values = unsafe { std::slice::from_raw_parts_mut(ptr as *mut i32, registered_len) };
+    values[start..end].fill(value);
+    Ok(())
+}
+
 pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mut f32, len: usize) {
     if ptr.is_null() {
         return;
@@ -4611,6 +4641,25 @@ mod tests {
 
         let ptr2 = stasis_jit_global_i32_array_ptr(collection_hash, field_hash, 4);
         assert_eq!(ptr, ptr2);
+    }
+
+    #[test]
+    fn registered_i32_array_fill_is_bounded_and_does_not_partially_write() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        let key = 0x2468_1357i32;
+        let mut values = [1, 2, 3, 4, 5, 6];
+        register_global_i32_array(key, 0, values.as_mut_ptr(), values.len());
+
+        fill_registered_global_i32_array(key, 0, 2, 3, 0).expect("fill registered range");
+        assert_eq!(values, [1, 2, 0, 0, 0, 6]);
+
+        let before_rejection = values;
+        assert!(fill_registered_global_i32_array(key, 0, 5, 2, 9)
+            .expect_err("reject out-of-bounds fill")
+            .contains("exceeds length"));
+        assert_eq!(values, before_rejection);
+        clear_registered_global_memory();
     }
 
     #[test]

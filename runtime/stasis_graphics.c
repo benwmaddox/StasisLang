@@ -328,9 +328,30 @@ typedef struct {
     int needs_reraster;
     uint32_t surface_generation;
     uint32_t renderer_generation;
+    char source_path[1024];
+    uint64_t source_size;
 } StasisFont;
 
 static StasisFont g_fonts[MAX_FONTS];
+
+static void stasis_release_font(StasisFont* font) {
+    if (!font) return;
+    if (font->sdl_texture) {
+        SDL_DestroyTexture(font->sdl_texture);
+        font->sdl_texture = NULL;
+    }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (font->atlas_texture) {
+        glDeleteTextures(1, &font->atlas_texture);
+        font->atlas_texture = 0;
+    }
+#endif
+    if (font->ttf_buffer) {
+        free(font->ttf_buffer);
+        font->ttf_buffer = NULL;
+    }
+    memset(font, 0, sizeof(*font));
+}
 
 static const char* stasis_renderer_reason_name(StasisRendererResourceReason reason) {
     switch (reason) {
@@ -5450,23 +5471,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
     g_sprite_fallback.page_index = -1;
 
     for (int i = 0; i < MAX_FONTS; i++) {
-        if (g_fonts[i].active) {
-            if (g_fonts[i].sdl_texture) {
-                SDL_DestroyTexture(g_fonts[i].sdl_texture);
-                g_fonts[i].sdl_texture = NULL;
-            }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-            if (g_fonts[i].atlas_texture) {
-                glDeleteTextures(1, &g_fonts[i].atlas_texture);
-                g_fonts[i].atlas_texture = 0;
-            }
-#endif
-            if (g_fonts[i].ttf_buffer) {
-                free(g_fonts[i].ttf_buffer);
-                g_fonts[i].ttf_buffer = NULL;
-            }
-            g_fonts[i].active = false;
-        }
+        stasis_release_font(&g_fonts[i]);
     }
     stasis_reset_text_cache();
     if (g_renderer) {
@@ -6106,21 +6111,8 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
         return 0;
     }
 
-    /* Find free slot */
-    int slot = -1;
-    for (int i = 0; i < MAX_FONTS; i++) {
-        if (!g_fonts[i].active) {
-            slot = i;
-            break;
-        }
-    }
-
-    if (slot == -1) {
-        SDL_Log("stasis_load_font: no free font slots");
-        return 0;
-    }
-
-    /* Read font file */
+    /* Read first so reuse is based on the bytes that build the retained atlas,
+       not filesystem timestamp granularity. */
     FILE* f = fopen(resolved, "rb");
     if (!f) {
         stasis_report_runtime_errorf("Font failed to open: %s", path);
@@ -6129,18 +6121,63 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     }
 
     fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
+    long file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
-
+    if (file_size <= 0) {
+        fclose(f);
+        stasis_report_runtime_errorf("Font data is empty: %s", path);
+        SDL_Log("stasis_load_font: empty font %s", resolved);
+        return 0;
+    }
+    size_t size = (size_t)file_size;
     unsigned char* ttf_buffer = (unsigned char*)malloc(size);
     if (!ttf_buffer) {
         fclose(f);
         SDL_Log("stasis_load_font: malloc failed");
         return 0;
     }
-
-    fread(ttf_buffer, 1, size, f);
+    if (fread(ttf_buffer, 1, size, f) != size) {
+        fclose(f);
+        free(ttf_buffer);
+        stasis_report_runtime_errorf("Font data could not be read: %s", path);
+        SDL_Log("stasis_load_font: short read for %s", resolved);
+        return 0;
+    }
     fclose(f);
+
+    /* Reuse an identical load. If the file changed in place, retain the stable
+       handle while replacing its backing resources. */
+    int slot = -1;
+    for (int i = 0; i < MAX_FONTS; i++) {
+        if (g_fonts[i].active && g_fonts[i].font_size == font_size &&
+            strcmp(g_fonts[i].source_path, resolved) == 0) {
+            if (g_fonts[i].source_size == (uint64_t)size && g_fonts[i].ttf_buffer &&
+                memcmp(g_fonts[i].ttf_buffer, ttf_buffer, size) == 0) {
+                free(ttf_buffer);
+                return i + 1;
+            }
+            stasis_release_font(&g_fonts[i]);
+            stasis_reset_text_cache();
+            slot = i;
+            break;
+        }
+    }
+
+    /* Find free slot */
+    if (slot == -1) {
+        for (int i = 0; i < MAX_FONTS; i++) {
+            if (!g_fonts[i].active) {
+                slot = i;
+                break;
+            }
+        }
+    }
+
+    if (slot == -1) {
+        free(ttf_buffer);
+        SDL_Log("stasis_load_font: no free font slots");
+        return 0;
+    }
 
     /* Initialize font */
     StasisFont* font = &g_fonts[slot];
@@ -6154,6 +6191,8 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
 
     font->ttf_buffer = ttf_buffer;
     font->font_size = font_size;
+    snprintf(font->source_path, sizeof(font->source_path), "%s", resolved);
+    font->source_size = (uint64_t)size;
     stbtt_GetFontVMetrics(&font->font_info, &font->ascent, &font->descent, &font->line_gap);
     font->active = true;
     if (!stasis_build_font_atlas(font)) {

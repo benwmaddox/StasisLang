@@ -53,7 +53,9 @@ pub(crate) fn apply_asset_calls(
         let relative = required_string(args, "path")?;
         let path = controlled_asset_path(project_root, &relative, call.tool.as_str())?;
         if !touched.insert(path.clone()) {
-            return Err(format!("asset path appears more than once: {relative}"));
+            return Err(format!(
+                "asset path appears more than once: {relative}; import directly when replacing the same stable path, and use delete_asset only when the obsolete path differs"
+            ));
         }
         match call.tool.as_str() {
             "write_svg_asset" => {
@@ -483,14 +485,36 @@ fn transform_imported_png(
             .map(|_| required_u32(args, "transparent_tolerance", 0, 255))
             .transpose()?
             .unwrap_or(12) as u8;
+        let tolerance = adaptive_chroma_tolerance(&image, key, tolerance);
+        let mut transparent_pixels = 0_u64;
+        let mut opaque_pixels = 0_u64;
         for pixel in image.pixels_mut() {
-            let distance = pixel[0]
-                .abs_diff(key[0])
-                .max(pixel[1].abs_diff(key[1]))
-                .max(pixel[2].abs_diff(key[2]));
-            if distance <= tolerance {
+            if chroma_distance(*pixel, key) <= tolerance {
                 pixel[3] = 0;
             }
+            if pixel[3] == 0 {
+                transparent_pixels += 1;
+            } else {
+                opaque_pixels += 1;
+            }
+        }
+        let pixel_count = u64::from(image.width()) * u64::from(image.height());
+        let minimum_coverage = (pixel_count / 100).max(1);
+        let border_is_transparent = (0..image.width()).all(|x| {
+            image.get_pixel(x, 0)[3] == 0 && image.get_pixel(x, image.height() - 1)[3] == 0
+        }) && (0..image.height()).all(|y| {
+            image.get_pixel(0, y)[3] == 0 && image.get_pixel(image.width() - 1, y)[3] == 0
+        });
+        if transparent_pixels < minimum_coverage || !border_is_transparent {
+            return Err(format!(
+                "PNG background removal left the isolated-subject border opaque; increase transparent_tolerance or request a flatter chroma background (effective tolerance {tolerance})"
+            ));
+        }
+        if opaque_pixels < minimum_coverage {
+            return Err(
+                "PNG background removal erased nearly the entire subject; use a chroma color absent from the subject or lower transparent_tolerance"
+                    .to_string(),
+            );
         }
     }
     let width = image.width();
@@ -500,6 +524,37 @@ fn transform_imported_png(
         .write_to(&mut output, ImageFormat::Png)
         .map_err(|error| format!("failed encoding transformed PNG asset: {error}"))?;
     Ok((output.into_inner(), width, height, true))
+}
+
+fn chroma_distance(pixel: Rgba<u8>, key: Rgba<u8>) -> u8 {
+    pixel[0]
+        .abs_diff(key[0])
+        .max(pixel[1].abs_diff(key[1]))
+        .max(pixel[2].abs_diff(key[2]))
+}
+
+fn adaptive_chroma_tolerance(image: &RgbaImage, key: Rgba<u8>, requested: u8) -> u8 {
+    let width = image.width();
+    let height = image.height();
+    let mut border_distances = Vec::with_capacity(((width + height) * 2) as usize);
+    for x in 0..width {
+        border_distances.push(chroma_distance(*image.get_pixel(x, 0), key));
+        if height > 1 {
+            border_distances.push(chroma_distance(*image.get_pixel(x, height - 1), key));
+        }
+    }
+    for y in 1..height.saturating_sub(1) {
+        border_distances.push(chroma_distance(*image.get_pixel(0, y), key));
+        if width > 1 {
+            border_distances.push(chroma_distance(*image.get_pixel(width - 1, y), key));
+        }
+    }
+    let border_tolerance = border_distances.into_iter().max().unwrap_or(requested);
+    if border_tolerance <= 64 {
+        requested.max(border_tolerance.saturating_add(8))
+    } else {
+        requested
+    }
 }
 
 fn render_png(
@@ -516,12 +571,12 @@ fn render_png(
         let kind = shape
             .get("kind")
             .and_then(Value::as_str)
-            .ok_or_else(|| format!("PNG shape {index} requires kind"))?;
+            .ok_or_else(|| png_shape_error(index, "requires kind"))?;
         let color = parse_color(
             shape
                 .get("color")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("PNG shape {index} requires color"))?,
+                .ok_or_else(|| png_shape_error(index, "requires color"))?,
         )?;
         match kind {
             "rect" => draw_rect(
@@ -548,7 +603,12 @@ fn render_png(
                 shape_u32(shape, "thickness", index, 1, 128)? as i32,
                 color,
             ),
-            _ => return Err(format!("PNG shape {index} has unsupported kind {kind}")),
+            _ => {
+                return Err(png_shape_error(
+                    index,
+                    &format!("has unsupported kind {kind}"),
+                ))
+            }
         }
     }
     let mut output = Cursor::new(Vec::new());
@@ -556,6 +616,12 @@ fn render_png(
         .write_to(&mut output, ImageFormat::Png)
         .map_err(|error| format!("failed encoding PNG asset: {error}"))?;
     Ok(output.into_inner())
+}
+
+fn png_shape_error(index: usize, problem: &str) -> String {
+    format!(
+        "PNG shape {index} {problem}; supported filled shapes are rect(kind,color,x,y,width,height), circle(kind,color,x,y,radius), and line(kind,color,x1,y1,x2,y2,thickness); fill, stroke, stroke_width, cx/cy, and line width are unsupported"
+    )
 }
 
 fn draw_rect(image: &mut RgbaImage, x: i32, y: i32, width: u32, height: u32, color: Rgba<u8>) {
@@ -631,7 +697,9 @@ fn shape_i32(
         .and_then(Value::as_i64)
         .and_then(|value| i32::try_from(value).ok())
         .filter(|value| (-4096..=4096).contains(value))
-        .ok_or_else(|| format!("PNG shape {index} arg {name} must be between -4096 and 4096"))
+        .ok_or_else(|| {
+            png_shape_error(index, &format!("arg {name} must be between -4096 and 4096"))
+        })
 }
 
 fn shape_u32(
@@ -646,7 +714,12 @@ fn shape_u32(
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| (*value >= min) && (*value <= max))
-        .ok_or_else(|| format!("PNG shape {index} arg {name} must be between {min} and {max}"))
+        .ok_or_else(|| {
+            png_shape_error(
+                index,
+                &format!("arg {name} must be between {min} and {max}"),
+            )
+        })
 }
 
 fn controlled_id(value: &str) -> Result<String, String> {
@@ -771,6 +844,23 @@ mod tests {
     }
 
     #[test]
+    fn png_renderer_reports_the_complete_shape_contract() {
+        let error = render_png(
+            16,
+            16,
+            parse_color("#102030").unwrap(),
+            &[serde_json::json!({"kind": "circle", "cx": 8, "cy": 8})],
+        )
+        .expect_err("invalid shape");
+
+        assert!(error.contains("requires color"));
+        assert!(error.contains("rect(kind,color,x,y,width,height)"));
+        assert!(error.contains("circle(kind,color,x,y,radius)"));
+        assert!(error.contains("line(kind,color,x1,y1,x2,y2,thickness)"));
+        assert!(error.contains("cx/cy"));
+    }
+
+    #[test]
     fn imagegen_png_import_is_bounded_and_decodable() {
         let root =
             std::env::temp_dir().join(format!("stasis_gauntlet_imagegen_{}", std::process::id()));
@@ -816,6 +906,54 @@ mod tests {
         assert_eq!((width, height), (4, 3));
         assert_eq!(decoded.get_pixel(0, 0)[3], 0);
         assert_eq!(decoded.get_pixel(1, 1), &parse_color("#d08040").unwrap());
+    }
+
+    #[test]
+    fn imagegen_png_import_adapts_to_a_near_flat_generated_background() {
+        let mut source = RgbaImage::from_pixel(12, 10, parse_color("#ea0de6").unwrap());
+        for x in 0..12 {
+            source.put_pixel(x, 0, parse_color("#ef12e8").unwrap());
+            source.put_pixel(x, 9, parse_color("#e723e1").unwrap());
+        }
+        source.put_pixel(5, 4, parse_color("#108878").unwrap());
+        source.put_pixel(6, 4, parse_color("#d6a22f").unwrap());
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let args = serde_json::json!({
+            "transparent_color": "#ff00ff",
+            "transparent_tolerance": 18
+        });
+        let (png, _, _, transformed) =
+            transform_imported_png(args.as_object().unwrap(), encoded.into_inner(), 12, 10)
+                .unwrap();
+        let decoded = image::load_from_memory_with_format(&png, ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+
+        assert!(transformed);
+        assert_eq!(decoded.get_pixel(0, 0)[3], 0);
+        assert_eq!(decoded.get_pixel(11, 9)[3], 0);
+        assert_eq!(decoded.get_pixel(5, 4)[3], 255);
+        assert_eq!(decoded.get_pixel(6, 4)[3], 255);
+    }
+
+    #[test]
+    fn imagegen_png_import_rejects_an_opaque_unremoved_border() {
+        let source = RgbaImage::from_pixel(10, 10, parse_color("#102030").unwrap());
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let args = serde_json::json!({
+            "transparent_color": "#ff00ff",
+            "transparent_tolerance": 18
+        });
+        let error = transform_imported_png(args.as_object().unwrap(), encoded.into_inner(), 10, 10)
+            .expect_err("unremoved background must fail atomically");
+
+        assert!(error.contains("border opaque"));
     }
 
     #[test]

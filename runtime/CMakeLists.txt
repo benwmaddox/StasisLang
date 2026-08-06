@@ -219,6 +219,22 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     )
     target_include_directories(stasis_renderer_lifecycle_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME stasis_renderer_lifecycle_contract COMMAND stasis_renderer_lifecycle_test)
+    if(TARGET stasis_graphics_static)
+        add_executable(
+            stasis_font_cache_test
+            tests/stasis_font_cache_test.c
+        )
+        target_link_libraries(stasis_font_cache_test PRIVATE stasis_graphics_static)
+        target_compile_definitions(
+            stasis_font_cache_test
+            PRIVATE STASIS_TEST_FONT_PATH="${CMAKE_SOURCE_DIR}/../apps/stasis/assets/gauntlet-font/Basic-Regular.ttf"
+        )
+        add_test(NAME stasis_font_cache_contract COMMAND stasis_font_cache_test)
+        set_tests_properties(
+            stasis_font_cache_contract
+            PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software"
+        )
+    endif()
     add_executable(
         stasis_asset_path_test
         tests/stasis_asset_path_test.c

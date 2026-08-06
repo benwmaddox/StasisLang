@@ -162,11 +162,25 @@ override one run without rewriting the project configuration. The goal and
 frozen bar cannot be weakened after editing begins. Tests or stricter checks
 may be added, but accepted requirements cannot be removed.
 
+Fresh runs and resumed runs synchronize the controller-owned vendored Stasis
+snapshot before agent work. When a resume uses a newer toolchain, Gauntlet
+commits that vendor update, advances `best_commit` to the infrastructure
+checkpoint, and verifies the checkout is clean before running project tests.
+Later rejection therefore restores both the last accepted game and the exact
+vendor used to evaluate it instead of leaving `stasis.json` dirty or rolling
+back across a toolchain upgrade.
+
 Required scenarios remain gameplay requirements when `taps` is omitted. Up to
-four scenarios may also contain one to eight deterministic pointer taps. The
-controller restores the same validation snapshot before each scenario, replays
-the taps in order, and captures the final rendered frame for both the accepted
-checkpoint and every candidate. `ticks_after` defaults to 1 and may be 1-300,
+four scenarios may also contain one to eight deterministic pointer taps. For
+both the accepted baseline and each newly active candidate, the controller runs
+`main()` followed by one input-free startup tick, then replaces the validation
+snapshot before capture. It restores that candidate-specific input-ready
+snapshot before each scenario, replays the taps in order, and captures the final
+rendered frame for both the accepted checkpoint and every candidate. This makes
+new globals, asset loads, initialization, and render paths observable rather
+than preserving a migrated baseline from the prior candidate or letting a
+one-time startup transition consume the first scenario tap.
+`ticks_after` defaults to 1 and may be 1-300,
 allowing staged movement or feedback to settle without wall-clock timing. Leads
 and blind critics receive identically ordered, named scenario frames alongside
 the initial and fixed-probe pair, so selection, movement, targeting, endings,
@@ -283,7 +297,9 @@ When a replacement makes an older generated asset obsolete, the builder uses
 `delete_asset` in the same contiguous asset/source transaction. The tool removes
 the controlled file, its matching manifest entry, and any prepared-cache copy;
 all three are restored if the related source edit fails. Deletion precedes a
-replacement that reuses the same asset id.
+replacement that reuses the same asset id only when the obsolete path differs.
+A replacement at the same stable path is imported directly; the atomic write
+overwrites its file and manifest entry without a redundant delete call.
 
 For those authored-art workstreams, Gauntlet hides primitive SVG and
 shape-composed PNG tools and rejects completion until an ImageGen request has
@@ -308,8 +324,11 @@ copies it under `assets/generated/` and derives the manifest entry. Imports
 must be real PNG files, non-symlinks, at most 16 MiB, at most 2048 pixels per
 edge, and at most 4,194,304 pixels total. `import_png_asset` can copy the image
 unchanged, crop a bounded rectangle, and remove a caller-selected flat background
-color with a bounded tolerance before saving the project PNG. This bridge is inert when the running
-host has no ImageGen capability. One-shot `stasis ai` uses the equivalent
+color with a bounded tolerance before saving the project PNG. For the padded,
+isolated-subject contract, import adapts that tolerance to small ImageGen color
+variation observed around the border. It rejects an opaque border or a nearly
+erased subject instead of silently committing a broken sprite. This bridge is
+inert when the running host has no ImageGen capability. One-shot `stasis ai` uses the equivalent
 `build/ai-assets/imagegen/` inbox.
 
 ### Run records
@@ -338,6 +357,14 @@ terminal outcome. Writes use atomic replacement. `events.jsonl` is append-only
 and powers both the terminal observer and static report. The report shows reference
 provenance, before/current captures, rubric scores, tests, usage, checkpoints,
 rejected candidates, and the largest remaining gap.
+
+Rejecting a candidate restores the accepted Git checkpoint, removes its
+untracked files, and resynchronizes the accepted asset manifest and files into
+`.stasis_cache/play-assets/`. This happens in place because the live Windows
+renderer may keep that directory as its working directory. Obsolete prepared
+files can remain inert until normal runtime cleanup, but the restored manifest
+and source paths cannot resolve them. Toolchain and other project caches remain
+intact.
 
 `decisions.jsonl` is durable model working memory, not a dump of private
 chain-of-thought. The `record_decision` tool stores bounded explicit
@@ -419,24 +446,43 @@ input scenarios, state assertions, and completion thresholds. If the scout
 cannot establish at least one usable visual reference and one measurable
 gameplay bar, the run stops before production modification.
 
+Only game-owned workstreams are assignable to builders. The controller removes
+standalone Gauntlet, toolchain, test-harness, and acceptance-evidence repair
+workstreams both when a bar is created and when an older run resumes. Builders
+still add tests alongside gameplay changes, but deterministic scenario drivers,
+capture timing, harness provisioning, and evaluator integrity remain controller
+responsibilities. A lead decision naming a removed or unknown workstream is
+rejected and recovered through the first eligible frozen game workstream.
+
 ### Persistent runtime and live protocol
 
 The controller owns one in-process graphical JIT runtime and one live-session
 client. The observer consumes controller events rather than competing for live
 responses.
 
-The version-one live protocol gains two additive primitives:
+The version-one live protocol gains three additive primitives:
 
 - `set_input_state` injects a bounded logical pointer snapshot and temporarily
   overrides physical input during deterministic scenarios.
 - `capture_frame` schedules a PNG for the next presented frame using a
   controller-generated artifact identity.
+- `validation_reinitialize` runs the active candidate's `main()`, executes one
+  input-free startup tick, and replaces the deterministic validation snapshot
+  at the first input-ready state before candidate capture.
 
 The controller composes existing `snapshot`, `step`, `inspect`, and `restore`
 commands with those primitives into deterministic scenarios. Input is limited
 to eight pointers with valid logical coordinates. Captures occur after drawing
 and post-effects but before presentation, matching the existing screenshot
 acceptance path. Ordinary rendering allocates no capture framebuffer.
+
+Repeated validation reinitialization is resource-safe. Runtime asset loaders
+used by `main()` must be idempotent for an unchanged asset identity; in
+particular, repeated `load_font(path, size)` calls reuse the existing handle
+instead of consuming another fixed font slot. If that font file changes in
+place, the runtime refreshes the same handle and invalidates cached text. This
+lets an unattended run reinitialize and evaluate many candidates without
+silently losing HUD text to renderer resource exhaustion.
 
 ### Agent roles and context separation
 

@@ -5,12 +5,15 @@ use super::{
     GauntletScenarioRequirement, GAUNTLET_SCHEMA_VERSION, MAX_GOAL_BYTES, MAX_REFERENCE_BYTES,
 };
 use crate::toolchain_cli::live_tui;
-use crate::toolchain_cli::{CommandResult, Workspace};
+use crate::toolchain_cli::{
+    load_workspace_with_vendor_gate, CommandResult, VendorGate, Workspace,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stasis::{run_live_in_process, LiveRunConfig};
 use stasis_ai::{AgentCompactionPolicy, AgentProfile, CodexExecProvider, ModelProvider};
+use stasis_assets::{load_project_asset_manifest, prepare_asset_bundle, AssetLimits};
 use stasis_runner::live::{
     live_session, LiveCommand, LivePointerInput, LiveRequest, LiveResponse, LiveSessionClient,
 };
@@ -623,6 +626,24 @@ pub(super) fn resume(
         &project_root,
         state.best_commit.as_deref().unwrap_or(&state.base_commit),
     )?;
+    let accepted_before_vendor_sync = state.best_commit.clone();
+    let resumed_workspace =
+        load_workspace_with_vendor_gate(Some(&project_root), VendorGate::Inspect)?;
+    sync_vendor_checkpoint(&resumed_workspace)?;
+    require_clean_checkout(&project_root)?;
+    let resumed_checkpoint = git_stdout(&project_root, &["rev-parse", "HEAD"])?;
+    if accepted_before_vendor_sync.as_deref() != Some(resumed_checkpoint.as_str()) {
+        state.best_commit = Some(resumed_checkpoint.clone());
+        emit_event(
+            &artifacts,
+            "vendor_checkpoint_advanced",
+            json!({
+                "previous_commit": accepted_before_vendor_sync,
+                "commit": resumed_checkpoint,
+                "reason": "resume synchronized the controller-owned Stasis vendor snapshot",
+            }),
+        )?;
+    }
     let stop = artifacts.join(STOP_NAME);
     if stop.exists() {
         fs::remove_file(&stop)
@@ -858,7 +879,7 @@ fn controller_loop(
     let goal = read_bounded_utf8(&goal_path, MAX_GOAL_BYTES, "Gauntlet goal")?;
     state.phase = GauntletRunPhase::DiscoveringBar;
     persist_state(artifacts, &mut state)?;
-    let bar = if artifacts.join(QUALITY_BAR_NAME).is_file() {
+    let mut bar = if artifacts.join(QUALITY_BAR_NAME).is_file() {
         read_json(&artifacts.join(QUALITY_BAR_NAME))?
     } else {
         let bar = match bootstrap_bar(
@@ -891,6 +912,25 @@ fn controller_loop(
         )?;
         bar
     };
+    let builder_workstreams = sanitize_builder_workstreams(&bar.workstreams);
+    if builder_workstreams != bar.workstreams {
+        let removed = bar
+            .workstreams
+            .iter()
+            .filter(|workstream| !builder_workstreams.contains(workstream))
+            .cloned()
+            .collect::<Vec<_>>();
+        bar.workstreams = builder_workstreams;
+        write_json(&artifacts.join(QUALITY_BAR_NAME), &bar)?;
+        emit_event(
+            artifacts,
+            "controller_workstreams_removed",
+            json!({
+                "removed": removed,
+                "reason": "Gauntlet infrastructure, harness, and acceptance-evidence repair are controller-owned",
+            }),
+        )?;
+    }
     write_creative_direction(artifacts, &bar)?;
     let reference_images = resolve_reference_images(
         &bar.references,
@@ -899,7 +939,7 @@ fn controller_loop(
     );
     let scenario_pointer = logical_center(&project_root);
     request_live(&client, 1, LiveCommand::Pause)?;
-    request_live(&client, 2, LiveCommand::ValidationSnapshot)?;
+    request_live(&client, 2, LiveCommand::ValidationReinitialize)?;
     let mut next_request = 3_u64;
     let mut baseline = capture_scenario(
         &client,
@@ -1129,7 +1169,7 @@ fn controller_loop(
                 &canceled,
             )
         };
-        let primary_instruction = "Use only the supplied Stasis live-workspace tools. Inspect relevant symbols and references, then make one contiguous atomic semantic edit batch. For readable UI text, use the existing project-local assets/gauntlet-ui.ttf font; system and absolute font paths are invalid and rejected. Authored visual-art workstreams require request_imagegen_asset plus a transactionally imported PNG that project Stasis source actually loads and emits through a sprite draw path; importing an unused file does not satisfy the completion gate. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional for pure logic or basic interface geometry. Request one isolated foreground subject per PNG on a flat removable background rather than an atlas. Render contract v2 draws line primitives before sprites; never place an opaque full-board sprite over a line-rendered battlefield unless the project already has a verified sprite-first background path. Use the 1024x1024 master default; request up to 2048x2048 only when extra detail or crop latitude is needed. The tool persists the request and waits for the host PNG, then returns the source_path for import_png_asset crop/background-removal. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset obsolete; place deletion before a replacement that reuses the same id. You may also create JSON/CSV or procedural WAV assets. Put one contiguous asset-tool group immediately before the related source writes in the same response. Use record_decision during exploration and after consequential tested choices to preserve concise conclusions, tradeoffs, evidence, and next steps for future agents; never record hidden chain-of-thought. The write must compile and run tests. Do not grade your own visual quality. Return done immediately after a successful tested write and decision record. If a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools, call report_blocked once; it terminates this attempt immediately. Never retry the same terminal failure.";
+        let primary_instruction = "Use only the supplied Stasis live-workspace tools. Inspect relevant symbols and references, then make one contiguous atomic semantic edit batch. For readable UI text, use the existing project-local assets/gauntlet-ui.ttf font; system and absolute font paths are invalid and rejected. Authored visual-art workstreams require request_imagegen_asset plus a transactionally imported PNG that project Stasis source actually loads and emits through a sprite draw path; importing an unused file does not satisfy the completion gate. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional for pure logic or basic interface geometry. Request one isolated foreground subject per PNG on a flat removable background rather than an atlas. Render contract v2 draws line primitives before sprites; never place an opaque full-board sprite over a line-rendered battlefield unless the project already has a verified sprite-first background path. Use the 1024x1024 master default; request up to 2048x2048 only when extra detail or crop latitude is needed. The tool persists the request and waits for the host PNG, then returns the source_path for import_png_asset crop/background-removal. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset at a different path obsolete. If the replacement keeps the same stable path, import it directly without delete_asset; the transaction overwrites the file and manifest entry. You may also create JSON/CSV or procedural WAV assets. Put one contiguous asset-tool group immediately before the related source writes in the same response. Use record_decision during exploration and after consequential tested choices to preserve concise conclusions, tradeoffs, evidence, and next steps for future agents; never record hidden chain-of-thought. The write must compile and run tests. Do not grade your own visual quality. Return done immediately after a successful tested write and decision record. If a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools, call report_blocked once; it terminates this attempt immediately. Never retry the same terminal failure.";
         emit_builder_attempt_started(
             artifacts,
             &candidate_id,
@@ -1291,6 +1331,30 @@ fn controller_loop(
         }
         state.phase = GauntletRunPhase::Evaluating;
         persist_state(artifacts, &mut state)?;
+        if let Err(error) = request_live(&client, next_request, LiveCommand::ValidationReinitialize)
+        {
+            next_request = next_request.saturating_add(1);
+            rollback_candidate(
+                &project_root,
+                state.best_commit.as_deref().unwrap_or(&state.base_commit),
+            )?;
+            reject(
+                &mut state,
+                artifacts,
+                &candidate_id,
+                &format!("candidate runtime reinitialization failed: {error}"),
+            )?;
+            largest_gap = format!(
+                "The candidate could not be evaluated because the newly active runtime did not reinitialize: {error}"
+            );
+            continue;
+        }
+        next_request = next_request.saturating_add(1);
+        emit_event(
+            artifacts,
+            "candidate_runtime_reinitialized",
+            json!({"candidate": candidate_id}),
+        )?;
         let candidate_capture = capture_scenario(
             &client,
             &project_root,
@@ -1586,10 +1650,9 @@ fn controller_loop(
 }
 
 fn fallback_lead_decision(bar: &FrozenBar, largest_gap: &str) -> LeadDecision {
-    let workstream = bar
-        .workstreams
-        .first()
-        .cloned()
+    let workstream = sanitize_builder_workstreams(&bar.workstreams)
+        .into_iter()
+        .next()
         .unwrap_or_else(|| "Integration and release quality".to_string());
     LeadDecision {
         done: false,
@@ -1745,6 +1808,7 @@ fn bootstrap_bar(
             }
         }
     };
+    let workstreams = sanitize_builder_workstreams(&workstreams);
     let workstreams = if workstreams.is_empty() {
         emit_event(
             artifacts,
@@ -1803,6 +1867,33 @@ fn default_workstreams() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn sanitize_builder_workstreams(workstreams: &[String]) -> Vec<String> {
+    let mut sanitized = Vec::new();
+    for workstream in workstreams {
+        let trimmed = workstream.trim();
+        if trimmed.is_empty() || is_controller_owned_workstream(trimmed) {
+            continue;
+        }
+        if !sanitized
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+        {
+            sanitized.push(trimmed.to_string());
+        }
+    }
+    sanitized
+}
+
+fn is_controller_owned_workstream(workstream: &str) -> bool {
+    let normalized = workstream.to_ascii_lowercase();
+    normalized.contains("gauntlet")
+        || normalized.contains("toolchain")
+        || normalized.contains("test harness")
+        || normalized.contains("acceptance evidence")
+        || normalized.contains("stasis test")
+        || (normalized.contains("acceptance") && normalized.contains("test"))
 }
 
 fn restore_prior_creative_direction(
@@ -2020,6 +2111,10 @@ fn lead_decision(
     model_call_limit: u32,
     canceled: &AtomicBool,
 ) -> Result<LeadDecision, String> {
+    let workstreams = sanitize_builder_workstreams(&bar.workstreams);
+    if workstreams.is_empty() {
+        return Err("Gauntlet has no game-owned builder workstreams".to_string());
+    }
     let memory = decision_memory_snapshot(artifacts)?;
     let runtime_evidence = serde_json::to_string(&accepted.state)
         .map_err(|error| format!("failed encoding accepted runtime evidence: {error}"))?;
@@ -2027,7 +2122,7 @@ fn lead_decision(
     let accepted_image_order = capture_image_order("accepted", accepted);
     let prompt = format!(
         "Act as the fresh playability and visual-coherence director for a Stasis Gauntlet. The attached images begin with the latest accepted initial frame, its frame after the controller's fixed interaction probe, and any configured deterministic scenario frames; later images are optional quality references. Accepted image order: {accepted_image_order}. The controller-owned creative direction below is authoritative: enforce and interpret it, but do not silently rewrite it. Use every supplied scenario frame together with runtime and passing-test evidence. First produce playability_guidance that teaches the next builder exactly how a new player should parse the grid and complete one turn: board and cell boundaries, meaningful terrain, faction and unit-role recognition, selection, legal movement, attack/counterattack preview, objective and economy, turn ownership, end turn, and cancel/reselect. Identify which relationships are unclear from evidence and whether each exercised interaction's result is visibly understandable; do not invent mechanics. Then choose exactly one highest-value next work item from the frozen workstreams whose builder prompt improves that comprehension and preserves already-readable relationships. Visual polish is valuable only when it strengthens this hierarchy. The live workspace contains only the latest accepted checkpoint: rejected candidate edits were rolled back, so use their evidence as lessons but never assume their implementation exists. Set done=true only if the largest gap says the bar is fully met; otherwise done=false. Preserve a concise rationale and next step for future fresh agents; do not provide hidden chain-of-thought. Return only JSON.\n\nBrief:\n{goal}\n\nAuthoritative creative direction:\n{creative_direction}\n\nWorkstreams: {}\nAccepted: {} Rejected: {}\nLargest gap: {largest_gap}\n\nAccepted runtime and deterministic-test evidence:\n{runtime_evidence}\n\nDurable decision memory (explicit conclusions only):\n{memory}",
-        bar.workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
+        workstreams.join(", "), state.accepted_candidates, state.rejected_candidates
     );
     let mut images = capture_images(accepted);
     images.extend(references.iter().take(4).cloned());
@@ -2049,6 +2144,15 @@ fn lead_decision(
         || decision.next_step.trim().is_empty()
     {
         return Err("Gauntlet lead returned empty decision memory fields".to_string());
+    }
+    if !workstreams
+        .iter()
+        .any(|workstream| workstream.eq_ignore_ascii_case(decision.workstream.trim()))
+    {
+        return Err(format!(
+            "Gauntlet lead selected non-builder or unknown workstream {:?}",
+            decision.workstream
+        ));
     }
     Ok(decision)
 }
@@ -2661,6 +2765,7 @@ fn rollback_candidate(root: &Path, commit: &str) -> Result<(), String> {
             ".",
         ],
     )?;
+    resync_accepted_runtime_assets(root)?;
     let untracked = git_stdout(root, &["ls-files", "--others", "--exclude-standard"])?;
     for relative in untracked.lines().filter(|line| !line.trim().is_empty()) {
         let path = root.join(relative);
@@ -2678,6 +2783,15 @@ fn rollback_candidate(root: &Path, commit: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn resync_accepted_runtime_assets(root: &Path) -> Result<(), String> {
+    let prepared = root.join(".stasis_cache/play-assets");
+    let resolved = load_project_asset_manifest(root, AssetLimits::default())
+        .map_err(|error| format!("failed resolving accepted assets after rollback: {error}"))?;
+    prepare_asset_bundle(&resolved, &prepared, root.join(".stasis_cache/assets"))
+        .map(|_| ())
+        .map_err(|error| format!("failed restoring accepted prepared assets: {error}"))
 }
 
 fn builder_agent_profile(
@@ -3676,6 +3790,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn candidate_rollback_resyncs_prepared_manifest_without_deleting_live_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_gauntlet_rollback_cache_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let prepared_asset = root.join(".stasis_cache/play-assets/assets/generated/rejected.png");
+        let project_manifest = root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH);
+        let prepared_manifest = root
+            .join(".stasis_cache/play-assets")
+            .join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH);
+        let toolchain_marker = root.join(".stasis_cache/toolchain/keep.txt");
+        fs::create_dir_all(prepared_asset.parent().expect("prepared parent"))
+            .expect("prepared directory");
+        fs::create_dir_all(toolchain_marker.parent().expect("toolchain parent"))
+            .expect("toolchain directory");
+        fs::write(&prepared_asset, b"rejected").expect("prepared asset");
+        fs::write(&toolchain_marker, b"keep").expect("toolchain marker");
+        fs::create_dir_all(project_manifest.parent().expect("manifest parent"))
+            .expect("manifest directory");
+        fs::write(
+            &project_manifest,
+            br#"{"schema":"stasis-assets","version":2,"assets":[]}"#,
+        )
+        .expect("project manifest");
+        fs::write(&prepared_manifest, b"rejected manifest").expect("prepared manifest");
+
+        resync_accepted_runtime_assets(&root).expect("resync accepted cache");
+
+        assert!(prepared_asset.exists());
+        let restored: Value = serde_json::from_slice(
+            &fs::read(prepared_manifest).expect("restored prepared manifest"),
+        )
+        .expect("prepared manifest JSON");
+        assert_eq!(restored["assets"], json!([]));
+        assert!(toolchain_marker.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn authored_visual_workstreams_require_imagegen() {
         assert!(requires_authored_imagegen(
             "Medieval world art and animation"
@@ -3954,6 +4108,52 @@ mod tests {
             &gameplay_regression,
             true
         ));
+    }
+
+    #[test]
+    fn controller_owned_workstreams_are_not_assignable_to_builders() {
+        let workstreams = vec![
+            "Mobile interaction grammar".to_string(),
+            "Stasis tests and acceptance evidence".to_string(),
+            "Gauntlet harness recovery".to_string(),
+            "Toolchain diagnostics".to_string(),
+            "mobile interaction grammar".to_string(),
+            "Faction and unit art".to_string(),
+        ];
+
+        assert_eq!(
+            sanitize_builder_workstreams(&workstreams),
+            vec![
+                "Mobile interaction grammar".to_string(),
+                "Faction and unit art".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_lead_uses_the_first_game_owned_workstream() {
+        let bar = FrozenBar {
+            schema_version: 3,
+            goal_sha256: "goal".to_string(),
+            goal: "game".to_string(),
+            direction_source_markdown: String::new(),
+            direction_source_sha256: String::new(),
+            creative_direction: CreativeDirection::default(),
+            workstreams: vec![
+                "Acceptance evidence and tests".to_string(),
+                "Economy capture and recruitment".to_string(),
+            ],
+            hard_gates: Vec::new(),
+            required_scenarios: Vec::new(),
+            references: Vec::new(),
+            web_sources: Vec::new(),
+            acceptance_score: 65,
+        };
+
+        assert_eq!(
+            fallback_lead_decision(&bar, "gap").workstream,
+            "Economy capture and recruitment"
+        );
     }
 
     #[test]

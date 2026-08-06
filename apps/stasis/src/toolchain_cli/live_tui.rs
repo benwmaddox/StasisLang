@@ -91,7 +91,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     canceled: &AtomicBool,
 ) -> Result<(String, PathBuf, PathBuf), String> {
     let mut profile = AgentProfile::default();
-    profile.instruction.push_str(" New Gauntlet projects include the project-local assets/gauntlet-ui.ttf font. Use that exact project-local path with load_font for readable UI text; absolute and system font paths are invalid and the atomic write gate rejects them. Preserve or replace the seeded font transactionally. You may request host-generated bitmap art with request_imagegen_asset when you judge that it materially improves the assigned work, then import its returned source_path with import_png_asset. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when the task is purely logic or basic interface geometry. Request one isolated foreground subject per image on a flat removable background; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Render contract v2 draws line primitives before sprites, so do not place an opaque full-board sprite over line-rendered gameplay unless the project already has a verified sprite-first background path. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset obsolete; place deletion before a replacement that reuses the same id. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
+    profile.instruction.push_str(" New Gauntlet projects include the project-local assets/gauntlet-ui.ttf font. Use that exact project-local path with load_font for readable UI text; absolute and system font paths are invalid and the atomic write gate rejects them. Preserve or replace the seeded font transactionally. You may request host-generated bitmap art with request_imagegen_asset when you judge that it materially improves the assigned work, then import its returned source_path with import_png_asset. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when the task is purely logic or basic interface geometry. Request one isolated foreground subject per image on a flat removable background; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. Render contract v2 draws line primitives before sprites, so do not place an opaque full-board sprite over line-rendered gameplay unless the project already has a verified sprite-first background path. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset at a different path obsolete. If the replacement keeps the same stable path, import it directly without delete_asset; the transaction overwrites the file and manifest entry. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
     let outcome = run_scripted_ai_profile(
         client,
         project_root,
@@ -3077,7 +3077,14 @@ fn validate_ai_font_paths(project_root: &Path, edits: &[LiveEdit]) -> Result<(),
 }
 
 fn preserve_truncated_applied_write_evidence(mut response: LiveResponse) -> LiveResponse {
-    if response.ok && response.kind == "edit_applied" && response.truncated {
+    if response.ok
+        && response.kind == "edit_applied"
+        && response.truncated
+        && response.data.as_ref().is_none_or(|data| {
+            data.pointer("/plan/reload")
+                .is_none_or(serde_json::Value::is_null)
+        })
+    {
         response.data = Some(serde_json::json!({
             "tests": "passed",
             "response_truncated": true,
