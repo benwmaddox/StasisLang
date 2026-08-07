@@ -1414,6 +1414,14 @@ fn prepare_play_asset_working_dir(watch_dir: &Path) -> Result<PathBuf, String> {
     Ok(prepared_watch_dir)
 }
 
+fn resolve_play_asset_source_dir(watch_file: &Path, watch_dir: &Path) -> PathBuf {
+    watch_file
+        .parent()
+        .filter(|parent| parent.starts_with(watch_dir))
+        .unwrap_or(watch_dir)
+        .to_path_buf()
+}
+
 const PLAY_INPUT_MAX_FRAMES: usize = 10_000;
 const PLAY_INPUT_MAX_POINTERS: usize = 8;
 const PLAY_INPUT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -1829,8 +1837,8 @@ fn run_play_in_process_inner(
         validate_play_input_script_ticks(max_ticks, timeline)?;
     }
 
-    // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
-    // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
+    // Watch the requested project scope, but resolve source-relative assets from the entry
+    // module's directory. These differ for root-scoped QA runs whose entry lives under tests/.
     let watch_dir_abs = watch_dir
         .canonicalize()
         .unwrap_or_else(|_| watch_dir.clone());
@@ -1878,7 +1886,8 @@ fn run_play_in_process_inner(
         resolve_play_project_root(&root_path, &watch_dir_abs, &canonical_repository)?
     };
 
-    let asset_working_dir = prepare_play_asset_working_dir(&watch_dir_abs)?;
+    let asset_source_dir = resolve_play_asset_source_dir(&root_path, &watch_dir_abs);
+    let asset_working_dir = prepare_play_asset_working_dir(&asset_source_dir)?;
     std::env::set_current_dir(&asset_working_dir).map_err(|error| {
         format!(
             "failed to set current directory to {}: {error}",
@@ -6061,6 +6070,20 @@ mod tests {
         );
         assert!(root.join(".stasis_cache/assets").is_dir());
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn play_asset_source_directory_follows_entry_with_root_scoped_watching() {
+        let root = PathBuf::from("project");
+        let entry = root.join("tests/qa_scenario.stasis");
+        assert_eq!(
+            resolve_play_asset_source_dir(&entry, &root),
+            root.join("tests")
+        );
+        assert_eq!(
+            resolve_play_asset_source_dir(Path::new("outside/game.stasis"), &root),
+            root
+        );
     }
 
     #[test]
