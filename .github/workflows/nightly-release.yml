@@ -281,13 +281,13 @@ jobs:
           Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
           .\stasis.exe --workspace cli-smoke package --target desktop
           if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package runner missing" }
-          if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.dll")) { throw "game package library missing" }
+          if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/ci_smoke.dll")) { throw "game package library missing" }
           .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
           .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
           if (-not (Test-Path "cli-smoke/dist/android/android/app/src/main/cpp/CMakeLists.txt")) { throw "Android mobile shell missing" }
           if (-not (Test-Path "cli-smoke/dist/ios/ios/StasisMobile.xcodeproj/project.pbxproj")) { throw "iOS mobile shell missing" }
           Pop-Location
-          python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ci_smoke-desktop"
+          python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ci_smoke-desktop/app"
           python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/android" --expect-runtime-sources
           python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ios" --expect-runtime-sources
 
