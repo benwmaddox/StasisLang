@@ -1,5 +1,5 @@
 // Flex-style layout helpers for simple UI composition.
-// From a generated project: import "/vendor/stasis/src/stdlib/flex_layout.stasis";
+// From a generated project: import "/vendor/stasis/stdlib/flex_layout.stasis";
 //
 // Uses plain f32 arrays for portability across backends.
 // Rect layout: [x, y, w, h]

@@ -73,18 +73,18 @@ const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
 const PROJECT_GIT_ATTRIBUTES: &str = "*.stasis text eol=crlf\n";
-const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/src/stdlib/stdlib.stasis";
-import "/vendor/stasis/src/stdlib/graphics.stasis";
-import "/vendor/stasis/src/stdlib/audio.stasis";
-import "/vendor/stasis/src/stdlib/collision.stasis";
-import "/vendor/stasis/src/stdlib/flex_layout.stasis";
-import "/vendor/stasis/src/stdlib/frame_timer.stasis";
-import "/vendor/stasis/src/stdlib/hud_table.stasis";
-import "/vendor/stasis/src/stdlib/sdl_scancodes.stasis";
-import "/vendor/stasis/src/stdlib/storage.stasis";
-import "/vendor/stasis/src/stdlib/ui_axis_layout.stasis";
-import "/vendor/stasis/src/stdlib/ui_layout_audit.stasis";
-import "/vendor/stasis/src/stdlib/ui_button_9slice.stasis";
+const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
+import "/vendor/stasis/stdlib/graphics.stasis";
+import "/vendor/stasis/stdlib/audio.stasis";
+import "/vendor/stasis/stdlib/collision.stasis";
+import "/vendor/stasis/stdlib/flex_layout.stasis";
+import "/vendor/stasis/stdlib/frame_timer.stasis";
+import "/vendor/stasis/stdlib/hud_table.stasis";
+import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
+import "/vendor/stasis/stdlib/storage.stasis";
+import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
+import "/vendor/stasis/stdlib/ui_layout_audit.stasis";
+import "/vendor/stasis/stdlib/ui_button_9slice.stasis";
 
 function main(): i32 {
     return 0;
@@ -1126,8 +1126,8 @@ fn create_project_with_options(
     let mut manifest = ProjectManifest::new(name.clone());
     manifest.vendor = Some(current_vendor_manifest(bundled_source)?);
     write_manifest(&manifest_path, &manifest)?;
-    let vendor_source = root.join("vendor/stasis/src");
-    copy_dir_if_exists(&bundled_stdlib, &vendor_source.join("stdlib"))?;
+    let vendor_package = root.join("vendor/stasis");
+    copy_dir_if_exists(&bundled_stdlib, &vendor_package.join("stdlib"))?;
     write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
     write_new_file(&root.join("CLAUDE.md"), PROJECT_CLAUDE_GUIDE)?;
     write_new_file(
@@ -1425,21 +1425,22 @@ fn validate_vendor_sources(source_root: &Path) -> Result<(), String> {
             .strip_prefix(source_root)
             .map_err(|_| format!("vendor source escaped {}", source_root.display()))?;
         let logical = format!(
-            "vendor/stasis/src/{}",
+            "vendor/stasis/{}",
             relative.to_string_lossy().replace('\\', "/")
         );
         let imports = stasis_compiler::frontend::module_graph::parse_imports(&logical, &source)
             .map_err(|diagnostic| format!("invalid vendor import in {logical}: {diagnostic:?}"))?;
         for import in imports {
-            let relative_target = import
-                .target
-                .strip_prefix("vendor/stasis/src/")
-                .ok_or_else(|| {
-                    format!(
-                        "vendor import '{}' from {logical} escapes the Stasis package",
-                        import.path
-                    )
-                })?;
+            let relative_target =
+                import
+                    .target
+                    .strip_prefix("vendor/stasis/")
+                    .ok_or_else(|| {
+                        format!(
+                            "vendor import '{}' from {logical} escapes the Stasis package",
+                            import.path
+                        )
+                    })?;
             if !source_root.join(relative_target).is_file() {
                 return Err(format!(
                     "vendor import '{}' from {logical} is missing its target",
@@ -1473,17 +1474,17 @@ fn inspect_project_vendor(
     })?;
     let installed = current_vendor_manifest(bundled_source)?.stasis;
     let recorded = manifest.vendor.as_ref().map(|vendor| vendor.stasis.clone());
-    let vendor_source = workspace_root.join("vendor/stasis/src");
-    let actual_sha256 = if vendor_source.exists() {
-        let metadata = fs::symlink_metadata(&vendor_source)
-            .map_err(|error| format!("failed to inspect {}: {error}", vendor_source.display()))?;
+    let vendor_package = workspace_root.join("vendor/stasis");
+    let actual_sha256 = if vendor_package.exists() {
+        let metadata = fs::symlink_metadata(&vendor_package)
+            .map_err(|error| format!("failed to inspect {}: {error}", vendor_package.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(format!(
                 "refusing to inspect vendored sources through {}",
-                vendor_source.display()
+                vendor_package.display()
             ));
         }
-        Some(directory_sha256(&vendor_source)?)
+        Some(directory_sha256(&vendor_package)?)
     } else {
         None
     };
@@ -1570,15 +1571,15 @@ fn update_vendor_snapshot(
     let manifest_staging = workspace_root.join(format!("{MANIFEST_NAME}.vendor-sync-{suffix}"));
     let manifest_backup = workspace_root.join(format!("{MANIFEST_NAME}.vendor-previous-{suffix}"));
 
-    if let Err(error) = copy_dir_if_exists(bundled_source, &staging.join("src")) {
+    if let Err(error) = copy_dir_if_exists(bundled_source, &staging) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    if let Err(error) = validate_vendor_sources(&staging.join("src")) {
+    if let Err(error) = validate_vendor_sources(&staging) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    let staged_hash = directory_sha256(&staging.join("src"))?;
+    let staged_hash = directory_sha256(&staging)?;
     if staged_hash != status.installed.sha256 {
         let _ = fs::remove_dir_all(&staging);
         return Err("staged Stasis vendor fingerprint does not match the toolchain".to_string());
@@ -5562,7 +5563,7 @@ mod tests {
             "ui_button_9slice",
         ] {
             assert!(
-                source.contains(&format!("/vendor/stasis/src/stdlib/{module}.stasis")),
+                source.contains(&format!("/vendor/stasis/stdlib/{module}.stasis")),
                 "missing default {module} import"
             );
         }
@@ -5596,22 +5597,39 @@ mod tests {
             current_release_id()
         );
 
-        let older_source = root.join("vendor/stasis/src/stdlib/audio.stasis");
+        let older_source = root.join("vendor/stasis/stdlib/audio.stasis");
         let mut older_contents = fs::read_to_string(&older_source).expect("read vendor source");
         older_contents.push_str("// older clean snapshot\r\n");
         fs::write(&older_source, older_contents).expect("write older clean snapshot");
         let vendor = manifest.vendor.as_mut().expect("tracked vendor");
         vendor.stasis.release_id = current_release_id().to_string();
         vendor.stasis.sha256 =
-            directory_sha256(&root.join("vendor/stasis/src")).expect("hash older clean snapshot");
+            directory_sha256(&root.join("vendor/stasis")).expect("hash older clean snapshot");
         write_manifest(&manifest_path, &manifest).expect("record older content hash");
         let workspace = load_workspace(Some(&root)).expect("content-hash update");
         let updated = workspace.manifest.vendor.expect("updated vendor").stasis;
         assert_eq!(updated.release_id, current_release_id());
         assert_eq!(
             updated.sha256,
-            directory_sha256(&root.join("vendor/stasis/src")).expect("hash updated vendor")
+            directory_sha256(&root.join("vendor/stasis")).expect("hash updated vendor")
         );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_upgrade_flattens_the_legacy_src_directory() {
+        let root = temp_dir("vendor_flatten");
+        create_project(root.clone(), "vendor_flatten".to_string()).expect("create project");
+        let vendor_root = root.join("vendor/stasis");
+        let old_contents = root.join("vendor/stasis-old");
+        fs::rename(&vendor_root, &old_contents).expect("stage flat vendor contents");
+        fs::create_dir_all(&vendor_root).expect("recreate vendor root");
+        fs::rename(&old_contents, vendor_root.join("src")).expect("create legacy layout");
+
+        load_workspace(Some(&root)).expect("upgrade legacy vendor layout");
+
+        assert!(vendor_root.join("stdlib/stdlib.stasis").is_file());
+        assert!(!vendor_root.join("src").exists());
         remove_temp(&root);
     }
 
@@ -5619,7 +5637,7 @@ mod tests {
     fn automatic_upgrade_replaces_vendor_edits_owned_by_stasis() {
         let root = temp_dir("vendor_local_edits");
         create_project(root.clone(), "vendor_local_edits".to_string()).expect("create project");
-        let edited = root.join("vendor/stasis/src/stdlib/audio.stasis");
+        let edited = root.join("vendor/stasis/stdlib/audio.stasis");
         fs::write(&edited, "// local vendor edit\n").expect("edit vendor source");
 
         let current = load_workspace(Some(&root)).expect("automatic vendor replacement");
@@ -6154,9 +6172,7 @@ mod tests {
             fs::read_to_string(root.join("vendor/example/keep.txt")).expect("read existing vendor"),
             "keep\n"
         );
-        assert!(root
-            .join("vendor/stasis/src/stdlib/stdlib.stasis")
-            .is_file());
+        assert!(root.join("vendor/stasis/stdlib/stdlib.stasis").is_file());
         remove_temp(&root);
 
         let conflict = temp_dir("vendor_conflict");

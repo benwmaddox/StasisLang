@@ -1,5 +1,5 @@
 // HUD layout helpers for reusable "tables" (rows/columns) over arrays of data.
-// From a generated project: import "/vendor/stasis/src/stdlib/hud_table.stasis";
+// From a generated project: import "/vendor/stasis/stdlib/hud_table.stasis";
 //
 // Cranelift note:
 // - The Cranelift backend does not currently support arbitrary struct member access.

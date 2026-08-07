@@ -770,18 +770,18 @@ fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-const GAUNTLET_SEED_SOURCE: &str = r#"import "/vendor/stasis/src/stdlib/stdlib.stasis";
-import "/vendor/stasis/src/stdlib/graphics.stasis";
-import "/vendor/stasis/src/stdlib/audio.stasis";
-import "/vendor/stasis/src/stdlib/collision.stasis";
-import "/vendor/stasis/src/stdlib/flex_layout.stasis";
-import "/vendor/stasis/src/stdlib/frame_timer.stasis";
-import "/vendor/stasis/src/stdlib/hud_table.stasis";
-import "/vendor/stasis/src/stdlib/sdl_scancodes.stasis";
-import "/vendor/stasis/src/stdlib/storage.stasis";
-import "/vendor/stasis/src/stdlib/ui_axis_layout.stasis";
-import "/vendor/stasis/src/stdlib/ui_layout_audit.stasis";
-import "/vendor/stasis/src/stdlib/ui_button_9slice.stasis";
+const GAUNTLET_SEED_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
+import "/vendor/stasis/stdlib/graphics.stasis";
+import "/vendor/stasis/stdlib/audio.stasis";
+import "/vendor/stasis/stdlib/collision.stasis";
+import "/vendor/stasis/stdlib/flex_layout.stasis";
+import "/vendor/stasis/stdlib/frame_timer.stasis";
+import "/vendor/stasis/stdlib/hud_table.stasis";
+import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
+import "/vendor/stasis/stdlib/storage.stasis";
+import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
+import "/vendor/stasis/stdlib/ui_layout_audit.stasis";
+import "/vendor/stasis/stdlib/ui_button_9slice.stasis";
 
 struct Game {
     ticks: i32;
@@ -1128,18 +1128,18 @@ mod tests {
     #[test]
     fn seed_has_the_required_graphical_lifecycle() {
         for required in [
-            "/vendor/stasis/src/stdlib/stdlib.stasis",
-            "/vendor/stasis/src/stdlib/graphics.stasis",
-            "/vendor/stasis/src/stdlib/audio.stasis",
-            "/vendor/stasis/src/stdlib/collision.stasis",
-            "/vendor/stasis/src/stdlib/flex_layout.stasis",
-            "/vendor/stasis/src/stdlib/frame_timer.stasis",
-            "/vendor/stasis/src/stdlib/hud_table.stasis",
-            "/vendor/stasis/src/stdlib/sdl_scancodes.stasis",
-            "/vendor/stasis/src/stdlib/storage.stasis",
-            "/vendor/stasis/src/stdlib/ui_axis_layout.stasis",
-            "/vendor/stasis/src/stdlib/ui_layout_audit.stasis",
-            "/vendor/stasis/src/stdlib/ui_button_9slice.stasis",
+            "/vendor/stasis/stdlib/stdlib.stasis",
+            "/vendor/stasis/stdlib/graphics.stasis",
+            "/vendor/stasis/stdlib/audio.stasis",
+            "/vendor/stasis/stdlib/collision.stasis",
+            "/vendor/stasis/stdlib/flex_layout.stasis",
+            "/vendor/stasis/stdlib/frame_timer.stasis",
+            "/vendor/stasis/stdlib/hud_table.stasis",
+            "/vendor/stasis/stdlib/sdl_scancodes.stasis",
+            "/vendor/stasis/stdlib/storage.stasis",
+            "/vendor/stasis/stdlib/ui_axis_layout.stasis",
+            "/vendor/stasis/stdlib/ui_layout_audit.stasis",
+            "/vendor/stasis/stdlib/ui_button_9slice.stasis",
             "function main(): i32",
             "function tick(): i32",
             "function render(): i32",

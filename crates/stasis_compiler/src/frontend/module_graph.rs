@@ -660,18 +660,18 @@ mod tests {
     fn project_root_imports_resolve_from_any_source_directory() {
         for importer in ["src/main.stasis", "src/game/player.stasis"] {
             assert_eq!(
-                resolve_import_path(importer, "/vendor/stasis/src/stdlib/storage.stasis")
+                resolve_import_path(importer, "/vendor/stasis/stdlib/storage.stasis")
                     .expect("project-root import"),
-                "vendor/stasis/src/stdlib/storage.stasis"
+                "vendor/stasis/stdlib/storage.stasis"
             );
         }
         assert_eq!(
             resolve_import_path(
-                "vendor/stasis/src/stdlib/graphics.stasis",
+                "vendor/stasis/stdlib/graphics.stasis",
                 "internal/host_frame.stasis"
             )
             .expect("package-internal relative import"),
-            "vendor/stasis/src/stdlib/internal/host_frame.stasis"
+            "vendor/stasis/stdlib/internal/host_frame.stasis"
         );
     }
 

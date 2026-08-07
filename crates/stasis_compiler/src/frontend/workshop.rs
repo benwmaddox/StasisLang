@@ -5187,10 +5187,10 @@ mod workshop_contract_tests {
         assert_eq!(
             resolve_project_import_path(
                 "src/game/player.stasis",
-                "/vendor/stasis/src/stdlib/graphics.stasis"
+                "/vendor/stasis/stdlib/graphics.stasis"
             )
             .expect("project-root import"),
-            "vendor/stasis/src/stdlib/graphics.stasis"
+            "vendor/stasis/stdlib/graphics.stasis"
         );
     }
 

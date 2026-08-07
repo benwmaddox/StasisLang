@@ -1,7 +1,7 @@
 @link("stasis_graphics");
 
 // Audio/runtime bindings (marker module).
-// From a generated project: import "/vendor/stasis/src/stdlib/audio.stasis";
+// From a generated project: import "/vendor/stasis/stdlib/audio.stasis";
 
 extern function audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
 extern function audio_shutdown(): void;

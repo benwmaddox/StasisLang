@@ -41,9 +41,9 @@ stasis inspect --capacity state.enemies=512
 ```
 
 `stasis init --name brick_game .` initializes an existing directory. The built-in template copies
-the version-matched Stasis sources into `vendor/stasis/src/stdlib`, so imports remain
+the version-matched Stasis sources into `vendor/stasis/stdlib`, so imports remain
 offline and project-local. Generated source uses project-root imports such as
-`/vendor/stasis/src/stdlib/stdlib.stasis`, which resolve consistently from nested source files.
+`/vendor/stasis/stdlib/stdlib.stasis`, which resolve consistently from nested source files.
 Commands discover
 `stasis.json` by walking from the selected path toward the filesystem root, so they work from the
 project root and nested directories. `--workspace PATH` selects a project explicitly.
@@ -68,7 +68,7 @@ project root and nested directories. `--workspace PATH` selects a project explic
 }
 ```
 
-The vendor release and hash describe the exact checked-in `vendor/stasis/src` snapshot.
+The vendor release and hash describe the exact checked-in `vendor/stasis` snapshot.
 `manifest_version` versions the JSON schema and is independent of the selected toolchain release.
 On every normal project command, Stasis verifies the on-disk tree against the selected executable.
 A mismatch stages its matching public stdlib and internal host-ABI modules together and publishes the vendor tree and
