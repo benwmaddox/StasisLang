@@ -1,5 +1,8 @@
 name: Bootstrap Artifacts
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 on:
   workflow_dispatch:
   release:

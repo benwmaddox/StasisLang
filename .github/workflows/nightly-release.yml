@@ -1,5 +1,8 @@
 name: Nightly Release
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 permissions:
   contents: write
 

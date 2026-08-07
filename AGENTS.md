@@ -18,6 +18,8 @@
 - `cargo build`
 - `cargo test`
 - `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`
+- Codex and automation Cargo commands must run through `python tools/cargo_cache.py run -- cargo ...` so linked worktrees share one repository-owned target and disable Rust incremental artifacts. Human interactive Cargo commands keep their normal target and incremental settings.
+- Inspect cache ownership with `python tools/cargo_cache.py measure`; cleanup is dry-run unless `--apply` is explicit.
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
 - Validation entrypoint:

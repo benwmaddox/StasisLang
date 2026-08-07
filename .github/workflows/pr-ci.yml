@@ -1,5 +1,8 @@
 name: PR CI
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 on:
   pull_request:
     types:
@@ -31,6 +34,7 @@ jobs:
           python tools/ci/check_stasis_src_layout.py
           python tools/ci/check_sdl3_migration.py
           python tools/ci/check_windows_vs_generator.py
+          python -m unittest tools.ci.test_cargo_cache
           python -m unittest tools.ci.test_sdl3_migration
           python -m unittest tools.ci.test_windows_vs_generator
 
@@ -122,7 +126,6 @@ jobs:
             os: macos-15
             runtime_library: libstasis_graphics.dylib
     env:
-      CARGO_INCREMENTAL: "0"
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_E2E_VSCODE_VERSION: "1.96.0"
       STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/vscode-e2e-runtime/bin/${{ matrix.runtime_library }}
