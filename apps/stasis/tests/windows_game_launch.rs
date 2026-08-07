@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 const TIMEOUT: Duration = Duration::from_secs(60);
+const RELEASE_BUILD_TIMEOUT: Duration = Duration::from_secs(180);
 
 struct CompletedProcess {
     status: ExitStatus,
@@ -57,16 +58,16 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
-fn finish_child(mut child: Child, description: &str) -> CompletedProcess {
+fn finish_child(mut child: Child, description: &str, timeout: Duration) -> CompletedProcess {
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().expect("poll child") {
             break status;
         }
-        if started.elapsed() >= TIMEOUT {
+        if started.elapsed() >= timeout {
             child.kill().ok();
             child.wait().ok();
-            panic!("{description} exceeded {} seconds", TIMEOUT.as_secs());
+            panic!("{description} exceeded {} seconds", timeout.as_secs());
         }
         thread::sleep(Duration::from_millis(25));
     };
@@ -96,7 +97,15 @@ fn launch(mut command: Command, description: &str) -> CompletedProcess {
     let child = command
         .spawn()
         .unwrap_or_else(|error| panic!("start {description}: {error}"));
-    finish_child(child, description)
+    finish_child(child, description, TIMEOUT)
+}
+
+fn launch_release_build(mut command: Command) -> CompletedProcess {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("start release build: {error}"));
+    finish_child(child, "release build", RELEASE_BUILD_TIMEOUT)
 }
 
 fn configure_capture(command: &mut Command, screenshot: &Path, exit_after: bool) {
@@ -211,14 +220,11 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
         assert_launch(case, launch(command, case), &screenshot);
     }
 
-    let release = launch(
-        {
-            let mut command = stasis_command(&project);
-            command.args(["build", "--mode", "release"]);
-            command
-        },
-        "release build",
-    );
+    let release = launch_release_build({
+        let mut command = stasis_command(&project);
+        command.args(["build", "--mode", "release"]);
+        command
+    });
     assert!(
         release.status.success(),
         "release build failed: {}",

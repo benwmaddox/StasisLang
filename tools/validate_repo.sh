@@ -13,6 +13,7 @@ python3 tools/ci/check_sdl3_migration.py
 python3 tools/ci/check_jit_generation_contract.py
 python3 tools/ci/check_unsafe_boundaries.py
 python3 -m unittest tools.ci.test_jit_generation_contract
+python3 -m unittest tools.ci.test_cargo_cache
 python3 -m unittest tools.ci.test_unsafe_boundaries
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
@@ -32,4 +33,4 @@ elif [[ $ignored_status -ne 1 ]]; then
   exit "$ignored_status"
 fi
 
-cargo test --workspace --all-targets -- --test-threads=1
+python3 tools/cargo_cache.py run -- cargo test --workspace --all-targets -- --test-threads=1

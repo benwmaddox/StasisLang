@@ -1,5 +1,8 @@
 name: Perf CI
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 on:
   pull_request:
     types:

@@ -11,6 +11,7 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 3. Run the baseline validation command: `tools/validate_repo.sh`.
 4. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
 5. Run `tools/install_git_hooks.ps1` once per clone. This repository's pre-commit hook blocks noncanonical staged Stasis source. Run the Android Workshop JIT render-parity emulator gate explicitly for rendering changes; the arm64 release shell has its own package-content and device gates.
+6. Codex and other automation must invoke Cargo through `python tools/cargo_cache.py run -- cargo ...`. This shares one repository-owned cache across linked worktrees and disables incremental artifacts only for the child Cargo process. See `docs/cargo_cache_policy.md` for measurement and safe cleanup.
 
 ## Choose work
 
