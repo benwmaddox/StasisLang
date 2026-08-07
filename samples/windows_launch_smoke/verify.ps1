@@ -143,6 +143,27 @@ $packageRoot = Join-Path $projectOutputRoot 'package'
 $packageArguments = @('--workspace', $PSScriptRoot, 'package', '--target', 'desktop', '--out', "$projectOutputName/package")
 if ($DevelopmentBuild) { $packageArguments += '--development-build' }
 Invoke-Bounded -Description 'desktop package' -FilePath $Toolchain -Arguments $packageArguments
+$packagePayload = Join-Path $packageRoot 'app'
+$requiredPayload = @(
+    'assets/manifest.json',
+    'stasis.json',
+    'stasis_dynload.dll',
+    'stasis_provenance.json',
+    'stasis_graphics.dll',
+    'windows_launch_smoke.dll',
+    'windows_launch_smoke.exe.launch'
+)
+foreach ($relative in $requiredPayload) {
+    if (-not (Test-Path -LiteralPath (Join-Path $packagePayload $relative))) {
+        throw "desktop package payload is missing $relative"
+    }
+}
+$unexpectedRootEntries = @(Get-ChildItem -LiteralPath $packageRoot | Where-Object {
+    $_.Name -ne 'app' -and $_.Name -ne 'windows_launch_smoke.exe'
+})
+if ($unexpectedRootEntries.Count -ne 0) {
+    throw "desktop package root contains unexpected entries: $($unexpectedRootEntries.Name -join ', ')"
+}
 $captures.package = Join-Path $ArtifactRoot 'package.png'
 Invoke-Capture -Description 'packaged executable' -Screenshot $captures.package `
     -ExitAfterScreenshot -FilePath (Join-Path $packageRoot 'windows_launch_smoke.exe') `

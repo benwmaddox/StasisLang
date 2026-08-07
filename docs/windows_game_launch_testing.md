@@ -26,6 +26,9 @@ responsive on Windows while using the same startup treatment on SDL, OpenGL, and
 Generated launchers anchor `STASIS_ASSET_ROOT` to their own directory and reject a graphics DLL
 whose exported runtime ABI does not match the runner, preventing caller working-directory and
 mixed-version installations from degrading into missing assets or undefined runtime behavior.
+Windows desktop packages keep the game-named executable at the package root and resolve the
+launch sidecar, game DLL, graphics DLL, assets, and metadata from the relative `app/` directory.
+This leaves one obvious file for non-developers to launch while keeping the package portable.
 Source-tree integration builds select the rebuilt runner and graphics DLL explicitly instead of
 using file modification times to guess which copied native artifact belongs to the current build.
 

@@ -135,7 +135,8 @@ cloning a generated repository, reactivate the checked-in hook with
 - `build --mode release`: use the shared Cranelift AOT pipeline and write the native executable to
   `build/`.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
-  assets, graphics runtime when present, and verified release provenance.
+  assets, graphics runtime when present, and verified release provenance. Windows packages keep
+  the game-named executable as the only root file and place all support files under `app/`.
 - `package-mobile --target android-arm64|ios-arm64 [--entry PATH]`: atomically assemble the
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
   Xcode app shell.
