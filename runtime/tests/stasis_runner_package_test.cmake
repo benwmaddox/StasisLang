@@ -13,7 +13,7 @@ file(COPY_FILE "${GAME}" "${TEST_ROOT}/package/${GAME_NAME}")
 file(WRITE "${TEST_ROOT}/package/game.launch" "dll=${GAME_NAME}\nentry=main\nfps=60\n")
 
 execute_process(
-    COMMAND "${TEST_ROOT}/package/game"
+    COMMAND "../package/game"
     WORKING_DIRECTORY "${TEST_ROOT}/caller"
     RESULT_VARIABLE RESULT
     OUTPUT_VARIABLE STDOUT
