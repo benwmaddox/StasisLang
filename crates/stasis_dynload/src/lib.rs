@@ -1052,8 +1052,14 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_cache_text: usize,
     stasis_gfx_measure_text_cached: usize,
     stasis_gfx_measure_text_cached_height: usize,
+    stasis_clipboard_load_ascii: Option<usize>,
+    stasis_clipboard_save_ascii: Option<usize>,
+    #[cfg(windows)]
+    stasis_storage_load_ascii: Option<usize>,
     #[cfg(windows)]
     stasis_storage_load_i32: Option<usize>,
+    #[cfg(windows)]
+    stasis_storage_save_ascii: Option<usize>,
     #[cfg(windows)]
     stasis_storage_save_i32: Option<usize>,
 }
@@ -1095,8 +1101,14 @@ impl StasisGraphicsAssetsApi {
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
             stasis_gfx_measure_text_cached_height: lib
                 .symbol_address("stasis_gfx_measure_text_cached_height")?,
+            stasis_clipboard_load_ascii: lib.symbol_address("stasis_clipboard_load_ascii").ok(),
+            stasis_clipboard_save_ascii: lib.symbol_address("stasis_clipboard_save_ascii").ok(),
+            #[cfg(windows)]
+            stasis_storage_load_ascii: lib.symbol_address("stasis_storage_load_ascii").ok(),
             #[cfg(windows)]
             stasis_storage_load_i32: lib.symbol_address("stasis_storage_load_i32").ok(),
+            #[cfg(windows)]
+            stasis_storage_save_ascii: lib.symbol_address("stasis_storage_save_ascii").ok(),
             #[cfg(windows)]
             stasis_storage_save_i32: lib.symbol_address("stasis_storage_save_i32").ok(),
             _lib: lib,
@@ -3299,7 +3311,7 @@ fn preference_component_valid(value: &[u8]) -> bool {
 }
 
 #[cfg(not(windows))]
-fn preference_i32_path(scope: &[u8], key: &[u8]) -> Option<PathBuf> {
+fn preference_path(scope: &[u8], key: &[u8], extension: &str) -> Option<PathBuf> {
     if !preference_component_valid(scope) || !preference_component_valid(key) {
         return None;
     }
@@ -3308,13 +3320,13 @@ fn preference_i32_path(scope: &[u8], key: &[u8]) -> Option<PathBuf> {
     Some(
         preference_storage_root()?
             .join(scope)
-            .join(format!("{key}.i32")),
+            .join(format!("{key}.{extension}")),
     )
 }
 
 #[cfg(not(windows))]
 fn portable_storage_load_i32(scope: &[u8], key: &[u8], fallback: i32) -> i32 {
-    let Some(path) = preference_i32_path(scope, key) else {
+    let Some(path) = preference_path(scope, key, "i32") else {
         return fallback;
     };
     let Ok(bytes) = std::fs::read(path) else {
@@ -3331,7 +3343,7 @@ fn portable_storage_load_i32(scope: &[u8], key: &[u8], fallback: i32) -> i32 {
 
 #[cfg(not(windows))]
 fn portable_storage_save_i32(scope: &[u8], key: &[u8], value: i32) -> bool {
-    let Some(path) = preference_i32_path(scope, key) else {
+    let Some(path) = preference_path(scope, key, "i32") else {
         return false;
     };
     let Some(directory) = path.parent() else {
@@ -3352,6 +3364,208 @@ fn portable_storage_save_i32(scope: &[u8], key: &[u8], value: i32) -> bool {
         return false;
     }
     true
+}
+
+fn printable_ascii(bytes: &[u8]) -> bool {
+    bytes.iter().all(|byte| (32..=126).contains(byte))
+}
+
+fn write_jit_ascii_buffer(out_id: i32, capacity: i32, bytes: &[u8]) -> i32 {
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return -1;
+    };
+    if bytes.len() > capacity || !printable_ascii(bytes) {
+        return -1;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        stasis_jit_global_i32_array_store(out_id, 0, index as i32, i32::from(*byte));
+    }
+    bytes.len() as i32
+}
+
+#[cfg(not(windows))]
+fn portable_storage_load_ascii(scope: &[u8], key: &[u8], capacity: i32) -> Option<Vec<u8>> {
+    let path = preference_path(scope, key, "ascii")?;
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() > usize::try_from(capacity).ok()? || !printable_ascii(&bytes) {
+        return None;
+    }
+    Some(bytes)
+}
+
+#[cfg(not(windows))]
+fn portable_storage_save_ascii(scope: &[u8], key: &[u8], value: &[u8]) -> bool {
+    if !printable_ascii(value) {
+        return false;
+    }
+    let Some(path) = preference_path(scope, key, "ascii") else {
+        return false;
+    };
+    let Some(directory) = path.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(directory).is_err() {
+        return false;
+    }
+    let temporary = path.with_extension("ascii.tmp");
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(value)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+        return false;
+    }
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_storage_load_ascii(
+    scope_id: i32,
+    key_id: i32,
+    out_id: i32,
+    capacity: i32,
+) -> i32 {
+    if capacity <= 0 {
+        return -1;
+    }
+    #[cfg(windows)]
+    {
+        let (Ok(scope), Ok(key)) = (
+            jit_text_arg_to_cstring(scope_id),
+            jit_text_arg_to_cstring(key_id),
+        ) else {
+            return -1;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return -1;
+        };
+        let Some(address) = api.stasis_storage_load_ascii else {
+            return -1;
+        };
+        let mut bytes = vec![0_u8; capacity as usize];
+        let callback: extern "system" fn(*const c_char, *const c_char, *mut c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        let loaded = callback(
+            scope.as_ptr(),
+            key.as_ptr(),
+            bytes.as_mut_ptr().cast::<c_char>(),
+            capacity,
+        );
+        if loaded < 0 || loaded > capacity {
+            return -1;
+        }
+        return write_jit_ascii_buffer(out_id, capacity, &bytes[..loaded as usize]);
+    }
+    #[cfg(not(windows))]
+    {
+        let (Some(scope), Some(key)) = (jit_text_arg_bytes(scope_id), jit_text_arg_bytes(key_id))
+        else {
+            return -1;
+        };
+        let Some(bytes) = portable_storage_load_ascii(&scope, &key, capacity) else {
+            return -1;
+        };
+        write_jit_ascii_buffer(out_id, capacity, &bytes)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_storage_save_ascii(
+    scope_id: i32,
+    key_id: i32,
+    value_id: i32,
+    length: i32,
+) -> i32 {
+    let (Some(scope), Some(key), Some(value)) = (
+        jit_text_arg_bytes(scope_id),
+        jit_text_arg_bytes(key_id),
+        jit_text_arg_bytes(value_id),
+    ) else {
+        return 0;
+    };
+    let Ok(length) = usize::try_from(length) else {
+        return 0;
+    };
+    if length > value.len() || !printable_ascii(&value[..length]) {
+        return 0;
+    }
+    #[cfg(windows)]
+    {
+        let (Ok(scope), Ok(key)) = (CString::new(scope), CString::new(key)) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let Some(address) = api.stasis_storage_save_ascii else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char, *const c_char, *const c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        return callback(
+            scope.as_ptr(),
+            key.as_ptr(),
+            value.as_ptr().cast::<c_char>(),
+            length as i32,
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        portable_storage_save_ascii(&scope, &key, &value[..length]) as i32
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_clipboard_load_ascii(out_id: i32, capacity: i32) -> i32 {
+    if capacity <= 0 {
+        return -1;
+    }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return -1;
+    };
+    let Some(address) = api.stasis_clipboard_load_ascii else {
+        return -1;
+    };
+    let mut bytes = vec![0_u8; capacity as usize];
+    #[cfg(windows)]
+    let callback: extern "system" fn(*mut c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*mut c_char, i32) -> i32 = unsafe { std::mem::transmute(address) };
+    let loaded = callback(bytes.as_mut_ptr().cast::<c_char>(), capacity);
+    if loaded < 0 || loaded > capacity {
+        return -1;
+    }
+    write_jit_ascii_buffer(out_id, capacity, &bytes[..loaded as usize])
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_clipboard_save_ascii(value_id: i32, length: i32) -> i32 {
+    let Some(value) = jit_text_arg_bytes(value_id) else {
+        return 0;
+    };
+    let Ok(length) = usize::try_from(length) else {
+        return 0;
+    };
+    if length > value.len() || !printable_ascii(&value[..length]) {
+        return 0;
+    }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_clipboard_save_ascii else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    callback(value.as_ptr().cast::<c_char>(), length as i32)
 }
 
 #[no_mangle]

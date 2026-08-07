@@ -98,7 +98,11 @@ int stasis_jit_text_run_load_from(int32_t base, int32_t index, int32_t len, int3
 int stasis_jit_load_font(int32_t path, int32_t size);
 float stasis_jit_measure_text(int32_t font, int32_t text);
 void stasis_jit_sleep_ms(int32_t ms);
+int stasis_jit_clipboard_load_ascii(int32_t out, int32_t capacity);
+int stasis_jit_clipboard_save_ascii(int32_t value, int32_t length);
+int stasis_jit_storage_load_ascii(int32_t scope, int32_t key, int32_t out, int32_t capacity);
 int stasis_jit_storage_load_i32(int32_t scope, int32_t key, int32_t fallback);
+int stasis_jit_storage_save_ascii(int32_t scope, int32_t key, int32_t value, int32_t length);
 int stasis_jit_storage_save_i32(int32_t scope, int32_t key, int32_t value);
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity);
 void stasis_mobile_aot_reset(void);

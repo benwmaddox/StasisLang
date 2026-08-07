@@ -3,3 +3,31 @@
 // Missing, invalid, or corrupt values return the caller-provided fallback.
 extern function storage_load_i32(scope: string, key: string, fallback: i32): i32;
 extern function storage_save_i32(scope: string, key: string, value: i32): bool;
+
+// Bounded durable ASCII values for share codes and other small text payloads.
+// Returns the byte length, or -1 when the value is missing, invalid, or does not fit.
+function @extern("stasis_jit_storage_load_ascii") storage_load_ascii_raw(scope: string, key: string, out: ascii[], capacity: i32): i32;
+function @extern("stasis_jit_storage_save_ascii") storage_save_ascii_raw(scope: string, key: string, value: ascii[], length: i32): i32;
+
+function storage_load_ascii(scope: string, key: string, out: ascii[]): i32 {
+    out.length = 0;
+    let capacity: i32 = out.max_length;
+    if (capacity <= 0) {
+        return -1;
+    }
+    let loaded: i32 = storage_load_ascii_raw(scope, key, out, capacity);
+    if (loaded < 0 || loaded > capacity) {
+        out.length = 0;
+        return -1;
+    }
+    out.length = loaded;
+    return loaded;
+}
+
+function storage_save_ascii(scope: string, key: string, value: ascii[]): bool {
+    let count: i32 = value.length;
+    if (count < 0 || count > value.max_length) {
+        return false;
+    }
+    return storage_save_ascii_raw(scope, key, value, count) != 0;
+}
