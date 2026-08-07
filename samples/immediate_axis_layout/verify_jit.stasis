@@ -1,4 +1,5 @@
 import "layout.stasis";
+import "../../src/stdlib/ui_layout_audit.stasis";
 
 function main(): i32 {
     menu_layout(0.0, 0.0, 360.0, 720.0, 180.0, 64.0);
@@ -19,6 +20,12 @@ function main(): i32 {
     }
     if (menu_button_contains(200.0, 196.0)) {
         return 6;
+    }
+    if (!ui_audit_centered_x(menu_button_x, menu_button_w, menu_label_x, 64.0, 0.01)) {
+        return 7;
+    }
+    if (!ui_audit_centered_y(menu_button_y, menu_button_h, menu_label_y, 26.0, 0.01)) {
+        return 8;
     }
     return 0;
 }

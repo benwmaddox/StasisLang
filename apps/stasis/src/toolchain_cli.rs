@@ -83,6 +83,7 @@ import "/vendor/stasis/src/stdlib/hud_table.stasis";
 import "/vendor/stasis/src/stdlib/sdl_scancodes.stasis";
 import "/vendor/stasis/src/stdlib/storage.stasis";
 import "/vendor/stasis/src/stdlib/ui_axis_layout.stasis";
+import "/vendor/stasis/src/stdlib/ui_layout_audit.stasis";
 import "/vendor/stasis/src/stdlib/ui_button_9slice.stasis";
 
 function main(): i32 {
@@ -5557,6 +5558,7 @@ mod tests {
             "sdl_scancodes",
             "storage",
             "ui_axis_layout",
+            "ui_layout_audit",
             "ui_button_9slice",
         ] {
             assert!(

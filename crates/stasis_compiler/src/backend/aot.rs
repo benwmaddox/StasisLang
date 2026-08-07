@@ -2877,6 +2877,10 @@ mod tests {
             include_str!("../../../../src/stdlib/ui_axis_layout.stasis"),
         );
         process.upsert_file(
+            "src/stdlib/ui_layout_audit.stasis",
+            include_str!("../../../../src/stdlib/ui_layout_audit.stasis"),
+        );
+        process.upsert_file(
             "samples/immediate_axis_layout/placement.stasis",
             include_str!("../../../../samples/immediate_axis_layout/placement.stasis"),
         );

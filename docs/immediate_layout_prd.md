@@ -836,3 +836,9 @@ A future rectangle type can call the same axis functions internally. Existing fl
 ### Prediction
 
 If this model is sufficient, menu titles, button labels, corner icons, HUD counters, and content inside flex-generated boxes will share `ui_place_x` and `ui_place_y` without needing a general rectangle framework. A request for rectangle values should arise only when multiple downstream consumers genuinely need to pass or store the complete box as one value.
+
+Machine-readable review is a separate concern from placement. The debug-facing
+`ui_layout_audit.stasis` module consumes the final scalar rectangles and measured
+text bounds without changing them, then emits deterministic geometry and
+relationship checks for automated or AI review. See
+`docs/ui_layout_audit.md` and `samples/immediate_axis_layout/audit.stasis`.

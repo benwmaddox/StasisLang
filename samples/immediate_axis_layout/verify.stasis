@@ -1,4 +1,5 @@
 import "placement.stasis";
+import "../../src/stdlib/ui_layout_audit.stasis";
 
 function main(): i32 {
     let title_x: f32 = menu_title_x_for(0.0, 360.0, 180.0);
@@ -23,6 +24,18 @@ function main(): i32 {
     }
     if (menu_point_in_button(200.0, 196.0, button_x, button_y, 180.0, 56.0)) {
         return 6;
+    }
+    if (!ui_audit_centered_x(20.0, 180.0, label_x, 64.0, 0.01)) {
+        return 7;
+    }
+    if (!ui_audit_centered_y(140.0, 56.0, label_y, 26.0, 0.01)) {
+        return 8;
+    }
+    if (!ui_audit_contains_axis(20.0, 180.0, label_x, 64.0, 0.01)) {
+        return 9;
+    }
+    if (ui_audit_overlap_x(90.0, 180.0, 20.0, 180.0) != 110.0) {
+        return 10;
     }
     return 0;
 }
