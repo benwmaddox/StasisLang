@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 use crate::compiler::{source_workshop_items, Compiler};
 use crate::data_flow::CompilerLocalType;
 use crate::frontend::lexer::{lex, Token, TokenKind};
-use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
+use crate::frontend::parser::{
+    parse_local_declarations, parse_top_level_functions, parse_top_level_type_layout,
+};
 use crate::identity::{
     canonical_source_path, overload_discriminator, CanonicalSourcePath, SymbolId,
 };
@@ -2451,19 +2453,20 @@ pub fn workshop_completion_items(
     let parsed_files = files
         .iter()
         .map(|file| {
-            source_workshop_items(&file.source).map(|records| {
-                (
-                    file,
-                    records.layout,
-                    records.functions,
-                    records.typed_local_bindings,
-                    records.structs,
-                )
-            })
+            let records = source_workshop_items(&file.source)?;
+            let local_declarations = parse_local_declarations(&file.source)?;
+            Ok((
+                file,
+                records.layout,
+                records.functions,
+                records.typed_local_bindings,
+                local_declarations,
+                records.structs,
+            ))
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut struct_scopes = BTreeMap::<(String, String), WorkshopCompletionScope>::new();
-    for (file, layout, _, _, ranges) in &parsed_files {
+    for (file, layout, _, _, _, ranges) in &parsed_files {
         for definition in &layout.structs {
             struct_fields.insert(
                 definition.name.clone(),
@@ -2525,7 +2528,7 @@ pub fn workshop_completion_items(
     }
 
     let mut typed_bindings = Vec::<WorkshopTypedBinding>::new();
-    for (file, layout, functions, locals, _) in parsed_files {
+    for (file, layout, functions, locals, local_declarations, _) in parsed_files {
         for definition in layout.structs {
             let struct_scope = struct_scopes
                 .get(&(file.path.clone(), definition.name.clone()))
@@ -2637,6 +2640,16 @@ pub fn workshop_completion_items(
                 )
             })
             .collect::<Vec<_>>();
+        let inferred_local_declarations = local_declarations
+            .into_iter()
+            .filter(|declaration| {
+                !locals.iter().any(|local| {
+                    local.function_name == declaration.function_name
+                        && local.name == declaration.name
+                        && local.visibility_range == declaration.visibility_range
+                })
+            })
+            .collect::<Vec<_>>();
         for function in functions {
             let owner_signature = format_function_signature(
                 &function.name,
@@ -2715,6 +2728,36 @@ pub fn workshop_completion_items(
                 file: file.path.clone(),
                 scope: Some(scope),
             });
+        }
+        for local in inferred_local_declarations {
+            let (owner_range, owner_signature) = function_scopes
+                .iter()
+                .find(|(range, _)| {
+                    range.start <= local.visibility_range.start
+                        && local.visibility_range.start <= range.end
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "local {} has no containing function in {}",
+                        local.name, file.path
+                    )
+                })?;
+            items.push(scoped_completion_catalog_item(
+                &local.name,
+                "local",
+                &format!("local in {} [{}]", local.function_name, file.path),
+                &file.path,
+                Some(local.function_name.clone()),
+                None,
+                WorkshopCompletionScope {
+                    owner: local.function_name,
+                    file: file.path.clone(),
+                    owner_signature: Some(owner_signature.clone()),
+                    owner_end: Some(owner_range.end),
+                    visible_from: local.visibility_range.start,
+                    visible_to: local.visibility_range.end,
+                },
+            ));
         }
     }
 
@@ -3391,7 +3434,7 @@ fn prune_unused_workshop_imports(
         let identifiers = source_identifiers(&body)?;
         let mut kept = Vec::new();
         for import in imports {
-            let imported_path = resolve_project_import_path(&file.path, &import);
+            let imported_path = resolve_project_import_path(&file.path, &import)?;
             let Some(_) = by_path.get(&imported_path) else {
                 kept.push(import);
                 continue;
@@ -3595,7 +3638,7 @@ fn exported_identifiers(
         .map(|symbol| symbol.name)
         .collect::<BTreeSet<_>>();
     for import in parse_workshop_import_paths(&file.source)? {
-        let imported_path = resolve_project_import_path(&file.path, &import);
+        let imported_path = resolve_project_import_path(&file.path, &import)?;
         exports.extend(exported_identifiers(
             &imported_path,
             files,
@@ -3607,11 +3650,8 @@ fn exported_identifiers(
     Ok(exports)
 }
 
-fn resolve_project_import_path(file: &str, import: &str) -> String {
-    let base = Path::new(file).parent().unwrap_or_else(|| Path::new(""));
-    normalize_filesystem_path(&base.join(import))
-        .to_string_lossy()
-        .replace('\\', "/")
+fn resolve_project_import_path(file: &str, import: &str) -> Result<String, String> {
+    crate::frontend::module_graph::resolve_import_path(file, import)
 }
 
 fn validate_source_item_replacement(
@@ -5118,6 +5158,18 @@ mod workshop_contract_tests {
         }
         fs::write(&path, source).expect("write project file");
         path
+    }
+
+    #[test]
+    fn semantic_tooling_resolves_project_root_imports_from_nested_files() {
+        assert_eq!(
+            resolve_project_import_path(
+                "src/game/player.stasis",
+                "/vendor/stasis/src/stdlib/graphics.stasis"
+            )
+            .expect("project-root import"),
+            "vendor/stasis/src/stdlib/graphics.stasis"
+        );
     }
 
     #[test]

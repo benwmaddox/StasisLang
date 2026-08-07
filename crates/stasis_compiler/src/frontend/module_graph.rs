@@ -274,7 +274,7 @@ pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, Sour
         }
         let import_path = parse_string_literal_text(token_text(source, literal))
             .map_err(|message| diagnostic(path, literal.start..literal.end, "import", message))?;
-        let target = resolve_import(path, &import_path).map_err(|message| {
+        let target = resolve_import_path(path, &import_path).map_err(|message| {
             diagnostic(path, literal.start..literal.end, &import_path, message)
         })?;
         let alias = module_alias(&target);
@@ -336,23 +336,33 @@ fn import_removal_span(source: &str, start: usize, end: usize) -> Range<usize> {
     }
 }
 
-fn resolve_import(importer: &str, import: &str) -> Result<String, String> {
-    if !import.replace('\\', "/").ends_with(".stasis") {
+pub(crate) fn resolve_import_path(importer: &str, import: &str) -> Result<String, String> {
+    let normalized = import.replace('\\', "/");
+    if !normalized.ends_with(".stasis") {
         return Err(format!("import target must end in .stasis: '{import}'"));
     }
-    if import.starts_with('/')
-        || import.starts_with("//")
-        || import.as_bytes().get(1) == Some(&b':')
-    {
+    if normalized.starts_with("//") || import.as_bytes().get(1) == Some(&b':') {
         return Err(format!(
             "import target must be project-relative: '{import}'"
         ));
     }
+    if let Some(project_path) = normalized.strip_prefix('/') {
+        if project_path.is_empty()
+            || project_path
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err(format!(
+                "project-root import must stay within the project: '{import}'"
+            ));
+        }
+        return crate::identity::canonical_source_path(None, project_path);
+    }
     let parent = importer.rsplit_once('/').map_or("", |(parent, _)| parent);
     let joined = if parent.is_empty() {
-        import.to_string()
+        normalized
     } else {
-        format!("{parent}/{import}")
+        format!("{parent}/{normalized}")
     };
     crate::identity::canonical_source_path(None, &joined)
 }
@@ -644,6 +654,32 @@ mod tests {
         assert!(error
             .message
             .contains("duplicate imported module alias 'util'"));
+    }
+
+    #[test]
+    fn project_root_imports_resolve_from_any_source_directory() {
+        for importer in ["src/main.stasis", "src/game/player.stasis"] {
+            assert_eq!(
+                resolve_import_path(importer, "/vendor/stasis/src/stdlib/game_math.stasis")
+                    .expect("project-root import"),
+                "vendor/stasis/src/stdlib/game_math.stasis"
+            );
+        }
+        assert_eq!(
+            resolve_import_path(
+                "vendor/stasis/src/stdlib/graphics.stasis",
+                "../runtime/host_frame.stasis"
+            )
+            .expect("package-internal relative import"),
+            "vendor/stasis/src/runtime/host_frame.stasis"
+        );
+    }
+
+    #[test]
+    fn project_root_imports_cannot_escape_the_project() {
+        let error = resolve_import_path("src/main.stasis", "/vendor/../main.stasis")
+            .expect_err("project-root escape must fail");
+        assert!(error.contains("must stay within the project"));
     }
 
     #[test]

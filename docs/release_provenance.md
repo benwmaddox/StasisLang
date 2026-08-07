@@ -14,11 +14,12 @@ package with the expected and actual SHA-256 values. This prevents a release
 binary from silently packaging renderer sources copied from another checkout.
 
 Every generated desktop, Android, and iOS package contains
-`stasis_provenance.json`. Mobile packages also place the manifest in the game
+`stasis_provenance.json`; Windows desktop packages keep it in the relative
+`app/` payload beside the runtime. Mobile packages also place the manifest in the game
 asset root and compile a small generated header into the lifecycle adapter. At
 startup, the adapter logs the build label, release tag, source commit, and
 `gfx_cmd_v1` renderer contract. The desktop graphics runtime logs the bounded
-sidecar manifest from the executable directory during initialization.
+sidecar manifest from the resolved runtime payload directory during initialization.
 `stasis_mobile_package.json` points to the
 embedded manifest and exposes the release/development classification to build
 audit tools.

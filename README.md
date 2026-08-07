@@ -232,6 +232,11 @@ stasis test
 stasis run
 ```
 
+Generated projects track their checked-in `vendor/stasis` snapshot in `stasis.json`. When the
+selected Stasis executable or the checked-in tree differs from that identity, the next project
+command restores `vendor/stasis` and updates its manifest automatically. Stasis owns that directory;
+review and commit the resulting Git changes with the compiler upgrade.
+
 For a graphical program, `stasis play path\to\main.stasis` keeps the process alive and watches the current import graph. Saving a `.stasis` file compiles a candidate in the background and attempts an all-or-nothing swap between ticks.
 
 From a project containing `stasis.json`, `stasis tui` opens the manifest entry in the persistent live-workspace interface. Pass an entry path to override the manifest for one invocation.

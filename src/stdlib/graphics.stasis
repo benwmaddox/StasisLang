@@ -1,4 +1,5 @@
 @link("stasis_graphics");
+
 // Graphics/runtime bindings.
 //
 // Policy: Stasis does not call into the host on hot paths.
@@ -12,17 +13,27 @@ import "../runtime/gfx_cmd.stasis";
 import "../runtime/host_window_request.stasis";
 
 extern function time(): i32;
+
 extern function sleep_ms(ms: i32): void;
 
 // Hot-path reads are HostFrame snapshot-only (no host calls).
-function get_time_ms(): i32 { return host_time_ms(); }
-function get_time_us(): i32 { return host_time_us(); }
+function get_time_ms(): i32 {
+    return host_time_ms();
+}
+
+function get_time_us(): i32 {
+    return host_time_us();
+}
 
 // Startup / assets (host calls; avoid in hot paths)
 extern function gfx_poll_reload(handle: i32): bool;
+
 extern function gfx_dump_bmp(path: string): i32;
+
 extern function gfx_dump_png(path: string): i32;
+
 extern function load_font(path: string, size: i32): i32;
+
 extern function measure_text(font: i32, text: string): f32;
 
 struct Sprite {
@@ -41,7 +52,9 @@ struct TextRun {
 function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
-    if (self.handle <= 0 || self.width <= 0 || self.height <= 0) { return; }
+    if (self.handle <= 0 || self.width <= 0 || self.height <= 0) {
+        return;
+    }
     let width: f32 = 0.0;
     let height: f32 = 0.0;
     width.from_i32(self.width);
@@ -52,7 +65,9 @@ function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
 function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
 
 function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
-    if (self.font <= 0 || self.handle <= 0) { return; }
+    if (self.font <= 0 || self.handle <= 0) {
+        return;
+    }
     gfx_cmd_text_cached(self.font, self.handle, x, y, r, g, b, a);
 }
 
@@ -60,9 +75,16 @@ function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): vo
 function set_postfx(strength: f32, phase: f32, speed: f32, r: f32, g: f32, b: f32): void {
 }
 
-function gfx_debug_bake_hash(path: string): i32 { return 0; }
-function gfx_debug_enable_hash(enabled: i32): void { }
-function gfx_debug_get_frame_hash(): i32 { return 0; }
+function gfx_debug_bake_hash(path: string): i32 {
+    return 0;
+}
+
+function gfx_debug_enable_hash(enabled: i32): void {
+}
+
+function gfx_debug_get_frame_hash(): i32 {
+    return 0;
+}
 
 function get_desktop_size(out_w: i32[], out_h: i32[]): void {
     out_w[0] = host_screen_w_px();
@@ -119,24 +141,73 @@ function gfx_draw_sprites(cmd_i32: i32[], cmd_f32: f32[], count: i32): void {
     gfx_cmd_sprites_from(cmd_i32, cmd_f32, count);
 }
 
-function gfx_window_resized(): bool { return host_resized(); }
-function gfx_logical_width(): f32 { return host_logical_width(); }
-function gfx_logical_height(): f32 { return host_logical_height(); }
-function gfx_native_width_px(): i32 { return host_native_w_px(); }
-function gfx_native_height_px(): i32 { return host_native_h_px(); }
-function gfx_drawable_width_px(): i32 { return host_drawable_w_px(); }
-function gfx_drawable_height_px(): i32 { return host_drawable_h_px(); }
-function gfx_safe_viewport_x(): f32 { return host_safe_x(); }
-function gfx_safe_viewport_y(): f32 { return host_safe_y(); }
-function gfx_safe_viewport_width(): f32 { return host_safe_width(); }
-function gfx_safe_viewport_height(): f32 { return host_safe_height(); }
-function gfx_content_scale(): f32 { return host_content_scale(); }
-function gfx_raster_scale(): f32 { return host_raster_scale(); }
-function gfx_display_generation(): i32 { return host_display_generation(); }
-function gfx_density_generation(): i32 { return host_density_generation(); }
+function gfx_window_resized(): bool {
+    return host_resized();
+}
 
-function is_key_down(scancode: i32): bool { return host_key_down(scancode); }
-function should_quit(): bool { return host_quit_requested(); }
+function gfx_logical_width(): f32 {
+    return host_logical_width();
+}
+
+function gfx_logical_height(): f32 {
+    return host_logical_height();
+}
+
+function gfx_native_width_px(): i32 {
+    return host_native_w_px();
+}
+
+function gfx_native_height_px(): i32 {
+    return host_native_h_px();
+}
+
+function gfx_drawable_width_px(): i32 {
+    return host_drawable_w_px();
+}
+
+function gfx_drawable_height_px(): i32 {
+    return host_drawable_h_px();
+}
+
+function gfx_safe_viewport_x(): f32 {
+    return host_safe_x();
+}
+
+function gfx_safe_viewport_y(): f32 {
+    return host_safe_y();
+}
+
+function gfx_safe_viewport_width(): f32 {
+    return host_safe_width();
+}
+
+function gfx_safe_viewport_height(): f32 {
+    return host_safe_height();
+}
+
+function gfx_content_scale(): f32 {
+    return host_content_scale();
+}
+
+function gfx_raster_scale(): f32 {
+    return host_raster_scale();
+}
+
+function gfx_display_generation(): i32 {
+    return host_display_generation();
+}
+
+function gfx_density_generation(): i32 {
+    return host_density_generation();
+}
+
+function is_key_down(scancode: i32): bool {
+    return host_key_down(scancode);
+}
+
+function should_quit(): bool {
+    return host_quit_requested();
+}
 
 // Legacy submit calls are no-ops in bulk mode (host pulls command buffers after tick).
 function gfx_submit(cmd_i32: i32[], cmd_f32: f32[]): void {
@@ -148,15 +219,50 @@ function gfx_submit_u8(cmd_i32: i32[], cmd_f32: f32[], cmd_u8: u8[]): void {
 }
 
 // Pointer/query wrappers over HostFrame
-function input_pointer_count(): i32 { return host_pointer_count(); }
-function input_pointer_id(index: i32): i32 { return host_pointer_id(index); }
-function input_pointer_is_down(index: i32): bool { return host_pointer_is_down(index); }
-function input_pointer_went_down(index: i32): bool { return host_pointer_went_down(index); }
-function input_pointer_went_up(index: i32): bool { return host_pointer_went_up(index); }
-function input_pointer_x_logical(index: i32): f32 { return host_pointer_x_logical(index); }
-function input_pointer_y_logical(index: i32): f32 { return host_pointer_y_logical(index); }
-function input_pointer_dx_logical(index: i32): f32 { return host_pointer_dx_logical(index); }
-function input_pointer_dy_logical(index: i32): f32 { return host_pointer_dy_logical(index); }
-function input_pointer_x_n(index: i32): f32 { return host_pointer_x_n(index); }
-function input_pointer_y_n(index: i32): f32 { return host_pointer_y_n(index); }
-function input_dropped_pointers(): i32 { return host_dropped_pointers(); }
+function input_pointer_count(): i32 {
+    return host_pointer_count();
+}
+
+function input_pointer_id(index: i32): i32 {
+    return host_pointer_id(index);
+}
+
+function input_pointer_is_down(index: i32): bool {
+    return host_pointer_is_down(index);
+}
+
+function input_pointer_went_down(index: i32): bool {
+    return host_pointer_went_down(index);
+}
+
+function input_pointer_went_up(index: i32): bool {
+    return host_pointer_went_up(index);
+}
+
+function input_pointer_x_logical(index: i32): f32 {
+    return host_pointer_x_logical(index);
+}
+
+function input_pointer_y_logical(index: i32): f32 {
+    return host_pointer_y_logical(index);
+}
+
+function input_pointer_dx_logical(index: i32): f32 {
+    return host_pointer_dx_logical(index);
+}
+
+function input_pointer_dy_logical(index: i32): f32 {
+    return host_pointer_dy_logical(index);
+}
+
+function input_pointer_x_n(index: i32): f32 {
+    return host_pointer_x_n(index);
+}
+
+function input_pointer_y_n(index: i32): f32 {
+    return host_pointer_y_n(index);
+}
+
+function input_dropped_pointers(): i32 {
+    return host_dropped_pointers();
+}

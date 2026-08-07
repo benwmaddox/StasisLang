@@ -17,6 +17,14 @@ pub struct ParsedLocalBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedLocalDeclaration {
+    pub function_name: String,
+    pub name: String,
+    pub name_range: Range<usize>,
+    pub visibility_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFunctionSignature {
     pub name: String,
     pub annotations: Vec<ParsedFunctionAnnotation>,
@@ -117,6 +125,43 @@ pub struct ParsedTypeLayout {
 pub fn parse_typed_local_bindings(source: &str) -> Result<Vec<ParsedLocalBinding>, String> {
     let tokens = lex(source)?;
     let mut bindings = Vec::new();
+    for declaration in parse_local_declarations(source)? {
+        let Some(name_index) = tokens
+            .iter()
+            .position(|token| token.start == declaration.name_range.start)
+        else {
+            continue;
+        };
+        if !tokens
+            .get(name_index + 1)
+            .is_some_and(|token| token.kind == TokenKind::Colon)
+        {
+            continue;
+        }
+        let (type_name, _) = parse_type_name(source, &tokens, name_index + 2)?;
+        bindings.push(ParsedLocalBinding {
+            function_name: declaration.function_name,
+            name: declaration.name,
+            type_name,
+            visibility_range: declaration.visibility_range,
+        });
+    }
+    bindings.sort_by_key(|binding| {
+        (
+            binding.function_name.clone(),
+            binding.name.clone(),
+            binding.type_name.clone(),
+            binding.visibility_range.start,
+            binding.visibility_range.end,
+        )
+    });
+    bindings.dedup();
+    Ok(bindings)
+}
+
+pub fn parse_local_declarations(source: &str) -> Result<Vec<ParsedLocalDeclaration>, String> {
+    let tokens = lex(source)?;
+    let mut declarations = Vec::new();
     for function in parse_top_level_functions(source)? {
         let scope_ranges = lexical_scope_ranges(&tokens, function.body_range.clone());
         let loop_ranges = for_scope_ranges(source, &tokens, function.body_range.clone());
@@ -132,14 +177,10 @@ pub fn parse_typed_local_bindings(source: &str) -> Result<Vec<ParsedLocalBinding
             let Some(name) = tokens.get(cursor + 1).copied() else {
                 break;
             };
-            let Some(colon) = tokens.get(cursor + 2).copied() else {
-                break;
-            };
-            if name.kind != TokenKind::Identifier || colon.kind != TokenKind::Colon {
+            if name.kind != TokenKind::Identifier {
                 cursor += 1;
                 continue;
             }
-            let (type_name, next) = parse_type_name(source, &tokens, cursor + 3)?;
             let scope_end = scope_ranges
                 .iter()
                 .chain(loop_ranges.iter())
@@ -147,26 +188,16 @@ pub fn parse_typed_local_bindings(source: &str) -> Result<Vec<ParsedLocalBinding
                 .min_by_key(|range| range.end.saturating_sub(range.start))
                 .map(|range| range.end)
                 .unwrap_or(function.body_range.end);
-            bindings.push(ParsedLocalBinding {
+            declarations.push(ParsedLocalDeclaration {
                 function_name: function.name.clone(),
                 name: token_text(source, name).to_string(),
-                type_name,
+                name_range: name.start..name.end,
                 visibility_range: name.end..scope_end,
             });
-            cursor = next;
+            cursor += 2;
         }
     }
-    bindings.sort_by_key(|binding| {
-        (
-            binding.function_name.clone(),
-            binding.name.clone(),
-            binding.type_name.clone(),
-            binding.visibility_range.start,
-            binding.visibility_range.end,
-        )
-    });
-    bindings.dedup();
-    Ok(bindings)
+    Ok(declarations)
 }
 
 pub fn completion_expected_type(source: &str, cursor: usize) -> Result<Option<String>, String> {

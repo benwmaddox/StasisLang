@@ -412,6 +412,9 @@ static int stasis_try_load_launch_config(
     char self_path[2048];
     char launch_path[2080];
     char exe_dir[2048];
+#ifdef _WIN32
+    char payload_dir[2080];
+#endif
     char line[2048];
 
     if (!stasis_try_get_self_path(argv0, self_path, sizeof(self_path)))
@@ -428,6 +431,31 @@ static int stasis_try_load_launch_config(
     }
 
     FILE *file = fopen(launch_path, "rb");
+#ifdef _WIN32
+    if (!file)
+    {
+        const char *exe_name = strrchr(self_path, '\\');
+        const char *forward_name = strrchr(self_path, '/');
+        if (!exe_name || (forward_name && forward_name > exe_name))
+        {
+            exe_name = forward_name;
+        }
+        exe_name = exe_name ? exe_name + 1 : self_path;
+        int payload_written = snprintf(payload_dir, sizeof(payload_dir), "%s\\app", exe_dir);
+        int launch_written = payload_written > 0 && payload_written < (int)sizeof(payload_dir)
+            ? snprintf(launch_path, sizeof(launch_path), "%s\\%s.launch", payload_dir, exe_name)
+            : -1;
+        if (launch_written > 0 && launch_written < (int)sizeof(launch_path))
+        {
+            file = fopen(launch_path, "rb");
+            if (file)
+            {
+                strncpy(exe_dir, payload_dir, sizeof(exe_dir) - 1);
+                exe_dir[sizeof(exe_dir) - 1] = '\0';
+            }
+        }
+    }
+#endif
     if (!file)
     {
         return 0;
@@ -536,7 +564,23 @@ static int stasis_try_load_launch_config(
         entry_out[entry_out_cap - 1] = '\0';
     }
 
-    /* Anchor assets to the generated executable, independent of caller CWD. */
+#ifdef _WIN32
+    if (dll_out && dll_out[0] && dll_out[0] != '\\' && dll_out[0] != '/' && dll_out[1] != ':')
+    {
+        char resolved_dll[4096];
+        int resolved_written = snprintf(
+            resolved_dll, sizeof(resolved_dll), "%s\\%s", exe_dir, dll_out);
+        if (resolved_written <= 0 || resolved_written >= (int)sizeof(resolved_dll) ||
+            (size_t)resolved_written >= dll_out_cap)
+        {
+            fprintf(stderr, "error: generated launcher DLL path is too long\n");
+            return 0;
+        }
+        memcpy(dll_out, resolved_dll, (size_t)resolved_written + 1);
+    }
+#endif
+
+    /* Anchor assets to the resolved launch payload, independent of caller CWD. */
     if (!stasis_set_current_dir(exe_dir) ||
         !stasis_set_asset_root(exe_dir) ||
         !stasis_set_packaged_graphics_path(exe_dir))
@@ -686,6 +730,22 @@ static void stasis_setup_runtime_dirs(const char *exe_path, const char *dll_path
 {
     out_runtime_dir[0] = '\0';
 
+    char program_dir[1024];
+    program_dir[0] = '\0';
+    if (dll_path && stasis_path_dirname(dll_path, program_dir, sizeof(program_dir)) == 0)
+    {
+        char runtime_probe[1024];
+        int probe_written = snprintf(
+            runtime_probe, sizeof(runtime_probe), "%s\\stasis_graphics.dll", program_dir);
+        if (probe_written > 0 && probe_written < (int)sizeof(runtime_probe) &&
+            file_exists(runtime_probe))
+        {
+            strncpy(out_runtime_dir, program_dir, out_cap - 1);
+            out_runtime_dir[out_cap - 1] = '\0';
+            return;
+        }
+    }
+
     char exe_dir[1024];
     exe_dir[0] = '\0';
     if (exe_path && stasis_path_dirname(exe_path, exe_dir, sizeof(exe_dir)) == 0)
@@ -715,7 +775,6 @@ static void stasis_setup_runtime_dirs(const char *exe_path, const char *dll_path
         stasis_try_add_relative_runtime_dir(exe_dir, "..\\runtime\\build\\bin\\Release", out_runtime_dir, out_cap);
     }
 
-    (void)dll_path;
 }
 
 static void stasis_enable_dll_search(const char *exe_path, const char *dll_path)

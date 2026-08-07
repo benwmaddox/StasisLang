@@ -250,6 +250,24 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
         String::from_utf8_lossy(&package.stderr)
     );
     let package_root = project.join("dist/windows_launch_smoke-desktop");
+    let package_payload = package_root.join("app");
+    assert!(package_root.join("windows_launch_smoke.exe").is_file());
+    assert!(package_payload.is_dir());
+    for relative in [
+        "assets/manifest.json",
+        "stasis.json",
+        "stasis_dynload.dll",
+        "stasis_provenance.json",
+        "stasis_graphics.dll",
+        "windows_launch_smoke.dll",
+        "windows_launch_smoke.exe.launch",
+    ] {
+        assert!(
+            package_payload.join(relative).exists(),
+            "Windows package payload should contain {relative}"
+        );
+    }
+    assert!(!package_root.join("stasis_graphics.dll").exists());
     let package_screenshot = parent.join("package.png");
     let mut package_command = Command::new(package_root.join("windows_launch_smoke.exe"));
     package_command.current_dir(&package_root);

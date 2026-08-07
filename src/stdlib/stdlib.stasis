@@ -1,6 +1,7 @@
 // Stasis standard library (stub).
-// Import explicitly: import "src/stdlib/stdlib.stasis";
-// For runtime bindings: import "src/stdlib/graphics.stasis" and/or "src/stdlib/audio.stasis".
+// From a generated project: import "/vendor/stasis/src/stdlib/stdlib.stasis";
+// For runtime bindings, import "/vendor/stasis/src/stdlib/graphics.stasis" and/or
+// "/vendor/stasis/src/stdlib/audio.stasis".
 
 import "memory.stasis";
 
@@ -104,10 +105,10 @@ function char_to_hex(b: u8): i32 {
         return b - 48;
     }
     if (b >= 65 && b <= 70) {
-        return 10 + (b - 65);
+        return 10 +(b - 65);
     }
     if (b >= 97 && b <= 102) {
-        return 10 + (b - 97);
+        return 10 +(b - 97);
     }
     return -1;
 }
@@ -119,7 +120,7 @@ function char_from_hex(d: i32): u8 {
     if (d < 10) {
         return 48 + d;
     }
-    return 65 + (d - 10);
+    return 65 +(d - 10);
 }
 
 function ascii_is_digit(b: u8): bool {
@@ -356,7 +357,7 @@ function ascii_push_i32(dst: ascii[], value: i32): void {
 
     // Emit digits.
     for (i = 0; pow10 > 0; i = i + 1) {
-        let digit: i32 = (v / pow10) % 10;
+        let digit: i32 =(v / pow10) % 10;
         ascii_push(dst, i32_to_u8_trunc(48 + digit));
         pow10 = pow10 / 10;
     }
@@ -474,7 +475,7 @@ function ascii_find(s: ascii[], needle: ascii[]): i32 {
     let i: i32 = 0;
     let j: i32 = 0;
     let match: bool = true;
-    for (i = 0; i < (len_s - len_n + 1); i = i + 1) {
+    for (i = 0; i <(len_s - len_n + 1); i = i + 1) {
         match = true;
         for (j = 0; j < len_n; j = j + 1) {
             if (s[i + j] != needle[j]) {

@@ -67,6 +67,11 @@ use the same aspect-fit viewport, and replace SVG/font/text textures when the
 density generation changes. Those metadata slots are host-populated and are
 not part of the command trace, so JIT/AOT command parity is unchanged.
 
+Desktop windows start maximized through the platform window manager. This fills
+the usable work area while preserving taskbars, docks, and panels; it is still a
+resizable window rather than borderless fullscreen. The logical size requested
+by `init_window` remains the game's stable coordinate space.
+
 On Windows, `stasis_runner.exe` declares per-monitor-v2 DPI awareness and the
 graphics runtime enables SDL's DPI-scaled point coordinate mode before video
 initialization. A requested `800 x 600` logical window on a 150% display is

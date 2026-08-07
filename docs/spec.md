@@ -586,10 +586,15 @@ Import syntax:
 
 ```stasis
 import "relative/path/to/file.stasis";
+import "/project/root/path/to/file.stasis";
 ```
 
 Rules:
 - Imports are resolved relative to the importing file.
+- Imports beginning with `/` are resolved from the project root. The leading slash is project-root
+  syntax, not an operating-system absolute path.
+- Project-root imports may not contain empty, `.` or `..` path components and remain confined to
+  the project root.
 - Imported files are included once.
 - Import graphs are compilation graph edges, not textual expansion.
 - Import cycles are hard errors.

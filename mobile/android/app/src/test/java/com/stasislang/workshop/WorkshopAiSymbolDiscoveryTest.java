@@ -16,6 +16,10 @@ public final class WorkshopAiSymbolDiscoveryTest {
     public void resolvesImportsRelativeToTheirSourceFile() {
         assertEquals("src/shared/math.stasis", WorkshopAiSymbolDiscovery.resolveImport(
                 "src/systems/movement.stasis", "../shared/math.stasis"));
+        assertEquals("vendor/stasis/src/stdlib/game_math.stasis",
+                WorkshopAiSymbolDiscovery.resolveImport(
+                        "src/systems/movement.stasis",
+                        "/vendor/stasis/src/stdlib/game_math.stasis"));
     }
 
     @Test

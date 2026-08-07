@@ -143,6 +143,21 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
     .expect("write LSP manifest");
     let source_path = project.join("src/main.stasis");
     fs::write(&source_path, "function main(): i32 { return 0; }\n").expect("write LSP source");
+    let stale_cache = project.join(".stasis_cache/toolchain/stale.bin");
+    fs::create_dir_all(stale_cache.parent().expect("stale cache parent"))
+        .expect("create stale cache fixture");
+    fs::write(&stale_cache, "stale").expect("write stale cache fixture");
+    let stale_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    fs::File::options()
+        .write(true)
+        .open(&stale_cache)
+        .expect("open stale cache fixture")
+        .set_times(
+            fs::FileTimes::new()
+                .set_accessed(stale_time)
+                .set_modified(stale_time),
+        )
+        .expect("age stale cache fixture");
     let uri = file_uri(&source_path);
     let fixed_source = "// Adds two values.\nfunction add_score(amount: i32, bonus: i32): i32 { return amount + bonus; }\nfunction main(): i32 { return add_score(1, 2); }\n";
     let input = [
@@ -220,6 +235,15 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         })),
         lsp_frame(json!({
             "jsonrpc": "2.0",
+            "id": 7,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 0 }
+            }
+        })),
+        lsp_frame(json!({
+            "jsonrpc": "2.0",
             "id": 2,
             "method": "shutdown",
             "params": null
@@ -241,6 +265,7 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         String::from_utf8_lossy(&output.stderr)
     );
     let messages = lsp_messages(&output.stdout);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cache_cleanup_removed_files=1"));
     assert_eq!(messages[0]["id"], 1);
     assert_eq!(
         messages[0]["result"]["capabilities"]["positionEncoding"],
@@ -295,6 +320,12 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
         hints.iter().any(|hint| hint["label"] == "amount:")
             && hints.iter().any(|hint| hint["label"] == "bonus:")
     }));
+    let definition_miss = messages
+        .iter()
+        .find(|message| message["id"] == 7)
+        .expect("definition response");
+    assert_eq!(definition_miss["result"], Value::Null);
+    assert!(definition_miss.get("error").is_none());
     assert!(messages
         .iter()
         .any(|message| message["id"] == 2 && message["result"].is_null()));
@@ -312,6 +343,20 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let created_json = json_stdout(&created);
     assert_eq!(created_json["ok"], true);
     assert_eq!(created_json["command"], "new");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(project.join("stasis.json")).expect("read generated manifest"),
+    )
+    .expect("parse generated manifest");
+    assert!(manifest["vendor"]["stasis"].get("update_policy").is_none());
+    assert_eq!(
+        manifest["vendor"]["stasis"]["sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    let vendor_status = stasis(&["--json", "vendor", "status"], &project);
+    assert_eq!(vendor_status.status.code(), Some(0));
+    assert_eq!(json_stdout(&vendor_status)["result"]["current"], true);
     let agent_guide = fs::read_to_string(project.join("AGENTS.md")).expect("read agent guide");
     assert!(agent_guide.contains("stasis --json symbol list"));
     assert!(agent_guide.contains("stasis --json symbol references SYMBOL"));
@@ -354,6 +399,28 @@ fn project_commands_emit_stable_json_from_nested_directories() {
             .expect("read generated VS Code recommendations"),
         "{\n  \"recommendations\": [\n    \"stasislang.stasis\"\n  ]\n}\n"
     );
+    assert!(project
+        .join("vendor/stasis/src/runtime/host_frame.stasis")
+        .is_file());
+    assert!(project
+        .join("vendor/stasis/src/runtime/gfx_cmd.stasis")
+        .is_file());
+
+    fs::create_dir_all(project.join("src/game")).expect("create nested game source directory");
+    fs::write(
+        project.join("src/main.stasis"),
+        crlf(
+            "import \"game/player.stasis\";\n\nfunction main(): i32 {\n    return player_ready();\n}\n",
+        ),
+    )
+    .expect("write generated-project package import smoke entry");
+    fs::write(
+        project.join("src/game/player.stasis"),
+        crlf(
+            "import \"/vendor/stasis/src/stdlib/graphics.stasis\";\n\nfunction player_ready(): i32 {\n    return 1;\n}\n",
+        ),
+    )
+    .expect("write nested generated-project package import smoke");
 
     let formatted = stasis(&["--json", "fmt", "--check"], &project);
     assert_eq!(formatted.status.code(), Some(0));

@@ -9,6 +9,7 @@ import {
   Trace,
 } from "vscode-languageclient/node";
 import { LiveSession, LiveSessionState } from "./liveSession";
+import { buildLiveCollectionTableModel } from "./liveCollectionTable";
 import { buildLiveValueTree, LiveValueTreeNode } from "./liveValueTree";
 import { displayRuntimeValue, LiveCollection, LiveResponse, LiveValue } from "./protocol";
 import { resolveEditorToolchain } from "./toolchain";
@@ -258,8 +259,8 @@ class LiveValueItem extends vscode.TreeItem {
         ? collection.rows.filter((row) => row.values[activeField.field] === true).length
         : collection.rows.length;
       const filtered = filterInactiveRows && activeField ? `, ${shownRows} shown` : "";
-      this.description = `${collection.elementShape} [${collection.activeCount}/${collection.capacity}${truncated}${filtered}] · ${table ? "table" : "tree"}`;
-      this.tooltip = `${collection.path}\n${collection.fields.map((field) => `${field.field || "value"}: ${field.staticType}`).join("\n")}`;
+      this.description = `[${collection.activeCount}/${collection.capacity}${truncated}${filtered}] | ${table ? "table" : "tree"}`;
+      this.tooltip = `${collection.path}\n${collection.elementShape}\n${collection.fields.map((field) => `${field.field || "value"}: ${field.staticType}`).join("\n")}`;
       this.iconPath = new vscode.ThemeIcon(table ? "table" : "symbol-array");
       if (collection.fields.some((field) => field.field.length > 0)) {
         this.contextValue = table ? "stasisLiveCollectionTable" : "stasisLiveCollectionTree";
@@ -330,6 +331,14 @@ class LiveValuesProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
     this.emitter.fire(undefined);
   }
 
+  collection(path: string): LiveCollection | undefined {
+    return this.collections.find((collection) => collection.path === path);
+  }
+
+  get filtersInactiveRows(): boolean {
+    return this.filterInactiveRows;
+  }
+
   getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
     return element;
   }
@@ -341,7 +350,19 @@ class LiveValuesProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
       );
     }
     const status = new vscode.TreeItem(`Play session: ${this.state}`);
-    status.iconPath = new vscode.ThemeIcon(this.state === "stopped" ? "debug-stop" : "pulse");
+    status.description = this.state === "paused"
+      ? "Resume or step one tick from the toolbar"
+      : this.state === "running"
+        ? "Polling while Live Values is open"
+        : this.state === "starting"
+          ? "Preparing compiler and runtime"
+          : "Select to start";
+    status.tooltip = this.state === "paused"
+      ? "The game is paused. Use Resume or Step One Tick in the Live Values toolbar."
+      : `Stasis play session: ${this.state}`;
+    status.iconPath = new vscode.ThemeIcon(
+      this.state === "stopped" ? "debug-stop" : this.state === "paused" ? "debug-pause" : "pulse",
+    );
     status.contextValue = "stasisLiveStatus";
     if (this.state === "stopped") {
       status.command = { command: "stasis.startPlaySession", title: "Start Play Session" };
@@ -361,10 +382,157 @@ class LiveValuesProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
   }
 }
 
+class LiveCollectionTablePanel implements vscode.Disposable {
+  private panel: vscode.WebviewPanel | undefined;
+  private path: string | undefined;
+  private readonly subscription: vscode.Disposable;
+
+  constructor(
+    private readonly values: LiveValuesProvider,
+    private readonly onDidChangeVisibility: (visible: boolean) => void,
+  ) {
+    this.subscription = values.onDidChangeTreeData(() => this.render());
+  }
+
+  show(path: string): void {
+    if (this.path && this.path !== path) {
+      this.values.setCollectionTable(this.path, false);
+    }
+    this.path = path;
+    this.values.setCollectionTable(path, true);
+
+    if (!this.panel) {
+      const panel = vscode.window.createWebviewPanel(
+        "stasis.liveCollectionTable",
+        `Live Table: ${path}`,
+        vscode.ViewColumn.Beside,
+        { enableScripts: true, retainContextWhenHidden: true },
+      );
+      panel.webview.html = liveCollectionTableHtml(panel.webview);
+      panel.webview.onDidReceiveMessage((message: unknown) => {
+        if (asRecord(message)?.type === "ready") {
+          this.render();
+        }
+      });
+      panel.onDidChangeViewState((event) => {
+        this.onDidChangeVisibility(event.webviewPanel.visible);
+        if (event.webviewPanel.visible) {
+          this.render();
+        }
+      });
+      panel.onDidDispose(() => {
+        const closedPath = this.path;
+        this.panel = undefined;
+        this.path = undefined;
+        if (closedPath) {
+          this.values.setCollectionTable(closedPath, false);
+        }
+        this.onDidChangeVisibility(false);
+      });
+      this.panel = panel;
+    } else {
+      this.panel.title = `Live Table: ${path}`;
+      this.panel.reveal(vscode.ViewColumn.Beside, true);
+    }
+    this.onDidChangeVisibility(true);
+    this.render();
+  }
+
+  close(path: string): void {
+    if (this.path === path && this.panel) {
+      this.panel.dispose();
+      return;
+    }
+    this.values.setCollectionTable(path, false);
+  }
+
+  dispose(): void {
+    this.subscription.dispose();
+    this.panel?.dispose();
+  }
+
+  private render(): void {
+    if (!this.panel || !this.path) {
+      return;
+    }
+    const collection = this.values.collection(this.path);
+    if (!collection) {
+      void this.panel.webview.postMessage({ type: "unavailable", path: this.path });
+      return;
+    }
+    void this.panel.webview.postMessage({
+      type: "update",
+      model: buildLiveCollectionTableModel(collection, this.values.filtersInactiveRows),
+    });
+  }
+}
+
+function liveCollectionTableHtml(webview: vscode.Webview): string {
+  const nonce = Array.from({ length: 32 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <style nonce="${nonce}">
+    :root { color-scheme: light dark; }
+    body { color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); margin: 0; padding: 20px; }
+    header { align-items: end; display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: space-between; margin-bottom: 16px; }
+    h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+    #shape { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); }
+    #metadata { color: var(--vscode-descriptionForeground); font-size: 12px; }
+    .table-frame { border: 1px solid var(--vscode-panel-border); max-height: calc(100vh - 105px); overflow: auto; }
+    table { border-collapse: separate; border-spacing: 0; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); min-width: 100%; width: max-content; }
+    th, td { border-bottom: 1px solid var(--vscode-panel-border); border-right: 1px solid var(--vscode-panel-border); padding: 7px 12px; text-align: left; white-space: nowrap; }
+    th:last-child, td:last-child { border-right: 0; }
+    thead th { background: var(--vscode-sideBar-background); font-family: var(--vscode-font-family); font-weight: 600; position: sticky; top: 0; z-index: 1; }
+    thead small { color: var(--vscode-descriptionForeground); display: block; font-family: var(--vscode-editor-font-family); font-size: 10px; font-weight: 400; margin-top: 2px; }
+    tbody tr:nth-child(even) { background: var(--vscode-list-inactiveSelectionBackground); }
+    tbody tr:hover { background: var(--vscode-list-hoverBackground); }
+    tbody tr:last-child td { border-bottom: 0; }
+    .index { color: var(--vscode-descriptionForeground); text-align: right; }
+    .empty { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); padding: 20px; text-align: center; }
+  </style>
+</head>
+<body>
+  <header><div><h1 id="path">Live collection</h1><div id="shape"></div></div><div id="metadata"></div></header>
+  <div class="table-frame"><table aria-label="Live collection values"><thead><tr id="columns"></tr></thead><tbody id="rows"></tbody></table></div>
+  <script nonce="${nonce}">
+    const path = document.getElementById('path');
+    const shape = document.getElementById('shape');
+    const metadata = document.getElementById('metadata');
+    const columns = document.getElementById('columns');
+    const rows = document.getElementById('rows');
+    const vscode = acquireVsCodeApi();
+    const cell = (tag, text, className) => { const node = document.createElement(tag); node.textContent = text; if (className) node.className = className; return node; };
+    window.addEventListener('message', ({ data }) => {
+      if (data.type === 'unavailable') { path.textContent = data.path; metadata.textContent = 'Collection unavailable'; columns.replaceChildren(); rows.replaceChildren(); return; }
+      if (data.type !== 'update') return;
+      const model = data.model;
+      path.textContent = model.path;
+      shape.textContent = model.elementShape;
+      const details = [model.activeCount + '/' + model.capacity + ' rows', model.rows.length + ' shown', 'tick ' + model.tick];
+      if (model.filtered) details.splice(2, 0, 'inactive filtered');
+      if (model.rowsTruncated) details.push('partial snapshot');
+      metadata.textContent = details.join('  ·  ');
+      const indexHeader = cell('th', 'index'); indexHeader.appendChild(cell('small', 'i32')); columns.replaceChildren(indexHeader);
+      for (const column of model.columns) { const header = cell('th', column.label); header.appendChild(cell('small', column.staticType)); columns.appendChild(header); }
+      rows.replaceChildren();
+      for (const row of model.rows) { const tr = document.createElement('tr'); tr.appendChild(cell('td', String(row.index), 'index')); row.cells.forEach(value => tr.appendChild(cell('td', value))); rows.appendChild(tr); }
+      if (model.rows.length === 0) { const td = cell('td', 'No rows match the current filter.', 'empty'); td.colSpan = model.columns.length + 1; const tr = document.createElement('tr'); tr.appendChild(td); rows.appendChild(tr); }
+    });
+    vscode.postMessage({ type: 'ready' });
+  </script>
+</body>
+</html>`;
+}
+
 class LiveController implements vscode.Disposable {
   private current: LiveSession | undefined;
   private sessionSubscriptions: vscode.Disposable[] = [];
   private valuesViewVisible = false;
+  private tableViewVisible = false;
   private visibilityUpdate: Promise<void> = Promise.resolve();
   readonly status: vscode.StatusBarItem;
 
@@ -459,9 +627,14 @@ class LiveController implements vscode.Disposable {
     await this.queueVisibilityUpdate();
   }
 
+  async setTableViewVisible(visible: boolean): Promise<void> {
+    this.tableViewVisible = visible;
+    await this.queueVisibilityUpdate();
+  }
+
   async refreshLiveValues(): Promise<void> {
-    if (!this.valuesViewVisible) {
-      throw new Error("Open the Live Values view before refreshing live data.");
+    if (!this.valuesViewVisible && !this.tableViewVisible) {
+      throw new Error("Open Live Values or a live collection table before refreshing live data.");
     }
     await this.requireSession().refresh(this.refreshEveryTicks());
   }
@@ -512,7 +685,7 @@ class LiveController implements vscode.Disposable {
         if (!session || session.state === "stopped" || session.state === "starting") {
           return;
         }
-        if (this.valuesViewVisible) {
+        if (this.valuesViewVisible || this.tableViewVisible) {
           await session.refresh(this.refreshEveryTicks());
         } else {
           await session.stopRefreshing();
@@ -806,6 +979,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     output,
     (root) => languageClients.clientForRoot(root),
   );
+  const collectionTable = new LiveCollectionTablePanel(values, (visible) => {
+    void showCommandError(() => controller.setTableViewVisible(visible));
+  });
   const liveValuesView = vscode.window.createTreeView("stasis.liveValues", {
     treeDataProvider: values,
   });
@@ -819,6 +995,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     output,
     languageClients,
     controller,
+    collectionTable,
     liveValuesView,
     tests,
     vscode.debug.registerDebugAdapterDescriptorFactory("stasis", debugFactory),
@@ -867,12 +1044,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     }),
     command("stasis.showCollectionAsTable", async (item) => {
       if (item instanceof LiveValueItem && item.node.kind === "collection") {
-        values.setCollectionTable(item.node.path, true);
+        collectionTable.show(item.node.path);
       }
     }),
     command("stasis.showCollectionAsTree", async (item) => {
       if (item instanceof LiveValueItem && item.node.kind === "collection") {
-        values.setCollectionTable(item.node.path, false);
+        collectionTable.close(item.node.path);
       }
     }),
     command("stasis.refreshLiveValues", async () => controller.refreshLiveValues()),

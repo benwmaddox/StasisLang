@@ -253,7 +253,7 @@
     "bundle:e2e": "esbuild src/e2e/run.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/e2e-run.cjs && esbuild src/e2e/suite.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/e2e-suite.cjs",
     "check": "tsc --noEmit",
     "test": "npm run test:unit",
-    "test:unit": "npm run check && esbuild src/protocol.test.ts src/liveValueTree.test.ts --bundle --platform=node --target=node20 --format=cjs --outdir=dist && node --test dist/protocol.test.js dist/liveValueTree.test.js",
+    "test:unit": "npm run check && esbuild src/protocol.test.ts src/liveValueTree.test.ts src/liveCollectionTable.test.ts --bundle --platform=node --target=node20 --format=cjs --outdir=dist && node --test dist/protocol.test.js dist/liveValueTree.test.js dist/liveCollectionTable.test.js",
     "test:e2e": "npm run package && npm run bundle:e2e && node dist/e2e-run.cjs",
     "prepackage": "node scripts/prepare-toolchain.mjs && node -e \"require('node:fs').mkdirSync('.vsix', { recursive: true })\"",
     "package": "npm run build && vsce package --out .vsix/stasislang.stasis.vsix"

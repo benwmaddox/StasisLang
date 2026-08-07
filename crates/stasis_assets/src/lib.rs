@@ -420,7 +420,7 @@ pub fn prepare_asset_bundle(
 
         let cache_key = sha256_bytes(
             format!(
-                "stasis-png-v1:{}:{output_width}:{output_height}",
+                "stasis-png-v2-linear-premultiplied-lanczos3:{}:{output_width}:{output_height}",
                 source.entry.content_sha256
             )
             .as_bytes(),
@@ -440,11 +440,7 @@ pub fn prepare_asset_bundle(
                     image.height()
                 ));
             }
-            let resized = image.resize_exact(
-                output_width,
-                output_height,
-                image::imageops::FilterType::Lanczos3,
-            );
+            let resized = resize_png_high_quality(&image, output_width, output_height);
             let temporary = cache_root.join(format!("{cache_key}.{}.tmp", std::process::id()));
             strip_opaque_alpha(resized)
                 .save_with_format(&temporary, image::ImageFormat::Png)
@@ -456,21 +452,19 @@ pub fn prepare_asset_bundle(
                         entry.id
                     )
                 })?;
-            } else {
-                if let Err(error) = fs::rename(&temporary, &cached) {
-                    if cached.is_file() {
-                        fs::remove_file(&temporary).map_err(|remove_error| {
-                            format!(
-                                "failed to resolve cache race for {} after {error}: {remove_error}",
-                                entry.id
-                            )
-                        })?;
-                    } else {
-                        return Err(format!(
-                            "failed to publish cached asset {}: {error}",
+            } else if let Err(error) = fs::rename(&temporary, &cached) {
+                if cached.is_file() {
+                    fs::remove_file(&temporary).map_err(|remove_error| {
+                        format!(
+                            "failed to resolve cache race for {} after {error}: {remove_error}",
                             entry.id
-                        ));
-                    }
+                        )
+                    })?;
+                } else {
+                    return Err(format!(
+                        "failed to publish cached asset {}: {error}",
+                        entry.id
+                    ));
                 }
             }
             fs::copy(&cached, &destination)
@@ -535,6 +529,69 @@ fn prepared_axis(logical: u32, display_scale: f64, render_scale: f64) -> u32 {
     (logical as f64 * display_scale * render_scale)
         .ceil()
         .clamp(1.0, 16_384.0) as u32
+}
+
+fn resize_png_high_quality(
+    image: &image::DynamicImage,
+    output_width: u32,
+    output_height: u32,
+) -> image::DynamicImage {
+    let source = image.to_rgba8();
+    let linear_premultiplied =
+        image::ImageBuffer::from_fn(source.width(), source.height(), |x, y| {
+            let pixel = source.get_pixel(x, y);
+            let alpha = f32::from(pixel[3]) / 255.0;
+            image::Rgba([
+                srgb_to_linear(f32::from(pixel[0]) / 255.0) * alpha,
+                srgb_to_linear(f32::from(pixel[1]) / 255.0) * alpha,
+                srgb_to_linear(f32::from(pixel[2]) / 255.0) * alpha,
+                alpha,
+            ])
+        });
+    let resized = image::imageops::resize(
+        &linear_premultiplied,
+        output_width,
+        output_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let encoded = image::RgbaImage::from_fn(output_width, output_height, |x, y| {
+        let pixel = resized.get_pixel(x, y);
+        let alpha = pixel[3].clamp(0.0, 1.0);
+        let encode = |channel: f32| {
+            if alpha <= f32::EPSILON {
+                0
+            } else {
+                normalized_to_u8(linear_to_srgb((channel / alpha).clamp(0.0, 1.0)))
+            }
+        };
+        image::Rgba([
+            encode(pixel[0]),
+            encode(pixel[1]),
+            encode(pixel[2]),
+            normalized_to_u8(alpha),
+        ])
+    });
+    image::DynamicImage::ImageRgba8(encoded)
+}
+
+fn srgb_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(value: f32) -> f32 {
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn normalized_to_u8(value: f32) -> u8 {
+    (value * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
 fn strip_opaque_alpha(image: image::DynamicImage) -> image::DynamicImage {
@@ -1189,5 +1246,45 @@ mod tests {
         assert_eq!(second.resized_assets, 1);
         assert_eq!(second.cache_hits, 1);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn prepared_png_resizes_in_linear_light() {
+        let source = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(2, 1, |x, _| {
+            let value = if x == 0 { 0 } else { 255 };
+            image::Rgba([value, value, value, 255])
+        }));
+
+        let resized = resize_png_high_quality(&source, 1, 1).to_rgba8();
+        let value = resized.get_pixel(0, 0)[0];
+
+        assert!(
+            (180..=195).contains(&value),
+            "linear-light midpoint should be near 188, found {value}"
+        );
+    }
+
+    #[test]
+    fn prepared_png_resizes_premultiplied_alpha_without_color_halos() {
+        let source = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 255, 0])
+            }
+        }));
+
+        let resized = resize_png_high_quality(&source, 1, 1).to_rgba8();
+        let pixel = resized.get_pixel(0, 0);
+
+        assert!(pixel[0] >= 250, "opaque color should remain red: {pixel:?}");
+        assert!(
+            pixel[2] <= 5,
+            "transparent blue must not bleed in: {pixel:?}"
+        );
+        assert!(
+            (120..=135).contains(&pixel[3]),
+            "alpha should average: {pixel:?}"
+        );
     }
 }

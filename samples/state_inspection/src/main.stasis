@@ -1,19 +1,31 @@
 struct Enemy {
+    // Remaining hit points for this enemy.
     hp: i32;
+    // Movement speed in world units per tick.
     speed: f32;
+    // Whether the enemy participates in the current simulation.
     active: bool;
 }
 
 struct SimulationState {
+    // Current gameplay score, updated once per accepted tick.
     score: i32;
     enemies: Enemy[4];
 }
 
 global state: SimulationState;
 global render_cmd_i32: i32[16];
+// Scalar mirror used to demonstrate live-value hover.
+global live_score: i32;
+
+// Combines a base score with a gameplay bonus.
+function add_score(amount: i32, bonus: i32): i32 {
+    return amount + bonus;
+}
 
 function main(): i32 {
-    state.score = 10;
+    live_score = add_score(8, 2);
+    state.score = live_score;
     state.enemies[0].hp = 3;
     state.enemies[0].speed = 1.0;
     state.enemies[0].active = true;
@@ -27,13 +39,20 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    state.score += 1;
+    live_score += 1;
+    if (live_score >= 70) {
+        live_score = 10;
+    }
+    state.score = live_score;
     state.enemies[1].hp -= 1;
+    if (state.enemies[1].hp <= 0) {
+        state.enemies[1].hp = 8;
+    }
     return 0;
 }
 
 function render(): i32 {
-    render_cmd_i32[0] = state.score;
+    render_cmd_i32[0] = live_score;
     return 0;
 }
 

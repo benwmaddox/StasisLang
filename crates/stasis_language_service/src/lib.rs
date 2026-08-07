@@ -9,7 +9,7 @@ use std::sync::Arc;
 use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
-use stasis_compiler::frontend::parser::completion_expected_type;
+use stasis_compiler::frontend::parser::{completion_expected_type, parse_top_level_functions};
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, organize_workshop_imports, plan_workshop_rename,
     prepare_workshop_rename, workshop_call_hierarchy, workshop_completion_items,
@@ -397,7 +397,7 @@ impl LiveSessionBroker {
             return None;
         }
         let accepted_hash = batch.source_hashes.get(owner_file)?;
-        if accepted_hash != &workshop_source_hash(owner_source) {
+        if !source_matches_hash(owner_source, accepted_hash) {
             return None;
         }
         batch
@@ -434,7 +434,7 @@ impl LiveSessionBroker {
                 files
                     .iter()
                     .find(|file| file.path == *path)
-                    .is_none_or(|file| &workshop_source_hash(&file.source) != accepted_hash)
+                    .is_none_or(|file| !source_matches_hash(&file.source, accepted_hash))
             })
         {
             return Vec::new();
@@ -463,6 +463,16 @@ impl LiveSessionBroker {
             })
             .collect()
     }
+}
+
+fn source_matches_hash(source: &str, accepted_hash: &str) -> bool {
+    if workshop_source_hash(source) == accepted_hash {
+        return true;
+    }
+    // Editors normalize line endings, while the running compiler hashes disk text.
+    let lf_source = source.replace("\r\n", "\n");
+    workshop_source_hash(&lf_source) == accepted_hash
+        || workshop_source_hash(&lf_source.replace('\n', "\r\n")) == accepted_hash
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1299,20 +1309,46 @@ impl LanguageService {
         let document = snapshot
             .document(path)
             .ok_or_else(|| format!("navigation document is not indexed: '{path}'"))?;
-        let symbol = reference_symbol_at(&document.text, byte_offset)
-            .ok_or_else(|| "no Stasis symbol at navigation position".to_string())?;
+        let Some(symbol) = reference_symbol_at(&document.text, byte_offset) else {
+            return Ok(Vec::new());
+        };
         let project_root = self.project_root.clone();
-        if let Some(locations) = self.language_index.as_ref().and_then(|index| {
-            index
-                .definitions
-                .definition(&symbol)
-                .and_then(|resolution| {
-                    remap_definition_locations(&project_root, &snapshot, index, &resolution)
-                })
-        }) {
-            return Ok(locations);
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let has_scoped_candidate = self.language_index.as_ref().is_some_and(|index| {
+            index.workshop_items.iter().any(|item| {
+                item.text == symbol
+                    && matches!(item.kind.as_str(), "local" | "parameter")
+                    && item
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.file == relative)
+            })
+        });
+        if !has_scoped_candidate {
+            if let Some(locations) = self.language_index.as_ref().and_then(|index| {
+                index
+                    .definitions
+                    .definition(&symbol)
+                    .and_then(|resolution| {
+                        remap_definition_locations(&project_root, &snapshot, index, &resolution)
+                    })
+            }) {
+                return Ok(locations);
+            }
         }
+        let context = self.query_context(&relative, byte_offset, &document.text)?;
         let index = self.language_index()?;
+        if let Some(location) = scoped_binding_definition(
+            &project_root,
+            index,
+            &relative,
+            &document.text,
+            byte_offset,
+            &symbol,
+            &context,
+        )? {
+            return Ok(vec![location]);
+        }
         if let Some(resolution) = index.definitions.definition(&symbol) {
             if let Some(locations) =
                 remap_definition_locations(&project_root, &snapshot, index, &resolution)
@@ -2571,6 +2607,109 @@ fn workshop_completion_specificity<'a>(
     }
 }
 
+fn scoped_binding_definition(
+    project_root: &str,
+    index: &LanguageIndex,
+    relative_path: &str,
+    source: &str,
+    byte_offset: usize,
+    symbol: &str,
+    context: &CompletionContext,
+) -> Result<Option<LanguageLocation>, String> {
+    let Some(file) = index.files.iter().find(|file| file.path == relative_path) else {
+        return Ok(None);
+    };
+    let mut matches = index
+        .workshop_items
+        .iter()
+        .filter(|item| {
+            item.text == symbol
+                && matches!(item.kind.as_str(), "local" | "parameter")
+                && scoped_completion_owner_matches(item, context)
+        })
+        .filter_map(|item| {
+            let declaration = scoped_binding_declaration_range(&file.source, item).ok()??;
+            let visible = item.scope.as_ref().is_some_and(|scope| {
+                scope.visible_from <= byte_offset && byte_offset <= scope.visible_to
+            });
+            let on_declaration = declaration.start <= byte_offset && byte_offset <= declaration.end;
+            (visible || on_declaration).then_some((item, declaration))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(item, _)| workshop_completion_specificity(item, context));
+    let Some((_, indexed_range)) = matches.first() else {
+        return Ok(None);
+    };
+    let Some(range) = UnchangedRegions::new(&file.source, source).remap(
+        &file.source,
+        source,
+        indexed_range.clone(),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(LanguageLocation {
+        path: absolute_source_path(project_root, relative_path),
+        range,
+    }))
+}
+
+fn scoped_completion_owner_matches(
+    item: &WorkshopCompletionItem,
+    context: &CompletionContext,
+) -> bool {
+    let Some(scope) = item.scope.as_ref() else {
+        return false;
+    };
+    context.owner.as_deref() == Some(scope.owner.as_str())
+        && context.file.as_deref() == Some(scope.file.as_str())
+        && context
+            .owner_signature
+            .as_deref()
+            .is_none_or(|signature| scope.owner_signature.as_deref() == Some(signature))
+}
+
+fn scoped_binding_declaration_range(
+    source: &str,
+    item: &WorkshopCompletionItem,
+) -> Result<Option<Range<usize>>, String> {
+    let Some(scope) = item.scope.as_ref() else {
+        return Ok(None);
+    };
+    if item.kind == "local" {
+        let start = scope.visible_from.saturating_sub(item.text.len());
+        return Ok(
+            (source.get(start..scope.visible_from) == Some(item.text.as_str()))
+                .then_some(start..scope.visible_from),
+        );
+    }
+    let Some(owner_end) = scope.owner_end else {
+        return Ok(None);
+    };
+    let Some(function) = parse_top_level_functions(source)?
+        .into_iter()
+        .find(|function| function.name == scope.owner && function.body_range.end == owner_end)
+    else {
+        return Ok(None);
+    };
+    let tokens = lex(source)?;
+    Ok(tokens
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, token)| {
+            function.signature_range.start <= token.start
+                && token.end <= function.signature_range.end
+                && token.kind == TokenKind::Identifier
+                && token_text(source, *token) == item.text
+        })
+        .find(|(index, _)| {
+            tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind == TokenKind::Colon)
+        })
+        .map(|(_, token)| token.start..token.end))
+}
+
 fn item_signature(item: &WorkshopCompletionItem) -> Option<String> {
     item.signature
         .clone()
@@ -2582,7 +2721,7 @@ fn documentation_for_completion(
     item: &WorkshopCompletionItem,
 ) -> Option<String> {
     let declaration_name = item.text.rsplit('.').next().unwrap_or(&item.text);
-    index
+    let direct = index
         .source_items
         .iter()
         .filter(|source| source.file == item.file && source.name == declaration_name)
@@ -2596,7 +2735,48 @@ fn documentation_for_completion(
                 .as_deref()
                 .is_none_or(|signature| source.signature == signature)
         })
-        .find_map(|source| leading_documentation(&source.source))
+        .find_map(|source| leading_documentation(&source.source));
+    direct.or_else(|| {
+        let container = match item.kind.as_str() {
+            "field" => index.source_items.iter().find(|source| {
+                source.file == item.file
+                    && source.kind == WorkshopSourceItemKind::Struct
+                    && item.owner.as_deref() == Some(source.name.as_str())
+            }),
+            "global" | "constant" => index.source_items.iter().find(|source| {
+                source.file == item.file && source.kind == WorkshopSourceItemKind::Globals
+            }),
+            _ => None,
+        }?;
+        declaration_documentation(&container.source, declaration_name)
+    })
+}
+
+fn declaration_documentation(source: &str, declaration_name: &str) -> Option<String> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let declaration = lines.iter().position(|line| {
+        let trimmed = line.trim_start();
+        let declaration = trimmed
+            .strip_prefix("global ")
+            .or_else(|| trimmed.strip_prefix("const "))
+            .unwrap_or(trimmed);
+        declaration
+            .strip_prefix(declaration_name)
+            .is_some_and(|suffix| suffix.trim_start().starts_with(':'))
+    })?;
+    let mut comments = Vec::new();
+    for line in lines[..declaration].iter().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() && comments.is_empty() {
+            continue;
+        }
+        let Some(comment) = trimmed.strip_prefix("//") else {
+            break;
+        };
+        comments.push(comment.trim());
+    }
+    comments.reverse();
+    (!comments.is_empty()).then(|| comments.join("\n"))
 }
 
 fn leading_documentation(source: &str) -> Option<String> {
@@ -3246,7 +3426,10 @@ mod tests {
         let root = std::env::temp_dir().join("stasis-language-service-intelligence");
         let path = root.join("src/main.stasis");
         let path_text = path.to_string_lossy().replace('\\', "/");
-        let source = r#"struct Enemy { hp: i32; }
+        let source = r#"struct Enemy {
+    // Remaining hit points.
+    hp: i32;
+}
 
 // Creates an enemy with explicit health.
 function spawn_enemy(count: i32, health: i32): Enemy {
@@ -3596,6 +3779,10 @@ function main(): i32 {
         assert_eq!(field.kind, "field");
         assert_eq!(field.type_name.as_deref(), Some("i32"));
         assert_eq!(field.owner.as_deref(), Some("Enemy"));
+        assert_eq!(
+            field.documentation.as_deref(),
+            Some("Remaining hit points.")
+        );
 
         let function_start = source.find("spawn_enemy(1").expect("function call");
         let function = service
@@ -3658,6 +3845,43 @@ function main(): i32 {
                 .and_then(|hover| hover.live_value),
             None
         );
+    }
+
+    #[test]
+    fn hover_composes_documentation_and_live_value_for_nested_state_field() {
+        let root = std::env::temp_dir().join("stasis-language-service-nested-live-hover");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct State {\n    // Current gameplay score.\n    score: i32;\n}\nglobal state: State;\nfunction main(): i32 { return state.score; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        service.publish_live_observations(LiveObservationBatch {
+            session_id: "nested-session".into(),
+            generation: 2,
+            source_hashes: BTreeMap::from([(
+                "src/main.stasis".into(),
+                workshop_source_hash(&source.replace('\n', "\r\n")),
+            )]),
+            observations: vec![LiveObservation {
+                path: "state.score".into(),
+                type_name: Some("i32".into()),
+                value: "42".into(),
+                tick: 9,
+            }],
+            indexed_collections: Vec::new(),
+            complete: true,
+        });
+
+        let offset = source.rfind("state.score").expect("nested score use") + 8;
+        let hover = service
+            .hover(&path_text, offset)
+            .expect("nested hover")
+            .expect("nested hover information");
+        assert_eq!(
+            hover.documentation.as_deref(),
+            Some("Current gameplay score.")
+        );
+        assert_eq!(hover.live_value.as_deref(), Some("42 (tick 9)"));
     }
 
     #[test]
@@ -3727,6 +3951,11 @@ function main(): i32 {
     #[test]
     fn navigation_and_symbols_share_compiler_owned_spans() {
         let (mut service, path, source) = intelligence_service();
+        let punctuation = source.find('{').expect("struct body");
+        assert!(service
+            .definition(&path, punctuation)
+            .expect("definition miss")
+            .is_empty());
         let call = source.find("spawn_enemy(1").expect("function call") + 2;
         let definitions = service.definition(&path, call).expect("definition");
         assert_eq!(definitions.len(), 1);
@@ -3751,6 +3980,44 @@ function main(): i32 {
             .expect("workspace symbols");
         assert_eq!(workspace.len(), 1);
         assert_eq!(workspace[0].name, "spawn_enemy");
+    }
+
+    #[test]
+    fn same_function_bindings_navigate_to_the_lexically_visible_declaration() {
+        let root = std::env::temp_dir().join("stasis-language-service-local-navigation");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "global value: i32;\nfunction compute(seed: i32): i32 {\n    let value = seed;\n    {\n        let value: i32 = 2;\n        value += 1;\n    }\n    return value;\n}\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+
+        let parameter_use = source.find("= seed").expect("parameter use") + 3;
+        let parameter = service
+            .definition(&path_text, parameter_use)
+            .expect("parameter definition");
+        assert_eq!(parameter.len(), 1);
+        assert_eq!(&source[parameter[0].range.clone()], "seed");
+        assert!(parameter[0].range.start < source.find('{').expect("function body"));
+
+        let inner_use = source.find("value += 1").expect("inner local use") + 2;
+        let inner = service
+            .definition(&path_text, inner_use)
+            .expect("inner local definition");
+        assert_eq!(inner.len(), 1);
+        assert_eq!(
+            inner[0].range.start,
+            source.rfind("let value").expect("inner declaration") + "let ".len()
+        );
+
+        let outer_use = source.rfind("return value").expect("outer local use") + "return ".len();
+        let outer = service
+            .definition(&path_text, outer_use)
+            .expect("outer local definition");
+        assert_eq!(outer.len(), 1);
+        assert_eq!(
+            outer[0].range.start,
+            source.find("let value").expect("outer declaration") + "let ".len()
+        );
     }
 
     #[test]

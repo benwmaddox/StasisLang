@@ -966,9 +966,9 @@ fn maybe_cleanup_stale_stasis_cache() {
     match cleanup_stale_stasis_cache(cache_root, ttl) {
         Ok(summary) => {
             if summary.removed_files > 0 || summary.removed_dirs > 0 {
-                println!("cache_cleanup_removed_files={}", summary.removed_files);
-                println!("cache_cleanup_removed_dirs={}", summary.removed_dirs);
-                println!("cache_cleanup_ttl_days={ttl_days}");
+                eprintln!("cache_cleanup_removed_files={}", summary.removed_files);
+                eprintln!("cache_cleanup_removed_dirs={}", summary.removed_dirs);
+                eprintln!("cache_cleanup_ttl_days={ttl_days}");
             }
         }
         Err(message) => {
