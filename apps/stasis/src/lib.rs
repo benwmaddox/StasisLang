@@ -4262,6 +4262,31 @@ mod tests {
     }
 
     #[test]
+    fn explicit_window_size_request_restores_the_desktop_window() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let resize_start = graphics_source
+            .find("STASIS_EXPORT void stasis_set_window_size")
+            .expect("graphics runtime should expose window resizing");
+        let resize_end = graphics_source[resize_start..]
+            .find("STASIS_EXPORT int stasis_set_fullscreen")
+            .expect("window resizing should precede fullscreen control")
+            + resize_start;
+        let resize_source = &graphics_source[resize_start..resize_end];
+        let restore = resize_source
+            .find("SDL_RestoreWindow(g_window);")
+            .expect("an explicit size should restore a maximized or minimized window");
+        let resize = resize_source
+            .find("SDL_SetWindowSize(g_window, width, height);")
+            .expect("an explicit size should resize the restored window");
+
+        assert!(
+            restore < resize
+                && resize_source[restore..resize].contains("SDL_SyncWindow(g_window);"),
+            "desktop restore must complete before applying an explicit window size"
+        );
+    }
+
+    #[test]
     fn macos_runner_is_packaged_for_retina_drawables() {
         let runner_plist = STASIS_RUNNER_MACOS_PLIST.replace("\r\n", "\n");
         for required in [

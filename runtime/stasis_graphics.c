@@ -4046,7 +4046,13 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
     g_window_height = height;
     g_window_resized = true;
 #if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+    const SDL_WindowFlags window_flags = SDL_GetWindowFlags(g_window);
+    if ((window_flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) {
+        SDL_RestoreWindow(g_window);
+        SDL_SyncWindow(g_window);
+    }
     SDL_SetWindowSize(g_window, width, height);
+    SDL_SyncWindow(g_window);
 #endif
     stasis_sync_display_metrics();
 
