@@ -4265,10 +4265,10 @@ mod tests {
     fn explicit_window_size_request_restores_the_desktop_window() {
         let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
         let resize_start = graphics_source
-            .find("STASIS_EXPORT void stasis_set_window_size")
+            .find("STASIS_EXPORT void stasis_set_window_size(int width, int height) {")
             .expect("graphics runtime should expose window resizing");
         let resize_end = graphics_source[resize_start..]
-            .find("STASIS_EXPORT int stasis_set_fullscreen")
+            .find("STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {")
             .expect("window resizing should precede fullscreen control")
             + resize_start;
         let resize_source = &graphics_source[resize_start..resize_end];
