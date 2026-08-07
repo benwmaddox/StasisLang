@@ -75,10 +75,19 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
 }
 
 static void log_package_provenance(void) {
-    const char* base = SDL_GetBasePath();
-    if (!base) return;
+    const char* asset_root = SDL_getenv("STASIS_ASSET_ROOT");
+    const char* base = NULL;
+    if (!asset_root || !*asset_root) {
+        base = SDL_GetBasePath();
+        asset_root = base;
+    }
+    if (!asset_root) return;
     char path[1024];
-    int written = snprintf(path, sizeof(path), "%sstasis_provenance.json", base);
+    size_t root_len = strlen(asset_root);
+    const char* separator = root_len > 0 &&
+        (asset_root[root_len - 1] == '/' || asset_root[root_len - 1] == '\\') ? "" : "/";
+    int written = snprintf(
+        path, sizeof(path), "%s%sstasis_provenance.json", asset_root, separator);
     if (written < 0 || (size_t)written >= sizeof(path)) return;
     FILE* file = fopen(path, "rb");
     if (!file) return;
@@ -3729,6 +3738,10 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         native_request_height = display_mode->h;
     }
     window_flags |= SDL_WINDOW_FULLSCREEN;
+#else
+    /* Let the desktop window manager fill its usable work area without
+       covering taskbars, docks, or panels. */
+    window_flags |= SDL_WINDOW_MAXIMIZED;
 #endif
 
     g_window = SDL_CreateWindow(

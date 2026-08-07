@@ -4200,6 +4200,14 @@ mod tests {
             "generated launchers must anchor packaged assets and reject mismatched graphics DLLs"
         );
         assert!(
+            STASIS_RUNNER_SOURCE.contains("\"%s\\\\app\", exe_dir")
+                && STASIS_RUNNER_SOURCE.contains("\"%s\\\\%s.launch\", payload_dir, exe_name")
+                && STASIS_RUNNER_SOURCE.contains("strncpy(exe_dir, payload_dir")
+                && STASIS_RUNNER_SOURCE.contains("\"%s\\\\%s\", exe_dir, dll_out")
+                && STASIS_RUNNER_SOURCE.contains("stasis_path_dirname(dll_path, program_dir"),
+            "Windows root launchers must resolve and anchor their nested app payload"
+        );
+        assert!(
             STASIS_RUNNER_SOURCE.contains("strncmp(out, \"\\\\\\\\?\\\\UNC\\\\\", 8)")
                 && STASIS_RUNNER_SOURCE.contains("strncmp(out, \"\\\\\\\\?\\\\\", 4)"),
             "Windows launchers must normalize extended drive and UNC paths before asset loading"
@@ -4231,6 +4239,26 @@ mod tests {
                 "Windows runner manifest should contain {required}"
             );
         }
+    }
+
+    #[test]
+    fn desktop_runtime_starts_maximized_in_the_window_manager_work_area() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let mobile_fullscreen = graphics_source
+            .find("window_flags |= SDL_WINDOW_FULLSCREEN;\n#else")
+            .expect("mobile window creation should retain its fullscreen policy");
+        let desktop_maximized = graphics_source
+            .find("window_flags |= SDL_WINDOW_MAXIMIZED;")
+            .expect("desktop window creation should request a maximized window");
+        let platform_guard_end = graphics_source[desktop_maximized..]
+            .find("#endif")
+            .expect("desktop window policy should remain platform guarded")
+            + desktop_maximized;
+
+        assert!(
+            mobile_fullscreen < desktop_maximized && desktop_maximized < platform_guard_end,
+            "desktop maximization must be the non-mobile branch of window creation"
+        );
     }
 
     #[test]

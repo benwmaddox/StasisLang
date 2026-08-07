@@ -48,6 +48,7 @@ const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
+const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",
     "nanosvg.h",
@@ -3318,8 +3319,9 @@ fn package_workspace(
     let provenance = resolve_package_provenance(development_build)?;
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
+    let executable_file_name = executable_name(&workspace.manifest.name);
     let assembled = (|| -> Result<(), String> {
-        let executable = staging_root.join(executable_name(&workspace.manifest.name));
+        let executable = staging_root.join(&executable_file_name);
         build_workspace(workspace, BuildMode::Release, Some(&executable))?;
         let summary = executable.with_file_name(format!(
             "{}.summary.json",
@@ -3333,17 +3335,24 @@ fn package_workspace(
                 )
             })?;
         }
+        #[cfg(windows)]
+        nest_windows_desktop_payload(&staging_root, &executable)?;
+        let payload_root = if cfg!(windows) {
+            staging_root.join(WINDOWS_DESKTOP_PAYLOAD_DIR)
+        } else {
+            staging_root.clone()
+        };
         copy_file(
             &workspace.root.join(MANIFEST_NAME),
-            &staging_root.join(MANIFEST_NAME),
+            &payload_root.join(MANIFEST_NAME),
         )?;
         if let Some(runtime) = installed_runtime_library() {
             copy_file(
                 &runtime,
-                &staging_root.join(runtime.file_name().unwrap_or_default()),
+                &payload_root.join(runtime.file_name().unwrap_or_default()),
             )?;
         }
-        write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
+        write_json_file(&payload_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
         Ok(())
     })();
     if let Err(error) = assembled {
@@ -3362,10 +3371,41 @@ fn package_workspace(
         json!({
             "target": target.as_str(),
             "output": display_path(&package_root),
-            "provenance": PACKAGE_PROVENANCE_NAME,
+            "provenance": if cfg!(windows) {
+                format!("{WINDOWS_DESKTOP_PAYLOAD_DIR}/{PACKAGE_PROVENANCE_NAME}")
+            } else {
+                PACKAGE_PROVENANCE_NAME.to_string()
+            },
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+#[cfg(windows)]
+fn nest_windows_desktop_payload(staging_root: &Path, executable: &Path) -> Result<(), String> {
+    let payload_root = staging_root.join(WINDOWS_DESKTOP_PAYLOAD_DIR);
+    fs::create_dir_all(&payload_root)
+        .map_err(|error| format!("failed to create {}: {error}", payload_root.display()))?;
+    let entries = fs::read_dir(staging_root)
+        .map_err(|error| format!("failed to read {}: {error}", staging_root.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to inspect {}: {error}", staging_root.display()))?;
+
+    for entry in entries {
+        let source = entry.path();
+        if source == executable || source == payload_root {
+            continue;
+        }
+        let destination = payload_root.join(entry.file_name());
+        fs::rename(&source, &destination).map_err(|error| {
+            format!(
+                "failed to move Windows package payload {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn stage_workspace_assets(
@@ -6241,6 +6281,43 @@ mod tests {
         .is_err());
         assert!(!root.join("dist/out").exists());
         assert!(!root.join("dist/.out.staging").exists());
+        remove_temp(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_desktop_package_keeps_only_the_launcher_at_root() {
+        let root = temp_dir("windows_desktop_payload");
+        fs::create_dir_all(root.join("assets")).expect("create staged assets");
+        let executable = root.join("demo.exe");
+        fs::write(&executable, "launcher").expect("write launcher");
+        fs::write(root.join("demo.exe.launch"), "dll=demo.dll").expect("write launch config");
+        fs::write(root.join("demo.dll"), "game").expect("write game library");
+        fs::write(root.join("stasis_graphics.dll"), "graphics").expect("write graphics runtime");
+
+        nest_windows_desktop_payload(&root, &executable).expect("nest package payload");
+
+        assert!(executable.is_file());
+        assert_eq!(
+            fs::read_dir(&root)
+                .expect("read package root")
+                .map(|entry| entry.expect("root entry").file_name())
+                .collect::<BTreeSet<_>>(),
+            [OsString::from("app"), OsString::from("demo.exe")]
+                .into_iter()
+                .collect()
+        );
+        for relative in [
+            "assets",
+            "demo.dll",
+            "demo.exe.launch",
+            "stasis_graphics.dll",
+        ] {
+            assert!(root
+                .join(WINDOWS_DESKTOP_PAYLOAD_DIR)
+                .join(relative)
+                .exists());
+        }
         remove_temp(&root);
     }
 
