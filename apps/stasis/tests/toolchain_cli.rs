@@ -400,15 +400,14 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         "{\n  \"recommendations\": [\n    \"stasislang.stasis\"\n  ]\n}\n"
     );
     assert!(project
-        .join("vendor/stasis/src/stdlib/internal/host_frame.stasis")
+        .join("vendor/stasis/stdlib/internal/host_frame.stasis")
         .is_file());
     assert!(project
-        .join("vendor/stasis/src/stdlib/internal/gfx_cmd.stasis")
+        .join("vendor/stasis/stdlib/internal/gfx_cmd.stasis")
         .is_file());
-    assert!(!project.join("vendor/stasis/src/runtime").exists());
-    assert!(!project
-        .join("vendor/stasis/src/stdlib/gfx_cmd.stasis")
-        .exists());
+    assert!(!project.join("vendor/stasis/src").exists());
+    assert!(!project.join("vendor/stasis/runtime").exists());
+    assert!(!project.join("vendor/stasis/stdlib/gfx_cmd.stasis").exists());
 
     fs::create_dir_all(project.join("src/game")).expect("create nested game source directory");
     fs::write(
@@ -421,7 +420,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     fs::write(
         project.join("src/game/player.stasis"),
         crlf(
-            "import \"/vendor/stasis/src/stdlib/graphics.stasis\";\n\nfunction player_ready(): i32 {\n    return 1;\n}\n",
+            "import \"/vendor/stasis/stdlib/graphics.stasis\";\n\nfunction player_ready(): i32 {\n    return 1;\n}\n",
         ),
     )
     .expect("write nested generated-project package import smoke");
@@ -1284,7 +1283,7 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     assert_eq!(created.status.code(), Some(0));
     fs::write(
         project.join("src/main.stasis"),
-        "import \"/vendor/stasis/src/stdlib/graphics.stasis\";\nfunction main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        "import \"/vendor/stasis/stdlib/graphics.stasis\";\nfunction main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
     )
     .expect("write mobile entry");
     fs::create_dir_all(project.join("assets")).expect("create assets");

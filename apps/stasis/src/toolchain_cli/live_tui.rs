@@ -331,8 +331,8 @@ fn load_ai_initial_context(
 fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
     let candidates = [
         (
-            project_root.join("vendor/stasis/src/stdlib"),
-            "/vendor/stasis/src/stdlib",
+            project_root.join("vendor/stasis/stdlib"),
+            "/vendor/stasis/stdlib",
         ),
         (
             project_root.join(".stasis_cache/toolchain/src/stdlib"),
@@ -4097,7 +4097,7 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ));
-        let stdlib = root.join("vendor/stasis/src/stdlib");
+        let stdlib = root.join("vendor/stasis/stdlib");
         fs::create_dir_all(stdlib.join("internal")).expect("stdlib dirs");
         fs::write(
             stdlib.join("stdlib.stasis"),
@@ -4132,7 +4132,7 @@ mod tests {
             "load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool"
         ));
         assert!(rendered.contains("\"extern\":true"));
-        assert!(rendered.contains("/vendor/stasis/src/stdlib/graphics.stasis"));
+        assert!(rendered.contains("/vendor/stasis/stdlib/graphics.stasis"));
         assert!(!rendered.contains("private_counter"));
         assert!(!rendered.contains("host_private"));
         fs::remove_dir_all(root).ok();
