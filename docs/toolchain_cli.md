@@ -115,6 +115,10 @@ cloning a generated repository, reactivate the checked-in hook with
 - `test [PATH]`: run Stasis tests in one isolated JIT session.
 - `run [--headless]`: JIT-compile and execute no-argument `main(): i32` or `main(): void`; an
   `i32` result is the process exit code. Headless execution is the default.
+- `play [ENTRY]`: launch the graphical hot-swap runtime. Without an entry override, discover the
+  nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
+  and display `name`. Explicit entries discover their own ancestor manifest, so project-root
+  imports and asset preparation remain anchored to the project even when play starts in `src/`.
 - `run --watch`: launch the existing graphical runner and hot-swap pipeline for game projects.
   The window title uses the manifest project name. Because it is an unbounded graphical session,
   watch mode rejects `--json` and `--headless`.

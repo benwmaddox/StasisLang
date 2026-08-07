@@ -7,7 +7,7 @@ returns distinct nonzero startup codes when any required resource fails.
 The Windows-only Rust integration test `apps/stasis/tests/windows_game_launch.rs` copies the fixture
 under `target/windows-launch-tests`, gives every child process a 60-second timeout, and exercises:
 
-- `stasis play ENTRY`;
+- `stasis play ENTRY` and manifest-inferred `stasis play` from a nested project directory;
 - `stasis run --watch`;
 - `stasis tui ENTRY` with a deterministic live script;
 - `stasis build --mode release`, followed by the generated AOT executable;

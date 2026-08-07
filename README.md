@@ -239,7 +239,7 @@ selected Stasis executable or the checked-in tree differs from that identity, th
 command restores `vendor/stasis` and updates its manifest automatically. Stasis owns that directory;
 review and commit the resulting Git changes with the compiler upgrade.
 
-For a graphical program, `stasis play path\to\main.stasis` keeps the process alive and watches the current import graph. Saving a `.stasis` file compiles a candidate in the background and attempts an all-or-nothing swap between ticks.
+For a graphical program, `stasis play path\to\main.stasis` keeps the process alive and watches the current import graph. From a project directory or any descendant, `stasis play` reads the entry and project name from the nearest ancestor `stasis.json`. Explicit entries still use that manifest root for project-root imports and asset preparation. Saving a `.stasis` file compiles a candidate in the background and attempts an all-or-nothing swap between ticks.
 
 From a project containing `stasis.json`, `stasis tui` opens the manifest entry in the persistent live-workspace interface. Pass an entry path to override the manifest for one invocation.
 
