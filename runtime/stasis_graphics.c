@@ -109,7 +109,11 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
 STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a);
 STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle);
 STASIS_EXPORT float stasis_gfx_measure_text_cached_height(int run_handle);
+STASIS_EXPORT int stasis_clipboard_load_ascii(char* out, int capacity);
+STASIS_EXPORT int stasis_clipboard_save_ascii(const char* value, int length);
+STASIS_EXPORT int stasis_storage_load_ascii(const char* scope, const char* key, char* out, int capacity);
 STASIS_EXPORT int stasis_storage_load_i32(const char* scope, const char* key, int fallback);
+STASIS_EXPORT int stasis_storage_save_ascii(const char* scope, const char* key, const char* value, int length);
 STASIS_EXPORT int stasis_storage_save_i32(const char* scope, const char* key, int value);
 
 STASIS_EXPORT int stasis_graphics_runtime_abi_version(void) {
@@ -5189,9 +5193,10 @@ static int stasis_storage_component_valid(const char* value) {
     return 1;
 }
 
-static int stasis_storage_i32_path(
+static int stasis_storage_path(
     const char* scope,
     const char* key,
+    const char* extension,
     char* path,
     size_t capacity,
     char** owned_root
@@ -5204,7 +5209,7 @@ static int stasis_storage_i32_path(
     }
     root = SDL_GetPrefPath("StasisLang", scope);
     if (!root) return 0;
-    written = snprintf(path, capacity, "%s%s.i32", root, key);
+    written = snprintf(path, capacity, "%s%s.%s", root, key, extension);
     if (written < 0 || (size_t)written >= capacity) {
         SDL_free(root);
         return 0;
@@ -5221,7 +5226,7 @@ STASIS_EXPORT int stasis_storage_load_i32(const char* scope, const char* key, in
     long long parsed;
     FILE* file;
     int trailing;
-    if (!stasis_storage_i32_path(scope, key, path, sizeof(path), &root)) return fallback;
+    if (!stasis_storage_path(scope, key, "i32", path, sizeof(path), &root)) return fallback;
     file = fopen(path, "rb");
     SDL_free(root);
     if (!file) return fallback;
@@ -5249,7 +5254,7 @@ STASIS_EXPORT int stasis_storage_save_i32(const char* scope, const char* key, in
     int path_written;
     int text_written;
     int ok = 1;
-    if (!stasis_storage_i32_path(scope, key, path, sizeof(path), &root)) return 0;
+    if (!stasis_storage_path(scope, key, "i32", path, sizeof(path), &root)) return 0;
     SDL_free(root);
     path_written = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
     text_written = snprintf(text, sizeof(text), "%d\n", value);
@@ -5278,6 +5283,116 @@ STASIS_EXPORT int stasis_storage_save_i32(const char* scope, const char* key, in
     }
 #endif
     return 1;
+}
+
+STASIS_EXPORT int stasis_storage_load_ascii(const char* scope, const char* key, char* out, int capacity) {
+    char path[1024];
+    char* root = NULL;
+    FILE* file;
+    int count;
+    int trailing;
+    int index;
+    if (!out || capacity <= 0 ||
+        !stasis_storage_path(scope, key, "ascii", path, sizeof(path), &root)) return -1;
+    file = fopen(path, "rb");
+    SDL_free(root);
+    if (!file) return -1;
+    count = (int)fread(out, 1, (size_t)capacity, file);
+    trailing = fgetc(file);
+    fclose(file);
+    if (trailing != EOF) return -1;
+    for (index = 0; index < count; index += 1) {
+        unsigned char ch = (unsigned char)out[index];
+        if (ch < 32 || ch > 126) return -1;
+    }
+    return count;
+}
+
+STASIS_EXPORT int stasis_storage_save_ascii(
+    const char* scope,
+    const char* key,
+    const char* value,
+    int length
+) {
+    char path[1024];
+    char temp_path[1032];
+    char* root = NULL;
+    FILE* file;
+    int path_written;
+    int index;
+    int ok = 1;
+    if (!value || length < 0 ||
+        !stasis_storage_path(scope, key, "ascii", path, sizeof(path), &root)) return 0;
+    SDL_free(root);
+    for (index = 0; index < length; index += 1) {
+        unsigned char ch = (unsigned char)value[index];
+        if (ch < 32 || ch > 126) return 0;
+    }
+    path_written = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    if (path_written < 0 || (size_t)path_written >= sizeof(temp_path)) return 0;
+    file = fopen(temp_path, "wb");
+    if (!file) return 0;
+    if (fwrite(value, 1, (size_t)length, file) != (size_t)length) ok = 0;
+    if (ok && fflush(file) != 0) ok = 0;
+    if (fclose(file) != 0) ok = 0;
+    if (!ok) {
+        remove(temp_path);
+        return 0;
+    }
+#if defined(_WIN32)
+    if (!MoveFileExA(temp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        remove(temp_path);
+        return 0;
+    }
+#else
+    if (rename(temp_path, path) != 0) {
+        remove(temp_path);
+        return 0;
+    }
+#endif
+    return 1;
+}
+
+STASIS_EXPORT int stasis_clipboard_load_ascii(char* out, int capacity) {
+    char* text;
+    size_t count;
+    size_t index;
+    if (!out || capacity <= 0) return -1;
+    text = SDL_GetClipboardText();
+    if (!text) return -1;
+    count = strlen(text);
+    if (count > (size_t)capacity) {
+        SDL_free(text);
+        return -1;
+    }
+    for (index = 0; index < count; index += 1) {
+        unsigned char ch = (unsigned char)text[index];
+        if (ch < 32 || ch > 126) {
+            SDL_free(text);
+            return -1;
+        }
+    }
+    memcpy(out, text, count);
+    SDL_free(text);
+    return (int)count;
+}
+
+STASIS_EXPORT int stasis_clipboard_save_ascii(const char* value, int length) {
+    char* text;
+    int index;
+    int result;
+    if (!value || length < 0) return 0;
+    for (index = 0; index < length; index += 1) {
+        unsigned char ch = (unsigned char)value[index];
+        if (ch < 32 || ch > 126) return 0;
+    }
+    text = (char*)malloc((size_t)length + 1);
+    if (!text) return 0;
+    memcpy(text, value, (size_t)length);
+    text[length] = '\0';
+    result = SDL_SetClipboardText(text) ? 1 : 0;
+    free(text);
+    return result;
 }
 
 /*

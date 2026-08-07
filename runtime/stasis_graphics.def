@@ -22,7 +22,11 @@ EXPORTS
     stasis_get_time_ms
     stasis_get_time_us
     stasis_sleep_ms
+    stasis_clipboard_load_ascii
+    stasis_clipboard_save_ascii
+    stasis_storage_load_ascii
     stasis_storage_load_i32
+    stasis_storage_save_ascii
     stasis_storage_save_i32
     stasis_audio_init
     stasis_audio_shutdown

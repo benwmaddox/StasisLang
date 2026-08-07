@@ -33,6 +33,9 @@ static char saved_scope[64];
 static char saved_key[64];
 static int saved_value;
 static int has_saved_value;
+static char saved_ascii[64];
+static int saved_ascii_length;
+static char clipboard_ascii[64] = "GG1-clipboard";
 
 int stasis_audio_init(int rate, int channels, int latency) {
     return rate > 0 && channels == 2 && latency > 0;
@@ -82,6 +85,30 @@ int stasis_storage_save_i32(const char *scope, const char *key, int value) {
     has_saved_value = 1;
     return 1;
 }
+int stasis_storage_load_ascii(const char *scope, const char *key, char *out, int capacity) {
+    int count = saved_ascii_length;
+    if (scope == NULL || key == NULL || count > capacity) return -1;
+    memcpy(out, saved_ascii, (size_t)count);
+    return count;
+}
+int stasis_storage_save_ascii(const char *scope, const char *key, const char *value, int length) {
+    if (scope == NULL || key == NULL || value == NULL || length < 0 || length > 63) return 0;
+    memcpy(saved_ascii, value, (size_t)length);
+    saved_ascii_length = length;
+    return 1;
+}
+int stasis_clipboard_load_ascii(char *out, int capacity) {
+    int count = (int)strlen(clipboard_ascii);
+    if (out == NULL || count > capacity) return -1;
+    memcpy(out, clipboard_ascii, (size_t)count);
+    return count;
+}
+int stasis_clipboard_save_ascii(const char *value, int length) {
+    if (value == NULL || length < 0 || length > 63) return 0;
+    memcpy(clipboard_ascii, value, (size_t)length);
+    clipboard_ascii[length] = '\0';
+    return 1;
+}
 
 int main(void) {
     int32_t external = 4;
@@ -90,6 +117,8 @@ int main(void) {
     float overlapping_f32[5] = {1, 2, 3, 4, 5};
     uint8_t external_u8[4] = {1, 2, 3, 4};
     uint8_t dynamic_path[] = "sprite.bmp";
+    uint8_t ascii_value[] = "GG1-test";
+    uint8_t ascii_out[32] = {0};
     int32_t sprite_handle[1] = {0};
     int32_t sprite_width[1] = {0};
     int32_t sprite_height[1] = {0};
@@ -167,6 +196,16 @@ int main(void) {
     CHECK(stasis_jit_storage_load_i32(40, 41, 1) == 4);
     CHECK(strcmp(saved_scope, "sample_game") == 0);
     CHECK(strcmp(saved_key, "unlocked_tier") == 0);
+    stasis_jit_register_global_u8_array(42, 0, ascii_value, sizeof(ascii_value) - 1);
+    stasis_jit_collection_i32_store(42, 1, sizeof(ascii_value) - 1);
+    stasis_jit_register_global_u8_array(43, 0, ascii_out, sizeof(ascii_out));
+    CHECK(stasis_jit_storage_save_ascii(40, 41, 42, sizeof(ascii_value) - 1) == 1);
+    CHECK(stasis_jit_storage_load_ascii(40, 41, 43, sizeof(ascii_out)) == 8);
+    CHECK(memcmp(ascii_out, "GG1-test", 8) == 0);
+    CHECK(stasis_jit_clipboard_save_ascii(42, sizeof(ascii_value) - 1) == 1);
+    memset(ascii_out, 0, sizeof(ascii_out));
+    CHECK(stasis_jit_clipboard_load_ascii(43, sizeof(ascii_out)) == 8);
+    CHECK(memcmp(ascii_out, "GG1-test", 8) == 0);
 
     owned = stasis_jit_global_i32_array_ptr(21, 0, 4);
     CHECK(owned != NULL);

@@ -42,9 +42,10 @@ int stasis_storage_set_root(const char *root) {
     return stasis_storage_ensure_directory(stasis_storage_root);
 }
 
-static int stasis_storage_i32_path(
+static int stasis_storage_path(
     const char *scope,
     const char *key,
+    const char *extension,
     char *path,
     size_t capacity
 ) {
@@ -56,7 +57,7 @@ static int stasis_storage_i32_path(
     directory_written = snprintf(directory, sizeof(directory), "%s/%s", stasis_storage_root, scope);
     if (directory_written < 0 || (size_t)directory_written >= sizeof(directory) ||
         !stasis_storage_ensure_directory(directory)) return 0;
-    path_written = snprintf(path, capacity, "%s/%s.i32", directory, key);
+    path_written = snprintf(path, capacity, "%s/%s.%s", directory, key, extension);
     return path_written >= 0 && (size_t)path_written < capacity;
 }
 
@@ -67,7 +68,7 @@ int stasis_storage_load_i32(const char *scope, const char *key, int fallback) {
     long long parsed;
     FILE *file;
     int trailing;
-    if (!stasis_storage_i32_path(scope, key, path, sizeof(path))) return fallback;
+    if (!stasis_storage_path(scope, key, "i32", path, sizeof(path))) return fallback;
     file = fopen(path, "rb");
     if (file == NULL) return fallback;
     if (fgets(buffer, sizeof(buffer), file) == NULL) {
@@ -91,12 +92,60 @@ int stasis_storage_save_i32(const char *scope, const char *key, int value) {
     FILE *file;
     int temporary_written;
     int ok = 1;
-    if (!stasis_storage_i32_path(scope, key, path, sizeof(path))) return 0;
+    if (!stasis_storage_path(scope, key, "i32", path, sizeof(path))) return 0;
     temporary_written = snprintf(temporary, sizeof(temporary), "%s.tmp", path);
     if (temporary_written < 0 || (size_t)temporary_written >= sizeof(temporary)) return 0;
     file = fopen(temporary, "wb");
     if (file == NULL) return 0;
     if (fprintf(file, "%d\n", value) < 0) ok = 0;
+    if (ok && fflush(file) != 0) ok = 0;
+    if (fclose(file) != 0) ok = 0;
+    if (!ok || rename(temporary, path) != 0) {
+        remove(temporary);
+        return 0;
+    }
+    return 1;
+}
+
+int stasis_storage_load_ascii(const char *scope, const char *key, char *out, int capacity) {
+    char path[STASIS_STORAGE_PATH_CAPACITY];
+    FILE *file;
+    int count;
+    int trailing;
+    int index;
+    if (out == NULL || capacity <= 0 ||
+        !stasis_storage_path(scope, key, "ascii", path, sizeof(path))) return -1;
+    file = fopen(path, "rb");
+    if (file == NULL) return -1;
+    count = (int)fread(out, 1, (size_t)capacity, file);
+    trailing = fgetc(file);
+    fclose(file);
+    if (trailing != EOF) return -1;
+    for (index = 0; index < count; index += 1) {
+        unsigned char ch = (unsigned char)out[index];
+        if (ch < 32 || ch > 126) return -1;
+    }
+    return count;
+}
+
+int stasis_storage_save_ascii(const char *scope, const char *key, const char *value, int length) {
+    char path[STASIS_STORAGE_PATH_CAPACITY];
+    char temporary[STASIS_STORAGE_PATH_CAPACITY + 8];
+    FILE *file;
+    int temporary_written;
+    int index;
+    int ok = 1;
+    if (value == NULL || length < 0 ||
+        !stasis_storage_path(scope, key, "ascii", path, sizeof(path))) return 0;
+    for (index = 0; index < length; index += 1) {
+        unsigned char ch = (unsigned char)value[index];
+        if (ch < 32 || ch > 126) return 0;
+    }
+    temporary_written = snprintf(temporary, sizeof(temporary), "%s.tmp", path);
+    if (temporary_written < 0 || (size_t)temporary_written >= sizeof(temporary)) return 0;
+    file = fopen(temporary, "wb");
+    if (file == NULL) return 0;
+    if (fwrite(value, 1, (size_t)length, file) != (size_t)length) ok = 0;
     if (ok && fflush(file) != 0) ok = 0;
     if (fclose(file) != 0) ok = 0;
     if (!ok || rename(temporary, path) != 0) {

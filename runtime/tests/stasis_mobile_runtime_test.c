@@ -161,6 +161,22 @@ int stasis_storage_save_i32(const char *scope, const char *key, int value) {
     (void)value;
     return scope && key;
 }
+int stasis_storage_load_ascii(const char *scope, const char *key, char *out, int capacity) {
+    (void)scope; (void)key; (void)out; (void)capacity;
+    return -1;
+}
+int stasis_storage_save_ascii(const char *scope, const char *key, const char *value, int length) {
+    (void)value; (void)length;
+    return scope && key;
+}
+int stasis_clipboard_load_ascii(char *out, int capacity) {
+    (void)out; (void)capacity;
+    return -1;
+}
+int stasis_clipboard_save_ascii(const char *value, int length) {
+    (void)value; (void)length;
+    return 1;
+}
 
 static int32_t hash_path(const char *path);
 

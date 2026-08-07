@@ -2879,8 +2879,24 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "sleep_ms" | "stasis_sleep_ms" | "stasis_jit_sleep_ms" => {
             function_address(stasis_dynload::stasis_jit_sleep_ms as *const ())
         }
+        "clipboard_load_ascii"
+        | "stasis_clipboard_load_ascii"
+        | "stasis_jit_clipboard_load_ascii" => {
+            function_address(stasis_dynload::stasis_jit_clipboard_load_ascii as *const ())
+        }
+        "clipboard_save_ascii"
+        | "stasis_clipboard_save_ascii"
+        | "stasis_jit_clipboard_save_ascii" => {
+            function_address(stasis_dynload::stasis_jit_clipboard_save_ascii as *const ())
+        }
+        "storage_load_ascii" | "stasis_storage_load_ascii" | "stasis_jit_storage_load_ascii" => {
+            function_address(stasis_dynload::stasis_jit_storage_load_ascii as *const ())
+        }
         "storage_load_i32" | "stasis_storage_load_i32" | "stasis_jit_storage_load_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_load_i32 as *const ())
+        }
+        "storage_save_ascii" | "stasis_storage_save_ascii" | "stasis_jit_storage_save_ascii" => {
+            function_address(stasis_dynload::stasis_jit_storage_save_ascii as *const ())
         }
         "storage_save_i32" | "stasis_storage_save_i32" | "stasis_jit_storage_save_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_save_i32 as *const ())

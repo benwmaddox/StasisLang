@@ -33,6 +33,10 @@ float stasis_measure_text(int font, const char *text);
 void stasis_sleep_ms(int ms);
 int stasis_storage_load_i32(const char *scope, const char *key, int fallback);
 int stasis_storage_save_i32(const char *scope, const char *key, int value);
+int stasis_storage_load_ascii(const char *scope, const char *key, char *out, int capacity);
+int stasis_storage_save_ascii(const char *scope, const char *key, const char *value, int length);
+int stasis_clipboard_load_ascii(char *out, int capacity);
+int stasis_clipboard_save_ascii(const char *value, int length);
 
 typedef union StasisScalarValue {
     int32_t i32_value;
@@ -517,6 +521,69 @@ float stasis_jit_measure_text(int32_t font, int32_t text) {
     return result;
 }
 void stasis_jit_sleep_ms(int32_t ms) { stasis_sleep_ms(ms); }
+static int stasis_write_ascii_result(int32_t out, const char *value, int length, int capacity) {
+    int index;
+    if (length < 0 || length > capacity) return -1;
+    for (index = 0; index < length; index += 1) {
+        unsigned char ch = (unsigned char)value[index];
+        if (ch < 32 || ch > 126) return -1;
+        stasis_jit_global_i32_array_store(out, 0, index, (int32_t)ch);
+    }
+    return length;
+}
+int stasis_jit_storage_load_ascii(int32_t scope, int32_t key, int32_t out, int32_t capacity) {
+    char *scope_value;
+    char *key_value;
+    char *buffer;
+    int loaded;
+    if (capacity <= 0) return -1;
+    scope_value = resolve_text(scope);
+    key_value = resolve_text(key);
+    buffer = (char *)malloc((size_t)capacity);
+    if (scope_value == NULL || key_value == NULL || buffer == NULL) {
+        free(scope_value);
+        free(key_value);
+        free(buffer);
+        return -1;
+    }
+    loaded = stasis_storage_load_ascii(scope_value, key_value, buffer, capacity);
+    loaded = stasis_write_ascii_result(out, buffer, loaded, capacity);
+    free(scope_value);
+    free(key_value);
+    free(buffer);
+    return loaded;
+}
+int stasis_jit_storage_save_ascii(int32_t scope, int32_t key, int32_t value, int32_t length) {
+    char *scope_value = resolve_text(scope);
+    char *key_value = resolve_text(key);
+    char *text_value = resolve_text(value);
+    int result = scope_value == NULL || key_value == NULL || text_value == NULL || length < 0
+        ? 0
+        : stasis_storage_save_ascii(scope_value, key_value, text_value, length);
+    free(scope_value);
+    free(key_value);
+    free(text_value);
+    return result;
+}
+int stasis_jit_clipboard_load_ascii(int32_t out, int32_t capacity) {
+    char *buffer;
+    int loaded;
+    if (capacity <= 0) return -1;
+    buffer = (char *)malloc((size_t)capacity);
+    if (buffer == NULL) return -1;
+    loaded = stasis_clipboard_load_ascii(buffer, capacity);
+    loaded = stasis_write_ascii_result(out, buffer, loaded, capacity);
+    free(buffer);
+    return loaded;
+}
+int stasis_jit_clipboard_save_ascii(int32_t value, int32_t length) {
+    char *text_value = resolve_text(value);
+    int result = text_value == NULL || length < 0
+        ? 0
+        : stasis_clipboard_save_ascii(text_value, length);
+    free(text_value);
+    return result;
+}
 int stasis_jit_storage_load_i32(int32_t scope, int32_t key, int32_t fallback) {
     char *scope_value = resolve_text(scope);
     char *key_value = resolve_text(key);
