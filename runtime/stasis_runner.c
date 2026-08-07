@@ -305,8 +305,19 @@ static int stasis_try_get_self_path(const char *argv0, char *out, size_t out_cap
     {
         return 0;
     }
-    strncpy(out, argv0, out_cap - 1);
-    out[out_cap - 1] = '\0';
+    if (argv0[0] == '/')
+    {
+        strncpy(out, argv0, out_cap - 1);
+        out[out_cap - 1] = '\0';
+        return 1;
+    }
+
+    char current_dir[2048];
+    if (!getcwd(current_dir, sizeof(current_dir)) ||
+        snprintf(out, out_cap, "%s/%s", current_dir, argv0) >= (int)out_cap)
+    {
+        return 0;
+    }
     return 1;
 #endif
 }
