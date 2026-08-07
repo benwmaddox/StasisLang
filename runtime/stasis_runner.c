@@ -378,8 +378,8 @@ static int stasis_set_asset_root(const char *path)
 
 static int stasis_set_packaged_graphics_path(const char *exe_dir)
 {
-#ifdef _WIN32
     char path[2080];
+#ifdef _WIN32
     if (!exe_dir || !exe_dir[0] ||
         snprintf(path, sizeof(path), "%s\\stasis_graphics.dll", exe_dir) >= (int)sizeof(path))
     {
@@ -388,8 +388,17 @@ static int stasis_set_packaged_graphics_path(const char *exe_dir)
     return SetEnvironmentVariableA("STASIS_RUNTIME_DLL_PATH", path) != 0 &&
            _putenv_s("STASIS_RUNTIME_DLL_PATH", path) == 0;
 #else
-    (void)exe_dir;
-    return 1;
+#if defined(__APPLE__)
+    const char *runtime_name = "libstasis_graphics.dylib";
+#else
+    const char *runtime_name = "libstasis_graphics.so";
+#endif
+    if (!exe_dir || !exe_dir[0] ||
+        snprintf(path, sizeof(path), "%s/%s", exe_dir, runtime_name) >= (int)sizeof(path))
+    {
+        return 0;
+    }
+    return setenv("STASIS_RUNTIME_LIBRARY_PATH", path, 1) == 0;
 #endif
 }
 
@@ -535,6 +544,21 @@ static int stasis_try_load_launch_config(
         strncpy(entry_out, "main", entry_out_cap - 1);
         entry_out[entry_out_cap - 1] = '\0';
     }
+
+#ifndef _WIN32
+    /* dlopen does not search the current directory for a bare library name. */
+    if (dll_out[0] != '/')
+    {
+        char absolute_dll[4096];
+        int written = snprintf(absolute_dll, sizeof(absolute_dll), "%s/%s", exe_dir, dll_out);
+        if (written < 0 || (size_t)written >= sizeof(absolute_dll) ||
+            (size_t)written >= dll_out_cap)
+        {
+            return 0;
+        }
+        memcpy(dll_out, absolute_dll, (size_t)written + 1);
+    }
+#endif
 
     /* Anchor assets to the generated executable, independent of caller CWD. */
     if (!stasis_set_current_dir(exe_dir) ||
@@ -2656,6 +2680,52 @@ int main(int argc, char **argv)
         fflush(stderr);
     }
 
+    const char *graphics_path = getenv("STASIS_RUNTIME_LIBRARY_PATH");
+    void *gfx_lib = NULL;
+    if (graphics_path && graphics_path[0])
+    {
+        gfx_lib = dlopen(graphics_path, RTLD_NOW | RTLD_GLOBAL);
+        if (!gfx_lib)
+        {
+            fprintf(stderr, "error: failed to load packaged graphics runtime %s: %s\n",
+                    graphics_path, dlerror());
+            return 1;
+        }
+        stasis_graphics_runtime_abi_version_fn graphics_abi =
+            (stasis_graphics_runtime_abi_version_fn)dlsym(gfx_lib, "stasis_graphics_runtime_abi_version");
+        if (!graphics_abi || graphics_abi() != STASIS_GRAPHICS_RUNTIME_ABI_VERSION)
+        {
+            fprintf(stderr, "error: incompatible packaged graphics runtime (expected ABI %d)\n",
+                    STASIS_GRAPHICS_RUNTIME_ABI_VERSION);
+            dlclose(gfx_lib);
+            return 1;
+        }
+        stasis_graphics_set_asset_root_fn set_graphics_asset_root =
+            (stasis_graphics_set_asset_root_fn)dlsym(gfx_lib, "stasis_set_asset_root");
+        const char *launcher_asset_root = getenv("STASIS_ASSET_ROOT");
+        if (!set_graphics_asset_root || !launcher_asset_root ||
+            !set_graphics_asset_root(launcher_asset_root))
+        {
+            fprintf(stderr, "error: packaged graphics runtime rejected the launcher asset root\n");
+            dlclose(gfx_lib);
+            return 1;
+        }
+        stasis_init_window_fn init_window =
+            (stasis_init_window_fn)dlsym(gfx_lib, "stasis_init_window");
+        stasis_set_fullscreen_fn set_fullscreen =
+            (stasis_set_fullscreen_fn)dlsym(gfx_lib, "stasis_set_fullscreen");
+        if (init_window)
+        {
+            const char *start_fs = getenv("STASIS_START_FULLSCREEN");
+            int want_fullscreen = (start_fs && strcmp(start_fs, "1") == 0) ? 1 : 0;
+            (void)init_window(640, 360, "Stasis");
+            if (want_fullscreen && set_fullscreen)
+            {
+                (void)set_fullscreen(1);
+            }
+        }
+    }
+
     void *lib = dlopen(dll_path, RTLD_NOW);
     if (!lib)
     {
@@ -2785,18 +2855,13 @@ int main(int argc, char **argv)
         stasis_host_get_frame_fn host_get_frame = NULL;
         stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
 
-        void *gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
+        if (!gfx_lib)
+        {
+            gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
+        }
         if (!gfx_lib)
         {
             gfx_lib = dlopen("stasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
-        }
-        if (!gfx_lib)
-        {
-            gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_NOLOAD);
-        }
-        if (!gfx_lib)
-        {
-            gfx_lib = dlopen("stasis_graphics.so", RTLD_NOW | RTLD_NOLOAD);
         }
         if (!gfx_lib)
         {

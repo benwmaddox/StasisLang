@@ -305,6 +305,9 @@ pub fn link_objects_to_dynamic_library(
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
     }
+    if matches!(config.target, AotTarget::Native) && !cfg!(windows) {
+        args.push("-lm".to_string());
+    }
 
     run_link_command_with_args(
         &linker,
@@ -732,6 +735,7 @@ exit /b 0
         } else {
             let path = temp_dir.join("fake-link.sh");
             let script = r#"#!/usr/bin/env sh
+ALL_ARGS="$*"
 OUT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -746,6 +750,7 @@ if [ -z "$OUT" ]; then
   exit 2
 fi
 echo "fake-shared" > "$OUT"
+printf '%s\n' "$ALL_ARGS" > "$OUT.args"
 "#;
             fs::write(&path, script).expect("write fake unix linker");
             let status = Command::new("chmod")
@@ -780,6 +785,14 @@ echo "fake-shared" > "$OUT"
         )
         .expect("fake linker should succeed");
         assert!(output_library.exists(), "fake linker should create output");
+        if !cfg!(windows) {
+            let args = fs::read_to_string(format!("{}.args", output_library.display()))
+                .expect("read captured Unix linker arguments");
+            assert!(
+                args.split_ascii_whitespace().any(|arg| arg == "-lm"),
+                "native Unix dynamic libraries must link libm: {args}"
+            );
+        }
 
         fs::remove_dir_all(&temp_dir).ok();
     }

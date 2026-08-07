@@ -309,4 +309,20 @@ if(STASIS_BUILD_RUNNER)
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
         RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
     )
+    if(UNIX AND STASIS_MOBILE_RUNTIME_BUILD_TESTS)
+        add_library(stasis_runner_package_graphics SHARED tests/stasis_runner_package_graphics.c)
+        set_target_properties(stasis_runner_package_graphics PROPERTIES OUTPUT_NAME stasis_graphics)
+        add_library(stasis_runner_package_game SHARED tests/stasis_runner_package_game.c)
+        target_link_libraries(stasis_runner_package_game PRIVATE m)
+        set_target_properties(stasis_runner_package_game PROPERTIES PREFIX "")
+        add_test(
+            NAME stasis_runner_packaged_unix_contract
+            COMMAND ${CMAKE_COMMAND}
+                -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/runner-package-test
+                -DRUNNER=$<TARGET_FILE:stasis_runner>
+                -DGRAPHICS=$<TARGET_FILE:stasis_runner_package_graphics>
+                -DGAME=$<TARGET_FILE:stasis_runner_package_game>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/stasis_runner_package_test.cmake
+        )
+    endif()
 endif()
