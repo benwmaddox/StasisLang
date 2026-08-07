@@ -780,6 +780,7 @@ import "/vendor/stasis/src/stdlib/hud_table.stasis";
 import "/vendor/stasis/src/stdlib/sdl_scancodes.stasis";
 import "/vendor/stasis/src/stdlib/storage.stasis";
 import "/vendor/stasis/src/stdlib/ui_axis_layout.stasis";
+import "/vendor/stasis/src/stdlib/ui_layout_audit.stasis";
 import "/vendor/stasis/src/stdlib/ui_button_9slice.stasis";
 
 struct Game {
@@ -1137,6 +1138,7 @@ mod tests {
             "/vendor/stasis/src/stdlib/sdl_scancodes.stasis",
             "/vendor/stasis/src/stdlib/storage.stasis",
             "/vendor/stasis/src/stdlib/ui_axis_layout.stasis",
+            "/vendor/stasis/src/stdlib/ui_layout_audit.stasis",
             "/vendor/stasis/src/stdlib/ui_button_9slice.stasis",
             "function main(): i32",
             "function tick(): i32",

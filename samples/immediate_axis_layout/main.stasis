@@ -1,5 +1,6 @@
 import "../../src/stdlib/graphics.stasis";
 import "layout.stasis";
+import "audit.stasis";
 
 struct MenuState {
     font: i32;
@@ -9,6 +10,7 @@ struct MenuState {
     play_width: f32;
     button: Sprite;
     play_clicked: bool;
+    audit_emitted: bool;
 }
 
 global state: MenuState;
@@ -22,6 +24,7 @@ function main(): i32 {
     state.play_width = state.play.width;
     state.button.load_sprite_from("../render_parity/assets/opaque.svg", 180, 56);
     state.play_clicked = false;
+    state.audit_emitted = false;
     if (state.font == 0 || state.title.handle == 0 || state.play.handle == 0 || state.button.handle == 0) {
         return 1;
     }
@@ -41,6 +44,19 @@ function update_menu_layout(): void {
 
 function tick(): i32 {
     update_menu_layout();
+    if (!state.audit_emitted) {
+        menu_emit_layout_audit(
+            gfx_safe_viewport_x(),
+            gfx_safe_viewport_y(),
+            gfx_safe_viewport_width(),
+            gfx_safe_viewport_height(),
+            state.title.width,
+            state.title.height,
+            state.play.width,
+            state.play.height
+        );
+        state.audit_emitted = true;
+    }
     state.play_clicked = false;
     let pointer_count: i32 = input_pointer_count();
     let i: i32 = 0;

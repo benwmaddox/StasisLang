@@ -1,0 +1,20 @@
+import "../../src/stdlib/ui_layout_audit.stasis";
+
+function menu_emit_layout_audit(safe_x: f32, safe_y: f32, safe_w: f32, safe_h: f32, title_w: f32, title_h: f32, label_w: f32, label_h: f32): void {
+    ui_audit_rect("safe_viewport", "viewport", safe_x, safe_y, safe_w, safe_h);
+    ui_audit_rect("menu_title", "text_box", menu_title_x, menu_title_y, title_w, title_h);
+    ui_audit_text("menu_title", menu_title_x, menu_title_y, title_w, title_h, 24);
+    ui_audit_rect("play_button", "button", menu_button_x, menu_button_y, menu_button_w, menu_button_h);
+    ui_audit_rect("play_label", "text_box", menu_label_x, menu_label_y, label_w, label_h);
+    ui_audit_text("play_label", menu_label_x, menu_label_y, label_w, label_h, 24);
+
+    ui_audit_center_check("x", "menu_title", "safe_viewport", ui_audit_center_delta_x(safe_x, safe_w, menu_title_x, title_w), 0.5);
+    ui_audit_center_check("x", "play_label", "play_button", ui_audit_center_delta_x(menu_button_x, menu_button_w, menu_label_x, label_w), 0.5);
+    ui_audit_center_check("y", "play_label", "play_button", ui_audit_center_delta_y(menu_button_y, menu_button_h, menu_label_y, label_h), 1.0);
+    ui_audit_padding_axis("x", "play_label", "play_button", menu_button_x, menu_button_w, menu_label_x, label_w, 0.5);
+    ui_audit_padding_axis("y", "play_label", "play_button", menu_button_y, menu_button_h, menu_label_y, label_h, 0.5);
+    ui_audit_padding_axis("x", "play_button", "safe_viewport", safe_x, safe_w, menu_button_x, menu_button_w, 0.5);
+    ui_audit_padding_axis("y", "play_button", "safe_viewport", safe_y, safe_h, menu_button_y, menu_button_h, 0.5);
+    ui_audit_overlap_axis("x", "menu_title", "play_button", menu_title_x, title_w, menu_button_x, menu_button_w, true);
+    ui_audit_overlap_axis("y", "menu_title", "play_button", menu_title_y, title_h, menu_button_y, menu_button_h, false);
+}
