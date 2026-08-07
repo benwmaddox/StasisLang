@@ -1752,7 +1752,7 @@ pub fn run_play_in_process_with_input_script(
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
 ) -> Result<(), String> {
-    run_play_in_process_inner(
+    run_play_in_process_with_input_script_and_window_title(
         watch_file,
         watch_dir,
         data_bind_json,
@@ -1761,6 +1761,29 @@ pub fn run_play_in_process_with_input_script(
         tick_sleep_micros,
         max_ticks,
         None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_input_script_and_window_title(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
         None,
     )
 }
@@ -2419,6 +2442,22 @@ fn resolve_play_project_root(
             root_path.display(),
             watch_dir.display()
         ));
+    }
+    if let Some(manifest_root) = root_path
+        .parent()
+        .and_then(|parent| {
+            parent
+                .ancestors()
+                .find(|ancestor| ancestor.join("stasis.json").is_file())
+        })
+        .map(Path::to_path_buf)
+    {
+        return manifest_root.canonicalize().map_err(|error| {
+            format!(
+                "failed to canonicalize play project root {}: {error}",
+                manifest_root.display()
+            )
+        });
     }
     if root_path.starts_with(repository_root) {
         Ok(repository_root.to_path_buf())
@@ -6061,6 +6100,37 @@ mod tests {
             7
         );
 
+        fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn play_project_root_prefers_manifest_above_nested_entry_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("stasis_play_manifest_root_{stamp}"));
+        let source_dir = project.join("src");
+        fs::create_dir_all(&source_dir).expect("create source directory");
+        fs::write(
+            project.join("stasis.json"),
+            r#"{"manifest_version":1,"name":"fixture","entry":"src/main.stasis"}"#,
+        )
+        .expect("write manifest");
+        let entry = source_dir.join("main.stasis");
+        fs::write(&entry, "function main(): i32 { return 0; }\n").expect("write entry");
+        let entry = entry.canonicalize().expect("canonical entry");
+        let source_dir = source_dir
+            .canonicalize()
+            .expect("canonical source directory");
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical repository");
+
+        let selected = resolve_play_project_root(&entry, &source_dir, &repository)
+            .expect("resolve project root");
+        assert_eq!(selected, project.canonicalize().expect("canonical project"));
         fs::remove_dir_all(&project).ok();
     }
 

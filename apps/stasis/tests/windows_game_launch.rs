@@ -184,14 +184,33 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
     let project = parent.join("windows_launch_smoke");
     copy_tree(&fixture, &project);
 
-    for case in ["play", "run_watch", "tui"] {
+    let nested_launch_dir = project.join("nested/launch");
+    fs::create_dir_all(&nested_launch_dir).expect("create nested manifest launch directory");
+    for case in ["play", "play_manifest_nested", "run_watch", "tui"] {
         let screenshot = parent.join(format!("{case}.png"));
-        let mut command = stasis_command(&project);
+        let command_dir = if case == "play_manifest_nested" {
+            &nested_launch_dir
+        } else {
+            &project
+        };
+        let mut command = stasis_command(command_dir);
         match case {
             "play" => {
                 command.args([
                     "play",
                     "main.stasis",
+                    "--ticks",
+                    "2",
+                    "--screenshot-frame",
+                    "2",
+                    "--screenshot",
+                    screenshot.to_str().unwrap(),
+                    "--exit-after-screenshot",
+                ]);
+            }
+            "play_manifest_nested" => {
+                command.args([
+                    "play",
                     "--ticks",
                     "2",
                     "--screenshot-frame",

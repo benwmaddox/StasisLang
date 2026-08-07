@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
     build_aot_direct_storage_source, run_jit_tests_in_directory_with_session,
-    run_play_in_process_with_input_script, run_self_host_aot_cli_with_options,
+    run_play_in_process_with_input_script_and_window_title, run_self_host_aot_cli_with_options,
     run_with_default_backend, run_with_real_backend, RunnerConfig, StasisTestRunSession,
 };
 use stasis_assets::{
@@ -112,7 +112,7 @@ struct MobileAotBundleArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlayCliArgs {
-    watch_file: PathBuf,
+    watch_file: Option<PathBuf>,
     watch_dir: Option<PathBuf>,
     data_bind_json: Option<PathBuf>,
     data_bind_struct_meta: Option<PathBuf>,
@@ -122,6 +122,13 @@ struct PlayCliArgs {
     screenshot: Option<PathBuf>,
     screenshot_frame: u64,
     exit_after_screenshot: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedPlayLaunch {
+    watch_file: PathBuf,
+    watch_dir: PathBuf,
+    window_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -601,12 +608,6 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         }
         i += 1;
     }
-    let Some(watch_file) = watch_file else {
-        return Err(
-            "missing entry file. Use `stasis.exe play <path.stasis>` (or --watch-file <path>)"
-                .to_string(),
-        );
-    };
     if screenshot.is_none() && (screenshot_frame_explicit || exit_after_screenshot) {
         return Err(
             "--screenshot-frame and --exit-after-screenshot require --screenshot <path>"
@@ -627,6 +628,146 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         screenshot,
         screenshot_frame,
         exit_after_screenshot,
+    })
+}
+
+fn find_play_manifest_root(start: &Path) -> Option<PathBuf> {
+    let start_dir = if start.is_file() {
+        start.parent()?
+    } else {
+        start
+    };
+    start_dir
+        .ancestors()
+        .find(|ancestor| ancestor.join("stasis.json").is_file())
+        .map(Path::to_path_buf)
+}
+
+fn resolve_existing_play_file(path: &Path, launch_dir: &Path) -> Result<PathBuf, String> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        launch_dir.join(path)
+    };
+    let resolved = candidate.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve play entry {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if !resolved.is_file() {
+        return Err(format!("play entry is not a file: {}", resolved.display()));
+    }
+    Ok(resolved)
+}
+
+fn resolve_existing_play_directory(path: &Path, launch_dir: &Path) -> Result<PathBuf, String> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        launch_dir.join(path)
+    };
+    let resolved = candidate.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve play watch directory {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if !resolved.is_dir() {
+        return Err(format!(
+            "play watch directory is not a directory: {}",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+fn load_play_manifest_details(root: &Path) -> Result<(PathBuf, Option<String>), String> {
+    let manifest_path = root.join("stasis.json");
+    let source = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|error| format!("invalid {}: {error}", manifest_path.display()))?;
+    let entry = manifest
+        .get("entry")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{} has no non-empty entry", manifest_path.display()))?;
+    let entry = Path::new(entry);
+    if entry.is_absolute() {
+        return Err(format!(
+            "{} entry must be project-relative",
+            manifest_path.display()
+        ));
+    }
+    let resolved_entry = resolve_existing_play_file(entry, root)?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve project root {}: {error}", root.display()))?;
+    if !resolved_entry.starts_with(&canonical_root) {
+        return Err(format!(
+            "{} entry escapes project root {}",
+            manifest_path.display(),
+            canonical_root.display()
+        ));
+    }
+    let title = manifest
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Ok((resolved_entry, title))
+}
+
+fn resolve_play_launch(
+    parsed: &PlayCliArgs,
+    launch_dir: &Path,
+) -> Result<ResolvedPlayLaunch, String> {
+    let explicit_entry = parsed
+        .watch_file
+        .as_deref()
+        .map(|path| resolve_existing_play_file(path, launch_dir))
+        .transpose()?;
+    let manifest_root = if let Some(entry) = explicit_entry.as_deref() {
+        find_play_manifest_root(entry)
+    } else {
+        find_play_manifest_root(launch_dir)
+    };
+
+    let (watch_file, window_title) = if let Some(entry) = explicit_entry {
+        let title = manifest_root
+            .as_deref()
+            .and_then(|root| load_play_manifest_details(root).ok())
+            .and_then(|(_, title)| title);
+        (entry, title)
+    } else {
+        let root = manifest_root.as_deref().ok_or_else(|| {
+            format!(
+                "missing entry file and no stasis.json found from {}",
+                launch_dir.display()
+            )
+        })?;
+        load_play_manifest_details(root)?
+    };
+
+    let watch_dir = match parsed
+        .watch_dir
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        Some(path) => resolve_existing_play_directory(path, launch_dir)?,
+        None => manifest_root
+            .or_else(|| watch_file.parent().map(Path::to_path_buf))
+            .ok_or_else(|| format!("play entry has no parent: {}", watch_file.display()))?
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve play watch directory: {error}"))?,
+    };
+
+    Ok(ResolvedPlayLaunch {
+        watch_file,
+        watch_dir,
+        window_title,
     })
 }
 
@@ -719,6 +860,20 @@ fn try_run_play_subcommand() -> Option<i32> {
             return Some(2);
         }
     };
+    let launch_dir = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read current directory: {error}");
+            return Some(2);
+        }
+    };
+    let launch = match resolve_play_launch(&parsed, &launch_dir) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
     let screenshot_environment = match configure_play_screenshot_environment(&parsed) {
         Ok(value) => value,
         Err(message) => {
@@ -727,14 +882,15 @@ fn try_run_play_subcommand() -> Option<i32> {
         }
     };
 
-    let play_result = run_play_in_process_with_input_script(
-        &parsed.watch_file,
-        parsed.watch_dir.as_deref(),
+    let play_result = run_play_in_process_with_input_script_and_window_title(
+        &launch.watch_file,
+        Some(&launch.watch_dir),
         parsed.data_bind_json.as_deref(),
         parsed.data_bind_struct_meta.as_deref(),
         parsed.input_script.as_deref(),
         parsed.tick_sleep_micros,
         parsed.ticks,
+        launch.window_title.as_deref(),
     );
     match play_result {
         Ok(()) => {
@@ -2291,7 +2447,7 @@ mod tests {
         let parsed = parse_play_cli_args(&args).expect("parse should succeed");
         assert_eq!(
             parsed.watch_file,
-            PathBuf::from("samples/bucket_catcher.stasis")
+            Some(PathBuf::from("samples/bucket_catcher.stasis"))
         );
         assert_eq!(parsed.watch_dir, Some(PathBuf::from("samples")));
         assert_eq!(
@@ -2304,6 +2460,134 @@ mod tests {
                 "samples/bucket_catcher/data/config.struct-meta.json"
             ))
         );
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_manifest_inferred_entry() {
+        let parsed = parse_play_cli_args(&[]).expect("parse should succeed");
+        assert_eq!(parsed.watch_file, None);
+        assert_eq!(parsed.watch_dir, None);
+    }
+
+    #[test]
+    fn play_launch_infers_manifest_entry_from_nested_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = env::temp_dir().join(format!("stasis_play_manifest_{stamp}"));
+        let source_dir = project.join("src");
+        let nested_dir = source_dir.join("nested");
+        fs::create_dir_all(&nested_dir).expect("create project directories");
+        fs::write(
+            project.join("stasis.json"),
+            r#"{"manifest_version":1,"name":"Manifest Game","entry":"src/main.stasis"}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            source_dir.join("main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .expect("write entry");
+
+        let parsed = parse_play_cli_args(&[]).expect("parse arguments");
+        let resolved = resolve_play_launch(&parsed, &nested_dir).expect("resolve manifest entry");
+        assert_eq!(
+            resolved.watch_file,
+            source_dir
+                .join("main.stasis")
+                .canonicalize()
+                .expect("canonical entry")
+        );
+        assert_eq!(
+            resolved.watch_dir,
+            project.canonicalize().expect("canonical project")
+        );
+        assert_eq!(resolved.window_title.as_deref(), Some("Manifest Game"));
+        fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn explicit_nested_entry_still_uses_manifest_project_root() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = env::temp_dir().join(format!("stasis_play_explicit_{stamp}"));
+        let source_dir = project.join("src");
+        fs::create_dir_all(&source_dir).expect("create source directory");
+        fs::write(
+            project.join("stasis.json"),
+            r#"{"manifest_version":1,"name":"Explicit Game","entry":"src/main.stasis"}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            source_dir.join("main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .expect("write entry");
+
+        let parsed = parse_play_cli_args(&["main.stasis".to_string()]).expect("parse arguments");
+        let resolved = resolve_play_launch(&parsed, &source_dir).expect("resolve explicit entry");
+        assert_eq!(
+            resolved.watch_dir,
+            project.canonicalize().expect("canonical project")
+        );
+        assert_eq!(resolved.window_title.as_deref(), Some("Explicit Game"));
+        fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn explicit_external_entry_does_not_inherit_callers_manifest() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("stasis_play_external_{stamp}"));
+        let caller = root.join("caller");
+        let external = root.join("external");
+        fs::create_dir_all(&caller).expect("create caller directory");
+        fs::create_dir_all(&external).expect("create external directory");
+        fs::write(
+            caller.join("stasis.json"),
+            r#"{"manifest_version":1,"name":"Caller","entry":"main.stasis"}"#,
+        )
+        .expect("write caller manifest");
+        fs::write(
+            caller.join("main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .expect("write caller entry");
+        let external_entry = external.join("standalone.stasis");
+        fs::write(&external_entry, "function main(): i32 { return 0; }\n")
+            .expect("write external entry");
+
+        let parsed = parse_play_cli_args(&[external_entry.display().to_string()])
+            .expect("parse explicit entry");
+        let resolved = resolve_play_launch(&parsed, &caller).expect("resolve external entry");
+        assert_eq!(
+            resolved.watch_dir,
+            external
+                .canonicalize()
+                .expect("canonical external directory")
+        );
+        assert_eq!(resolved.window_title, None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn play_without_entry_or_manifest_reports_discovery_root() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("stasis_play_no_manifest_{stamp}"));
+        fs::create_dir_all(&directory).expect("create directory");
+        let parsed = parse_play_cli_args(&[]).expect("parse arguments");
+        let error = resolve_play_launch(&parsed, &directory).expect_err("manifest is required");
+        assert!(error.contains("missing entry file and no stasis.json found"));
+        assert!(error.contains(&directory.display().to_string()));
+        fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
