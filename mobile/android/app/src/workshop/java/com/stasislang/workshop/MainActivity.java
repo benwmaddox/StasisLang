@@ -172,7 +172,6 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_IMAGE_REQUEST = 73;
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
-    private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
     private static final int RENDER_FRAME_HEADER_SIZE = 22;
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
@@ -192,7 +191,7 @@ public final class MainActivity extends Activity {
     private TextView aiBudgetStatus;
     private TextView aiAttachmentStatus;
     private TextView screenshotAttachmentStatus;
-    private CheckBox allowAiImageGeneration;
+    private Spinner aiImageGenerationProfileSelector;
     private TextView aiStepPill;
     private TextView aiActionPill;
     private TextView aiPhasePill;
@@ -1824,10 +1823,19 @@ public final class MainActivity extends Activity {
         });
         contextBody.addView(capturePreview, fullWidth());
         refreshScreenshotAttachmentStatus();
-        allowAiImageGeneration = new CheckBox(this);
-        allowAiImageGeneration.setText("Allow one low-quality 1024x1024 AI image (~$0.006 plus Sol usage)");
-        allowAiImageGeneration.setChecked(false);
-        contextBody.addView(allowAiImageGeneration, fullWidth());
+        TextView imageGenerationLabel = new TextView(this);
+        imageGenerationLabel.setText("Optional ImageGen output");
+        imageGenerationLabel.setTextColor(Color.rgb(45, 56, 72));
+        contextBody.addView(imageGenerationLabel, fullWidth());
+        aiImageGenerationProfileSelector = new Spinner(this);
+        ArrayAdapter<String> imageGenerationAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, WorkshopImageGenerationProfile.labels());
+        imageGenerationAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        aiImageGenerationProfileSelector.setAdapter(imageGenerationAdapter);
+        aiImageGenerationProfileSelector.setSelection(0);
+        aiImageGenerationProfileSelector.setContentDescription(
+                "Choose no generated image, a low-cost draft, or a high-quality final image and aspect ratio");
+        contextBody.addView(aiImageGenerationProfileSelector, fullWidth());
 
         LinearLayout aiActionRow = new LinearLayout(this);
         configureActionRow(aiActionRow, layout);
@@ -3110,16 +3118,16 @@ public final class MainActivity extends Activity {
             JSONArray metadata = aiImageMetadata(images);
             JSONObject logical = attachPreviewLogicalSnapshot && pendingPreviewLogicalSnapshot != null
                     ? new JSONObject(pendingPreviewLogicalSnapshot.toString()) : null;
-            boolean imageGeneration = allowAiImageGeneration != null && allowAiImageGeneration.isChecked();
+            WorkshopImageGenerationProfile imageGeneration = selectedAiImageGenerationProfile();
             Bitmap preview = attachPreviewPixels ? pendingPreviewScreenshot : null;
             if (attachPreviewPixels && preview == null) throw new IOException("selected preview pixels are unavailable");
             if (preview != null && preview.isRecycled()) throw new IOException("selected preview pixels are unavailable");
             byte[] previewPng = preview == null ? null : encodeBitmapPng(preview);
             AndroidAiQueue.enqueue(this, activeRecoveryProjectId(), source, prompt, metadata, logical,
-                    imageGeneration, previewPng, preview == null ? 0 : preview.getWidth(),
+                    imageGeneration.id, previewPng, preview == null ? 0 : preview.getWidth(),
                     preview == null ? 0 : preview.getHeight());
             recordCommandHistory(prompt);
-            if (imageGeneration) allowAiImageGeneration.setChecked(false);
+            if (imageGeneration.enabled()) aiImageGenerationProfileSelector.setSelection(0);
             refreshAiQueue();
             setStatusText("AI request queued behind the active item");
         } catch (Exception error) {
@@ -3379,7 +3387,7 @@ public final class MainActivity extends Activity {
         }
         selectedImageAssets.clear();
         clearPendingPreviewCapture();
-        if (allowAiImageGeneration != null) allowAiImageGeneration.setChecked(false);
+        if (aiImageGenerationProfileSelector != null) aiImageGenerationProfileSelector.setSelection(0);
         refreshImageAssetList();
         refreshAiAttachmentStatus();
         refreshScreenshotAttachmentStatus();
@@ -3938,7 +3946,7 @@ public final class MainActivity extends Activity {
             });
         }
         clearPendingPreviewCapture();
-        if (allowAiImageGeneration != null) allowAiImageGeneration.setChecked(false);
+        if (aiImageGenerationProfileSelector != null) aiImageGenerationProfileSelector.setSelection(0);
     }
 
     private static void restoreVisibility(View view, boolean visible) {
@@ -4998,9 +5006,17 @@ public final class MainActivity extends Activity {
         }
         if (useCodex) model = "codex-default";
         double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
-        final boolean requestImageGeneration = queuedEntry == null
-                ? allowAiImageGeneration != null && allowAiImageGeneration.isChecked()
-                : queuedEntry.imageGeneration;
+        final WorkshopImageGenerationProfile requestImageGenerationProfile = queuedEntry == null
+                ? selectedAiImageGenerationProfile()
+                : WorkshopImageGenerationProfile.fromId(queuedEntry.imageGenerationProfile);
+        final boolean requestImageGeneration = requestImageGenerationProfile.enabled();
+        if (useCodex && requestImageGeneration) {
+            setStatusText("AI image generation requires the OpenAI API provider; change the provider under AI Settings");
+            updateAiProgress(0, 0, "image provider blocked");
+            failQueuedAiPreflight(queuedEntry,
+                    "The selected ImageGen profile requires the OpenAI API provider");
+            return;
+        }
         if (!useCodex && !hasKnownAiPricing(model)) {
             setStatusText("AI run blocked: pricing is unavailable for " + model);
             updateAiProgress(0, 0, "budget blocked");
@@ -5070,7 +5086,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (!useCodex && requestImageGeneration && WorkshopAiBudgetPolicy.remainingUsd(
-                monthlyLimitUsd, monthlyAiSpendUsd()) < GPT_IMAGE_2_LOW_1024_USD) {
+                monthlyLimitUsd, monthlyAiSpendUsd()) < requestImageGenerationProfile.reserveUsd) {
             setStatusText("AI image generation blocked: the device monthly limit does not cover the reserved image output");
             updateAiProgress(0, 0, "image budget blocked");
             failQueuedAiPreflight(queuedEntry, "Image generation reserve exceeded the device monthly AI limit");
@@ -5117,7 +5133,7 @@ public final class MainActivity extends Activity {
         try {
             if (queuedEntry == null) {
                 AndroidAiQueue.Entry submitted = AndroidAiQueue.enqueue(this, activeRecoveryProjectId(), queueSource, prompt,
-                        requestImageMetadata, requestLogicalSnapshot, requestImageGeneration,
+                        requestImageMetadata, requestLogicalSnapshot, requestImageGenerationProfile.id,
                         requestPreviewPixels == null ? null : encodeBitmapPng(requestPreviewPixels),
                         requestPreviewPixels == null ? 0 : requestPreviewPixels.getWidth(),
                         requestPreviewPixels == null ? 0 : requestPreviewPixels.getHeight());
@@ -5195,7 +5211,7 @@ public final class MainActivity extends Activity {
                     activeAiImageAttachments = loadAiImageAttachments(
                             requestImageInfos, requestImageMetadata, requestPreviewPixels);
                     final AiAgentResult aiResult = runAiAgentLoop(
-                            requestApiKey, requestModel, requestJson, requestImageGeneration, useCodex,
+                            requestApiKey, requestModel, requestJson, requestImageGenerationProfile, useCodex,
                             aiTransaction, resumeCheckpoint);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
@@ -5261,7 +5277,7 @@ public final class MainActivity extends Activity {
                     activeAiImageAttachments = Collections.emptyList();
                     if (requestImageGeneration) {
                         runOnUiThread(new Runnable() {
-                            @Override public void run() { allowAiImageGeneration.setChecked(false); }
+                            @Override public void run() { aiImageGenerationProfileSelector.setSelection(0); }
                         });
                     }
                 }
@@ -5691,7 +5707,7 @@ public final class MainActivity extends Activity {
     }
 
     private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson,
-            boolean allowImageGeneration, boolean useCodex,
+            WorkshopImageGenerationProfile imageGenerationProfile, boolean useCodex,
             WorkshopAiProjectTransaction.Snapshot transaction,
             AndroidAiSessionCheckpointStore.Checkpoint resumeCheckpoint) throws Exception {
         JSONObject resumed = resumeCheckpoint == null ? null : resumeCheckpoint.payload;
@@ -5744,7 +5760,7 @@ public final class MainActivity extends Activity {
                         aiCheckpointPayload(initialRequestJson, currentRequestJson, turn,
                                 "", previousToolCallBatch, session, usage));
                 double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
-                boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
+                boolean allowImageOnThisTurn = !useCodex && imageGenerationProfile.enabled() && turn == 0;
                 AiApiResponse apiResponse;
                 long llmStartedMs = SystemClock.elapsedRealtime();
                 if (useCodex) {
@@ -5752,16 +5768,18 @@ public final class MainActivity extends Activity {
                     usage.addUnpriced(apiResponse.model, apiResponse.usage);
                 } else {
                     int maxOutputTokens = maxOutputTokensForBudget(
-                            model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
+                            model, currentRequestJson, remainingUsd,
+                            allowImageOnThisTurn ? imageGenerationProfile.reserveUsd : 0.0);
                     apiResponse = callOpenAiResponsesApi(
-                            apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
+                            apiKey, model, currentRequestJson, maxOutputTokens,
+                            allowImageOnThisTurn ? imageGenerationProfile : null);
                     usage.add(model, apiResponse.usage);
                     if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
                 }
                 List<AiGeneratedImageCandidate> callImages = extractAiGeneratedImages(apiResponse.body);
                 if (!callImages.isEmpty()) {
                     generatedImages.addAll(callImages);
-                    double imageCost = callImages.size() * GPT_IMAGE_2_LOW_1024_USD;
+                    double imageCost = callImages.size() * imageGenerationProfile.reserveUsd;
                     usage.addImageGenerationCost(imageCost, callImages.size());
                     recordMonthlyAiSpend(imageCost);
                 }
@@ -6225,9 +6243,9 @@ public final class MainActivity extends Activity {
                 double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(
                         configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00"), monthlyAiSpendUsd());
                 int maxOutputTokens = maxOutputTokensForBudget(
-                        reviewerModel, request.toString(), remainingUsd, false);
+                        reviewerModel, request.toString(), remainingUsd, 0.0);
                 response = callOpenAiResponsesApi(apiKey, reviewerModel, request.toString(),
-                        maxOutputTokens, false);
+                        maxOutputTokens, null);
                 usage.add(reviewerModel, response.usage);
                 if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
             }
@@ -7517,7 +7535,7 @@ public final class MainActivity extends Activity {
     }
 
     private int maxOutputTokensForBudget(String model, String requestJson, double remainingUsd,
-            boolean reserveImageGeneration) throws Exception {
+            double imageGenerationReserveUsd) throws Exception {
         WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
         if (pricing == null) throw new IOException("AI pricing is unavailable for " + model);
         byte[] inputBytes = buildAiOpenAiInput(requestJson, false, pricing.explicitCacheBreakpoints)
@@ -7526,8 +7544,7 @@ public final class MainActivity extends Activity {
         for (AiImageAttachment attachment : activeAiImageAttachments) imageTokens += attachment.estimatedPatchTokens();
         long conservativeInputTokens = inputBytes.length + imageTokens;
         double conservativeInputCost = pricing.conservativeInputCostUsd(conservativeInputTokens);
-        double outputBudget = remainingUsd - conservativeInputCost
-                - (reserveImageGeneration ? GPT_IMAGE_2_LOW_1024_USD : 0.0);
+        double outputBudget = remainingUsd - conservativeInputCost - imageGenerationReserveUsd;
         int outputTokens = (int)Math.floor(outputBudget * 1000000.0
                 / pricing.effectiveOutputUsdPerMillion(conservativeInputTokens));
         if (outputTokens < 64) {
@@ -7536,8 +7553,14 @@ public final class MainActivity extends Activity {
         return Math.min(MAX_AI_OUTPUT_TOKENS, outputTokens);
     }
 
+    private WorkshopImageGenerationProfile selectedAiImageGenerationProfile() {
+        int selection = aiImageGenerationProfileSelector == null
+                ? 0 : aiImageGenerationProfileSelector.getSelectedItemPosition();
+        return WorkshopImageGenerationProfile.fromSelection(selection);
+    }
+
     private AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson,
-            int maxOutputTokens, boolean allowImageGeneration) throws Exception {
+            int maxOutputTokens, WorkshopImageGenerationProfile imageGenerationProfile) throws Exception {
         WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
         if (pricing == null) throw new IOException("AI pricing is unavailable for " + model);
         JSONObject payload = new JSONObject();
@@ -7550,13 +7573,8 @@ public final class MainActivity extends Activity {
         }
         if (pricing.structuredOutputs) payload.put("text", buildAiResponseTextFormat());
         payload.put("input", buildAiOpenAiInput(requestJson, true, pricing.explicitCacheBreakpoints));
-        if (allowImageGeneration) {
-            payload.put("tools", new JSONArray().put(new JSONObject()
-                    .put("type", "image_generation")
-                    .put("action", "auto")
-                    .put("quality", "low")
-                    .put("size", "1024x1024")
-                    .put("output_format", "png")));
+        if (imageGenerationProfile != null && imageGenerationProfile.enabled()) {
+            payload.put("tools", new JSONArray().put(imageGenerationProfile.toolOptions()));
             payload.put("tool_choice", "auto");
         }
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);

@@ -1,0 +1,112 @@
+{
+  "schema": "stasis-animation",
+  "version": 1,
+  "animation_id": "hearthguard_man_at_arms_walk_front_right",
+  "identity_revision": 1,
+  "status": "candidate",
+  "creative_source": "built_in_imagegen",
+  "references": [
+    {
+      "path": "../../man_at_arms_model_sheet.png",
+      "role": "canonical_identity",
+      "sha256": "fac894b03be3b3f665665364e427a46fa9249736db9648443eea67b9dce7c638"
+    },
+    {
+      "path": "../../man_at_arms_spritesheet_192.png",
+      "role": "runtime_scale_and_style",
+      "sha256": "883c1a911da469fe70b179c578485c84e88d69072608fe5430e213a60b33714e"
+    },
+    {
+      "path": "../../man_at_arms_action_sheet.png",
+      "role": "pose_language",
+      "sha256": "9feec27148e24a9d9f643ec8ebd220c53d945ae45d11a6631daa9da86c2f4056"
+    }
+  ],
+  "source_master": {
+    "path": "walk_cycle_master.png",
+    "width": 1536,
+    "height": 1024,
+    "cell_width": 512,
+    "cell_height": 512,
+    "sha256": "a423457231e3590f4e87d6705d5c4a28f17867aebb1b5cd467be1b2eb29951d3"
+  },
+  "playback": {
+    "frame_width": 192,
+    "frame_height": 192,
+    "frame_duration_ms": 120,
+    "loop_duration_ms": 720,
+    "frames_per_second": 8.3333333333,
+    "loop": true,
+    "anchor": "bottom_center"
+  },
+  "frames": [
+    {
+      "index": 0,
+      "phase": "left_contact",
+      "path": "frames_192/frame_00.png",
+      "source_translation_px": [-51, 1],
+      "sha256": "be2b65543e6f83bc707edc7c7629fcd4bc65d3445960d34840f2b148bc7c7b86"
+    },
+    {
+      "index": 1,
+      "phase": "left_down",
+      "path": "frames_192/frame_01.png",
+      "source_translation_px": [35, 1],
+      "sha256": "21178a2dbdee601614fd039452afb32926544ec8c567ec308b9d06b05727c6f9"
+    },
+    {
+      "index": 2,
+      "phase": "right_passing",
+      "path": "frames_192/frame_02.png",
+      "source_translation_px": [92, -1],
+      "sha256": "45787b4f3e30b3da23c9bcfe8a5a8c016b3fa1d35164a3f77991a91b8e5d978e"
+    },
+    {
+      "index": 3,
+      "phase": "right_contact",
+      "path": "frames_192/frame_03.png",
+      "source_translation_px": [-51, 41],
+      "sha256": "134a3d631420746b8f9473a3e0c9aa5079a013fe7dcdb09535290ba12dad65b0"
+    },
+    {
+      "index": 4,
+      "phase": "right_down",
+      "path": "frames_192/frame_04.png",
+      "source_translation_px": [32, 45],
+      "sha256": "ae60d85464bf1618016dee7a9f56b8557c4838719ab02df8e69c5dbe23fcc11c"
+    },
+    {
+      "index": 5,
+      "phase": "left_passing",
+      "path": "frames_192/frame_05.png",
+      "source_translation_px": [101, 41],
+      "sha256": "1279f67c459eaba31b16285c2637520702b519560670509b4d0e8501d38b42ca"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "walk_cycle_sheet_192.png",
+      "kind": "contact_sheet",
+      "sha256": "842b82613a664d7fb6c456bea560ab9783ebb247d67ae1c894f3ea151fff40eb"
+    },
+    {
+      "path": "walk_cycle_192.webp",
+      "kind": "transparent_animation",
+      "sha256": "999b1547b70707d547f6917345e2182a4029465391bb7be3394d3eb0546fcfc0"
+    },
+    {
+      "path": "walk_cycle_192_review.gif",
+      "kind": "review_animation",
+      "sha256": "0933108233b0059022d63fd1745d4f335b084b47992f0420cccc97e226df89ee"
+    }
+  ],
+  "assessment": {
+    "dimensions": "pass",
+    "alpha": "pass",
+    "identity": "pass",
+    "equipment_continuity": "pass",
+    "registration": "pass_after_deterministic_alignment",
+    "gait_semantics": "candidate_with_limited_passing_pose_separation",
+    "production_approved": false
+  }
+}

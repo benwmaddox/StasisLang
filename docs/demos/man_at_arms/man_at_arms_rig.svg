@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 760" role="img" aria-labelledby="title desc">
+  <title id="title">Layered Hearthguard man-at-arms</title>
+  <desc id="desc">An original storybook medieval tactics character assembled from named vector layers.</desc>
+  <defs>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#aab5b4"/><stop offset=".42" stop-color="#68757a"/><stop offset="1" stop-color="#465359"/>
+    </linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9a5b37"/><stop offset="1" stop-color="#6b3825"/>
+    </linearGradient>
+  </defs>
+
+  <g id="shadow" opacity=".18">
+    <ellipse cx="330" cy="711" rx="210" ry="26" fill="#17272c"/>
+  </g>
+
+  <g id="spear" stroke="#26353a" stroke-linejoin="round">
+    <path d="M130 657L177 113" stroke="#6b3b25" stroke-width="18" stroke-linecap="round"/>
+    <path d="M177 114l-25-54 33-48 25 54z" fill="url(#steel)" stroke-width="8"/>
+    <path d="M158 116l39 3" stroke="#c48a32" stroke-width="12"/>
+    <path d="M181 31l-5 59" stroke="#d4dcda" stroke-width="5" opacity=".65"/>
+  </g>
+
+  <g id="rear_leg" stroke="#26353a" stroke-width="8" stroke-linejoin="round">
+    <path d="M257 558c-5 43-8 75-3 108l85 2c8-34 6-72-1-111z" fill="#554937"/>
+    <path d="M238 642c-8 25-10 48 5 65 32 16 80 16 111-2 8-23 1-43-12-62z" fill="#743b2d"/>
+    <path d="M246 660c30 8 64 8 97-2" fill="none" stroke="#9f5d3e" stroke-width="6"/>
+  </g>
+  <g id="front_leg" stroke="#26353a" stroke-width="8" stroke-linejoin="round">
+    <path d="M367 554c-6 41-6 82 1 116l85 2c8-37 5-77-4-117z" fill="#554937"/>
+    <path d="M357 645c-9 26-7 49 9 65 36 13 91 9 121-11 5-20-6-40-24-54z" fill="#743b2d"/>
+    <path d="M369 662c35 7 67 5 95-5" fill="none" stroke="#9f5d3e" stroke-width="6"/>
+  </g>
+
+  <g id="torso" stroke="#26353a" stroke-width="9" stroke-linejoin="round">
+    <path d="M225 309c-32 39-44 111-31 202l33 74c67 27 171 26 237-8l19-72c10-88-10-161-51-196-57-31-151-31-207 0z" fill="#17616a"/>
+    <path d="M225 309c51 24 156 25 207 0l22 21c-67 31-185 30-249-1z" fill="#2a7880"/>
+    <path d="M222 507c65 24 175 24 244-4l-2 74c-66 34-170 35-237 8z" fill="#0e4850"/>
+    <path d="M231 523c65 20 161 20 226-3" fill="none" stroke="#c48a32" stroke-width="8"/>
+    <g fill="#c48a32" stroke="#26353a" stroke-width="3">
+      <circle cx="266" cy="365" r="6"/><circle cx="331" cy="373" r="6"/><circle cx="397" cy="365" r="6"/>
+      <circle cx="251" cy="428" r="6"/><circle cx="330" cy="436" r="6"/><circle cx="414" cy="426" r="6"/>
+      <circle cx="254" cy="491" r="6"/><circle cx="335" cy="500" r="6"/><circle cx="426" cy="487" r="6"/>
+    </g>
+    <path d="M228 535c70 17 159 17 232-5" fill="none" stroke="#743b2d" stroke-width="20"/>
+    <rect x="316" y="516" width="65" height="44" rx="9" fill="#c48a32"/>
+    <rect x="328" y="527" width="41" height="22" rx="4" fill="#743b2d" stroke-width="5"/>
+  </g>
+
+  <g id="rear_arm" stroke="#26353a" stroke-width="9" stroke-linejoin="round">
+    <path d="M220 326c-37 6-66 40-76 92-7 35-5 79 8 111 16 23 51 16 61-6l20-118z" fill="#e7d5ad"/>
+    <path d="M170 354l44 144M151 408l69 64M147 467l63 40" fill="none" stroke="#c7af83" stroke-width="5" opacity=".75"/>
+    <path d="M132 478c-23 3-36 21-33 44 3 25 24 40 49 34l35-12c18-11 17-49-4-58z" fill="#c98254"/>
+    <path d="M107 511c19-5 39-5 58 4M118 532c15-6 31-7 47-3" fill="none" stroke="#9f5d3e" stroke-width="5"/>
+  </g>
+
+  <g id="front_arm" stroke="#26353a" stroke-width="9" stroke-linejoin="round">
+    <path d="M427 324c41 11 68 49 74 104 4 37-1 76-18 106-16 21-49 10-57-14l-18-127z" fill="#e7d5ad"/>
+    <path d="M451 351l-29 148M479 390l-61 63M490 449l-66 48" fill="none" stroke="#c7af83" stroke-width="5" opacity=".75"/>
+  </g>
+
+  <g id="scabbard" transform="rotate(-15 397 538)" stroke="#26353a" stroke-width="7" stroke-linejoin="round">
+    <path d="M405 530l32 7-21 143-24 8z" fill="#743b2d"/>
+    <path d="M397 676l18-4 10 20-22 9zM402 541l39 8" fill="#c48a32"/>
+  </g>
+
+  <g id="head" stroke="#26353a" stroke-width="8" stroke-linejoin="round">
+    <path id="coif" d="M242 304c-4-77 20-137 87-150 70 6 103 67 91 151l-42 45-96-3z" fill="#743b2d"/>
+    <path d="M259 186l148 131M241 236l113 104M310 160l108 97" fill="none" stroke="#9f5d3e" stroke-width="5" opacity=".65"/>
+    <path id="face" d="M274 202c-23 30-19 92 7 124 17 20 74 23 99 0 28-27 32-91 5-124-31-24-82-23-111 0z" fill="#c98254"/>
+    <path d="M285 213c17-14 40-20 65-14 21 5 36 17 43 34-22-12-46-15-70-10-18 3-33 12-45 24z" fill="#e4a878" stroke="none"/>
+    <g id="eyes" fill="#f4ead0" stroke="#26353a" stroke-width="5">
+      <ellipse cx="304" cy="253" rx="15" ry="18"/><ellipse cx="356" cy="251" rx="15" ry="18"/>
+      <circle cx="307" cy="256" r="7" fill="#26353a" stroke="none"/><circle cx="359" cy="254" r="7" fill="#26353a" stroke="none"/>
+    </g>
+    <g id="brows" fill="none" stroke="#4e291f" stroke-width="9" stroke-linecap="round">
+      <path d="M286 227c12-7 24-8 36-2M343 224c12-5 24-3 34 5"/>
+    </g>
+    <path id="nose" d="M328 251c-8 20-9 33 4 38 9 3 17 0 21-6" fill="#e4a878" stroke="#9f5d3e" stroke-width="5" stroke-linecap="round"/>
+    <path id="moustache" d="M333 286c-15-13-33-10-43 1 9 20 29 22 43 8 14 15 39 12 48-8-12-11-32-14-48-1z" fill="#4e291f"/>
+    <path id="mouth" d="M316 308c10 8 24 8 34 0" fill="none" stroke="#743b2d" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <g id="helmet" stroke="#26353a" stroke-width="8" stroke-linejoin="round">
+    <path d="M239 202c4-78 44-124 98-124 59 1 99 50 100 124-57 22-141 22-198 0z" fill="url(#steel)"/>
+    <path d="M337 87c-25 22-37 62-38 119" fill="none" stroke="#d4dcda" stroke-width="8" opacity=".55"/>
+    <path d="M213 202c75-19 166-18 251 1-7 26-39 38-124 37-78 0-118-12-127-38z" fill="#68757a"/>
+    <path d="M230 207c70-13 142-13 216 1" fill="none" stroke="#aab5b4" stroke-width="7" opacity=".7"/>
+    <circle cx="405" cy="156" r="12" fill="#c48a32"/>
+    <circle cx="401" cy="151" r="4" fill="#f0c66a" stroke="none"/>
+  </g>
+
+  <g id="shield" stroke="#26353a" stroke-linejoin="round">
+    <ellipse cx="472" cy="500" rx="130" ry="150" fill="#68757a" stroke-width="10"/>
+    <ellipse cx="472" cy="500" rx="112" ry="132" fill="url(#wood)" stroke-width="8"/>
+    <path d="M410 417h26v23h22v-23h27v23h22v-23h27v49h-17v92h24v28H401v-28h24v-92h-15z"
+          fill="#e9dfc4" stroke-width="8"/>
+    <path d="M457 585v-43c0-20 30-20 30 0v43" fill="#7a432a" stroke-width="8"/>
+    <path d="M397 471c48-18 100-22 151-12" fill="none" stroke="#9a5b37" stroke-width="7" opacity=".7"/>
+    <g fill="#c48a32" stroke="#26353a" stroke-width="4">
+      <circle cx="472" cy="360" r="7"/><circle cx="565" cy="400" r="7"/><circle cx="584" cy="508" r="7"/>
+      <circle cx="532" cy="623" r="7"/><circle cx="424" cy="632" r="7"/><circle cx="363" cy="529" r="7"/>
+      <circle cx="381" cy="415" r="7"/>
+    </g>
+  </g>
+</svg>

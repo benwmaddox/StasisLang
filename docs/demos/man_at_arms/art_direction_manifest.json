@@ -1,0 +1,68 @@
+{
+  "schema": "stasis-art-direction",
+  "version": 1,
+  "character_id": "hearthguard_man_at_arms",
+  "identity_revision": 1,
+  "references": [
+    {
+      "path": "man_at_arms_model_sheet.png",
+      "role": "canonical_identity",
+      "sha256": "fac894b03be3b3f665665364e427a46fa9249736db9648443eea67b9dce7c638"
+    },
+    {
+      "path": "man_at_arms_action_sheet.png",
+      "role": "approved_pose_language",
+      "derived_from": ["canonical_identity"],
+      "sha256": "9feec27148e24a9d9f643ec8ebd220c53d945ae45d11a6631daa9da86c2f4056"
+    },
+    {
+      "path": "man_at_arms_asset_family.png",
+      "role": "approved_game_presentation",
+      "derived_from": ["canonical_identity", "approved_pose_language"],
+      "sha256": "530ea1925a3eb1bc16a1099b207eb948695c4d52907867bf004cdffd239c4119"
+    },
+    {
+      "path": "man_at_arms_rig.svg",
+      "role": "editable_vector_rig",
+      "derived_from": ["canonical_identity"],
+      "sha256": "ed500b51779427182233fbc24d414eb1daec4d16b29f4d37aa2b7fda882a0bc6"
+    },
+    {
+      "path": "tower_emblem.svg",
+      "role": "canonical_emblem",
+      "derived_from": ["canonical_identity"],
+      "sha256": "0508f30081e76fc3282856c05d98cb3af00a951fd512b256f041c68421e7e7a9"
+    },
+    {
+      "path": "man_at_arms_spritesheet_master.png",
+      "role": "transparent_sprite_master",
+      "derived_from": ["canonical_identity", "approved_pose_language"],
+      "sha256": "b5929a7cca0868330fef97bdb7c6cdeb712de95f7bf0823d01c10a3d123a5bc0"
+    },
+    {
+      "path": "man_at_arms_spritesheet_128.png",
+      "role": "runtime_sprite_sheet",
+      "derived_from": ["transparent_sprite_master"],
+      "sha256": "48321635f87acdf79d0e689056783083d85e8d8654fa41e7c6395cc4e21cd864"
+    },
+    {
+      "path": "man_at_arms_spritesheet_192.png",
+      "role": "runtime_sprite_sheet_4k",
+      "derived_from": ["transparent_sprite_master"],
+      "sha256": "883c1a911da469fe70b179c578485c84e88d69072608fe5430e213a60b33714e"
+    }
+  ],
+  "required_generation_inputs": ["canonical_identity"],
+  "recommended_generation_inputs": ["approved_pose_language", "approved_game_presentation"],
+  "locked_traits": [
+    "face_and_dark_swept_moustache",
+    "compact_3_65_head_proportions",
+    "asymmetric_kettle_helmet_and_single_brass_rivet",
+    "teal_brigandine_and_cream_quilted_sleeves",
+    "oxblood_leather",
+    "walnut_round_shield_and_cream_tower",
+    "colored_outline_and_two_tone_material_language"
+  ],
+  "allowed_pose_edits": ["pose", "expression", "view_angle", "equipment_angle"],
+  "render_review_widths_px": [1024, 96, 64]
+}

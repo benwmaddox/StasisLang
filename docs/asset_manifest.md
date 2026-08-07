@@ -48,7 +48,7 @@ min(max_physical_width / logical_width,
 
 Each prepared axis is the ceiling of `maximum logical axis * display scale * max_render_scale`. The source aspect ratio is retained, the result never exceeds either bound, and Stasis never enlarges a master. `max_render_scale` defaults to `1.0` and accepts `1.0..=8.0`; use it for the greatest zoom, bounce, or other enlargement that can actually be painted.
 
-Only PNG resizing is implemented initially. Other sprite encodings and assets without `prepare` are copied unchanged. SVG remains resolution-independent. Opaque prepared PNGs are encoded as RGB; images with any transparency retain alpha.
+Only PNG resizing is implemented initially. Other sprite encodings and assets without `prepare` are copied unchanged. SVG remains resolution-independent. PNG masters are resized with a Lanczos3 filter in linear-light, premultiplied-alpha space so gradients retain their brightness and transparent edge colors do not bleed into visible pixels. Opaque prepared PNGs are encoded as RGB; images with any transparency retain alpha.
 
 Fonts use `{"kind":"font","encoding":"ttf"}` or
 `{"kind":"font","encoding":"otf"}`. They are hash-validated and copied unchanged; sprite
