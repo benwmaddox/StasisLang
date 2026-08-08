@@ -180,7 +180,8 @@ fn assert_maximized_portrait(description: &str, completed: CompletedProcess, scr
     let log = format!("{stdout}\n{stderr}");
     let presentation = log
         .lines()
-        .find(|line| line.contains("Stasis window presentation: mode=maximized"))
+        .filter(|line| line.contains("Stasis window presentation: mode=maximized"))
+        .last()
         .unwrap_or_else(|| panic!("{description} did not maximize its desktop window: {log}"));
     let mut modes = Vec::new();
     for line in log
