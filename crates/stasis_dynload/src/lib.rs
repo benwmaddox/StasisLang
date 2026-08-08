@@ -1061,6 +1061,7 @@ struct StasisGraphicsAssetsApi {
     stasis_audio_get_channels: Option<usize>,
     stasis_audio_get_queued_frames: Option<usize>,
     stasis_audio_get_underruns: Option<usize>,
+    stasis_audio_push_f32_interleaved: Option<usize>,
     stasis_audio_load_wav: Option<usize>,
     stasis_audio_release: Option<usize>,
     stasis_audio_play: Option<usize>,
@@ -1133,6 +1134,9 @@ impl StasisGraphicsAssetsApi {
                 .symbol_address("stasis_audio_get_queued_frames")
                 .ok(),
             stasis_audio_get_underruns: lib.symbol_address("stasis_audio_get_underruns").ok(),
+            stasis_audio_push_f32_interleaved: lib
+                .symbol_address("stasis_audio_push_f32_interleaved")
+                .ok(),
             stasis_audio_load_wav: lib.symbol_address("stasis_audio_load_wav").ok(),
             stasis_audio_release: lib.symbol_address("stasis_audio_release").ok(),
             stasis_audio_play: lib.symbol_address("stasis_audio_play").ok(),
@@ -4710,9 +4714,42 @@ pub extern "C" fn stasis_jit_audio_get_underruns() -> i32 {
     callback()
 }
 
+fn with_jit_audio_f32_interleaved(
+    samples: i32,
+    frame_count: i32,
+    channels: i32,
+    push: impl FnOnce(*const f32, i32) -> i32,
+) -> i32 {
+    if frame_count <= 0 || channels <= 0 {
+        return 0;
+    }
+    let Some(sample_count) = frame_count.checked_mul(channels) else {
+        return 0;
+    };
+    let values = stasis_jit_global_f32_array_ptr(samples, 0, sample_count);
+    if values.is_null() {
+        return 0;
+    }
+    push(values.cast_const(), frame_count)
+}
+
 #[no_mangle]
-pub extern "C" fn stasis_jit_audio_push_f32_interleaved(_samples: i32, _frame_count: i32) -> i32 {
-    0
+pub extern "C" fn stasis_jit_audio_push_f32_interleaved(samples: i32, frame_count: i32) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_push_f32_interleaved else {
+        return 0;
+    };
+    let channels = stasis_jit_audio_get_channels();
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const f32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const f32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+    with_jit_audio_f32_interleaved(samples, frame_count, channels, |values, frames| {
+        callback(values, frames)
+    })
 }
 
 #[no_mangle]
@@ -5402,6 +5439,31 @@ mod tests {
         assert_eq!(out_i32[1], STASIS_RENDER_V2_VERSION);
         assert_eq!(out_i32[STASIS_RENDER_ORDER_COUNT_INDEX], 0);
         assert_eq!(&out_f32[4..12], &f32s[4..12]);
+
+        clear_registered_global_memory();
+    }
+
+    #[test]
+    fn audio_push_bridge_forwards_registered_interleaved_samples() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+
+        let samples_id = global_path_hash("audio_samples");
+        let mut samples = vec![0.25f32, -0.25, 0.5, -0.5];
+        register_global_f32_array(samples_id, 0, samples.as_mut_ptr(), samples.len());
+
+        let accepted = with_jit_audio_f32_interleaved(samples_id, 2, 2, |values, frames| {
+            assert_eq!(frames, 2);
+            assert_eq!(unsafe { std::slice::from_raw_parts(values, 4) }, samples);
+            frames
+        });
+        assert_eq!(accepted, 2);
+        assert_eq!(
+            with_jit_audio_f32_interleaved(samples_id, i32::MAX, 2, |_, _| {
+                panic!("overflowing sample count must not reach the runtime")
+            }),
+            0
+        );
 
         clear_registered_global_memory();
     }
