@@ -14,7 +14,10 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
-    def test_wav_mixer_is_part_of_release_provenance(self):
+    def test_audio_asset_decoder_is_part_of_release_provenance(self):
+        self.assertIn("MINIMP3-LICENSE.txt", RUNTIME_FILES)
+        self.assertIn("minimp3.h", RUNTIME_FILES)
+        self.assertIn("minimp3_ex.h", RUNTIME_FILES)
         self.assertIn("stasis_audio_assets.c", RUNTIME_FILES)
         self.assertIn("stasis_audio_assets.h", RUNTIME_FILES)
 

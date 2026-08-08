@@ -19,6 +19,9 @@ PINNED_SDL_DEPENDENCIES = {
 
 RUNTIME_FILES = (
     "CMakeLists.txt",
+    "MINIMP3-LICENSE.txt",
+    "minimp3.h",
+    "minimp3_ex.h",
     "nanosvg.h",
     "nanosvgrast.h",
     "stasis_display_scale.h",
