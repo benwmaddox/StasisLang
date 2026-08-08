@@ -154,6 +154,129 @@ fn assert_launch(description: &str, completed: CompletedProcess, screenshot: &Pa
     assert!(svg_pixel[1] > 150, "{description} SVG pixel {svg_pixel:?}");
 }
 
+fn parse_dimensions(log: &str, key: &str) -> (u32, u32) {
+    let value = log
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(key))
+        .unwrap_or_else(|| panic!("missing {key} in presentation log: {log}"));
+    let (width, height) = value
+        .trim_end_matches(|character: char| !character.is_ascii_digit())
+        .split_once('x')
+        .unwrap_or_else(|| panic!("invalid {key} dimensions: {value}"));
+    (
+        width.parse().expect("numeric presentation width"),
+        height.parse().expect("numeric presentation height"),
+    )
+}
+
+fn assert_maximized_portrait(description: &str, completed: CompletedProcess, screenshot: &Path) {
+    let stdout = String::from_utf8_lossy(&completed.stdout);
+    let stderr = String::from_utf8_lossy(&completed.stderr);
+    assert!(
+        completed.status.success(),
+        "{description} failed with {:?}\nstdout={stdout}\nstderr={stderr}",
+        completed.status.code()
+    );
+    let log = format!("{stdout}\n{stderr}");
+    let presentation = log
+        .lines()
+        .find(|line| line.contains("Stasis window presentation: mode=maximized"))
+        .unwrap_or_else(|| panic!("{description} did not maximize its desktop window: {log}"));
+    let mut modes = Vec::new();
+    for line in log
+        .lines()
+        .filter(|line| line.contains("Stasis window presentation: mode="))
+    {
+        let mode = line
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("mode="))
+            .expect("presentation mode token");
+        if modes.last().copied() != Some(mode) {
+            modes.push(mode);
+        }
+    }
+    assert_eq!(
+        modes,
+        [
+            "maximized",
+            "fullscreen",
+            "maximized",
+            "windowed",
+            "maximized"
+        ],
+        "{description} should apply tick requests at distinct host boundaries"
+    );
+    assert_eq!(
+        parse_dimensions(presentation, "logical="),
+        (360, 720),
+        "{description} logical canvas"
+    );
+    let native = parse_dimensions(presentation, "native=");
+    let bounds = parse_dimensions(presentation, "bounds=");
+    let usable = parse_dimensions(presentation, "usable=");
+    assert_eq!(
+        native.0, usable.0,
+        "{description} client width should fill the usable work area"
+    );
+    assert!(
+        native.1 <= usable.1
+            && usable.1 - native.1 < 128
+            && bounds.0 >= usable.0
+            && bounds.1 >= usable.1,
+        "{description} should use normal maximized chrome inside the usable work area: native={native:?} bounds={bounds:?} usable={usable:?}"
+    );
+
+    let image = image::open(screenshot)
+        .unwrap_or_else(|error| panic!("{description} did not capture a PNG: {error}"))
+        .to_rgba8();
+    let drawable = parse_dimensions(presentation, "drawable=");
+    assert_eq!(
+        image.height(),
+        drawable.1,
+        "{description} portrait content should use the full drawable height"
+    );
+    assert_eq!(
+        image.width() * 720,
+        image.height() * 360,
+        "{description} capture should preserve the 360x720 logical aspect"
+    );
+    let last_x = image.width() - 1;
+    let last_y = image.height() - 1;
+    for (name, pixels) in [
+        (
+            "top",
+            (0..image.width())
+                .map(|x| *image.get_pixel(x, 0))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "right",
+            (0..image.height())
+                .map(|y| *image.get_pixel(last_x, y))
+                .collect(),
+        ),
+        (
+            "bottom",
+            (0..image.width())
+                .map(|x| *image.get_pixel(x, last_y))
+                .collect(),
+        ),
+        (
+            "left",
+            (0..image.height())
+                .map(|y| *image.get_pixel(0, y))
+                .collect(),
+        ),
+    ] {
+        assert!(
+            pixels
+                .iter()
+                .any(|pixel| pixel.0[0] > 80 || pixel.0[1] > 80 || pixel.0[2] > 80),
+            "{description} clipped the {name} logical framebuffer edge"
+        );
+    }
+}
+
 fn app_control_blocked(completed: &CompletedProcess) -> bool {
     !completed.status.success()
         && String::from_utf8_lossy(&completed.stderr)
@@ -308,6 +431,63 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
         release_blocked, package_blocked,
         "Application Control must not hide a failure in only one AOT launch path"
     );
+}
+
+#[test]
+fn maximized_portrait_preserves_canvas_in_jit_and_release() {
+    let root = repository_root();
+    let fixture = root.join("samples/maximized_portrait");
+    let test_tree = TestTree(temp_dir("maximized_portrait"));
+    let project = test_tree.0.join("maximized_portrait");
+    copy_tree(&fixture, &project);
+    copy_tree(&root.join("src"), &project.join("vendor/stasis/src"));
+
+    let jit_screenshot = test_tree.0.join("jit-maximized.png");
+    let jit = launch(
+        {
+            let mut command = stasis_command(&project);
+            command.args([
+                "play",
+                "main.stasis",
+                "--ticks",
+                "6",
+                "--screenshot-frame",
+                "6",
+                "--screenshot",
+                jit_screenshot.to_str().unwrap(),
+                "--exit-after-screenshot",
+            ]);
+            command
+        },
+        "maximized portrait JIT",
+    );
+    assert_maximized_portrait("maximized portrait JIT", jit, &jit_screenshot);
+
+    let release = launch_release_build({
+        let mut command = stasis_command(&project);
+        command.args(["build", "--mode", "release"]);
+        command
+    });
+    assert!(
+        release.status.success(),
+        "maximized portrait release build failed: {}",
+        String::from_utf8_lossy(&release.stderr)
+    );
+    let release_screenshot = test_tree.0.join("release-maximized.png");
+    let mut release_command = Command::new(project.join("build/maximized_portrait.exe"));
+    release_command.current_dir(&project);
+    configure_capture(&mut release_command, &release_screenshot, true);
+    release_command.env("STASIS_SCREENSHOT_FRAME", "6");
+    let release_run = launch(release_command, "maximized portrait release");
+    if app_control_blocked(&release_run) {
+        eprintln!("maximized portrait release executable was blocked by Windows Application Control (error 4551)");
+    } else {
+        assert_maximized_portrait(
+            "maximized portrait release",
+            release_run,
+            &release_screenshot,
+        );
+    }
 }
 
 #[test]

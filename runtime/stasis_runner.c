@@ -65,6 +65,7 @@ typedef int (*stasis_host_bulk_step_fn)(
     stasis_tick_fn tick_fn);
 typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
 typedef int (*stasis_set_fullscreen_fn)(int enabled);
+typedef int (*stasis_set_maximized_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
 typedef int (*stasis_graphics_runtime_abi_version_fn)(void);
 typedef int (*stasis_graphics_set_asset_root_fn)(const char *path);
@@ -118,7 +119,8 @@ static int stasis_rebind_bulk_pointers_linux(
     int32_t **gfx_cmd_i32,
     float **gfx_cmd_f32,
     uint8_t **gfx_cmd_u8,
-    int32_t *last_req_seq)
+    int32_t *last_req_seq,
+    int initialize_request_baseline)
 {
     if (!lib)
     {
@@ -163,7 +165,7 @@ static int stasis_rebind_bulk_pointers_linux(
         *gfx_cmd_u8 = (uint8_t *)dlsym(lib, "gfx_cmd_u8");
     }
 
-    if (host_bulk_init && host_req_seq && *host_req_seq)
+    if (initialize_request_baseline && host_bulk_init && host_req_seq && *host_req_seq)
     {
         host_bulk_init(*host_req_seq);
     }
@@ -2002,6 +2004,7 @@ int main(int argc, char **argv)
     HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
     stasis_init_window_fn init_window = NULL;
     stasis_set_fullscreen_fn set_fullscreen = NULL;
+    stasis_set_maximized_fn set_maximized = NULL;
     stasis_set_window_size_fn set_window_size = NULL;
     if (gfx)
     {
@@ -2027,6 +2030,7 @@ int main(int argc, char **argv)
         }
         init_window = (stasis_init_window_fn)GetProcAddress(gfx, "stasis_init_window");
         set_fullscreen = (stasis_set_fullscreen_fn)GetProcAddress(gfx, "stasis_set_fullscreen");
+        set_maximized = (stasis_set_maximized_fn)GetProcAddress(gfx, "stasis_set_maximized");
         set_window_size = (stasis_set_window_size_fn)GetProcAddress(gfx, "stasis_set_window_size");
         if (init_window)
         {
@@ -2260,6 +2264,14 @@ int main(int argc, char **argv)
             else if ((flags & 2) != 0)
             {
                 (void)set_fullscreen(1);
+            }
+            else if ((flags & 4) != 0 && set_maximized)
+            {
+                if (set_window_size && host_req_window_w_px && host_req_window_h_px)
+                {
+                    set_window_size(*host_req_window_w_px, *host_req_window_h_px);
+                }
+                (void)set_maximized(1);
             }
         }
 
@@ -2587,6 +2599,14 @@ int main(int argc, char **argv)
                     {
                         (void)set_fullscreen(1);
                     }
+                    else if ((flags & 4) != 0 && set_maximized)
+                    {
+                        if (set_window_size && host_req_window_w_px && host_req_window_h_px)
+                        {
+                            set_window_size(*host_req_window_w_px, *host_req_window_h_px);
+                        }
+                        (void)set_maximized(1);
+                    }
                 }
 
                 int step_result = 0;
@@ -2892,6 +2912,16 @@ int main(int argc, char **argv)
     }
     stasis_try_set_sys_args(lib, argc, argv);
 
+    /* Capture the guest request sequence before main(), matching Windows and JIT.
+       The initial pointer rebind below must not replace this baseline after main(). */
+    stasis_host_bulk_init_fn startup_host_bulk_init =
+        (stasis_host_bulk_init_fn)dlsym(gfx_lib, "stasis_host_bulk_init");
+    int32_t *startup_host_req_seq = (int32_t *)dlsym(lib, "host_req_seq");
+    if (startup_host_bulk_init)
+    {
+        startup_host_bulk_init(startup_host_req_seq);
+    }
+
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     if (runner_diag)
     {
@@ -2969,7 +2999,8 @@ int main(int argc, char **argv)
             &gfx_cmd_i32,
             &gfx_cmd_f32,
             &gfx_cmd_u8,
-            &last_req_seq);
+            &last_req_seq,
+            0);
         if (!bulk_active)
         {
             fprintf(stderr, "error: stasis_runner requires HostFrame bulk globals for tick execution\n");
@@ -3206,7 +3237,8 @@ int main(int argc, char **argv)
                         &gfx_cmd_i32,
                         &gfx_cmd_f32,
                         &gfx_cmd_u8,
-                        &last_req_seq);
+                        &last_req_seq,
+                        1);
 
                     if (next_map_owned)
                     {
@@ -3242,7 +3274,8 @@ int main(int argc, char **argv)
                     &gfx_cmd_i32,
                     &gfx_cmd_f32,
                     &gfx_cmd_u8,
-                    &last_req_seq);
+                    &last_req_seq,
+                    1);
             }
 
             stasis_data_poll_all();

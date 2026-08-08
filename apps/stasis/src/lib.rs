@@ -3805,6 +3805,14 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_runner.c"
     ));
+    const STASIS_GRAPHICS_STDLIB: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/stdlib/graphics.stasis"
+    ));
+    const STASIS_WINDOW_REQUEST_STDLIB: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/stdlib/internal/host_window_request.stasis"
+    ));
     const STASIS_MOBILE_RUNTIME_SOURCE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_mobile_runtime.c"
@@ -3955,6 +3963,27 @@ mod tests {
 
         assert_eq!(result, 0);
         assert_eq!(&*phases.borrow(), &["init", "main", "apply"]);
+
+        let unix_source = STASIS_RUNNER_SOURCE.replace("\r\n", "\n");
+        let baseline = unix_source
+            .find("startup_host_bulk_init(startup_host_req_seq);")
+            .expect("Unix packaged runner should capture the request baseline");
+        let guest_main = unix_source[baseline..]
+            .find("int result = entry();")
+            .expect("Unix packaged runner should execute guest main")
+            + baseline;
+        let initial_rebind = unix_source[guest_main..]
+            .find("&last_req_seq,\n            0);")
+            .expect("initial Unix pointer binding must preserve the pre-main baseline")
+            + guest_main;
+        let initial_apply = unix_source[initial_rebind..]
+            .find("host_bulk_apply_requests(host_req_seq")
+            .expect("Unix packaged runner should apply main's request")
+            + initial_rebind;
+        assert!(
+            baseline < guest_main && guest_main < initial_rebind && initial_rebind < initial_apply,
+            "Unix packaged AOT must baseline before main and apply after binding"
+        );
     }
 
     #[test]
@@ -4322,6 +4351,55 @@ mod tests {
             restore < resize
                 && resize_source[restore..resize].contains("SDL_SyncWindow(g_window);"),
             "desktop restore must complete before applying an explicit window size"
+        );
+    }
+
+    #[test]
+    fn maximized_request_preserves_logical_canvas_and_uses_distinct_host_mode() {
+        assert!(
+            STASIS_WINDOW_REQUEST_STDLIB.contains("const HOST_REQ_FLAG_MAXIMIZED: i32 = 4;")
+                && STASIS_WINDOW_REQUEST_STDLIB
+                    .contains("function host_request_maximized(enabled: i32): void")
+                && STASIS_GRAPHICS_STDLIB.contains("function set_maximized(enabled: i32): i32"),
+            "stdlib should expose a first-class maximized presentation request"
+        );
+
+        let maximize_start = STASIS_GRAPHICS_SOURCE
+            .find("STASIS_EXPORT int stasis_set_maximized(int maximized) {")
+            .expect("graphics runtime should expose maximized presentation");
+        let maximize_end = STASIS_GRAPHICS_SOURCE[maximize_start..]
+            .find("STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {")
+            .expect("maximized presentation should precede fullscreen control")
+            + maximize_start;
+        let maximize_source = &STASIS_GRAPHICS_SOURCE[maximize_start..maximize_end];
+        assert!(
+            maximize_source.contains("SDL_MaximizeWindow(g_window)")
+                && maximize_source.contains("SDL_RestoreWindow(g_window)")
+                && !maximize_source.contains("SDL_SetWindowSize("),
+            "maximizing must change presentation without replacing logical dimensions"
+        );
+
+        let apply_start = STASIS_GRAPHICS_SOURCE
+            .find("STASIS_EXPORT void stasis_host_bulk_apply_requests(")
+            .expect("graphics runtime should apply the shared request mailbox");
+        let apply_end = STASIS_GRAPHICS_SOURCE[apply_start..]
+            .find("STASIS_EXPORT void stasis_host_set_performance_metrics(")
+            .expect("request application should precede performance metrics")
+            + apply_start;
+        let apply_source = &STASIS_GRAPHICS_SOURCE[apply_start..apply_end];
+        assert!(
+            apply_source.contains("const int32_t HOST_REQ_FLAG_MAXIMIZED = 4;")
+                && apply_source.contains("#if !defined(__ANDROID__) && !defined(__IPHONEOS__)")
+                && apply_source.contains(
+                    "stasis_set_logical_size(*host_req_window_w_px, *host_req_window_h_px);"
+                )
+                && apply_source.contains("(void)stasis_set_maximized(1);"),
+            "JIT and AOT bulk hosts should preserve mobile fullscreen and apply one logical-size-preserving maximized mode"
+        );
+        assert!(
+            STASIS_GRAPHICS_EXPORTS.contains("stasis_set_maximized")
+                && STASIS_RUNNER_SOURCE.contains("else if ((flags & 4) != 0 && set_maximized)"),
+            "exported and fallback runner contracts should recognize maximized mode"
         );
     }
 

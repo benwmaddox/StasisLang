@@ -119,6 +119,28 @@ static void test_safe_native_area_maps_to_logical_viewport(void) {
     CHECK(close_enough(metrics.safe_logical_viewport.h, 680.0f));
 }
 
+static void test_maximized_portrait_pointer_mapping(void) {
+    StasisDisplayMetrics metrics = stasis_display_metrics(
+        360, 720, 1920, 986, 1920, 986,
+        (StasisDisplayViewport){0.0f, 0.0f, 1920.0f, 986.0f});
+    CHECK(close_enough(metrics.native_viewport.x, 713.0f));
+    CHECK(close_enough(metrics.native_viewport.y, 0.0f));
+    CHECK(close_enough(metrics.native_viewport.w, 493.0f));
+    CHECK(close_enough(metrics.native_viewport.h, 986.0f));
+
+    float logical_x = 0.0f;
+    float logical_y = 0.0f;
+    stasis_display_native_to_logical_xy(
+        &metrics, 959.5f, 493.0f, &logical_x, &logical_y);
+    CHECK(close_enough(logical_x, 180.0f));
+    CHECK(close_enough(logical_y, 360.0f));
+
+    stasis_display_native_to_logical_xy(
+        &metrics, 713.0f, 985.0f, &logical_x, &logical_y);
+    CHECK(close_enough(logical_x, 0.0f));
+    CHECK(logical_y > 719.0f && logical_y <= 720.0f);
+}
+
 static void test_extreme_density_and_extent_are_bounded(void) {
     StasisDisplayMetrics metrics = metrics_for(1, 1, 32768, 32768, 32768, 32768);
     CHECK(close_enough(metrics.raster_scale, 8.0f));
@@ -133,6 +155,7 @@ int main(void) {
     test_orientation_change_keeps_logical_dimensions();
     test_odd_fractional_viewport_uses_renderer_rounding();
     test_safe_native_area_maps_to_logical_viewport();
+    test_maximized_portrait_pointer_mapping();
     test_extreme_density_and_extent_are_bounded();
     return 0;
 }

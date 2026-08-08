@@ -7,6 +7,7 @@
 
 const HOST_REQ_FLAG_WINDOWED: i32 = 1;
 const HOST_REQ_FLAG_FULLSCREEN: i32 = 2;
+const HOST_REQ_FLAG_MAXIMIZED: i32 = 4;
 
 global host_req_seq: i32;
 global host_req_flags: i32;
@@ -25,6 +26,15 @@ function host_request_windowed(width: i32, height: i32): void {
 function host_request_fullscreen(enabled: i32): void {
     if (enabled != 0) {
         host_req_flags = HOST_REQ_FLAG_FULLSCREEN;
+    } else {
+        host_req_flags = HOST_REQ_FLAG_WINDOWED;
+    }
+    host_req_seq = host_req_seq + 1;
+}
+
+function host_request_maximized(enabled: i32): void {
+    if (enabled != 0) {
+        host_req_flags = HOST_REQ_FLAG_MAXIMIZED;
     } else {
         host_req_flags = HOST_REQ_FLAG_WINDOWED;
     }
