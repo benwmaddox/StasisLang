@@ -51,6 +51,9 @@ const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",
+    "MINIMP3-LICENSE.txt",
+    "minimp3.h",
+    "minimp3_ex.h",
     "nanosvg.h",
     "nanosvgrast.h",
     "stasis_display_scale.h",

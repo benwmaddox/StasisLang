@@ -78,6 +78,19 @@ int main(void) {
     if (stasis_audio_assets_voice_is_playing(&store, looped)) return 9;
     stasis_audio_assets_release(&store, asset);
     if (stasis_audio_assets_play(&store, asset, 0, 1.0f, 0.0f) != 0) return 10;
+
+#ifdef STASIS_TEST_MP3_PATH
+    if (stasis_audio_assets_load_wav(&store, STASIS_TEST_MP3_PATH) != 0) return 11;
+    int mp3 = stasis_audio_assets_load(&store, STASIS_TEST_MP3_PATH);
+    if (mp3 <= 0 || store.assets[0].channels != 1 ||
+        store.assets[0].sample_rate != 24000 || store.assets[0].frame_count < 8000) return 12;
+    int mp3_voice = stasis_audio_assets_play(&store, mp3, 0, 0.5f, 0.0f);
+    if (mp3_voice <= 0) return 13;
+    memset(output, 0, sizeof(output));
+    stasis_audio_assets_mix(&store, output, 10, 48000);
+    if (!stasis_audio_assets_voice_is_playing(&store, mp3_voice)) return 14;
+    stasis_audio_assets_release(&store, mp3);
+#endif
     stasis_audio_assets_reset(&store);
     return 0;
 }

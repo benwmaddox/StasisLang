@@ -5451,6 +5451,16 @@ fail:
     return 0;
 }
 
+static int stasis_audio_load_asset(const char* path) {
+    char resolved[1024];
+    if (!path || !*path || !resolve_asset_path(path, resolved, sizeof(resolved))) return 0;
+    if (!stasis_audio_ensure_init()) return 0;
+    SDL_LockAudioStream(g_audio_stream);
+    int handle = stasis_audio_assets_load(&g_audio_assets, resolved);
+    SDL_UnlockAudioStream(g_audio_stream);
+    return handle;
+}
+
 STASIS_EXPORT void stasis_audio_release(int asset_handle) {
     if (!g_audio_stream) return;
     SDL_LockAudioStream(g_audio_stream);
@@ -5503,14 +5513,14 @@ STASIS_EXPORT void stasis_audio_voice_set_volume_pan(int voice_handle, float vol
     SDL_UnlockAudioStream(g_audio_stream);
 }
 
-/* Brickout-compatible convenience API. Both categories use the same bounded WAV asset table;
- * music is exclusive per asset while effects may overlap. */
+/* Brickout-compatible convenience API. Both categories use the same bounded WAV/MP3 asset
+ * table; music is exclusive per asset while effects may overlap. */
 STASIS_EXPORT int stasis_audio_load_music(const char* path) {
-    return stasis_audio_load_wav(path);
+    return stasis_audio_load_asset(path);
 }
 
 STASIS_EXPORT int stasis_audio_load_effect(const char* path) {
-    return stasis_audio_load_wav(path);
+    return stasis_audio_load_asset(path);
 }
 
 STASIS_EXPORT int stasis_audio_play_music(int asset_handle, int loop, float volume) {

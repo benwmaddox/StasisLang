@@ -311,7 +311,7 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
 }
 
 #[test]
-fn release_audio_sample_loads_wav_and_starts_playback() {
+fn release_audio_sample_loads_compressed_music_and_starts_playback() {
     let root = repository_root();
     let fixture = root.join("samples/audio_asset_playback");
     let test_tree = TestTree(temp_dir("audio_asset_playback"));

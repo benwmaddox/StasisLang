@@ -9,3 +9,8 @@ license, exception, copyright, and third-party notice text in `RUST-LLVM-COPYRIG
 
 The archive also includes `lld-link.exe` from the Rust toolchain distribution. LLVM and Rust
 license notices remain applicable to those binaries.
+
+The graphics runtime includes `minimp3` at commit
+`ea99364f61c14656440e8d77e9c233ccf3124633` to decode packaged MP3 audio into bounded host memory.
+The project is dedicated to the public domain under CC0 1.0; the complete notice is retained in
+`runtime/MINIMP3-LICENSE.txt`.
