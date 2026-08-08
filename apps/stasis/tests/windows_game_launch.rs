@@ -235,10 +235,12 @@ fn assert_maximized_portrait(description: &str, completed: CompletedProcess, scr
         drawable.1,
         "{description} portrait content should use the full drawable height"
     );
-    assert_eq!(
-        image.width() * 720,
-        image.height() * 360,
-        "{description} capture should preserve the 360x720 logical aspect"
+    let aspect_error = (image.width() * 720).abs_diff(image.height() * 360);
+    assert!(
+        aspect_error <= 360,
+        "{description} capture should preserve the 360x720 logical aspect within half a physical pixel: capture={}x{} error={aspect_error}",
+        image.width(),
+        image.height()
     );
     let last_x = image.width() - 1;
     let last_y = image.height() - 1;
