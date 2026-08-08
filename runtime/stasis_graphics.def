@@ -11,6 +11,7 @@ EXPORTS
     stasis_get_display_metrics
     stasis_get_desktop_size
     stasis_set_window_size
+    stasis_set_maximized
     stasis_set_fullscreen
     stasis_should_quit
     stasis_begin_frame

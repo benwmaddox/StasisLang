@@ -1,5 +1,7 @@
 #include <stdlib.h>
 
+#include "../stasis_render_contract.h"
+
 #if defined(_WIN32)
 #define STASIS_TEST_EXPORT __declspec(dllexport)
 #else
@@ -7,7 +9,7 @@
 #endif
 
 STASIS_TEST_EXPORT int stasis_graphics_runtime_abi_version(void) {
-    return 1;
+    return STASIS_GRAPHICS_RUNTIME_ABI_VERSION;
 }
 
 STASIS_TEST_EXPORT int stasis_set_asset_root(const char *path) {

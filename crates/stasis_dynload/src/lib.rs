@@ -764,7 +764,7 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
-const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 1;
+const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 2;
 
 fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
     let address = lib

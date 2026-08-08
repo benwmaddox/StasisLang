@@ -113,6 +113,7 @@ static void log_package_provenance(void) {
 #endif
 
 STASIS_EXPORT void stasis_set_window_size(int width, int height);
+STASIS_EXPORT int stasis_set_maximized(int maximized);
 STASIS_EXPORT int stasis_get_time_us(void);
 STASIS_EXPORT int stasis_load_font(const char* path, int font_size);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
@@ -262,6 +263,7 @@ static SpriteEntry* sprite_fallback_get(void);
 static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float w, float h, int rot_degrees, int a, int do_hash);
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
 static void stasis_sync_display_metrics(void);
+static void stasis_set_logical_size(int width, int height);
 static void stasis_reset_text_cache(void);
 static void stasis_invalidate_renderer_resources(int discard_gpu_handles);
 static int stasis_restore_renderer_resources(void);
@@ -976,6 +978,7 @@ STASIS_EXPORT void stasis_host_bulk_apply_requests(
     /* Matches src/runtime/host_window_request.stasis */
     const int32_t HOST_REQ_FLAG_WINDOWED = 1;
     const int32_t HOST_REQ_FLAG_FULLSCREEN = 2;
+    const int32_t HOST_REQ_FLAG_MAXIMIZED = 4;
 
     if (!host_req_seq || !host_req_flags)
     {
@@ -999,13 +1002,23 @@ STASIS_EXPORT void stasis_host_bulk_apply_requests(
     {
         if (host_req_window_w_px && host_req_window_h_px)
         {
+#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
             (void)stasis_set_fullscreen(0);
+#endif
             stasis_set_window_size(*host_req_window_w_px, *host_req_window_h_px);
         }
     }
     else if ((flags & HOST_REQ_FLAG_FULLSCREEN) != 0)
     {
         (void)stasis_set_fullscreen(1);
+    }
+    else if ((flags & HOST_REQ_FLAG_MAXIMIZED) != 0)
+    {
+        if (host_req_window_w_px && host_req_window_h_px)
+        {
+            stasis_set_logical_size(*host_req_window_w_px, *host_req_window_h_px);
+        }
+        (void)stasis_set_maximized(1);
     }
 }
 
@@ -4050,15 +4063,7 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
     if (height) *height = h;
 }
 
-/*
- * Set window size (windowed mode).
- * width/height are logical canvas/window points, not necessarily drawable pixels.
- */
-STASIS_EXPORT void stasis_set_window_size(int width, int height) {
-    if (!g_window) {
-        return;
-    }
-
+static void stasis_set_logical_size(int width, int height) {
     if (width < 1 || height < 1) {
         return;
     }
@@ -4066,6 +4071,18 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
     g_window_width = width;
     g_window_height = height;
     g_window_resized = true;
+}
+
+/*
+ * Set window size (windowed mode).
+ * width/height are logical canvas/window points, not necessarily drawable pixels.
+ */
+STASIS_EXPORT void stasis_set_window_size(int width, int height) {
+    if (!g_window || width < 1 || height < 1) {
+        return;
+    }
+
+    stasis_set_logical_size(width, height);
 #if !defined(__ANDROID__) && !defined(__IPHONEOS__)
     const SDL_WindowFlags window_flags = SDL_GetWindowFlags(g_window);
     if ((window_flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) {
@@ -4077,12 +4094,73 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
 #endif
     stasis_sync_display_metrics();
 
+#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+    SDL_Log("Stasis window presentation: mode=windowed");
+#endif
+
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!g_use_sdl_renderer) {
         setup_ortho();
         reset_line_program();
         reset_sprite_program();
     }
+#endif
+}
+
+/*
+ * Maximize or restore the desktop presentation without replacing the logical canvas.
+ * Mobile owns its fullscreen surface and treats this as an accepted no-op.
+ */
+STASIS_EXPORT int stasis_set_maximized(int maximized) {
+    if (!g_window) {
+        return 0;
+    }
+
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    (void)maximized;
+    stasis_sync_display_metrics();
+    return 1;
+#else
+    bool result = SDL_SetWindowFullscreen(g_window, false);
+    if (result) {
+        result = maximized ? SDL_MaximizeWindow(g_window) : SDL_RestoreWindow(g_window);
+    }
+    if (result) {
+        SDL_SyncWindow(g_window);
+        stasis_sync_display_metrics();
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        if (!g_use_sdl_renderer) {
+            setup_ortho();
+            reset_line_program();
+            reset_sprite_program();
+        }
+#endif
+
+        SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
+        SDL_Rect usable = {0, 0, 0, 0};
+        int native_w = 0;
+        int native_h = 0;
+        int border_top = 0;
+        int border_left = 0;
+        int border_bottom = 0;
+        int border_right = 0;
+        SDL_GetWindowSize(g_window, &native_w, &native_h);
+        SDL_GetWindowBordersSize(
+            g_window, &border_top, &border_left, &border_bottom, &border_right);
+        if (display != 0 && SDL_GetDisplayUsableBounds(display, &usable)) {
+            SDL_Log(
+                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d",
+                maximized ? "maximized" : "windowed",
+                g_window_width, g_window_height,
+                native_w, native_h,
+                g_drawable_width, g_drawable_height,
+                native_w + border_left + border_right,
+                native_h + border_top + border_bottom,
+                usable.w, usable.h);
+        }
+    }
+    return result ? 1 : 0;
 #endif
 }
 
@@ -4100,6 +4178,10 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
 
     if (result) {
         stasis_sync_display_metrics();
+
+#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+        SDL_Log("Stasis window presentation: mode=%s", fullscreen ? "fullscreen" : "windowed");
+#endif
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
         if (!g_use_sdl_renderer) {

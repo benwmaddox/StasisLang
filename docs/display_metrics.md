@@ -67,10 +67,35 @@ use the same aspect-fit viewport, and replace SVG/font/text textures when the
 density generation changes. Those metadata slots are host-populated and are
 not part of the command trace, so JIT/AOT command parity is unchanged.
 
-Desktop windows start maximized through the platform window manager. This fills
-the usable work area while preserving taskbars, docks, and panels; it is still a
-resizable window rather than borderless fullscreen. The logical size requested
-by `init_window` remains the game's stable coordinate space.
+Desktop presentation is explicit and independent from the logical canvas:
+
+- `init_window(width, height, title)` and `set_window_size(width, height)` select
+  a restored, resizable window whose client size uses the requested logical
+  dimensions.
+- `set_maximized(1)` fills the window-manager usable work area while preserving
+  taskbars, docks, panels, and normal window chrome. It does not change the
+  logical size last requested by `init_window` or `set_window_size`.
+- `set_maximized(0)` restores a windowed presentation using the retained logical
+  dimensions.
+- `set_fullscreen(1)` remains borderless desktop fullscreen and is not an alias
+  for maximized presentation. `set_fullscreen(0)` returns to the retained
+  windowed dimensions.
+- Android and iOS continue to own a fullscreen native surface; maximized
+  requests preserve logical dimensions but do not alter that platform policy.
+
+Requests published during `main()` are applied immediately after startup, and
+requests published during `tick()` are applied at the next between-tick host
+boundary in both JIT and packaged AOT runners. A common portrait setup is:
+
+```stasis
+init_window(360, 720, "Portrait Game");
+set_maximized(1);
+```
+
+The title argument remains a compatibility parameter for guest source. The
+native title is owned by the project/CLI launch configuration because the
+bounded window mailbox intentionally carries only presentation mode and logical
+dimensions; changing presentation does not replace that configured title.
 
 On Windows, `stasis_runner.exe` declares per-monitor-v2 DPI awareness and the
 graphics runtime enables SDL's DPI-scaled point coordinate mode before video

@@ -84,6 +84,11 @@ function set_fullscreen(enabled: i32): i32 {
     return 0;
 }
 
+function set_maximized(enabled: i32): i32 {
+    host_request_maximized(enabled);
+    return 0;
+}
+
 // Legacy-ish names retained as pure wrappers (no host calls).
 function begin_frame(): void {
     gfx_cmd_begin();
