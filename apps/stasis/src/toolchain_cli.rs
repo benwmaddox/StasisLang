@@ -57,6 +57,8 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_asset_path.h",
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
+    "stasis_audio_assets.c",
+    "stasis_audio_assets.h",
     "stasis_graphics.c",
     "stasis_runner.manifest",
     "stasis_runner_macos.plist.in",

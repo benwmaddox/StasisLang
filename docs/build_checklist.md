@@ -648,12 +648,14 @@ functions.
 - Status: `in progress (host implementation complete; device golden remains)`
 #### AS3 - Audio Decode, Mixer, and Playback API
 - Scope: Add bounded sound/music decode, voices/streams, play/stop/pause, loop, volume/pan, mixing, asset handles, and deterministic audio-event submission.
+- Progress: A shared SDL callback mixer now decodes bounded mono/stereo PCM16 WAV assets, linearly resamples them to the device rate, mixes 32 overlapping voices with loop/volume/pan/pause/stop controls, and preserves Brickout's `load_music`/`load_effect` convenience API. JIT and mobile AOT shims expose the same handles. A hardware-free contract test verifies decoding, overlap, resampling, pan, music pause/volume/stop, and release behavior; focused JIT/AOT compiler tests verify every compatibility call. Deterministic game-event submission and physical-device acceptance remain.
 - Done gate: Stasis code can play overlapping effects and streaming music through a real mixer rather than the current unavailable stub.
-- Status: `planned`
+- Status: `in progress (bounded WAV mixer and compiler/runtime contracts complete; event submission and device acceptance remain)`
 #### AS4 - Desktop and Android Audio Backends
 - Scope: Implement device initialization, callback/queue integration, focus/interruption handling, pause/resume, route changes, latency, underrun recovery, and clean shutdown.
+- Progress: Asset voices share the existing SDL3 device stream and lifecycle callback on desktop and mobile instead of restoring the prior Windows MCI/Android Java split. The full pinned SDL desktop runtime compiles with the mixer; physical Android focus, interruption, and route-change acceptance remain.
 - Done gate: The same audio sample plays on desktop and Android and recovers correctly from Android lifecycle/audio-focus events.
-- Status: `planned`
+- Status: `in progress (shared backend compiled; physical mobile acceptance remains)`
 #### AS5 - Asset Packaging and JIT/AOT Parity
 - Scope: Package referenced assets for dev/JIT, production/AOT, Android Workshop, published APK, import/export, and GitHub sync with reachability and size diagnostics.
 - Progress: The Android AOT bundle command now resolves the shared manifest with `stasis_assets`, verifies hashes and confinement, and stages only validated manifest entries under the runtime-only APK asset root. The published renderer consumes that packaged manifest directly, decodes bounded raster/SVG sprites, verifies content hashes and dimensions, uploads textures, and uses the same stable handle and fallback behavior as Workshop. The Pong APK verifier requires the representative manifest and ball sprite while continuing to reject source/JIT content. Broader import/export/GitHub reachability packaging and non-Android production parity remain.

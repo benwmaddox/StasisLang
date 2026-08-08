@@ -12,6 +12,20 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_audio_init",
     "stasis_jit_audio_is_available",
     "stasis_jit_audio_push_f32_interleaved",
+    "stasis_jit_audio_load_wav",
+    "stasis_jit_audio_release",
+    "stasis_jit_audio_play",
+    "stasis_jit_audio_stop",
+    "stasis_jit_audio_voice_is_playing",
+    "stasis_jit_audio_voice_set_paused",
+    "stasis_jit_audio_voice_set_volume_pan",
+    "stasis_jit_audio_load_music",
+    "stasis_jit_audio_load_effect",
+    "stasis_jit_audio_play_music",
+    "stasis_jit_audio_stop_music",
+    "stasis_jit_audio_pause_music",
+    "stasis_jit_audio_set_music_volume",
+    "stasis_jit_audio_play_effect",
     "stasis_jit_audio_shutdown",
     "stasis_jit_collection_i32_load",
     "stasis_jit_collection_i32_store",
@@ -79,6 +93,10 @@ mod tests {
         ));
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_gfx_release_sprite"
+        ));
+        assert!(is_aot_runtime_export_symbol("stasis_jit_audio_load_music"));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_audio_set_music_volume"
         ));
         assert!(!is_aot_runtime_export_symbol(
             "stasis_jit_gfx_totally_missing"

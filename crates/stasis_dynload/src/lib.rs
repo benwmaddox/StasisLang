@@ -1054,6 +1054,27 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_measure_text_cached_height: usize,
     stasis_clipboard_load_ascii: Option<usize>,
     stasis_clipboard_save_ascii: Option<usize>,
+    stasis_audio_init: Option<usize>,
+    stasis_audio_shutdown: Option<usize>,
+    stasis_audio_is_available: Option<usize>,
+    stasis_audio_get_sample_rate: Option<usize>,
+    stasis_audio_get_channels: Option<usize>,
+    stasis_audio_get_queued_frames: Option<usize>,
+    stasis_audio_get_underruns: Option<usize>,
+    stasis_audio_load_wav: Option<usize>,
+    stasis_audio_release: Option<usize>,
+    stasis_audio_play: Option<usize>,
+    stasis_audio_stop: Option<usize>,
+    stasis_audio_voice_is_playing: Option<usize>,
+    stasis_audio_voice_set_paused: Option<usize>,
+    stasis_audio_voice_set_volume_pan: Option<usize>,
+    stasis_audio_load_music: Option<usize>,
+    stasis_audio_load_effect: Option<usize>,
+    stasis_audio_play_music: Option<usize>,
+    stasis_audio_stop_music: Option<usize>,
+    stasis_audio_pause_music: Option<usize>,
+    stasis_audio_set_music_volume: Option<usize>,
+    stasis_audio_play_effect: Option<usize>,
     #[cfg(windows)]
     stasis_storage_load_ascii: Option<usize>,
     #[cfg(windows)]
@@ -1103,6 +1124,31 @@ impl StasisGraphicsAssetsApi {
                 .symbol_address("stasis_gfx_measure_text_cached_height")?,
             stasis_clipboard_load_ascii: lib.symbol_address("stasis_clipboard_load_ascii").ok(),
             stasis_clipboard_save_ascii: lib.symbol_address("stasis_clipboard_save_ascii").ok(),
+            stasis_audio_init: lib.symbol_address("stasis_audio_init").ok(),
+            stasis_audio_shutdown: lib.symbol_address("stasis_audio_shutdown").ok(),
+            stasis_audio_is_available: lib.symbol_address("stasis_audio_is_available").ok(),
+            stasis_audio_get_sample_rate: lib.symbol_address("stasis_audio_get_sample_rate").ok(),
+            stasis_audio_get_channels: lib.symbol_address("stasis_audio_get_channels").ok(),
+            stasis_audio_get_queued_frames: lib
+                .symbol_address("stasis_audio_get_queued_frames")
+                .ok(),
+            stasis_audio_get_underruns: lib.symbol_address("stasis_audio_get_underruns").ok(),
+            stasis_audio_load_wav: lib.symbol_address("stasis_audio_load_wav").ok(),
+            stasis_audio_release: lib.symbol_address("stasis_audio_release").ok(),
+            stasis_audio_play: lib.symbol_address("stasis_audio_play").ok(),
+            stasis_audio_stop: lib.symbol_address("stasis_audio_stop").ok(),
+            stasis_audio_voice_is_playing: lib.symbol_address("stasis_audio_voice_is_playing").ok(),
+            stasis_audio_voice_set_paused: lib.symbol_address("stasis_audio_voice_set_paused").ok(),
+            stasis_audio_voice_set_volume_pan: lib
+                .symbol_address("stasis_audio_voice_set_volume_pan")
+                .ok(),
+            stasis_audio_load_music: lib.symbol_address("stasis_audio_load_music").ok(),
+            stasis_audio_load_effect: lib.symbol_address("stasis_audio_load_effect").ok(),
+            stasis_audio_play_music: lib.symbol_address("stasis_audio_play_music").ok(),
+            stasis_audio_stop_music: lib.symbol_address("stasis_audio_stop_music").ok(),
+            stasis_audio_pause_music: lib.symbol_address("stasis_audio_pause_music").ok(),
+            stasis_audio_set_music_volume: lib.symbol_address("stasis_audio_set_music_volume").ok(),
+            stasis_audio_play_effect: lib.symbol_address("stasis_audio_play_effect").ok(),
             #[cfg(windows)]
             stasis_storage_load_ascii: lib.symbol_address("stasis_storage_load_ascii").ok(),
             #[cfg(windows)]
@@ -4554,50 +4600,349 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Audio host API (JIT extern call bridge)
 // ============================================================
 
-// Current dev runner doesn't model audio as a command buffer yet.
-// Brickout uses `audio_is_available()` as a gate; return false so the game runs without calling
-// pointer-typed audio externs (e.g. `audio_push_f32_interleaved`).
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_init(
-    _sample_rate: i32,
-    _channels: i32,
-    _target_latency_frames: i32,
+    sample_rate: i32,
+    channels: i32,
+    target_latency_frames: i32,
 ) -> i32 {
-    0
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_init else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(sample_rate, channels, target_latency_frames)
 }
 
 #[no_mangle]
-pub extern "C" fn stasis_jit_audio_shutdown() {}
+pub extern "C" fn stasis_jit_audio_shutdown() {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_audio_shutdown else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn() = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() = unsafe { std::mem::transmute(address) };
+    callback();
+}
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
-    0
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_is_available else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    callback()
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_sample_rate() -> i32 {
-    // Sensible default for callers that don't guard on `audio_is_available`.
-    48_000
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_get_sample_rate else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    callback()
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_channels() -> i32 {
-    2
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_get_channels else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    callback()
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_queued_frames() -> i32 {
-    0
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_get_queued_frames else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    callback()
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_underruns() -> i32 {
-    0
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_get_underruns else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    callback()
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_push_f32_interleaved(_samples: i32, _frame_count: i32) -> i32 {
     0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_load_wav(path_id: i32) -> i32 {
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_load_wav else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(path.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_release(asset_handle: i32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_audio_release else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(address) };
+    callback(asset_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_play(
+    asset_handle: i32,
+    looped: i32,
+    volume: f32,
+    pan: f32,
+) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_play else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32, f32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32, f32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    callback(asset_handle, looped, volume, pan)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_stop(voice_handle: i32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_audio_stop else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(address) };
+    callback(voice_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_voice_is_playing(voice_handle: i32) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_voice_is_playing else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(voice_handle)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_voice_set_paused(voice_handle: i32, paused: i32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_audio_voice_set_paused else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32) = unsafe { std::mem::transmute(address) };
+    callback(voice_handle, paused);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_voice_set_volume_pan(voice_handle: i32, volume: f32, pan: f32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_audio_voice_set_volume_pan else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, f32, f32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, f32, f32) = unsafe { std::mem::transmute(address) };
+    callback(voice_handle, volume, pan);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_load_music(path_id: i32) -> i32 {
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_load_music else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(path.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_load_effect(path_id: i32) -> i32 {
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_load_effect else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(path.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_play_music(asset_handle: i32, looped: i32, volume: f32) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_play_music else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32, f32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(asset_handle, looped, volume)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_stop_music(asset_handle: i32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_audio_stop_music else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(address) };
+    callback(asset_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_pause_music(asset_handle: i32, paused: i32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_audio_pause_music else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32) = unsafe { std::mem::transmute(address) };
+    callback(asset_handle, paused);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_set_music_volume(asset_handle: i32, volume: f32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_audio_set_music_volume else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, f32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, f32) = unsafe { std::mem::transmute(address) };
+    callback(asset_handle, volume);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_play_effect(asset_handle: i32, volume: f32) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_audio_play_effect else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, f32) -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, f32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(asset_handle, volume)
 }
 
 type JitI32GlobalMap = std::collections::HashMap<i32, i32>;
