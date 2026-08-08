@@ -20,6 +20,20 @@ int stasis_audio_get_channels(void);
 int stasis_audio_get_queued_frames(void);
 int stasis_audio_get_underruns(void);
 int stasis_audio_push_f32_interleaved(const float *samples, int frames);
+int stasis_audio_load_wav(const char *path);
+void stasis_audio_release(int asset_handle);
+int stasis_audio_play(int asset_handle, int loop, float volume, float pan);
+void stasis_audio_stop(int voice_handle);
+int stasis_audio_voice_is_playing(int voice_handle);
+void stasis_audio_voice_set_paused(int voice_handle, int paused);
+void stasis_audio_voice_set_volume_pan(int voice_handle, float volume, float pan);
+int stasis_audio_load_music(const char *path);
+int stasis_audio_load_effect(const char *path);
+int stasis_audio_play_music(int asset_handle, int loop, float volume);
+void stasis_audio_stop_music(int asset_handle);
+void stasis_audio_pause_music(int asset_handle, int paused);
+void stasis_audio_set_music_volume(int asset_handle, float volume);
+int stasis_audio_play_effect(int asset_handle, float volume);
 int stasis_gfx_load_sprite(const char *path, int max_w, int max_h);
 void stasis_gfx_release_sprite(int handle);
 int stasis_gfx_dump_bmp(const char *path);
@@ -410,6 +424,51 @@ int stasis_jit_audio_push_f32_interleaved(int32_t samples, int32_t frames) {
     if (frames <= 0 || channels <= 0) return 0;
     values = stasis_jit_global_f32_array_ptr(samples, 0, frames * channels);
     return values == NULL ? 0 : stasis_audio_push_f32_interleaved(values, frames);
+}
+int stasis_jit_audio_load_wav(int32_t path) {
+    char *value = resolve_text(path);
+    int result = value == NULL ? 0 : stasis_audio_load_wav(value);
+    free(value);
+    return result;
+}
+void stasis_jit_audio_release(int32_t asset_handle) { stasis_audio_release(asset_handle); }
+int stasis_jit_audio_play(int32_t asset_handle, int32_t loop, float volume, float pan) {
+    return stasis_audio_play(asset_handle, loop, volume, pan);
+}
+void stasis_jit_audio_stop(int32_t voice_handle) { stasis_audio_stop(voice_handle); }
+int stasis_jit_audio_voice_is_playing(int32_t voice_handle) {
+    return stasis_audio_voice_is_playing(voice_handle);
+}
+void stasis_jit_audio_voice_set_paused(int32_t voice_handle, int32_t paused) {
+    stasis_audio_voice_set_paused(voice_handle, paused);
+}
+void stasis_jit_audio_voice_set_volume_pan(int32_t voice_handle, float volume, float pan) {
+    stasis_audio_voice_set_volume_pan(voice_handle, volume, pan);
+}
+int stasis_jit_audio_load_music(int32_t path) {
+    char *value = resolve_text(path);
+    int result = value == NULL ? 0 : stasis_audio_load_music(value);
+    free(value);
+    return result;
+}
+int stasis_jit_audio_load_effect(int32_t path) {
+    char *value = resolve_text(path);
+    int result = value == NULL ? 0 : stasis_audio_load_effect(value);
+    free(value);
+    return result;
+}
+int stasis_jit_audio_play_music(int32_t asset_handle, int32_t loop, float volume) {
+    return stasis_audio_play_music(asset_handle, loop, volume);
+}
+void stasis_jit_audio_stop_music(int32_t asset_handle) { stasis_audio_stop_music(asset_handle); }
+void stasis_jit_audio_pause_music(int32_t asset_handle, int32_t paused) {
+    stasis_audio_pause_music(asset_handle, paused);
+}
+void stasis_jit_audio_set_music_volume(int32_t asset_handle, float volume) {
+    stasis_audio_set_music_volume(asset_handle, volume);
+}
+int stasis_jit_audio_play_effect(int32_t asset_handle, float volume) {
+    return stasis_audio_play_effect(asset_handle, volume);
 }
 
 int stasis_jit_gfx_load_sprite(int32_t path, int32_t max_w, int32_t max_h) {

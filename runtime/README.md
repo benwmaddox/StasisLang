@@ -140,6 +140,23 @@ The library exports these functions for Stasis programs:
 | `stasis_audio_get_queued_frames()` | Frames currently queued in the ring buffer |
 | `stasis_audio_get_underruns()` | Underrun counter (device starved -> outputs silence) |
 | `stasis_audio_push_f32_interleaved(ptr, frames)` | Push `f32` interleaved frames (LRLR...); returns frames accepted |
+| `stasis_audio_load_wav(path)` | Decode a bounded mono/stereo PCM16 WAV asset; returns an opaque handle |
+| `stasis_audio_play(handle, loop, volume, pan)` | Start an overlapping asset voice; returns an opaque voice handle |
+| `stasis_audio_stop(voice)` | Stop one asset voice |
+| `stasis_audio_voice_set_paused(voice, paused)` | Pause or resume one voice without changing its cursor |
+| `stasis_audio_voice_set_volume_pan(voice, volume, pan)` | Update one active voice (`volume` 0..1, `pan` -1..1) |
+| `stasis_audio_load_music/effect(path)` | Brickout-compatible category loaders backed by the WAV asset table |
+| `stasis_audio_play_music(handle, loop, volume)` | Start one exclusive music voice for an asset |
+| `stasis_audio_pause_music(handle, paused)` | Pause or resume every active voice for a music asset |
+| `stasis_audio_set_music_volume(handle, volume)` | Update every active voice for a music asset |
+| `stasis_audio_stop_music(handle)` | Stop every active voice for a music asset |
+| `stasis_audio_play_effect(handle, volume)` | Start an overlapping centered one-shot |
+
+WAV asset decoding accepts little-endian PCM16 at 8–384 kHz, one or two channels, and at most
+16 MiB per file. The callback linearly resamples into the active stereo device rate and clamps the
+combined raw-stream and asset-voice mix. Asset and voice tables are fixed at 64 and 32 entries so a
+game cannot create unbounded native audio state. All handles and decoded buffers remain host-owned;
+deterministic Stasis snapshots retain only the opaque integers chosen by game code.
 
 `play` and the native runner use HostFrame bulk snapshots for per-tick input/state now.
 Application code should read keyboard/pointer/quit state through the public wrappers in

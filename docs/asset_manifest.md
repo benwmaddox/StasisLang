@@ -54,6 +54,12 @@ Fonts use `{"kind":"font","encoding":"ttf"}` or
 `{"kind":"font","encoding":"otf"}`. They are hash-validated and copied unchanged; sprite
 preparation metadata is not valid for fonts.
 
+Audio uses `{"kind":"audio","encoding":"wav","sample_rate":24000,"channels":1,"duration_frames":24000}`.
+The first runtime playback slice accepts bounded little-endian PCM16 WAV files. Other manifest audio
+encodings remain valid for storage and packaging but are rejected by `audio_load_music` and
+`audio_load_effect` until a matching shared decoder lands; the runtime never guesses an encoding
+from content that contradicts its extension.
+
 ## Generated package contract
 
 Preparation writes only beneath the build output; project masters and the source manifest are never changed. The packaged manifest records the prepared dimensions and content hash. A resized entry also records `prepared_from_sha256`, which is the master hash. Preparation cache identity includes the master hash, algorithm version, and output dimensions, so unchanged assets can be reused deterministically.

@@ -143,6 +143,30 @@ int stasis_audio_get_channels(void) { return 2; }
 int stasis_audio_get_queued_frames(void) { return 0; }
 int stasis_audio_get_underruns(void) { return 0; }
 int stasis_audio_push_f32_interleaved(const float *samples, int frames) { return samples ? frames : 0; }
+int stasis_audio_load_wav(const char *path) { return path ? 1 : 0; }
+void stasis_audio_release(int asset_handle) { (void)asset_handle; }
+int stasis_audio_play(int asset_handle, int loop, float volume, float pan) {
+    return asset_handle + loop + (int)volume + (int)pan;
+}
+void stasis_audio_stop(int voice_handle) { (void)voice_handle; }
+int stasis_audio_voice_is_playing(int voice_handle) { return voice_handle > 0; }
+void stasis_audio_voice_set_paused(int voice_handle, int paused) { (void)voice_handle; (void)paused; }
+void stasis_audio_voice_set_volume_pan(int voice_handle, float volume, float pan) {
+    (void)voice_handle; (void)volume; (void)pan;
+}
+int stasis_audio_load_music(const char *path) { return path ? 2 : 0; }
+int stasis_audio_load_effect(const char *path) { return path ? 3 : 0; }
+int stasis_audio_play_music(int asset_handle, int loop, float volume) {
+    return asset_handle + loop + (int)volume;
+}
+void stasis_audio_stop_music(int asset_handle) { (void)asset_handle; }
+void stasis_audio_pause_music(int asset_handle, int paused) { (void)asset_handle; (void)paused; }
+void stasis_audio_set_music_volume(int asset_handle, float volume) {
+    (void)asset_handle; (void)volume;
+}
+int stasis_audio_play_effect(int asset_handle, float volume) {
+    return asset_handle + (int)volume;
+}
 int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) { return path && max_w && max_h; }
 void stasis_gfx_release_sprite(int handle) { (void)handle; }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }

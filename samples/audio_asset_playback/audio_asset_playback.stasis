@@ -1,0 +1,58 @@
+import "/vendor/stasis/src/stdlib/audio.stasis";
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global music: i32;
+global effect: i32;
+global ticks: i32;
+
+function main(): i32 {
+    init_window(480, 270, "Stasis WAV Asset Playback");
+    if (!audio_init(48000, 2, 1024)) {
+        return 1;
+    }
+    if (!audio_is_available() || audio_get_sample_rate() != 48000 || audio_get_channels() != 2) {
+        return 4;
+    }
+    music = audio_load_music("assets/tone.wav");
+    effect = audio_load_effect("assets/tone.wav");
+    if (music <= 0 || effect <= 0) {
+        return 2;
+    }
+    if (!audio_play_music(music, true, 0.18)) {
+        return 3;
+    }
+    ticks = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    ticks += 1;
+    if (ticks == 120) {
+        audio_pause_music(music, true);
+    }
+    if (ticks == 180) {
+        audio_set_music_volume(music, 0.08);
+        audio_pause_music(music, false);
+    }
+    if (ticks == 240) {
+        audio_play_effect(effect, 0.25);
+    }
+    if (ticks == 300) {
+        audio_stop_music(music);
+    }
+    if (ticks == 360) {
+        audio_play_music(music, true, 0.12);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.03, 0.04, 0.08, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

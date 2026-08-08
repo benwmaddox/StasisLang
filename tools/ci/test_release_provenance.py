@@ -14,6 +14,10 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    def test_wav_mixer_is_part_of_release_provenance(self):
+        self.assertIn("stasis_audio_assets.c", RUNTIME_FILES)
+        self.assertIn("stasis_audio_assets.h", RUNTIME_FILES)
+
     def test_mobile_preference_host_is_part_of_release_provenance(self):
         self.assertIn("stasis_platform_storage.c", RUNTIME_FILES)
         self.assertIn("stasis_platform_storage.h", RUNTIME_FILES)

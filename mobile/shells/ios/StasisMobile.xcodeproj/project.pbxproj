@@ -10,6 +10,7 @@
 		100000000000000000000003 /* stasis_mobile_runtime.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* stasis_mobile_runtime.c */; };
 		100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* stasis_mobile_aot_runtime.c */; };
 		100000000000000000000005 /* stasis_graphics.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* stasis_graphics.c */; };
+		100000000000000000000008 /* stasis_audio_assets.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* stasis_audio_assets.c */; };
 		100000000000000000000006 /* published_aot_bindings.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* published_aot_bindings.c */; };
 		100000000000000000000007 /* stasis_game in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* stasis_game */; };
 
@@ -22,6 +23,7 @@
 				100000000000000000000003 /* stasis_mobile_runtime.c in Sources */,
 				100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */,
 				100000000000000000000005 /* stasis_graphics.c in Sources */,
+				100000000000000000000008 /* stasis_audio_assets.c in Sources */,
 				100000000000000000000006 /* published_aot_bindings.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -53,6 +55,7 @@
 		200000000000000000000007 /* stasis_game */ = {isa = PBXFileReference; lastKnownFileType = folder; path = StasisMobile/stasis_game; sourceTree = "<group>"; };
 		200000000000000000000008 /* StasisMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StasisMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000009 /* StasisMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = StasisMobile.xcconfig; sourceTree = "<group>"; };
+		200000000000000000000010 /* stasis_audio_assets.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_audio_assets.c; sourceTree = "<group>"; };
 
 		400000000000000000000001 = {
 			isa = PBXGroup;
@@ -62,6 +65,7 @@
 				200000000000000000000003 /* stasis_mobile_runtime.c */,
 				200000000000000000000004 /* stasis_mobile_aot_runtime.c */,
 				200000000000000000000005 /* stasis_graphics.c */,
+				200000000000000000000010 /* stasis_audio_assets.c */,
 				200000000000000000000006 /* published_aot_bindings.c */,
 				200000000000000000000007 /* stasis_game */,
 				200000000000000000000009 /* StasisMobile.xcconfig */,

@@ -2925,6 +2925,50 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "audio_push_f32_interleaved" | "stasis_audio_push_f32_interleaved" => {
             function_address(stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const ())
         }
+        "audio_load_wav" | "stasis_audio_load_wav" => {
+            function_address(stasis_dynload::stasis_jit_audio_load_wav as *const ())
+        }
+        "audio_release" | "stasis_audio_release" => {
+            function_address(stasis_dynload::stasis_jit_audio_release as *const ())
+        }
+        "audio_play" | "stasis_audio_play" => {
+            function_address(stasis_dynload::stasis_jit_audio_play as *const ())
+        }
+        "audio_stop" | "stasis_audio_stop" => {
+            function_address(stasis_dynload::stasis_jit_audio_stop as *const ())
+        }
+        "audio_voice_is_playing" | "stasis_audio_voice_is_playing" => {
+            function_address(stasis_dynload::stasis_jit_audio_voice_is_playing as *const ())
+        }
+        "audio_voice_set_paused" | "stasis_audio_voice_set_paused" => {
+            function_address(stasis_dynload::stasis_jit_audio_voice_set_paused as *const ())
+        }
+        "audio_voice_set_volume_pan" | "stasis_audio_voice_set_volume_pan" => {
+            function_address(stasis_dynload::stasis_jit_audio_voice_set_volume_pan as *const ())
+        }
+        "stasis_jit_audio_load_music" | "audio_load_music" | "stasis_audio_load_music" => {
+            function_address(stasis_dynload::stasis_jit_audio_load_music as *const ())
+        }
+        "stasis_jit_audio_load_effect" | "audio_load_effect" | "stasis_audio_load_effect" => {
+            function_address(stasis_dynload::stasis_jit_audio_load_effect as *const ())
+        }
+        "stasis_jit_audio_play_music" | "audio_play_music" | "stasis_audio_play_music" => {
+            function_address(stasis_dynload::stasis_jit_audio_play_music as *const ())
+        }
+        "stasis_jit_audio_stop_music" | "audio_stop_music" | "stasis_audio_stop_music" => {
+            function_address(stasis_dynload::stasis_jit_audio_stop_music as *const ())
+        }
+        "stasis_jit_audio_pause_music" | "audio_pause_music" | "stasis_audio_pause_music" => {
+            function_address(stasis_dynload::stasis_jit_audio_pause_music as *const ())
+        }
+        "stasis_jit_audio_set_music_volume"
+        | "audio_set_music_volume"
+        | "stasis_audio_set_music_volume" => {
+            function_address(stasis_dynload::stasis_jit_audio_set_music_volume as *const ())
+        }
+        "stasis_jit_audio_play_effect" | "audio_play_effect" | "stasis_audio_play_effect" => {
+            function_address(stasis_dynload::stasis_jit_audio_play_effect as *const ())
+        }
         "sin_fast" | "stasis_jit_sin_fast" => {
             function_address(stasis_dynload::stasis_jit_sin_fast as *const ())
         }
@@ -3589,6 +3633,17 @@ mod tests {
             .expect("compile production preview externs");
         assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 1);
         assert!(crate::backend::emit::runtime_helper_trampoline_count_for_test() >= 5);
+    }
+
+    #[test]
+    fn jit_process_links_brickout_compatible_audio_asset_api() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "audio_asset_api.stasis",
+            "function @extern(\"stasis_jit_audio_load_music\") audio_load_music(path: string): i32;\nfunction @extern(\"stasis_jit_audio_load_effect\") audio_load_effect(path: string): i32;\nfunction @extern(\"stasis_jit_audio_play_music\") audio_play_music(handle: i32, loop: bool, volume: f32): bool;\nfunction @extern(\"stasis_jit_audio_pause_music\") audio_pause_music(handle: i32, paused: bool): void;\nfunction @extern(\"stasis_jit_audio_set_music_volume\") audio_set_music_volume(handle: i32, volume: f32): void;\nfunction @extern(\"stasis_jit_audio_stop_music\") audio_stop_music(handle: i32): void;\nfunction @extern(\"stasis_jit_audio_play_effect\") audio_play_effect(handle: i32, volume: f32): bool;\nfunction main(): i32 { let music: i32 = audio_load_music(\"missing.wav\"); let effect: i32 = audio_load_effect(\"missing.wav\"); audio_play_music(music, true, 0.4); audio_pause_music(music, true); audio_set_music_volume(music, 0.2); audio_stop_music(music); audio_play_effect(effect, 0.5); return music + effect; }\n",
+        );
+        process.compile().expect("jit compile audio asset API");
+        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 0);
     }
 
     #[test]

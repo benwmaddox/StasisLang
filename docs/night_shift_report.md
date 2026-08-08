@@ -136,3 +136,23 @@
 - Good: real size measurement, two-worktree resolution, concurrent builds, and destructive-path tests made cache ownership and safety observable.
 - Bad: the first implementation documented the wrapper but left the canonical validation script's Cargo phase outside it; cold validation also exposed hidden network and linker prerequisites.
 - Adjustment: whenever automation policy changes an execution boundary, test every canonical entrypoint for that boundary and run one cold plus one concurrent representative build before publication.
+
+- Added one SDL3-backed bounded PCM16 WAV mixer shared by desktop and mobile, with overlapping
+  voice handles and Brickout-compatible music/effect helpers for loop, pause, stop, volume, and pan.
+- Replaced the desktop JIT/AOT lifecycle-query stubs with optional calls into the same graphics
+  runtime, and added release/mobile source inventory coverage so the mixer ships in generated
+  archives and the iOS shell.
+- Verification: focused JIT/AOT audio compiler tests; seven C runtime contract tests; mobile package
+  and release-provenance tests; full pinned SDL runtime build; Windows AOT sample build and launch
+  through SDL's dummy audio backend.
+- Theory gained: audio samples and cursors are nondeterministic host resources while Stasis owns
+  only opaque handles and deterministic decisions to play or adjust them. The successful AOT sample
+  proves that this ownership boundary survives compilation, packaging, dynamic loading, decoding,
+  and callback startup; an adjacent prediction is that a future streaming decoder can replace the
+  asset source behind the same voice mixer without changing game state layouts.
+- Good: the isolated executable test exposed three dev-tree blind spots—escaping imports, an invalid
+  manifest shape, and a lifecycle stub—before the API reached a game.
+- Bad: the first runtime-only contract passed even though the AOT host bridge still returned a fake
+  unavailable result.
+- Adjustment: every new runtime export family must include one packaged AOT executable that crosses
+  the dynamic boundary and asserts real host behavior, not only compiler resolution and C-local tests.

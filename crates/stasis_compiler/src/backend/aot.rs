@@ -2145,6 +2145,70 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_accepts_brickout_compatible_audio_asset_api() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "audio_asset_api.stasis",
+            "function @extern(\"stasis_jit_audio_load_music\") audio_load_music(path: string): i32;\nfunction @extern(\"stasis_jit_audio_load_effect\") audio_load_effect(path: string): i32;\nfunction @extern(\"stasis_jit_audio_play_music\") audio_play_music(handle: i32, loop: bool, volume: f32): bool;\nfunction @extern(\"stasis_jit_audio_pause_music\") audio_pause_music(handle: i32, paused: bool): void;\nfunction @extern(\"stasis_jit_audio_set_music_volume\") audio_set_music_volume(handle: i32, volume: f32): void;\nfunction @extern(\"stasis_jit_audio_stop_music\") audio_stop_music(handle: i32): void;\nfunction @extern(\"stasis_jit_audio_play_effect\") audio_play_effect(handle: i32, volume: f32): bool;\nfunction main(): i32 { let music: i32 = audio_load_music(\"music.wav\"); let effect: i32 = audio_load_effect(\"effect.wav\"); audio_play_music(music, true, 0.4); audio_pause_music(music, true); audio_set_music_volume(music, 0.2); audio_stop_music(music); audio_play_effect(effect, 0.5); return music + effect; }\n",
+        );
+        process.compile().expect("aot compile audio asset API");
+        let signatures = &process
+            .program_snapshot
+            .as_ref()
+            .expect("program snapshot")
+            .analysis
+            .resolved_extern_signatures;
+        assert_eq!(signatures.len(), 7);
+        for symbol in [
+            "stasis_jit_audio_load_music",
+            "stasis_jit_audio_load_effect",
+            "stasis_jit_audio_play_music",
+            "stasis_jit_audio_pause_music",
+            "stasis_jit_audio_set_music_volume",
+            "stasis_jit_audio_stop_music",
+            "stasis_jit_audio_play_effect",
+        ] {
+            assert!(signatures
+                .iter()
+                .any(|signature| signature.symbol == symbol));
+        }
+    }
+
+    #[test]
+    fn aot_process_compiles_audio_asset_playback_sample() {
+        let sample = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/audio_asset_playback/audio_asset_playback.stasis"
+        ));
+        let source = sample
+            .replace("import \"/vendor/stasis/src/stdlib/audio.stasis\";", "")
+            .replace("import \"/vendor/stasis/src/stdlib/graphics.stasis\";", "");
+        let declarations = r#"
+function @extern("stasis_jit_audio_init") audio_init(sample_rate: i32, channels: i32, latency: i32): bool;
+function @extern("stasis_jit_audio_is_available") audio_is_available(): bool;
+function @extern("stasis_jit_audio_get_sample_rate") audio_get_sample_rate(): i32;
+function @extern("stasis_jit_audio_get_channels") audio_get_channels(): i32;
+function @extern("stasis_jit_audio_load_music") audio_load_music(path: string): i32;
+function @extern("stasis_jit_audio_load_effect") audio_load_effect(path: string): i32;
+function @extern("stasis_jit_audio_play_music") audio_play_music(handle: i32, loop: bool, volume: f32): bool;
+function @extern("stasis_jit_audio_pause_music") audio_pause_music(handle: i32, paused: bool): void;
+function @extern("stasis_jit_audio_set_music_volume") audio_set_music_volume(handle: i32, volume: f32): void;
+function @extern("stasis_jit_audio_stop_music") audio_stop_music(handle: i32): void;
+function @extern("stasis_jit_audio_play_effect") audio_play_effect(handle: i32, volume: f32): bool;
+function init_window(width: i32, height: i32, title: string): bool { return true; }
+function begin_frame(): void { return; }
+function clear(r: f32, g: f32, b: f32, a: f32): void { return; }
+function end_frame(): void { return; }
+"#;
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "samples/audio_asset_playback/audio_asset_playback.stasis",
+            format!("{declarations}\n{source}"),
+        );
+        process.compile().expect("aot compile playback sample");
+    }
+
+    #[test]
     fn aot_process_rejects_nonexplicit_unknown_extern_without_known_runtime_symbol() {
         let mut process = AotProcess::new();
         process.upsert_file(

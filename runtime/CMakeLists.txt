@@ -106,7 +106,7 @@ if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_
 endif()
 
 function(configure_stasis_target target is_static sdl_only)
-    target_sources(${target} PRIVATE stasis_graphics.c)
+    target_sources(${target} PRIVATE stasis_graphics.c stasis_audio_assets.c)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     target_link_libraries(${target} PRIVATE
         $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>
@@ -198,6 +198,16 @@ endif()
 
 if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     enable_testing()
+    add_executable(
+        stasis_audio_assets_test
+        tests/stasis_audio_assets_test.c
+        stasis_audio_assets.c
+    )
+    target_include_directories(stasis_audio_assets_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT WIN32)
+        target_link_libraries(stasis_audio_assets_test PRIVATE m)
+    endif()
+    add_test(NAME stasis_audio_assets_contract COMMAND stasis_audio_assets_test)
     add_executable(
         stasis_render_contract_test
         tests/stasis_render_contract_test.c

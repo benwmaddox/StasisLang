@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include "stasis_asset_path.h"
+#include "stasis_audio_assets.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -1219,6 +1220,14 @@ static int g_audio_write_sample = 0;
 static int g_audio_queued_samples = 0;
 static int64_t g_audio_running_frame_index = 0;
 
+static StasisAudioAssetStore g_audio_assets;
+
+static int resolve_asset_path(const char* path, char* out, size_t out_size);
+
+static int stasis_audio_has_active_voice(void) {
+    return stasis_audio_assets_has_active_voice(&g_audio_assets);
+}
+
 static int stasis_audio_maxi(int a, int b) { return a > b ? a : b; }
 static int stasis_audio_mini(int a, int b) { return a < b ? a : b; }
 
@@ -1233,7 +1242,9 @@ static void SDLCALL stasis_audio_callback(
     if (!stream || additional_amount <= 0 || g_audio_channels <= 0) return;
 
     int remaining_samples = additional_amount / (int)sizeof(float);
-    if (g_audio_queued_samples < remaining_samples) g_audio_underruns++;
+    if (g_audio_queued_samples < remaining_samples && !stasis_audio_has_active_voice()) {
+        g_audio_underruns++;
+    }
 
     float output[1024];
     while (remaining_samples > 0) {
@@ -1254,6 +1265,8 @@ static void SDLCALL stasis_audio_callback(
         if (copied < chunk) {
             SDL_memset(&output[copied], 0, (size_t)(chunk - copied) * sizeof(float));
         }
+        stasis_audio_assets_mix(
+            &g_audio_assets, output, chunk / g_audio_channels, g_audio_sample_rate);
         if (!SDL_PutAudioStreamData(stream, output, chunk * (int)sizeof(float))) return;
         remaining_samples -= chunk;
     }
@@ -1272,6 +1285,8 @@ static void stasis_audio_shutdown_internal(void) {
         free(g_audio_ring);
         g_audio_ring = NULL;
     }
+
+    stasis_audio_assets_reset(&g_audio_assets);
 
     g_audio_initialized = 0;
     g_audio_ring_capacity_frames = 0;
@@ -1292,12 +1307,16 @@ static int stasis_audio_ensure_init(void) {
     if (stasis_audio_disabled()) {
         return 0;
     }
+    if (g_audio_assets.next_asset_handle <= 0 || g_audio_assets.next_voice_handle <= 0) {
+        stasis_audio_assets_reset(&g_audio_assets);
+    }
     if (g_audio_initialized && g_audio_stream) {
         return 1;
     }
 
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         if (!SDL_Init(SDL_INIT_AUDIO)) {
+            SDL_Log("stasis_audio_init: SDL audio subsystem unavailable: %s", SDL_GetError());
             return 0;
         }
     }
@@ -1321,6 +1340,7 @@ static int stasis_audio_ensure_init(void) {
     }
 
     if (!stream) {
+        SDL_Log("stasis_audio_init: playback stream unavailable: %s", SDL_GetError());
         return 0;
     }
 
@@ -1347,6 +1367,7 @@ static int stasis_audio_ensure_init(void) {
     g_audio_initialized = 1;
 
     if (!SDL_ResumeAudioStreamDevice(g_audio_stream)) {
+        SDL_Log("stasis_audio_init: playback stream could not resume: %s", SDL_GetError());
         stasis_audio_shutdown_internal();
         return 0;
     }
@@ -5417,6 +5438,116 @@ STASIS_EXPORT int stasis_clipboard_save_ascii(const char* value, int length) {
 /*
  * Audio - init/shutdown and ring-buffer push API
  */
+STASIS_EXPORT int stasis_audio_load_wav(const char* path) {
+    char resolved[1024];
+    if (!path || !*path || !resolve_asset_path(path, resolved, sizeof(resolved))) return 0;
+    if (!stasis_audio_ensure_init()) goto fail;
+    SDL_LockAudioStream(g_audio_stream);
+    int handle = stasis_audio_assets_load_wav(&g_audio_assets, resolved);
+    SDL_UnlockAudioStream(g_audio_stream);
+    return handle;
+
+fail:
+    return 0;
+}
+
+STASIS_EXPORT void stasis_audio_release(int asset_handle) {
+    if (!g_audio_stream) return;
+    SDL_LockAudioStream(g_audio_stream);
+    stasis_audio_assets_release(&g_audio_assets, asset_handle);
+    SDL_UnlockAudioStream(g_audio_stream);
+}
+
+STASIS_EXPORT int stasis_audio_play(int asset_handle, int loop, float volume, float pan) {
+    if (!stasis_audio_ensure_init()) return 0;
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    if (pan < -1.0f) pan = -1.0f;
+    if (pan > 1.0f) pan = 1.0f;
+    SDL_LockAudioStream(g_audio_stream);
+    int voice_handle = stasis_audio_assets_play(&g_audio_assets, asset_handle, loop, volume, pan);
+    SDL_UnlockAudioStream(g_audio_stream);
+    return voice_handle;
+}
+
+STASIS_EXPORT void stasis_audio_stop(int voice_handle) {
+    if (!g_audio_stream) return;
+    SDL_LockAudioStream(g_audio_stream);
+    stasis_audio_assets_stop_voice(&g_audio_assets, voice_handle);
+    SDL_UnlockAudioStream(g_audio_stream);
+}
+
+STASIS_EXPORT int stasis_audio_voice_is_playing(int voice_handle) {
+    if (!g_audio_stream) return 0;
+    SDL_LockAudioStream(g_audio_stream);
+    int playing = stasis_audio_assets_voice_is_playing(&g_audio_assets, voice_handle);
+    SDL_UnlockAudioStream(g_audio_stream);
+    return playing;
+}
+
+STASIS_EXPORT void stasis_audio_voice_set_paused(int voice_handle, int paused) {
+    if (!g_audio_stream) return;
+    SDL_LockAudioStream(g_audio_stream);
+    stasis_audio_assets_voice_set_paused(&g_audio_assets, voice_handle, paused);
+    SDL_UnlockAudioStream(g_audio_stream);
+}
+
+STASIS_EXPORT void stasis_audio_voice_set_volume_pan(int voice_handle, float volume, float pan) {
+    if (!g_audio_stream) return;
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    if (pan < -1.0f) pan = -1.0f;
+    if (pan > 1.0f) pan = 1.0f;
+    SDL_LockAudioStream(g_audio_stream);
+    stasis_audio_assets_voice_set_volume_pan(&g_audio_assets, voice_handle, volume, pan);
+    SDL_UnlockAudioStream(g_audio_stream);
+}
+
+/* Brickout-compatible convenience API. Both categories use the same bounded WAV asset table;
+ * music is exclusive per asset while effects may overlap. */
+STASIS_EXPORT int stasis_audio_load_music(const char* path) {
+    return stasis_audio_load_wav(path);
+}
+
+STASIS_EXPORT int stasis_audio_load_effect(const char* path) {
+    return stasis_audio_load_wav(path);
+}
+
+STASIS_EXPORT int stasis_audio_play_music(int asset_handle, int loop, float volume) {
+    if (!g_audio_stream) {
+        return stasis_audio_play(asset_handle, loop, volume, 0.0f) > 0;
+    }
+    SDL_LockAudioStream(g_audio_stream);
+    stasis_audio_assets_stop_asset(&g_audio_assets, asset_handle);
+    SDL_UnlockAudioStream(g_audio_stream);
+    return stasis_audio_play(asset_handle, loop, volume, 0.0f) > 0;
+}
+
+STASIS_EXPORT void stasis_audio_stop_music(int asset_handle) {
+    if (!g_audio_stream) return;
+    SDL_LockAudioStream(g_audio_stream);
+    stasis_audio_assets_stop_asset(&g_audio_assets, asset_handle);
+    SDL_UnlockAudioStream(g_audio_stream);
+}
+
+STASIS_EXPORT void stasis_audio_pause_music(int asset_handle, int paused) {
+    if (!g_audio_stream) return;
+    SDL_LockAudioStream(g_audio_stream);
+    stasis_audio_assets_set_asset_paused(&g_audio_assets, asset_handle, paused);
+    SDL_UnlockAudioStream(g_audio_stream);
+}
+
+STASIS_EXPORT void stasis_audio_set_music_volume(int asset_handle, float volume) {
+    if (!g_audio_stream) return;
+    SDL_LockAudioStream(g_audio_stream);
+    stasis_audio_assets_set_asset_volume(&g_audio_assets, asset_handle, volume);
+    SDL_UnlockAudioStream(g_audio_stream);
+}
+
+STASIS_EXPORT int stasis_audio_play_effect(int asset_handle, float volume) {
+    return stasis_audio_play(asset_handle, 0, volume, 0.0f) > 0;
+}
+
 STASIS_EXPORT int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) {
     if (sample_rate > 0) g_audio_sample_rate = sample_rate;
     if (channels != 0 && channels != 2) return 0;

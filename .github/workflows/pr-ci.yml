@@ -84,6 +84,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
           if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
+          $env:STASIS_CMAKE_GENERATOR = $generator
           cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/render-parity-runtime --config Release

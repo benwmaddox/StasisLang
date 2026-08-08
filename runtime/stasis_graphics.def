@@ -36,6 +36,20 @@ EXPORTS
     stasis_audio_get_queued_frames
     stasis_audio_get_underruns
     stasis_audio_push_f32_interleaved
+    stasis_audio_load_wav
+    stasis_audio_release
+    stasis_audio_play
+    stasis_audio_stop
+    stasis_audio_voice_is_playing
+    stasis_audio_voice_set_paused
+    stasis_audio_voice_set_volume_pan
+    stasis_audio_load_music
+    stasis_audio_load_effect
+    stasis_audio_play_music
+    stasis_audio_stop_music
+    stasis_audio_pause_music
+    stasis_audio_set_music_volume
+    stasis_audio_play_effect
     stasis_get_startup_test_error
     stasis_get_startup_test_success
     stasis_set_postfx

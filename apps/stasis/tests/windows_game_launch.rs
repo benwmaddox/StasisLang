@@ -309,3 +309,58 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
         "Application Control must not hide a failure in only one AOT launch path"
     );
 }
+
+#[test]
+fn release_audio_sample_loads_wav_and_starts_playback() {
+    let root = repository_root();
+    let fixture = root.join("samples/audio_asset_playback");
+    let test_tree = TestTree(temp_dir("audio_asset_playback"));
+    let project = test_tree.0.join("audio_asset_playback");
+    copy_tree(&fixture, &project);
+    copy_tree(&root.join("src"), &project.join("vendor/stasis/src"));
+
+    let release = launch_release_build({
+        let mut command = stasis_command(&project);
+        command
+            .env(
+                "STASIS_RUNTIME_DLL_PATH",
+                root.join("runtime/build/bin/stasis_graphics.dll"),
+            )
+            .env(
+                "STASIS_RUNTIME_RUNNER_PATH",
+                root.join("runtime/build/bin/Debug/stasis_runner.exe"),
+            );
+        command.args(["build", "--mode", "release"]);
+        command
+    });
+    assert!(
+        release.status.success(),
+        "audio release build failed: {}",
+        String::from_utf8_lossy(&release.stderr)
+    );
+
+    let screenshot = test_tree.0.join("audio-release.png");
+    let mut release_command = Command::new(project.join("build/audio_asset_playback.exe"));
+    release_command
+        .current_dir(&project)
+        .env("SDL_AUDIO_DRIVER", "dummy");
+    configure_capture(&mut release_command, &screenshot, true);
+    let completed = launch(release_command, "audio release executable");
+    let stdout = String::from_utf8_lossy(&completed.stdout);
+    let stderr = String::from_utf8_lossy(&completed.stderr);
+    assert!(
+        completed.status.success(),
+        "audio release executable failed with {:?}\nstdout={stdout}\nstderr={stderr}",
+        completed.status.code()
+    );
+    assert!(
+        screenshot.is_file(),
+        "audio release executable did not submit its frame"
+    );
+    assert_eq!(
+        image::open(&screenshot)
+            .expect("open audio screenshot")
+            .dimensions(),
+        (480, 270)
+    );
+}
