@@ -145,18 +145,21 @@ The library exports these functions for Stasis programs:
 | `stasis_audio_stop(voice)` | Stop one asset voice |
 | `stasis_audio_voice_set_paused(voice, paused)` | Pause or resume one voice without changing its cursor |
 | `stasis_audio_voice_set_volume_pan(voice, volume, pan)` | Update one active voice (`volume` 0..1, `pan` -1..1) |
-| `stasis_audio_load_music/effect(path)` | Brickout-compatible category loaders backed by the WAV asset table |
+| `stasis_audio_load_music/effect(path)` | Category loaders for bounded WAV or MP3 assets |
 | `stasis_audio_play_music(handle, loop, volume)` | Start one exclusive music voice for an asset |
 | `stasis_audio_pause_music(handle, paused)` | Pause or resume every active voice for a music asset |
 | `stasis_audio_set_music_volume(handle, volume)` | Update every active voice for a music asset |
 | `stasis_audio_stop_music(handle)` | Stop every active voice for a music asset |
 | `stasis_audio_play_effect(handle, volume)` | Start an overlapping centered one-shot |
 
-WAV asset decoding accepts little-endian PCM16 at 8–384 kHz, one or two channels, and at most
-16 MiB per file. The callback linearly resamples into the active stereo device rate and clamps the
-combined raw-stream and asset-voice mix. Asset and voice tables are fixed at 64 and 32 entries so a
-game cannot create unbounded native audio state. All handles and decoded buffers remain host-owned;
-deterministic Stasis snapshots retain only the opaque integers chosen by game code.
+WAV asset decoding accepts little-endian PCM16 at 8–384 kHz, one or two channels. Category loaders
+also accept mono or stereo MP3 in that sample-rate range. Each source file is capped at 16 MiB and
+each decoded asset at 64 MiB. Compressed bytes remain compressed in game packages and decode into
+bounded host memory when loaded. The callback linearly resamples into the active stereo device rate
+and clamps the combined raw-stream and asset-voice mix. Asset and voice tables are fixed at 64 and
+32 entries so a game cannot create unbounded native audio state. All handles and decoded buffers
+remain host-owned; deterministic Stasis snapshots retain only the opaque integers chosen by game
+code.
 
 `play` and the native runner use HostFrame bulk snapshots for per-tick input/state now.
 Application code should read keyboard/pointer/quit state through the public wrappers in

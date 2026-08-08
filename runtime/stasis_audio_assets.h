@@ -6,6 +6,7 @@
 #define STASIS_AUDIO_MAX_ASSETS 64
 #define STASIS_AUDIO_MAX_VOICES 32
 #define STASIS_AUDIO_MAX_FILE_BYTES (16 * 1024 * 1024)
+#define STASIS_AUDIO_MAX_DECODED_BYTES (64 * 1024 * 1024)
 
 typedef struct {
     int handle;
@@ -34,7 +35,9 @@ typedef struct {
 } StasisAudioAssetStore;
 
 void stasis_audio_assets_reset(StasisAudioAssetStore* store);
+int stasis_audio_assets_load(StasisAudioAssetStore* store, const char* path);
 int stasis_audio_assets_load_wav(StasisAudioAssetStore* store, const char* path);
+int stasis_audio_assets_load_mp3(StasisAudioAssetStore* store, const char* path);
 void stasis_audio_assets_release(StasisAudioAssetStore* store, int asset_handle);
 int stasis_audio_assets_play(
     StasisAudioAssetStore* store,

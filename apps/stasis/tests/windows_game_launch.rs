@@ -494,7 +494,7 @@ fn maximized_portrait_preserves_canvas_in_jit_and_release() {
 }
 
 #[test]
-fn release_audio_sample_loads_wav_and_starts_playback() {
+fn release_audio_sample_loads_compressed_music_and_starts_playback() {
     let root = repository_root();
     let fixture = root.join("samples/audio_asset_playback");
     let test_tree = TestTree(temp_dir("audio_asset_playback"));
