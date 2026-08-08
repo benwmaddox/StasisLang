@@ -204,6 +204,10 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         stasis_audio_assets.c
     )
     target_include_directories(stasis_audio_assets_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_definitions(
+        stasis_audio_assets_test
+        PRIVATE STASIS_TEST_MP3_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/audio_asset_playback/assets/tone.mp3"
+    )
     if(NOT WIN32)
         target_link_libraries(stasis_audio_assets_test PRIVATE m)
     endif()

@@ -1335,10 +1335,23 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
         assert!(provenance["runtime_sources"]
             .as_object()
             .is_some_and(|sources| sources.contains_key("runtime/stasis_audio_assets.c")));
+        assert!(provenance["runtime_sources"]
+            .as_object()
+            .is_some_and(|sources| sources.contains_key("runtime/minimp3.h")));
         assert!(project
             .join(output)
             .join("runtime")
             .join("stasis_audio_assets.h")
+            .is_file());
+        assert!(project
+            .join(output)
+            .join("runtime")
+            .join("minimp3_ex.h")
+            .is_file());
+        assert!(project
+            .join(output)
+            .join("runtime")
+            .join("MINIMP3-LICENSE.txt")
             .is_file());
         let receipt: Value = serde_json::from_str(
             &fs::read_to_string(project.join(output).join("stasis_mobile_package.json"))

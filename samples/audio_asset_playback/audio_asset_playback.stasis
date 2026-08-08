@@ -6,14 +6,14 @@ global effect: i32;
 global ticks: i32;
 
 function main(): i32 {
-    init_window(480, 270, "Stasis WAV Asset Playback");
+    init_window(480, 270, "Stasis Compressed Audio Playback");
     if (!audio_init(48000, 2, 1024)) {
         return 1;
     }
     if (!audio_is_available() || audio_get_sample_rate() != 48000 || audio_get_channels() != 2) {
         return 4;
     }
-    music = audio_load_music("assets/tone.wav");
+    music = audio_load_music("assets/tone.mp3");
     effect = audio_load_effect("assets/tone.wav");
     if (music <= 0 || effect <= 0) {
         return 2;

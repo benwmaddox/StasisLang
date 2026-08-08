@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_ONLY_MP3
+#include "minimp3_ex.h"
+
 static uint16_t read_u16(const uint8_t* bytes) {
     return (uint16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
 }
@@ -20,6 +24,33 @@ static int find_asset(const StasisAudioAssetStore* store, int handle) {
         if (store->assets[i].handle == handle && store->assets[i].samples) return i;
     }
     return -1;
+}
+
+static int find_open_asset_slot(const StasisAudioAssetStore* store) {
+    if (!store) return -1;
+    for (int i = 0; i < STASIS_AUDIO_MAX_ASSETS; i++) {
+        if (!store->assets[i].samples) return i;
+    }
+    return -1;
+}
+
+static int store_samples(
+    StasisAudioAssetStore* store,
+    int16_t* samples,
+    int sample_rate,
+    int channels,
+    int frame_count
+) {
+    int slot = find_open_asset_slot(store);
+    if (slot < 0 || !samples || sample_rate <= 0 || (channels != 1 && channels != 2) ||
+        frame_count <= 0) return 0;
+    store->assets[slot].handle = store->next_asset_handle++;
+    if (store->next_asset_handle <= 0) store->next_asset_handle = 1;
+    store->assets[slot].sample_rate = sample_rate;
+    store->assets[slot].channels = channels;
+    store->assets[slot].frame_count = frame_count;
+    store->assets[slot].samples = samples;
+    return store->assets[slot].handle;
 }
 
 static float clamp_unit(float value) {
@@ -55,7 +86,6 @@ int stasis_audio_assets_load_wav(StasisAudioAssetStore* store, const char* path)
     uint32_t sample_rate = 0;
     const uint8_t* data = NULL;
     uint32_t data_size = 0;
-    int slot = -1;
 
     if (!store || !path || !*path) return 0;
     file = fopen(path, "rb");
@@ -96,26 +126,86 @@ int stasis_audio_assets_load_wav(StasisAudioAssetStore* store, const char* path)
     memcpy(samples, data, data_size);
     free(bytes);
     bytes = NULL;
-    for (int i = 0; i < STASIS_AUDIO_MAX_ASSETS; i++) {
-        if (!store->assets[i].samples) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0) goto fail;
-    store->assets[slot].handle = store->next_asset_handle++;
-    if (store->next_asset_handle <= 0) store->next_asset_handle = 1;
-    store->assets[slot].sample_rate = (int)sample_rate;
-    store->assets[slot].channels = (int)channels;
-    store->assets[slot].frame_count = (int)(data_size / ((uint32_t)channels * 2u));
-    store->assets[slot].samples = samples;
-    return store->assets[slot].handle;
+    int handle = store_samples(
+        store,
+        samples,
+        (int)sample_rate,
+        (int)channels,
+        (int)(data_size / ((uint32_t)channels * 2u))
+    );
+    if (handle <= 0) goto fail;
+    return handle;
 
 fail:
     if (file) fclose(file);
     free(bytes);
     free(samples);
     return 0;
+}
+
+int stasis_audio_assets_load_mp3(StasisAudioAssetStore* store, const char* path) {
+    FILE* file = NULL;
+    uint8_t* bytes = NULL;
+    int16_t* samples = NULL;
+    long file_size = 0;
+    mp3dec_ex_t decoder;
+    int decoder_open = 0;
+    int result = 0;
+
+    if (!store || !path || !*path) return 0;
+    file = fopen(path, "rb");
+    if (!file) return 0;
+    if (fseek(file, 0, SEEK_END) != 0) goto done;
+    file_size = ftell(file);
+    if (file_size <= 0 || file_size > STASIS_AUDIO_MAX_FILE_BYTES) goto done;
+    if (fseek(file, 0, SEEK_SET) != 0) goto done;
+    bytes = (uint8_t*)malloc((size_t)file_size);
+    if (!bytes || fread(bytes, 1, (size_t)file_size, file) != (size_t)file_size) goto done;
+    fclose(file);
+    file = NULL;
+    if (mp3dec_detect_buf(bytes, (size_t)file_size) != 0) goto done;
+    memset(&decoder, 0, sizeof(decoder));
+    if (mp3dec_ex_open_buf(&decoder, bytes, (size_t)file_size, MP3D_SEEK_TO_SAMPLE) != 0) goto done;
+    decoder_open = 1;
+    if ((decoder.info.channels != 1 && decoder.info.channels != 2) ||
+        decoder.info.hz < 8000 || decoder.info.hz > 384000 || decoder.samples == 0 ||
+        decoder.samples > (uint64_t)STASIS_AUDIO_MAX_DECODED_BYTES / sizeof(int16_t) ||
+        decoder.samples / (uint64_t)decoder.info.channels > 2147483647u) goto done;
+    samples = (int16_t*)malloc((size_t)decoder.samples * sizeof(int16_t));
+    if (!samples) goto done;
+    size_t decoded = mp3dec_ex_read(&decoder, samples, (size_t)decoder.samples);
+    if (decoded == 0 || decoded % (size_t)decoder.info.channels != 0) goto done;
+    result = store_samples(
+        store,
+        samples,
+        decoder.info.hz,
+        decoder.info.channels,
+        (int)(decoded / (size_t)decoder.info.channels)
+    );
+    if (result > 0) samples = NULL;
+
+done:
+    if (file) fclose(file);
+    if (decoder_open) mp3dec_ex_close(&decoder);
+    free(bytes);
+    free(samples);
+    return result;
+}
+
+int stasis_audio_assets_load(StasisAudioAssetStore* store, const char* path) {
+    FILE* file = NULL;
+    uint8_t signature[12];
+    size_t read = 0;
+    if (!store || !path || !*path) return 0;
+    file = fopen(path, "rb");
+    if (!file) return 0;
+    read = fread(signature, 1, sizeof(signature), file);
+    fclose(file);
+    if (read >= sizeof(signature) && memcmp(signature, "RIFF", 4) == 0 &&
+        memcmp(signature + 8, "WAVE", 4) == 0) {
+        return stasis_audio_assets_load_wav(store, path);
+    }
+    return stasis_audio_assets_load_mp3(store, path);
 }
 
 void stasis_audio_assets_release(StasisAudioAssetStore* store, int asset_handle) {
