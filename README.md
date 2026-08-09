@@ -252,7 +252,7 @@ stasis package --target desktop
 stasis package-mobile --target android-arm64
 ```
 
-The integrated CLI, workspace manifest, JSON output, offline guarantees, and installation layout are specified in [docs/toolchain_cli.md](docs/toolchain_cli.md). Mobile packaging is documented in [docs/mobile_packaging.md](docs/mobile_packaging.md).
+The integrated CLI, workspace manifest, JSON output, offline guarantees, and installation layout are specified in [docs/toolchain_cli.md](docs/toolchain_cli.md). Mobile packaging is documented in [docs/mobile_packaging.md](docs/mobile_packaging.md), and optional asynchronous host capabilities use the [platform service bridge](docs/platform_services.md).
 
 ## Visual Studio Code Extension
 

@@ -1,4 +1,5 @@
 #include "stasis_mobile_aot_runtime.h"
+#include "stasis_platform_services.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -240,6 +241,7 @@ void stasis_mobile_aot_reset(void) {
     array_count = 0;
     code_ptr_count = 0;
     string_count = 0;
+    stasis_platform_service_reset();
 }
 
 void stasis_jit_register_global_i32_ptr(int32_t hash, int32_t *ptr) {
@@ -495,6 +497,58 @@ int stasis_jit_gfx_cache_text(int32_t font, int32_t text) {
     int result = value == NULL ? 0 : stasis_gfx_cache_text(font, value);
     free(value);
     return result;
+}
+int stasis_jit_platform_service_submit(
+    int32_t service,
+    int32_t action,
+    int32_t request_id,
+    int32_t key,
+    int32_t key_length
+) {
+    char *value;
+    int result;
+    if (key_length <= 0) return STASIS_PLATFORM_SERVICE_SUBMIT_INVALID;
+    value = resolve_text(key);
+    if (value == NULL || (int32_t)strlen(value) < key_length) {
+        free(value);
+        return STASIS_PLATFORM_SERVICE_SUBMIT_INVALID;
+    }
+    result = stasis_platform_service_submit(
+        service, action, request_id, value, key_length);
+    free(value);
+    return result;
+}
+int stasis_jit_platform_service_poll(
+    int32_t out_fields,
+    int32_t out_field_capacity,
+    int32_t out_text,
+    int32_t out_text_capacity
+) {
+    StasisPlatformServiceResponse response;
+    int result;
+    int index;
+    int32_t fields[5];
+    if (out_field_capacity < 5 || out_text_capacity <= 0) return -1;
+    stasis_jit_collection_i32_store(out_text, 1, 0);
+    stasis_jit_collection_i32_store(out_text, 3, 0);
+    memset(&response, 0, sizeof(response));
+    result = stasis_platform_service_poll(&response, out_text_capacity);
+    if (result != 1) return result;
+    fields[0] = response.service;
+    fields[1] = response.action;
+    fields[2] = response.request_id;
+    fields[3] = response.status;
+    fields[4] = response.value;
+    for (index = 0; index < 5; index += 1) {
+        stasis_jit_global_i32_array_store(out_fields, 0, index, fields[index]);
+    }
+    for (index = 0; index < response.text_length; index += 1) {
+        stasis_jit_global_i32_array_store(
+            out_text, 0, index, (int32_t)(unsigned char)response.text[index]);
+    }
+    stasis_jit_collection_i32_store(out_text, 1, response.text_length);
+    stasis_jit_collection_i32_store(out_text, 3, response.text_char_length);
+    return 1;
 }
 int stasis_jit_gfx_poll_reload(int32_t handle) { return stasis_gfx_poll_reload(handle); }
 float stasis_jit_gfx_measure_text_cached(int32_t handle) {

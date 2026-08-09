@@ -143,6 +143,9 @@ int main(void) {
     uint8_t dynamic_path[] = "sprite.bmp";
     uint8_t ascii_value[] = "GG1-test";
     uint8_t ascii_out[32] = {0};
+    uint8_t platform_key[] = "power_up";
+    int32_t platform_fields[5] = {0};
+    uint8_t platform_text[32] = {0};
     int32_t sprite_handle[1] = {0};
     int32_t sprite_width[1] = {0};
     int32_t sprite_height[1] = {0};
@@ -230,6 +233,19 @@ int main(void) {
     memset(ascii_out, 0, sizeof(ascii_out));
     CHECK(stasis_jit_clipboard_load_ascii(43, sizeof(ascii_out)) == 8);
     CHECK(memcmp(ascii_out, "GG1-test", 8) == 0);
+
+    stasis_jit_register_global_u8_array(44, 0, platform_key, sizeof(platform_key) - 1);
+    stasis_jit_collection_i32_store(44, 1, sizeof(platform_key) - 1);
+    stasis_jit_register_global_i32_array(45, 0, platform_fields, 5);
+    stasis_jit_register_global_u8_array(46, 0, platform_text, sizeof(platform_text));
+    CHECK(stasis_jit_platform_service_submit(1, 1, 77, 44, 8) == 1);
+    CHECK(stasis_jit_platform_service_poll(45, 5, 46, sizeof(platform_text)) == 1);
+    CHECK(platform_fields[0] == 1 && platform_fields[1] == 1);
+    CHECK(platform_fields[2] == 77 && platform_fields[3] == 4);
+    CHECK(platform_fields[4] == 0);
+    CHECK(stasis_jit_collection_i32_load(46, 1) == 0);
+    CHECK(stasis_jit_collection_i32_load(46, 3) == 0);
+    CHECK(stasis_jit_platform_service_poll(45, 5, 46, sizeof(platform_text)) == 0);
 
     owned = stasis_jit_global_i32_array_ptr(21, 0, 4);
     CHECK(owned != NULL);

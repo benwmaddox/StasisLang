@@ -182,6 +182,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_runtime STATIC
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
     )
     configure_stasis_target(stasis_mobile_runtime ON TRUE)
     target_include_directories(stasis_mobile_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -191,7 +192,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     )
     install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
     install(
-        FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
+        FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h stasis_platform_services.h
         DESTINATION include
     )
 endif()
@@ -260,6 +261,7 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         tests/stasis_mobile_runtime_test.c
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
     )
     target_include_directories(stasis_mobile_runtime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME stasis_mobile_runtime_lifecycle COMMAND stasis_mobile_runtime_test)
@@ -267,6 +269,7 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         stasis_mobile_aot_runtime_test
         tests/stasis_mobile_aot_runtime_test.c
         stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
     )
     target_include_directories(stasis_mobile_aot_runtime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     if(NOT WIN32)
@@ -274,6 +277,16 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         target_link_libraries(stasis_mobile_aot_runtime_test PRIVATE m)
     endif()
     add_test(NAME stasis_mobile_aot_runtime_contract COMMAND stasis_mobile_aot_runtime_test)
+    add_executable(
+        stasis_platform_services_test
+        tests/stasis_platform_services_test.c
+        stasis_platform_services.c
+    )
+    target_include_directories(stasis_platform_services_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT WIN32)
+        target_link_libraries(stasis_platform_services_test PRIVATE pthread)
+    endif()
+    add_test(NAME stasis_platform_services_contract COMMAND stasis_platform_services_test)
     if(UNIX)
         add_executable(
             stasis_platform_storage_test

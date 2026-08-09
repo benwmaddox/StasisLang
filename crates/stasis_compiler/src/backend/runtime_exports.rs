@@ -57,6 +57,8 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_global_i32_store",
     "stasis_jit_load_font",
     "stasis_jit_measure_text",
+    "stasis_jit_platform_service_poll",
+    "stasis_jit_platform_service_submit",
     "stasis_jit_print_i32",
     "stasis_jit_print_string",
     "stasis_jit_reject_code_swap",
@@ -97,6 +99,12 @@ mod tests {
         assert!(is_aot_runtime_export_symbol("stasis_jit_audio_load_music"));
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_audio_set_music_volume"
+        ));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_platform_service_submit"
+        ));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_platform_service_poll"
         ));
         assert!(!is_aot_runtime_export_symbol(
             "stasis_jit_gfx_totally_missing"

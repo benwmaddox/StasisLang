@@ -104,6 +104,19 @@ void stasis_jit_gfx_release_sprite(int32_t handle);
 int stasis_jit_gfx_dump_bmp(int32_t path);
 int stasis_jit_gfx_dump_png(int32_t path);
 int stasis_jit_gfx_cache_text(int32_t font, int32_t text);
+int stasis_jit_platform_service_submit(
+    int32_t service,
+    int32_t action,
+    int32_t request_id,
+    int32_t key,
+    int32_t key_length
+);
+int stasis_jit_platform_service_poll(
+    int32_t out_fields,
+    int32_t out_field_capacity,
+    int32_t out_text,
+    int32_t out_text_capacity
+);
 int stasis_jit_gfx_poll_reload(int32_t handle);
 float stasis_jit_gfx_measure_text_cached(int32_t handle);
 float stasis_jit_gfx_measure_text_cached_height(int32_t handle);

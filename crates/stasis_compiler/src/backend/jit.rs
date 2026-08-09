@@ -2901,6 +2901,16 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "storage_save_i32" | "stasis_storage_save_i32" | "stasis_jit_storage_save_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_save_i32 as *const ())
         }
+        "platform_service_submit"
+        | "stasis_platform_service_submit"
+        | "stasis_jit_platform_service_submit" => {
+            function_address(stasis_dynload::stasis_jit_platform_service_submit as *const ())
+        }
+        "platform_service_poll"
+        | "stasis_platform_service_poll"
+        | "stasis_jit_platform_service_poll" => {
+            function_address(stasis_dynload::stasis_jit_platform_service_poll as *const ())
+        }
         "audio_init" | "stasis_audio_init" => {
             function_address(stasis_dynload::stasis_jit_audio_init as *const ())
         }
@@ -3626,7 +3636,7 @@ mod tests {
         process.set_local_runtime_helper_trampolines(true);
         process.upsert_file(
             "sample.stasis",
-            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let width: f32 = gfx_measure_text_cached(0); if (gfx_poll_reload(0) || audio_is_available() || width != 0.0) { return 2; } if (ms == 0 && us == 0) { return 0; } return 1; }\n",
+            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let width: f32 = gfx_measure_text_cached(0); let audio_ready: bool = audio_is_available(); if (audio_ready) { ms += 0; } if (gfx_poll_reload(0) || width != 0.0) { return 2; } if (ms == 0 && us == 0) { return 0; } return 1; }\n",
         );
         process
             .compile()
@@ -4342,6 +4352,32 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 30);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_platform_service_mailbox_reports_unsupported_without_adapter() {
+        let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_platform_service_mailbox_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/platform_services.stasis\";\nglobal key: ascii[16];\nglobal fields: i32[5];\nglobal text: utf8[32];\nfunction main(): i32 {\n    key[0] = 112; key[1] = 111; key[2] = 119; key[3] = 101;\n    key[4] = 114; key[5] = 95; key[6] = 117; key[7] = 112;\n    key.length = 8;\n    if (platform_service_submit(1, 2, 77, key) != PLATFORM_SERVICE_SUBMIT_ACCEPTED) { return 91; }\n    if (platform_service_poll(fields, text) != 1) { return 92; }\n    return fields[PLATFORM_SERVICE_RESPONSE_STATUS];\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 4);
     }
 
     #[cfg(windows)]
