@@ -77,7 +77,6 @@ const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md"
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
-const PROJECT_GIT_ATTRIBUTES: &str = "*.stasis text eol=crlf\n";
 const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
 import "/vendor/stasis/stdlib/audio.stasis";
@@ -1092,7 +1091,6 @@ fn create_project_with_options(
         root.join(".vscode/extensions.json"),
     ];
     if initialize_git {
-        reserved_paths.push(root.join(".gitattributes"));
         reserved_paths.push(root.join(".githooks/pre-commit"));
     }
     let vscode_directory = root.join(".vscode");
@@ -1152,7 +1150,6 @@ fn create_project_with_options(
         PROJECT_VSCODE_EXTENSIONS,
     )?;
     if initialize_git {
-        write_new_file(&root.join(".gitattributes"), PROJECT_GIT_ATTRIBUTES)?;
         let hook = root.join(".githooks/pre-commit");
         fs::create_dir_all(hook.parent().expect("hook parent"))
             .map_err(|error| format!("failed to create {}: {error}", hook.display()))?;

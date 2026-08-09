@@ -142,7 +142,7 @@ impl Writer {
 
 pub fn format_source(source: &str) -> Result<String, String> {
     let tokens = canonicalize_enum_commas(&scan(source)?)?;
-    let formatted = windows_line_endings(&render(&tokens)?);
+    let formatted = apply_source_line_endings(&render(&tokens)?, source);
     let formatted_tokens = scan(&formatted)?;
     let original_significant = significant_tokens(&tokens);
     let formatted_significant = significant_tokens(&formatted_tokens);
@@ -157,11 +157,41 @@ pub fn format_source(source: &str) -> Result<String, String> {
     Ok(formatted)
 }
 
-fn windows_line_endings(source: &str) -> String {
-    source
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .replace('\n', "\r\n")
+fn apply_source_line_endings(formatted: &str, source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut line_endings = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            line_endings.push("\r\n");
+            index += 2;
+        } else if bytes[index] == b'\r' {
+            line_endings.push("\r");
+            index += 1;
+        } else if bytes[index] == b'\n' {
+            line_endings.push("\n");
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    let fallback = line_endings.last().copied().unwrap_or("\n");
+    let mut output = String::with_capacity(formatted.len());
+    let mut line = 0usize;
+    for character in formatted.chars() {
+        if character == '\n' {
+            output.push_str(line_endings.get(line).copied().unwrap_or(fallback));
+            line += 1;
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn normalize_line_endings(source: &str) -> String {
+    source.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn compiler_tokens_without_enum_commas(
@@ -204,7 +234,7 @@ fn compiler_tokens_without_enum_commas(
 fn significant_tokens(tokens: &[Token]) -> Vec<(TokenKind, String)> {
     tokens
         .iter()
-        .map(|token| (token.kind, windows_line_endings(&token.text)))
+        .map(|token| (token.kind, normalize_line_endings(&token.text)))
         .collect()
 }
 
@@ -1013,7 +1043,7 @@ fn matching_close(tokens: &[Token], open_index: usize, open: &str, close: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::{format_source, windows_line_endings, LINE_WIDTH};
+    use super::{format_source, LINE_WIDTH};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1021,7 +1051,7 @@ mod tests {
     #[test]
     fn formats_declarations_blocks_and_spacing() {
         let source = "struct Player{health :i32;position:Vec2;} enum Screen{Menu Playing} global state :Player; function damage (self:Player,amount:i32):void {if(amount<=0){return;}else{self.health-=amount;}}";
-        let expected = windows_line_endings("struct Player {\n    health: i32;\n    position: Vec2;\n}\n\nenum Screen {\n    Menu,\n    Playing,\n}\n\nglobal state: Player;\n\nfunction damage(self: Player, amount: i32): void {\n    if (amount <= 0) {\n        return;\n    } else {\n        self.health -= amount;\n    }\n}\n");
+        let expected = "struct Player {\n    health: i32;\n    position: Vec2;\n}\n\nenum Screen {\n    Menu,\n    Playing,\n}\n\nglobal state: Player;\n\nfunction damage(self: Player, amount: i32): void {\n    if (amount <= 0) {\n        return;\n    } else {\n        self.health -= amount;\n    }\n}\n";
         assert_eq!(format_source(source).expect("format"), expected);
     }
 
@@ -1046,9 +1076,9 @@ mod tests {
             .join(", ");
         let source = format!("function calculate({names}):i32{{return parameter_0;}}");
         let formatted = format_source(&source).expect("format");
-        assert!(formatted.starts_with("function calculate(\r\n"));
-        assert!(formatted.contains("    parameter_0: i32,\r\n"));
-        assert!(formatted.contains("    parameter_17: i32\r\n): i32 {"));
+        assert!(formatted.starts_with("function calculate(\n"));
+        assert!(formatted.contains("    parameter_0: i32,\n"));
+        assert!(formatted.contains("    parameter_17: i32\n): i32 {"));
         assert!(formatted
             .lines()
             .all(|line| line.chars().count() <= LINE_WIDTH));
@@ -1056,16 +1086,28 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_tabs_blank_lines_and_line_endings() {
+    fn preserves_crlf_while_normalizing_whitespace() {
         let source = "function main(): i32 {\r\n\treturn 0;   \r\n\r\n\r\n}\r\n\r\n";
         let expected = "function main(): i32 {\r\n    return 0;\r\n}\r\n";
         assert_eq!(format_source(source).expect("format"), expected);
     }
 
     #[test]
+    fn accepts_any_line_endings_without_rewriting_them() {
+        let lf = "function main(): i32 {\n    return 0;\n}\n";
+        let crlf = "function main(): i32 {\r\n    return 0;\r\n}\r\n";
+        let cr = "function main(): i32 {\r    return 0;\r}\r";
+        let mixed = "function main(): i32 {\r\n    return 0;\n}\r";
+        assert_eq!(format_source(lf).expect("format LF"), lf);
+        assert_eq!(format_source(crlf).expect("format CRLF"), crlf);
+        assert_eq!(format_source(cr).expect("format CR"), cr);
+        assert_eq!(format_source(mixed).expect("format mixed"), mixed);
+    }
+
+    #[test]
     fn formats_annotations_unary_values_and_attached_comments() {
         let source = "function @extern(\"native_tick\")tick(value:i32):i32; enum Phase{Menu// initial\nPlaying} function main():i32{/* first\n * second\n */let value:i32=2*-3;return value;} // entry\n";
-        let expected = windows_line_endings("function @extern(\"native_tick\") tick(value: i32): i32;\n\nenum Phase {\n    Menu, // initial\n    Playing,\n}\n\nfunction main(): i32 {\n    /* first\n * second\n */\n    let value: i32 = 2 * -3;\n    return value;\n} // entry\n");
+        let expected = "function @extern(\"native_tick\") tick(value: i32): i32;\n\nenum Phase {\n    Menu, // initial\n    Playing,\n}\n\nfunction main(): i32 {\n    /* first\n * second\n */\n    let value: i32 = 2 * -3;\n    return value;\n} // entry\n";
         assert_eq!(format_source(source).expect("format"), expected);
         assert_eq!(format_source(&expected).expect("reformat"), expected);
     }
@@ -1073,7 +1115,7 @@ mod tests {
     #[test]
     fn keeps_commented_imports_in_one_group() {
         let source = "import\"a.stasis\";// first\nimport \"b.stasis\";/* second */\nfunction main():i32{return 0;}";
-        let expected = windows_line_endings("import \"a.stasis\"; // first\nimport \"b.stasis\"; /* second */\n\nfunction main(): i32 {\n    return 0;\n}\n");
+        let expected = "import \"a.stasis\"; // first\nimport \"b.stasis\"; /* second */\n\nfunction main(): i32 {\n    return 0;\n}\n";
         assert_eq!(format_source(source).expect("format"), expected);
         assert_eq!(format_source(&expected).expect("reformat"), expected);
     }
@@ -1081,9 +1123,8 @@ mod tests {
     #[test]
     fn adds_trailing_enum_commas_before_attached_comments() {
         let source = "enum Phase{Ready Running=4// active\n,Finished/* done */}";
-        let expected = windows_line_endings(
-            "enum Phase {\n    Ready,\n    Running = 4, // active\n    Finished, /* done */\n}\n",
-        );
+        let expected =
+            "enum Phase {\n    Ready,\n    Running = 4, // active\n    Finished, /* done */\n}\n";
         assert_eq!(format_source(source).expect("format"), expected);
         assert_eq!(format_source(&expected).expect("reformat"), expected);
     }
@@ -1091,7 +1132,7 @@ mod tests {
     #[test]
     fn groups_globals_and_fields_and_keeps_braced_items_separated() {
         let source = "global first:i32;\n\n\nglobal second:i32;\n\nstruct Pair {\n    left:i32;\n\n    right:i32;\n}\n\n// entry\n\nexport function main():i32 {\n\n    // setup\n\n    let value:i32=first;\n\n\n    value+=second;\n\n    return value;\n\n}\n\ntest `pair total`():bool {\n    let total:i32=main();\n\n    if(total>0){\n\n        return true;\n    }\n\n\n    return total>=0;\n}\n";
-        let expected = windows_line_endings("global first: i32;\nglobal second: i32;\n\nstruct Pair {\n    left: i32;\n    right: i32;\n}\n\n// entry\n\nexport function main(): i32 {\n    // setup\n\n    let value: i32 = first;\n\n    value += second;\n\n    return value;\n}\n\ntest `pair total`(): bool {\n    let total: i32 = main();\n\n    if (total > 0) {\n        return true;\n    }\n\n    return total >= 0;\n}\n");
+        let expected = "global first: i32;\nglobal second: i32;\n\nstruct Pair {\n    left: i32;\n    right: i32;\n}\n\n// entry\n\nexport function main(): i32 {\n    // setup\n\n    let value: i32 = first;\n\n    value += second;\n\n    return value;\n}\n\ntest `pair total`(): bool {\n    let total: i32 = main();\n\n    if (total > 0) {\n        return true;\n    }\n\n    return total >= 0;\n}\n";
         assert_eq!(format_source(source).expect("format"), expected);
         assert_eq!(format_source(&expected).expect("reformat"), expected);
     }
@@ -1128,7 +1169,6 @@ mod tests {
             assert!(staged.status.success(), "failed to read staged {path}");
             let source = String::from_utf8(staged.stdout)
                 .unwrap_or_else(|error| panic!("staged source is not UTF-8 for {path}: {error}"));
-            let source = windows_line_endings(&source);
             let formatted = format_source(&source)
                 .unwrap_or_else(|error| panic!("failed to format {path}: {error}"));
             assert_eq!(

@@ -385,10 +385,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let pre_commit = fs::read_to_string(project.join(".githooks/pre-commit"))
         .expect("read generated pre-commit hook");
     assert!(pre_commit.contains("stasis format --check"));
-    assert_eq!(
-        fs::read_to_string(project.join(".gitattributes")).expect("read generated Git attributes"),
-        "*.stasis text eol=crlf\n"
-    );
+    assert!(!project.join(".gitattributes").exists());
     assert_eq!(
         fs::read_to_string(project.join(".vscode/settings.json"))
             .expect("read generated VS Code settings"),
@@ -496,7 +493,7 @@ fn new_project_blocks_unformatted_commits() {
     );
     assert_eq!(
         fs::read_to_string(project.join("src/main.stasis")).expect("read hook-formatted source"),
-        "function main(): i32 {\r\n    return 0;\r\n}\r\n"
+        "function main(): i32 {\n    return 0;\n}\n"
     );
     let still_blocked = git_with_stasis_on_path(&["commit", "-m", "still unformatted"], &project);
     assert!(!still_blocked.status.success());

@@ -92,9 +92,9 @@ guide, a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
 `PROJECT_ARCHITECTURE.md` with practical input, tick, state, and rendering guidance.
 Both `new` and `init` also add language-scoped VS Code settings that recommend the Stasis extension
 and enable its canonical formatter on save without changing the formatter for other languages.
-`stasis new` also initializes a local Git repository, writes `.gitattributes` to keep `.stasis`
-files on CRLF in every checkout, selects the checked-in `.githooks` directory, and installs a
-pre-commit hook. The hook checks formatting, formats noncanonical source when needed, and blocks
+`stasis new` also initializes a local Git repository, selects the checked-in `.githooks`
+directory, and installs a pre-commit hook. The hook checks formatting, formats noncanonical source
+when needed, and blocks
 that first commit so the developer can review and stage the changes. It also blocks partially
 staged Stasis changes. A retry then commits the canonical source. Git must be available when running
 `stasis new`; `stasis init` does not alter an existing repository's hook configuration. After
@@ -213,8 +213,9 @@ The canonical rules are:
 - Keep adjacent imports together and separate other top-level declarations with one blank line.
   Preserve at most one intentional blank line inside a body, but omit a blank line immediately
   before a closing brace.
-- Use Windows CRLF line endings on every platform, remove trailing whitespace and blank lines at
-  end of file, and emit exactly one final newline.
+- Preserve the file's existing line-ending style, remove trailing whitespace and blank lines at
+  end of file, and emit exactly one final newline. LF, CRLF, CR, and mixed line endings are
+  accepted.
 - Treat 160 columns as a soft limit. When a parenthesized signature, call, or condition would exceed
   it, put its comma-separated items on indented lines without adding trailing commas. Wrapped
   boolean conditions may also break before `&&` and `||`. A comment, string, or other indivisible
