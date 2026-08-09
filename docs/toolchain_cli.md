@@ -71,9 +71,10 @@ project root and nested directories. `--workspace PATH` selects a project explic
 The vendor release and hash describe the exact checked-in `vendor/stasis` snapshot.
 `manifest_version` versions the JSON schema and is independent of the selected toolchain release.
 On every normal project command, Stasis verifies the on-disk tree against the selected executable.
-A mismatch stages its matching public stdlib and internal host-ABI modules together and publishes the vendor tree and
-manifest as one rollback-capable transaction. This detects rebuilt development executables whose
-release ID did not change and repairs edited or missing vendor files. Stasis owns `vendor/stasis`;
+A content mismatch stages its matching public stdlib and internal host-ABI modules together and publishes the vendor tree and
+manifest as one rollback-capable transaction. The recorded release ID changes only with that vendor content;
+building or selecting an executable with a different release ID does not rewrite an unchanged snapshot.
+The content hash still detects rebuilt development executables whose release ID did not change and repairs edited or missing vendor files. Stasis owns `vendor/stasis`;
 Git is the review and rollback mechanism, so synchronization does not prompt. Review and commit the
 vendor and manifest changes together with the compiler upgrade.
 

@@ -1496,9 +1496,9 @@ fn inspect_project_vendor(
     let local_changes = recorded
         .as_ref()
         .is_some_and(|recorded| actual_sha256.as_deref() != Some(recorded.sha256.as_str()));
-    let update_available = recorded.as_ref().is_none_or(|recorded| {
-        recorded.release_id != installed.release_id || recorded.sha256 != installed.sha256
-    });
+    let update_available = recorded
+        .as_ref()
+        .is_none_or(|recorded| recorded.sha256 != installed.sha256);
     Ok(VendorStatus {
         recorded,
         installed,
@@ -5581,7 +5581,7 @@ mod tests {
     }
 
     #[test]
-    fn vendor_upgrade_is_automatic_and_uses_the_content_hash() {
+    fn vendor_upgrade_only_rewrites_the_release_when_content_changes() {
         let root = temp_dir("vendor_upgrade");
         create_project(root.clone(), "vendor_upgrade".to_string()).expect("create project");
         let manifest_path = root.join(MANIFEST_NAME);
@@ -5591,15 +5591,21 @@ mod tests {
         let vendor = manifest.vendor.as_mut().expect("tracked vendor");
         vendor.stasis.release_id = "older-toolchain".to_string();
         write_manifest(&manifest_path, &manifest).expect("record older vendor");
-        let workspace = load_workspace(Some(&root)).expect("upgrade older vendor automatically");
+        let unchanged_manifest = fs::read(&manifest_path).expect("read manifest before load");
+        let workspace = load_workspace(Some(&root)).expect("load with a new toolchain release");
         assert_eq!(
             workspace
                 .manifest
                 .vendor
-                .expect("updated vendor")
+                .expect("tracked vendor")
                 .stasis
                 .release_id,
-            current_release_id()
+            "older-toolchain"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("read manifest after load"),
+            unchanged_manifest,
+            "a release-only toolchain rebuild must not rewrite the vendor manifest"
         );
 
         let older_source = root.join("vendor/stasis/stdlib/audio.stasis");
@@ -5607,7 +5613,6 @@ mod tests {
         older_contents.push_str("// older clean snapshot\r\n");
         fs::write(&older_source, older_contents).expect("write older clean snapshot");
         let vendor = manifest.vendor.as_mut().expect("tracked vendor");
-        vendor.stasis.release_id = current_release_id().to_string();
         vendor.stasis.sha256 =
             directory_sha256(&root.join("vendor/stasis")).expect("hash older clean snapshot");
         write_manifest(&manifest_path, &manifest).expect("record older content hash");

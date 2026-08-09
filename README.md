@@ -235,8 +235,9 @@ stasis run
 ```
 
 Generated projects track their checked-in `vendor/stasis` snapshot in `stasis.json`. When the
-selected Stasis executable or the checked-in tree differs from that identity, the next project
-command restores `vendor/stasis` and updates its manifest automatically. Stasis owns that directory;
+selected Stasis executable has different vendor content, or the checked-in tree differs from its
+recorded hash, the next project command restores `vendor/stasis` and updates its manifest automatically.
+A release-label change alone leaves an unchanged vendor snapshot and manifest untouched. Stasis owns that directory;
 review and commit the resulting Git changes with the compiler upgrade.
 
 For a graphical program, `stasis play path\to\main.stasis` keeps the process alive and watches the current import graph. From a project directory or any descendant, `stasis play` reads the entry and project name from the nearest ancestor `stasis.json`. Explicit entries still use that manifest root for project-root imports and asset preparation. Saving a `.stasis` file compiles a candidate in the background and attempts an all-or-nothing swap between ticks.
