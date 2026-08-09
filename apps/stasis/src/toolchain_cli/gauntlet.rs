@@ -1016,9 +1016,17 @@ mod tests {
         let mut manifest: Value =
             serde_json::from_slice(&fs::read(&manifest_path).expect("read generated manifest"))
                 .expect("parse generated manifest");
+        let older_source = root.join("vendor/stasis/stdlib/audio.stasis");
+        let mut older_contents = fs::read_to_string(&older_source).expect("read vendor source");
+        older_contents.push_str("// older clean snapshot\r\n");
+        fs::write(&older_source, older_contents).expect("write older vendor source");
         manifest["vendor"]["stasis"]["release_id"] = Value::String("older-toolchain".into());
+        manifest["vendor"]["stasis"]["sha256"] = Value::String(
+            super::super::directory_sha256(&root.join("vendor/stasis"))
+                .expect("hash older vendor snapshot"),
+        );
         write_json(&manifest_path, &manifest).expect("record older toolchain");
-        git(&["add", "stasis.json"]);
+        git(&["add", "stasis.json", "vendor/stasis/stdlib/audio.stasis"]);
         git(&[
             "-c",
             "user.name=Gauntlet Test",
