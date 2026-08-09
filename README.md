@@ -218,8 +218,8 @@ stasis new my_game
 cd my_game
 ```
 
-`stasis new` initializes Git, pins `.stasis` files to CRLF in `.gitattributes`, and activates the
-generated formatting hook. An attempted commit with noncanonical Stasis source formats the files
+`stasis new` initializes Git and activates the generated formatting hook without pinning a
+line-ending style. An attempted commit with noncanonical Stasis source formats the files
 and stops; review and stage those changes, then retry the commit. Git must be installed and `stasis`
 must remain available on `PATH` when committing. The generated `src/main.stasis` imports the
 game-facing standard-library modules for core utilities, graphics, audio, collision, layout,
