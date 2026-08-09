@@ -27,7 +27,7 @@ function get_time_us(): i32 {
 extern function gfx_poll_reload(handle: i32): bool;
 extern function gfx_dump_bmp(path: string): i32;
 extern function gfx_dump_png(path: string): i32;
-extern function load_font(path: string, size: i32): i32;
+extern function @asset_path(path) load_font(path: string, size: i32): i32;
 extern function measure_text(font: i32, text: string): f32;
 
 struct Sprite {
@@ -43,7 +43,7 @@ struct TextRun {
     height: f32;
 }
 
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
     if (self.handle <= 0 || self.width <= 0 || self.height <= 0) {

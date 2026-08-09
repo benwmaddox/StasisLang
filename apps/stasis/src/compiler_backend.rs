@@ -66,7 +66,7 @@ fn stable_absolute_path(path: &Path) -> PathBuf {
     absolute
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelfHostedAotCliSummary {
     pub source_file_count: usize,
     pub linked_image_path: PathBuf,
@@ -74,6 +74,8 @@ pub struct SelfHostedAotCliSummary {
     pub ir_bundle_path: PathBuf,
     pub object_bundle_path: PathBuf,
     pub object_file_names: Vec<String>,
+    #[serde(skip)]
+    pub program_snapshot: Option<ProgramSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4383,6 +4385,7 @@ fn package_engine_bundle_release(
         ir_bundle_path: PathBuf::new(),
         object_bundle_path: bundle.manifest_path.clone(),
         object_file_names,
+        program_snapshot: None,
     })
 }
 
@@ -8372,6 +8375,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
             ir_bundle_path: PathBuf::new(),
             object_bundle_path,
             object_file_names,
+            program_snapshot: None,
         }
     };
 
@@ -8405,7 +8409,14 @@ pub fn run_self_host_aot_cli_with_options(
         summary_file_path.map(PathBuf::from),
         entry_file.map(PathBuf::from),
     );
-    run_self_host_aot_cli_with_backend_and_options(&mut backend, project_dir, output_exe, &options)
+    let mut summary = run_self_host_aot_cli_with_backend_and_options(
+        &mut backend,
+        project_dir,
+        output_exe,
+        &options,
+    )?;
+    summary.program_snapshot = backend.last_program_snapshot.clone();
+    Ok(summary)
 }
 
 pub fn run_self_host_aot_cli(

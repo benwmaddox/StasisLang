@@ -1,0 +1,18 @@
+{
+  "schema": "stasis-assets",
+  "version": 2,
+  "assets": [
+    {
+      "id": "marker",
+      "path": "assets/marker.svg",
+      "content_sha256": "3384e177af0ea77fb90a5754af5ebc10caf63693b1f84b8b652338b7ce1d2644",
+      "format": {
+        "kind": "sprite",
+        "encoding": "svg",
+        "width": 8,
+        "height": 8
+      },
+      "dependencies": []
+    }
+  ]
+}

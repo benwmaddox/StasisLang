@@ -34,6 +34,8 @@ pub struct AssetManifest {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<AssetDisplay>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_assets: Vec<String>,
     pub assets: Vec<AssetEntry>,
 }
 
@@ -159,6 +161,7 @@ pub struct ResolvedAsset {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedAssetManifest {
     pub manifest_path: PathBuf,
+    pub dynamic_assets: BTreeSet<String>,
     pub assets: Vec<ResolvedAsset>,
 }
 
@@ -193,6 +196,7 @@ impl ResolvedAssetManifest {
         }
         Self {
             manifest_path: self.manifest_path.clone(),
+            dynamic_assets: self.dynamic_assets.intersection(paths).cloned().collect(),
             assets: self
                 .assets
                 .iter()
@@ -324,19 +328,29 @@ pub fn load_project_asset_manifest(
     }
     validate_dependencies(&manifest.assets, &ids)?;
 
+    let asset_root = root.join("assets").canonicalize().map_err(|error| {
+        manifest_error(
+            "asset_root_unavailable",
+            None,
+            Some(Path::new("assets")),
+            error.to_string(),
+        )
+    })?;
     let mut resolved = Vec::with_capacity(manifest.assets.len());
     for entry in manifest.assets {
         let relative = validate_relative_asset_path(&entry.path)
             .map_err(|detail| entry_error("asset_path_invalid", &entry, detail))?;
+        validate_exact_path_case(&root, &relative)
+            .map_err(|detail| entry_error("asset_path_case_mismatch", &entry, detail))?;
         let candidate = root.join(relative);
         let absolute_path = candidate
             .canonicalize()
             .map_err(|error| entry_error("asset_file_missing", &entry, error.to_string()))?;
-        if !absolute_path.starts_with(&root) || !absolute_path.is_file() {
+        if !absolute_path.starts_with(&asset_root) || !absolute_path.is_file() {
             return Err(entry_error(
-                "asset_path_outside_project",
+                "asset_path_outside_assets",
                 &entry,
-                "asset must resolve to a file inside the project root",
+                "asset must resolve to a file inside the project assets directory",
             ));
         }
         let (content_sha256, byte_length) = sha256_file(&absolute_path, limits.max_asset_bytes)
@@ -355,11 +369,69 @@ pub fn load_project_asset_manifest(
             byte_length,
         });
     }
+    let declared_paths = resolved
+        .iter()
+        .map(|asset| asset.entry.path.clone())
+        .collect::<BTreeSet<_>>();
+    let dynamic_assets = manifest
+        .dynamic_assets
+        .iter()
+        .map(|path| path.replace('\\', "/"))
+        .collect::<BTreeSet<_>>();
+    if let Some(path) = dynamic_assets
+        .iter()
+        .find(|path| !declared_paths.contains(*path))
+    {
+        return Err(manifest_error(
+            "asset_dynamic_path_undeclared",
+            None,
+            Some(Path::new(path)),
+            "dynamic_assets entries must name declared manifest asset paths",
+        ));
+    }
     resolved.sort_by(|left, right| left.entry.id.cmp(&right.entry.id));
     Ok(ResolvedAssetManifest {
         manifest_path,
+        dynamic_assets,
         assets: resolved,
     })
+}
+
+fn validate_exact_path_case(root: &Path, relative: &Path) -> Result<(), String> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(expected) = component else {
+            return Err("asset path must contain only relative path components".to_string());
+        };
+        let expected_text = expected.to_string_lossy();
+        let mut exact = false;
+        let mut insensitive = false;
+        let entries = fs::read_dir(&current)
+            .map_err(|error| format!("failed to inspect asset path casing: {error}"))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_text = name.to_string_lossy();
+            if name_text == expected_text {
+                exact = true;
+                break;
+            }
+            if name_text.eq_ignore_ascii_case(&expected_text) {
+                insensitive = true;
+            }
+        }
+        if !exact {
+            return if insensitive {
+                Err(format!(
+                    "path component '{}' does not exactly match disk casing",
+                    expected_text
+                ))
+            } else {
+                Ok(())
+            };
+        }
+        current.push(expected);
+    }
+    Ok(())
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -391,6 +463,9 @@ pub fn prepare_asset_bundle(
     manifest
         .assets
         .retain(|entry| by_id.contains_key(entry.id.as_str()));
+    manifest
+        .dynamic_assets
+        .retain(|path| resolved.dynamic_assets.contains(path));
     let mut summary = PreparedAssetSummary {
         copied_assets: 0,
         resized_assets: 0,
@@ -1045,6 +1120,7 @@ mod tests {
             schema: ASSET_MANIFEST_SCHEMA.to_string(),
             version: ASSET_MANIFEST_VERSION,
             display: None,
+            dynamic_assets: Vec::new(),
             assets: entries,
         };
         fs::write(
@@ -1086,6 +1162,41 @@ mod tests {
             fs::read(root.join("output/assets/fonts/ui.ttf")).unwrap(),
             bytes
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_manifest_entry_with_non_exact_disk_casing() {
+        let root = project("case");
+        let bytes = b"sprite";
+        fs::write(root.join("assets/images/hero.png"), bytes).unwrap();
+        write_manifest(&root, vec![sprite("hero", "assets/Images/hero.png", bytes)]);
+        let error = load_project_asset_manifest(&root, AssetLimits::default()).unwrap_err();
+        assert_eq!(error.code, "asset_path_case_mismatch");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_manifest_asset_symlink_that_escapes_assets_directory() {
+        let root = project("symlink_escape");
+        fs::create_dir_all(root.join("private")).unwrap();
+        let bytes = b"private sprite";
+        fs::write(root.join("private/hero.png"), bytes).unwrap();
+        let link = root.join("assets/link");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(root.join("private"), &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(root.join("private"), &link).is_ok();
+        if !linked {
+            fs::remove_dir_all(root).ok();
+            return;
+        }
+        write_manifest(
+            &root,
+            vec![sprite("private", "assets/link/hero.png", bytes)],
+        );
+        let error = load_project_asset_manifest(&root, AssetLimits::default()).unwrap_err();
+        assert_eq!(error.code, "asset_path_outside_assets");
         fs::remove_dir_all(root).ok();
     }
 
@@ -1298,6 +1409,7 @@ mod tests {
                 max_physical_height: 1000,
                 scale_mode: AssetScaleMode::Fit,
             }),
+            dynamic_assets: Vec::new(),
             assets: vec![hero],
         };
         fs::write(
