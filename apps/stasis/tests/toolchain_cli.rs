@@ -561,7 +561,7 @@ fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
     assert_eq!(json_stdout(&formatted)["command"], "fmt");
     assert_eq!(
         fs::read_to_string(&entry).expect("read formatted fixture"),
-        crlf("struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu,\n    Playing,\n}\n\nglobal score: i32;\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n")
+        "struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu,\n    Playing,\n}\n\nglobal score: i32;\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n"
     );
 
     let fixed_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -618,7 +618,7 @@ fn format_accepts_explicit_sources_without_a_project_manifest() {
         .success());
     assert_eq!(
         fs::read_to_string(&source).expect("read standalone formatted source"),
-        "function main(): i32 {\r\n    return 0;\r\n}\r\n"
+        "function main(): i32 {\n    return 0;\n}\n"
     );
 
     fs::remove_dir_all(&root).ok();
@@ -643,9 +643,7 @@ fn format_stdin_returns_only_canonical_source_without_a_manifest() {
     assert!(output.stderr.is_empty());
     assert_eq!(
         String::from_utf8(output.stdout).expect("formatted UTF-8"),
-        crlf(
-            "enum Mode {\n    Menu,\n    Playing,\n}\n\nfunction main(): i32 {\n    return 0;\n}\n"
-        )
+        "enum Mode {\n    Menu,\n    Playing,\n}\n\nfunction main(): i32 {\n    return 0;\n}\n"
     );
 
     let rejected = stasis_with_stdin(&["--json", "format", "--stdin"], &root, "");
