@@ -3195,6 +3195,12 @@ fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
     guard.get(&value_id).map(|text| text.as_bytes().to_vec())
 }
 
+fn validated_jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
+    let bytes = jit_text_arg_bytes(value_id)?;
+    std::str::from_utf8(&bytes).ok()?;
+    Some(bytes)
+}
+
 thread_local! {
     static JIT_TEXT_SCRATCH: std::cell::RefCell<Vec<u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
@@ -3760,10 +3766,13 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
-    if let (Some(host), Some(text)) = (embedded_graphics_host(), jit_text_arg_bytes(text_id)) {
+    let Some(text) = validated_jit_text_arg_bytes(text_id) else {
+        return 0;
+    };
+    if let Some(host) = embedded_graphics_host() {
         return (host.cache_text)(font, &text);
     }
-    let Ok(text) = jit_text_arg_to_cstring(text_id) else {
+    let Ok(text) = CString::new(text) else {
         return 0;
     };
     let Ok(api) = stasis_graphics_assets_api() else {
@@ -5679,6 +5688,45 @@ mod tests {
         stasis_jit_global_i32_array_store(collection_hash, 0, 3, i32::from(b'h'));
 
         assert_eq!(jit_text_arg_bytes(collection_hash), Some(b"path".to_vec()));
+    }
+
+    #[test]
+    fn validated_jit_text_arg_bytes_accepts_localized_price_utf8() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+
+        let collection_hash = 0x5566_7788i32;
+        let price = "€2.99".as_bytes();
+        stasis_jit_collection_i32_store(collection_hash, 1, price.len() as i32);
+        stasis_jit_collection_i32_store(collection_hash, 2, 16);
+        stasis_jit_collection_i32_store(collection_hash, 3, 5);
+        for (index, byte) in price.iter().copied().enumerate() {
+            stasis_jit_global_i32_array_store(collection_hash, 0, index as i32, i32::from(byte));
+        }
+
+        assert_eq!(
+            validated_jit_text_arg_bytes(collection_hash),
+            Some(price.to_vec())
+        );
+    }
+
+    #[test]
+    fn validated_jit_text_arg_bytes_rejects_malformed_utf8() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+
+        let collection_hash = 0x6677_8899i32;
+        stasis_jit_collection_i32_store(collection_hash, 1, 2);
+        stasis_jit_collection_i32_store(collection_hash, 2, 2);
+        stasis_jit_collection_i32_store(collection_hash, 3, 1);
+        stasis_jit_global_i32_array_store(collection_hash, 0, 0, 0xc3);
+        stasis_jit_global_i32_array_store(collection_hash, 0, 1, 0x28);
+
+        assert_eq!(validated_jit_text_arg_bytes(collection_hash), None);
     }
 
     #[test]

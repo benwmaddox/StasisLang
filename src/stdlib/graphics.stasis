@@ -58,6 +58,13 @@ function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
 
 function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
 
+// Runtime-owned display text, such as a localized store price, uses the same cached
+// UTF-8 path as string literals. The named wrapper makes the bounded-buffer contract
+// explicit at call sites while preserving the existing source-compatible API.
+function load_utf8_from(self: TextRun, font: i32, text: utf8[]): bool {
+    return self.load_text_from(font, text);
+}
+
 function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     if (self.font <= 0 || self.handle <= 0) {
         return;
