@@ -850,6 +850,20 @@ about final signed APK/IPA compression or store metadata.
 mixed-width particle fields, capacity, host call, and tick budget provide deterministic acceptance
 evidence for the report.
 
+### 14.3.3 Inline function hint
+
+`function @inline helper(...): T` asks the shared AOT/JIT lowering path to substitute the helper's
+body at eligible call sites. The annotation is a performance hint rather than a different function
+kind: the compiler still emits the real typed function symbol so ordinary calls, recursive edges,
+exports, and future address-taking remain valid. Current eligibility covers a single returned
+expression whose arguments can be substituted without duplicating or reordering calls. Other body
+shapes retain the ordinary direct call.
+
+Inlining never weakens live-update correctness. The annotated bit participates in the lowering
+contract, and an edited inline callee invalidates its reverse caller closure before a JIT patch is
+published. Recursive expansion is rejected at the call site and continues through the real
+function.
+
 ### 14.4 Development File-Change Boundary Contracts
 
 During development, file-change handling uses explicit role ownership and message boundaries.

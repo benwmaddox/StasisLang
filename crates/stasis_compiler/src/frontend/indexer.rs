@@ -16,6 +16,7 @@ pub struct IndexedFunction {
     pub params: Vec<TypeId>,
     pub param_type_names: Vec<String>,
     pub return_type: TypeId,
+    pub inline: bool,
     pub dependencies: Vec<IndexedCallDependency>,
 }
 
@@ -65,7 +66,11 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
         }
         let return_type = types.resolve_or_intern(&function.return_type_name)?;
         let name_hash = hash_text(&function.name);
-        let signature_hash = hash_signature(name_hash, &params, return_type);
+        let inline = function
+            .annotations
+            .iter()
+            .any(|annotation| annotation.name == "inline");
+        let signature_hash = hash_signature(name_hash, &params, return_type, inline);
         let body_text = source
             .get(function.body_range.clone())
             .ok_or_else(|| "invalid function body range".to_string())?;
@@ -83,6 +88,7 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
             params,
             param_type_names,
             return_type,
+            inline,
             dependencies,
         });
     }
@@ -98,7 +104,7 @@ pub fn hash_text(text: &str) -> u64 {
     hash
 }
 
-fn hash_signature(name_hash: u64, params: &[TypeId], return_type: TypeId) -> u64 {
+fn hash_signature(name_hash: u64, params: &[TypeId], return_type: TypeId, inline: bool) -> u64 {
     let mut hash = name_hash;
     hash = hash
         .wrapping_mul(1099511628211)
@@ -108,6 +114,9 @@ fn hash_signature(name_hash: u64, params: &[TypeId], return_type: TypeId) -> u64
             .wrapping_mul(1099511628211)
             .wrapping_add(u64::from(*param));
     }
+    hash = hash
+        .wrapping_mul(1099511628211)
+        .wrapping_add(u64::from(inline));
     hash
 }
 
@@ -182,6 +191,25 @@ mod tests {
             indexed[0].return_type,
             types.resolve("i32").unwrap_or_default()
         );
+        assert!(!indexed[0].inline);
+    }
+
+    #[test]
+    fn indexes_inline_as_part_of_the_lowering_contract() {
+        let mut types = TypeTable::new();
+        let plain = index_file(
+            "function helper(value: i32): i32 { return value; }\n",
+            &mut types,
+        )
+        .expect("plain index");
+        let annotated = index_file(
+            "function @inline helper(value: i32): i32 { return value; }\n",
+            &mut types,
+        )
+        .expect("inline index");
+        assert!(!plain[0].inline);
+        assert!(annotated[0].inline);
+        assert_ne!(plain[0].signature_hash, annotated[0].signature_hash);
     }
 
     #[test]
