@@ -2,12 +2,13 @@
   "schema_version": 1,
   "fixture": "samples/render_parity/main.stasis",
   "trace_fixture": "samples/render_parity/trace.stasis",
-  "command_trace": 3298812902,
+  "command_trace": 1390729377,
   "font_sha256": "17ec668bd0cd62e934f97563287ed72a4a8599ae716d20c1a93c82f1876dde47",
   "logical_size": [640, 360],
   "required_commands": {
     "clear": 1,
     "lines": 2,
+    "filled_rectangles": 1,
     "sprites": 5,
     "direct_text": 1,
     "cached_text": 1,
@@ -28,7 +29,7 @@
   "capture_profiles": {
     "windows_sdl_d3d11": {
       "comparison": "exact",
-      "sha256_rgba": "26e98164fed5ffc800b432d56fcfb3d3b92816c38abbee4223ecb483166e18e3"
+      "sha256_rgba": "9093a09445c569118fab61c76244b722999fb9abf34d606b097f44f2c199f68a"
     },
     "portable": {
       "comparison": "regions",
@@ -38,6 +39,7 @@
         {"name": "opaque_svg", "rect": [146, 54, 76, 52], "rgba": [49, 209, 124, 255], "max_channel_delta": 32, "min_coverage": 0.35},
         {"name": "translucent_svg", "rect": [282, 54, 76, 52], "rgba": [108, 78, 91, 255], "max_channel_delta": 36, "min_coverage": 0.18},
         {"name": "rotated_scaled_sprite", "rect": [440, 36, 112, 84], "predicate": "green_sprite", "min_coverage": 0.20},
+        {"name": "filled_rectangle", "rect": [240, 170, 32, 20], "rgba": [36, 122, 74, 255], "max_channel_delta": 45, "min_coverage": 0.80},
         {"name": "overlapping_lines", "rect": [304, 168, 32, 24], "predicate": "crossing_lines", "min_red_coverage": 0.008, "min_cyan_coverage": 0.008},
         {"name": "direct_text", "rect": [64, 252, 190, 34], "predicate": "neutral_bright", "min_coverage": 0.04},
         {"name": "cached_text", "rect": [344, 252, 190, 34], "predicate": "gold_text", "min_coverage": 0.04}
@@ -51,6 +53,7 @@
         {"name": "opaque_svg", "rect": [146, 54, 76, 52], "rgba": [49, 209, 124, 255], "max_channel_delta": 32, "min_coverage": 0.35},
         {"name": "translucent_svg", "rect": [282, 54, 76, 52], "non_background_fraction": 0.50},
         {"name": "rotated_scaled_sprite", "rect": [440, 36, 112, 84], "predicate": "green_sprite", "min_coverage": 0.20},
+        {"name": "filled_rectangle", "rect": [240, 170, 32, 20], "rgba": [36, 122, 74, 255], "max_channel_delta": 45, "min_coverage": 0.80},
         {"name": "overlapping_lines", "rect": [304, 168, 32, 24], "predicate": "crossing_lines", "min_red_coverage": 0.008, "min_cyan_coverage": 0.008},
         {"name": "direct_text", "rect": [64, 252, 190, 34], "predicate": "neutral_bright", "min_coverage": 0.04},
         {"name": "cached_text", "rect": [344, 252, 190, 34], "predicate": "gold_text", "min_coverage": 0.04}

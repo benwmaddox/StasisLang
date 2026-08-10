@@ -785,11 +785,12 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
                 last_density_generation != values_i32[STASIS_RENDER_I_DENSITY_GENERATION]) {
             uint32_t trace = stasis_render_trace(values_i32, values_f32, values_u8);
             __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG,
-                    "Stasis preview gfx_cmd v%d trace=%u flags=%d lines=%d sprites=%d text=%d "
+                    "Stasis preview gfx_cmd v%d trace=%u flags=%d lines=%d rects=%d sprites=%d text=%d "
                     "logical=%dx%d native=%dx%d drawable=%dx%d display_gen=%d density_gen=%d",
                     values_i32[STASIS_RENDER_I_VERSION], trace,
                     values_i32[STASIS_RENDER_I_FLAGS],
                     values_i32[STASIS_RENDER_I_LINE_COUNT],
+                    values_i32[STASIS_RENDER_I_RECT_COUNT],
                     values_i32[STASIS_RENDER_I_SPRITE_COUNT],
                     values_i32[STASIS_RENDER_I_TEXT_COUNT],
                     values_i32[STASIS_RENDER_I_LOGICAL_W],

@@ -142,6 +142,7 @@ def validate_fixture(manifest_path: Path) -> dict:
     actual_commands = {
         "clear": int("PARITY_GFX_FLAG_CLEAR + PARITY_GFX_FLAG_PRESENT" in frame_source),
         "lines": 2 if "cmd_i32[3] = 2;" in frame_source else 0,
+        "filled_rectangles": 1 if "cmd_i32[24] = 1;" in frame_source else 0,
         "sprites": frame_source.count("\n    parity_add_sprite("),
         "direct_text": frame_source.count("\n    parity_add_direct_label("),
         "cached_text": frame_source.count("\n    parity_add_cached_label("),
@@ -359,7 +360,7 @@ def verify_runtime_evidence(
 ) -> None:
     log = _read_runtime_log(log_path)
     trace_match = re.search(
-        r"Stasis render contract v3 trace=(\d+)\s+flags=3\s+lines=2\s+sprites=5\s+text=2",
+        r"Stasis render contract v4 trace=(\d+)\s+flags=3\s+lines=2\s+rects=1\s+sprites=5\s+text=2",
         log,
     )
     if trace_match is None or int(trace_match.group(1)) != int(manifest["command_trace"]):

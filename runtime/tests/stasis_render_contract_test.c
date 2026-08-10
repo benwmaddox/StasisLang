@@ -14,6 +14,7 @@ static void build_representative_frame(
     i32s[STASIS_RENDER_I_FLAGS] =
         STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT;
     i32s[STASIS_RENDER_I_LINE_COUNT] = 1;
+    i32s[STASIS_RENDER_I_RECT_COUNT] = 1;
     i32s[STASIS_RENDER_I_SPRITE_COUNT] = 1;
     i32s[STASIS_RENDER_I_TEXT_COUNT] = 2;
     i32s[STASIS_RENDER_I_TEXT_BYTES_USED] = 5;
@@ -23,19 +24,26 @@ static void build_representative_frame(
     i32s[STASIS_RENDER_I_DRAWABLE_H] = 720;
     i32s[STASIS_RENDER_I_DISPLAY_GENERATION] = 3;
     i32s[STASIS_RENDER_I_DENSITY_GENERATION] = 5;
-    i32s[STASIS_RENDER_I_ORDER_COUNT] = 4;
+    i32s[STASIS_RENDER_I_ORDER_COUNT] = 5;
     i32s[STASIS_RENDER_I_ORDER_BASE + 0] =
         STASIS_RENDER_ORDER_LINE * STASIS_RENDER_ORDER_KIND_SCALE;
     i32s[STASIS_RENDER_I_ORDER_BASE + 1] =
-        STASIS_RENDER_ORDER_SPRITE * STASIS_RENDER_ORDER_KIND_SCALE;
+        STASIS_RENDER_ORDER_RECT * STASIS_RENDER_ORDER_KIND_SCALE;
     i32s[STASIS_RENDER_I_ORDER_BASE + 2] =
-        STASIS_RENDER_ORDER_TEXT * STASIS_RENDER_ORDER_KIND_SCALE;
+        STASIS_RENDER_ORDER_SPRITE * STASIS_RENDER_ORDER_KIND_SCALE;
     i32s[STASIS_RENDER_I_ORDER_BASE + 3] =
+        STASIS_RENDER_ORDER_TEXT * STASIS_RENDER_ORDER_KIND_SCALE;
+    i32s[STASIS_RENDER_I_ORDER_BASE + 4] =
         STASIS_RENDER_ORDER_TEXT * STASIS_RENDER_ORDER_KIND_SCALE + 1;
 
     f32s[0] = 0.1f; f32s[1] = 0.2f; f32s[2] = 0.3f; f32s[3] = 1.0f;
     const float line[] = {1.0f, 2.0f, 3.0f, 4.0f, 0.5f, 0.6f, 0.7f, 0.8f};
     memcpy(f32s + STASIS_RENDER_F_LINE_BASE, line, sizeof(line));
+    const float rect[] = {8.0f, 9.0f, 10.0f, 11.0f, 0.2f, 0.3f, 0.4f, 0.5f};
+    memcpy(
+        f32s + STASIS_RENDER_F_RECT_REVERSE_BASE,
+        rect,
+        sizeof(rect));
 
     const int32_t sprite_i32[] = {17, 45, 192};
     const float sprite_f32[] = {10.25f, 20.5f, 30.75f, 40.125f};
@@ -85,6 +93,8 @@ int main(void) {
     second_i32[STASIS_RENDER_I_ORDER_BASE + 1] =
         STASIS_RENDER_ORDER_SPRITE * STASIS_RENDER_ORDER_KIND_SCALE;
     second_i32[STASIS_RENDER_I_ORDER_BASE + 2] =
+        STASIS_RENDER_ORDER_RECT * STASIS_RENDER_ORDER_KIND_SCALE;
+    second_i32[STASIS_RENDER_I_ORDER_BASE + 3] =
         STASIS_RENDER_ORDER_LINE * STASIS_RENDER_ORDER_KIND_SCALE;
     CHECK(first_trace != stasis_render_trace(second_i32, second_f32, second_u8));
 
@@ -105,6 +115,9 @@ int main(void) {
     CHECK(first_trace == stasis_render_trace(second_i32, second_f32, second_u8));
 
     second_f32[STASIS_RENDER_F_SPRITE_BASE + 1] += 0.5f;
+    CHECK(first_trace != stasis_render_trace(second_i32, second_f32, second_u8));
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_f32[STASIS_RENDER_F_RECT_REVERSE_BASE + 2] += 0.5f;
     CHECK(first_trace != stasis_render_trace(second_i32, second_f32, second_u8));
     second_i32[STASIS_RENDER_I_VERSION] = 99;
     CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_VERSION);

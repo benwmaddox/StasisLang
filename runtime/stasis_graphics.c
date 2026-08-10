@@ -1484,6 +1484,8 @@ static float screen_to_ndc_y(float y) {
 
 STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
                                     float r, float g, float b, float a);
+STASIS_EXPORT void stasis_fill_rect(float x, float y, float w, float h,
+                                    float r, float g, float b, float a);
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void setup_ortho(void) {
@@ -4510,8 +4512,48 @@ STASIS_EXPORT void stasis_draw_lines_f32(const float* lines, int line_count) {
     }
 }
 
+STASIS_EXPORT void stasis_fill_rect(float x, float y, float w, float h,
+                                    float r, float g, float b, float a) {
+    gfx_debug_hash_f32(x);
+    gfx_debug_hash_f32(y);
+    gfx_debug_hash_f32(w);
+    gfx_debug_hash_f32(h);
+    gfx_debug_hash_f32(r);
+    gfx_debug_hash_f32(g);
+    gfx_debug_hash_f32(b);
+    gfx_debug_hash_f32(a);
+    if (w <= 0.0f || h <= 0.0f) return;
+    if (g_use_sdl_renderer) {
+        SDL_FRect rect = {x, y, w, h};
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(
+            g_renderer,
+            (Uint8)(r * 255.0f),
+            (Uint8)(g * 255.0f),
+            (Uint8)(b * 255.0f),
+            (Uint8)(a * 255.0f));
+        SDL_RenderFillRect(g_renderer, &rect);
+        return;
+    }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_TEXTURE_2D);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glColor4f(r, g, b, a);
+    glBegin(GL_QUADS);
+    glVertex2f(x, y);
+    glVertex2f(x + w, y);
+    glVertex2f(x + w, y + h);
+    glVertex2f(x, y + h);
+    glEnd();
+    glColor4f(1, 1, 1, 1);
+#endif
+}
+
 /*
- * Command-buffer submission (v2).
+ * Command-buffer submission (v2-v4).
  *
  * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
  * Flush category-local batches before a later command category draws.
@@ -4603,6 +4645,23 @@ static void stasis_draw_ordered_text(
     stasis_draw_text(font, (const char*)(cmd_u8 + byte_off), x, y, r, g, b, a);
 }
 
+static void stasis_draw_ordered_rect(
+    const float* cmd_f32,
+    int32_t index
+) {
+    const int base = STASIS_RENDER_F_RECT_REVERSE_BASE -
+        index * STASIS_RENDER_GEOMETRY_F32_STRIDE;
+    stasis_fill_rect(
+        cmd_f32[base + 0],
+        cmd_f32[base + 1],
+        cmd_f32[base + 2],
+        cmd_f32[base + 3],
+        cmd_f32[base + 4],
+        cmd_f32[base + 5],
+        cmd_f32[base + 6],
+        cmd_f32[base + 7]);
+}
+
 static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     static int contract_logged = 0;
     StasisRenderValidation validation = stasis_render_validate(cmd_i32, cmd_f32);
@@ -4639,17 +4698,19 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
     if (text_bytes_used < 0) text_bytes_used = 0;
 
     if (line_count > gfx_cmd_max_lines) line_count = gfx_cmd_max_lines;
+    const int32_t rect_count = stasis_render_rect_count(cmd_i32, line_count);
     if (sprite_count > gfx_cmd_max_sprites) sprite_count = gfx_cmd_max_sprites;
     if (text_count > gfx_cmd_max_text) text_count = gfx_cmd_max_text;
     if (text_bytes_used > gfx_cmd_max_text_bytes) text_bytes_used = gfx_cmd_max_text_bytes;
 
     if (!contract_logged) {
         SDL_Log(
-            "Stasis render contract v%d trace=%u flags=%d lines=%d sprites=%d text=%d",
+            "Stasis render contract v%d trace=%u flags=%d lines=%d rects=%d sprites=%d text=%d",
             cmd_i32[STASIS_RENDER_I_VERSION],
             (unsigned int)stasis_render_trace(cmd_i32, cmd_f32, cmd_u8),
             flags,
             line_count,
+            rect_count,
             sprite_count,
             text_count);
         contract_logged = 1;
@@ -4662,7 +4723,7 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
     }
 
     const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
-    const int32_t order_count = version == STASIS_RENDER_V3_VERSION
+    const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
         ? stasis_render_clamp_count(
             cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER)
         : 0;
@@ -4690,6 +4751,11 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
                 stasis_draw_ordered_text(
                     cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
                 pending_kind = kind;
+            } else if (kind == STASIS_RENDER_ORDER_RECT && index < rect_count) {
+                if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
+                if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
+                stasis_draw_ordered_rect(cmd_f32, index);
+                pending_kind = kind;
             }
         }
         if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
@@ -4698,6 +4764,9 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
         if (line_count > 0) {
             stasis_draw_lines_f32(cmd_f32 + STASIS_RENDER_F_LINE_BASE, line_count);
             flush_ordered_lines();
+        }
+        for (int32_t index = 0; index < rect_count; index++) {
+            stasis_draw_ordered_rect(cmd_f32, index);
         }
         for (int32_t index = 0; index < sprite_count; index++) {
             stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
