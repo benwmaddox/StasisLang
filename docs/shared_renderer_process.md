@@ -80,3 +80,26 @@ shipping renderer. It performs no per-command JNI calls and adds no additional
 full-frame copy. The old desktop GL adapter is available only when CMake is
 explicitly configured with `STASIS_GRAPHICS_SDL_ONLY=OFF`; it is not packaged or
 exercised as the canonical process.
+
+## On-demand presentation
+
+Games with static presentation state can call `begin_frame_if_needed()` instead
+of `begin_frame()`. The helper always clears the guest command counts, then
+returns `false` after a clean frame so the game can return from `render` without
+rebuilding the command list. `request_redraw()` marks a semantic game change; a
+monotonic HostFrame presentation generation independently forces the first frame
+and redraws after resize, density, surface, renderer, resume, and capture changes.
+`end_frame()` consumes both sources only when the game submits a present.
+
+This is an explicit invalidation contract, not a command-buffer hash. An empty
+clean submission takes a renderer-free runtime fast path while host input and
+lifecycle polling continue at tick cadence. Existing games remain continuous:
+their ordinary `begin_frame()` / `end_frame()` pair still presents every tick.
+Games with animation either retain that pair or call `request_redraw()` from
+each animated tick.
+
+Presentation never defines simulation time. Desktop, Android, and iOS continue
+to collect input and execute deterministic ticks when a frame is clean. The
+shared mobile frame pacer keeps that cadence independent of 60, 90, or 120 Hz
+display presentation. Physical-device verification remains necessary because
+drivers differ in whether and how long presentation blocks.

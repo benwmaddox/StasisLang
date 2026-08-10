@@ -150,6 +150,25 @@ static inline int32_t stasis_render_rect_count(
         STASIS_RENDER_MAX_GEOMETRY - line_count);
 }
 
+static inline int stasis_render_is_empty_submission(const int32_t *cmd_i32) {
+    if (!stasis_render_is_valid(cmd_i32)) return 0;
+    const int32_t line_count = stasis_render_clamp_count(
+        cmd_i32[STASIS_RENDER_I_LINE_COUNT], STASIS_RENDER_MAX_LINES);
+    const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
+    const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
+        ? stasis_render_clamp_count(
+            cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER)
+        : 0;
+    return cmd_i32[STASIS_RENDER_I_FLAGS] == 0 &&
+        line_count == 0 &&
+        stasis_render_rect_count(cmd_i32, line_count) == 0 &&
+        stasis_render_clamp_count(
+            cmd_i32[STASIS_RENDER_I_SPRITE_COUNT], STASIS_RENDER_MAX_SPRITES) == 0 &&
+        stasis_render_clamp_count(
+            cmd_i32[STASIS_RENDER_I_TEXT_COUNT], STASIS_RENDER_MAX_TEXT) == 0 &&
+        order_count == 0;
+}
+
 static inline int stasis_render_text_span_is_valid(
     int32_t byte_offset,
     int32_t byte_length,

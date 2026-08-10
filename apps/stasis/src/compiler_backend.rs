@@ -3845,7 +3845,9 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
             "STASIS_EXPORT void stasis_init(int width, int height) {\n\
     host_i32[12] = width;\n\
     host_i32[13] = height;\n\
-    host_i32[14] = 3;\n\
+    host_i32[14] = 4;\n\
+    host_i32[20] = 1;\n\
+    host_i32[21] = 0;\n\
     host_i32[22] = width;\n\
     host_i32[23] = height;\n\
     host_i32[24] = width;\n\
@@ -5132,7 +5134,8 @@ mod tests {
 
         assert!(!source.contains("StasisDirectStorageSlot"));
         assert!(source.contains("STASIS_EXPORT void stasis_init(int width, int height)"));
-        assert!(source.contains("host_i32[14] = 3;"));
+        assert!(source.contains("host_i32[14] = 4;"));
+        assert!(source.contains("host_i32[20] = 1;"));
         assert!(source.contains("host_f32[50] = (float)width;"));
         assert!(source.contains("STASIS_EXPORT void stasis_tick(float dt)"));
         assert!(source.contains("host_i32[10] = host_i32[10] + 1;"));
