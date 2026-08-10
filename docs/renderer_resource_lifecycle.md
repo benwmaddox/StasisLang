@@ -24,13 +24,6 @@ Android pause/resume is a visibility transition: the Workshop asks GLSurfaceView
 preserve its EGL context and retains textures when that context survives. A later
 `onSurfaceCreated` callback is the authoritative signal that the context was lost.
 
-The lifecycle also owns a separate `presentation_generation`. It advances for
-surface or renderer invalidation and foreground resume without pretending that
-every visibility change invalidated GPU resources. Display/density changes and
-capture requests advance the same HostFrame-visible presentation contract. A
-game using on-demand presentation must redraw when this generation differs from
-the generation consumed by its last `end_frame()`.
-
 The native SDL runtime retains sprite paths, logical raster requests, decoded font
 bytes, font metrics, and cached text bytes/quads. Android Workshop and release
 previews retain their project or packaged manifest, asset identities, content

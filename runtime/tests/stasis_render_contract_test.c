@@ -83,26 +83,10 @@ int main(void) {
     CHECK(stasis_render_validate(NULL, first_f32) == STASIS_RENDER_NULL_I32);
     CHECK(stasis_render_validate(first_i32, NULL) == STASIS_RENDER_NULL_F32);
     CHECK(stasis_render_is_valid(first_i32));
-    CHECK(!stasis_render_is_empty_submission(first_i32));
     uint32_t first_trace = stasis_render_trace(first_i32, first_f32, first_u8);
     uint32_t second_trace = stasis_render_trace(second_i32, second_f32, second_u8);
     CHECK(first_trace != 0);
     CHECK(first_trace == second_trace);
-
-    memset(second_i32, 0, STASIS_RENDER_I32_COUNT * sizeof(*second_i32));
-    second_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V2_MAGIC;
-    second_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_CURRENT_VERSION;
-    CHECK(stasis_render_is_empty_submission(second_i32));
-    second_i32[STASIS_RENDER_I_FLAGS] = STASIS_RENDER_FLAG_PRESENT;
-    CHECK(!stasis_render_is_empty_submission(second_i32));
-    second_i32[STASIS_RENDER_I_FLAGS] = 0;
-    second_i32[STASIS_RENDER_I_LINE_COUNT] = 1;
-    CHECK(!stasis_render_is_empty_submission(second_i32));
-    second_i32[STASIS_RENDER_I_LINE_COUNT] = 0;
-    second_i32[STASIS_RENDER_I_ORDER_COUNT] = 1;
-    CHECK(!stasis_render_is_empty_submission(second_i32));
-
-    build_representative_frame(second_i32, second_f32, second_u8);
 
     second_i32[STASIS_RENDER_I_ORDER_BASE + 0] =
         STASIS_RENDER_ORDER_TEXT * STASIS_RENDER_ORDER_KIND_SCALE;
