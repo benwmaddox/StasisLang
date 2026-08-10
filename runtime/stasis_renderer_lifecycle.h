@@ -24,6 +24,7 @@ typedef enum {
 typedef struct {
     uint32_t surface_generation;
     uint32_t renderer_generation;
+    uint32_t presentation_generation;
     uint32_t restore_attempts;
     uint32_t restore_failures;
     StasisRendererResourceState state;
@@ -40,6 +41,7 @@ static void stasis_renderer_lifecycle_initialize(StasisRendererLifecycle* lifecy
     if (!lifecycle) return;
     lifecycle->surface_generation = 1u;
     lifecycle->renderer_generation = 1u;
+    lifecycle->presentation_generation = 1u;
     lifecycle->restore_attempts = 0u;
     lifecycle->restore_failures = 0u;
     lifecycle->state = STASIS_RENDERER_READY;
@@ -47,10 +49,17 @@ static void stasis_renderer_lifecycle_initialize(StasisRendererLifecycle* lifecy
     lifecycle->reason = STASIS_RENDERER_REASON_NONE;
 }
 
+static void stasis_renderer_lifecycle_request_redraw(StasisRendererLifecycle* lifecycle) {
+    if (!lifecycle || lifecycle->state == STASIS_RENDERER_UNAVAILABLE) return;
+    lifecycle->presentation_generation =
+        stasis_renderer_next_generation(lifecycle->presentation_generation);
+}
+
 static void stasis_renderer_lifecycle_surface_changed(StasisRendererLifecycle* lifecycle) {
     if (!lifecycle || lifecycle->state == STASIS_RENDERER_UNAVAILABLE) return;
     lifecycle->surface_generation =
         stasis_renderer_next_generation(lifecycle->surface_generation);
+    stasis_renderer_lifecycle_request_redraw(lifecycle);
     lifecycle->reason = STASIS_RENDERER_REASON_SURFACE_CHANGED;
 }
 
@@ -63,6 +72,7 @@ static void stasis_renderer_lifecycle_renderer_reset(
         stasis_renderer_next_generation(lifecycle->surface_generation);
     lifecycle->renderer_generation =
         stasis_renderer_next_generation(lifecycle->renderer_generation);
+    stasis_renderer_lifecycle_request_redraw(lifecycle);
     lifecycle->state = STASIS_RENDERER_RESTORE_PENDING;
     lifecycle->reason = reason;
 }
@@ -80,6 +90,7 @@ static void stasis_renderer_lifecycle_resume(StasisRendererLifecycle* lifecycle)
         ? STASIS_RENDERER_READY
         : STASIS_RENDERER_RESTORE_PENDING;
     lifecycle->reason = STASIS_RENDERER_REASON_FOREGROUND;
+    stasis_renderer_lifecycle_request_redraw(lifecycle);
 }
 
 static int stasis_renderer_lifecycle_begin_restore(StasisRendererLifecycle* lifecycle) {
