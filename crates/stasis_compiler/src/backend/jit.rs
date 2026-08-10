@@ -3883,6 +3883,28 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_inline_preserves_overloads_and_indexed_struct_fields() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nstruct Player { score: i32; }\nglobal enemies: Enemy[2];\nglobal player: Player;\nfunction @inline hp(enemy: Enemy): i32 { return enemy.hp; }\nfunction @inline value(item: Enemy): i32 { return item.hp + 100; }\nfunction value(item: Player): i32 { return item.score; }\nfunction main(): i32 { enemies[0].hp = 7; player.score = 5; return hp(enemies[0]) + value(player); }\n",
+        );
+        process.compile().expect("compile inline review fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute inline review fixture"),
+            12
+        );
+        let main = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            main.lines().any(|line| line.contains("call fn")),
+            "same-arity overload call must remain for typed backend selection:\n{main}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_print_string_literal_statement() {
         let mut process = JitProcess::new();
         process.upsert_file(

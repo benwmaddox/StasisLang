@@ -1099,11 +1099,19 @@ impl Compiler {
             let SimpleStmt::Return(expression) = qualified_body.remove(0) else {
                 unreachable!("inline candidate shape was already checked")
             };
+            let qualified_name = format!("{}.{}", candidate.module_alias, candidate.name);
+            let has_same_arity_overload = self.functions.iter().any(|other| {
+                other.id != candidate.id
+                    && other.module_alias == candidate.module_alias
+                    && other.name == candidate.name
+                    && other.params.len() == candidate.params.len()
+            });
             inline_candidates.push(InlineExpressionCandidate {
                 id: candidate.id,
-                qualified_name: format!("{}.{}", candidate.module_alias, candidate.name),
+                qualified_name,
                 param_names: candidate.param_names.clone(),
                 expression,
+                has_same_arity_overload,
             });
         }
         inline_expression_calls(&mut statements, &inline_candidates, function.id);
@@ -1411,6 +1419,7 @@ struct InlineExpressionCandidate {
     qualified_name: String,
     param_names: Vec<String>,
     expression: SimpleExpr,
+    has_same_arity_overload: bool,
 }
 
 fn inline_expression_calls(
@@ -1423,8 +1432,27 @@ fn inline_expression_calls(
             return argument.clone();
         }
         if let Some((root, suffix)) = path.split_once('.') {
-            if let Some(SimpleExpr::Identifier(argument_root)) = arguments.get(root) {
-                return SimpleExpr::Identifier(format!("{argument_root}.{suffix}"));
+            match arguments.get(root) {
+                Some(SimpleExpr::Identifier(argument_root)) => {
+                    return SimpleExpr::Identifier(format!("{argument_root}.{suffix}"));
+                }
+                Some(SimpleExpr::IndexedPath {
+                    collection_path,
+                    index,
+                    suffix: argument_suffix,
+                }) => {
+                    let combined_suffix = if argument_suffix.is_empty() {
+                        suffix.to_string()
+                    } else {
+                        format!("{argument_suffix}.{suffix}")
+                    };
+                    return SimpleExpr::IndexedPath {
+                        collection_path: collection_path.clone(),
+                        index: index.clone(),
+                        suffix: combined_suffix,
+                    };
+                }
+                _ => {}
             }
         }
         SimpleExpr::Identifier(path.to_string())
@@ -1518,6 +1546,7 @@ fn inline_expression_calls(
                     .filter(|candidate| {
                         candidate.qualified_name == *target
                             && candidate.param_names.len() == args.len()
+                            && !candidate.has_same_arity_overload
                             && candidate.id != caller_id
                             && !stack.contains(&candidate.id)
                     })
@@ -1658,6 +1687,48 @@ mod tests {
             .map(|offset| body[offset..].split_whitespace().next().unwrap_or_default())
             .collect::<Vec<_>>();
         assert_eq!(starts, vec!["let", "if", "value", "return"]);
+    }
+
+    #[test]
+    fn inline_keeps_same_arity_overload_calls_for_typed_backend_resolution() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nstruct Player { score: i32; }\nglobal player: Player;\nfunction @inline value(item: Enemy): i32 { return item.hp + 100; }\nfunction value(item: Player): i32 { return item.score; }\nfunction main(): i32 { return value(player); }\n",
+        );
+        compiler.index_pass().expect("index overload fixture");
+        let function = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&function)
+            .expect("lower overload caller");
+        assert!(matches!(
+            &hir.statements[0],
+            SimpleStmt::Return(SimpleExpr::Call { target, .. }) if target.ends_with(".value")
+        ));
+    }
+
+    #[test]
+    fn inline_composes_indexed_argument_with_callee_field_suffix() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nglobal enemies: Enemy[2];\nfunction @inline hp(enemy: Enemy): i32 { return enemy.hp; }\nfunction main(): i32 { return hp(enemies[0]); }\n",
+        );
+        compiler.index_pass().expect("index indexed-view fixture");
+        let function = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&function)
+            .expect("lower indexed-view caller");
+        assert!(matches!(
+            &hir.statements[0],
+            SimpleStmt::Return(SimpleExpr::IndexedPath {
+                collection_path,
+                index,
+                suffix,
+            }) if collection_path == "enemies"
+                && matches!(index.as_ref(), SimpleExpr::Int(0))
+                && suffix == "hp"
+        ));
     }
 
     #[test]
