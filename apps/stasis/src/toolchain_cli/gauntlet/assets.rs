@@ -974,6 +974,7 @@ mod tests {
             schema: "stasis-assets".to_string(),
             version: 2,
             display: None,
+            dynamic_assets: Vec::new(),
             assets: vec![AssetEntry {
                 id: "old-unit".to_string(),
                 path: "assets/generated/old-unit.png".to_string(),
@@ -1055,6 +1056,7 @@ mod tests {
             schema: "stasis-assets".to_string(),
             version: 2,
             display: None,
+            dynamic_assets: Vec::new(),
             assets: vec![AssetEntry {
                 id: "unit".to_string(),
                 path: "assets/generated/unit-v1.png".to_string(),

@@ -3329,17 +3329,18 @@ function end_frame(): void { return; }
     fn resolve_link_config_for_smoke() -> Option<stasis_jit::AotLinkConfig> {
         if let Some(explicit) = std::env::var_os("STASIS_AOT_LINKER") {
             let explicit = PathBuf::from(explicit);
+            eprintln!("AOT smoke linker: {}", explicit.display());
             return Some(stasis_jit::AotLinkConfig {
                 linker_path: Some(explicit),
                 runtime_lib_paths: vec![],
                 target: stasis_jit::AotTarget::default(),
             });
         }
-        for candidate in ["lld-link.exe", "link.exe"] {
-            let output = Command::new("where").arg(candidate).output().ok()?;
-            if output.status.success() {
+        for candidate in ["link.exe", "lld-link.exe"] {
+            if let Some(linker_path) = resolve_windows_linker_path(candidate) {
+                eprintln!("AOT smoke linker: {}", linker_path.display());
                 return Some(stasis_jit::AotLinkConfig {
-                    linker_path: Some(PathBuf::from(candidate)),
+                    linker_path: Some(linker_path),
                     runtime_lib_paths: vec![],
                     target: stasis_jit::AotTarget::default(),
                 });
@@ -3347,5 +3348,33 @@ function end_frame(): void { return; }
         }
         eprintln!("skipping AOT executable smoke test: no Windows linker found");
         None
+    }
+
+    #[cfg(windows)]
+    fn resolve_windows_linker_path(candidate: &str) -> Option<PathBuf> {
+        let output = Command::new("where").arg(candidate).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .find(|path| path.is_absolute() && path.is_file())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_smoke_linker_prefers_absolute_msvc_path() {
+        if std::env::var_os("STASIS_AOT_LINKER").is_some() {
+            return;
+        }
+        let Some(expected_msvc) = resolve_windows_linker_path("link.exe") else {
+            return;
+        };
+        let config = resolve_link_config_for_smoke().expect("MSVC linker config");
+        assert_eq!(config.linker_path.as_deref(), Some(expected_msvc.as_path()));
+        assert!(expected_msvc.is_absolute());
     }
 }

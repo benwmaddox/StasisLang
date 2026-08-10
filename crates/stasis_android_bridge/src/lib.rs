@@ -844,6 +844,7 @@ fn prepare_embedded_resource_catalog(
     } else {
         ResolvedAssetManifest {
             manifest_path,
+            dynamic_assets: Default::default(),
             assets: Vec::new(),
         }
     };

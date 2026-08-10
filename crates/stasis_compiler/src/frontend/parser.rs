@@ -61,6 +61,7 @@ pub struct ParsedExternFunctionDeclaration {
     pub name: String,
     pub symbol_name: String,
     pub explicit_symbol: bool,
+    pub annotations: Vec<ParsedFunctionAnnotation>,
     pub params: Vec<ParsedParam>,
     pub return_type_name: String,
 }
@@ -689,7 +690,7 @@ pub fn parse_top_level_extern_functions(
         }
 
         cursor += 1;
-        let (after_annotations, annotation_symbol, _) =
+        let (after_annotations, annotation_symbol, annotations) =
             parse_function_annotations(source, &tokens, cursor)?;
         cursor = after_annotations;
         let name = token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
@@ -744,6 +745,7 @@ pub fn parse_top_level_extern_functions(
                     name,
                     symbol_name,
                     explicit_symbol,
+                    annotations,
                     params,
                     return_type_name,
                 });

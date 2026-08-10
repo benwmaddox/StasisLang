@@ -40,13 +40,13 @@ Each output contains the same pieces:
 - `stasis_provenance.json`: verified release identity and content hashes
 - `android/` or `ios/`: a thin platform-native app project
 
-Mobile packaging follows the selected entry module's import graph. It includes only
-manifest assets referenced by static string literals in reachable production source,
-plus their transitive manifest dependencies, and emits a manifest containing that same
-subset. Relative literals use the selected entry file's directory as their base, even
-when they appear in imported modules. Keep dynamically chosen release asset paths out of
-string construction; declare the literal paths in reachable source instead. Android and
-iOS use the identical rule.
+Mobile packaging follows the selected entry module's import graph and the same
+compiler-owned `@asset_path` validation used by `stasis check` and desktop builds. It includes
+only validated manifest assets from reachable production calls plus transitive dependencies.
+Relative literals use the declaring module directory, project-root `assets/...` paths are also
+accepted, and casing is checked identically on Windows and Unix. Bounded dynamic loaders must use
+the manifest's `dynamic_assets` declaration; otherwise packaging fails before publishing output.
+Android and iOS use the identical result.
 
 The packaged runtime is the same canonical SDL command interpreter used by the
 desktop distribution. The versioned guest buffer and deterministic trace

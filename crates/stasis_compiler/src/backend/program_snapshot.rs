@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::backend::assets::{discover_asset_references, AssetReference};
 use crate::backend::emit::{
     build_compile_analysis_cache, compute_files_fingerprint,
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
@@ -93,6 +94,7 @@ pub struct ProgramSnapshot {
     functions: Vec<ProgramFunction>,
     accepted_diagnostics: Vec<crate::SourceDiagnostic>,
     reachable_function_ids: BTreeSet<FunctionId>,
+    asset_references: Vec<AssetReference>,
     state_layout: StateLayout,
     layout_digest: [u8; 32],
     data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
@@ -135,13 +137,21 @@ impl ProgramSnapshot {
             })
             .collect();
         let literal_table = collect_program_literals(files)?;
+        let reachable_function_ids = compute_reachable_function_ids(functions, required_emit_roots);
+        let asset_references = discover_asset_references(
+            files,
+            functions,
+            &reachable_function_ids,
+            &analysis.constant_values,
+        )?;
         Ok(Self {
             source_revision,
             files: files.to_vec(),
             module_graph: module_graph.clone(),
             functions: functions.iter().map(ProgramFunction::from).collect(),
             accepted_diagnostics: Vec::new(),
-            reachable_function_ids: compute_reachable_function_ids(functions, required_emit_roots),
+            reachable_function_ids,
+            asset_references,
             state_layout,
             layout_digest,
             data_flow_summaries,
@@ -180,6 +190,9 @@ impl ProgramSnapshot {
     }
     pub fn reachable_function_ids(&self) -> &BTreeSet<FunctionId> {
         &self.reachable_function_ids
+    }
+    pub fn asset_references(&self) -> &[AssetReference] {
+        &self.asset_references
     }
     pub fn state_layout(&self) -> &StateLayout {
         &self.state_layout

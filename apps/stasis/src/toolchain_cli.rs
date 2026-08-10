@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
-    run_jit_tests_in_directory_with_project_root_and_session, run_live_in_process,
-    run_live_in_process_with_data, run_play_in_process_with_window_title,
+    run_live_in_process, run_live_in_process_with_data, run_play_in_process_with_window_title,
     run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_assets::{
@@ -781,15 +780,21 @@ pub(super) fn try_run() -> Option<i32> {
         }
         Err(message) => {
             if parsed.json {
-                eprintln!(
-                    "{}",
-                    json!({
-                        "ok": false,
-                        "command": command_name,
-                        "code": "command_failed",
-                        "message": message,
-                    })
-                );
+                let mut error = json!({
+                    "ok": false,
+                    "command": command_name,
+                    "code": "command_failed",
+                    "message": &message,
+                });
+                if let Some(payload) = message
+                    .strip_prefix(crate::release_assets::ASSET_DIAGNOSTIC_PREFIX)
+                    .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+                {
+                    error["code"] = json!("asset_validation_failed");
+                    error["message"] = json!("asset validation failed");
+                    error["diagnostics"] = payload;
+                }
+                eprintln!("{error}");
             } else {
                 eprintln!("stasis {command_name}: {message}");
             }
@@ -1821,6 +1826,7 @@ fn format_files(
 
 fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
     let jit = compile_workspace_jit(workspace)?;
+    validate_compiled_workspace_assets(workspace, &jit)?;
     Ok(CommandResult::success(
         format!("checked {}", workspace.manifest.name),
         json!({
@@ -1829,6 +1835,25 @@ fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
             "functions_emitted": jit.artifacts().len(),
         }),
     ))
+}
+
+fn validate_compiled_workspace_assets(
+    workspace: &Workspace,
+    jit: &JitProcess,
+) -> Result<Option<stasis_assets::ResolvedAssetManifest>, String> {
+    let manifest = if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        Some(
+            load_project_asset_manifest(&workspace.root, AssetLimits::default())
+                .map_err(|error| format!("failed to resolve project assets: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "asset validation compile produced no ProgramSnapshot".to_string())?;
+    crate::release_assets::validate_snapshot_assets(&workspace.root, snapshot, manifest.as_ref())?;
+    Ok(manifest)
 }
 
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
@@ -2058,11 +2083,30 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         .map(|value| workspace.root.join(value))
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
     validate_workspace_destination(workspace, "test directory", &directory)?;
+    let manifest = if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        Some(
+            load_project_asset_manifest(&workspace.root, AssetLimits::default())
+                .map_err(|error| format!("failed to resolve test assets: {error}"))?,
+        )
+    } else {
+        None
+    };
     let mut session = StasisTestRunSession::new();
-    let summary = run_jit_tests_in_directory_with_project_root_and_session(
+    let summary = stasis::run_jit_tests_in_directory_with_project_root_session_and_validator(
         &directory,
         &workspace.root,
         &mut session,
+        |jit| {
+            let snapshot = jit
+                .program_snapshot()
+                .ok_or_else(|| "test compilation did not publish a program snapshot".to_string())?;
+            crate::release_assets::validate_snapshot_assets(
+                &workspace.root,
+                snapshot,
+                manifest.as_ref(),
+            )
+            .map(|_| ())
+        },
     )?;
     let data = json!({
         "files_discovered": summary.files_discovered,
@@ -3188,6 +3232,7 @@ fn build_workspace(
     match mode {
         BuildMode::Dev => {
             let jit = compile_workspace_jit(workspace)?;
+            let manifest = validate_compiled_workspace_assets(workspace, &jit)?;
             let receipt = output
                 .map(|path| workspace.root.join(path))
                 .unwrap_or_else(|| {
@@ -3209,8 +3254,6 @@ fn build_workspace(
             let mut contents = serde_json::to_string_pretty(&data)
                 .map_err(|error| format!("failed to serialize dev build receipt: {error}"))?;
             contents.push('\n');
-            fs::write(&receipt, contents)
-                .map_err(|error| format!("failed to write {}: {error}", receipt.display()))?;
             stage_workspace_assets(
                 workspace,
                 receipt.parent().ok_or_else(|| {
@@ -3219,15 +3262,19 @@ fn build_workspace(
                         receipt.display()
                     )
                 })?,
-                Path::new("."),
-                None,
+                manifest.as_ref(),
             )?;
+            fs::write(&receipt, contents)
+                .map_err(|error| format!("failed to write {}: {error}", receipt.display()))?;
             Ok(CommandResult::success(
                 format!("built JIT development image: {}", receipt.display()),
                 json!({"backend": "jit", "receipt": display_path(&receipt)}),
             ))
         }
         BuildMode::Release => {
+            let validation_jit = compile_workspace_jit(workspace)?;
+            let manifest = validate_compiled_workspace_assets(workspace, &validation_jit)?;
+            preflight_release_asset_preparation(workspace, &validation_jit, manifest.as_ref())?;
             let output = output
                 .map(|path| workspace.root.join(path))
                 .unwrap_or_else(|| default_release_output(workspace));
@@ -3242,10 +3289,28 @@ fn build_workspace(
                 None,
                 Some(Path::new(&workspace.manifest.entry)),
             )?;
-            let sources = crate::release_assets::load_entry_sources(
-                &workspace.root,
-                Path::new(&workspace.manifest.entry),
-            )?;
+            let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
+                "release build did not publish its authoritative ProgramSnapshot".to_string()
+            })?;
+            let validation_snapshot = validation_jit.program_snapshot().ok_or_else(|| {
+                "release asset preflight did not publish a ProgramSnapshot".to_string()
+            })?;
+            if build_snapshot.asset_references() != validation_snapshot.asset_references() {
+                return Err(
+                    "release build asset roots changed after successful preflight validation"
+                        .to_string(),
+                );
+            }
+            let retained = manifest
+                .as_ref()
+                .map(|resolved| {
+                    crate::release_assets::retain_snapshot_assets(
+                        &workspace.root,
+                        build_snapshot,
+                        resolved,
+                    )
+                })
+                .transpose()?;
             stage_workspace_assets(
                 workspace,
                 summary.linked_image_path.parent().ok_or_else(|| {
@@ -3254,10 +3319,7 @@ fn build_workspace(
                         summary.linked_image_path.display()
                     )
                 })?,
-                Path::new(&workspace.manifest.entry)
-                    .parent()
-                    .unwrap_or_else(|| Path::new(".")),
-                Some(&sources),
+                retained.as_ref(),
             )?;
             Ok(CommandResult::success(
                 format!(
@@ -3273,6 +3335,47 @@ fn build_workspace(
             ))
         }
     }
+}
+
+fn preflight_release_asset_preparation(
+    workspace: &Workspace,
+    jit: &JitProcess,
+    resolved: Option<&stasis_assets::ResolvedAssetManifest>,
+) -> Result<(), String> {
+    let Some(resolved) = resolved else {
+        return Ok(());
+    };
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "release asset preflight produced no ProgramSnapshot".to_string())?;
+    let retained =
+        crate::release_assets::retain_snapshot_assets(&workspace.root, snapshot, resolved)?;
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let destination = workspace
+        .root
+        .join(".stasis_cache")
+        .join(format!("asset-preflight-{}-{stamp}", std::process::id()));
+    let prepared = prepare_asset_bundle(
+        &retained,
+        &destination,
+        workspace.root.join(".stasis_cache/assets"),
+    )
+    .map_err(|error| format!("release asset preparation failed: {error}"));
+    let cleanup = if destination.exists() {
+        fs::remove_dir_all(&destination).map_err(|error| {
+            format!(
+                "failed to remove asset preflight {}: {error}",
+                destination.display()
+            )
+        })
+    } else {
+        Ok(())
+    };
+    prepared?;
+    cleanup
 }
 
 fn package_workspace(
@@ -3415,26 +3518,13 @@ fn nest_windows_desktop_payload(staging_root: &Path, executable: &Path) -> Resul
 fn stage_workspace_assets(
     workspace: &Workspace,
     destination_root: &Path,
-    source_base_dir: &Path,
-    sources: Option<&[(String, String)]>,
+    resolved: Option<&stasis_assets::ResolvedAssetManifest>,
 ) -> Result<(), String> {
     let assets = workspace.root.join("assets");
     validate_workspace_destination(workspace, "assets directory", &assets)?;
-    if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
-        let resolved = load_project_asset_manifest(&workspace.root, AssetLimits::default())
-            .map_err(|error| format!("failed to resolve desktop build assets: {error}"))?;
-        let resolved = if let Some(sources) = sources {
-            crate::release_assets::retain_source_referenced_assets(
-                &workspace.root,
-                source_base_dir,
-                sources,
-                &resolved,
-            )?
-        } else {
-            resolved
-        };
+    if let Some(resolved) = resolved {
         prepare_asset_bundle(
-            &resolved,
+            resolved,
             destination_root,
             workspace.root.join(".stasis_cache/assets"),
         )

@@ -1,0 +1,8 @@
+extern function @asset_path(path) gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+
+function main(): i32 {
+    if (1 == 0) {
+        gfx_load_sprite("../assets/marker.svg", 8, 8);
+    }
+    return 0;
+}

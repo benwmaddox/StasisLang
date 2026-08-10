@@ -93,6 +93,95 @@ fn json_stderr(output: &Output) -> Value {
     serde_json::from_slice(&output.stderr).expect("single JSON stderr object")
 }
 
+#[test]
+fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
+    let project = temp_dir("asset_validation");
+    fs::create_dir_all(project.join("src")).expect("source directory");
+    fs::create_dir_all(project.join("assets/fonts")).expect("asset directory");
+    fs::write(
+        project.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"asset_validation","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("workspace manifest");
+    fs::write(project.join("assets/fonts/ui.ttf"), b"font").expect("font asset");
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
+            "function main(): i32 { return load_font(\"../assets/fonts/UI.ttf\", 16); }\n"
+        ),
+    )
+    .expect("entry source");
+
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(checked.status.code(), Some(1));
+    let error = json_stderr(&checked);
+    assert_eq!(error["code"], "asset_validation_failed");
+    assert_eq!(error["diagnostics"][0]["code"], "asset_path_case_mismatch");
+    assert_eq!(error["diagnostics"][0]["api"], "load_font");
+    assert_eq!(
+        error["diagnostics"][0]["logical_path"],
+        "../assets/fonts/UI.ttf"
+    );
+    assert!(error["diagnostics"][0]["start"].as_u64().is_some());
+    assert!(error["diagnostics"][0]["attempted_paths"]
+        .as_array()
+        .is_some_and(|paths| paths.len() == 2));
+
+    let built = stasis(&["--json", "build", "--mode", "dev"], &project);
+    assert_eq!(built.status.code(), Some(1));
+    assert!(!project.join("build/dev-build.json").exists());
+
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
+            "function main(): i32 { return load_font(\"../assets/fonts/ui.ttf\", 16); }\n"
+        ),
+    )
+    .expect("corrected entry source");
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(checked.status.code(), Some(0));
+    assert_eq!(json_stdout(&checked)["result"]["name"], "asset_validation");
+
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
+            "const FONT_PATH: string = \"../assets/fonts/ui.ttf\";\n",
+            "function choose_font(FONT_PATH: string): i32 { return load_font(FONT_PATH, 16); }\n",
+            "function main(): i32 { return choose_font(\"../assets/fonts/ui.ttf\"); }\n"
+        ),
+    )
+    .expect("shadowed asset source");
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(checked.status.code(), Some(1));
+    let error = json_stderr(&checked);
+    assert_eq!(error["code"], "asset_validation_failed");
+    assert_eq!(
+        error["diagnostics"][0]["code"],
+        "asset_dynamic_path_undeclared"
+    );
+    assert_eq!(error["diagnostics"][0]["logical_path"], Value::Null);
+
+    fs::create_dir_all(project.join("tests")).expect("test directory");
+    fs::write(
+        project.join("tests/assets.test.stasis"),
+        concat!(
+            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
+            "test `invalid asset is never executed`(): bool {\n",
+            "    return load_font(\"../assets/fonts/missing.ttf\", 16) > 0;\n",
+            "}\n"
+        ),
+    )
+    .expect("asset test source");
+    let tested = stasis(&["--json", "test"], &project);
+    assert_eq!(tested.status.code(), Some(1));
+    assert_eq!(json_stderr(&tested)["code"], "asset_validation_failed");
+
+    fs::remove_dir_all(project).ok();
+}
+
 fn lsp_frame(message: Value) -> String {
     let body = message.to_string();
     format!("Content-Length: {}\r\n\r\n{body}", body.len())

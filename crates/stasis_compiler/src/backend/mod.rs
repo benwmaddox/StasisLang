@@ -1,4 +1,5 @@
 pub mod aot;
+pub mod assets;
 pub(crate) mod emit;
 pub mod jit;
 pub mod patch_plan;

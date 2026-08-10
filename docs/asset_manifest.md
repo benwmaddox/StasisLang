@@ -17,6 +17,7 @@ Version 1 manifests remain valid and package their files unchanged. Version 2 ad
     "max_physical_height": 3200,
     "scale_mode": "fit"
   },
+  "dynamic_assets": ["assets/images/seasonal.png"],
   "assets": [
     {
       "id": "white_queen",
@@ -66,7 +67,23 @@ Preparation writes only beneath the build output; project masters and the source
 
 `stasis play` prepares the same bundle beneath `.stasis_cache/play-assets` before guest startup and mirrors the source directory's position relative to the project root. Existing source-relative paths such as `../assets/images/hero.png` therefore resolve to prepared output without source rewriting. Resized cache hits do not decode the master again. Development builds stage the complete declared manifest so iterative and optional paths remain available.
 
-Release builds and mobile packages scan the entry module's reachable import graph and stage only declared assets named by string literals that resolve beneath the project `assets/` directory, plus their transitive manifest dependencies. Paths such as `../assets/images/hero.png` resolve relative to the selected entry file's directory, including when the literal appears in an imported module; project-root paths such as `assets/images/hero.png` are also accepted. These are the same resolution rules used at runtime. The generated manifest is rewritten to the same exact subset. Runtime asset paths therefore need to be static string literals in reachable production source; dynamically constructed paths are not a supported release-packaging contract. Test-only and unreachable modules do not enlarge a release package.
+`stasis check`, tests, development builds, release builds, and mobile/desktop packages
+consume one compiler-owned asset-reference result. Asset loader declarations mark their path
+parameter with `@asset_path(path)`; standard sprite, font, and audio loaders already carry that
+metadata, and supported legacy loader names remain compatible. Arbitrary string literals are not
+treated as assets.
+
+Static references in the entry module's reachable graph are validated before output publication.
+Each path resolves first relative to its declaring source module and then from the project root,
+must remain beneath `assets/`, must name a regular file with exact disk casing on every host, and,
+when a manifest exists, must name a declared entry. Release outputs retain only those validated
+paths plus transitive manifest dependencies. Test roots use the same rules; test-only and
+unreachable production modules do not enlarge a release package.
+
+A dynamically constructed loader argument is rejected unless the manifest supplies a bounded
+`dynamic_assets` list. Every list item must be the exact `assets/...` path of a declared entry.
+When a reachable dynamic loader is present, those entries form its conservative package set.
+This is intentionally a bounded escape hatch, not unrestricted runtime filesystem discovery.
 
 Once a project has an asset manifest, every runtime-loaded asset must be declared. Source-only provenance files may remain elsewhere in the project, but undeclared files are not copied into prepared play or build output.
 
@@ -76,20 +93,20 @@ The package contains only the selected display envelope's output, not multiple r
 
 - IDs are 1-128 ASCII letters, digits, `.`, `_`, or `-` and are unique within a project.
 - Runtime handles are the nonzero FNV-1a 32-bit hash of `<kind>:<id>`. Load fails if two entries collide; platforms must not repair or renumber collisions independently.
-- Paths use forward slashes, start with `assets/`, contain only normal path components, and must resolve to a regular file under the canonical project root.
+- Paths use forward slashes, start with `assets/`, contain only normal path components, and must resolve to a regular file under the canonical project `assets/` directory.
 - SHA-256 is checked against the complete bounded file before the asset is accepted.
 - Declared encodings must match file extensions. Sprite dimensions, audio metadata, font encoding, display dimensions, manifest size, entry count, and individual file size are bounded by the shared resolver.
 - Sprite preparation requires a version 2 manifest and top-level `display` metadata.
 - Dependencies must name manifest entries, cannot repeat or reference themselves, and must be acyclic.
 - Unknown fields, schemas, and future versions fail with stable diagnostic codes.
+- `dynamic_assets` entries must name declared asset paths; undeclared or missing entries fail
+  manifest loading before compilation output is published.
 
 ## Mobile packaging
 
 - The AOT bundle command resolves and verifies the source manifest, then invokes the shared `stasis_assets` preparation path and packages the generated manifest and files under `assets/stasis_game/`.
 - Android and iOS apply the same reachable-source asset closure as desktop release builds; platform packaging does not carry unused manifest entries or alternate prepared sizes.
-- Declared fonts use the shared manifest path. As a compatibility supplement for projects that
-  have not declared their path-based `load_font` assets yet, mobile packaging also scans compiled
-  `.stasis` source string literals for `.ttf` and `.otf` paths and copies only referenced regular
-  font files beneath the canonical project `assets/` directory.
+- Declared fonts use the same compiler-owned reference set and manifest closure as every other
+  asset. Mobile packaging does not scan arbitrary string literals or copy undeclared font files.
 - Android uses one GL texture per resolved sprite and batches only consecutive commands that share texture and clip state. Atlas layout remains backend-private, so atlas coordinates never enter the manifest or render-command ABI.
 - Missing, corrupt, oversized, hash-mismatched, or unsupported packaged sprites render the deterministic magenta checker fallback.

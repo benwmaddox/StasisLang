@@ -1,130 +1,55 @@
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use stasis_assets::ResolvedAssetManifest;
-use stasis_compiler::frontend::lexer::{lex, TokenKind};
+use stasis_compiler::backend::assets::{
+    validate_asset_references, AssetDiagnostic, AssetValidationResult,
+};
+use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 
-pub(crate) fn retain_source_referenced_assets(
+pub(crate) const ASSET_DIAGNOSTIC_PREFIX: &str = "stasis_asset_diagnostics:";
+
+pub(crate) fn validate_snapshot_assets(
     project_dir: &Path,
-    source_base_dir: &Path,
-    sources: &[(String, String)],
+    snapshot: &ProgramSnapshot,
+    resolved: Option<&ResolvedAssetManifest>,
+) -> Result<AssetValidationResult, String> {
+    let manifest_paths = resolved.map(|manifest| {
+        manifest
+            .assets
+            .iter()
+            .map(|asset| asset.entry.path.clone())
+            .collect()
+    });
+    let dynamic_paths = resolved
+        .map(|manifest| &manifest.dynamic_assets)
+        .cloned()
+        .unwrap_or_default();
+    let validation = validate_asset_references(
+        project_dir,
+        snapshot.asset_references(),
+        manifest_paths.as_ref(),
+        &dynamic_paths,
+    );
+    if validation.diagnostics.is_empty() {
+        Ok(validation)
+    } else {
+        Err(format_asset_diagnostics(&validation.diagnostics))
+    }
+}
+
+pub(crate) fn retain_snapshot_assets(
+    project_dir: &Path,
+    snapshot: &ProgramSnapshot,
     resolved: &ResolvedAssetManifest,
 ) -> Result<ResolvedAssetManifest, String> {
-    let project_root = project_dir.canonicalize().map_err(|error| {
-        format!(
-            "failed to canonicalize release asset project {}: {error}",
-            project_dir.display()
-        )
-    })?;
-    let asset_root = project_root
-        .join("assets")
-        .canonicalize()
-        .map_err(|error| format!("failed to canonicalize release asset root: {error}"))?;
-    let source_base = canonical_project_path(&project_root, source_base_dir)?;
-    if !source_base.is_dir() {
-        return Err(format!(
-            "release asset source base must be a directory: {}",
-            source_base.display()
-        ));
-    }
-    let mut paths = BTreeSet::new();
-    for (relative_source_path, source) in sources {
-        for token in lex(source).map_err(|error| {
-            format!("failed to scan release asset paths in {relative_source_path}: {error}")
-        })? {
-            if token.kind != TokenKind::StringLiteral {
-                continue;
-            }
-            let literal: String =
-                serde_json::from_str(&source[token.start..token.end]).map_err(|error| {
-                    format!("failed to decode string literal in {relative_source_path}: {error}")
-                })?;
-            let absolute_path = [source_base.join(&literal), project_root.join(&literal)]
-                .into_iter()
-                .filter_map(|candidate| candidate.canonicalize().ok())
-                .find(|candidate| candidate.is_file() && candidate.starts_with(&asset_root));
-            let Some(absolute_path) = absolute_path else {
-                continue;
-            };
-            paths.insert(
-                absolute_path
-                    .strip_prefix(&project_root)
-                    .map_err(|_| {
-                        format!(
-                            "release asset escaped project root: {}",
-                            absolute_path.display()
-                        )
-                    })?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
-        }
-    }
-    Ok(resolved.retain_paths(&paths))
+    let validation = validate_snapshot_assets(project_dir, snapshot, Some(resolved))?;
+    Ok(resolved.retain_paths(&validation.resolved_paths))
 }
 
-pub(crate) fn load_entry_sources(
-    project_dir: &Path,
-    entry_file: &Path,
-) -> Result<Vec<(String, String)>, String> {
-    let project_root = project_dir.canonicalize().map_err(|error| {
-        format!(
-            "failed to canonicalize release asset project {}: {error}",
-            project_dir.display()
-        )
-    })?;
-    let entry_path = canonical_project_file(&project_root, entry_file)?;
-    let (graph, sources) = stasis_compiler::frontend::module_graph::load_project_module_graph(
-        &project_root,
-        &entry_path,
-    )
-    .map_err(|diagnostic| diagnostic.message)?;
-    let mut out = Vec::new();
-    for relative in graph.modules().keys() {
-        if relative.ends_with(".test.stasis") {
-            continue;
-        }
-        let source = sources
-            .get(relative)
-            .cloned()
-            .ok_or_else(|| format!("module graph source missing for {relative}"))?;
-        out.push((relative.clone(), source));
-    }
-    out.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(out)
-}
-
-fn canonical_project_file(project_root: &Path, file: &Path) -> Result<PathBuf, String> {
-    let canonical = canonical_project_path(project_root, file)?;
-    if !canonical.is_file() {
-        return Err(format!(
-            "release entry must be a file: {}",
-            canonical.display()
-        ));
-    }
-    Ok(canonical)
-}
-
-fn canonical_project_path(project_root: &Path, path: &Path) -> Result<PathBuf, String> {
-    let candidate = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        project_root.join(path)
-    };
-    let canonical = candidate.canonicalize().map_err(|error| {
-        format!(
-            "failed to canonicalize release entry {}: {error}",
-            candidate.display()
-        )
-    })?;
-    if !canonical.starts_with(project_root) {
-        return Err(format!(
-            "release entry {} must stay under project directory {}",
-            canonical.display(),
-            project_root.display()
-        ));
-    }
-    Ok(canonical)
+pub(crate) fn format_asset_diagnostics(diagnostics: &[AssetDiagnostic]) -> String {
+    let json = serde_json::to_string(diagnostics)
+        .unwrap_or_else(|_| "[{\"code\":\"asset_diagnostic_serialization_failed\"}]".to_string());
+    format!("{ASSET_DIAGNOSTIC_PREFIX}{json}")
 }
 
 #[cfg(test)]
@@ -133,6 +58,7 @@ mod tests {
     use stasis_assets::{
         stable_asset_handle, AssetEntry, AssetFormat, ResolvedAsset, SpriteEncoding,
     };
+    use stasis_compiler::backend::aot::AotProcess;
 
     fn resolved(root: &Path, id: &str, path: &str) -> ResolvedAsset {
         let entry = AssetEntry {
@@ -156,6 +82,30 @@ mod tests {
         }
     }
 
+    fn retain_from_sources(
+        root: &Path,
+        sources: &[(String, String)],
+        manifest: &ResolvedAssetManifest,
+    ) -> ResolvedAssetManifest {
+        let mut process = AotProcess::new();
+        process
+            .set_project_root(root.to_string_lossy().to_string())
+            .expect("project root");
+        for (path, source) in sources {
+            process.upsert_file(
+                root.join(path).to_string_lossy().to_string(),
+                source.clone(),
+            );
+        }
+        process.compile().expect("compile asset fixture");
+        retain_snapshot_assets(
+            root,
+            process.program_snapshot().expect("program snapshot"),
+            manifest,
+        )
+        .expect("retain snapshot assets")
+    }
+
     #[test]
     fn keeps_only_literal_assets_in_the_reachable_source_set() {
         let stamp = std::time::SystemTime::now()
@@ -169,6 +119,7 @@ mod tests {
         std::fs::write(root.join("assets/svg/unused.svg"), "x").unwrap();
         let manifest = ResolvedAssetManifest {
             manifest_path: root.join("assets/manifest.json"),
+            dynamic_assets: Default::default(),
             assets: vec![
                 resolved(&root, "used", "assets/svg/used.svg"),
                 resolved(&root, "unused", "assets/svg/unused.svg"),
@@ -177,15 +128,15 @@ mod tests {
         let sources = vec![(
             "src/main.stasis".to_string(),
             concat!(
+                "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32; ",
                 "function main(): void { ",
-                "hero.load_sprite_from(\"../assets/svg/used.svg\", 32, 32); ",
-                "hero.load_sprite_from(\"assets/svg/used.svg\", 32, 32); }"
+                "gfx_load_sprite(\"../assets/svg/used.svg\", 32, 32); ",
+                "gfx_load_sprite(\"assets/svg/used.svg\", 32, 32); }"
             )
             .to_string(),
         )];
 
-        let retained =
-            retain_source_referenced_assets(&root, Path::new("src"), &sources, &manifest).unwrap();
+        let retained = retain_from_sources(&root, &sources, &manifest);
         assert_eq!(retained.assets.len(), 1);
         assert_eq!(retained.assets[0].entry.id, "used");
         std::fs::remove_dir_all(root).ok();
@@ -204,16 +155,19 @@ mod tests {
         std::fs::write(root.join("src/assets/svg/used.svg"), "source shadow").unwrap();
         let manifest = ResolvedAssetManifest {
             manifest_path: root.join("assets/manifest.json"),
+            dynamic_assets: Default::default(),
             assets: vec![resolved(&root, "used", "assets/svg/used.svg")],
         };
         let sources = vec![(
             "src/main.stasis".to_string(),
-            "function main(): void { hero.load_sprite_from(\"assets/svg/used.svg\", 32, 32); }"
-                .to_string(),
+            concat!(
+                "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32; ",
+                "function main(): void { gfx_load_sprite(\"assets/svg/used.svg\", 32, 32); }"
+            )
+            .to_string(),
         )];
 
-        let retained =
-            retain_source_referenced_assets(&root, Path::new("src"), &sources, &manifest).unwrap();
+        let retained = retain_from_sources(&root, &sources, &manifest);
         assert_eq!(retained.assets.len(), 1);
         assert_eq!(retained.assets[0].entry.id, "used");
         std::fs::remove_dir_all(root).ok();
