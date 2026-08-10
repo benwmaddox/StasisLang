@@ -20,6 +20,14 @@ static void test_fills_the_remainder_of_a_high_refresh_frame(void) {
     check(stasis_mobile_frame_pacer_wait_ns(&pacer, 1000 + 25000000) == 8333334);
 }
 
+static void test_fills_the_remainder_after_a_ninety_hz_present(void) {
+    StasisMobileFramePacer pacer;
+    stasis_mobile_frame_pacer_reset(&pacer, 1500);
+
+    check(stasis_mobile_frame_pacer_wait_ns(&pacer, 1500 + 11111111) == 5555556);
+    check(pacer.next_deadline_ns == 1500 + 33333334);
+}
+
 static void test_vsync_at_sixty_hz_needs_no_extra_sleep(void) {
     StasisMobileFramePacer pacer;
     stasis_mobile_frame_pacer_reset(&pacer, 2000);
@@ -55,6 +63,7 @@ static void test_long_pause_resets_without_a_catch_up_burst(void) {
 
 int main(void) {
     test_fills_the_remainder_of_a_high_refresh_frame();
+    test_fills_the_remainder_after_a_ninety_hz_present();
     test_vsync_at_sixty_hz_needs_no_extra_sleep();
     test_small_overrun_preserves_the_next_absolute_deadline();
     test_long_pause_resets_without_a_catch_up_burst();

@@ -29,6 +29,7 @@ static int render_calls;
 static int32_t main_result;
 static int32_t tick_result;
 static int32_t render_result;
+static int render_present;
 static int begin_frame_calls;
 static int end_frame_calls;
 static int host_frame_calls;
@@ -112,6 +113,7 @@ void stasis_gfx_submit_u8(
     assert(cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_V2_MAGIC);
     assert(cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V2_VERSION);
     gfx_submit_calls += 1;
+    if (stasis_render_is_empty_submission(cmd_i32)) return;
     stasis_begin_frame();
     stasis_end_frame();
 }
@@ -240,6 +242,8 @@ static int32_t game_render(void) {
     render_calls += 1;
     game_gfx_cmd_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V2_MAGIC;
     game_gfx_cmd_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V2_VERSION;
+    game_gfx_cmd_i32[STASIS_RENDER_I_FLAGS] =
+        render_present ? STASIS_RENDER_FLAG_PRESENT : 0;
     return render_result;
 }
 
@@ -277,6 +281,7 @@ static void reset_fakes(void) {
     main_result = 0;
     tick_result = 0;
     render_result = 0;
+    render_present = 1;
     begin_frame_calls = 0;
     end_frame_calls = 0;
     host_frame_calls = 0;
@@ -379,6 +384,23 @@ static void test_rejects_duplicate_initialization(void) {
     stasis_mobile_runtime_shutdown();
 }
 
+static void test_clean_submission_keeps_ticks_without_presenting(void) {
+    StasisMobileRuntimeConfig valid_config = config();
+    StasisMobileGameEntries valid_entries = entries();
+    render_present = 0;
+
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(tick_calls == 2);
+    assert(render_calls == 2);
+    assert(host_frame_calls == 2);
+    assert(gfx_submit_calls == 2);
+    assert(begin_frame_calls == 0);
+    assert(end_frame_calls == 0);
+    stasis_mobile_runtime_shutdown();
+}
+
 static void test_reports_graphics_initialization_failure(void) {
     StasisMobileRuntimeConfig valid_config = config();
     StasisMobileGameEntries valid_entries = entries();
@@ -434,6 +456,8 @@ int main(void) {
     test_runs_mobile_lifecycle();
     reset_fakes();
     test_rejects_duplicate_initialization();
+    reset_fakes();
+    test_clean_submission_keeps_ticks_without_presenting();
     reset_fakes();
     test_reports_graphics_initialization_failure();
     reset_fakes();

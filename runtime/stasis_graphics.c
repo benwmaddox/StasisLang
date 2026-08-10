@@ -1172,7 +1172,8 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[19] = stasis_get_time_us();
 
     out_i32[20] = (int32_t)g_resource_lifecycle.presentation_generation;
-    out_i32[21] = (g_force_debug_overlay ||
+    out_i32[21] = (!stasis_renderer_lifecycle_can_present(&g_resource_lifecycle) ||
+        g_force_debug_overlay ||
         (!g_screenshot_taken && g_screenshot_path[0] != 0 &&
             g_debug_frame_counter + 1 <= g_screenshot_frame)) ? 1 : 0;
     out_i32[22] = g_display_metrics.native_w;

@@ -5,6 +5,7 @@ final class RendererResourceLifecycle {
 
     private int surfaceGeneration;
     private int rendererGeneration;
+    private int presentationGeneration;
     private int restoreAttempts;
     private int restoreFailures;
     private State state = State.UNAVAILABLE;
@@ -14,6 +15,7 @@ final class RendererResourceLifecycle {
     void onRendererCreated() {
         surfaceGeneration = nextGeneration(surfaceGeneration);
         rendererGeneration = nextGeneration(rendererGeneration);
+        requestRedraw();
         state = State.RESTORE_PENDING;
         reason = "renderer_created";
     }
@@ -21,6 +23,7 @@ final class RendererResourceLifecycle {
     void onSurfaceChanged() {
         if (state == State.UNAVAILABLE) return;
         surfaceGeneration = nextGeneration(surfaceGeneration);
+        requestRedraw();
         reason = "surface_changed";
     }
 
@@ -35,6 +38,11 @@ final class RendererResourceLifecycle {
         if (state != State.PAUSED) return;
         state = stateBeforePause == State.READY ? State.READY : State.RESTORE_PENDING;
         reason = "foreground";
+        requestRedraw();
+    }
+
+    void requestRedraw() {
+        presentationGeneration = nextGeneration(presentationGeneration);
     }
 
     boolean beginRestore() {
@@ -51,29 +59,33 @@ final class RendererResourceLifecycle {
         } else {
             restoreFailures = nextCounter(restoreFailures);
             state = State.RESTORE_FAILED;
+            requestRedraw();
         }
     }
 
     void deferRestore() {
         if (state != State.RESTORING) return;
         state = State.RESTORE_PENDING;
+        requestRedraw();
     }
 
     void resourceFailed() {
         if (state == State.UNAVAILABLE || state == State.PAUSED) return;
         restoreFailures = nextCounter(restoreFailures);
         state = State.RESTORE_FAILED;
+        requestRedraw();
     }
 
     boolean canPresent() { return state == State.READY; }
     int surfaceGeneration() { return surfaceGeneration; }
     int rendererGeneration() { return rendererGeneration; }
+    int presentationGeneration() { return presentationGeneration; }
     int restoreAttempts() { return restoreAttempts; }
     int restoreFailures() { return restoreFailures; }
     State state() { return state; }
     String reason() { return reason; }
 
-    private static int nextGeneration(int value) {
+    static int nextGeneration(int value) {
         value += 1;
         return value == 0 ? 1 : value;
     }

@@ -349,7 +349,8 @@ public final class MainActivity extends Activity {
                                                     boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
-            int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
+            int touchActive, int screenWidth, int screenHeight, int presentationGeneration,
+            int presentationFlags, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
     private static native String nativeLastFrameError();
     private static native String nativeInspectRuntimeState(String projectRoot);
@@ -11792,12 +11793,14 @@ public final class MainActivity extends Activity {
                 long started = System.nanoTime();
                 lastRendererSyncWaitNanos = started - requested;
                 status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
-                        screenWidth, screenHeight, renderer.frameI32Bytes(),
+                        screenWidth, screenHeight, renderer.presentationGeneration(),
+                        renderer.presentationFlags(),
+                        renderer.frameI32Bytes(),
                         renderer.frameF32Bytes(), renderer.frameU8Bytes());
                 lastNativeFrameDurationNanos = System.nanoTime() - started;
                 renderer.copyFrameHeaderInto(header);
             }
-            if (status == 0) requestRender();
+            if (status == 0 && renderer.shouldScheduleRender()) requestRender();
             return status;
         }
 
@@ -11811,7 +11814,6 @@ public final class MainActivity extends Activity {
 
         void captureFrame(CaptureCallback callback) {
             renderer.requestCapture(callback::onCaptured);
-            requestRender();
         }
 
         StasisPreviewRenderer.LogicalFrameSnapshot logicalFrameSnapshot() {

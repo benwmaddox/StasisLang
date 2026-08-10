@@ -154,6 +154,8 @@ struct AndroidRuntimeSession {
     display_generation: i32,
     density_scale_bits: u32,
     density_generation: i32,
+    host_presentation_token: i32,
+    presentation_generation: i32,
 }
 
 thread_local! {
@@ -778,7 +780,7 @@ pub fn run_android_workshop_tick(
     entry_file: impl AsRef<Path>,
     input: AndroidBridgeTickInput,
 ) -> Result<AndroidBridgeRunTickResult, String> {
-    run_android_workshop_tick_internal(project_root, entry_file, input, true)
+    run_android_workshop_tick_internal(project_root, entry_file, input, true, 0, 0)
 }
 
 const MAX_EMBEDDED_FONTS: usize = 64;
@@ -1126,6 +1128,8 @@ fn run_android_workshop_tick_internal(
     entry_file: impl AsRef<Path>,
     input: AndroidBridgeTickInput,
     read_legacy_render_commands: bool,
+    host_presentation_token: i32,
+    host_presentation_flags: i32,
 ) -> Result<AndroidBridgeRunTickResult, String> {
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
@@ -1157,7 +1161,12 @@ fn run_android_workshop_tick_internal(
         let initialized = if session.initialized {
             false
         } else {
-            write_production_host_frame(session, input)?;
+            write_production_host_frame(
+                session,
+                input,
+                host_presentation_token,
+                host_presentation_flags,
+            )?;
             execute_lifecycle_noarg(&session.jit, "main")?;
             take_embedded_resource_error()?;
             session.initialized = true;
@@ -1166,7 +1175,12 @@ fn run_android_workshop_tick_internal(
             session.density_generation = 0;
             true
         };
-        let metrics = write_production_host_frame(session, input)?;
+        let metrics = write_production_host_frame(
+            session,
+            input,
+            host_presentation_token,
+            host_presentation_flags,
+        )?;
         if read_legacy_render_commands {
             let (touch_x, touch_y) = metrics.native_to_logical(input.touch_x, input.touch_y);
             session
@@ -1239,6 +1253,8 @@ fn hash_global_path(path: &str) -> i32 {
 fn write_production_host_frame(
     session: &mut AndroidRuntimeSession,
     input: AndroidBridgeTickInput,
+    host_presentation_token: i32,
+    host_presentation_flags: i32,
 ) -> Result<AndroidDisplayMetrics, String> {
     const HOST_I32_COUNT: i32 = 768;
     const HOST_F32_COUNT: i32 = 64;
@@ -1281,9 +1297,22 @@ fn write_production_host_frame(
         session.display_signature = signature;
     }
     let raster_scale_bits = metrics.raster_scale.to_bits();
-    if session.density_generation == 0 || raster_scale_bits != session.density_scale_bits {
+    let density_changed =
+        session.density_generation == 0 || raster_scale_bits != session.density_scale_bits;
+    if density_changed {
         session.density_generation = session.density_generation.saturating_add(1);
         session.density_scale_bits = raster_scale_bits;
+    }
+    let host_invalidated =
+        host_presentation_token != 0 && host_presentation_token != session.host_presentation_token;
+    if host_invalidated {
+        session.host_presentation_token = host_presentation_token;
+    }
+    if session.presentation_generation == 0 || resized || density_changed || host_invalidated {
+        session.presentation_generation = session.presentation_generation.wrapping_add(1);
+        if session.presentation_generation == 0 {
+            session.presentation_generation = 1;
+        }
     }
     session.display_metrics = metrics;
 
@@ -1302,12 +1331,14 @@ fn write_production_host_frame(
     host_i32[11] = i32::from(resized);
     host_i32[12] = metrics.native_w;
     host_i32[13] = metrics.native_h;
-    host_i32[14] = 3;
+    host_i32[14] = 4;
     host_i32[15] = 0;
     host_i32[16] = 60;
     host_i32[17] = 1;
     host_i32[18] = 0;
     host_i32[19] = stasis_dynload::stasis_get_time_us();
+    host_i32[20] = session.presentation_generation;
+    host_i32[21] = host_presentation_flags;
     host_i32[22] = metrics.native_w;
     host_i32[23] = metrics.native_h;
     host_i32[24] = metrics.drawable_w;
@@ -1450,6 +1481,8 @@ fn build_runtime_session(
         display_generation: 0,
         density_scale_bits: display_metrics.raster_scale.to_bits(),
         density_generation: 0,
+        host_presentation_token: 0,
+        presentation_generation: 0,
     })
 }
 
@@ -2401,7 +2434,7 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame(
 }
 
 #[no_mangle]
-pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
+pub extern "C" fn stasis_android_bridge_run_tick_frame_v3(
     project_root: *const c_char,
     entry_file: *const c_char,
     touch_x: i32,
@@ -2409,6 +2442,8 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
     touch_active: i32,
     screen_w: i32,
     screen_h: i32,
+    host_presentation_token: i32,
+    host_presentation_flags: i32,
     out_i32: *mut i32,
     out_i32_len: usize,
     out_f32: *mut f32,
@@ -2446,6 +2481,8 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
                 screen_h,
             },
             false,
+            host_presentation_token,
+            host_presentation_flags,
         )?;
         let i32_values = std::slice::from_raw_parts_mut(out_i32, out_i32_len);
         let f32_values = std::slice::from_raw_parts_mut(out_f32, out_f32_len);
@@ -2475,6 +2512,41 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
             -1
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+    touch_x: i32,
+    touch_y: i32,
+    touch_active: i32,
+    screen_w: i32,
+    screen_h: i32,
+    out_i32: *mut i32,
+    out_i32_len: usize,
+    out_f32: *mut f32,
+    out_f32_len: usize,
+    out_u8: *mut u8,
+    out_u8_len: usize,
+) -> i32 {
+    stasis_android_bridge_run_tick_frame_v3(
+        project_root,
+        entry_file,
+        touch_x,
+        touch_y,
+        touch_active,
+        screen_w,
+        screen_h,
+        0,
+        0,
+        out_i32,
+        out_i32_len,
+        out_f32,
+        out_f32_len,
+        out_u8,
+        out_u8_len,
+    )
 }
 
 #[no_mangle]
@@ -3652,6 +3724,8 @@ mod tests {
             display_generation: 0,
             density_scale_bits: 1.0f32.to_bits(),
             density_generation: 0,
+            host_presentation_token: 0,
+            presentation_generation: 0,
         };
 
         assert!(activate_pending_runtime_candidate(&mut session)
@@ -4186,8 +4260,13 @@ global host_req_window_h_px: i32;
 global gfx_cmd_i32: i32[34608];
 global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
+global observed_presentation_generation: i32;
+global observed_presentation_flags: i32;
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
-function tick(): void {}
+function tick(): void {
+  observed_presentation_generation = host_i32[20];
+  observed_presentation_flags = host_i32[21];
+}
 function render(): void {
   gfx_cmd_i32[0] = 1196967473;
   gfx_cmd_i32[1] = 3;
@@ -4228,7 +4307,7 @@ function render(): void {
         let mut frame_i32 = vec![0i32; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut frame_u8 = vec![0u8; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame_v2(
+        let status = stasis_android_bridge_run_tick_frame_v3(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             540,
@@ -4236,6 +4315,8 @@ function render(): void {
             1,
             1080,
             2400,
+            1,
+            1,
             frame_i32.as_mut_ptr(),
             frame_i32.len(),
             frame_f32.as_mut_ptr(),
@@ -4244,6 +4325,24 @@ function render(): void {
             frame_u8.len(),
         );
         assert_eq!(status, 0);
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                "src/main.stasis",
+                "observed_presentation_generation",
+            )
+            .expect("read presentation generation"),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                "src/main.stasis",
+                "observed_presentation_flags",
+            )
+            .expect("read presentation flags"),
+            1
+        );
         assert_eq!(&frame_i32[..5], &[1196967473, 3, 3, 1, 1]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
@@ -4258,6 +4357,60 @@ function render(): void {
         assert_eq!(&frame_f32[80004..80008], &[10.25, 20.5, 30.75, 40.125]);
         assert_eq!(frame_f32[96388], 12.0);
         assert_eq!(&frame_u8[..2], &[65, 0]);
+        let status = stasis_android_bridge_run_tick_frame_v3(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            540,
+            1200,
+            1,
+            1080,
+            2400,
+            2,
+            0,
+            frame_i32.as_mut_ptr(),
+            frame_i32.len(),
+            frame_f32.as_mut_ptr(),
+            frame_f32.len(),
+            frame_u8.as_mut_ptr(),
+            frame_u8.len(),
+        );
+        assert_eq!(status, 0);
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                "src/main.stasis",
+                "observed_presentation_generation",
+            )
+            .expect("read changed presentation generation"),
+            3
+        );
+        let status = stasis_android_bridge_run_tick_frame_v3(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            540,
+            1200,
+            1,
+            1080,
+            2400,
+            i32::MIN,
+            0,
+            frame_i32.as_mut_ptr(),
+            frame_i32.len(),
+            frame_f32.as_mut_ptr(),
+            frame_f32.len(),
+            frame_u8.as_mut_ptr(),
+            frame_u8.len(),
+        );
+        assert_eq!(status, 0);
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                "src/main.stasis",
+                "observed_presentation_generation",
+            )
+            .expect("read wrapped-token presentation generation"),
+            4
+        );
         fs::remove_dir_all(&root).ok();
     }
 

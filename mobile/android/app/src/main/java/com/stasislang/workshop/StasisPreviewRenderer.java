@@ -273,6 +273,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                             new byte[0], new int[0]));
         }
         pendingCapture = callback;
+        resourceLifecycle.requestRedraw();
     }
 
     synchronized void onHostPaused() {
@@ -281,6 +282,26 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     synchronized void onHostResumed() {
         resourceLifecycle.onResume();
+    }
+
+    synchronized int presentationGeneration() {
+        return resourceLifecycle.presentationGeneration();
+    }
+
+    synchronized int presentationFlags() {
+        return hasPendingPresentationWork(
+                restorePlaceholderPending,
+                resourceLifecycle.canPresent(),
+                pendingCapture != null) ? 1 : 0;
+    }
+
+    synchronized boolean shouldScheduleRender() {
+        return shouldPresent(frameI32) || presentationFlags() != 0;
+    }
+
+    static boolean hasPendingPresentationWork(
+            boolean placeholderPending, boolean canPresent, boolean capturePending) {
+        return placeholderPending || !canPresent || capturePending;
     }
 
     @Override
@@ -381,8 +402,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     }
                 }
             }
-            capture = pendingCapture;
-            pendingCapture = null;
+            capture = hasFrame && restored && resourceLifecycle.canPresent()
+                    ? pendingCapture : null;
+            if (capture != null) pendingCapture = null;
             capturedFrame = capture == null ? null : captureLogicalFrame();
         }
         captureIfRequested(capture, capturedFrame);

@@ -90,6 +90,9 @@ rebuilding the command list. `request_redraw()` marks a semantic game change; a
 monotonic HostFrame presentation generation independently forces the first frame
 and redraws after resize, density, surface, renderer, resume, and capture changes.
 `end_frame()` consumes both sources only when the game submits a present.
+The host keeps the continuous flag set while a restore placeholder, resource
+retry, or capture is pending, so a guest redraw cannot be consumed before the
+surface actually becomes presentable.
 
 This is an explicit invalidation contract, not a command-buffer hash. An empty
 clean submission takes a renderer-free runtime fast path while host input and

@@ -18,6 +18,14 @@ public final class StasisPreviewRendererSchemaTest {
     }
 
     @Test
+    public void placeholderRestoreAndCaptureKeepSchedulingUntilPresentable() {
+        assertTrue(StasisPreviewRenderer.hasPendingPresentationWork(true, true, false));
+        assertTrue(StasisPreviewRenderer.hasPendingPresentationWork(false, false, false));
+        assertTrue(StasisPreviewRenderer.hasPendingPresentationWork(false, true, true));
+        assertFalse(StasisPreviewRenderer.hasPendingPresentationWork(false, true, false));
+    }
+
+    @Test
     public void replacedCaptureIncludesEmptyTypedSpriteLanes() {
         StasisPreviewRenderer renderer = new StasisPreviewRenderer(
                 new StasisPreviewRenderer.TextureProvider() {

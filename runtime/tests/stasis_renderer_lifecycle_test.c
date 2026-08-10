@@ -29,6 +29,7 @@ static void test_restore_retry_and_generations(void) {
     CHECK(!stasis_renderer_lifecycle_can_present(&lifecycle));
     CHECK(stasis_renderer_lifecycle_begin_restore(&lifecycle));
     stasis_renderer_lifecycle_finish_restore(&lifecycle, 0);
+    CHECK(lifecycle.presentation_generation == 4u);
     CHECK(lifecycle.restore_attempts == 1u);
     CHECK(lifecycle.restore_failures == 1u);
     CHECK(stasis_renderer_lifecycle_begin_restore(&lifecycle));

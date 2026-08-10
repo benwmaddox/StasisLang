@@ -114,6 +114,7 @@ static void stasis_renderer_lifecycle_finish_restore(
     } else {
         lifecycle->restore_failures += 1u;
         lifecycle->state = STASIS_RENDERER_RESTORE_FAILED;
+        stasis_renderer_lifecycle_request_redraw(lifecycle);
     }
 }
 
