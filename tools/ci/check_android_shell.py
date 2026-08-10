@@ -1356,8 +1356,12 @@ def main() -> int:
     assert "event.getPointerCount() >= 3" in release_activity
     assert "nativeReadPerformanceMetrics" in release_activity
     assert "nativeReadRuntimeError" in release_activity
-    assert "tick avg=" in release_activity
-    assert "render avg=" in release_activity
+    assert 'hudText.append("tick=")' in release_activity
+    assert 'hudText.append("  render=")' in release_activity
+    assert 'hudText.append("  total=")' in release_activity
+    assert 'hudText.append(" ms  budget@60fps=")' in release_activity
+    assert "percentile(" not in release_activity
+    assert "performanceHud.setSingleLine(true)" in release_activity
     assert "setOnApplyWindowInsetsListener" in release_activity
     assert "getDisplayCutout" in release_activity
     assert "verifyAssetManifest(staging)" in release_activity
