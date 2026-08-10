@@ -7367,6 +7367,7 @@ public final class MainActivity extends Activity {
         if (frame == null) return new JSONObject().put("status", "unavailable");
         JSONArray header = jsonArray(frame.header);
         JSONArray lines = jsonArray(frame.lines);
+        JSONArray rectangles = jsonArray(frame.rectangles);
         JSONArray sprites = jsonArray(frame.sprites);
         JSONArray textMetadata = jsonArray(frame.textMetadata);
         JSONArray textValues = jsonArray(frame.textValues);
@@ -7377,11 +7378,13 @@ public final class MainActivity extends Activity {
                 .put("version", frame.header[1])
                 .put("flags", frame.header[2])
                 .put("line_count", frame.header[3])
+                .put("rectangle_count", frame.header[24])
                 .put("sprite_count", frame.header[4])
                 .put("text_count", frame.header[7])
                 .put("text_bytes_used", frame.header[9])
                 .put("header_i32", header)
                 .put("line_f32", lines)
+                .put("rectangle_f32", rectangles)
                 .put("sprite_i32", sprites)
                 .put("text_i32", textMetadata)
                 .put("text_f32", textValues)

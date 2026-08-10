@@ -1706,7 +1706,7 @@ mod tests {
             ParityCorpusCase {
                 label: "renderer_command_trace",
                 source: RENDER_TRACE_FIXTURE,
-                expected_exit: -996_154_394,
+                expected_exit: 1_390_729_377,
                 expected_extern_symbols: &[(
                     "native_render_trace",
                     "stasis_jit_render_v2_trace",
