@@ -7,7 +7,7 @@ test `invalid sprite replacement preserves receiver atomically`(): bool {
     tested_sprite.handle = 23;
     tested_sprite.width = 16;
     tested_sprite.height = 16;
-    if (tested_sprite.load_sprite_from("unused.svg", 0, 48)) {
+    if (tested_sprite.load_sprite_from("assets/__typed_drawable_fixture.svg", 0, 48)) {
         return false;
     }
     return tested_sprite.handle == 23 && tested_sprite.width == 16 && tested_sprite.height == 16;

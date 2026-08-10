@@ -9,8 +9,8 @@ use crate::backend::emit::ConstantValue;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{
-    parse_string_literal_text, parse_top_level_extern_functions,
-    ParsedFunctionAnnotationArgumentKind,
+    parse_local_declarations, parse_string_literal_text, parse_top_level_extern_functions,
+    ParsedFunctionAnnotationArgumentKind, ParsedLocalDeclaration,
 };
 
 const ASSET_ANNOTATION: &str = "asset_path";
@@ -70,6 +70,17 @@ pub(crate) fn discover_asset_references(
     constants: &BTreeMap<String, ConstantValue>,
 ) -> Result<Vec<AssetReference>, String> {
     let loaders = collect_asset_loaders(files)?;
+    let local_declarations = files
+        .iter()
+        .map(|file| {
+            parse_local_declarations(&file.content).map_err(|error| {
+                format!(
+                    "failed parsing scoped bindings for asset discovery in {}: {error}",
+                    file.path
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut references = Vec::new();
     for function in functions
         .iter()
@@ -90,6 +101,9 @@ pub(crate) fn discover_asset_references(
             &file.path,
             body,
             body_start,
+            &function.name,
+            &function.param_names,
+            &local_declarations[function.file_id as usize],
             &loaders,
             constants,
             &mut references,
@@ -200,6 +214,9 @@ fn discover_function_references(
     source_path: &str,
     body: &str,
     body_offset: usize,
+    function_name: &str,
+    parameter_names: &[String],
+    local_declarations: &[ParsedLocalDeclaration],
     loaders: &BTreeMap<String, Vec<AssetLoader>>,
     constants: &BTreeMap<String, ConstantValue>,
     out: &mut Vec<AssetReference>,
@@ -268,7 +285,15 @@ fn discover_function_references(
         let leading = body[range.clone()].len() - body[range.clone()].trim_start().len();
         let start = range.start + leading;
         let end = start + expression.len();
-        let logical_path = static_string(expression, constants)?;
+        let expression_start = body_offset + start;
+        let logical_path = static_string(expression, constants, |name| {
+            parameter_names.iter().any(|parameter| parameter == name)
+                || local_declarations.iter().any(|declaration| {
+                    declaration.function_name == function_name
+                        && declaration.name == name
+                        && declaration.visibility_range.contains(&expression_start)
+                })
+        })?;
         out.push(AssetReference {
             api: name.to_string(),
             source_path: source_path.to_string(),
@@ -398,6 +423,7 @@ fn call_argument_ranges(
 fn static_string(
     expression: &str,
     constants: &BTreeMap<String, ConstantValue>,
+    is_scoped_binding: impl Fn(&str) -> bool,
 ) -> Result<Option<String>, String> {
     let expression = strip_parenthesized_expression(expression)?;
     let tokens = lex(expression)?;
@@ -414,12 +440,14 @@ fn static_string(
             parse_string_literal_text(&expression[token.start..token.end]).map(Some)
         }
         TokenKind::Identifier => {
-            Ok(constants
-                .get(&expression[token.start..token.end])
-                .and_then(|value| match value {
-                    ConstantValue::String { value, .. } => Some(value.clone()),
-                    _ => None,
-                }))
+            let name = &expression[token.start..token.end];
+            if is_scoped_binding(name) {
+                return Ok(None);
+            }
+            Ok(constants.get(name).and_then(|value| match value {
+                ConstantValue::String { value, .. } => Some(value.clone()),
+                _ => None,
+            }))
         }
         _ => Ok(None),
     }
@@ -798,8 +826,49 @@ function main(path: string): i32 { return path.load_font(16); }
             },
         )]);
         assert_eq!(
-            static_string("(FONT_PATH)", &constants).expect("parenthesized constant"),
+            static_string("(FONT_PATH)", &constants, |_| false).expect("parenthesized constant"),
             Some("assets/ui.ttf".to_string())
+        );
+    }
+
+    #[test]
+    fn scoped_bindings_shadow_global_asset_constants_at_the_call_site() {
+        let source = r#"
+extern function @asset_path(path) load_font(path: string, size: i32): i32;
+const FONT_PATH: string = "assets/global.ttf";
+function from_parameter(FONT_PATH: string): i32 { return load_font(FONT_PATH, 16); }
+function from_local(): i32 {
+    let result: i32 = 0;
+    if (result == 0) {
+        let FONT_PATH: string = "assets/local.ttf";
+        return load_font(FONT_PATH, 16);
+    }
+    return load_font(FONT_PATH, 16);
+}
+function from_initializer(): i32 {
+    let FONT_PATH: i32 = load_font(FONT_PATH, 16);
+    return FONT_PATH;
+}
+function main(): i32 {
+    return from_parameter("assets/runtime.ttf") + from_local() + from_initializer();
+}
+"#;
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile().expect("compile scoped asset fixture");
+        let references = jit.program_snapshot().expect("snapshot").asset_references();
+        let paths = references
+            .iter()
+            .map(|reference| reference.logical_path.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                None,
+                None,
+                Some("assets/global.ttf"),
+                Some("assets/global.ttf")
+            ]
         );
     }
 

@@ -144,6 +144,26 @@ fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
     assert_eq!(checked.status.code(), Some(0));
     assert_eq!(json_stdout(&checked)["result"]["name"], "asset_validation");
 
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
+            "const FONT_PATH: string = \"../assets/fonts/ui.ttf\";\n",
+            "function choose_font(FONT_PATH: string): i32 { return load_font(FONT_PATH, 16); }\n",
+            "function main(): i32 { return choose_font(\"../assets/fonts/ui.ttf\"); }\n"
+        ),
+    )
+    .expect("shadowed asset source");
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(checked.status.code(), Some(1));
+    let error = json_stderr(&checked);
+    assert_eq!(error["code"], "asset_validation_failed");
+    assert_eq!(
+        error["diagnostics"][0]["code"],
+        "asset_dynamic_path_undeclared"
+    );
+    assert_eq!(error["diagnostics"][0]["logical_path"], Value::Null);
+
     fs::create_dir_all(project.join("tests")).expect("test directory");
     fs::write(
         project.join("tests/assets.test.stasis"),
