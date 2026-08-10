@@ -264,6 +264,12 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     target_include_directories(stasis_mobile_runtime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME stasis_mobile_runtime_lifecycle COMMAND stasis_mobile_runtime_test)
     add_executable(
+        stasis_mobile_frame_pacer_test
+        tests/stasis_mobile_frame_pacer_test.c
+    )
+    target_include_directories(stasis_mobile_frame_pacer_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_mobile_frame_pacer_contract COMMAND stasis_mobile_frame_pacer_test)
+    add_executable(
         stasis_mobile_aot_runtime_test
         tests/stasis_mobile_aot_runtime_test.c
         stasis_mobile_aot_runtime.c

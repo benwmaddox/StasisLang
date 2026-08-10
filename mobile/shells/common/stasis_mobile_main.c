@@ -65,9 +65,19 @@ int SDL_main(int argc, char **argv) {
         report_runtime_status("Stasis mobile initialization", status);
         SDL_Log("Stasis mobile initialization stopped with status %d", status);
     }
+    StasisMobileFramePacer frame_pacer;
+    stasis_mobile_frame_pacer_reset(&frame_pacer, SDL_GetTicksNS());
     while (status == STASIS_MOBILE_RUNTIME_OK) {
         status = stasis_mobile_runtime_step();
-        SDL_Delay(1);
+        if (status == STASIS_MOBILE_RUNTIME_OK) {
+            uint64_t wait_ns = stasis_mobile_frame_pacer_wait_ns(
+                &frame_pacer,
+                SDL_GetTicksNS()
+            );
+            if (wait_ns > 0) {
+                SDL_DelayPrecise(wait_ns);
+            }
+        }
     }
     SDL_Log("Stasis mobile loop stopped with status %d", status);
     int32_t game_result = stasis_mobile_runtime_last_entry_result();
