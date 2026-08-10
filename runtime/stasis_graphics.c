@@ -6153,12 +6153,16 @@ typedef struct {
 #define STASIS_MAX_TEXT_RUNS 1024
 #define STASIS_TEXT_RUN_MAX_BYTES 262144
 #define STASIS_TEXT_RUN_MAX_QUADS 65536
+#define STASIS_TEXT_GEOMETRY_BATCH_QUADS 256
 
 static StasisTextRun g_text_runs[STASIS_MAX_TEXT_RUNS];
 static unsigned char g_text_run_bytes[STASIS_TEXT_RUN_MAX_BYTES];
 static int g_text_run_bytes_used = 0;
 static StasisTextQuad g_text_run_quads[STASIS_TEXT_RUN_MAX_QUADS];
 static int g_text_run_quads_used = 0;
+static SDL_Vertex g_text_geometry_vertices[STASIS_TEXT_GEOMETRY_BATCH_QUADS * 4];
+static int g_text_geometry_indices[STASIS_TEXT_GEOMETRY_BATCH_QUADS * 6];
+static bool g_text_geometry_indices_ready = false;
 
 static void stasis_reset_text_cache(void) {
     memset(g_text_runs, 0, sizeof(g_text_runs));
@@ -6421,6 +6425,80 @@ static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, co
     return free_slot;
 }
 
+static void stasis_prepare_text_geometry_indices(void) {
+    if (g_text_geometry_indices_ready) return;
+    for (int i = 0; i < STASIS_TEXT_GEOMETRY_BATCH_QUADS; i++) {
+        const int vertex = i * 4;
+        const int index = i * 6;
+        g_text_geometry_indices[index + 0] = vertex + 0;
+        g_text_geometry_indices[index + 1] = vertex + 1;
+        g_text_geometry_indices[index + 2] = vertex + 2;
+        g_text_geometry_indices[index + 3] = vertex + 0;
+        g_text_geometry_indices[index + 4] = vertex + 2;
+        g_text_geometry_indices[index + 5] = vertex + 3;
+    }
+    g_text_geometry_indices_ready = true;
+}
+
+static void stasis_draw_cached_text_sdl(
+    const StasisTextRun* run,
+    const StasisFont* font,
+    float x,
+    float y,
+    Uint8 color_r,
+    Uint8 color_g,
+    Uint8 color_b,
+    Uint8 color_a
+) {
+    /* SDL_RenderGeometry ignores texture modulation, so preserve the old
+       8-bit text tint through per-vertex color. */
+    const SDL_FColor color = {
+        (float)color_r / 255.0f,
+        (float)color_g / 255.0f,
+        (float)color_b / 255.0f,
+        (float)color_a / 255.0f};
+    stasis_prepare_text_geometry_indices();
+    for (int batch_start = 0; batch_start < run->quad_count;
+         batch_start += STASIS_TEXT_GEOMETRY_BATCH_QUADS) {
+        int batch_count = run->quad_count - batch_start;
+        if (batch_count > STASIS_TEXT_GEOMETRY_BATCH_QUADS) {
+            batch_count = STASIS_TEXT_GEOMETRY_BATCH_QUADS;
+        }
+        for (int i = 0; i < batch_count; i++) {
+            const StasisTextQuad* q =
+                &g_text_run_quads[run->quad_off + batch_start + i];
+            const int src_x = (int)(q->s0 * (float)font->atlas_size);
+            const int src_y = (int)(q->t0 * (float)font->atlas_size);
+            const int src_w = (int)((q->s1 - q->s0) * (float)font->atlas_size);
+            const int src_h = (int)((q->t1 - q->t0) * (float)font->atlas_size);
+            SDL_Vertex* vertices = &g_text_geometry_vertices[i * 4];
+            const float s0 = (float)src_x / (float)font->atlas_size;
+            const float t0 = (float)src_y / (float)font->atlas_size;
+            const float s1 = (float)(src_x + src_w) / (float)font->atlas_size;
+            const float t1 = (float)(src_y + src_h) / (float)font->atlas_size;
+
+            vertices[0].position = (SDL_FPoint){x + q->x0, y + q->y0};
+            vertices[1].position = (SDL_FPoint){x + q->x1, y + q->y0};
+            vertices[2].position = (SDL_FPoint){x + q->x1, y + q->y1};
+            vertices[3].position = (SDL_FPoint){x + q->x0, y + q->y1};
+            vertices[0].tex_coord = (SDL_FPoint){s0, t0};
+            vertices[1].tex_coord = (SDL_FPoint){s1, t0};
+            vertices[2].tex_coord = (SDL_FPoint){s1, t1};
+            vertices[3].tex_coord = (SDL_FPoint){s0, t1};
+            for (int vertex = 0; vertex < 4; vertex++) {
+                vertices[vertex].color = color;
+            }
+        }
+        SDL_RenderGeometry(
+            g_renderer,
+            font->sdl_texture,
+            g_text_geometry_vertices,
+            batch_count * 4,
+            g_text_geometry_indices,
+            batch_count * 6);
+    }
+}
+
 /* Cache a text run and return a 1-based handle (0 on failure). */
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     if (font_handle <= 0 || font_handle > MAX_FONTS) return 0;
@@ -6476,33 +6554,16 @@ static void stasis_draw_text_cached_internal(int run_handle, float x, float y, f
         if (!font->sdl_texture || !g_renderer) return;
 
         SDL_SetTextureBlendMode(font->sdl_texture, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureColorMod(font->sdl_texture,
-            (Uint8)(r < 0.0f ? 0 : (r > 1.0f ? 255 : (int)(r * 255.0f))),
-            (Uint8)(g < 0.0f ? 0 : (g > 1.0f ? 255 : (int)(g * 255.0f))),
-            (Uint8)(b < 0.0f ? 0 : (b > 1.0f ? 255 : (int)(b * 255.0f))));
-        SDL_SetTextureAlphaMod(font->sdl_texture,
-            (Uint8)(a < 0.0f ? 0 : (a > 1.0f ? 255 : (int)(a * 255.0f))));
-
-        for (int i = 0; i < run->quad_count; i++) {
-            StasisTextQuad* q = &g_text_run_quads[run->quad_off + i];
-            SDL_Rect src;
-            src.x = (int)(q->s0 * (float)font->atlas_size);
-            src.y = (int)(q->t0 * (float)font->atlas_size);
-            src.w = (int)((q->s1 - q->s0) * (float)font->atlas_size);
-            src.h = (int)((q->t1 - q->t0) * (float)font->atlas_size);
-
-            SDL_FRect dst;
-            dst.x = x + q->x0;
-            dst.y = y + q->y0;
-            dst.w = q->x1 - q->x0;
-            dst.h = q->y1 - q->y0;
-
-            if (src.w > 0 && src.h > 0 && dst.w > 0.0f && dst.h > 0.0f) {
-                SDL_FRect source = {
-                    (float)src.x, (float)src.y, (float)src.w, (float)src.h};
-                SDL_RenderTexture(g_renderer, font->sdl_texture, &source, &dst);
-            }
-        }
+        const Uint8 color_r =
+            (Uint8)(r < 0.0f ? 0 : (r > 1.0f ? 255 : (int)(r * 255.0f)));
+        const Uint8 color_g =
+            (Uint8)(g < 0.0f ? 0 : (g > 1.0f ? 255 : (int)(g * 255.0f)));
+        const Uint8 color_b =
+            (Uint8)(b < 0.0f ? 0 : (b > 1.0f ? 255 : (int)(b * 255.0f)));
+        const Uint8 color_a =
+            (Uint8)(a < 0.0f ? 0 : (a > 1.0f ? 255 : (int)(a * 255.0f)));
+        stasis_draw_cached_text_sdl(
+            run, font, x, y, color_r, color_g, color_b, color_a);
         return;
     }
 

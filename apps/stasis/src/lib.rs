@@ -4574,6 +4574,34 @@ mod tests {
     }
 
     #[test]
+    fn sdl_cached_text_batches_glyphs_without_crossing_text_run_order() {
+        let start = STASIS_GRAPHICS_SOURCE
+            .find("static void stasis_draw_cached_text_sdl(")
+            .expect("cached SDL text batch helper");
+        let end = STASIS_GRAPHICS_SOURCE[start..]
+            .find("/* Cache a text run")
+            .map(|offset| start + offset)
+            .expect("cached text helper boundary");
+        let helper = &STASIS_GRAPHICS_SOURCE[start..end];
+        assert!(helper.contains("SDL_RenderGeometry("));
+        assert!(helper.contains("STASIS_TEXT_GEOMETRY_BATCH_QUADS"));
+        assert!(helper.contains("vertices[vertex].color = color;"));
+        assert!(!helper.contains("SDL_RenderTexture("));
+
+        let cached_start = STASIS_GRAPHICS_SOURCE
+            .find("static void stasis_draw_text_cached_internal(")
+            .expect("cached text draw entry");
+        let cached_end = STASIS_GRAPHICS_SOURCE[cached_start..]
+            .find("STASIS_EXPORT void stasis_gfx_draw_text_cached")
+            .map(|offset| cached_start + offset)
+            .expect("cached text draw boundary");
+        let cached_draw = &STASIS_GRAPHICS_SOURCE[cached_start..cached_end];
+        assert!(cached_draw.contains(
+            "run, font, x, y, color_r, color_g, color_b, color_a);"
+        ));
+    }
+
+    #[test]
     fn live_runtime_exposes_repeatable_pre_present_png_capture() {
         assert!(
             STASIS_GRAPHICS_SOURCE
