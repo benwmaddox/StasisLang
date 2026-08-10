@@ -120,9 +120,6 @@ cloning a generated repository, reactivate the checked-in hook with
   nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
   and display `name`. Explicit entries discover their own ancestor manifest, so project-root
   imports and asset preparation remain anchored to the project even when play starts in `src/`.
-  Static screens may use the graphics stdlib's explicit `request_redraw()` and
-  `begin_frame_if_needed()` contract. Skipping a clean presentation never skips host input,
-  deterministic ticks, file watching, or lifecycle handling.
 - `run --watch`: launch the existing graphical runner and hot-swap pipeline for game projects.
   The window title uses the manifest project name. Because it is an unbounded graphical session,
   watch mode rejects `--json` and `--headless`.

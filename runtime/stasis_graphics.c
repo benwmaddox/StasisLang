@@ -164,7 +164,6 @@ static bool g_screenshot_taken = false;
 static char g_screenshot_path[1024] = {0};
 static int g_screenshot_exit_after = 0;
 static int g_screenshot_frame = 1;
-static int g_debug_frame_counter = 0;
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_postfx_program = 0;
 static GLint g_postfx_time_loc = -1;
@@ -505,7 +504,6 @@ static void stasis_mark_density_resources_dirty(void) {
     for (int i = 0; i < MAX_FONTS; i++) {
         if (g_fonts[i].active) g_fonts[i].needs_reraster = 1;
     }
-    stasis_renderer_lifecycle_request_redraw(&g_resource_lifecycle);
 }
 
 static void stasis_sync_display_metrics(void) {
@@ -558,7 +556,6 @@ static void stasis_sync_display_metrics(void) {
     if (g_display_generation == 0 || dimensions_changed) {
         g_display_generation++;
         g_window_resized = true;
-        stasis_renderer_lifecycle_request_redraw(&g_resource_lifecycle);
     }
     g_display_metrics = next;
     g_drawable_width = drawable_w;
@@ -755,7 +752,6 @@ static void stasis_pump_events(void) {
                 }
                 if (event.key.key == SDLK_F3 && !event.key.repeat) {
                     g_force_debug_overlay = !g_force_debug_overlay;
-                    stasis_renderer_lifecycle_request_redraw(&g_resource_lifecycle);
                     if (g_force_debug_overlay) (void)stasis_perf_font();
                     SDL_Log("performance HUD %s (F3 toggles)", g_force_debug_overlay ? "on" : "off");
                 }
@@ -1126,7 +1122,7 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (!out_i32 || !out_f32) return;
 
     static int32_t g_host_tick_index = 0;
-    const int32_t host_version = 4;
+    const int32_t host_version = 3;
     const int i32_key_base = 32;
     const int i32_key_count = 512;
 
@@ -1171,10 +1167,8 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[18] = minimized;
     out_i32[19] = stasis_get_time_us();
 
-    out_i32[20] = (int32_t)g_resource_lifecycle.presentation_generation;
-    out_i32[21] = (g_force_debug_overlay ||
-        (!g_screenshot_taken && g_screenshot_path[0] != 0 &&
-            g_debug_frame_counter + 1 <= g_screenshot_frame)) ? 1 : 0;
+    out_i32[20] = 0;
+    out_i32[21] = 0;
     out_i32[22] = g_display_metrics.native_w;
     out_i32[23] = g_display_metrics.native_h;
     out_i32[24] = g_display_metrics.drawable_w;
@@ -1406,6 +1400,7 @@ static struct {
 } g_lines[MAX_LINES];
 static LineVertex g_line_vertices[MAX_LINES * 2];
 static int g_line_count = 0;
+static int g_debug_frame_counter = 0;
 
 /* Simple shader + buffer for line rendering */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -3254,7 +3249,6 @@ STASIS_EXPORT int stasis_host_schedule_screenshot(const char* path) {
     g_screenshot_frame = (int)(g_debug_frame_counter + 1);
     g_screenshot_exit_after = 0;
     g_screenshot_taken = false;
-    stasis_renderer_lifecycle_request_redraw(&g_resource_lifecycle);
     return 1;
 }
 
@@ -4709,19 +4703,6 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
     if (text_count > gfx_cmd_max_text) text_count = gfx_cmd_max_text;
     if (text_bytes_used > gfx_cmd_max_text_bytes) text_bytes_used = gfx_cmd_max_text_bytes;
 
-    const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
-    const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
-        ? stasis_render_clamp_count(
-            cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER)
-        : 0;
-
-    if (stasis_render_is_empty_submission(cmd_i32)) {
-        g_perf_render_started_counter = 0;
-        g_line_count = 0;
-        g_events_pumped_this_frame = 0;
-        return;
-    }
-
     if (!contract_logged) {
         SDL_Log(
             "Stasis render contract v%d trace=%u flags=%d lines=%d rects=%d sprites=%d text=%d",
@@ -4741,6 +4722,11 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
     }
 
+    const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
+    const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
+        ? stasis_render_clamp_count(
+            cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER)
+        : 0;
     if (order_count > 0) {
         int32_t pending_kind = 0;
         for (int32_t order_index = 0; order_index < order_count; order_index++) {

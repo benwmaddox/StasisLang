@@ -43,10 +43,6 @@ struct TextRun {
     height: f32;
 }
 
-global gfx_redraw_requested: bool;
-global gfx_has_presented_frame: bool;
-global gfx_last_presented_generation: i32;
-
 function @asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
@@ -98,30 +94,8 @@ function begin_frame(): void {
     gfx_cmd_begin();
 }
 
-function request_redraw(): void {
-    gfx_redraw_requested = true;
-}
-
-function presentation_needs_redraw(): bool {
-    if (!gfx_has_presented_frame || gfx_redraw_requested) {
-        return true;
-    }
-    if (gfx_last_presented_generation != host_presentation_generation()) {
-        return true;
-    }
-    return host_presentation_continuous();
-}
-
-function begin_frame_if_needed(): bool {
-    gfx_cmd_begin();
-    return presentation_needs_redraw();
-}
-
 function end_frame(): void {
     gfx_cmd_mark_present();
-    gfx_redraw_requested = false;
-    gfx_has_presented_frame = true;
-    gfx_last_presented_generation = host_presentation_generation();
 }
 
 function clear(r: f32, g: f32, b: f32, a: f32): void {

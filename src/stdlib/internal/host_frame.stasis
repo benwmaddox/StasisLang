@@ -37,11 +37,8 @@ const HOST_I_NATIVE_W_PX: i32 = 22;
 const HOST_I_NATIVE_H_PX: i32 = 23;
 const HOST_I_DRAWABLE_W_PX: i32 = 24;
 const HOST_I_DRAWABLE_H_PX: i32 = 25;
-const HOST_I_PRESENTATION_GENERATION: i32 = 20;
-const HOST_I_PRESENTATION_FLAGS: i32 = 21;
-const HOST_PRESENTATION_FLAG_CONTINUOUS: i32 = 1;
 
-// 26..29 removed with integer presentation geometry.
+// 20,21 and 26..29 removed with integer presentation geometry.
 const HOST_I_DISPLAY_GENERATION: i32 = 30;
 const HOST_I_DENSITY_GENERATION: i32 = 31;
 
@@ -127,14 +124,6 @@ function host_window_minimized(): bool {
 
 function host_time_us(): i32 {
     return host_i32[HOST_I_TIME_US];
-}
-
-function host_presentation_generation(): i32 {
-    return host_i32[HOST_I_PRESENTATION_GENERATION];
-}
-
-function host_presentation_continuous(): bool {
-    return host_i32[HOST_I_PRESENTATION_FLAGS] != 0;
 }
 
 function host_logical_width(): f32 {
