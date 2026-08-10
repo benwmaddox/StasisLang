@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use stasis_assets::ResolvedAssetManifest;
 use stasis_compiler::backend::assets::{
@@ -7,6 +8,17 @@ use stasis_compiler::backend::assets::{
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 
 pub(crate) const ASSET_DIAGNOSTIC_PREFIX: &str = "stasis_asset_diagnostics:";
+
+fn snapshot_asset_source_dirs(snapshot: &ProgramSnapshot) -> Vec<PathBuf> {
+    snapshot
+        .module_graph()
+        .roots()
+        .iter()
+        .filter_map(|root| Path::new(root).parent().map(Path::to_path_buf))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
 
 pub(crate) fn validate_snapshot_assets(
     project_dir: &Path,
@@ -24,8 +36,10 @@ pub(crate) fn validate_snapshot_assets(
         .map(|manifest| &manifest.dynamic_assets)
         .cloned()
         .unwrap_or_default();
+    let source_base_dirs = snapshot_asset_source_dirs(snapshot);
     let validation = validate_asset_references(
         project_dir,
+        &source_base_dirs,
         snapshot.asset_references(),
         manifest_paths.as_ref(),
         &dynamic_paths,
