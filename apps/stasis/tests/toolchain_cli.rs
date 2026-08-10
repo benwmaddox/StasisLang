@@ -182,6 +182,49 @@ fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
     fs::remove_dir_all(project).ok();
 }
 
+#[test]
+fn check_resolves_nested_asset_calls_from_the_entry_source_boundary() {
+    let project = temp_dir("nested_entry_asset_boundary");
+    fs::create_dir_all(project.join("src/game/view")).expect("nested source directory");
+    fs::create_dir_all(project.join("assets/fonts")).expect("asset directory");
+    fs::write(
+        project.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"nested_entry_asset_boundary","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("workspace manifest");
+    fs::write(project.join("assets/fonts/ui.ttf"), b"font").expect("font asset");
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "import \"game/view/assets.stasis\";\n",
+            "function main(): i32 { return load_ui_font(); }\n",
+        ),
+    )
+    .expect("entry source");
+    fs::write(
+        project.join("src/game/view/assets.stasis"),
+        concat!(
+            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
+            "function load_ui_font(): i32 { return load_font(\"../assets/fonts/ui.ttf\", 16); }\n",
+        ),
+    )
+    .expect("nested asset source");
+
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(
+        json_stdout(&checked)["result"]["name"],
+        "nested_entry_asset_boundary"
+    );
+
+    fs::remove_dir_all(project).ok();
+}
+
 fn lsp_frame(message: Value) -> String {
     let body = message.to_string();
     format!("Content-Length: {}\r\n\r\n{body}", body.len())

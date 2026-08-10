@@ -67,6 +67,8 @@ Preparation writes only beneath the build output; project masters and the source
 
 `stasis play` prepares the same bundle beneath `.stasis_cache/play-assets` before guest startup and mirrors the source directory's position relative to the project root. Existing source-relative paths such as `../assets/images/hero.png` therefore resolve to prepared output without source rewriting. Resized cache hits do not decode the master again. Development builds stage the complete declared manifest so iterative and optional paths remain available.
 
+Static `@asset_path` validation uses the active program entry's source directory as that same runtime boundary, including when the annotated loader call lives in a nested imported module. The declaring module and project root remain compatibility fallbacks, but they do not replace the entry boundary used by play and packaging.
+
 `stasis check`, tests, development builds, release builds, and mobile/desktop packages
 consume one compiler-owned asset-reference result. Asset loader declarations mark their path
 parameter with `@asset_path(path)`; standard sprite, font, and audio loaders already carry that

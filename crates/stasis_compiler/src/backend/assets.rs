@@ -479,6 +479,7 @@ fn token_text_is(source: &str, token: Token, expected: &str) -> bool {
 
 pub fn validate_asset_references(
     project_root: &Path,
+    source_base_dirs: &[PathBuf],
     references: &[AssetReference],
     manifest_paths: Option<&BTreeSet<String>>,
     dynamic_paths: &BTreeSet<String>,
@@ -517,6 +518,7 @@ pub fn validate_asset_references(
                     resolve_one(
                         &project_root,
                         &asset_root,
+                        source_base_dirs,
                         reference,
                         path,
                         manifest_paths,
@@ -529,6 +531,7 @@ pub fn validate_asset_references(
         resolve_one(
             &project_root,
             &asset_root,
+            source_base_dirs,
             reference,
             logical_path,
             manifest_paths,
@@ -561,6 +564,7 @@ pub fn validate_asset_references(
 fn resolve_one(
     project_root: &Path,
     asset_root: &Path,
+    source_base_dirs: &[PathBuf],
     reference: &AssetReference,
     logical_path: &str,
     manifest_paths: Option<&BTreeSet<String>>,
@@ -589,10 +593,26 @@ fn resolve_one(
             .unwrap_or(project_root)
             .to_path_buf()
     };
-    let candidates = [
+    let mut candidates = Vec::new();
+    for source_base_dir in source_base_dirs {
+        let source_base_dir = if source_base_dir.is_absolute() {
+            source_base_dir.clone()
+        } else {
+            project_root.join(source_base_dir)
+        };
+        let candidate = source_base_dir.join(logical_path);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    for candidate in [
         declaring_dir.join(logical_path),
         project_root.join(logical_path),
-    ];
+    ] {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
     let attempted = candidates
         .iter()
         .map(|path| path.to_string_lossy().to_string())
@@ -900,6 +920,7 @@ function main(): i32 {
         }];
         let result = validate_asset_references(
             &root,
+            &[],
             &references,
             Some(&BTreeSet::from(["assets/escape.svg".to_string()])),
             &BTreeSet::new(),
@@ -940,6 +961,7 @@ function main(): i32 {
         ];
         let result = validate_asset_references(
             &root,
+            &[],
             &references,
             Some(&BTreeSet::from(["assets/other.svg".to_string()])),
             &BTreeSet::new(),
@@ -987,6 +1009,7 @@ function main(): i32 {
         ];
         let result = validate_asset_references(
             &root,
+            &[],
             &references,
             Some(&BTreeSet::from(["assets/svg/hero.svg".to_string()])),
             &BTreeSet::new(),
@@ -1012,6 +1035,7 @@ function main(): i32 {
 
         let undeclared = validate_asset_references(
             &root,
+            &[],
             &[reference(60, "assets/svg/hero.svg")],
             Some(&BTreeSet::new()),
             &BTreeSet::new(),
