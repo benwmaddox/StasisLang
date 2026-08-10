@@ -44,6 +44,8 @@ pub struct FunctionMeta {
     pub param_names: Vec<String>,
     pub params: Vec<TypeId>,
     pub return_type: TypeId,
+    /// Requests body substitution at eligible call sites. The real function is still emitted.
+    pub inline: bool,
     pub dependencies: Vec<FunctionId>,
     pub dependents: Vec<FunctionId>,
     pub call_sites: Vec<FunctionCallSite>,
@@ -669,6 +671,7 @@ impl Compiler {
                     param_names: indexed_function.param_names,
                     params: indexed_function.params,
                     return_type: indexed_function.return_type,
+                    inline: indexed_function.inline,
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
                     call_sites: Vec::new(),
@@ -1067,6 +1070,51 @@ impl Compiler {
             &self.module_resolution,
         )
         .map_err(CompileError::Frontend)?;
+        let mut inline_candidates = Vec::new();
+        for candidate in self.functions.iter().filter(|candidate| candidate.inline) {
+            let Some(candidate_statements) =
+                self.parsed_statements.get(candidate.storage_index as usize)
+            else {
+                continue;
+            };
+            let [SimpleStmt::Return(expression)] = candidate_statements.as_slice() else {
+                continue;
+            };
+            let candidate_file = self.files.get(candidate.file_id as usize).ok_or_else(|| {
+                CompileError::Invariant(format!(
+                    "inline function '{}' references missing file",
+                    candidate.name
+                ))
+            })?;
+            let mut qualified_body = vec![SimpleStmt::Return(expression.clone())];
+            qualify_module_calls(
+                &mut qualified_body,
+                &candidate_file.path,
+                &self.module_graph,
+                &self.files,
+                &self.functions,
+                &self.module_resolution,
+            )
+            .map_err(CompileError::Frontend)?;
+            let SimpleStmt::Return(expression) = qualified_body.remove(0) else {
+                unreachable!("inline candidate shape was already checked")
+            };
+            let qualified_name = format!("{}.{}", candidate.module_alias, candidate.name);
+            let has_same_arity_overload = self.functions.iter().any(|other| {
+                other.id != candidate.id
+                    && other.module_alias == candidate.module_alias
+                    && other.name == candidate.name
+                    && other.params.len() == candidate.params.len()
+            });
+            inline_candidates.push(InlineExpressionCandidate {
+                id: candidate.id,
+                qualified_name,
+                param_names: candidate.param_names.clone(),
+                expression,
+                has_same_arity_overload,
+            });
+        }
+        inline_expression_calls(&mut statements, &inline_candidates, function.id);
         Ok(FunctionHIR {
             blocks: vec![Block { source: body }],
             statements,
@@ -1365,6 +1413,243 @@ struct PreviousFunctionHashes {
     body_hash: u64,
 }
 
+#[derive(Clone)]
+struct InlineExpressionCandidate {
+    id: FunctionId,
+    qualified_name: String,
+    param_names: Vec<String>,
+    expression: SimpleExpr,
+    has_same_arity_overload: bool,
+}
+
+fn inline_expression_calls(
+    statements: &mut [SimpleStmt],
+    candidates: &[InlineExpressionCandidate],
+    caller_id: FunctionId,
+) {
+    fn substitute_identifier(path: &str, arguments: &BTreeMap<String, SimpleExpr>) -> SimpleExpr {
+        if let Some(argument) = arguments.get(path) {
+            return argument.clone();
+        }
+        if let Some((root, suffix)) = path.split_once('.') {
+            match arguments.get(root) {
+                Some(SimpleExpr::Identifier(argument_root)) => {
+                    return SimpleExpr::Identifier(format!("{argument_root}.{suffix}"));
+                }
+                Some(SimpleExpr::IndexedPath {
+                    collection_path,
+                    index,
+                    suffix: argument_suffix,
+                }) => {
+                    let combined_suffix = if argument_suffix.is_empty() {
+                        suffix.to_string()
+                    } else {
+                        format!("{argument_suffix}.{suffix}")
+                    };
+                    return SimpleExpr::IndexedPath {
+                        collection_path: collection_path.clone(),
+                        index: index.clone(),
+                        suffix: combined_suffix,
+                    };
+                }
+                _ => {}
+            }
+        }
+        SimpleExpr::Identifier(path.to_string())
+    }
+
+    fn is_safe_argument(expression: &SimpleExpr) -> bool {
+        match expression {
+            SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::Identifier(_) => true,
+            SimpleExpr::IndexedPath { index, .. } => is_safe_argument(index),
+            SimpleExpr::Binary { lhs, rhs, .. } => is_safe_argument(lhs) && is_safe_argument(rhs),
+            SimpleExpr::Condition(condition) => is_safe_condition(condition),
+            SimpleExpr::Call { .. } => false,
+        }
+    }
+
+    fn is_safe_condition(condition: &SimpleCondition) -> bool {
+        match condition {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                is_safe_argument(lhs) && is_safe_argument(rhs)
+            }
+            SimpleCondition::Expr(expression) => is_safe_argument(expression),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                is_safe_condition(lhs) && is_safe_condition(rhs)
+            }
+            SimpleCondition::Not(inner) => is_safe_condition(inner),
+        }
+    }
+
+    fn condition(
+        value: &mut SimpleCondition,
+        candidates: &[InlineExpressionCandidate],
+        caller_id: FunctionId,
+        arguments: Option<&BTreeMap<String, SimpleExpr>>,
+        stack: &mut Vec<FunctionId>,
+    ) {
+        match value {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                expression(lhs, candidates, caller_id, arguments, stack);
+                expression(rhs, candidates, caller_id, arguments, stack);
+            }
+            SimpleCondition::Expr(value) => {
+                expression(value, candidates, caller_id, arguments, stack)
+            }
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                condition(lhs, candidates, caller_id, arguments, stack);
+                condition(rhs, candidates, caller_id, arguments, stack);
+            }
+            SimpleCondition::Not(inner) => {
+                condition(inner, candidates, caller_id, arguments, stack)
+            }
+        }
+    }
+
+    fn expression(
+        value: &mut SimpleExpr,
+        candidates: &[InlineExpressionCandidate],
+        caller_id: FunctionId,
+        arguments: Option<&BTreeMap<String, SimpleExpr>>,
+        stack: &mut Vec<FunctionId>,
+    ) {
+        match value {
+            SimpleExpr::Identifier(path) => {
+                if let Some(arguments) = arguments {
+                    *value = substitute_identifier(path, arguments);
+                }
+            }
+            SimpleExpr::IndexedPath {
+                collection_path,
+                index,
+                ..
+            } => {
+                if let Some(arguments) = arguments {
+                    if let Some(SimpleExpr::Identifier(argument_path)) =
+                        arguments.get(collection_path)
+                    {
+                        *collection_path = argument_path.clone();
+                    }
+                }
+                expression(index, candidates, caller_id, arguments, stack);
+            }
+            SimpleExpr::Call { target, args } => {
+                for argument in args.iter_mut() {
+                    expression(argument, candidates, caller_id, arguments, stack);
+                }
+                let matches = candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.qualified_name == *target
+                            && candidate.param_names.len() == args.len()
+                            && !candidate.has_same_arity_overload
+                            && candidate.id != caller_id
+                            && !stack.contains(&candidate.id)
+                    })
+                    .collect::<Vec<_>>();
+                if matches.len() != 1 || !args.iter().all(is_safe_argument) {
+                    return;
+                }
+                let candidate = matches[0];
+                let replacements = candidate
+                    .param_names
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect::<BTreeMap<_, _>>();
+                let mut inlined = candidate.expression.clone();
+                stack.push(candidate.id);
+                expression(
+                    &mut inlined,
+                    candidates,
+                    caller_id,
+                    Some(&replacements),
+                    stack,
+                );
+                stack.pop();
+                *value = inlined;
+            }
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, candidates, caller_id, arguments, stack);
+                expression(rhs, candidates, caller_id, arguments, stack);
+            }
+            SimpleExpr::Condition(value) => {
+                condition(value, candidates, caller_id, arguments, stack)
+            }
+            SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_) => {}
+        }
+    }
+
+    fn statement(
+        value: &mut SimpleStmt,
+        candidates: &[InlineExpressionCandidate],
+        caller_id: FunctionId,
+        stack: &mut Vec<FunctionId>,
+    ) {
+        match value {
+            SimpleStmt::Let {
+                expression: value, ..
+            }
+            | SimpleStmt::Assign {
+                expression: value, ..
+            }
+            | SimpleStmt::Expr(value)
+            | SimpleStmt::Return(value) => expression(value, candidates, caller_id, None, stack),
+            SimpleStmt::Convert { source, .. } => {
+                expression(source, candidates, caller_id, None, stack)
+            }
+            SimpleStmt::If {
+                condition: condition_value,
+                then_statements,
+                else_statements,
+            } => {
+                condition(condition_value, candidates, caller_id, None, stack);
+                for nested in then_statements {
+                    statement(nested, candidates, caller_id, stack);
+                }
+                if let Some(nested) = else_statements {
+                    for statement_value in nested {
+                        statement(statement_value, candidates, caller_id, stack);
+                    }
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition: condition_value,
+                step,
+                body_statements,
+            } => {
+                statement(init, candidates, caller_id, stack);
+                condition(condition_value, candidates, caller_id, None, stack);
+                statement(step, candidates, caller_id, stack);
+                for nested in body_statements {
+                    statement(nested, candidates, caller_id, stack);
+                }
+            }
+            SimpleStmt::Foreach {
+                body_statements, ..
+            } => {
+                for nested in body_statements {
+                    statement(nested, candidates, caller_id, stack);
+                }
+            }
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+        }
+    }
+
+    let mut stack = Vec::new();
+    for statement_value in statements {
+        statement(statement_value, candidates, caller_id, &mut stack);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1402,6 +1687,48 @@ mod tests {
             .map(|offset| body[offset..].split_whitespace().next().unwrap_or_default())
             .collect::<Vec<_>>();
         assert_eq!(starts, vec!["let", "if", "value", "return"]);
+    }
+
+    #[test]
+    fn inline_keeps_same_arity_overload_calls_for_typed_backend_resolution() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nstruct Player { score: i32; }\nglobal player: Player;\nfunction @inline value(item: Enemy): i32 { return item.hp + 100; }\nfunction value(item: Player): i32 { return item.score; }\nfunction main(): i32 { return value(player); }\n",
+        );
+        compiler.index_pass().expect("index overload fixture");
+        let function = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&function)
+            .expect("lower overload caller");
+        assert!(matches!(
+            &hir.statements[0],
+            SimpleStmt::Return(SimpleExpr::Call { target, .. }) if target.ends_with(".value")
+        ));
+    }
+
+    #[test]
+    fn inline_composes_indexed_argument_with_callee_field_suffix() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nglobal enemies: Enemy[2];\nfunction @inline hp(enemy: Enemy): i32 { return enemy.hp; }\nfunction main(): i32 { return hp(enemies[0]); }\n",
+        );
+        compiler.index_pass().expect("index indexed-view fixture");
+        let function = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&function)
+            .expect("lower indexed-view caller");
+        assert!(matches!(
+            &hir.statements[0],
+            SimpleStmt::Return(SimpleExpr::IndexedPath {
+                collection_path,
+                index,
+                suffix,
+            }) if collection_path == "enemies"
+                && matches!(index.as_ref(), SimpleExpr::Int(0))
+                && suffix == "hp"
+        ));
     }
 
     #[test]

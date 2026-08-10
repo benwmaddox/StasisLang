@@ -48,6 +48,11 @@ closure. Patch size is a measured graph property, not a fixed promise.
 11. JIT and AOT share semantic analysis and per-function lowering. JIT selects a patch closure;
     AOT emits the complete reachable program.
 
+An eligible `@inline` call is still represented by the ordinary caller-to-callee dependency edge.
+The shared lowering path may embed the callee expression in both AOT and JIT machine code while a
+real callee body remains emitted. A body or annotation change therefore seeds the normal reverse
+caller closure; selective JIT must never retain a caller containing stale embedded code.
+
 `FnId` remains a stable compiler identity for call graphs, hashes, diagnostics, patch plans, and
 metadata. It is not an internal runtime dispatch key.
 

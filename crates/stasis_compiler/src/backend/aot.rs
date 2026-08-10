@@ -3032,6 +3032,27 @@ function end_frame(): void { return; }
         let _ = fs::remove_dir_all(&temp_root);
     }
 
+    #[test]
+    fn aot_inlines_eligible_expression_and_keeps_real_function_object() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function @inline helper(value: i32): i32 { return value + 1; }\nfunction main(): i32 { return helper(9); }\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        let main = captured.get("main").expect("main CLIF");
+        assert!(
+            !main.lines().any(|line| line.contains("call fn")),
+            "eligible @inline call remained in AOT CLIF:\n{main}"
+        );
+        assert!(captured.contains_key("helper"));
+        assert_eq!(
+            process.artifacts().len(),
+            2,
+            "AOT must retain a real object for an inline function"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn aot_and_jit_match_internal_call_fixture_results() {

@@ -3844,6 +3844,67 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_inlines_eligible_expression_and_keeps_real_function() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function @inline helper(value: i32): i32 { return value + 1; }\nfunction main(): i32 { return helper(9); }\n",
+        );
+        process.compile().expect("compile inline fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute inline fixture"),
+            10
+        );
+        let main = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            !main.lines().any(|line| line.contains("call fn")),
+            "eligible @inline call remained in JIT CLIF:\n{main}"
+        );
+        assert!(
+            process.clif_for_function_name("helper").is_some(),
+            "the real inline function must remain independently callable"
+        );
+
+        process.upsert_file(
+            "sample.stasis",
+            "function @inline helper(value: i32): i32 { return value + 2; }\nfunction main(): i32 { return helper(9); }\n",
+        );
+        process.compile().expect("hot patch inline callee");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute patched inline fixture"),
+            11,
+            "changing an inline callee must regenerate callers that embed its body"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_inline_preserves_overloads_and_indexed_struct_fields() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nstruct Player { score: i32; }\nglobal enemies: Enemy[2];\nglobal player: Player;\nfunction @inline hp(enemy: Enemy): i32 { return enemy.hp; }\nfunction @inline value(item: Enemy): i32 { return item.hp + 100; }\nfunction value(item: Player): i32 { return item.score; }\nfunction main(): i32 { enemies[0].hp = 7; player.score = 5; return hp(enemies[0]) + value(player); }\n",
+        );
+        process.compile().expect("compile inline review fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute inline review fixture"),
+            12
+        );
+        let main = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            main.lines().any(|line| line.contains("call fn")),
+            "same-arity overload call must remain for typed backend selection:\n{main}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_print_string_literal_statement() {
         let mut process = JitProcess::new();
         process.upsert_file(
