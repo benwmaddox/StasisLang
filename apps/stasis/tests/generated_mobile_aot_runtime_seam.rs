@@ -175,6 +175,9 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     assert!(stdout.contains(
         "IT-013 order=123 paused_poll=1 reinit=1 main_stop=11 tick_stop=22 render_stop=33 frames_after_failures=0"
     ));
+    assert!(
+        stdout.contains("IT-014 order=123 marker=77 request=41:5:640:360 render_score=15 frames=1")
+    );
 
     let evidence = json!({
         "schema": "stasis.seam_test.v1",
@@ -215,4 +218,23 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     )
     .expect("write lifecycle evidence");
     eprintln!("IT-013 evidence: {lifecycle_evidence}");
+
+    let ordering_evidence = json!({
+        "schema": "stasis.seam_test.v1",
+        "test_id": "IT-014",
+        "status": "passed",
+        "target": "windows-native-aot+c-mobile-runtime",
+        "host_apply_submit_order": 123,
+        "host_frame_marker_seen_by_tick": 77,
+        "request_applied": {"sequence": 41, "flags": 5, "width": 640, "height": 360},
+        "tick_score_seen_by_render": 15,
+        "submitted_frames": 1
+    });
+    let ordering_path = evidence_root().join("it-014-mobile-host-frame-order.json");
+    fs::write(
+        ordering_path,
+        serde_json::to_vec_pretty(&ordering_evidence).expect("serialize ordering evidence"),
+    )
+    .expect("write ordering evidence");
+    eprintln!("IT-014 evidence: {ordering_evidence}");
 }
