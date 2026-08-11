@@ -354,6 +354,7 @@ pub fn link_objects_to_executable(
         args.push(format!("/OUT:{}", output_executable.display()));
         args.push(format!("/ENTRY:{entry_symbol}"));
         args.push("/SUBSYSTEM:CONSOLE".to_string());
+        args.push("kernel32.lib".to_string());
         let windows_lib_paths = resolve_windows_link_lib_paths();
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
