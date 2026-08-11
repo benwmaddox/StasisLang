@@ -8,18 +8,29 @@ global host_req_flags: i32;
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global score: i32;
+global lifecycle_mode: i32;
+global entry_trace: i32;
 
 function main(): i32 {
+    entry_trace = 1;
     score = 10;
+    if (lifecycle_mode == 1) {
+        return 11;
+    }
     return 0;
 }
 
 function tick(): i32 {
+    entry_trace = entry_trace * 10 + 2;
     score += 5;
+    if (lifecycle_mode == 2) {
+        return 22;
+    }
     return 0;
 }
 
 function render(): i32 {
+    entry_trace = entry_trace * 10 + 3;
     gfx_cmd_i32[0] = 1196967473;
     gfx_cmd_i32[1] = 4;
     gfx_cmd_i32[2] = 3;
@@ -42,6 +53,9 @@ function render(): i32 {
     gfx_cmd_f32[80001] = 0.2;
     gfx_cmd_f32[80002] = 0.1;
     gfx_cmd_f32[80003] = 1.0;
+    if (lifecycle_mode == 3) {
+        return 33;
+    }
     return 0;
 }
 
