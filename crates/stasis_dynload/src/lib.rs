@@ -1194,36 +1194,42 @@ fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, Stri
 
 pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            // A release bundle is one unit. Never let an environment override replace its sibling
-            // runtime with a different build.
-            for file_name in runtime_library_file_names() {
-                out.push(exe_dir.join(file_name));
-            }
+    let configured = [
+        std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH"),
+        // Preserve the original variable as a compatibility alias for existing Windows workflows.
+        std::env::var_os("STASIS_RUNTIME_DLL_PATH"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(PathBuf::from)
+    .collect::<Vec<_>>();
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    if let Some(exe_dir) = executable_dir {
+        // A release bundle is one unit. Never let an environment override replace its sibling
+        // runtime with a different build.
+        for file_name in runtime_library_file_names() {
+            out.push(exe_dir.join(file_name));
+        }
+        out.extend(configured.iter().cloned());
 
-            // Dev-friendly default: locate the runtime built under the repo tree by
-            // walking a few parents from the executable location.
-            for ancestor in exe_dir.ancestors().take(6) {
-                for file_name in runtime_library_file_names() {
-                    for configuration in [None, Some("Release"), Some("Debug")] {
-                        let mut candidate = ancestor.join("runtime").join("build").join("bin");
-                        if let Some(configuration) = configuration {
-                            candidate.push(configuration);
-                        }
-                        candidate.push(file_name);
-                        out.push(candidate);
+        // Dev-friendly default: locate the runtime built under the repo tree by
+        // walking a few parents from the executable location.
+        for ancestor in exe_dir.ancestors().take(6) {
+            for file_name in runtime_library_file_names() {
+                for configuration in [None, Some("Release"), Some("Debug")] {
+                    let mut candidate = ancestor.join("runtime").join("build").join("bin");
+                    if let Some(configuration) = configuration {
+                        candidate.push(configuration);
                     }
+                    candidate.push(file_name);
+                    out.push(candidate);
                 }
             }
         }
-    }
-    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH") {
-        out.push(PathBuf::from(configured));
-    }
-    // Preserve the original variable as a compatibility alias for existing Windows workflows.
-    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
-        out.push(PathBuf::from(configured));
+    } else {
+        out.extend(configured);
     }
 
     // Allow loading from the current working directory too (handy for ad-hoc runs).

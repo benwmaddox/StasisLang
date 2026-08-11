@@ -140,6 +140,12 @@ jobs:
           $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
           cargo test -p stasis --test desktop_display_metrics_seam -- --test-threads=1 --nocapture
 
+      - name: Test desktop manifest asset rendering seam
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          cargo test -p stasis --test desktop_manifest_assets_seam -- --test-threads=1 --nocapture
+
       - name: Bootstrap Compile Smoke (compiler .stasis)
         # Compiler/JIT tests share process-global dispatch and runtime registration state.
         run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture
