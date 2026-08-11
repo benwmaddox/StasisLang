@@ -3748,6 +3748,79 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const WINDOW_REQUEST_MAILBOX_FIXTURE: &str =
+        include_str!("../../../tests/stasis/seams/window_request_mailbox_probe.stasis");
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AppliedWindowRequest {
+        sequence: i32,
+        mode: &'static str,
+        width: i32,
+        height: i32,
+    }
+
+    #[derive(Default)]
+    struct RecordingWindowHost {
+        last_sequence: i32,
+        applications: Vec<AppliedWindowRequest>,
+    }
+
+    impl RecordingWindowHost {
+        fn establish_baseline(&mut self, jit: &JitProcess) {
+            self.last_sequence = jit.read_i32_global_path("host_req_seq");
+        }
+
+        fn apply_pending(&mut self, jit: &JitProcess) {
+            let sequence = jit.read_i32_global_path("host_req_seq");
+            if sequence == self.last_sequence {
+                return;
+            }
+            self.last_sequence = sequence;
+            let flags = jit.read_i32_global_path("host_req_flags");
+            self.applications.push(AppliedWindowRequest {
+                sequence,
+                mode: if flags & 1 != 0 {
+                    "windowed"
+                } else if flags & 2 != 0 {
+                    "fullscreen"
+                } else {
+                    "unknown"
+                },
+                width: jit.read_i32_global_path("host_req_window_w_px"),
+                height: jit.read_i32_global_path("host_req_window_h_px"),
+            });
+        }
+    }
+
+    fn expected_window_requests() -> Vec<AppliedWindowRequest> {
+        vec![
+            AppliedWindowRequest {
+                sequence: 1,
+                mode: "windowed",
+                width: 960,
+                height: 540,
+            },
+            AppliedWindowRequest {
+                sequence: 2,
+                mode: "fullscreen",
+                width: 960,
+                height: 540,
+            },
+            AppliedWindowRequest {
+                sequence: 3,
+                mode: "windowed",
+                width: 1280,
+                height: 720,
+            },
+            AppliedWindowRequest {
+                sequence: 4,
+                mode: "windowed",
+                width: 1280,
+                height: 720,
+            },
+        ]
+    }
+
     #[test]
     fn tick_budget_diagnostics_report_bounded_average_p99_and_overruns() {
         let mut diagnostics = TickBudgetDiagnostics::new(100, 7);
@@ -3984,6 +4057,104 @@ mod tests {
         assert!(
             baseline < guest_main && guest_main < initial_rebind && initial_rebind < initial_apply,
             "Unix packaged AOT must baseline before main and apply after binding"
+        );
+    }
+
+    fn verify_window_request_log(actual: &[AppliedWindowRequest]) -> Result<(), String> {
+        let expected = expected_window_requests();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "window request application order mismatch: expected {expected:?}, actual {actual:?}"
+            ))
+        }
+    }
+
+    fn compile_window_request_fixture(jit: &mut JitProcess) {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        jit.set_project_root(repository_root.to_string_lossy())
+            .expect("set mailbox fixture project root");
+        jit.upsert_file(
+            "tests/stasis/seams/window_request_mailbox_probe.stasis",
+            WINDOW_REQUEST_MAILBOX_FIXTURE,
+        );
+        jit.compile().expect("compile mailbox fixture");
+    }
+
+    #[test]
+    fn stasis_window_requests_apply_once_after_pre_main_baseline() {
+        use std::cell::RefCell;
+
+        let jit = RefCell::new(JitProcess::new());
+        compile_window_request_fixture(&mut jit.borrow_mut());
+        let host = RefCell::new(RecordingWindowHost::default());
+
+        let main_result = run_guest_main_with_initial_host_requests(
+            || {
+                host.borrow_mut().establish_baseline(&jit.borrow());
+                Ok(())
+            },
+            || {
+                jit.borrow_mut()
+                    .execute_i32_noarg_by_name("main")
+                    .map_err(|error| error.to_string())
+            },
+            || {
+                host.borrow_mut().apply_pending(&jit.borrow());
+                Ok(())
+            },
+        )
+        .expect("run guest main with request boundary");
+        assert_eq!(main_result, 0);
+
+        for _ in 0..4 {
+            host.borrow_mut().apply_pending(&jit.borrow());
+            host.borrow_mut().apply_pending(&jit.borrow());
+            assert_eq!(
+                jit.borrow_mut()
+                    .execute_i32_noarg_by_name("tick")
+                    .expect("execute mailbox tick"),
+                0
+            );
+        }
+        host.borrow_mut().apply_pending(&jit.borrow());
+        host.borrow_mut().apply_pending(&jit.borrow());
+        verify_window_request_log(&host.borrow().applications).expect("ordered request log");
+
+        let evidence_path = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("seam-tests/it-005-window-request.json");
+        fs::create_dir_all(evidence_path.parent().expect("evidence directory"))
+            .expect("create evidence directory");
+        fs::write(
+            &evidence_path,
+            format!(
+                "{{\"schema\":\"stasis.seam_test.v1\",\"test\":\"IT-005\",\"fixture\":\"window-request-v1\",\"target\":\"{}-{}\",\"backend\":\"jit\",\"baseline\":0,\"events\":[[1,\"windowed\",960,540],[2,\"fullscreen\",960,540],[3,\"windowed\",1280,720],[4,\"windowed\",1280,720]],\"final_sequence\":4,\"final_mode\":\"windowed\",\"final_width\":1280,\"final_height\":720}}\n",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+            ),
+        )
+        .expect("write window request evidence");
+        drop(jit);
+
+        let mut inverted_jit = JitProcess::new();
+        compile_window_request_fixture(&mut inverted_jit);
+        assert_eq!(
+            inverted_jit
+                .execute_i32_noarg_by_name("main")
+                .expect("execute inverted guest main"),
+            0
+        );
+        let mut inverted_host = RecordingWindowHost::default();
+        inverted_host.establish_baseline(&inverted_jit);
+        inverted_host.apply_pending(&inverted_jit);
+        let inversion = verify_window_request_log(&inverted_host.applications)
+            .expect_err("post-main baseline must lose main's request");
+        assert!(
+            inversion.contains("actual []"),
+            "unexpected inversion: {inversion}"
         );
     }
 

@@ -107,6 +107,7 @@ def main() -> int:
                 integration_test = rel_path.as_posix() in {
                     "tests/stasis/rust_native_tick_input_snapshot.stasis",
                     "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
+                    "tests/stasis/seams/window_request_mailbox_probe.stasis",
                 }
                 if not inside_stdlib and not integration_test:
                     errors.append(
