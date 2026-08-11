@@ -128,6 +128,12 @@ jobs:
           python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png --runtime-log target/render-parity-ci/runtime.log --evidence target/render-parity-ci/evidence.json --write-evidence --require-load-details --profile portable --stage second_frame
           cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
 
+      - name: Test desktop SDL input to JIT frame seam
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          cargo test -p stasis --test desktop_input_frame_seam -- --test-threads=1 --nocapture
+
       - name: Bootstrap Compile Smoke (compiler .stasis)
         # Compiler/JIT tests share process-global dispatch and runtime registration state.
         run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture
