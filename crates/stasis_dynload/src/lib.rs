@@ -843,6 +843,7 @@ pub struct StasisGraphicsApi {
     stasis_host_bulk_apply_requests: usize,
     stasis_host_set_performance_metrics: usize,
     stasis_gfx_submit_u8: usize,
+    stasis_test_get_render_submission_state: Option<usize>,
     stasis_sleep_ms: usize,
 }
 
@@ -875,6 +876,9 @@ impl StasisGraphicsApi {
         let stasis_host_set_performance_metrics =
             lib.symbol_address("stasis_host_set_performance_metrics")?;
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
+        let stasis_test_get_render_submission_state = lib
+            .symbol_address("stasis_test_get_render_submission_state")
+            .ok();
         let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
         Ok(Self {
             _lib: lib,
@@ -884,6 +888,7 @@ impl StasisGraphicsApi {
             stasis_host_bulk_apply_requests,
             stasis_host_set_performance_metrics,
             stasis_gfx_submit_u8,
+            stasis_test_get_render_submission_state,
             stasis_sleep_ms,
         })
     }
@@ -1015,6 +1020,25 @@ impl StasisGraphicsApi {
                 unsafe { std::mem::transmute(self.stasis_gfx_submit_u8) };
             callback(cmd_i32.as_mut_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
             Ok(())
+        }
+    }
+
+    pub fn test_render_submission_state(&self) -> Result<Option<[i32; 5]>, String> {
+        let Some(address) = self.stasis_test_get_render_submission_state else {
+            return Ok(None);
+        };
+        let mut state = [0; 5];
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*mut i32, i32) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            return Ok((callback(state.as_mut_ptr(), state.len() as i32) != 0).then_some(state));
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(*mut i32, i32) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            Ok((callback(state.as_mut_ptr(), state.len() as i32) != 0).then_some(state))
         }
     }
 

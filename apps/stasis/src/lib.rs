@@ -46,7 +46,7 @@ use stasis_runner::swap::contracts::{
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -55,6 +55,49 @@ use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
 const TICK_BUDGET_SAMPLE_LIMIT: usize = 4096;
+const DESKTOP_FRAME_EVIDENCE_ENV: &str = "STASIS_DESKTOP_FRAME_EVIDENCE";
+
+struct DesktopFrameEvidence {
+    file: fs::File,
+}
+
+impl DesktopFrameEvidence {
+    fn from_env() -> Result<Option<Self>, String> {
+        let Some(path) = std::env::var_os(DESKTOP_FRAME_EVIDENCE_ENV).map(PathBuf::from) else {
+            return Ok(None);
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create frame evidence directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let file = fs::File::create(&path).map_err(|error| {
+            format!(
+                "failed to create frame evidence {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Some(Self { file }))
+    }
+
+    fn record(
+        &mut self,
+        frame: u64,
+        entry_revision: u64,
+        submission: [i32; 5],
+    ) -> Result<(), String> {
+        writeln!(
+            self.file,
+            "{{\"schema\":\"stasis.desktop_frame.v1\",\"frame\":{frame},\"entry_revision\":{entry_revision},\"accepted\":{},\"rejected\":{},\"presented\":{},\"validation\":{},\"trace\":{}}}",
+            submission[0], submission[1], submission[2], submission[3], submission[4] as u32
+        )
+        .and_then(|_| self.file.flush())
+        .map_err(|error| format!("failed to write desktop frame evidence: {error}"))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TickBudgetDiagnostics {
@@ -1980,6 +2023,7 @@ fn run_play_in_process_inner(
     );
 
     let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
+    let mut frame_evidence = DesktopFrameEvidence::from_env()?;
     let configured_title = window_title.or_else(|| {
         live.as_ref()
             .and_then(|(_, config)| config.window_title.as_deref())
@@ -2259,6 +2303,17 @@ fn run_play_in_process_inner(
 
         gfx.host_set_performance_metrics(tick_micros, render_micros)?;
         gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
+        if let Some(evidence) = frame_evidence.as_mut() {
+            let submission = gfx.test_render_submission_state()?.ok_or_else(|| {
+                format!(
+                    "{DESKTOP_FRAME_EVIDENCE_ENV} requires a graphics runtime with STASIS_ENABLE_TEST_INPUT=1"
+                )
+            })?;
+            let entry_revision = stasis_dynload::jit_host_entry_targets()
+                .map(|targets| targets.revision)
+                .ok_or_else(|| "desktop frame has no published JIT entry table".to_string())?;
+            evidence.record(ticks_executed.saturating_add(1), entry_revision, submission)?;
+        }
         if tick_sleep_micros > 0 {
             let ms = (tick_sleep_micros / 1000) as i32;
             if ms > 0 {

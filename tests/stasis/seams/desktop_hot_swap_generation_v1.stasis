@@ -1,0 +1,39 @@
+global gfx_cmd_i32: i32[34608];
+global gfx_cmd_f32: f32[108676];
+global gfx_cmd_u8: u8[65536];
+global tick_generation: i32;
+
+function main(): i32 {
+    tick_generation = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    tick_generation = 101;
+    return 0;
+}
+
+function render(): i32 {
+    gfx_cmd_i32[0] = 1196967473;
+    gfx_cmd_i32[1] = 4;
+    gfx_cmd_i32[2] = 3;
+    gfx_cmd_i32[3] = 0;
+    gfx_cmd_i32[4] = 0;
+    gfx_cmd_i32[7] = 0;
+    gfx_cmd_i32[9] = 0;
+    gfx_cmd_i32[22] = 0;
+    if (tick_generation == 101) {
+        gfx_cmd_f32[0] = 0.11;
+        gfx_cmd_f32[1] = 0.21;
+    } else {
+        gfx_cmd_f32[0] = 0.91;
+        gfx_cmd_f32[1] = 0.01;
+    }
+    gfx_cmd_f32[2] = 0.31;
+    gfx_cmd_f32[3] = 1.0;
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}
