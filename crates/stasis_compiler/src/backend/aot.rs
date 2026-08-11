@@ -2160,9 +2160,10 @@ mod tests {
         .expect("write asset extern seam evidence");
 
         let missing_declaration = ASSET_EXTERN_FIXTURE.replace(
-            "extern function load_font(path: string, size: i32): i32;\n",
+            "extern function load_font(path: string, size: i32): i32;",
             "",
         );
+        assert_ne!(missing_declaration, ASSET_EXTERN_FIXTURE);
         assert_asset_extern_diagnostic(&missing_declaration, "load_font");
         let wrong_signature = ASSET_EXTERN_FIXTURE.replace(
             "extern function load_font(path: string, size: i32): i32;",
