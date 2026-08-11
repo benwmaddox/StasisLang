@@ -23,16 +23,17 @@ set(SDLIMAGE_PNG_LIBPNG OFF CACHE BOOL "" FORCE)
 add_subdirectory("${STASIS_SDL3_IMAGE_SOURCE}" "${CMAKE_BINARY_DIR}/sdl3_image")
 add_subdirectory("${STASIS_ROOT}/runtime" "${CMAKE_BINARY_DIR}/stasis_runtime")
 
-file(GLOB STASIS_AOT_OBJECTS CONFIGURE_DEPENDS "${STASIS_AOT_DIR}/*.o")
-if(NOT STASIS_AOT_OBJECTS)
-    message(FATAL_ERROR "No Android AOT objects found in ${STASIS_AOT_DIR}")
+include("${STASIS_AOT_DIR}/published_aot_objects.cmake")
+if(NOT STASIS_PUBLISHED_AOT_OBJECTS)
+    message(FATAL_ERROR "No published Android AOT objects found in ${STASIS_AOT_DIR}")
 endif()
 
 add_library(main SHARED
     "${STASIS_ROOT}/common/stasis_mobile_main.c"
     "${CMAKE_CURRENT_LIST_DIR}/stasis_android_assets.c"
     "${STASIS_AOT_DIR}/published_aot_bindings.c"
-    ${STASIS_AOT_OBJECTS}
+    ${STASIS_PUBLISHED_AOT_OBJECTS}
 )
 target_include_directories(main PRIVATE "${STASIS_AOT_DIR}" "${STASIS_ROOT}/runtime")
 target_link_libraries(main PRIVATE stasis_mobile_runtime SDL3::SDL3 SDL3_image::SDL3_image log android)
+target_link_options(main PRIVATE "-Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/libmain.map")

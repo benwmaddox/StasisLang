@@ -6053,7 +6053,10 @@ mod tests {
             fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read Android CMake");
         assert!(android_cmake.contains("stasis_mobile_runtime"));
-        assert!(android_cmake.contains("STASIS_AOT_OBJECTS"));
+        assert!(android_cmake.contains("published_aot_objects.cmake"));
+        assert!(android_cmake.contains("STASIS_PUBLISHED_AOT_OBJECTS"));
+        assert!(!android_cmake.contains("file(GLOB STASIS_AOT_OBJECTS"));
+        assert!(android_cmake.contains("libmain.map"));
         assert!(!android_cmake.contains("stasis_dynload"));
         let android_gradle = fs::read_to_string(android.join("android/app/build.gradle"))
             .expect("read Android Gradle");

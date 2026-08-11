@@ -37,6 +37,7 @@ jobs:
           python tools/ci/check_runtime_abi_contract.py
           python -m unittest tools.ci.test_cargo_cache
           python -m unittest tools.ci.test_runtime_abi_contract
+          python -m unittest tools.ci.test_verify_android_native_library
           python -m unittest tools.ci.test_sdl3_migration
           python -m unittest tools.ci.test_windows_vs_generator
 
@@ -334,3 +335,19 @@ jobs:
           cargo run -p stasis -- --workspace samples/mobile_storage_link package-mobile --target android-arm64 --out dist/android --development-build
           gradle -p samples/mobile_storage_link/dist/android/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain
           test -f samples/mobile_storage_link/dist/android/android/app/build/outputs/apk/debug/app-debug.apk
+          native_library=$(find samples/mobile_storage_link/dist/android/android/app/build/intermediates/cxx/Debug -path '*/obj/arm64-v8a/libmain.so' -print -quit)
+          link_map=$(find samples/mobile_storage_link/dist/android/android/app/.cxx/Debug -name libmain.map -print -quit)
+          test -n "$native_library"
+          test -n "$link_map"
+          python tools/ci/verify_android_native_library.py \
+            --library "$native_library" \
+            --bundle-manifest samples/mobile_storage_link/dist/android/aot/mobile_aot_bundle_manifest.json \
+            --link-map "$link_map" \
+            --readelf "$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            --evidence target/android-native-link-evidence.json
+
+      - name: Upload Android native-link evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-native-link-evidence
+          path: target/android-native-link-evidence.json
