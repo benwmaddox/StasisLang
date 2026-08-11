@@ -172,6 +172,9 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         .expect("harness trace");
     assert_eq!(trace, EXPECTED_TRACE, "first generated render trace");
     assert!(stdout.contains("state=15 frames=1 rects=1"));
+    assert!(stdout.contains(
+        "IT-013 order=123 paused_poll=1 reinit=1 main_stop=11 tick_stop=22 render_stop=33 frames_after_failures=0"
+    ));
 
     let evidence = json!({
         "schema": "stasis.seam_test.v1",
@@ -193,4 +196,23 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     )
     .expect("write evidence");
     eprintln!("IT-012 evidence: {evidence}");
+
+    let lifecycle_evidence = json!({
+        "schema": "stasis.seam_test.v1",
+        "test_id": "IT-013",
+        "status": "passed",
+        "target": "windows-native-aot+c-mobile-runtime",
+        "entry_order": 123,
+        "paused": {"polls": 1, "tick_or_render_calls": 0},
+        "reinitialize": {"entry_order": 1, "score": 10},
+        "stop_results": {"main": 11, "tick": 22, "render": 33},
+        "frames_after_tick_or_render_failure": 0
+    });
+    let lifecycle_path = evidence_root().join("it-013-generated-mobile-aot-lifecycle.json");
+    fs::write(
+        lifecycle_path,
+        serde_json::to_vec_pretty(&lifecycle_evidence).expect("serialize lifecycle evidence"),
+    )
+    .expect("write lifecycle evidence");
+    eprintln!("IT-013 evidence: {lifecycle_evidence}");
 }

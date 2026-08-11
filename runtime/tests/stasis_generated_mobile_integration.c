@@ -24,6 +24,11 @@ extern int32_t stasis_mobile_render_entry(void);
 static int32_t submitted_frames;
 static uint32_t submitted_trace;
 static int32_t submitted_rects;
+static int32_t polled_events;
+static int32_t pause_transitions;
+static int32_t last_pause_value;
+static int32_t shutdowns;
+static int32_t next_bind_mode;
 
 static int32_t hash_path(const char *text) {
     uint32_t hash = 2166136261u;
@@ -38,8 +43,11 @@ int stasis_init_window(int width, int height, const char *title) {
     return width == 320 && height == 180 && title != NULL;
 }
 int stasis_should_quit(void) { return 0; }
-int stasis_mobile_poll_events(void) { return 0; }
-void stasis_mobile_set_paused(int paused) { (void)paused; }
+int stasis_mobile_poll_events(void) { polled_events += 1; return 0; }
+void stasis_mobile_set_paused(int paused) {
+    pause_transitions += 1;
+    last_pause_value = paused;
+}
 void stasis_host_get_frame(int32_t *out_i32, float *out_f32) {
     out_i32[10] += 1;
     out_f32[50] = 320.0f;
@@ -69,7 +77,7 @@ void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us) {
     (void)tick_us;
     (void)render_us;
 }
-void stasis_shutdown(void) {}
+void stasis_shutdown(void) { shutdowns += 1; }
 
 int stasis_audio_init(int rate, int channels, int latency) {
     return rate > 0 && channels > 0 && latency > 0;
@@ -133,22 +141,87 @@ int stasis_clipboard_save_ascii(const char *value, int length) {
     return value != NULL && length >= 0;
 }
 
+static void bind_runtime_with_mode(void) {
+    stasis_aot_bind_runtime_globals();
+    stasis_jit_global_i32_store(hash_path("lifecycle_mode"), next_bind_mode);
+}
+
+static void reset_frame_observations(void) {
+    submitted_frames = 0;
+    submitted_trace = 0;
+    submitted_rects = 0;
+}
+
 int main(void) {
     const StasisMobileRuntimeConfig config = {320, 180, "IT-012 generated mobile AOT"};
     const StasisMobileGameEntries entries = {
-        stasis_aot_bind_runtime_globals,
+        bind_runtime_with_mode,
         stasis_mobile_main_entry,
         stasis_mobile_tick_entry,
         stasis_mobile_render_entry
     };
+    next_bind_mode = 0;
     CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
     CHECK(stasis_jit_global_i32_load(hash_path("score")) == 10);
+    CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 1);
+    CHECK(stasis_jit_global_i32_array_load(hash_path("host_i32"), 0, 10) == 0);
+    stasis_mobile_runtime_set_paused(1);
+    CHECK(pause_transitions == 1);
+    CHECK(last_pause_value == 1);
+    CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
+    CHECK(polled_events == 1);
+    CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 1);
+    CHECK(stasis_jit_global_i32_load(hash_path("score")) == 10);
+    CHECK(submitted_frames == 0);
+    stasis_mobile_runtime_set_paused(0);
+    CHECK(pause_transitions == 2);
+    CHECK(last_pause_value == 0);
     CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
     CHECK(stasis_jit_global_i32_load(hash_path("score")) == 15);
+    CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 123);
     CHECK(submitted_frames == 1);
     CHECK(submitted_rects == 1);
     CHECK(submitted_trace == IT012_EXPECTED_TRACE);
     printf("stasis.seam_test.v1 IT-012 state=15 frames=1 rects=1 trace=%u\n", submitted_trace);
     stasis_mobile_runtime_shutdown();
+
+    CHECK(stasis_mobile_runtime_is_initialized() == 0);
+    CHECK(stasis_mobile_runtime_last_entry_result() == 0);
+    CHECK(shutdowns == 1);
+    reset_frame_observations();
+    CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
+    CHECK(stasis_jit_global_i32_load(hash_path("score")) == 10);
+    CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 1);
+    CHECK(stasis_jit_global_i32_array_load(hash_path("host_i32"), 0, 10) == 0);
+    CHECK(submitted_frames == 0);
+    stasis_mobile_runtime_shutdown();
+
+    next_bind_mode = 2;
+    reset_frame_observations();
+    CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
+    CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    CHECK(stasis_mobile_runtime_last_entry_result() == 22);
+    CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 12);
+    CHECK(submitted_frames == 0);
+    stasis_mobile_runtime_shutdown();
+
+    next_bind_mode = 3;
+    reset_frame_observations();
+    CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
+    CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    CHECK(stasis_mobile_runtime_last_entry_result() == 33);
+    CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 123);
+    CHECK(submitted_frames == 0);
+    stasis_mobile_runtime_shutdown();
+
+    next_bind_mode = 1;
+    reset_frame_observations();
+    CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    CHECK(stasis_mobile_runtime_last_entry_result() == 11);
+    CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 1);
+    CHECK(submitted_frames == 0);
+    stasis_mobile_runtime_shutdown();
+    CHECK(shutdowns == 5);
+    printf("stasis.seam_test.v1 IT-013 order=123 paused_poll=1 reinit=1 main_stop=11 tick_stop=22 render_stop=33 frames_after_failures=0\n");
     return 0;
 }
