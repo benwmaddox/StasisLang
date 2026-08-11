@@ -139,7 +139,23 @@ int main(void) {
     CHECK(!stasis_render_text_span_is_valid(1, INT32_MAX, 5));
     CHECK(stasis_render_text_span_is_valid(0, 4, 5));
     CHECK(!stasis_render_text_span_is_valid(0, 5, 5));
-    CHECK(stasis_render_trace(second_i32, second_f32, second_u8) != 0);
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_TEXT_SPAN);
+    CHECK(strcmp(stasis_render_validation_name(STASIS_RENDER_BAD_TEXT_SPAN), "invalid_text_span") == 0);
+    CHECK(strcmp(stasis_render_validation_stage(STASIS_RENDER_BAD_TEXT_SPAN), "text_span") == 0);
+    CHECK(stasis_render_trace(second_i32, second_f32, second_u8) == 0);
+
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_i32[STASIS_RENDER_I_LINE_COUNT] = -1;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_NEGATIVE_COUNT);
+    CHECK(strcmp(stasis_render_validation_stage(STASIS_RENDER_NEGATIVE_COUNT), "command_counts") == 0);
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_i32[STASIS_RENDER_I_SPRITE_COUNT] = STASIS_RENDER_MAX_SPRITES + 1;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_EXCESSIVE_COUNT);
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_i32[STASIS_RENDER_I_ORDER_BASE] =
+        STASIS_RENDER_ORDER_TEXT * STASIS_RENDER_ORDER_KIND_SCALE + 2;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_ORDER_REFERENCE);
+    CHECK(strcmp(stasis_render_validation_stage(STASIS_RENDER_BAD_ORDER_REFERENCE), "order_reference") == 0);
 
     free(first_i32); free(first_f32); free(first_u8);
     free(second_i32); free(second_f32); free(second_u8);

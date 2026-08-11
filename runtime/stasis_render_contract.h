@@ -97,8 +97,22 @@ typedef enum StasisRenderValidation {
     STASIS_RENDER_NULL_I32 = 1,
     STASIS_RENDER_NULL_F32 = 2,
     STASIS_RENDER_BAD_MAGIC = 3,
-    STASIS_RENDER_BAD_VERSION = 4
+    STASIS_RENDER_BAD_VERSION = 4,
+    STASIS_RENDER_NEGATIVE_COUNT = 5,
+    STASIS_RENDER_EXCESSIVE_COUNT = 6,
+    STASIS_RENDER_BAD_TEXT_SPAN = 7,
+    STASIS_RENDER_BAD_ORDER_REFERENCE = 8
 } StasisRenderValidation;
+
+static inline int stasis_render_text_span_is_valid(
+    int32_t byte_offset,
+    int32_t byte_length,
+    int32_t text_bytes_used
+) {
+    return byte_offset >= 0 && byte_length >= 0 &&
+        byte_offset < text_bytes_used &&
+        byte_length < text_bytes_used - byte_offset;
+}
 
 static inline StasisRenderValidation stasis_render_validate(
     const int32_t *cmd_i32,
@@ -114,6 +128,53 @@ static inline StasisRenderValidation stasis_render_validate(
         cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_V4_VERSION) {
         return STASIS_RENDER_BAD_VERSION;
     }
+    const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
+    const int32_t line_count = cmd_i32[STASIS_RENDER_I_LINE_COUNT];
+    const int32_t sprite_count = cmd_i32[STASIS_RENDER_I_SPRITE_COUNT];
+    const int32_t text_count = cmd_i32[STASIS_RENDER_I_TEXT_COUNT];
+    const int32_t text_bytes_used = cmd_i32[STASIS_RENDER_I_TEXT_BYTES_USED];
+    const int32_t rect_count = version == STASIS_RENDER_V4_VERSION
+        ? cmd_i32[STASIS_RENDER_I_RECT_COUNT] : 0;
+    const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
+        ? cmd_i32[STASIS_RENDER_I_ORDER_COUNT] : 0;
+    if (line_count < 0 || sprite_count < 0 || text_count < 0 ||
+        text_bytes_used < 0 || rect_count < 0 || order_count < 0) {
+        return STASIS_RENDER_NEGATIVE_COUNT;
+    }
+    if (line_count > STASIS_RENDER_MAX_LINES ||
+        rect_count > STASIS_RENDER_MAX_GEOMETRY - line_count ||
+        sprite_count > STASIS_RENDER_MAX_SPRITES ||
+        text_count > STASIS_RENDER_MAX_TEXT ||
+        text_bytes_used > STASIS_RENDER_TEXT_MAX_BYTES ||
+        order_count > STASIS_RENDER_MAX_ORDER) {
+        return STASIS_RENDER_EXCESSIVE_COUNT;
+    }
+    for (int32_t index = 0; index < text_count; index++) {
+        const int32_t base = STASIS_RENDER_I_TEXT_BASE +
+            index * STASIS_RENDER_TEXT_I32_STRIDE;
+        const int32_t offset = cmd_i32[base + 1];
+        const int32_t length = cmd_i32[base + 2];
+        if (offset < 0) {
+            if (offset == INT32_MIN || length != 0) {
+                return STASIS_RENDER_BAD_TEXT_SPAN;
+            }
+        } else if (!stasis_render_text_span_is_valid(
+                offset, length, text_bytes_used)) {
+            return STASIS_RENDER_BAD_TEXT_SPAN;
+        }
+    }
+    for (int32_t order = 0; order < order_count; order++) {
+        const int32_t entry = cmd_i32[STASIS_RENDER_I_ORDER_BASE + order];
+        if (entry < 0) return STASIS_RENDER_BAD_ORDER_REFERENCE;
+        const int32_t kind = entry / STASIS_RENDER_ORDER_KIND_SCALE;
+        const int32_t index = entry % STASIS_RENDER_ORDER_KIND_SCALE;
+        const int valid =
+            (kind == STASIS_RENDER_ORDER_LINE && index < line_count) ||
+            (kind == STASIS_RENDER_ORDER_RECT && index < rect_count) ||
+            (kind == STASIS_RENDER_ORDER_SPRITE && index < sprite_count) ||
+            (kind == STASIS_RENDER_ORDER_TEXT && index < text_count);
+        if (!valid) return STASIS_RENDER_BAD_ORDER_REFERENCE;
+    }
     return STASIS_RENDER_VALID;
 }
 
@@ -126,7 +187,32 @@ static inline const char *stasis_render_validation_name(
         case STASIS_RENDER_NULL_F32: return "missing_f32_buffer";
         case STASIS_RENDER_BAD_MAGIC: return "invalid_magic";
         case STASIS_RENDER_BAD_VERSION: return "unsupported_version";
+        case STASIS_RENDER_NEGATIVE_COUNT: return "negative_count";
+        case STASIS_RENDER_EXCESSIVE_COUNT: return "excessive_count";
+        case STASIS_RENDER_BAD_TEXT_SPAN: return "invalid_text_span";
+        case STASIS_RENDER_BAD_ORDER_REFERENCE: return "invalid_order_reference";
         default: return "unknown_validation_failure";
+    }
+}
+
+static inline const char *stasis_render_validation_stage(
+    StasisRenderValidation validation
+) {
+    switch (validation) {
+        case STASIS_RENDER_BAD_MAGIC:
+        case STASIS_RENDER_BAD_VERSION:
+        case STASIS_RENDER_NULL_I32:
+        case STASIS_RENDER_NULL_F32:
+            return "command_header";
+        case STASIS_RENDER_NEGATIVE_COUNT:
+        case STASIS_RENDER_EXCESSIVE_COUNT:
+            return "command_counts";
+        case STASIS_RENDER_BAD_TEXT_SPAN:
+            return "text_span";
+        case STASIS_RENDER_BAD_ORDER_REFERENCE:
+            return "order_reference";
+        default:
+            return "none";
     }
 }
 
@@ -151,16 +237,6 @@ static inline int32_t stasis_render_rect_count(
     return stasis_render_clamp_count(
         cmd_i32[STASIS_RENDER_I_RECT_COUNT],
         STASIS_RENDER_MAX_GEOMETRY - line_count);
-}
-
-static inline int stasis_render_text_span_is_valid(
-    int32_t byte_offset,
-    int32_t byte_length,
-    int32_t text_bytes_used
-) {
-    return byte_offset >= 0 && byte_length >= 0 &&
-        byte_offset < text_bytes_used &&
-        byte_length < text_bytes_used - byte_offset;
 }
 
 static inline uint32_t stasis_render_trace_mix_u32(uint32_t hash, uint32_t value) {
@@ -277,7 +353,7 @@ static inline uint32_t stasis_render_trace(
     const float *cmd_f32,
     const uint8_t *cmd_u8
 ) {
-    if (!stasis_render_is_valid(cmd_i32) || cmd_f32 == NULL) return 0;
+    if (stasis_render_validate(cmd_i32, cmd_f32) != STASIS_RENDER_VALID) return 0;
 
     const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
     const int32_t line_count = stasis_render_clamp_count(
