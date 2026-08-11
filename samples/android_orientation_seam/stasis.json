@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "name": "android_orientation_seam",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "android": {
+    "application_id": "com.stasislang.seam.it019",
+    "label": "Stasis Android Orientation Seam",
+    "orientation": "unspecified",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  }
+}

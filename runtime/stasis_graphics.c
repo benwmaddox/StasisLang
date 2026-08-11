@@ -161,6 +161,8 @@ static uint32_t g_render_rejected_frames = 0;
 static uint32_t g_render_presented_frames = 0;
 static uint32_t g_render_last_trace = 0;
 static StasisRenderValidation g_render_last_validation = STASIS_RENDER_VALID;
+static int32_t g_render_last_display_generation = 0;
+static int32_t g_render_last_density_generation = 0;
 static uint32_t g_render_logged_validation_mask = 0;
 static bool g_render_contract_logged = false;
 typedef struct {
@@ -4857,6 +4859,10 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
     g_render_last_validation = STASIS_RENDER_VALID;
     g_render_last_trace = stasis_render_trace(cmd_i32, cmd_f32, cmd_u8);
     stasis_stamp_display_metadata(cmd_i32);
+    g_render_last_display_generation =
+        cmd_i32[STASIS_RENDER_I_DISPLAY_GENERATION];
+    g_render_last_density_generation =
+        cmd_i32[STASIS_RENDER_I_DENSITY_GENERATION];
     g_perf_render_started_counter = SDL_GetPerformanceCounter();
 
     const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
@@ -4975,6 +4981,10 @@ STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int3
     out_i32[2] = (int32_t)g_render_presented_frames;
     out_i32[3] = (int32_t)g_render_last_validation;
     out_i32[4] = (int32_t)g_render_last_trace;
+    if (capacity >= 7) {
+        out_i32[5] = g_render_last_display_generation;
+        out_i32[6] = g_render_last_density_generation;
+    }
     return 1;
 }
 
@@ -6152,6 +6162,8 @@ STASIS_EXPORT void stasis_shutdown(void) {
     g_render_presented_frames = 0;
     g_render_last_trace = 0;
     g_render_last_validation = STASIS_RENDER_VALID;
+    g_render_last_display_generation = 0;
+    g_render_last_density_generation = 0;
     g_render_logged_validation_mask = 0;
     g_render_contract_logged = false;
     g_resource_frame_ready = false;

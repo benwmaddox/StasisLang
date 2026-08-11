@@ -185,6 +185,174 @@ def validate_touch_markers(markers: list[dict], expectations: dict) -> list[dict
     return observed
 
 
+def validate_orientation_markers(
+    markers: list[dict], expectations: dict, surfaces: dict[str, tuple[int, int]]
+) -> list[dict]:
+    orientation = expectations["orientation"]
+    probes = {
+        item.get("probe_sequence"): item
+        for item in markers
+        if item.get("event") == "probe"
+    }
+    logical_width, logical_height = expectations["logical_size"]
+    coordinate_tolerance = orientation["coordinate_tolerance"]
+    surface_tolerance = orientation["surface_tolerance"]
+    touch_x, touch_y = orientation["touch"]
+    configured_width, configured_height = orientation["display_size"]
+    observed = []
+    for stage in orientation["stages"]:
+        sequence = stage["sequence"]
+        marker = probes.get(sequence)
+        if marker is None:
+            raise SeamError(
+                f"Android orientation seam is missing probe sequence {sequence}"
+            )
+        if marker.get("probe_kind") != stage["kind"]:
+            raise SeamError(
+                f"Android orientation probe {sequence} kind mismatch: "
+                f"expected={stage['kind']} actual={marker.get('probe_kind')}"
+            )
+        for field, expected, tolerance in (
+            ("logical_w", logical_width, 0.01),
+            ("logical_h", logical_height, 0.01),
+            ("x", touch_x, coordinate_tolerance),
+            ("y", touch_y, coordinate_tolerance),
+            ("x_n", touch_x / logical_width, 0.05),
+            ("y_n", touch_y / logical_height, 0.05),
+        ):
+            if abs(marker.get(field, 0.0) - expected) > tolerance:
+                raise SeamError(
+                    f"Android orientation probe {sequence} {field} mismatch: "
+                    f"expected={expected} actual={marker.get(field)} "
+                    f"tolerance={tolerance}"
+                )
+        if (
+            marker.get("pointer_id") != 1
+            or marker.get("pointer_count", 0) < 2
+            or marker.get("went_up") != 1
+        ):
+            raise SeamError(
+                f"Android orientation probe {sequence} pointer mismatch: "
+                f"id={marker.get('pointer_id')} count={marker.get('pointer_count')} "
+                f"went_up={marker.get('went_up')}"
+            )
+        surface = surfaces.get(stage["name"])
+        if surface is None:
+            raise SeamError(f"Android orientation stage {stage['name']} has no capture")
+        surface_width, surface_height = surface
+        expected_surface = (
+            (configured_width, configured_height)
+            if stage["orientation"] == "portrait"
+            else (configured_height, configured_width)
+        )
+        if any(
+            abs(actual - expected) > surface_tolerance
+            for actual, expected in zip(surface, expected_surface)
+        ):
+            raise SeamError(
+                f"Android orientation stage {stage['name']} configured size mismatch: "
+                f"expected={expected_surface[0]}x{expected_surface[1]} "
+                f"actual={surface_width}x{surface_height} "
+                f"tolerance={surface_tolerance}"
+            )
+        if surface_width % 2 == 0 or surface_height % 2 == 0:
+            raise SeamError(
+                f"Android orientation stage {stage['name']} is not odd-sized: "
+                f"{surface_width}x{surface_height}"
+            )
+        is_portrait = surface_height > surface_width
+        if is_portrait != (stage["orientation"] == "portrait"):
+            raise SeamError(
+                f"Android orientation stage {stage['name']} surface mismatch: "
+                f"{surface_width}x{surface_height}"
+            )
+        for prefix in ("native", "drawable"):
+            actual_width = marker.get(f"{prefix}_w", 0)
+            actual_height = marker.get(f"{prefix}_h", 0)
+            if (
+                abs(actual_width - surface_width) > surface_tolerance
+                or abs(actual_height - surface_height) > surface_tolerance
+            ):
+                raise SeamError(
+                    f"Android orientation probe {sequence} {prefix} size mismatch: "
+                    f"expected={surface_width}x{surface_height} "
+                    f"actual={actual_width}x{actual_height} "
+                    f"tolerance={surface_tolerance}"
+                )
+        expected_scale = min(
+            surface_width / logical_width, surface_height / logical_height
+        )
+        if abs(marker.get("content_scale", 0.0) - expected_scale) > 0.02:
+            raise SeamError(
+                f"Android orientation probe {sequence} content_scale mismatch: "
+                f"expected={expected_scale:.4f} actual={marker.get('content_scale')}"
+            )
+        expected_raster = max(1.0, min(8.0, expected_scale))
+        if abs(marker.get("raster_scale", 0.0) - expected_raster) > 0.02:
+            raise SeamError(
+                f"Android orientation probe {sequence} raster_scale mismatch: "
+                f"expected={expected_raster:.4f} actual={marker.get('raster_scale')}"
+            )
+        for field, expected in zip(
+            ("safe_x", "safe_y", "safe_w", "safe_h"),
+            orientation["safe_viewport"],
+        ):
+            if abs(marker.get(field, 0.0) - expected) > coordinate_tolerance:
+                raise SeamError(
+                    f"Android orientation probe {sequence} {field} mismatch: "
+                    f"expected={expected} actual={marker.get(field)}"
+                )
+        expected_checksum = (
+            4000
+            + sequence * 100
+            + stage["kind"] * 10
+            + marker.get("display_generation", 0)
+        )
+        if marker.get("state_checksum") != expected_checksum:
+            raise SeamError(
+                f"Android orientation probe {sequence} state_checksum mismatch: "
+                f"expected={expected_checksum} actual={marker.get('state_checksum')}"
+            )
+        for field in ("display_generation", "density_generation"):
+            frame_field = f"frame_{field}"
+            if marker.get(frame_field) != marker.get(field):
+                raise SeamError(
+                    f"Android orientation probe {sequence} {frame_field} mismatch: "
+                    f"guest={marker.get(field)} frame={marker.get(frame_field)}"
+                )
+        if not marker.get("command_trace"):
+            raise SeamError(
+                f"Android orientation probe {sequence} has an empty command trace"
+            )
+        observed.append(marker)
+    ticks = [item.get("probe_tick") for item in observed]
+    display_generations = [item.get("display_generation") for item in observed]
+    density_generations = [item.get("density_generation") for item in observed]
+    if any(not isinstance(value, int) for value in ticks) or any(
+        current >= following for current, following in zip(ticks, ticks[1:])
+    ):
+        raise SeamError(f"Android orientation probe ticks are not ordered: {ticks}")
+    if any(not isinstance(value, int) or value <= 0 for value in display_generations) or any(
+        current >= following
+        for current, following in zip(display_generations, display_generations[1:])
+    ):
+        raise SeamError(
+            "Android orientation display generations are not strictly ordered: "
+            f"{display_generations}"
+        )
+    if any(not isinstance(value, int) or value <= 0 for value in density_generations) or any(
+        current >= following
+        for current, following in zip(density_generations, density_generations[1:])
+    ):
+        raise SeamError(
+            "Android orientation density generations are not strictly ordered: "
+            f"{density_generations}"
+        )
+    if len({item["command_trace"] for item in observed}) != len(observed):
+        raise SeamError("Android orientation stages did not produce distinct frame traces")
+    return observed
+
+
 def logical_to_native(
     logical: list[float], logical_size: list[int], native_size: tuple[int, int]
 ) -> tuple[int, int]:
@@ -322,12 +490,48 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     return observed
 
 
+def parse_wm_size_override(output: str) -> str | None:
+    match = re.search(r"^Override size:\s*(\d+x\d+)\s*$", output, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def wait_for_surface(
+    adb: Path,
+    serial: str | None,
+    orientation: str,
+    expected_size: tuple[int, int],
+    tolerance: int,
+    deadline: float,
+    capture: Path,
+) -> tuple[int, int]:
+    last_size = None
+    while time.monotonic() < deadline:
+        capture.write_bytes(
+            _run(adb, serial, "exec-out", "screencap", "-p", text=False)
+        )
+        width, height, _ = read_png_rgb(capture)
+        last_size = (width, height)
+        matches = (height > width) == (orientation == "portrait")
+        expected = all(
+            abs(actual - target) <= tolerance
+            for actual, target in zip(last_size, expected_size)
+        )
+        if matches and expected and width % 2 == 1 and height % 2 == 1:
+            return last_size
+        time.sleep(0.25)
+    raise SeamError(
+        f"Android surface did not reach odd {orientation} dimensions "
+        f"{expected_size[0]}x{expected_size[1]}: {last_size}"
+    )
+
+
 def restore_device_state(
     adb: Path,
     serial: str | None,
     package_id: str,
     installed: bool,
     immersive_confirmation: str,
+    device_state: dict | None = None,
 ) -> list[str]:
     errors = []
     operations = []
@@ -338,6 +542,24 @@ def restore_device_state(
                 ("uninstall", ("uninstall", package_id)),
             )
         )
+    if device_state is not None:
+        size = device_state.get("wm_size_override")
+        operations.append(
+            (
+                "restore display size",
+                ("shell", "wm", "size", size if size else "reset"),
+            )
+        )
+        for namespace, key in (
+            ("system", "user_rotation"),
+            ("system", "accelerometer_rotation"),
+        ):
+            value = device_state.get(key, "null")
+            action = "delete" if not value or value == "null" else "put"
+            arguments = ("shell", "settings", action, namespace, key)
+            if action == "put":
+                arguments += (value,)
+            operations.append((f"restore {key}", arguments))
     if immersive_confirmation and immersive_confirmation != "null":
         operations.append(
             (
@@ -421,6 +643,34 @@ def main() -> int:
         "immersive_mode_confirmations",
         required=False,
     ).strip()
+    orientation = expectations.get("orientation")
+    device_state = None
+    if orientation is not None:
+        device_state = {
+            "wm_size_override": parse_wm_size_override(
+                _run(args.adb, args.serial, "shell", "wm", "size")
+            ),
+            "accelerometer_rotation": _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "settings",
+                "get",
+                "system",
+                "accelerometer_rotation",
+                required=False,
+            ).strip(),
+            "user_rotation": _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "settings",
+                "get",
+                "system",
+                "user_rotation",
+                required=False,
+            ).strip(),
+        }
     evidence = {
         "schema": SCHEMA,
         "test_id": test_id,
@@ -441,6 +691,8 @@ def main() -> int:
         },
         "artifacts": {"log": str(log_path), "capture": str(capture_path)},
     }
+    if device_state is not None:
+        evidence["original_device_state"] = device_state
     installed = False
     try:
         _run(
@@ -453,6 +705,37 @@ def main() -> int:
             "immersive_mode_confirmations",
             "confirmed",
         )
+        if orientation is not None:
+            first_stage = orientation["stages"][0]
+            display_width, display_height = orientation["display_size"]
+            _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "settings",
+                "put",
+                "system",
+                "accelerometer_rotation",
+                "0",
+            )
+            _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "wm",
+                "size",
+                f"{display_width}x{display_height}",
+            )
+            _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "settings",
+                "put",
+                "system",
+                "user_rotation",
+                str(first_stage["rotation"]),
+            )
         _run(args.adb, args.serial, "install", "-r", str(args.apk))
         installed = True
         _run(args.adb, args.serial, "logcat", "-c")
@@ -495,6 +778,8 @@ def main() -> int:
         if not first_pid:
             raise SeamError("generated Android shell exited before capture")
         touch_probes = []
+        orientation_probes = []
+        orientation_evidence = []
         if "touch" in expectations:
             initial_capture_path.write_bytes(
                 _run(args.adb, args.serial, "exec-out", "screencap", "-p", text=False)
@@ -571,6 +856,107 @@ def main() -> int:
                     )
             touch_probes = validate_touch_markers(markers, expectations)
             evidence["injected_gestures"] = injected_gestures
+        if orientation is not None:
+            surfaces = {}
+            for index, stage in enumerate(orientation["stages"]):
+                if index > 0:
+                    _run(
+                        args.adb,
+                        args.serial,
+                        "shell",
+                        "settings",
+                        "put",
+                        "system",
+                        "user_rotation",
+                        str(stage["rotation"]),
+                    )
+                stage_capture_path = args.output / f"{stage['name']}-frame.png"
+                configured_width, configured_height = orientation["display_size"]
+                expected_surface = (
+                    (configured_width, configured_height)
+                    if stage["orientation"] == "portrait"
+                    else (configured_height, configured_width)
+                )
+                surface = wait_for_surface(
+                    args.adb,
+                    args.serial,
+                    stage["orientation"],
+                    expected_surface,
+                    orientation["surface_tolerance"],
+                    min(deadline, time.monotonic() + 15),
+                    stage_capture_path,
+                )
+                surfaces[stage["name"]] = surface
+                touch_x, touch_y = logical_to_native(
+                    orientation["touch"], expectations["logical_size"], surface
+                )
+                _run(
+                    args.adb,
+                    args.serial,
+                    "shell",
+                    "input",
+                    "touchscreen",
+                    "swipe",
+                    str(touch_x),
+                    str(touch_y),
+                    str(touch_x),
+                    str(touch_y),
+                    "250",
+                )
+                probe_deadline = min(deadline, time.monotonic() + 10)
+                while time.monotonic() < probe_deadline:
+                    log = _run(
+                        args.adb,
+                        args.serial,
+                        "logcat",
+                        "-d",
+                        "-v",
+                        "brief",
+                        "Stasis:I",
+                        "*:S",
+                    )
+                    markers = parse_markers(log, test_id)
+                    if any(
+                        item.get("probe_sequence") == stage["sequence"]
+                        for item in markers
+                    ):
+                        break
+                    time.sleep(0.25)
+                else:
+                    raise SeamError(
+                        f"Android orientation stage {stage['name']} did not reach "
+                        f"probe sequence {stage['sequence']}"
+                    )
+                stage_capture_path.write_bytes(
+                    _run(
+                        args.adb,
+                        args.serial,
+                        "exec-out",
+                        "screencap",
+                        "-p",
+                        text=False,
+                    )
+                )
+                stage_expectations = {
+                    "logical_size": expectations["logical_size"],
+                    "regions": stage["regions"],
+                }
+                stage_regions = validate_regions(
+                    stage_capture_path, stage_expectations
+                )
+                orientation_evidence.append(
+                    {
+                        "name": stage["name"],
+                        "rotation": stage["rotation"],
+                        "surface": list(surface),
+                        "touch": [touch_x, touch_y],
+                        "capture": str(stage_capture_path),
+                        "regions": stage_regions,
+                    }
+                )
+            orientation_probes = validate_orientation_markers(
+                markers, expectations, surfaces
+            )
         log_path.write_text(log, encoding="utf-8")
         capture_path.write_bytes(
             _run(args.adb, args.serial, "exec-out", "screencap", "-p", text=False)
@@ -593,6 +979,9 @@ def main() -> int:
         )
         if touch_probes:
             evidence["touch_probes"] = touch_probes
+        if orientation_probes:
+            evidence["orientation_probes"] = orientation_probes
+            evidence["orientation_stages"] = orientation_evidence
     except (OSError, KeyError, ValueError, SeamError, zlib.error) as error:
         evidence["failure"] = str(error)
         raise
@@ -621,6 +1010,7 @@ def main() -> int:
                 package_id,
                 installed,
                 immersive_confirmation,
+                device_state,
             )
         )
         evidence["device_state_restored"] = not cleanup_errors
