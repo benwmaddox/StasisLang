@@ -185,6 +185,57 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     return observed
 
 
+def restore_device_state(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    installed: bool,
+    immersive_confirmation: str,
+) -> list[str]:
+    errors = []
+    operations = []
+    if installed:
+        operations.extend(
+            (
+                ("force-stop", ("shell", "am", "force-stop", package_id)),
+                ("uninstall", ("uninstall", package_id)),
+            )
+        )
+    if immersive_confirmation and immersive_confirmation != "null":
+        operations.append(
+            (
+                "restore immersive confirmation",
+                (
+                    "shell",
+                    "settings",
+                    "put",
+                    "secure",
+                    "immersive_mode_confirmations",
+                    immersive_confirmation,
+                ),
+            )
+        )
+    else:
+        operations.append(
+            (
+                "restore immersive confirmation",
+                (
+                    "shell",
+                    "settings",
+                    "delete",
+                    "secure",
+                    "immersive_mode_confirmations",
+                ),
+            )
+        )
+    for name, arguments in operations:
+        try:
+            _run(adb, serial, *arguments)
+        except (OSError, SeamError) as error:
+            errors.append(f"{name}: {error}")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--adb", type=Path, required=True)
@@ -331,48 +382,30 @@ def main() -> int:
     finally:
         cleanup_errors = []
         if installed and not log_path.is_file():
-            diagnostic_log = _run(
+            try:
+                diagnostic_log = _run(
+                    args.adb,
+                    args.serial,
+                    "logcat",
+                    "-d",
+                    "-v",
+                    "brief",
+                    "Stasis:I",
+                    "*:S",
+                    required=False,
+                )
+                log_path.write_text(diagnostic_log, encoding="utf-8")
+            except (OSError, SeamError) as cleanup_error:
+                cleanup_errors.append(f"diagnostic log: {cleanup_error}")
+        cleanup_errors.extend(
+            restore_device_state(
                 args.adb,
                 args.serial,
-                "logcat",
-                "-d",
-                "-v",
-                "brief",
-                "Stasis:I",
-                "*:S",
-                required=False,
+                package_id,
+                installed,
+                immersive_confirmation,
             )
-            log_path.write_text(diagnostic_log, encoding="utf-8")
-        try:
-            if installed:
-                _run(args.adb, args.serial, "shell", "am", "force-stop", package_id)
-                _run(args.adb, args.serial, "uninstall", package_id)
-        except SeamError as cleanup_error:
-            cleanup_errors.append(str(cleanup_error))
-        try:
-            if immersive_confirmation and immersive_confirmation != "null":
-                _run(
-                    args.adb,
-                    args.serial,
-                    "shell",
-                    "settings",
-                    "put",
-                    "secure",
-                    "immersive_mode_confirmations",
-                    immersive_confirmation,
-                )
-            else:
-                _run(
-                    args.adb,
-                    args.serial,
-                    "shell",
-                    "settings",
-                    "delete",
-                    "secure",
-                    "immersive_mode_confirmations",
-                )
-        except SeamError as cleanup_error:
-            cleanup_errors.append(str(cleanup_error))
+        )
         evidence["device_state_restored"] = not cleanup_errors
         evidence["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         evidence["timeout_seconds"] = args.timeout_seconds

@@ -55,7 +55,9 @@ public final class MainActivity extends SDLActivity {
         System.loadLibrary("SDL3_image");
         System.loadLibrary("main");
         String seamTestId = getIntent().getStringExtra("stasis.seam_test_id");
-        if (seamTestId != null) nativeSetSeamTestId(seamTestId);
+        if (BuildConfig.STASIS_SEAM_TESTS && seamTestId != null) {
+            nativeSetSeamTestId(seamTestId);
+        }
         File root = new File(getFilesDir(), "stasis_game");
         File staging = new File(getFilesDir(), ".stasis_game.staging");
         String startupError = null;

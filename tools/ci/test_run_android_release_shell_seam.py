@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 from tools.ci import run_android_release_shell_seam as seam
 
@@ -112,6 +113,34 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 },
             )
             self.assertEqual([item["name"] for item in observed], ["red", "teal"])
+
+    def test_cleanup_continues_after_force_stop_failure(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments[:3] == ("shell", "am", "force-stop"):
+                raise seam.SeamError("injected force-stop failure")
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            errors = seam.restore_device_state(
+                Path("adb"), "device", "com.example.seam", True, "null"
+            )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("force-stop", errors[0])
+        self.assertIn(("uninstall", "com.example.seam"), calls)
+        self.assertIn(
+            (
+                "shell",
+                "settings",
+                "delete",
+                "secure",
+                "immersive_mode_confirmations",
+            ),
+            calls,
+        )
 
 
 if __name__ == "__main__":

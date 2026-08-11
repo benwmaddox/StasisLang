@@ -53,8 +53,11 @@ function Resolve-Gradle {
     throw "Gradle was not found; install Gradle 8.9 or newer"
 }
 
-$abi = (& $adb -s $Serial shell getprop ro.product.cpu.abi).Trim()
-if ($LASTEXITCODE -ne 0) { throw "Unable to inspect Android device $Serial" }
+$abiOutput = @(& $adb -s $Serial shell getprop ro.product.cpu.abi)
+if ($LASTEXITCODE -ne 0 -or $abiOutput.Count -eq 0) {
+    throw "Unable to inspect Android device $Serial"
+}
+$abi = ($abiOutput -join "").Trim()
 $abiList = (& $adb -s $Serial shell getprop ro.product.cpu.abilist).Trim() -split ','
 if ($LASTEXITCODE -ne 0 -or "arm64-v8a" -notin $abiList) {
     throw "IT-017 requires arm64-v8a support; $Serial reports '$abi' ($($abiList -join ','))"
@@ -78,7 +81,7 @@ try {
 
     $gradle = Resolve-Gradle
     & $gradle -p (Join-Path $packageRoot "android") `
-        :app:assembleDebug --no-daemon --max-workers=2 --console=plain
+        :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
     if ($LASTEXITCODE -ne 0) { throw "IT-017 Gradle build failed with exit code $LASTEXITCODE" }
     Assert-In-Time "Gradle build"
 

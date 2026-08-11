@@ -6,7 +6,7 @@ on:
 jobs:
   generated-release-shell:
     runs-on: [self-hosted, Windows, android-device]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +19,7 @@ jobs:
           & ./mobile/android/test_release_shell.ps1
           -Serial "$env:ANDROID_SERIAL"
           -OutputPath "artifacts/android_release_shell"
+          -TotalTimeoutSeconds 840
 
       - name: Upload Android release-shell evidence
         if: always()

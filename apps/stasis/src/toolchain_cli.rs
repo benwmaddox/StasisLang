@@ -6079,11 +6079,19 @@ mod tests {
         )
         .expect("read Android activity");
         assert!(android_activity.contains("stasis.seam_test_id"));
+        assert!(android_activity.contains("BuildConfig.STASIS_SEAM_TESTS"));
         assert!(android_activity.contains("nativeSetSeamTestId"));
         let android_jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
                 .expect("read Android JNI bridge");
         assert!(android_jni.contains("STASIS_ENABLE_TEST_INPUT"));
+        let android_gradle = fs::read_to_string(android.join("android/app/build.gradle"))
+            .expect("read Android Gradle build");
+        assert!(android_gradle.contains("stasisSeamTests"));
+        let android_cmake =
+            fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
+                .expect("read Android CMake project");
+        assert!(android_cmake.contains("STASIS_ENABLE_SEAM_TESTS"));
         assert!(android_jni.contains("STASIS_SEAM_TEST_ID"));
         let runtime_header = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.h"))
             .expect("read shared mobile runtime header");
