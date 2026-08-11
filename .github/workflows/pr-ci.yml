@@ -163,6 +163,11 @@ jobs:
         run: |
           cargo test -p stasis_compiler --test jit_aot_host_replay_seam -- --test-threads=1 --nocapture
 
+      - name: Test generated AOT bindings in the C mobile runtime
+        shell: pwsh
+        run: |
+          cargo test -p stasis --test generated_mobile_aot_runtime_seam -- --test-threads=1 --nocapture
+
       - name: Bootstrap Compile Smoke (compiler .stasis)
         # Compiler/JIT tests share process-global dispatch and runtime registration state.
         run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture

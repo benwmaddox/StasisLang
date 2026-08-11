@@ -1,0 +1,50 @@
+global host_i32: i32[768];
+global host_f32: f32[64];
+global gfx_cmd_i32: i32[34608];
+global gfx_cmd_f32: f32[108676];
+global gfx_cmd_u8: u8[65536];
+global host_req_seq: i32;
+global host_req_flags: i32;
+global host_req_window_w_px: i32;
+global host_req_window_h_px: i32;
+global score: i32;
+
+function main(): i32 {
+    score = 10;
+    return 0;
+}
+
+function tick(): i32 {
+    score += 5;
+    return 0;
+}
+
+function render(): i32 {
+    gfx_cmd_i32[0] = 1196967473;
+    gfx_cmd_i32[1] = 4;
+    gfx_cmd_i32[2] = 3;
+    gfx_cmd_i32[3] = 0;
+    gfx_cmd_i32[4] = 0;
+    gfx_cmd_i32[7] = 0;
+    gfx_cmd_i32[9] = 0;
+    gfx_cmd_i32[22] = 1;
+    gfx_cmd_i32[24] = 1;
+    gfx_cmd_i32[18464] = 65536;
+    gfx_cmd_f32[0] = 0.05;
+    gfx_cmd_f32[1] = 0.10;
+    gfx_cmd_f32[2] = 0.15;
+    gfx_cmd_f32[3] = 1.0;
+    gfx_cmd_f32[79996] = 12.0;
+    gfx_cmd_f32[79997] = 14.0;
+    gfx_cmd_f32[79998] = 30.0;
+    gfx_cmd_f32[79999] = 18.0;
+    gfx_cmd_f32[80000] = 0.8;
+    gfx_cmd_f32[80001] = 0.2;
+    gfx_cmd_f32[80002] = 0.1;
+    gfx_cmd_f32[80003] = 1.0;
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}
