@@ -168,6 +168,12 @@ jobs:
         run: |
           cargo test -p stasis --test generated_mobile_aot_runtime_seam -- --test-threads=1 --nocapture
 
+      - name: Test packaged mobile assets through linked AOT and shared native hosts
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          python tools/cargo_cache.py run -- cargo test -p stasis --test mobile_packaged_assets_seam -- --test-threads=1 --nocapture
+
       - name: Bootstrap Compile Smoke (compiler .stasis)
         # Compiler/JIT tests share process-global dispatch and runtime registration state.
         run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture

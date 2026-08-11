@@ -5783,11 +5783,17 @@ STASIS_EXPORT int stasis_clipboard_save_ascii(const char* value, int length) {
  */
 STASIS_EXPORT int stasis_audio_load_wav(const char* path) {
     char resolved[1024];
-    if (!path || !*path || !resolve_asset_path(path, resolved, sizeof(resolved))) return 0;
+    if (!path || !*path || !resolve_asset_path(path, resolved, sizeof(resolved))) {
+        stasis_report_runtime_errorf("Audio path could not be resolved: %s", path ? path : "");
+        return 0;
+    }
     if (!stasis_audio_ensure_init()) goto fail;
     SDL_LockAudioStream(g_audio_stream);
     int handle = stasis_audio_assets_load_wav(&g_audio_assets, resolved);
     SDL_UnlockAudioStream(g_audio_stream);
+    if (handle == 0) {
+        stasis_report_runtime_errorf("Audio failed to load: %s", path);
+    }
     return handle;
 
 fail:
@@ -5796,11 +5802,17 @@ fail:
 
 static int stasis_audio_load_asset(const char* path) {
     char resolved[1024];
-    if (!path || !*path || !resolve_asset_path(path, resolved, sizeof(resolved))) return 0;
+    if (!path || !*path || !resolve_asset_path(path, resolved, sizeof(resolved))) {
+        stasis_report_runtime_errorf("Audio path could not be resolved: %s", path ? path : "");
+        return 0;
+    }
     if (!stasis_audio_ensure_init()) return 0;
     SDL_LockAudioStream(g_audio_stream);
     int handle = stasis_audio_assets_load(&g_audio_assets, resolved);
     SDL_UnlockAudioStream(g_audio_stream);
+    if (handle == 0) {
+        stasis_report_runtime_errorf("Audio failed to load: %s", path);
+    }
     return handle;
 }
 

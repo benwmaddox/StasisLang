@@ -1,0 +1,93 @@
+@link("stasis_graphics");
+
+extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+extern function load_font(path: string, size: i32): i32;
+extern function measure_text(font: i32, text: string): f32;
+function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
+function @extern("stasis_jit_gfx_measure_text_cached") gfx_measure_text_cached(handle: i32): f32;
+extern function audio_load_wav(path: string): i32;
+extern function audio_play(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
+
+global gfx_cmd_i32: i32[34608];
+global gfx_cmd_f32: f32[108676];
+global gfx_cmd_u8: u8[65536];
+global seam_sprite_handle: i32;
+global seam_font_handle: i32;
+global seam_cached_handle: i32;
+global seam_audio_handle: i32;
+global seam_voice_handle: i32;
+global seam_direct_width: f32;
+global seam_cached_width: f32;
+
+function main(): i32 {
+    seam_sprite_handle = gfx_load_sprite("assets/sprite.png", 64, 64);
+    if (seam_sprite_handle == 0) { return 21; }
+    seam_font_handle = load_font("assets/ui.ttf", 24);
+    if (seam_font_handle == 0) { return 22; }
+    seam_cached_handle = gfx_cache_text(seam_font_handle, "MOBILE");
+    if (seam_cached_handle == 0) { return 23; }
+    seam_direct_width = measure_text(seam_font_handle, "BUNDLE");
+    seam_cached_width = gfx_measure_text_cached(seam_cached_handle);
+    if (seam_direct_width <= 0.0 || seam_cached_width <= 0.0) { return 24; }
+    seam_audio_handle = audio_load_wav("assets/tone.wav");
+    if (seam_audio_handle == 0) { return 25; }
+    seam_voice_handle = audio_play(seam_audio_handle, false, 0.5, 0.0);
+    if (seam_voice_handle == 0) { return 26; }
+    return 0;
+}
+
+function tick(): i32 { return 0; }
+
+function render(): i32 {
+    gfx_cmd_i32[0] = 1196967473;
+    gfx_cmd_i32[1] = 4;
+    gfx_cmd_i32[2] = 3;
+    gfx_cmd_i32[3] = 0;
+    gfx_cmd_i32[4] = 1;
+    gfx_cmd_i32[7] = 2;
+    gfx_cmd_i32[9] = 7;
+    gfx_cmd_i32[22] = 3;
+    gfx_cmd_f32[0] = 0.04;
+    gfx_cmd_f32[1] = 0.07;
+    gfx_cmd_f32[2] = 0.12;
+    gfx_cmd_f32[3] = 1.0;
+
+    gfx_cmd_i32[32] = seam_sprite_handle;
+    gfx_cmd_i32[34] = 255;
+    gfx_cmd_f32[80004] = 52.0;
+    gfx_cmd_f32[80005] = 28.0;
+    gfx_cmd_f32[80006] = 64.0;
+    gfx_cmd_f32[80007] = 64.0;
+
+    gfx_cmd_i32[12320] = seam_font_handle;
+    gfx_cmd_i32[12321] = 0;
+    gfx_cmd_i32[12322] = 6;
+    gfx_cmd_f32[96388] = 30.0;
+    gfx_cmd_f32[96389] = 112.0;
+    gfx_cmd_f32[96390] = 1.0;
+    gfx_cmd_f32[96391] = 0.8;
+    gfx_cmd_f32[96392] = 0.1;
+    gfx_cmd_f32[96393] = 1.0;
+
+    gfx_cmd_i32[12323] = seam_font_handle;
+    gfx_cmd_i32[12324] = 0 - seam_cached_handle;
+    gfx_cmd_f32[96394] = 175.0;
+    gfx_cmd_f32[96395] = 112.0;
+    gfx_cmd_f32[96396] = 0.1;
+    gfx_cmd_f32[96397] = 0.9;
+    gfx_cmd_f32[96398] = 1.0;
+    gfx_cmd_f32[96399] = 1.0;
+
+    gfx_cmd_u8[0] = 66;
+    gfx_cmd_u8[1] = 85;
+    gfx_cmd_u8[2] = 78;
+    gfx_cmd_u8[3] = 68;
+    gfx_cmd_u8[4] = 76;
+    gfx_cmd_u8[5] = 69;
+    gfx_cmd_i32[18464] = 32768;
+    gfx_cmd_i32[18465] = 49152;
+    gfx_cmd_i32[18466] = 49153;
+    return 0;
+}
+
+function on_code_swap(): void { return; }
