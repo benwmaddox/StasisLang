@@ -155,6 +155,18 @@ static StasisDisplayMetrics g_display_metrics;
 static int g_display_generation = 0;
 static int g_density_generation = 0;
 static bool g_window_resized = false;
+static bool g_window_minimized = false;
+typedef struct {
+    int active;
+    int logical_w;
+    int logical_h;
+    int native_w;
+    int native_h;
+    int drawable_w;
+    int drawable_h;
+    StasisDisplayViewport safe_native;
+} StasisTestDisplayOverride;
+static StasisTestDisplayOverride g_test_display_override;
 static StasisRendererLifecycle g_resource_lifecycle;
 static bool g_resource_frame_ready = false;
 static bool g_force_debug_overlay = false;
@@ -254,7 +266,7 @@ STASIS_EXPORT int stasis_should_quit(void);
 STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32);
 STASIS_EXPORT int stasis_set_fullscreen(int fullscreen);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, float x, float y, float w, float h, int rot_degrees, int a);
-STASIS_EXPORT void stasis_gfx_submit_u8(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
+STASIS_EXPORT void stasis_gfx_submit_u8(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
 /* Forward decls for internal helpers used before their definitions. */
@@ -512,13 +524,28 @@ static void stasis_sync_display_metrics(void) {
 
     int native_w = g_native_window_width;
     int native_h = g_native_window_height;
-    SDL_GetWindowSize(g_window, &native_w, &native_h);
+    if (g_test_display_override.active) {
+        g_window_width = g_test_display_override.logical_w;
+        g_window_height = g_test_display_override.logical_h;
+        native_w = g_test_display_override.native_w;
+        native_h = g_test_display_override.native_h;
+    } else {
+        SDL_GetWindowSize(g_window, &native_w, &native_h);
+    }
     if (native_w > 0) g_native_window_width = native_w;
     if (native_h > 0) g_native_window_height = native_h;
 
     int drawable_w = native_w;
     int drawable_h = native_h;
-    if (g_use_sdl_renderer && g_renderer) {
+    if (g_test_display_override.active) {
+        drawable_w = g_test_display_override.drawable_w;
+        drawable_h = g_test_display_override.drawable_h;
+        if (g_use_sdl_renderer && g_renderer) {
+            SDL_SetRenderLogicalPresentation(
+                g_renderer, g_window_width, g_window_height,
+                SDL_LOGICAL_PRESENTATION_LETTERBOX);
+        }
+    } else if (g_use_sdl_renderer && g_renderer) {
         if (!SDL_GetCurrentRenderOutputSize(g_renderer, &drawable_w, &drawable_h)) {
             drawable_w = native_w;
             drawable_h = native_h;
@@ -605,6 +632,49 @@ static void stasis_window_to_logical(float native_x, float native_y, float* logi
 }
 
 /*
+ * Supply platform readings to the real SDL window-event path for native seam
+ * tests. HostFrame and gfx_cmd buffers remain owned by their production writers.
+ */
+STASIS_EXPORT int stasis_test_push_display_event(
+    int kind,
+    int logical_w,
+    int logical_h,
+    int native_w,
+    int native_h,
+    int drawable_w,
+    int drawable_h,
+    int safe_x,
+    int safe_y,
+    int safe_w,
+    int safe_h) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!g_window || !enabled || enabled[0] != '1' || enabled[1] != '\0' ||
+        logical_w <= 0 || logical_h <= 0 || native_w <= 0 || native_h <= 0 ||
+        drawable_w <= 0 || drawable_h <= 0 || safe_x < 0 || safe_y < 0 ||
+        safe_w <= 0 || safe_h <= 0 || safe_x + safe_w > native_w ||
+        safe_y + safe_h > native_h || kind < 1 || kind > 3) {
+        return 0;
+    }
+
+    g_test_display_override.active = 1;
+    g_test_display_override.logical_w = logical_w;
+    g_test_display_override.logical_h = logical_h;
+    g_test_display_override.native_w = native_w;
+    g_test_display_override.native_h = native_h;
+    g_test_display_override.drawable_w = drawable_w;
+    g_test_display_override.drawable_h = drawable_h;
+    g_test_display_override.safe_native = (StasisDisplayViewport){
+        (float)safe_x, (float)safe_y, (float)safe_w, (float)safe_h};
+
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = kind == 1 ? SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED :
+        (kind == 2 ? SDL_EVENT_WINDOW_MINIMIZED : SDL_EVENT_WINDOW_RESTORED);
+    event.window.windowID = SDL_GetWindowID(g_window);
+    return SDL_PushEvent(&event) ? 1 : 0;
+}
+
+/*
  * Native integration-test input enters through SDL's event queue. The explicit
  * environment gate prevents shipped applications from synthesizing host input.
  */
@@ -621,19 +691,30 @@ STASIS_EXPORT int stasis_test_push_input_event(
         event.key.scancode = (SDL_Scancode)code;
         event.key.repeat = false;
     } else if (kind >= 3 && kind <= 5) {
-        if (code < 0 || g_display_metrics.native_w <= 0 || g_display_metrics.native_h <= 0) {
+        StasisDisplayMetrics input_metrics = g_display_metrics;
+        if (g_test_display_override.active) {
+            input_metrics = stasis_display_metrics(
+                g_test_display_override.logical_w,
+                g_test_display_override.logical_h,
+                g_test_display_override.native_w,
+                g_test_display_override.native_h,
+                g_test_display_override.drawable_w,
+                g_test_display_override.drawable_h,
+                g_test_display_override.safe_native);
+        }
+        if (code < 0 || input_metrics.native_w <= 0 || input_metrics.native_h <= 0) {
             return 0;
         }
         float native_x = 0.0f;
         float native_y = 0.0f;
         stasis_display_logical_to_native_xy(
-            &g_display_metrics, logical_x, logical_y, &native_x, &native_y);
+            &input_metrics, logical_x, logical_y, &native_x, &native_y);
         event.type = kind == 3 ? SDL_EVENT_FINGER_DOWN :
             (kind == 4 ? SDL_EVENT_FINGER_MOTION : SDL_EVENT_FINGER_UP);
         event.tfinger.touchID = 1;
         event.tfinger.fingerID = (SDL_FingerID)code;
-        event.tfinger.x = native_x / (float)g_display_metrics.native_w;
-        event.tfinger.y = native_y / (float)g_display_metrics.native_h;
+        event.tfinger.x = native_x / (float)input_metrics.native_w;
+        event.tfinger.y = native_y / (float)input_metrics.native_h;
     } else {
         return 0;
     }
@@ -683,6 +764,11 @@ static void stasis_update_safe_viewport(void) {
 
     StasisDisplayViewport safe_native = {
         0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
+
+    if (g_test_display_override.active) {
+        safe_native = g_test_display_override.safe_native;
+        goto publish;
+    }
 
     SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
     if (display == 0) goto publish;
@@ -813,6 +899,14 @@ static void stasis_pump_events(void) {
 #endif
                 g_input_frame.viewport_w_px = g_window_width;
                 g_input_frame.viewport_h_px = g_window_height;
+                stasis_update_safe_viewport();
+                break;
+            case SDL_EVENT_WINDOW_MINIMIZED:
+                g_window_minimized = true;
+                break;
+            case SDL_EVENT_WINDOW_RESTORED:
+                g_window_minimized = false;
+                stasis_sync_display_metrics();
                 stasis_update_safe_viewport();
                 break;
             case SDL_EVENT_RENDER_TARGETS_RESET:
@@ -1199,11 +1293,10 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (out_i32[11] != 0) flags |= 8; /* resized */
 
     int32_t focused = 0;
-    int32_t minimized = 0;
+    int32_t minimized = g_window_minimized ? 1 : 0;
     if (g_window) {
         const Uint32 wf = SDL_GetWindowFlags(g_window);
         focused = ((wf & SDL_WINDOW_INPUT_FOCUS) != 0) ? 1 : 0;
-        minimized = ((wf & SDL_WINDOW_MINIMIZED) != 0) ? 1 : 0;
         if (focused) flags |= 2;
         if (minimized) flags |= 4;
     }
@@ -3926,6 +4019,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
 
     stasis_sync_display_metrics();
+    g_window_minimized = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_MINIMIZED) != 0;
     stasis_renderer_lifecycle_initialize(&g_resource_lifecycle);
     g_resource_frame_ready = true;
     /*
@@ -4712,7 +4806,26 @@ static void stasis_draw_ordered_rect(
         cmd_f32[base + 7]);
 }
 
-static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+static void stasis_stamp_display_metadata(int32_t* cmd_i32) {
+    cmd_i32[STASIS_RENDER_I_LOGICAL_W] = g_display_metrics.logical_w;
+    cmd_i32[STASIS_RENDER_I_LOGICAL_H] = g_display_metrics.logical_h;
+    cmd_i32[STASIS_RENDER_I_NATIVE_W] = g_display_metrics.native_w;
+    cmd_i32[STASIS_RENDER_I_NATIVE_H] = g_display_metrics.native_h;
+    cmd_i32[STASIS_RENDER_I_DRAWABLE_W] = g_display_metrics.drawable_w;
+    cmd_i32[STASIS_RENDER_I_DRAWABLE_H] = g_display_metrics.drawable_h;
+    cmd_i32[STASIS_RENDER_I_SAFE_X] =
+        (int32_t)floorf(g_display_metrics.safe_logical_viewport.x);
+    cmd_i32[STASIS_RENDER_I_SAFE_Y] =
+        (int32_t)floorf(g_display_metrics.safe_logical_viewport.y);
+    cmd_i32[STASIS_RENDER_I_SAFE_W] =
+        (int32_t)ceilf(g_display_metrics.safe_logical_viewport.w);
+    cmd_i32[STASIS_RENDER_I_SAFE_H] =
+        (int32_t)ceilf(g_display_metrics.safe_logical_viewport.h);
+    cmd_i32[STASIS_RENDER_I_DISPLAY_GENERATION] = g_display_generation;
+    cmd_i32[STASIS_RENDER_I_DENSITY_GENERATION] = g_density_generation;
+}
+
+static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     static int contract_logged = 0;
     StasisRenderValidation validation = stasis_render_validate(cmd_i32, cmd_f32);
     if (validation != STASIS_RENDER_VALID) {
@@ -4729,6 +4842,7 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
         }
         return;
     }
+    stasis_stamp_display_metadata(cmd_i32);
     g_perf_render_started_counter = SDL_GetPerformanceCounter();
 
     const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
@@ -4836,11 +4950,11 @@ static void stasis_gfx_submit_v2(const int32_t* cmd_i32, const float* cmd_f32, c
     }
 }
 
-STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f32) {
+STASIS_EXPORT void stasis_gfx_submit(int32_t* cmd_i32, const float* cmd_f32) {
     stasis_gfx_submit_v2(cmd_i32, cmd_f32, NULL);
 }
 
-STASIS_EXPORT void stasis_gfx_submit_u8(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+STASIS_EXPORT void stasis_gfx_submit_u8(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     stasis_gfx_submit_v2(cmd_i32, cmd_f32, cmd_u8);
 }
 
@@ -5991,6 +6105,8 @@ STASIS_EXPORT void stasis_shutdown(void) {
     }
     SDL_Quit();
     memset(&g_resource_lifecycle, 0, sizeof(g_resource_lifecycle));
+    memset(&g_test_display_override, 0, sizeof(g_test_display_override));
+    g_window_minimized = false;
     g_resource_frame_ready = false;
     SDL_Log("Stasis graphics shutdown");
 }

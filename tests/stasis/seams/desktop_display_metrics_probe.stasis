@@ -1,0 +1,72 @@
+import "../../../src/stdlib/internal/host_frame.stasis";
+import "../../../src/stdlib/internal/gfx_cmd.stasis";
+
+global metric_tick: i32;
+global metric_resized: bool;
+global metric_minimized: bool;
+global metric_native_w: i32;
+global metric_native_h: i32;
+global metric_drawable_w: i32;
+global metric_drawable_h: i32;
+global metric_display_generation: i32;
+global metric_density_generation: i32;
+global metric_logical_w: f32;
+global metric_logical_h: f32;
+global metric_safe_x: f32;
+global metric_safe_y: f32;
+global metric_safe_w: f32;
+global metric_safe_h: f32;
+global metric_content_scale: f32;
+global metric_raster_scale: f32;
+global metric_pointer_x: f32;
+global metric_pointer_y: f32;
+global metric_pointer_x_n: f32;
+global metric_pointer_y_n: f32;
+
+function main(): i32 {
+    metric_tick = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    metric_tick += 1;
+    metric_resized = host_resized();
+    metric_minimized = host_window_minimized();
+    metric_native_w = host_native_w_px();
+    metric_native_h = host_native_h_px();
+    metric_drawable_w = host_drawable_w_px();
+    metric_drawable_h = host_drawable_h_px();
+    metric_display_generation = host_display_generation();
+    metric_density_generation = host_density_generation();
+    metric_logical_w = host_logical_width();
+    metric_logical_h = host_logical_height();
+    metric_safe_x = host_safe_x();
+    metric_safe_y = host_safe_y();
+    metric_safe_w = host_safe_width();
+    metric_safe_h = host_safe_height();
+    metric_content_scale = host_content_scale();
+    metric_raster_scale = host_raster_scale();
+    if (host_pointer_count() > 1) {
+        metric_pointer_x = host_pointer_x_logical(1);
+        metric_pointer_y = host_pointer_y_logical(1);
+        metric_pointer_x_n = host_pointer_x_n(1);
+        metric_pointer_y_n = host_pointer_y_n(1);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    gfx_cmd_begin();
+    if (metric_minimized) {
+        gfx_cmd_clear(0.5, 0.5, 0.5, 1.0);
+    } else if (metric_display_generation == 2) {
+        gfx_cmd_clear(0.8, 0.2, 0.1, 1.0);
+    } else if (metric_display_generation == 3) {
+        gfx_cmd_clear(0.1, 0.3, 0.9, 1.0);
+    } else {
+        gfx_cmd_clear(0.0, 0.0, 0.0, 1.0);
+    }
+    gfx_cmd_rect(metric_pointer_x, metric_pointer_y, 5.0, 7.0, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_mark_present();
+    return 0;
+}

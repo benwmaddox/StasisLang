@@ -2258,7 +2258,7 @@ fn run_play_in_process_inner(
         }
 
         gfx.host_set_performance_metrics(tick_micros, render_micros)?;
-        gfx.gfx_submit_u8(&gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
+        gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
         if tick_sleep_micros > 0 {
             let ms = (tick_sleep_micros / 1000) as i32;
             if ms > 0 {

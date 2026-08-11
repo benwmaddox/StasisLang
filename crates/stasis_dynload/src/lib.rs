@@ -998,22 +998,22 @@ impl StasisGraphicsApi {
 
     pub fn gfx_submit_u8(
         &self,
-        cmd_i32: &[i32],
+        cmd_i32: &mut [i32],
         cmd_f32: &[f32],
         cmd_u8: &[u8],
     ) -> Result<(), String> {
         #[cfg(windows)]
         {
-            let callback: extern "system" fn(*const i32, *const f32, *const u8) =
+            let callback: extern "system" fn(*mut i32, *const f32, *const u8) =
                 unsafe { std::mem::transmute(self.stasis_gfx_submit_u8) };
-            callback(cmd_i32.as_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
+            callback(cmd_i32.as_mut_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
             return Ok(());
         }
         #[cfg(not(windows))]
         {
-            let callback: extern "C" fn(*const i32, *const f32, *const u8) =
+            let callback: extern "C" fn(*mut i32, *const f32, *const u8) =
                 unsafe { std::mem::transmute(self.stasis_gfx_submit_u8) };
-            callback(cmd_i32.as_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
+            callback(cmd_i32.as_mut_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
             Ok(())
         }
     }
