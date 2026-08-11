@@ -114,10 +114,14 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             )
             self.assertEqual([item["name"] for item in observed], ["red", "teal"])
 
-    def test_maps_logical_touch_points_through_letterbox(self):
+    def test_selects_real_letterbox_for_each_surface_orientation(self):
         self.assertEqual(
-            seam.logical_to_native([180, -20], [360, 720], (1080, 2400)),
+            seam.outside_letterbox_point([360, 720], (1080, 2400)),
             (540, 60),
+        )
+        self.assertEqual(
+            seam.outside_letterbox_point([360, 720], (1920, 1080)),
+            (345, 540),
         )
         self.assertEqual(
             seam.logical_to_native([270, 540], [360, 720], (1080, 2400)),

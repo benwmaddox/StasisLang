@@ -144,6 +144,18 @@ def validate_touch_markers(markers: list[dict], expectations: dict) -> list[dict
                     f"Android touch probe {sequence} {field} mismatch: "
                     f"expected={expected[field]} actual={marker.get(field)}"
                 )
+        if expected.get("on_boundary"):
+            normalized = (marker.get("x_n", 0.5), marker.get("y_n", 0.5))
+            boundary_distance = min(
+                abs(value - boundary)
+                for value in normalized
+                for boundary in (0.0, 1.0)
+            )
+            if boundary_distance > 0.02:
+                raise SeamError(
+                    f"Android touch probe {sequence} did not clamp to a viewport "
+                    f"boundary: x_n={normalized[0]} y_n={normalized[1]}"
+                )
         ticks.append(marker.get("probe_tick"))
         observed.append(marker)
     safe_viewport = touch.get("safe_viewport")
@@ -184,6 +196,23 @@ def logical_to_native(
     return (
         max(0, min(native_width - 1, round(offset_x + logical[0] * scale))),
         max(0, min(native_height - 1, round(offset_y + logical[1] * scale))),
+    )
+
+
+def outside_letterbox_point(
+    logical_size: list[int], native_size: tuple[int, int]
+) -> tuple[int, int]:
+    logical_width, logical_height = logical_size
+    native_width, native_height = native_size
+    scale = min(native_width / logical_width, native_height / logical_height)
+    offset_x = (native_width - logical_width * scale) / 2.0
+    offset_y = (native_height - logical_height * scale) / 2.0
+    if offset_x >= 2.0:
+        return round(offset_x / 2.0), native_height // 2
+    if offset_y >= 2.0:
+        return native_width // 2, round(offset_y / 2.0)
+    raise SeamError(
+        "Android touch fixture requires a real letterbox bar on the captured surface"
     )
 
 
@@ -260,8 +289,17 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     offset_y = (height - logical_height * scale) / 2.0
     observed = []
     for region in expectations["regions"]:
-        x = max(0, min(width - 1, round(offset_x + region["center"][0] * scale)))
-        y = max(0, min(height - 1, round(offset_y + region["center"][1] * scale)))
+        if region.get("location") == "outside_letterbox":
+            x, y = outside_letterbox_point(
+                expectations["logical_size"], (width, height)
+            )
+        else:
+            x = max(
+                0, min(width - 1, round(offset_x + region["center"][0] * scale))
+            )
+            y = max(
+                0, min(height - 1, round(offset_y + region["center"][1] * scale))
+            )
         radius = max(2, round(scale * 3))
         samples = [
             pixels[row * width + column]
@@ -469,16 +507,23 @@ def main() -> int:
             }
             injected_gestures = []
             for gesture in expectations["touch"]["gestures"]:
-                start_x, start_y = logical_to_native(
-                    gesture["start"],
-                    expectations["logical_size"],
-                    (native_width, native_height),
-                )
-                end_x, end_y = logical_to_native(
-                    gesture["end"],
-                    expectations["logical_size"],
-                    (native_width, native_height),
-                )
+                if gesture.get("location") == "outside_letterbox":
+                    start_x, start_y = outside_letterbox_point(
+                        expectations["logical_size"],
+                        (native_width, native_height),
+                    )
+                    end_x, end_y = start_x, start_y
+                else:
+                    start_x, start_y = logical_to_native(
+                        gesture["start"],
+                        expectations["logical_size"],
+                        (native_width, native_height),
+                    )
+                    end_x, end_y = logical_to_native(
+                        gesture["end"],
+                        expectations["logical_size"],
+                        (native_width, native_height),
+                    )
                 _run(
                     args.adb,
                     args.serial,
