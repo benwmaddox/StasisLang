@@ -39,6 +39,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("cmake: 3.22.1", self.workflow)
         self.assertIn("8e37db5e797b6167f3a00d697d816a684bd259c7", self.workflow)
         self.assertIn("bec9134a26c7d0f31b36d6083c25296e04cabff5", self.workflow)
+        self.assertLess(
+            self.workflow.index("- name: Setup Gradle"),
+            self.workflow.index("- name: Checkout SDL3"),
+        )
         for artifact in (
             "android-release-shell-seam",
             "android-touch-roundtrip-seam",
