@@ -104,9 +104,10 @@ def main() -> int:
             imports_internal = "/internal/" in norm or norm.startswith("internal/")
             if imports_internal:
                 inside_stdlib = rel_path.parts[:2] == ("src", "stdlib")
-                integration_test = rel_path.as_posix() == (
-                    "tests/stasis/rust_native_tick_input_snapshot.stasis"
-                )
+                integration_test = rel_path.as_posix() in {
+                    "tests/stasis/rust_native_tick_input_snapshot.stasis",
+                    "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
+                }
                 if not inside_stdlib and not integration_test:
                     errors.append(
                         f'{rel_path.as_posix()}:{line_no}: private ABI import "{import_path}" '

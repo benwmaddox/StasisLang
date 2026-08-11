@@ -488,7 +488,14 @@ pub(crate) fn build_state_layout(
             .iter_mut()
             .find(|collection| collection.path == *path)
         {
-            if !collection.fields.iter().any(|field| field.field.is_empty()) {
+            if let Some(field) = collection
+                .fields
+                .iter_mut()
+                .find(|field| field.field.is_empty())
+            {
+                field.type_name = "u8".to_string();
+                field.storage_type_name = "u8".to_string();
+            } else {
                 collection.fields.push(StateCollectionFieldLayout {
                     field: String::new(),
                     type_name: "u8".to_string(),
@@ -647,10 +654,13 @@ mod tests {
         let layout = jit.state_layout();
         assert_eq!(layout, aot.state_layout());
         assert!(layout.scalars.iter().any(|field| field.path == "score"));
-        assert!(layout
+        let title = layout
             .collections
             .iter()
-            .any(|collection| collection.path == "title" && collection.capacity == 8));
+            .find(|collection| collection.path == "title")
+            .expect("fixed UTF-8 collection layout");
+        assert_eq!(title.capacity, 8);
+        assert_eq!(title.fields[0].storage_type_name(), "u8");
         assert!(layout
             .collections
             .iter()

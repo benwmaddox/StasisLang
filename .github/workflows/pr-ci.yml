@@ -63,6 +63,9 @@ jobs:
       - name: Test HostFrame desktop JIT seam
         run: cargo test -p stasis_compiler --test host_frame_jit_seam -- --test-threads=1
 
+      - name: Test gfx command capacity seam
+        run: cargo test -p stasis_compiler gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace -- --test-threads=1
+
       - name: Run Cargo Test
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         run: cargo test --workspace --all-targets -- --test-threads=1
