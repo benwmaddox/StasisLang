@@ -41,6 +41,7 @@ pub struct AotProcess {
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
     string_literals: BTreeMap<i32, String>,
+    referenced_string_literals: BTreeMap<FunctionId, BTreeSet<i32>>,
     collection_max_lengths: BTreeMap<String, i32>,
     program_snapshot: Option<ProgramSnapshot>,
     last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
@@ -85,6 +86,7 @@ impl AotProcess {
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
             string_literals: BTreeMap::new(),
+            referenced_string_literals: BTreeMap::new(),
             collection_max_lengths: BTreeMap::new(),
             program_snapshot: None,
             last_failed_source_diagnostic: None,
@@ -122,6 +124,7 @@ impl AotProcess {
         let accepted_artifacts = self.artifacts.clone();
         let accepted_object_bytes_len = self.object_bytes.len();
         let accepted_string_literals = self.string_literals.clone();
+        let accepted_referenced_string_literals = self.referenced_string_literals.clone();
         let accepted_collection_max_lengths = self.collection_max_lengths.clone();
         let accepted_program_snapshot = self.program_snapshot.clone();
         match self.compile_internal() {
@@ -136,6 +139,7 @@ impl AotProcess {
                 self.artifacts = accepted_artifacts;
                 self.object_bytes.truncate(accepted_object_bytes_len);
                 self.string_literals = accepted_string_literals;
+                self.referenced_string_literals = accepted_referenced_string_literals;
                 self.collection_max_lengths = accepted_collection_max_lengths;
                 self.program_snapshot = accepted_program_snapshot;
                 self.last_failed_source_diagnostic = diagnostic;
@@ -230,7 +234,7 @@ impl AotProcess {
             artifacts,
             object_bytes,
             optimization_profile,
-            string_literals,
+            referenced_string_literals,
             target,
         ) = (
             &mut self.compiler,
@@ -238,7 +242,7 @@ impl AotProcess {
             &mut self.artifacts,
             &mut self.object_bytes,
             self.optimization_profile,
-            &mut self.string_literals,
+            &mut self.referenced_string_literals,
             self.target.clone(),
         );
         let emit = compiler.emit_pass_for_ids_with(
@@ -250,6 +254,7 @@ impl AotProcess {
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
+                let mut function_string_literals = BTreeMap::new();
                 let bytes = compile_function_to_object_bytes(
                     meta,
                     hir,
@@ -259,12 +264,14 @@ impl AotProcess {
                     &mut type_table,
                     &analysis.global_path_types,
                     &analysis.constant_values,
-                    string_literals,
+                    &mut function_string_literals,
                     &target,
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
                     &direct_storage,
                 )?;
+                referenced_string_literals
+                    .insert(meta.id, function_string_literals.keys().copied().collect());
                 let object_index = *next_object_index;
                 *next_object_index = next_object_index.saturating_add(1);
                 object_bytes.push(bytes);
@@ -284,6 +291,7 @@ impl AotProcess {
 
         let reachable = snapshot.reachable_function_ids().clone();
         artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
+        referenced_string_literals.retain(|function_id, _| reachable.contains(function_id));
         compact_active_artifact_storage(artifacts, object_bytes);
         self.next_object_index = u32::try_from(self.object_bytes.len()).unwrap_or(u32::MAX);
         if let Some(snapshot) = self.program_snapshot.as_mut() {
@@ -499,10 +507,19 @@ impl AotProcess {
             }
         }
 
+        let standalone_literal_ids: BTreeSet<i32> = self
+            .referenced_string_literals
+            .values()
+            .flat_map(|ids| ids.iter().copied())
+            .collect();
         let layout = self.state_layout();
         let exits_windows_process =
             cfg!(windows) && matches!(self.target, stasis_jit::AotTarget::Native);
-        if layout.scalars.is_empty() && layout.collections.is_empty() && !exits_windows_process {
+        if layout.scalars.is_empty()
+            && layout.collections.is_empty()
+            && standalone_literal_ids.is_empty()
+            && !exits_windows_process
+        {
             return Ok(None);
         }
         let mut flag_builder = settings::builder();
@@ -543,6 +560,18 @@ impl AotProcess {
         let mut module = ObjectModule::new(builder);
         let pointer_type = module.target_config().pointer_type();
         let mut registrations = Vec::new();
+        let mut literal_registrations = Vec::new();
+
+        for id in standalone_literal_ids {
+            let value = self.string_literals.get(&id).ok_or_else(|| {
+                format!("standalone AOT string literal {id} is missing from the program table")
+            })?;
+            let mut bytes = value.as_bytes().to_vec();
+            bytes.push(0);
+            let symbol = format!("__stasis_string_literal_{:08x}", id as u32);
+            let data_id = define_standalone_storage_data(&mut module, &symbol, bytes, 1)?;
+            literal_registrations.push((data_id, id));
+        }
 
         for scalar in &layout.scalars {
             let storage_type_name = scalar.storage_type_name();
@@ -558,7 +587,8 @@ impl AotProcess {
                 }
             }
             let symbol = aot_storage_symbol(&scalar.path, "");
-            let data_id = define_standalone_storage_data(&mut module, &symbol, bytes)?;
+            let data_id =
+                define_standalone_storage_data(&mut module, &symbol, bytes, width as u64)?;
             registrations.push((
                 data_id,
                 storage_type_name.to_string(),
@@ -584,7 +614,12 @@ impl AotProcess {
                     )
                 })?;
                 let symbol = aot_storage_symbol(&collection.path, &field.field);
-                let data_id = define_standalone_storage_data(&mut module, &symbol, vec![0; size])?;
+                let data_id = define_standalone_storage_data(
+                    &mut module,
+                    &symbol,
+                    vec![0; size],
+                    width as u64,
+                )?;
                 registrations.push((
                     data_id,
                     storage_type_name.to_string(),
@@ -610,6 +645,31 @@ impl AotProcess {
             )
         } else {
             None
+        };
+        let (clear_literals_id, upsert_literal_id) = if literal_registrations.is_empty() {
+            (None, None)
+        } else {
+            let clear_signature = module.make_signature();
+            let clear_id = module
+                .declare_function(
+                    "stasis_jit_clear_string_literal_table",
+                    Linkage::Import,
+                    &clear_signature,
+                )
+                .map_err(|error| format!("failed to declare literal-table reset: {error}"))?;
+            let mut upsert_signature = module.make_signature();
+            upsert_signature.params.push(AbiParam::new(types::I32));
+            upsert_signature.params.push(AbiParam::new(pointer_type));
+            let upsert_id = module
+                .declare_function(
+                    "stasis_jit_upsert_string_literal",
+                    Linkage::Import,
+                    &upsert_signature,
+                )
+                .map_err(|error| {
+                    format!("failed to declare literal-table registration: {error}")
+                })?;
+            (Some(clear_id), Some(upsert_id))
         };
         let wrapper_symbol = "stasis_aot_standalone_entry".to_string();
         let wrapper_id = module
@@ -658,6 +718,10 @@ impl AotProcess {
         let entry_ref = module.declare_func_in_func(entry_id, &mut context.func);
         let exit_process_ref =
             exit_process_id.map(|id| module.declare_func_in_func(id, &mut context.func));
+        let clear_literals_ref =
+            clear_literals_id.map(|id| module.declare_func_in_func(id, &mut context.func));
+        let upsert_literal_ref =
+            upsert_literal_id.map(|id| module.declare_func_in_func(id, &mut context.func));
         let register_refs: BTreeMap<_, _> = register_functions
             .into_iter()
             .map(|(key, id)| (key, module.declare_func_in_func(id, &mut context.func)))
@@ -674,12 +738,24 @@ impl AotProcess {
                 )
             })
             .collect();
+        let literal_registration_refs: Vec<_> = literal_registrations
+            .into_iter()
+            .map(|(data_id, id)| (module.declare_data_in_func(data_id, &mut context.func), id))
+            .collect();
         let mut builder_context = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
             let block = builder.create_block();
             builder.switch_to_block(block);
             builder.seal_block(block);
+            if let (Some(clear_ref), Some(upsert_ref)) = (clear_literals_ref, upsert_literal_ref) {
+                builder.ins().call(clear_ref, &[]);
+                for (data, id) in literal_registration_refs {
+                    let literal_id = builder.ins().iconst(types::I32, i64::from(id));
+                    let pointer = builder.ins().global_value(pointer_type, data);
+                    builder.ins().call(upsert_ref, &[literal_id, pointer]);
+                }
+            }
             for (data, type_name, path_hash, field_hash, len) in registration_refs {
                 let lane = if type_name == "f32" {
                     "f32"
@@ -1011,12 +1087,14 @@ fn define_standalone_storage_data(
     module: &mut ObjectModule,
     symbol: &str,
     bytes: Vec<u8>,
+    alignment: u64,
 ) -> Result<DataId, String> {
     let data_id = module
         .declare_data(symbol, Linkage::Export, true, false)
         .map_err(|error| format!("failed to declare standalone storage '{symbol}': {error}"))?;
     let mut description = DataDescription::new();
     description.define(bytes.into_boxed_slice());
+    description.set_align(alignment);
     module
         .define_data(data_id, &description)
         .map_err(|error| format!("failed to define standalone storage '{symbol}': {error}"))?;
@@ -1100,7 +1178,7 @@ fn compile_function_to_object_bytes(
     type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
-    string_literals: &mut BTreeMap<i32, String>,
+    referenced_string_literals: &mut BTreeMap<i32, String>,
     target: &stasis_jit::AotTarget,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
@@ -1155,7 +1233,7 @@ fn compile_function_to_object_bytes(
         Some(direct_storage),
         None,
         false,
-        |statement| record_string_literals_in_stmt(statement, string_literals),
+        |statement| record_string_literals_in_stmt(statement, referenced_string_literals),
         |_meta, _func| {
             #[cfg(test)]
             maybe_invoke_clif_dump_hook(_meta, _func);
@@ -1501,6 +1579,8 @@ mod tests {
 
     const GFX_CAPACITY_FIXTURE: &str =
         include_str!("../../../../tests/stasis/seams/gfx_cmd_capacity_probe.stasis");
+    const ASSET_EXTERN_FIXTURE: &str =
+        include_str!("../../../../tests/stasis/seams/asset_extern_abi_probe.stasis");
     const GFX_CMD_SOURCE: &str = include_str!("../../../../src/stdlib/internal/gfx_cmd.stasis");
     const GFX_CAPACITY_TRACE_ROOTS: [&str; 10] = [
         "trace_geometry_capacity",
@@ -1911,6 +1991,211 @@ mod tests {
         label: &str,
         link_config: &stasis_jit::AotLinkConfig,
     ) -> Option<i32> {
+        run_linked_i32_noarg_fixture_with_env(process, function_name, label, link_config, &[])
+    }
+
+    struct AssetExternRecorderReset;
+
+    impl Drop for AssetExternRecorderReset {
+        fn drop(&mut self) {
+            std::env::remove_var(stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV);
+        }
+    }
+
+    fn text_hex(text: &str) -> String {
+        text.as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn expected_asset_extern_calls() -> Vec<String> {
+        vec![
+            format!(
+                "stasis.asset_extern.v1\tload_sprite\t{}\t47\t29\t101",
+                text_hex("assets/球.png")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tload_font\t{}\t19\t202",
+                text_hex("fonts/Ångström.ttf")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text\t202\t{}\t{}",
+                text_hex("héllo 世界"),
+                18.75_f32.to_bits()
+            ),
+            format!(
+                "stasis.asset_extern.v1\tcache_text\t202\t{}\t303",
+                text_hex("cached ✓")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text_cached\t303\t{}",
+                44.5_f32.to_bits()
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text_cached_height\t303\t{}",
+                12.25_f32.to_bits()
+            ),
+            "stasis.asset_extern.v1\tpoll_reload\t101\t1".to_string(),
+            format!(
+                "stasis.asset_extern.v1\tdump_bmp\t{}\t11",
+                text_hex("captures/帧.bmp")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tdump_png\t{}\t12",
+                text_hex("captures/帧.png")
+            ),
+        ]
+    }
+
+    fn read_asset_extern_calls(path: &Path) -> Vec<String> {
+        fs::read_to_string(path)
+            .unwrap_or_else(|error| {
+                panic!("read asset extern evidence {}: {error}", path.display())
+            })
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn seam_evidence_path(name: &str) -> PathBuf {
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target")
+            })
+            .join("seam-tests")
+            .join(name)
+    }
+
+    fn assert_asset_extern_diagnostic(source: &str, expected_fragment: &str) {
+        let mut jit = JitProcess::new();
+        jit.upsert_file("asset_extern_diagnostic.stasis", source);
+        let jit_error = jit.compile().expect_err("invalid JIT extern must fail");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("asset_extern_diagnostic.stasis", source);
+        let aot_error = aot.compile().expect_err("invalid AOT extern must fail");
+
+        assert_eq!(jit_error, aot_error, "JIT/AOT extern diagnostic parity");
+        let diagnostic = format!("{jit_error:?}");
+        assert!(
+            diagnostic.contains(expected_fragment),
+            "diagnostic {diagnostic:?} must contain {expected_fragment:?}"
+        );
+    }
+
+    #[test]
+    fn startup_asset_externs_match_jit_and_linked_aot_recording_host() {
+        let evidence_root = seam_evidence_path("it-004-asset-extern.json")
+            .parent()
+            .expect("evidence directory")
+            .to_path_buf();
+        fs::create_dir_all(&evidence_root).expect("create seam evidence directory");
+        let jit_calls_path = evidence_root.join("it-004-jit.calls");
+        let aot_calls_path = evidence_root.join("it-004-aot.calls");
+        let _ = fs::remove_file(&jit_calls_path);
+        let _ = fs::remove_file(&aot_calls_path);
+
+        let _reset = AssetExternRecorderReset;
+        std::env::set_var(
+            stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV,
+            &jit_calls_path,
+        );
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "tests/stasis/seams/asset_extern_abi_probe.stasis",
+            ASSET_EXTERN_FIXTURE,
+        );
+        jit.compile().expect("compile asset extern JIT fixture");
+        let jit_exit = jit
+            .execute_i32_noarg_by_name("main")
+            .expect("execute asset extern JIT fixture");
+        std::env::remove_var(stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV);
+        assert_eq!(jit_exit, 79, "JIT asset extern fixture result");
+        let expected_calls = expected_asset_extern_calls();
+        assert_eq!(read_asset_extern_calls(&jit_calls_path), expected_calls);
+        drop(jit);
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file(
+            "tests/stasis/seams/asset_extern_abi_probe.stasis",
+            ASSET_EXTERN_FIXTURE,
+        );
+        aot.compile().expect("compile asset extern AOT fixture");
+        let resolved: BTreeMap<_, _> = aot
+            .program_snapshot()
+            .expect("asset extern AOT snapshot")
+            .analysis
+            .resolved_extern_signatures
+            .iter()
+            .map(|signature| (signature.name.as_str(), signature.symbol.as_str()))
+            .collect();
+        for (name, symbol) in [
+            ("gfx_poll_reload", "stasis_gfx_poll_reload"),
+            ("gfx_dump_bmp", "stasis_jit_gfx_dump_bmp"),
+            ("gfx_dump_png", "stasis_jit_gfx_dump_png"),
+            ("load_font", "stasis_jit_load_font"),
+            ("measure_text", "stasis_jit_measure_text"),
+            ("load_sprite_from", "stasis_jit_sprite_load_from"),
+            ("load_text_from", "stasis_jit_text_run_load_from"),
+        ] {
+            assert_eq!(resolved.get(name).copied(), Some(symbol));
+        }
+
+        #[allow(unused_mut)]
+        let mut linked_aot = false;
+        #[cfg(windows)]
+        if let Some(link_config) = resolve_link_config_for_smoke() {
+            let aot_exit = run_linked_i32_noarg_fixture_with_env(
+                &aot,
+                "main",
+                "asset_extern_abi",
+                &link_config,
+                &[(
+                    stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV,
+                    aot_calls_path.as_path(),
+                )],
+            )
+            .expect("linked asset extern AOT fixture");
+            assert_eq!(aot_exit, jit_exit, "asset extern JIT/AOT result parity");
+            assert_eq!(read_asset_extern_calls(&aot_calls_path), expected_calls);
+            linked_aot = true;
+        }
+
+        let evidence_path = seam_evidence_path("it-004-asset-extern.json");
+        fs::write(
+            &evidence_path,
+            format!(
+                "{{\"schema\":\"stasis.seam_test.v1\",\"test\":\"IT-004\",\"jit_exit\":{jit_exit},\"recorded_calls\":{},\"linked_aot\":{linked_aot}}}\n",
+                expected_calls.len()
+            ),
+        )
+        .expect("write asset extern seam evidence");
+
+        let missing_declaration = ASSET_EXTERN_FIXTURE.replace(
+            "extern function load_font(path: string, size: i32): i32;",
+            "",
+        );
+        assert_ne!(missing_declaration, ASSET_EXTERN_FIXTURE);
+        assert_asset_extern_diagnostic(&missing_declaration, "load_font");
+        let wrong_signature = ASSET_EXTERN_FIXTURE.replace(
+            "extern function load_font(path: string, size: i32): i32;",
+            "extern function load_font(path: string, size: f32): i32;",
+        );
+        assert_asset_extern_diagnostic(&wrong_signature, "load_font");
+    }
+
+    #[cfg(windows)]
+    fn run_linked_i32_noarg_fixture_with_env(
+        process: &AotProcess,
+        function_name: &str,
+        label: &str,
+        link_config: &stasis_jit::AotLinkConfig,
+        environment: &[(&str, &Path)],
+    ) -> Option<i32> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -1945,6 +2230,7 @@ mod tests {
         link_result.expect("link executable");
 
         let status = Command::new(&exe_path)
+            .envs(environment.iter().map(|(name, value)| (*name, *value)))
             .status()
             .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
         let code = status.code().expect("expected process exit code");

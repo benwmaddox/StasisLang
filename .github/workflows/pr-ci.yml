@@ -66,6 +66,9 @@ jobs:
       - name: Test gfx command capacity seam
         run: cargo test -p stasis_compiler gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace -- --test-threads=1
 
+      - name: Test startup asset extern ABI seam
+        run: cargo test -p stasis_compiler startup_asset_externs_match_jit_and_linked_aot_recording_host -- --test-threads=1
+
       - name: Run Cargo Test
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         run: cargo test --workspace --all-targets -- --test-threads=1
@@ -85,6 +88,9 @@ jobs:
 
       - name: Setup MSVC dev environment
         uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Test startup asset extern ABI seam (linked AOT)
+        run: cargo test -p stasis_compiler startup_asset_externs_match_jit_and_linked_aot_recording_host -- --test-threads=1
 
       - name: Capture the real Windows SDL parity fixture
         shell: pwsh

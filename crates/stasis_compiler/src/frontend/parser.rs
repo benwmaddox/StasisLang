@@ -1207,8 +1207,11 @@ pub(crate) fn parse_string_literal_text(literal_text: &str) -> Result<String, St
             index += 2;
             continue;
         }
-        out.push(byte as char);
-        index += 1;
+        let Some(next_char) = literal_text[index..].chars().next() else {
+            return Err("invalid UTF-8 boundary in string literal".to_string());
+        };
+        out.push(next_char);
+        index += next_char.len_utf8();
     }
     Ok(out)
 }
@@ -1765,6 +1768,14 @@ function tick(): i32 {
         assert!(parsed[0].explicit_symbol);
         assert_eq!(parsed[0].params.len(), 2);
         assert_eq!(parsed[0].params[1].type_name, "string");
+    }
+
+    #[test]
+    fn preserves_utf8_in_string_literals() {
+        assert_eq!(
+            parse_string_literal_text("\"héllo 世界 ✓\"").expect("parse UTF-8 literal"),
+            "héllo 世界 ✓"
+        );
     }
 
     #[test]
