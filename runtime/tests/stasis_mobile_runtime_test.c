@@ -49,6 +49,7 @@ static int32_t game_host_req_seq;
 static int32_t game_host_req_flags;
 static int32_t game_host_req_window_w_px;
 static int32_t game_host_req_window_h_px;
+static char game_string_literals[640][32];
 
 int stasis_init_window(int width, int height, const char *title) {
     assert(width == 1280);
@@ -206,6 +207,7 @@ static int32_t hash_path(const char *path);
 
 static int32_t game_main(void) {
     main_calls += 1;
+    assert(stasis_jit_load_font(1639, 19) == 19);
     game_host_req_seq = 1;
     game_host_req_flags = 1;
     game_host_req_window_w_px = 960;
@@ -214,7 +216,14 @@ static int32_t game_main(void) {
 }
 
 static void bind_runtime(void) {
+    int literal_index;
     bind_runtime_calls += 1;
+    stasis_jit_clear_string_literal_table();
+    for (literal_index = 0; literal_index < 640; literal_index += 1) {
+        snprintf(game_string_literals[literal_index], sizeof(game_string_literals[literal_index]),
+            "asset/path/%d.ttf", literal_index);
+        stasis_jit_upsert_string_literal(1000 + literal_index, game_string_literals[literal_index]);
+    }
     stasis_jit_register_global_i32_array(hash_path("host_i32"), 0, game_host_i32, 768);
     stasis_jit_register_global_f32_array(hash_path("host_f32"), 0, game_host_f32, 64);
     stasis_jit_register_global_i32_array(

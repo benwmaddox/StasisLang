@@ -9,7 +9,7 @@
 #define STASIS_MOBILE_MAX_SCALARS 2048
 #define STASIS_MOBILE_MAX_ARRAYS 512
 #define STASIS_MOBILE_MAX_FUNCTIONS 1024
-#define STASIS_MOBILE_MAX_STRINGS 512
+#define STASIS_MOBILE_INITIAL_STRING_CAPACITY 512
 #define STASIS_MOBILE_MAX_ARRAY_LENGTH 1048576
 
 int stasis_audio_init(int sample_rate, int channels, int target_latency_frames);
@@ -99,8 +99,9 @@ static StasisArray arrays[STASIS_MOBILE_MAX_ARRAYS];
 static size_t array_count;
 static StasisCodePtr code_ptrs[STASIS_MOBILE_MAX_FUNCTIONS];
 static size_t code_ptr_count;
-static StasisStringLiteral strings[STASIS_MOBILE_MAX_STRINGS];
+static StasisStringLiteral *strings;
 static size_t string_count;
+static size_t string_capacity;
 
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity) {
     static const char hex[] = "0123456789abcdef";
@@ -235,11 +236,13 @@ void stasis_mobile_aot_reset(void) {
     memset(scalars, 0, sizeof(scalars));
     memset(arrays, 0, sizeof(arrays));
     memset(code_ptrs, 0, sizeof(code_ptrs));
-    memset(strings, 0, sizeof(strings));
+    free(strings);
+    strings = NULL;
     scalar_count = 0;
     array_count = 0;
     code_ptr_count = 0;
     string_count = 0;
+    string_capacity = 0;
 }
 
 void stasis_jit_register_global_i32_ptr(int32_t hash, int32_t *ptr) {
@@ -351,19 +354,35 @@ float stasis_jit_call_f32_8(int32_t fn, float a0, float a1, float a2, float a3, 
 float stasis_jit_call_f32_i32_1(int32_t fn, int32_t a0) { CALL_OR_ZERO(fn, F32I32Call1, target(a0)); }
 
 void stasis_jit_clear_string_literal_table(void) {
-    memset(strings, 0, sizeof(strings));
+    if (strings != NULL && string_count > 0) {
+        memset(strings, 0, string_count * sizeof(*strings));
+    }
     string_count = 0;
 }
 
 void stasis_jit_upsert_string_literal(int32_t id, const char *value) {
     size_t index;
+    size_t next_capacity;
+    StasisStringLiteral *next;
     for (index = 0; index < string_count; index += 1) {
         if (strings[index].id == id) {
             strings[index].value = value;
             return;
         }
     }
-    if (string_count >= STASIS_MOBILE_MAX_STRINGS) return;
+    if (string_count >= string_capacity) {
+        next_capacity = string_capacity == 0
+            ? STASIS_MOBILE_INITIAL_STRING_CAPACITY
+            : string_capacity * 2;
+        if (next_capacity <= string_capacity ||
+            next_capacity > SIZE_MAX / sizeof(*strings)) {
+            return;
+        }
+        next = (StasisStringLiteral *)realloc(strings, next_capacity * sizeof(*strings));
+        if (next == NULL) return;
+        strings = next;
+        string_capacity = next_capacity;
+    }
     strings[string_count++] = (StasisStringLiteral){id, value};
 }
 

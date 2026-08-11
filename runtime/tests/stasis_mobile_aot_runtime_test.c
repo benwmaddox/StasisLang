@@ -135,6 +135,7 @@ int stasis_clipboard_save_ascii(const char *value, int length) {
 }
 
 int main(void) {
+    enum { STRESS_LITERAL_COUNT = 640 };
     int32_t external = 4;
     int32_t external_array[3] = {7, 8, 9};
     int32_t overlapping_i32[5] = {1, 2, 3, 4, 5};
@@ -151,6 +152,8 @@ int main(void) {
     float text_width[1] = {0};
     float text_height[1] = {0};
     int32_t *owned;
+    char stress_literals[STRESS_LITERAL_COUNT][32];
+    int stress_index;
     char escaped_json[64];
     const char json_controls[] = {'"', '\\', '\b', '\f', '\n', '\r', '\t', 1, 'A', 0};
 
@@ -230,6 +233,17 @@ int main(void) {
     memset(ascii_out, 0, sizeof(ascii_out));
     CHECK(stasis_jit_clipboard_load_ascii(43, sizeof(ascii_out)) == 8);
     CHECK(memcmp(ascii_out, "GG1-test", 8) == 0);
+
+    for (stress_index = 0; stress_index < STRESS_LITERAL_COUNT; stress_index += 1) {
+        snprintf(stress_literals[stress_index], sizeof(stress_literals[stress_index]),
+            "asset/path/%d.ttf", stress_index);
+        stasis_jit_upsert_string_literal(1000 + stress_index, stress_literals[stress_index]);
+    }
+    CHECK(stasis_jit_load_font(1000 + STRESS_LITERAL_COUNT - 1, 19) == 19);
+    stasis_jit_clear_string_literal_table();
+    CHECK(stasis_jit_load_font(1000 + STRESS_LITERAL_COUNT - 1, 19) == 0);
+    stasis_jit_upsert_string_literal(2000, "asset/path/rebound.ttf");
+    CHECK(stasis_jit_load_font(2000, 23) == 23);
 
     owned = stasis_jit_global_i32_array_ptr(21, 0, 4);
     CHECK(owned != NULL);
