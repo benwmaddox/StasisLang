@@ -45,3 +45,20 @@ jobs:
           name: android-touch-roundtrip-seam
           path: artifacts/android_touch_roundtrip/e
           if-no-files-found: warn
+
+      - name: Run Android release orientation metrics seam
+        shell: powershell
+        run: >-
+          & ./mobile/android/test_release_shell.ps1
+          -Serial "$env:ANDROID_SERIAL"
+          -ProjectPath "samples/android_orientation_seam"
+          -OutputPath "artifacts/android_orientation_metrics"
+          -TotalTimeoutSeconds 840
+
+      - name: Upload Android orientation metrics evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-orientation-metrics-seam
+          path: artifacts/android_orientation_metrics/e
+          if-no-files-found: warn

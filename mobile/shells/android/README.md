@@ -47,3 +47,18 @@ normalized coordinates, one Stasis state transition, and the resulting frame:
 mobile/android/test_release_shell.ps1 -Serial <device-serial> `
     -ProjectPath samples/android_touch_seam
 ```
+
+IT-019 drives an odd `1001 x 1601` display override through portrait,
+landscape, and restored portrait. Each stage waits for the AOT guest to observe
+the new HostFrame display generation during `tick`, injects a logical-coordinate
+touch, and verifies the same frame's guest metrics, pointer transform, command
+trace, and named pixel regions:
+
+```powershell
+mobile/android/test_release_shell.ps1 -Serial <device-serial> `
+    -ProjectPath samples/android_orientation_seam
+```
+
+The driver independently restores any prior display-size override, user and
+accelerometer rotation settings, immersive confirmation, package installation,
+and process state even when an assertion fails.

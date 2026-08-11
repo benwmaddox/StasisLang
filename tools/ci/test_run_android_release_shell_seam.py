@@ -211,6 +211,164 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 },
             )
 
+    def test_validates_ordered_orientation_metrics_and_pointer_mapping(self):
+        stages = [
+            (1, 1, 40, 1, 1001, 1601, 0x101),
+            (2, 2, 80, 2, 1601, 1001, 0x202),
+            (3, 1, 120, 3, 1001, 1601, 0x303),
+        ]
+        markers = []
+        for sequence, kind, tick, generation, width, height, trace in stages:
+            scale = min(width / 360, height / 720)
+            markers.append(
+                {
+                    "event": "probe",
+                    "probe_sequence": sequence,
+                    "probe_kind": kind,
+                    "probe_tick": tick,
+                    "pointer_id": 1,
+                    "pointer_count": 2,
+                    "went_up": 1,
+                    "x": 270.0,
+                    "y": 540.0,
+                    "x_n": 0.75,
+                    "y_n": 0.75,
+                    "safe_x": 0.0,
+                    "safe_y": 0.0,
+                    "safe_w": 360.0,
+                    "safe_h": 720.0,
+                    "logical_w": 360.0,
+                    "logical_h": 720.0,
+                    "native_w": width,
+                    "native_h": height,
+                    "drawable_w": width,
+                    "drawable_h": height,
+                    "display_generation": generation,
+                    "density_generation": generation,
+                    "frame_display_generation": generation,
+                    "frame_density_generation": generation,
+                    "content_scale": scale,
+                    "raster_scale": max(1.0, min(8.0, scale)),
+                    "state_checksum": 4000 + sequence * 100 + kind * 10 + generation,
+                    "command_trace": trace,
+                }
+            )
+        expectations = {
+            "logical_size": [360, 720],
+            "orientation": {
+                "coordinate_tolerance": 1.0,
+                "surface_tolerance": 0,
+                "display_size": [1001, 1601],
+                "safe_viewport": [0, 0, 360, 720],
+                "touch": [270, 540],
+                "stages": [
+                    {"name": "portrait", "sequence": 1, "kind": 1, "orientation": "portrait"},
+                    {"name": "landscape", "sequence": 2, "kind": 2, "orientation": "landscape"},
+                    {"name": "restored_portrait", "sequence": 3, "kind": 1, "orientation": "portrait"},
+                ],
+            },
+        }
+        observed = seam.validate_orientation_markers(
+            markers,
+            expectations,
+            {
+                "portrait": (1001, 1601),
+                "landscape": (1601, 1001),
+                "restored_portrait": (1001, 1601),
+            },
+        )
+        self.assertEqual([1, 2, 3], [item["probe_sequence"] for item in observed])
+        with self.assertRaisesRegex(seam.SeamError, "configured size mismatch"):
+            seam.validate_orientation_markers(
+                markers,
+                expectations,
+                {
+                    "portrait": (999, 1599),
+                    "landscape": (1599, 999),
+                    "restored_portrait": (999, 1599),
+                },
+            )
+        markers[1]["frame_display_generation"] = 1
+        with self.assertRaisesRegex(seam.SeamError, "frame_display_generation"):
+            seam.validate_orientation_markers(
+                markers,
+                expectations,
+                {
+                    "portrait": (1001, 1601),
+                    "landscape": (1601, 1001),
+                    "restored_portrait": (1001, 1601),
+                },
+            )
+
+    def test_rejects_regressing_orientation_generation(self):
+        expectations = {
+            "logical_size": [360, 720],
+            "orientation": {
+                "coordinate_tolerance": 1.0,
+                "surface_tolerance": 0,
+                "display_size": [1001, 1601],
+                "safe_viewport": [0, 0, 360, 720],
+                "touch": [270, 540],
+                "stages": [
+                    {"name": "portrait", "sequence": 1, "kind": 1, "orientation": "portrait"},
+                    {"name": "restored", "sequence": 2, "kind": 1, "orientation": "portrait"},
+                ],
+            },
+        }
+        marker = {
+            "event": "probe",
+            "probe_kind": 1,
+            "pointer_id": 1,
+            "pointer_count": 2,
+            "went_up": 1,
+            "x": 270.0,
+            "y": 540.0,
+            "x_n": 0.75,
+            "y_n": 0.75,
+            "safe_x": 0.0,
+            "safe_y": 0.0,
+            "safe_w": 360.0,
+            "safe_h": 720.0,
+            "logical_w": 360.0,
+            "logical_h": 720.0,
+            "native_w": 1001,
+            "native_h": 1601,
+            "drawable_w": 1001,
+            "drawable_h": 1601,
+            "display_generation": 2,
+            "density_generation": 1,
+            "frame_display_generation": 2,
+            "frame_density_generation": 1,
+            "content_scale": 1601 / 720,
+            "raster_scale": 1601 / 720,
+            "command_trace": 1,
+        }
+        markers = []
+        for sequence, tick in ((1, 10), (2, 20)):
+            value = dict(marker)
+            value.update(
+                probe_sequence=sequence,
+                probe_tick=tick,
+                state_checksum=4000 + sequence * 100 + 10 + 2,
+                command_trace=sequence,
+            )
+            markers.append(value)
+        with self.assertRaisesRegex(seam.SeamError, "not strictly ordered"):
+            seam.validate_orientation_markers(
+                markers,
+                expectations,
+                {"portrait": (1001, 1601), "restored": (1001, 1601)},
+            )
+
+    def test_parses_only_an_explicit_wm_size_override(self):
+        self.assertEqual(
+            "1001x1601",
+            seam.parse_wm_size_override(
+                "Physical size: 1080x2400\nOverride size: 1001x1601\n"
+            ),
+        )
+        self.assertIsNone(seam.parse_wm_size_override("Physical size: 1080x2400\n"))
+
     def test_cleanup_continues_after_force_stop_failure(self):
         calls = []
 
@@ -222,12 +380,64 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
 
         with mock.patch.object(seam, "_run", side_effect=fake_run):
             errors = seam.restore_device_state(
-                Path("adb"), "device", "com.example.seam", True, "null"
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                True,
+                "null",
+                {
+                    "wm_size_override": None,
+                    "user_rotation": "3",
+                    "accelerometer_rotation": "1",
+                },
             )
 
         self.assertEqual(len(errors), 1)
         self.assertIn("force-stop", errors[0])
         self.assertIn(("uninstall", "com.example.seam"), calls)
+        self.assertIn(("shell", "wm", "size", "reset"), calls)
+        self.assertIn(
+            ("shell", "settings", "put", "system", "user_rotation", "3"),
+            calls,
+        )
+
+    def test_cleanup_restores_orientation_and_prior_display_override(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_kwargs):
+            calls.append(arguments)
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            errors = seam.restore_device_state(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                False,
+                "null",
+                {
+                    "wm_size_override": "901x1501",
+                    "user_rotation": "3",
+                    "accelerometer_rotation": "1",
+                },
+            )
+        self.assertEqual([], errors)
+        self.assertIn(("shell", "wm", "size", "901x1501"), calls)
+        self.assertIn(
+            ("shell", "settings", "put", "system", "user_rotation", "3"),
+            calls,
+        )
+        self.assertIn(
+            (
+                "shell",
+                "settings",
+                "put",
+                "system",
+                "accelerometer_rotation",
+                "1",
+            ),
+            calls,
+        )
         self.assertIn(
             (
                 "shell",

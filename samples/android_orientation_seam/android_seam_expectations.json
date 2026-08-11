@@ -1,0 +1,57 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "IT-019",
+  "stable_frame": 30,
+  "state_checksum": 4000,
+  "logical_size": [360, 720],
+  "orientation": {
+    "display_size": [1001, 1601],
+    "coordinate_tolerance": 16.0,
+    "surface_tolerance": 2,
+    "safe_viewport": [0, 0, 360, 720],
+    "touch": [270, 540],
+    "stages": [
+      {
+        "name": "portrait",
+        "rotation": 0,
+        "sequence": 1,
+        "kind": 1,
+        "orientation": "portrait",
+        "regions": [
+          {"name": "outside_letterbox", "location": "outside_letterbox", "rgb": [0, 0, 0], "tolerance": 12},
+          {"name": "portrait_state", "center": [180, 360], "rgb": [31, 214, 92], "tolerance": 30},
+          {"name": "pointer_marker", "center": [270, 540], "rgb": [242, 51, 204], "tolerance": 30}
+        ]
+      },
+      {
+        "name": "landscape",
+        "rotation": 1,
+        "sequence": 2,
+        "kind": 2,
+        "orientation": "landscape",
+        "regions": [
+          {"name": "outside_letterbox", "location": "outside_letterbox", "rgb": [0, 0, 0], "tolerance": 12},
+          {"name": "landscape_state", "center": [180, 360], "rgb": [36, 107, 235], "tolerance": 30},
+          {"name": "pointer_marker", "center": [270, 540], "rgb": [242, 51, 204], "tolerance": 30}
+        ]
+      },
+      {
+        "name": "restored_portrait",
+        "rotation": 0,
+        "sequence": 3,
+        "kind": 1,
+        "orientation": "portrait",
+        "regions": [
+          {"name": "outside_letterbox", "location": "outside_letterbox", "rgb": [0, 0, 0], "tolerance": 12},
+          {"name": "restored_state", "center": [180, 360], "rgb": [235, 92, 41], "tolerance": 30},
+          {"name": "pointer_marker", "center": [270, 540], "rgb": [242, 51, 204], "tolerance": 30}
+        ]
+      }
+    ]
+  },
+  "regions": [
+    {"name": "outside_letterbox", "location": "outside_letterbox", "rgb": [0, 0, 0], "tolerance": 12},
+    {"name": "restored_state", "center": [180, 360], "rgb": [235, 92, 41], "tolerance": 30},
+    {"name": "pointer_marker", "center": [270, 540], "rgb": [242, 51, 204], "tolerance": 30}
+  ]
+}

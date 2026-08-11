@@ -1,0 +1,125 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global seam_state_checksum: i32;
+global seam_probe_sequence: i32;
+global seam_probe_kind: i32;
+global seam_probe_tick: i32;
+global seam_pointer_id: i32;
+global seam_pointer_count: i32;
+global seam_pointer_is_down: i32;
+global seam_pointer_went_down: i32;
+global seam_pointer_went_up: i32;
+global seam_pointer_x: f32;
+global seam_pointer_y: f32;
+global seam_pointer_x_n: f32;
+global seam_pointer_y_n: f32;
+global seam_safe_x: f32;
+global seam_safe_y: f32;
+global seam_safe_w: f32;
+global seam_safe_h: f32;
+global seam_logical_w: f32;
+global seam_logical_h: f32;
+global seam_native_w: i32;
+global seam_native_h: i32;
+global seam_drawable_w: i32;
+global seam_drawable_h: i32;
+global seam_display_generation: i32;
+global seam_density_generation: i32;
+global seam_content_scale: f32;
+global seam_raster_scale: f32;
+global seam_pending_generation: i32;
+global seam_last_generation: i32;
+
+// Copy HostFrame display lanes into guest-owned evidence before rendering.
+function snapshot_host_frame_display(): void {
+    seam_logical_w = gfx_logical_width();
+    seam_logical_h = gfx_logical_height();
+    seam_native_w = gfx_native_width_px();
+    seam_native_h = gfx_native_height_px();
+    seam_drawable_w = gfx_drawable_width_px();
+    seam_drawable_h = gfx_drawable_height_px();
+    seam_display_generation = gfx_display_generation();
+    seam_density_generation = gfx_density_generation();
+    seam_content_scale = gfx_content_scale();
+    seam_raster_scale = gfx_raster_scale();
+    seam_safe_x = gfx_safe_viewport_x();
+    seam_safe_y = gfx_safe_viewport_y();
+    seam_safe_w = gfx_safe_viewport_width();
+    seam_safe_h = gfx_safe_viewport_height();
+}
+
+function record_probe(pointer: i32): void {
+    snapshot_host_frame_display();
+    seam_probe_sequence += 1;
+    seam_probe_kind = 1;
+    if (seam_native_w > seam_native_h) {
+        seam_probe_kind = 2;
+    }
+    seam_probe_tick = host_tick_index();
+    seam_pointer_id = input_pointer_id(pointer);
+    seam_pointer_count = input_pointer_count();
+    seam_pointer_is_down = 0;
+    if (input_pointer_is_down(pointer)) {
+        seam_pointer_is_down = 1;
+    }
+    seam_pointer_went_down = 0;
+    if (input_pointer_went_down(pointer)) {
+        seam_pointer_went_down = 1;
+    }
+    seam_pointer_went_up = 0;
+    if (input_pointer_went_up(pointer)) {
+        seam_pointer_went_up = 1;
+    }
+    seam_pointer_x = input_pointer_x_logical(pointer);
+    seam_pointer_y = input_pointer_y_logical(pointer);
+    seam_pointer_x_n = input_pointer_x_n(pointer);
+    seam_pointer_y_n = input_pointer_y_n(pointer);
+    seam_pending_generation = 0;
+    seam_state_checksum = 4000 + seam_probe_sequence * 100 + seam_probe_kind * 10 + seam_display_generation;
+}
+
+function main(): i32 {
+    init_window(360, 720, "Stasis Android Orientation Seam");
+    seam_state_checksum = 4000;
+    seam_probe_sequence = 0;
+    seam_pending_generation = 0;
+    seam_last_generation = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    let generation: i32 = gfx_display_generation();
+    if (generation > 0 && generation != seam_last_generation) {
+        snapshot_host_frame_display();
+        seam_last_generation = generation;
+        seam_pending_generation = generation;
+    }
+    if (seam_pending_generation > 0 && input_pointer_count() > 1 && input_pointer_went_up(1)) {
+        record_probe(1);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.0, 0.0, 0.0, 1.0);
+    fill_rect(20.0, 20.0, 320.0, 680.0, 0.10, 0.12, 0.16, 1.0);
+    if (seam_probe_sequence == 1) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.12, 0.84, 0.36, 1.0);
+    } else if (seam_probe_sequence == 2) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.14, 0.42, 0.92, 1.0);
+    } else if (seam_probe_sequence >= 3) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.92, 0.36, 0.16, 1.0);
+    } else {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.72, 0.16, 0.18, 1.0);
+    }
+    if (seam_probe_sequence > 0) {
+        fill_rect(seam_pointer_x - 18.0, seam_pointer_y - 18.0, 36.0, 36.0, 0.95, 0.20, 0.80, 1.0);
+    }
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

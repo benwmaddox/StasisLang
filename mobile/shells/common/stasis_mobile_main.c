@@ -35,8 +35,8 @@ static float seam_f32(const char *path) {
 }
 
 static void log_seam_marker(const char *test_id, const char *event, int32_t frame) {
-    int32_t render[5] = {0};
-    int has_render = stasis_test_get_render_submission_state(render, 5);
+    int32_t render[7] = {0};
+    int has_render = stasis_test_get_render_submission_state(render, 7);
     int32_t checksum = seam_i32("seam_state_checksum");
     SDL_Log(
         "Stasis seam: {\"schema\":\"stasis.seam_test.v1\",\"test_id\":\"%s\","
@@ -49,7 +49,13 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         "\"move_count\":%d,\"up_count\":%d,\"state_transitions\":%d,"
         "\"input_phase\":%d,\"x\":%.3f,\"y\":%.3f,"
         "\"dx\":%.3f,\"dy\":%.3f,\"x_n\":%.4f,\"y_n\":%.4f,"
-        "\"safe_x\":%.3f,\"safe_y\":%.3f,\"safe_w\":%.3f,\"safe_h\":%.3f}",
+        "\"safe_x\":%.3f,\"safe_y\":%.3f,\"safe_w\":%.3f,\"safe_h\":%.3f,"
+        "\"logical_w\":%.3f,\"logical_h\":%.3f,"
+        "\"native_w\":%d,\"native_h\":%d,"
+        "\"drawable_w\":%d,\"drawable_h\":%d,"
+        "\"display_generation\":%d,\"density_generation\":%d,"
+        "\"frame_display_generation\":%d,\"frame_density_generation\":%d,"
+        "\"content_scale\":%.4f,\"raster_scale\":%.4f}",
         test_id,
         event,
         frame,
@@ -81,7 +87,19 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         seam_f32("seam_safe_x"),
         seam_f32("seam_safe_y"),
         seam_f32("seam_safe_w"),
-        seam_f32("seam_safe_h")
+        seam_f32("seam_safe_h"),
+        seam_f32("seam_logical_w"),
+        seam_f32("seam_logical_h"),
+        seam_i32("seam_native_w"),
+        seam_i32("seam_native_h"),
+        seam_i32("seam_drawable_w"),
+        seam_i32("seam_drawable_h"),
+        seam_i32("seam_display_generation"),
+        seam_i32("seam_density_generation"),
+        has_render ? render[5] : 0,
+        has_render ? render[6] : 0,
+        seam_f32("seam_content_scale"),
+        seam_f32("seam_raster_scale")
     );
 }
 #endif
