@@ -26,15 +26,30 @@ static int32_t hash_global_path(const char *path) {
     return (int32_t)hash;
 }
 
+static int32_t seam_i32(const char *path) {
+    return stasis_jit_global_i32_load(hash_global_path(path));
+}
+
+static float seam_f32(const char *path) {
+    return stasis_jit_global_f32_load(hash_global_path(path));
+}
+
 static void log_seam_marker(const char *test_id, const char *event, int32_t frame) {
     int32_t render[5] = {0};
     int has_render = stasis_test_get_render_submission_state(render, 5);
-    int32_t checksum = stasis_jit_global_i32_load(hash_global_path("seam_state_checksum"));
+    int32_t checksum = seam_i32("seam_state_checksum");
     SDL_Log(
         "Stasis seam: {\"schema\":\"stasis.seam_test.v1\",\"test_id\":\"%s\","
         "\"event\":\"%s\",\"frame\":%d,\"state_checksum\":%d,"
         "\"accepted\":%d,\"rejected\":%d,\"presented\":%d,"
-        "\"validation\":%d,\"command_trace\":%u}",
+        "\"validation\":%d,\"command_trace\":%u,"
+        "\"probe_sequence\":%d,\"probe_kind\":%d,\"probe_tick\":%d,"
+        "\"pointer_id\":%d,\"pointer_count\":%d,\"is_down\":%d,"
+        "\"went_down\":%d,\"went_up\":%d,\"down_count\":%d,"
+        "\"move_count\":%d,\"up_count\":%d,\"state_transitions\":%d,"
+        "\"input_phase\":%d,\"x\":%.3f,\"y\":%.3f,"
+        "\"dx\":%.3f,\"dy\":%.3f,\"x_n\":%.4f,\"y_n\":%.4f,"
+        "\"safe_x\":%.3f,\"safe_y\":%.3f,\"safe_w\":%.3f,\"safe_h\":%.3f}",
         test_id,
         event,
         frame,
@@ -43,7 +58,30 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         has_render ? render[1] : 0,
         has_render ? render[2] : 0,
         has_render ? render[3] : 0,
-        has_render ? (uint32_t)render[4] : 0U
+        has_render ? (uint32_t)render[4] : 0U,
+        seam_i32("seam_probe_sequence"),
+        seam_i32("seam_probe_kind"),
+        seam_i32("seam_probe_tick"),
+        seam_i32("seam_pointer_id"),
+        seam_i32("seam_pointer_count"),
+        seam_i32("seam_pointer_is_down"),
+        seam_i32("seam_pointer_went_down"),
+        seam_i32("seam_pointer_went_up"),
+        seam_i32("seam_down_count"),
+        seam_i32("seam_move_count"),
+        seam_i32("seam_up_count"),
+        seam_i32("seam_state_transitions"),
+        seam_i32("seam_input_phase"),
+        seam_f32("seam_pointer_x"),
+        seam_f32("seam_pointer_y"),
+        seam_f32("seam_pointer_dx"),
+        seam_f32("seam_pointer_dy"),
+        seam_f32("seam_pointer_x_n"),
+        seam_f32("seam_pointer_y_n"),
+        seam_f32("seam_safe_x"),
+        seam_f32("seam_safe_y"),
+        seam_f32("seam_safe_w"),
+        seam_f32("seam_safe_h")
     );
 }
 #endif
@@ -113,6 +151,7 @@ int SDL_main(int argc, char **argv) {
     StasisMobileFramePacer frame_pacer;
 #if defined(STASIS_ENABLE_SEAM_TESTS)
     int32_t frame = 0;
+    int32_t last_probe_sequence = 0;
 #endif
     stasis_mobile_frame_pacer_reset(&frame_pacer, SDL_GetTicksNS());
     while (status == STASIS_MOBILE_RUNTIME_OK) {
@@ -122,6 +161,13 @@ int SDL_main(int argc, char **argv) {
             frame++;
             if (seam_test_id != NULL && (frame == 1 || frame == 30)) {
                 log_seam_marker(seam_test_id, frame == 30 ? "stable" : "frame", frame);
+            }
+            if (seam_test_id != NULL) {
+                int32_t probe_sequence = seam_i32("seam_probe_sequence");
+                if (probe_sequence != last_probe_sequence) {
+                    log_seam_marker(seam_test_id, "probe", frame);
+                    last_probe_sequence = probe_sequence;
+                }
             }
 #endif
             uint64_t wait_ns = stasis_mobile_frame_pacer_wait_ns(

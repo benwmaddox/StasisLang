@@ -114,6 +114,99 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             )
             self.assertEqual([item["name"] for item in observed], ["red", "teal"])
 
+    def test_maps_logical_touch_points_through_letterbox(self):
+        self.assertEqual(
+            seam.logical_to_native([180, -20], [360, 720], (1080, 2400)),
+            (540, 60),
+        )
+        self.assertEqual(
+            seam.logical_to_native([270, 540], [360, 720], (1080, 2400)),
+            (810, 1740),
+        )
+
+    def test_validates_ordered_android_touch_probes(self):
+        markers = []
+        expected_probes = []
+        kinds = [1, 2, 3, 4, 5]
+        counts = [(1, 0, 0), (1, 0, 1), (2, 0, 1), (2, 1, 1), (2, 1, 2)]
+        for index, (kind, count) in enumerate(zip(kinds, counts), start=1):
+            marker = {
+                "event": "probe",
+                "probe_sequence": index,
+                "probe_kind": kind,
+                "probe_tick": 40 + index * 5,
+                "pointer_id": 1,
+                "pointer_count": 2,
+                "down_count": count[0],
+                "move_count": count[1],
+                "up_count": count[2],
+                "state_transitions": int(index >= 3),
+                "is_down": int(index in (1, 3, 4)),
+                "went_down": int(index in (1, 3)),
+                "went_up": int(index in (2, 5)),
+                "input_phase": max(0, index - 2),
+                "x": 0.0 if index < 3 else 90.0 * (index - 2),
+                "y": 360.0 if index < 3 else 180.0 * (index - 2),
+                "x_n": 0.0 if index < 3 else 0.25 * (index - 2),
+                "y_n": 0.5 if index < 3 else 0.25 * (index - 2),
+                "state_checksum": 3215 if index == 5 else 0,
+                "command_trace": 77,
+            }
+            markers.append(marker)
+            expected = {
+                "sequence": index,
+                "kind": kind,
+                "down_count": count[0],
+                "move_count": count[1],
+                "up_count": count[2],
+                "state_transitions": int(index >= 3),
+                "is_down": marker["is_down"],
+                "went_down": marker["went_down"],
+                "went_up": marker["went_up"],
+            }
+            if index == 5:
+                expected["state_checksum"] = 3215
+            expected_probes.append(expected)
+        observed = seam.validate_touch_markers(
+            markers,
+            {
+                "touch": {
+                    "coordinate_tolerance": 16.0,
+                    "final_command_trace": 77,
+                    "probes": expected_probes,
+                }
+            },
+        )
+        self.assertEqual(
+            [item["probe_sequence"] for item in observed], [1, 2, 3, 4, 5]
+        )
+
+    def test_rejects_touch_probes_on_the_same_tick(self):
+        markers = [
+            {
+                "event": "probe",
+                "probe_sequence": sequence,
+                "probe_kind": sequence,
+                "probe_tick": 42,
+                "pointer_id": 1,
+                "pointer_count": 2,
+            }
+            for sequence in (1, 2)
+        ]
+        with self.assertRaisesRegex(seam.SeamError, "strictly ordered"):
+            seam.validate_touch_markers(
+                markers,
+                {
+                    "touch": {
+                        "coordinate_tolerance": 1.0,
+                        "probes": [
+                            {"sequence": 1, "kind": 1},
+                            {"sequence": 2, "kind": 2},
+                        ],
+                    }
+                },
+            )
+
     def test_cleanup_continues_after_force_stop_failure(self):
         calls = []
 

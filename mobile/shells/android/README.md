@@ -24,9 +24,10 @@ in `docs/android_release_shell_backlog.md`.
 
 The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for
-initialization, the first frame, and stable frame 30; ordinary app launches do
-not enable the markers. Run IT-017 against an attached device whose ABI list
-includes `arm64-v8a` with:
+initialization, the first frame, stable frame 30, and fixture-owned probe
+sequence changes; ordinary app launches do not compile or enable the marker
+hooks. Run IT-017 against an attached device whose ABI list includes
+`arm64-v8a` with:
 
 ```powershell
 mobile/android/test_release_shell.ps1 -Serial <device-serial>
@@ -36,3 +37,13 @@ The driver builds a fresh generated package, verifies lifecycle/checksum/trace
 markers and named capture regions, retains JSON/log/screenshot evidence, then
 force-stops the app, removes a test-only install, and restores the device's
 prior immersive-confirmation setting.
+
+IT-018 reuses that driver with a portrait logical fixture on the landscape
+surface. It injects Android touchscreen gestures in the real pillarbox and
+content regions, then verifies ordered SDL/HostFrame pointer edges, logical and
+normalized coordinates, one Stasis state transition, and the resulting frame:
+
+```powershell
+mobile/android/test_release_shell.ps1 -Serial <device-serial> `
+    -ProjectPath samples/android_touch_seam
+```
