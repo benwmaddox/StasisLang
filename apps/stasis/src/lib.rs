@@ -6044,7 +6044,7 @@ mod tests {
             &candidate,
             &preview,
             true,
-            || stasis_dynload::invoke_code_swap_hook(mutating_rejecting_hook as usize),
+            || stasis_dynload::invoke_code_swap_hook(mutating_rejecting_hook as *const () as usize),
             Result::is_ok,
         )
         .expect("runtime transaction should execute")
@@ -6150,7 +6150,7 @@ mod tests {
             request_id,
             vec![JitCodePtrOverride {
                 fn_id: hook_fn_id,
-                code_ptr: mutating_rejecting_hook as usize as u64,
+                code_ptr: mutating_rejecting_hook as *const () as usize as u64,
             }],
         )]);
 

@@ -6001,9 +6001,9 @@ mod tests {
         let render_trampoline = jit_host_render_trampoline_ptr();
         begin_jit_host_entry_session(JitHostEntryTargets {
             revision: 41,
-            main: host_entry_one as usize,
-            tick: host_entry_one as usize,
-            render: host_entry_one as usize,
+            main: host_entry_one as *const () as usize,
+            tick: host_entry_one as *const () as usize,
+            render: host_entry_one as *const () as usize,
             on_code_swap: None,
         })
         .expect("publish first host-entry table");
@@ -6012,9 +6012,9 @@ mod tests {
 
         publish_jit_host_entry_targets(JitHostEntryTargets {
             revision: 42,
-            main: host_entry_two as usize,
-            tick: host_entry_two as usize,
-            render: host_entry_two as usize,
+            main: host_entry_two as *const () as usize,
+            tick: host_entry_two as *const () as usize,
+            render: host_entry_two as *const () as usize,
             on_code_swap: None,
         })
         .expect("publish second host-entry table");
@@ -6025,9 +6025,9 @@ mod tests {
         assert_eq!(jit_host_entry_targets().unwrap().revision, 42);
         assert!(publish_jit_host_entry_targets(JitHostEntryTargets {
             revision: 41,
-            main: host_entry_one as usize,
-            tick: host_entry_one as usize,
-            render: host_entry_one as usize,
+            main: host_entry_one as *const () as usize,
+            tick: host_entry_one as *const () as usize,
+            render: host_entry_one as *const () as usize,
             on_code_swap: None,
         })
         .expect_err("stale publication")
