@@ -127,7 +127,7 @@ Every process or device test should write `stasis.seam_test.v1` JSON containing:
 - entry symbols and signatures when AOT is involved;
 - ordered lifecycle events;
 - state checksum and command trace;
-- logical/native/drawable dimensions and generations when relevant;
+- logical/native dimensions, fitted drawable viewport, and generations when relevant;
 - asset IDs, paths, and content hashes when relevant;
 - bounded timing, exit status, and the first structured failure.
 

@@ -266,21 +266,33 @@ def validate_orientation_markers(
                 f"Android orientation stage {stage['name']} surface mismatch: "
                 f"{surface_width}x{surface_height}"
             )
-        for prefix in ("native", "drawable"):
+        native_scale = min(
+            surface_width / logical_width, surface_height / logical_height
+        )
+        expected_drawable = (
+            int(logical_width * native_scale),
+            int(logical_height * native_scale),
+        )
+        expected_sizes = {
+            "native": (surface_width, surface_height),
+            "drawable": expected_drawable,
+        }
+        for prefix, (expected_width, expected_height) in expected_sizes.items():
             actual_width = marker.get(f"{prefix}_w", 0)
             actual_height = marker.get(f"{prefix}_h", 0)
             if (
-                abs(actual_width - surface_width) > surface_tolerance
-                or abs(actual_height - surface_height) > surface_tolerance
+                abs(actual_width - expected_width) > surface_tolerance
+                or abs(actual_height - expected_height) > surface_tolerance
             ):
                 raise SeamError(
                     f"Android orientation probe {sequence} {prefix} size mismatch: "
-                    f"expected={surface_width}x{surface_height} "
+                    f"expected={expected_width}x{expected_height} "
                     f"actual={actual_width}x{actual_height} "
                     f"tolerance={surface_tolerance}"
                 )
         expected_scale = min(
-            surface_width / logical_width, surface_height / logical_height
+            expected_drawable[0] / logical_width,
+            expected_drawable[1] / logical_height,
         )
         if abs(marker.get("content_scale", 0.0) - expected_scale) > 0.02:
             raise SeamError(
@@ -382,6 +394,13 @@ def outside_letterbox_point(
     raise SeamError(
         "Android touch fixture requires a real letterbox bar on the captured surface"
     )
+
+
+def release_shell_target(package: dict) -> str:
+    target = package.get("target")
+    if target not in ("android-arm64", "android-x86_64"):
+        raise SeamError(f"invalid Android package target: {target!r}")
+    return f"{target}-release-shell"
 
 
 def read_png_rgb(path: Path) -> tuple[int, int, list[tuple[int, int, int]]]:
@@ -675,7 +694,7 @@ def main() -> int:
         "schema": SCHEMA,
         "test_id": test_id,
         "status": "failed",
-        "target": "android-arm64-release-shell",
+        "target": release_shell_target(package),
         "package_id": package_id,
         "package": package,
         "build_identity": {
