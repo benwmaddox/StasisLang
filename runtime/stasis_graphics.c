@@ -242,6 +242,7 @@ typedef struct {
 
 static StasisInputFrame g_input_frame;
 static int g_events_pumped_this_frame = 0;
+static int8_t g_keyboard_event_state[SDL_SCANCODE_COUNT];
 static float g_prev_x_px[STASIS_MAX_POINTERS];
 static float g_prev_y_px[STASIS_MAX_POINTERS];
 static SDL_FingerID g_finger_ids[STASIS_MAX_POINTERS - 1];
@@ -603,6 +604,42 @@ static void stasis_window_to_logical(float native_x, float native_y, float* logi
         &g_display_metrics, native_x, native_y, logical_x, logical_y);
 }
 
+/*
+ * Native integration-test input enters through SDL's event queue. The explicit
+ * environment gate prevents shipped applications from synthesizing host input.
+ */
+STASIS_EXPORT int stasis_test_push_input_event(
+    int kind, int code, float logical_x, float logical_y) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!g_window || !enabled || enabled[0] != '1' || enabled[1] != '\0') return 0;
+
+    SDL_Event event;
+    SDL_zero(event);
+    if (kind == 1 || kind == 2) {
+        if (code < 0 || code >= SDL_SCANCODE_COUNT) return 0;
+        event.type = kind == 1 ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        event.key.scancode = (SDL_Scancode)code;
+        event.key.repeat = false;
+    } else if (kind >= 3 && kind <= 5) {
+        if (code < 0 || g_display_metrics.native_w <= 0 || g_display_metrics.native_h <= 0) {
+            return 0;
+        }
+        float native_x = 0.0f;
+        float native_y = 0.0f;
+        stasis_display_logical_to_native_xy(
+            &g_display_metrics, logical_x, logical_y, &native_x, &native_y);
+        event.type = kind == 3 ? SDL_EVENT_FINGER_DOWN :
+            (kind == 4 ? SDL_EVENT_FINGER_MOTION : SDL_EVENT_FINGER_UP);
+        event.tfinger.touchID = 1;
+        event.tfinger.fingerID = (SDL_FingerID)code;
+        event.tfinger.x = native_x / (float)g_display_metrics.native_w;
+        event.tfinger.y = native_y / (float)g_display_metrics.native_h;
+    } else {
+        return 0;
+    }
+    return SDL_PushEvent(&event) ? 1 : 0;
+}
+
 static float stasis_clampf(float v, float minv, float maxv) {
     if (v < minv) return minv;
     if (v > maxv) return maxv;
@@ -732,6 +769,7 @@ static void stasis_pump_events(void) {
     }
 
     g_input_frame.dropped_pointers = 0;
+    memset(g_keyboard_event_state, -1, sizeof(g_keyboard_event_state));
     g_input_frame.viewport_x_px = 0;
     g_input_frame.viewport_y_px = 0;
     g_input_frame.viewport_w_px = g_window_width;
@@ -746,6 +784,9 @@ static void stasis_pump_events(void) {
                 g_should_quit = true;
                 break;
             case SDL_EVENT_KEY_DOWN:
+                if (event.key.scancode >= 0 && event.key.scancode < SDL_SCANCODE_COUNT) {
+                    g_keyboard_event_state[event.key.scancode] = 1;
+                }
                 if (event.key.key == SDLK_ESCAPE) {
                     SDL_Log("Stasis quit requested: Escape key");
                     g_should_quit = true;
@@ -754,6 +795,11 @@ static void stasis_pump_events(void) {
                     g_force_debug_overlay = !g_force_debug_overlay;
                     if (g_force_debug_overlay) (void)stasis_perf_font();
                     SDL_Log("performance HUD %s (F3 toggles)", g_force_debug_overlay ? "on" : "off");
+                }
+                break;
+            case SDL_EVENT_KEY_UP:
+                if (event.key.scancode >= 0 && event.key.scancode < SDL_SCANCODE_COUNT) {
+                    g_keyboard_event_state[event.key.scancode] = 0;
                 }
                 break;
             case SDL_EVENT_WINDOW_RESIZED:
@@ -1125,13 +1171,14 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     const int32_t host_version = 3;
     const int i32_key_base = 32;
     const int i32_key_count = 512;
+    const int should_quit = stasis_should_quit();
 
     /* i32 header */
     out_i32[0] = stasis_get_time_ms();
     for (int index = 1; index <= 6; index++) out_i32[index] = 0;
     out_i32[7] = g_input_frame.pointer_count;
     out_i32[8] = g_input_frame.dropped_pointers;
-    out_i32[9] = stasis_should_quit();
+    out_i32[9] = should_quit;
 
     out_i32[10] = g_host_tick_index++;
 
@@ -1181,7 +1228,9 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     int num_keys = 0;
     const bool* keys = SDL_GetKeyboardState(&num_keys);
     for (int i = 0; i < i32_key_count; i++) {
-        out_i32[i32_key_base + i] = (keys && i < num_keys && keys[i]) ? 1 : 0;
+        out_i32[i32_key_base + i] = g_keyboard_event_state[i] >= 0
+            ? g_keyboard_event_state[i]
+            : ((keys && i < num_keys && keys[i]) ? 1 : 0);
     }
 
     const int i32_base = i32_key_base + i32_key_count;
@@ -3895,6 +3944,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_line_count = 0;
     g_events_pumped_this_frame = 0;
     memset(&g_input_frame, 0, sizeof(g_input_frame));
+    memset(g_keyboard_event_state, -1, sizeof(g_keyboard_event_state));
     memset(g_finger_active, 0, sizeof(g_finger_active));
     memset(g_finger_ids, 0, sizeof(g_finger_ids));
     for (int i = 0; i < STASIS_MAX_POINTERS; i++) {

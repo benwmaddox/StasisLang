@@ -67,6 +67,7 @@ EXPORTS
     stasis_input_pointer_y_n
     stasis_input_dropped_pointers
     stasis_host_get_frame
+    stasis_test_push_input_event
     stasis_gfx_notify_file_changed
     stasis_gfx_load_sprite
     stasis_gfx_release_sprite
