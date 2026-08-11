@@ -2993,7 +2993,8 @@ pub struct RenderActiveCounts {
     pub order: usize,
 }
 
-fn global_path_hash(path: &str) -> i32 {
+/// Returns the stable identifier used by JIT global registration and lookup.
+pub fn global_path_hash(path: &str) -> i32 {
     let mut hash = 2_166_136_261u32;
     for byte in path.bytes() {
         hash ^= u32::from(byte);

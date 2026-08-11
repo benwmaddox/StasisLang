@@ -1,0 +1,77 @@
+import "host_frame.stasis";
+
+global probe_i32: i32[31];
+global probe_f32: f32[20];
+
+function bool_i32(value: bool): i32 {
+    if (value) {
+        return 1;
+    }
+    return 0;
+}
+
+function probe_host_frame(): i32 {
+    probe_i32[0] = host_tick_index();
+    probe_i32[1] = host_time_ms();
+    probe_i32[2] = host_pointer_count();
+    probe_i32[3] = host_dropped_pointers();
+    probe_i32[4] = bool_i32(host_quit_requested());
+    probe_i32[5] = bool_i32(host_resized());
+    probe_i32[6] = host_screen_w_px();
+    probe_i32[7] = host_screen_h_px();
+    probe_i32[8] = host_version();
+    probe_i32[9] = host_flags();
+    probe_i32[10] = host_tick_hz();
+    probe_i32[11] = bool_i32(host_window_focused());
+    probe_i32[12] = bool_i32(host_window_minimized());
+    probe_i32[13] = host_time_us();
+    probe_i32[14] = host_native_w_px();
+    probe_i32[15] = host_native_h_px();
+    probe_i32[16] = host_drawable_w_px();
+    probe_i32[17] = host_drawable_h_px();
+    probe_i32[18] = host_display_generation();
+    probe_i32[19] = host_density_generation();
+    probe_i32[20] = bool_i32(host_key_down(41));
+    probe_i32[21] = bool_i32(host_key_down(0 - 1));
+    probe_i32[22] = bool_i32(host_key_down(512));
+    probe_i32[23] = host_pointer_id(0);
+    probe_i32[24] = bool_i32(host_pointer_is_down(0));
+    probe_i32[25] = bool_i32(host_pointer_went_down(0));
+    probe_i32[26] = bool_i32(host_pointer_went_up(0));
+    probe_i32[27] = host_pointer_id(7);
+    probe_i32[28] = bool_i32(host_pointer_is_down(7));
+    probe_i32[29] = bool_i32(host_pointer_went_down(7));
+    probe_i32[30] = bool_i32(host_pointer_went_up(7));
+
+    probe_f32[0] = host_logical_width();
+    probe_f32[1] = host_logical_height();
+    probe_f32[2] = host_safe_x();
+    probe_f32[3] = host_safe_y();
+    probe_f32[4] = host_safe_width();
+    probe_f32[5] = host_safe_height();
+    probe_f32[6] = host_content_scale();
+    probe_f32[7] = host_raster_scale();
+    probe_f32[8] = host_pointer_x_logical(0);
+    probe_f32[9] = host_pointer_y_logical(0);
+    probe_f32[10] = host_pointer_dx_logical(0);
+    probe_f32[11] = host_pointer_dy_logical(0);
+    probe_f32[12] = host_pointer_x_n(0);
+    probe_f32[13] = host_pointer_y_n(0);
+    probe_f32[14] = host_pointer_x_logical(7);
+    probe_f32[15] = host_pointer_y_logical(7);
+    probe_f32[16] = host_pointer_dx_logical(7);
+    probe_f32[17] = host_pointer_dy_logical(7);
+    probe_f32[18] = host_pointer_x_n(7);
+    probe_f32[19] = host_pointer_y_n(7);
+
+    let checksum: i32 = 0;
+    for (let i: i32 = 0; i < 31; i += 1) {
+        checksum += probe_i32[i] * (i + 1);
+    }
+    for (let i: i32 = 0; i < 20; i += 1) {
+        let scaled: i32 = 0;
+        scaled.from_f32(probe_f32[i] * 8.0);
+        checksum += scaled * (i + 32);
+    }
+    return checksum;
+}
