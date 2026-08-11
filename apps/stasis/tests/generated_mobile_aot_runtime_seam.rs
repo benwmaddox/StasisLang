@@ -1,0 +1,196 @@
+#![cfg(windows)]
+
+use serde_json::json;
+use stasis::{
+    audit_mobile_aot_bindings, mobile_aot_function_for, write_mobile_aot_bindings_source,
+};
+use stasis_compiler::backend::aot::AotProcess;
+use stasis_compiler::backend::EngineEntrypoints;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const FIXTURE: &str = include_str!("../../../tests/stasis/seams/generated_mobile_aot_probe.stasis");
+const EXPECTED_TRACE: u32 = 3_312_025_514;
+
+struct TestTree(PathBuf);
+
+impl Drop for TestTree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn repository_root() -> PathBuf {
+    let canonical = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonical repository root");
+    let display = canonical.to_string_lossy();
+    PathBuf::from(display.strip_prefix(r"\\?\").unwrap_or(&display))
+}
+
+fn evidence_root() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("target"))
+        .join("seam-tests")
+}
+
+fn locate_cl() -> PathBuf {
+    if let Some(path) = std::env::var_os("STASIS_C_COMPILER").map(PathBuf::from) {
+        assert!(
+            path.is_file(),
+            "STASIS_C_COMPILER must name a compiler file"
+        );
+        return path;
+    }
+    let output = Command::new("where.exe")
+        .arg("cl.exe")
+        .output()
+        .expect("locate MSVC compiler");
+    assert!(
+        output.status.success(),
+        "MSVC cl.exe is required for IT-012"
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .expect("cl.exe path")
+}
+
+#[test]
+fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let tree = TestTree(
+        std::env::temp_dir().join(format!("stasis-it-012-{}-{stamp}", std::process::id())),
+    );
+    let project = tree.0.join("project");
+    let bundle_dir = tree.0.join("bundle");
+    fs::create_dir_all(project.join("src")).expect("create fixture source directory");
+    fs::create_dir_all(project.join("assets")).expect("create fixture asset directory");
+    fs::write(
+        project.join("stasis.json"),
+        "{\"manifest_version\":1,\"name\":\"it012\",\"entry\":\"src/main.stasis\",\"tests\":\"tests\",\"output\":\"build\"}\n",
+    )
+    .expect("write fixture manifest");
+    fs::write(
+        project.join("assets/manifest.json"),
+        "{\"schema\":\"stasis-assets\",\"version\":1,\"assets\":[]}\n",
+    )
+    .expect("write empty asset manifest");
+    fs::write(project.join("src/main.stasis"), FIXTURE).expect("write fixture source");
+
+    let mut process = AotProcess::new();
+    process
+        .set_project_root(project.to_string_lossy())
+        .expect("set native AOT project root");
+    process.upsert_file("src/main.stasis", FIXTURE);
+    process.compile().expect("compile native mobile fixture");
+    let bundle = process
+        .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+        .expect("write native engine bundle");
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&bundle.manifest_path).expect("read engine manifest"),
+    )
+    .expect("parse engine manifest");
+    let bindings_path = bundle_dir.join("published_aot_bindings.c");
+    write_mobile_aot_bindings_source(&manifest, &process.state_layout(), &project, &bindings_path)
+        .expect("write generated mobile bindings");
+    let bindings = fs::read_to_string(&bindings_path).expect("read generated bindings");
+    audit_mobile_aot_bindings(&manifest, &bindings).expect("audit generated bindings");
+
+    let (tick_symbol, _) = mobile_aot_function_for(&manifest, "tick").expect("tick symbol");
+    let declaration = format!("extern int32_t {tick_symbol}(void);");
+    let wrong = bindings.replacen(
+        &declaration,
+        "extern int32_t stasis_it012_missing_tick(void);",
+        1,
+    );
+    assert_ne!(wrong, bindings, "symbol mutation must apply");
+    let audit_error = audit_mobile_aot_bindings(&manifest, &wrong)
+        .expect_err("missing generated tick declaration must fail audit");
+    assert_eq!(
+        audit_error,
+        format!("mobile AOT bindings missing declaration for generated symbol '{tick_symbol}'")
+    );
+
+    let root = repository_root();
+    let runtime = root.join("runtime");
+    let executable = tree.0.join("it012_generated_mobile.exe");
+    let mut command = Command::new(locate_cl());
+    command
+        .current_dir(&tree.0)
+        .args([
+            "/nologo",
+            "/W4",
+            "/WX",
+            "/wd4204",
+            "/D_CRT_SECURE_NO_WARNINGS",
+        ])
+        .arg(format!("/I{}", runtime.display()))
+        .arg(runtime.join("tests/stasis_generated_mobile_integration.c"))
+        .arg(runtime.join("stasis_mobile_runtime.c"))
+        .arg(runtime.join("stasis_mobile_aot_runtime.c"))
+        .arg(runtime.join("stasis_render_trace.c"))
+        .arg(&bindings_path);
+    for path in bundle.object_paths_by_function_id.values() {
+        command.arg(path);
+    }
+    let output = command
+        .arg(format!("/Fe:{}", executable.display()))
+        .output()
+        .expect("compile and link generated mobile runtime harness");
+    assert!(
+        output.status.success(),
+        "generated mobile harness link failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run = Command::new(&executable)
+        .current_dir(&tree.0)
+        .output()
+        .expect("run generated mobile runtime harness");
+    assert!(
+        run.status.success(),
+        "generated mobile harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8(run.stdout).expect("UTF-8 harness output");
+    let trace = stdout
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("trace="))
+        .and_then(|value| value.parse::<u32>().ok())
+        .expect("harness trace");
+    assert_eq!(trace, EXPECTED_TRACE, "first generated render trace");
+    assert!(stdout.contains("state=15 frames=1 rects=1"));
+
+    let evidence = json!({
+        "schema": "stasis.seam_test.v1",
+        "test_id": "IT-012",
+        "status": "passed",
+        "target": "windows-native-aot+c-mobile-runtime",
+        "generated_objects": bundle.object_paths_by_function_id.len(),
+        "bindings": bindings_path,
+        "main_state": 10,
+        "first_tick_state": 15,
+        "first_render": {"frames": 1, "rects": 1, "trace": trace},
+        "oracle": {"symbol_audit_failure": audit_error}
+    });
+    let path = evidence_root().join("it-012-generated-mobile-aot-runtime.json");
+    fs::create_dir_all(path.parent().expect("evidence parent")).expect("create evidence directory");
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+    )
+    .expect("write evidence");
+    eprintln!("IT-012 evidence: {evidence}");
+}

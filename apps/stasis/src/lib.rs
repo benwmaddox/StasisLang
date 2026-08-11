@@ -5,6 +5,7 @@ mod compiler_backend;
 mod events;
 mod host_set_registry;
 mod live_workspace;
+mod mobile_aot_bindings;
 mod runtime_exec;
 mod stasis_test_runner;
 mod watch;
@@ -15,6 +16,10 @@ pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use events::RunnerEvent;
 pub use live_workspace::LiveRunConfig;
+pub use mobile_aot_bindings::{
+    audit_mobile_aot_bindings, escape_mobile_c_string_literal, mobile_aot_function_for,
+    write_mobile_aot_bindings_source,
+};
 pub use stasis_test_runner::{
     run_jit_tests_in_directory, run_jit_tests_in_directory_with_project_root_and_session,
     run_jit_tests_in_directory_with_project_root_session_and_validator,
