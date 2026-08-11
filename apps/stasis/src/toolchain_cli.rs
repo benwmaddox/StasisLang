@@ -6126,7 +6126,12 @@ mod tests {
         assert!(java.contains("event.getPointerCount() >= 3"));
         assert!(java.contains("nativeReadPerformanceMetrics"));
         assert!(java.contains("nativeReadRuntimeError"));
-        assert!(java.contains("tick avg="));
+        assert!(java.contains("hudText.append(\"tick=\")"));
+        assert!(java.contains("hudText.append(\"  render=\")"));
+        assert!(java.contains("hudText.append(\"  total=\")"));
+        assert!(java.contains("hudText.append(\" ms  budget@60fps=\")"));
+        assert!(!java.contains("percentile("));
+        assert!(java.contains("performanceHud.setSingleLine(true)"));
         assert!(java.contains("verifyAssetManifest(staging)"));
         assert!(java.contains("manifestVersion != 1 && manifestVersion != 2"));
         assert!(java.contains("Asset verification failed before runtime startup"));

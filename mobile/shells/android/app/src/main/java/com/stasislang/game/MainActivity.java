@@ -42,7 +42,7 @@ public final class MainActivity extends SDLActivity {
     private final float[] nativePerformance = new float[2];
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
-    private final StringBuilder hudText = new StringBuilder(160);
+    private final StringBuilder hudText = new StringBuilder(96);
     private FrameLayout diagnosticLayer;
     private TextView performanceHud;
     private TextView runtimeError;
@@ -127,9 +127,9 @@ public final class MainActivity extends SDLActivity {
 
         performanceHud = new TextView(this);
         performanceHud.setTextColor(Color.WHITE);
-        performanceHud.setTextSize(12.0f);
-        performanceHud.setSingleLine(false);
-        performanceHud.setPadding(dp(10), dp(6), dp(10), dp(6));
+        performanceHud.setTextSize(10.0f);
+        performanceHud.setSingleLine(true);
+        performanceHud.setPadding(dp(6), dp(4), dp(6), dp(4));
         performanceHud.setBackgroundColor(Color.argb(150, 20, 28, 38));
         performanceHud.setContentDescription("Stasis performance timing overlay");
         performanceHud.setVisibility(View.GONE);
@@ -137,7 +137,7 @@ public final class MainActivity extends SDLActivity {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.START);
-        params.setMargins(dp(8), dp(8), dp(8), 0);
+        params.setMargins(dp(4), dp(4), dp(4), 0);
         diagnosticLayer.addView(performanceHud, params);
 
         runtimeError = new TextView(this);
@@ -193,22 +193,17 @@ public final class MainActivity extends SDLActivity {
         renderMetric.add(now, nativePerformance[1]);
         double tickAverage = tickMetric.average();
         double renderAverage = renderMetric.average();
+        double totalAverage = tickAverage + renderAverage;
         int budgetPercent = Math.max(0,
-                (int)(((tickAverage + renderAverage) * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
+                (int)((totalAverage * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
         hudText.setLength(0);
-        hudText.append("tick avg=");
+        hudText.append("tick=");
         appendMillis(hudText, tickAverage);
-        hudText.append(" p50=");
-        appendMillis(hudText, tickMetric.percentile(50));
-        hudText.append(" p95=");
-        appendMillis(hudText, tickMetric.percentile(95));
-        hudText.append(" ms\nrender avg=");
+        hudText.append("  render=");
         appendMillis(hudText, renderAverage);
-        hudText.append(" p50=");
-        appendMillis(hudText, renderMetric.percentile(50));
-        hudText.append(" p95=");
-        appendMillis(hudText, renderMetric.percentile(95));
-        hudText.append(" ms  budget=").append(budgetPercent).append('%');
+        hudText.append("  total=");
+        appendMillis(hudText, totalAverage);
+        hudText.append(" ms  budget@60fps=").append(budgetPercent).append('%');
         performanceHud.setTextColor(debugColorForBudget(budgetPercent));
         performanceHud.setText(hudText.toString());
     }
@@ -417,20 +412,6 @@ public final class MainActivity extends SDLActivity {
                 }
             }
             return samples == 0 ? 0.0 : total / samples;
-        }
-
-        double percentile(int percentile) {
-            long cutoff = System.nanoTime() - WINDOW_NANOS;
-            double[] active = new double[count];
-            int samples = 0;
-            for (int i = 0; i < count; i++) {
-                if (times[i] >= cutoff) active[samples++] = values[i];
-            }
-            if (samples == 0) return 0.0;
-            java.util.Arrays.sort(active, 0, samples);
-            int index = Math.min(samples - 1,
-                    Math.max(0, (int)Math.ceil(samples * percentile / 100.0) - 1));
-            return active[index];
         }
     }
 }
