@@ -21,3 +21,18 @@ safe-inset-aware overlay layer presents startup/runtime resource failures, and
 startup verifies every packaged asset against its manifest SHA-256 before
 replacing the last validated app-private copy. Future candidates are recorded
 in `docs/android_release_shell_backlog.md`.
+
+The generated shell also supports an opt-in integration-test launch extra,
+`stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for
+initialization, the first frame, and stable frame 30; ordinary app launches do
+not enable the markers. Run IT-017 against an attached device whose ABI list
+includes `arm64-v8a` with:
+
+```powershell
+mobile/android/test_release_shell.ps1 -Serial <device-serial>
+```
+
+The driver builds a fresh generated package, verifies lifecycle/checksum/trace
+markers and named capture regions, retains JSON/log/screenshot evidence, then
+force-stops the app, removes a test-only install, and restores the device's
+prior immersive-confirmation setting.

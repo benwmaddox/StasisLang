@@ -1,0 +1,29 @@
+name: Android Device Seams
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generated-release-shell:
+    runs-on: [self-hosted, Windows, android-device]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run generated Android AOT release shell seam
+        shell: powershell
+        run: >-
+          & ./mobile/android/test_release_shell.ps1
+          -Serial "$env:ANDROID_SERIAL"
+          -OutputPath "artifacts/android_release_shell"
+
+      - name: Upload Android release-shell evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-shell-seam
+          path: artifacts/android_release_shell/e
+          if-no-files-found: warn
