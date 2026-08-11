@@ -29,6 +29,14 @@ static int32_t pause_transitions;
 static int32_t last_pause_value;
 static int32_t shutdowns;
 static int32_t next_bind_mode;
+static int32_t record_step_order;
+static int32_t step_order;
+static int32_t applied_seq;
+static int32_t applied_flags;
+static int32_t applied_width;
+static int32_t applied_height;
+static int32_t submit_tick_marker;
+static int32_t submit_render_score;
 
 static int32_t hash_path(const char *text) {
     uint32_t hash = 2166136261u;
@@ -49,7 +57,9 @@ void stasis_mobile_set_paused(int paused) {
     last_pause_value = paused;
 }
 void stasis_host_get_frame(int32_t *out_i32, float *out_f32) {
+    if (record_step_order) step_order = step_order * 10 + 1;
     out_i32[10] += 1;
+    out_i32[100] = 77;
     out_f32[50] = 320.0f;
     out_f32[51] = 180.0f;
 }
@@ -59,15 +69,19 @@ void stasis_host_bulk_apply_requests(
     const int32_t *width,
     const int32_t *height
 ) {
-    (void)seq;
-    (void)flags;
-    (void)width;
-    (void)height;
+    if (record_step_order) step_order = step_order * 10 + 2;
+    applied_seq = *seq;
+    applied_flags = *flags;
+    applied_width = *width;
+    applied_height = *height;
 }
 void stasis_gfx_submit_u8(int32_t *i32s, const float *f32s, const uint8_t *u8s) {
+    if (record_step_order) step_order = step_order * 10 + 3;
     submitted_frames += 1;
     submitted_trace = stasis_render_trace(i32s, f32s, u8s);
     submitted_rects = i32s[STASIS_RENDER_I_RECT_COUNT];
+    submit_tick_marker = stasis_jit_global_i32_load(hash_path("tick_host_marker"));
+    submit_render_score = stasis_jit_global_i32_load(hash_path("render_score"));
 }
 uint64_t stasis_host_performance_counter(void) { return 100; }
 uint64_t stasis_host_performance_elapsed_us(uint64_t started, uint64_t finished) {
@@ -176,13 +190,26 @@ int main(void) {
     stasis_mobile_runtime_set_paused(0);
     CHECK(pause_transitions == 2);
     CHECK(last_pause_value == 0);
+    stasis_jit_global_i32_store(hash_path("host_req_seq"), 41);
+    stasis_jit_global_i32_store(hash_path("host_req_flags"), 5);
+    stasis_jit_global_i32_store(hash_path("host_req_window_w_px"), 640);
+    stasis_jit_global_i32_store(hash_path("host_req_window_h_px"), 360);
+    record_step_order = 1;
     CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
+    record_step_order = 0;
     CHECK(stasis_jit_global_i32_load(hash_path("score")) == 15);
     CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 123);
+    CHECK(stasis_jit_global_i32_load(hash_path("tick_host_marker")) == 77);
+    CHECK(stasis_jit_global_i32_load(hash_path("render_score")) == 15);
+    CHECK(step_order == 123);
+    CHECK(applied_seq == 41 && applied_flags == 5);
+    CHECK(applied_width == 640 && applied_height == 360);
+    CHECK(submit_tick_marker == 77 && submit_render_score == 15);
     CHECK(submitted_frames == 1);
     CHECK(submitted_rects == 1);
     CHECK(submitted_trace == IT012_EXPECTED_TRACE);
     printf("stasis.seam_test.v1 IT-012 state=15 frames=1 rects=1 trace=%u\n", submitted_trace);
+    printf("stasis.seam_test.v1 IT-014 order=123 marker=77 request=41:5:640:360 render_score=15 frames=1\n");
     stasis_mobile_runtime_shutdown();
 
     CHECK(stasis_mobile_runtime_is_initialized() == 0);

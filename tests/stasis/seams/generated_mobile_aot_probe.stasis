@@ -10,6 +10,8 @@ global host_req_window_h_px: i32;
 global score: i32;
 global lifecycle_mode: i32;
 global entry_trace: i32;
+global tick_host_marker: i32;
+global render_score: i32;
 
 function main(): i32 {
     entry_trace = 1;
@@ -22,6 +24,7 @@ function main(): i32 {
 
 function tick(): i32 {
     entry_trace = entry_trace * 10 + 2;
+    tick_host_marker = host_i32[100];
     score += 5;
     if (lifecycle_mode == 2) {
         return 22;
@@ -31,6 +34,7 @@ function tick(): i32 {
 
 function render(): i32 {
     entry_trace = entry_trace * 10 + 3;
+    render_score = score;
     gfx_cmd_i32[0] = 1196967473;
     gfx_cmd_i32[1] = 4;
     gfx_cmd_i32[2] = 3;

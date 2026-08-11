@@ -163,7 +163,7 @@ jobs:
         run: |
           cargo test -p stasis_compiler --test jit_aot_host_replay_seam -- --test-threads=1 --nocapture
 
-      - name: Test generated AOT bindings and lifecycle in the C mobile runtime
+      - name: Test generated AOT bindings, lifecycle, and frame order in the C mobile runtime
         shell: pwsh
         run: |
           cargo test -p stasis --test generated_mobile_aot_runtime_seam -- --test-threads=1 --nocapture
