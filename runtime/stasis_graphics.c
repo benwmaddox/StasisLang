@@ -156,6 +156,13 @@ static int g_display_generation = 0;
 static int g_density_generation = 0;
 static bool g_window_resized = false;
 static bool g_window_minimized = false;
+static uint32_t g_render_accepted_frames = 0;
+static uint32_t g_render_rejected_frames = 0;
+static uint32_t g_render_presented_frames = 0;
+static uint32_t g_render_last_trace = 0;
+static StasisRenderValidation g_render_last_validation = STASIS_RENDER_VALID;
+static uint32_t g_render_logged_validation_mask = 0;
+static bool g_render_contract_logged = false;
 typedef struct {
     int active;
     int logical_w;
@@ -267,6 +274,7 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32);
 STASIS_EXPORT int stasis_set_fullscreen(int fullscreen);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, float x, float y, float w, float h, int rot_degrees, int a);
 STASIS_EXPORT void stasis_gfx_submit_u8(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
+STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int32_t capacity);
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
 /* Forward decls for internal helpers used before their definitions. */
@@ -4826,22 +4834,28 @@ static void stasis_stamp_display_metadata(int32_t* cmd_i32) {
 }
 
 static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
-    static int contract_logged = 0;
     StasisRenderValidation validation = stasis_render_validate(cmd_i32, cmd_f32);
     if (validation != STASIS_RENDER_VALID) {
-        if (!contract_logged) {
+        g_render_rejected_frames++;
+        g_render_last_validation = validation;
+        const uint32_t validation_mask = 1u << (uint32_t)validation;
+        if ((g_render_logged_validation_mask & validation_mask) == 0) {
             SDL_Log(
-                "Stasis renderer rejected frame: stage=command_header failure=%s magic=%d version=%d backend=%s surface_generation=%u renderer_generation=%u",
+                "Stasis renderer rejected frame: stage=%s failure=%s magic=%d version=%d backend=%s surface_generation=%u renderer_generation=%u",
+                stasis_render_validation_stage(validation),
                 stasis_render_validation_name(validation),
                 cmd_i32 ? cmd_i32[STASIS_RENDER_I_MAGIC] : 0,
                 cmd_i32 ? cmd_i32[STASIS_RENDER_I_VERSION] : 0,
                 g_use_sdl_renderer ? "sdl" : "gl",
                 g_resource_lifecycle.surface_generation,
                 g_resource_lifecycle.renderer_generation);
-            contract_logged = 1;
+            g_render_logged_validation_mask |= validation_mask;
         }
         return;
     }
+    g_render_accepted_frames++;
+    g_render_last_validation = STASIS_RENDER_VALID;
+    g_render_last_trace = stasis_render_trace(cmd_i32, cmd_f32, cmd_u8);
     stasis_stamp_display_metadata(cmd_i32);
     g_perf_render_started_counter = SDL_GetPerformanceCounter();
 
@@ -4867,7 +4881,7 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
     if (text_count > gfx_cmd_max_text) text_count = gfx_cmd_max_text;
     if (text_bytes_used > gfx_cmd_max_text_bytes) text_bytes_used = gfx_cmd_max_text_bytes;
 
-    if (!contract_logged) {
+    if (!g_render_contract_logged) {
         SDL_Log(
             "Stasis render contract v%d trace=%u flags=%d lines=%d rects=%d sprites=%d text=%d",
             cmd_i32[STASIS_RENDER_I_VERSION],
@@ -4877,7 +4891,7 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
             rect_count,
             sprite_count,
             text_count);
-        contract_logged = 1;
+        g_render_contract_logged = true;
     }
 
     stasis_begin_frame();
@@ -4945,9 +4959,23 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
     if ((flags & STASIS_RENDER_FLAG_PRESENT) != 0) {
         stasis_perf_draw_overlay();
         stasis_end_frame();
+        g_render_presented_frames++;
     } else {
         g_perf_render_started_counter = 0;
     }
+}
+
+STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int32_t capacity) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!out_i32 || capacity < 5 || !enabled || enabled[0] != '1' || enabled[1] != '\0') {
+        return 0;
+    }
+    out_i32[0] = (int32_t)g_render_accepted_frames;
+    out_i32[1] = (int32_t)g_render_rejected_frames;
+    out_i32[2] = (int32_t)g_render_presented_frames;
+    out_i32[3] = (int32_t)g_render_last_validation;
+    out_i32[4] = (int32_t)g_render_last_trace;
+    return 1;
 }
 
 STASIS_EXPORT void stasis_gfx_submit(int32_t* cmd_i32, const float* cmd_f32) {
@@ -6107,6 +6135,13 @@ STASIS_EXPORT void stasis_shutdown(void) {
     memset(&g_resource_lifecycle, 0, sizeof(g_resource_lifecycle));
     memset(&g_test_display_override, 0, sizeof(g_test_display_override));
     g_window_minimized = false;
+    g_render_accepted_frames = 0;
+    g_render_rejected_frames = 0;
+    g_render_presented_frames = 0;
+    g_render_last_trace = 0;
+    g_render_last_validation = STASIS_RENDER_VALID;
+    g_render_logged_validation_mask = 0;
+    g_render_contract_logged = false;
     g_resource_frame_ready = false;
     SDL_Log("Stasis graphics shutdown");
 }
