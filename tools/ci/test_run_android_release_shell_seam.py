@@ -156,6 +156,8 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 "state_checksum": 3215 if index == 5 else 0,
                 "command_trace": 77,
             }
+            if index == 5:
+                marker.update({"x": 259.183, "y": 518.118, "x_n": 0.72, "y_n": 0.7196})
             markers.append(marker)
             expected = {
                 "sequence": index,
@@ -170,6 +172,9 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             }
             if index == 5:
                 expected["state_checksum"] = 3215
+                expected.update(
+                    {"x_min": 240, "y_min": 480, "x_n": 0.75, "y_n": 0.75}
+                )
             expected_probes.append(expected)
         observed = seam.validate_touch_markers(
             markers,
