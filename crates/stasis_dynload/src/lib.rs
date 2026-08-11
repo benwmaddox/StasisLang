@@ -3256,6 +3256,46 @@ pub struct EmbeddedGraphicsHost {
     pub poll_reload: fn(i32) -> i32,
 }
 
+pub const ASSET_EXTERN_SEAM_EVIDENCE_ENV: &str = "STASIS_ASSET_EXTERN_SEAM_EVIDENCE";
+
+fn asset_extern_seam_evidence_path() -> Option<PathBuf> {
+    std::env::var_os(ASSET_EXTERN_SEAM_EVIDENCE_ENV).map(PathBuf::from)
+}
+
+fn asset_extern_seam_text_hex(text: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(text.len() * 2);
+    for byte in text {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn record_asset_extern_seam_call(kind: &str, fields: &[String]) -> Option<bool> {
+    let path = asset_extern_seam_evidence_path()?;
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!(
+                "asset extern seam recorder failed to open {}: {error}",
+                path.display()
+            );
+            return Some(false);
+        }
+    };
+    let mut line = format!("stasis.asset_extern.v1\t{kind}");
+    for field in fields {
+        line.push('\t');
+        line.push_str(field);
+    }
+    Some(writeln!(file, "{line}").is_ok())
+}
+
 thread_local! {
     static EMBEDDED_GRAPHICS_HOST: std::cell::Cell<Option<EmbeddedGraphicsHost>> =
         const { std::cell::Cell::new(None) };
@@ -3286,6 +3326,25 @@ fn jit_text_arg_to_cstring(value_id: i32) -> Result<CString, String> {
 // translate that into a stable `const char*` when calling the C runtime.
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(path) = jit_text_arg_bytes(path_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "load_sprite",
+            &[
+                asset_extern_seam_text_hex(&path),
+                max_w.to_string(),
+                max_h.to_string(),
+                "101".to_string(),
+            ],
+        ) == Some(true)
+        {
+            101
+        } else {
+            0
+        };
+    }
     if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
         return (host.load_sprite)(&path, max_w, max_h);
     }
@@ -3702,6 +3761,20 @@ pub extern "C" fn stasis_jit_storage_save_i32(scope_id: i32, key_id: i32, value:
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(path) = jit_text_arg_bytes(path_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "dump_bmp",
+            &[asset_extern_seam_text_hex(&path), "11".to_string()],
+        ) == Some(true)
+        {
+            11
+        } else {
+            0
+        };
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -3719,6 +3792,20 @@ pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_dump_png(path_id: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(path) = jit_text_arg_bytes(path_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "dump_png",
+            &[asset_extern_seam_text_hex(&path), "12".to_string()],
+        ) == Some(true)
+        {
+            12
+        } else {
+            0
+        };
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -3738,6 +3825,24 @@ pub extern "C" fn stasis_jit_gfx_dump_png(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(path) = jit_text_arg_bytes(path_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "load_font",
+            &[
+                asset_extern_seam_text_hex(&path),
+                size.to_string(),
+                "202".to_string(),
+            ],
+        ) == Some(true)
+        {
+            202
+        } else {
+            0
+        };
+    }
     if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
         return (host.load_font)(&path, size);
     }
@@ -3758,6 +3863,24 @@ pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(text) = jit_text_arg_bytes(text_id) else {
+            return 0.0;
+        };
+        return if record_asset_extern_seam_call(
+            "measure_text",
+            &[
+                font.to_string(),
+                asset_extern_seam_text_hex(&text),
+                18.75_f32.to_bits().to_string(),
+            ],
+        ) == Some(true)
+        {
+            18.75
+        } else {
+            0.0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         if let Some(width) =
             with_jit_text_arg_bytes(text_id, |text| (host.measure_text)(font, text))
@@ -3782,6 +3905,24 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(text) = jit_text_arg_bytes(text_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "cache_text",
+            &[
+                font.to_string(),
+                asset_extern_seam_text_hex(&text),
+                "303".to_string(),
+            ],
+        ) == Some(true)
+        {
+            303
+        } else {
+            0
+        };
+    }
     if let (Some(host), Some(text)) = (embedded_graphics_host(), jit_text_arg_bytes(text_id)) {
         return (host.cache_text)(font, &text);
     }
@@ -3802,6 +3943,18 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let result = i32::from(handle == 101);
+        return if record_asset_extern_seam_call(
+            "poll_reload",
+            &[handle.to_string(), result.to_string()],
+        ) == Some(true)
+        {
+            result
+        } else {
+            0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         return (host.poll_reload)(handle);
     }
@@ -3819,6 +3972,17 @@ pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        return if record_asset_extern_seam_call(
+            "measure_text_cached",
+            &[run_handle.to_string(), 44.5_f32.to_bits().to_string()],
+        ) == Some(true)
+        {
+            44.5
+        } else {
+            0.0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         return (host.measure_text_cached)(run_handle);
     }
@@ -3836,6 +4000,17 @@ pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_measure_text_cached_height(run_handle: i32) -> f32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        return if record_asset_extern_seam_call(
+            "measure_text_cached_height",
+            &[run_handle.to_string(), 12.25_f32.to_bits().to_string()],
+        ) == Some(true)
+        {
+            12.25
+        } else {
+            0.0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         return (host.measure_text_cached_height)(run_handle);
     }
