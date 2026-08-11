@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import unittest
 
 
@@ -16,6 +17,9 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.release_script = read("mobile/android/test_release_shell.ps1")
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
+        cls.touch_expectations = json.loads(
+            read("samples/android_touch_seam/android_seam_expectations.json")
+        )
 
     def test_workflow_uses_hosted_x86_emulator(self):
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
@@ -83,6 +87,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         for test_id in ("IT-017", "IT-018", "IT-019"):
             row = next(line for line in self.strategy.splitlines() if f"| {test_id} |" in line)
             self.assertTrue(row.endswith("| Emulator |"), row)
+
+    def test_touch_drag_is_long_enough_for_hosted_emulator_sampling(self):
+        inside_drag = next(
+            gesture
+            for gesture in self.touch_expectations["touch"]["gestures"]
+            if gesture["name"] == "inside_drag"
+        )
+        self.assertGreaterEqual(inside_drag["duration_ms"], 2000)
 
 
 if __name__ == "__main__":

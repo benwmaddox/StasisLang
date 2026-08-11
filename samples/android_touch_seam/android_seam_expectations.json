@@ -21,7 +21,7 @@
         "name": "inside_drag",
         "start": [90, 180],
         "end": [270, 540],
-        "duration_ms": 700,
+        "duration_ms": 2000,
         "after_sequence": 5
       }
     ],
