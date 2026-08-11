@@ -1,6 +1,8 @@
 param(
     [string]$Serial = $env:ANDROID_SERIAL,
     [string]$OutputPath = "",
+    [string]$ProjectPath = "samples/android_aot_seam",
+    [string]$ExpectationsPath = "",
     [int]$TotalTimeoutSeconds = 900
 )
 
@@ -18,18 +20,36 @@ $androidHome = if ($env:ANDROID_HOME) {
 $adb = Join-Path $androidHome "platform-tools\adb.exe"
 if (-not (Test-Path $adb)) { throw "adb.exe was not found: $adb" }
 if (-not $Serial) { throw "Pass -Serial or set ANDROID_SERIAL to one arm64 Android device" }
+$projectRoot = if ([System.IO.Path]::IsPathRooted($ProjectPath)) {
+    [System.IO.Path]::GetFullPath($ProjectPath)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ProjectPath))
+}
+if (-not (Test-Path (Join-Path $projectRoot "stasis.json"))) {
+    throw "Android seam project is missing stasis.json: $projectRoot"
+}
+if (-not $ExpectationsPath) {
+    $ExpectationsPath = Join-Path $projectRoot "android_seam_expectations.json"
+} elseif (-not [System.IO.Path]::IsPathRooted($ExpectationsPath)) {
+    $ExpectationsPath = Join-Path $repoRoot $ExpectationsPath
+}
+$ExpectationsPath = [System.IO.Path]::GetFullPath($ExpectationsPath)
+if (-not (Test-Path $ExpectationsPath)) {
+    throw "Android seam expectations are missing: $ExpectationsPath"
+}
+$testId = (Get-Content -Raw $ExpectationsPath | ConvertFrom-Json).test_id
+if (-not $testId) { throw "Android seam expectations do not name test_id" }
 
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
 if (-not $OutputPath) {
-    $OutputPath = Join-Path $repoRoot "target\it017\$stamp"
+    $OutputPath = Join-Path $repoRoot "target\$($testId.ToLowerInvariant().Replace('-', ''))\$stamp"
 }
 $artifactRoot = [System.IO.Path]::GetFullPath($OutputPath)
 $workspaceRoot = Join-Path $artifactRoot "w"
 $packageRoot = Join-Path $workspaceRoot "d"
 $evidenceRoot = Join-Path $artifactRoot "e"
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-Copy-Item -LiteralPath (Join-Path $repoRoot "samples\android_aot_seam") `
-    -Destination $workspaceRoot -Recurse
+Copy-Item -LiteralPath $projectRoot -Destination $workspaceRoot -Recurse
 $vendorRoot = Join-Path $workspaceRoot "vendor\stasis\src"
 New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $repoRoot "src\stdlib") `
@@ -60,7 +80,7 @@ if ($LASTEXITCODE -ne 0 -or $abiOutput.Count -eq 0) {
 $abi = ($abiOutput -join "").Trim()
 $abiList = (& $adb -s $Serial shell getprop ro.product.cpu.abilist).Trim() -split ','
 if ($LASTEXITCODE -ne 0 -or "arm64-v8a" -notin $abiList) {
-    throw "IT-017 requires arm64-v8a support; $Serial reports '$abi' ($($abiList -join ','))"
+    throw "$testId requires arm64-v8a support; $Serial reports '$abi' ($($abiList -join ','))"
 }
 if (-not $env:STASIS_SDL3_SOURCE -or -not $env:STASIS_SDL3_IMAGE_SOURCE) {
     throw "Set STASIS_SDL3_SOURCE and STASIS_SDL3_IMAGE_SOURCE to the pinned source trees"
@@ -69,20 +89,20 @@ if (-not $env:STASIS_SDL3_SOURCE -or -not $env:STASIS_SDL3_IMAGE_SOURCE) {
 Push-Location $repoRoot
 try {
     python tools/cargo_cache.py run -- cargo build -p stasis
-    if ($LASTEXITCODE -ne 0) { throw "IT-017 compiler build failed with exit code $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw "$testId compiler build failed with exit code $LASTEXITCODE" }
     $commonGit = (& git rev-parse --path-format=absolute --git-common-dir).Trim()
     if ($LASTEXITCODE -ne 0) { throw "Unable to resolve the shared Cargo target" }
     $compiler = Join-Path (Split-Path -Parent $commonGit) "build\codex-cargo-target\debug\stasis.exe"
     if (-not (Test-Path $compiler)) { throw "Built Stasis compiler is missing: $compiler" }
     & $compiler --workspace $workspaceRoot package-mobile `
         --target android-arm64 --out d --development-build
-    if ($LASTEXITCODE -ne 0) { throw "IT-017 package-mobile failed with exit code $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw "$testId package-mobile failed with exit code $LASTEXITCODE" }
     Assert-In-Time "package-mobile"
 
     $gradle = Resolve-Gradle
     & $gradle -p (Join-Path $packageRoot "android") `
         :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
-    if ($LASTEXITCODE -ne 0) { throw "IT-017 Gradle build failed with exit code $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw "$testId Gradle build failed with exit code $LASTEXITCODE" }
     Assert-In-Time "Gradle build"
 
     $apk = Join-Path $packageRoot "android\app\build\outputs\apk\debug\app-debug.apk"
@@ -92,10 +112,10 @@ try {
         --serial $Serial `
         --apk $apk `
         --package-manifest (Join-Path $packageRoot "stasis_mobile_package.json") `
-        --expectations samples/android_aot_seam/android_seam_expectations.json `
+        --expectations $ExpectationsPath `
         --output $evidenceRoot `
         --timeout-seconds ([math]::Max(15, $TotalTimeoutSeconds - [math]::Floor($startedAt.Elapsed.TotalSeconds)))
-    if ($LASTEXITCODE -ne 0) { throw "IT-017 device acceptance failed with exit code $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw "$testId device acceptance failed with exit code $LASTEXITCODE" }
     Assert-In-Time "device acceptance"
 } finally {
     Pop-Location

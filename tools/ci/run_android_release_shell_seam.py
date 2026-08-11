@@ -63,12 +63,10 @@ def validate_markers(markers: list[dict], expectations: dict) -> dict:
     stable = events.get(("stable", stable_frame))
     if stable is None:
         raise SeamError(f"Android shell did not reach stable frame {stable_frame}")
-    expected = {
-        "state_checksum": expectations["state_checksum"],
-        "command_trace": expectations["command_trace"],
-        "rejected": 0,
-        "validation": 0,
-    }
+    expected = {"rejected": 0, "validation": 0}
+    for key in ("state_checksum", "command_trace"):
+        if key in expectations:
+            expected[key] = expectations[key]
     mismatches = {
         key: {"expected": value, "actual": stable.get(key)}
         for key, value in expected.items()
@@ -86,6 +84,136 @@ def validate_markers(markers: list[dict], expectations: dict) -> dict:
     if mismatches:
         raise SeamError(f"Android stable-frame marker mismatch: {mismatches}")
     return stable
+
+
+def validate_touch_markers(markers: list[dict], expectations: dict) -> list[dict]:
+    touch = expectations["touch"]
+    probes = {
+        item.get("probe_sequence"): item
+        for item in markers
+        if item.get("event") == "probe"
+    }
+    observed = []
+    ticks = []
+    exact_fields = (
+        "probe_kind",
+        "down_count",
+        "move_count",
+        "up_count",
+        "state_transitions",
+        "input_phase",
+        "is_down",
+        "went_down",
+        "went_up",
+        "state_checksum",
+    )
+    tolerance = touch["coordinate_tolerance"]
+    for expected in touch["probes"]:
+        sequence = expected["sequence"]
+        marker = probes.get(sequence)
+        if marker is None:
+            raise SeamError(f"Android touch seam is missing probe sequence {sequence}")
+        for field in exact_fields:
+            expected_key = "kind" if field == "probe_kind" else field
+            if expected_key in expected and marker.get(field) != expected[expected_key]:
+                raise SeamError(
+                    f"Android touch probe {sequence} {field} mismatch: "
+                    f"expected={expected[expected_key]} actual={marker.get(field)}"
+                )
+        if marker.get("pointer_id") != 1 or marker.get("pointer_count", 0) < 2:
+            raise SeamError(
+                f"Android touch probe {sequence} pointer identity mismatch: "
+                f"id={marker.get('pointer_id')} count={marker.get('pointer_count')}"
+            )
+        for field in ("x", "y"):
+            if field in expected and abs(marker.get(field, 0.0) - expected[field]) > tolerance:
+                raise SeamError(
+                    f"Android touch probe {sequence} {field} mismatch: "
+                    f"expected={expected[field]} actual={marker.get(field)} "
+                    f"tolerance={tolerance}"
+                )
+            minimum = expected.get(f"{field}_min")
+            if minimum is not None and marker.get(field, 0.0) < minimum:
+                raise SeamError(
+                    f"Android touch probe {sequence} {field} below minimum: "
+                    f"expected>={minimum} actual={marker.get(field)}"
+                )
+        for field in ("x_n", "y_n"):
+            if field in expected and abs(marker.get(field, 0.0) - expected[field]) > 0.05:
+                raise SeamError(
+                    f"Android touch probe {sequence} {field} mismatch: "
+                    f"expected={expected[field]} actual={marker.get(field)}"
+                )
+        if expected.get("on_boundary"):
+            normalized = (marker.get("x_n", 0.5), marker.get("y_n", 0.5))
+            boundary_distance = min(
+                abs(value - boundary)
+                for value in normalized
+                for boundary in (0.0, 1.0)
+            )
+            if boundary_distance > 0.02:
+                raise SeamError(
+                    f"Android touch probe {sequence} did not clamp to a viewport "
+                    f"boundary: x_n={normalized[0]} y_n={normalized[1]}"
+                )
+        ticks.append(marker.get("probe_tick"))
+        observed.append(marker)
+    safe_viewport = touch.get("safe_viewport")
+    if safe_viewport:
+        for marker in observed:
+            for field, expected in zip(
+                ("safe_x", "safe_y", "safe_w", "safe_h"), safe_viewport
+            ):
+                if abs(marker.get(field, 0.0) - expected) > tolerance:
+                    raise SeamError(
+                        f"Android touch probe {marker['probe_sequence']} {field} mismatch: "
+                        f"expected={expected} actual={marker.get(field)} tolerance={tolerance}"
+                    )
+    if any(not isinstance(tick, int) for tick in ticks) or any(
+        current >= following for current, following in zip(ticks, ticks[1:])
+    ):
+        raise SeamError(f"Android touch probe ticks are not strictly ordered: {ticks}")
+    final = observed[-1]
+    if (
+        "final_command_trace" in touch
+        and final.get("command_trace") != touch["final_command_trace"]
+    ):
+        raise SeamError(
+            "Android touch final command trace mismatch: "
+            f"expected={touch['final_command_trace']} actual={final.get('command_trace')}"
+        )
+    return observed
+
+
+def logical_to_native(
+    logical: list[float], logical_size: list[int], native_size: tuple[int, int]
+) -> tuple[int, int]:
+    logical_width, logical_height = logical_size
+    native_width, native_height = native_size
+    scale = min(native_width / logical_width, native_height / logical_height)
+    offset_x = (native_width - logical_width * scale) / 2.0
+    offset_y = (native_height - logical_height * scale) / 2.0
+    return (
+        max(0, min(native_width - 1, round(offset_x + logical[0] * scale))),
+        max(0, min(native_height - 1, round(offset_y + logical[1] * scale))),
+    )
+
+
+def outside_letterbox_point(
+    logical_size: list[int], native_size: tuple[int, int]
+) -> tuple[int, int]:
+    logical_width, logical_height = logical_size
+    native_width, native_height = native_size
+    scale = min(native_width / logical_width, native_height / logical_height)
+    offset_x = (native_width - logical_width * scale) / 2.0
+    offset_y = (native_height - logical_height * scale) / 2.0
+    if offset_x >= 2.0:
+        return round(offset_x / 2.0), native_height // 2
+    if offset_y >= 2.0:
+        return native_width // 2, round(offset_y / 2.0)
+    raise SeamError(
+        "Android touch fixture requires a real letterbox bar on the captured surface"
+    )
 
 
 def read_png_rgb(path: Path) -> tuple[int, int, list[tuple[int, int, int]]]:
@@ -161,8 +289,17 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     offset_y = (height - logical_height * scale) / 2.0
     observed = []
     for region in expectations["regions"]:
-        x = max(0, min(width - 1, round(offset_x + region["center"][0] * scale)))
-        y = max(0, min(height - 1, round(offset_y + region["center"][1] * scale)))
+        if region.get("location") == "outside_letterbox":
+            x, y = outside_letterbox_point(
+                expectations["logical_size"], (width, height)
+            )
+        else:
+            x = max(
+                0, min(width - 1, round(offset_x + region["center"][0] * scale))
+            )
+            y = max(
+                0, min(height - 1, round(offset_y + region["center"][1] * scale))
+            )
         radius = max(2, round(scale * 3))
         samples = [
             pixels[row * width + column]
@@ -256,6 +393,7 @@ def main() -> int:
     test_id = expectations["test_id"]
     args.output.mkdir(parents=True, exist_ok=True)
     log_path = args.output / "logcat.txt"
+    initial_capture_path = args.output / "initial-frame.png"
     capture_path = args.output / "stable-frame.png"
     evidence_path = args.output / "evidence.json"
     preinstalled = bool(
@@ -350,13 +488,90 @@ def main() -> int:
             if any(item.get("event") == "stable" for item in markers):
                 break
             time.sleep(1)
-        log_path.write_text(log, encoding="utf-8")
         stable = validate_markers(markers, expectations)
         first_pid = _run(
             args.adb, args.serial, "shell", "pidof", package_id, required=False
         ).strip()
         if not first_pid:
             raise SeamError("generated Android shell exited before capture")
+        touch_probes = []
+        if "touch" in expectations:
+            initial_capture_path.write_bytes(
+                _run(args.adb, args.serial, "exec-out", "screencap", "-p", text=False)
+            )
+            native_width, native_height, _ = read_png_rgb(initial_capture_path)
+            evidence["artifacts"]["initial_capture"] = str(initial_capture_path)
+            evidence["input_surface"] = {
+                "width": native_width,
+                "height": native_height,
+            }
+            injected_gestures = []
+            for gesture in expectations["touch"]["gestures"]:
+                if gesture.get("location") == "outside_letterbox":
+                    start_x, start_y = outside_letterbox_point(
+                        expectations["logical_size"],
+                        (native_width, native_height),
+                    )
+                    end_x, end_y = start_x, start_y
+                else:
+                    start_x, start_y = logical_to_native(
+                        gesture["start"],
+                        expectations["logical_size"],
+                        (native_width, native_height),
+                    )
+                    end_x, end_y = logical_to_native(
+                        gesture["end"],
+                        expectations["logical_size"],
+                        (native_width, native_height),
+                    )
+                _run(
+                    args.adb,
+                    args.serial,
+                    "shell",
+                    "input",
+                    "touchscreen",
+                    "swipe",
+                    str(start_x),
+                    str(start_y),
+                    str(end_x),
+                    str(end_y),
+                    str(gesture["duration_ms"]),
+                )
+                injected_gestures.append(
+                    {
+                        "name": gesture["name"],
+                        "start": [start_x, start_y],
+                        "end": [end_x, end_y],
+                        "duration_ms": gesture["duration_ms"],
+                    }
+                )
+                gesture_deadline = min(deadline, time.monotonic() + 10)
+                while time.monotonic() < gesture_deadline:
+                    log = _run(
+                        args.adb,
+                        args.serial,
+                        "logcat",
+                        "-d",
+                        "-v",
+                        "brief",
+                        "Stasis:I",
+                        "*:S",
+                    )
+                    markers = parse_markers(log, test_id)
+                    if any(
+                        item.get("probe_sequence") == gesture["after_sequence"]
+                        for item in markers
+                    ):
+                        break
+                    time.sleep(0.25)
+                else:
+                    raise SeamError(
+                        f"Android gesture {gesture['name']} did not reach probe "
+                        f"sequence {gesture['after_sequence']}"
+                    )
+            touch_probes = validate_touch_markers(markers, expectations)
+            evidence["injected_gestures"] = injected_gestures
+        log_path.write_text(log, encoding="utf-8")
         capture_path.write_bytes(
             _run(args.adb, args.serial, "exec-out", "screencap", "-p", text=False)
         )
@@ -376,6 +591,8 @@ def main() -> int:
                 "regions": regions,
             }
         )
+        if touch_probes:
+            evidence["touch_probes"] = touch_probes
     except (OSError, KeyError, ValueError, SeamError, zlib.error) as error:
         evidence["failure"] = str(error)
         raise
