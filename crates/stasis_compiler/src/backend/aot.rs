@@ -482,7 +482,9 @@ impl AotProcess {
     }
 
     /// Builds the storage definitions and entry wrapper required when a
-    /// standalone executable references program globals directly.
+    /// standalone executable references program globals directly. Native
+    /// Windows executables always use the wrapper so their Stasis result is
+    /// passed to ExitProcess instead of returning from the raw PE entry point.
     pub fn compile_standalone_storage_object(
         &self,
         entry_symbol: &str,
@@ -498,7 +500,9 @@ impl AotProcess {
         }
 
         let layout = self.state_layout();
-        if layout.scalars.is_empty() && layout.collections.is_empty() {
+        let exits_windows_process =
+            cfg!(windows) && matches!(self.target, stasis_jit::AotTarget::Native);
+        if layout.scalars.is_empty() && layout.collections.is_empty() && !exits_windows_process {
             return Ok(None);
         }
         let mut flag_builder = settings::builder();
@@ -596,6 +600,17 @@ impl AotProcess {
         let entry_id = module
             .declare_function(entry_symbol, Linkage::Import, &entry_signature)
             .map_err(|error| format!("failed to declare standalone entry: {error}"))?;
+        let exit_process_id = if exits_windows_process {
+            let mut signature = module.make_signature();
+            signature.params.push(AbiParam::new(types::I32));
+            Some(
+                module
+                    .declare_function("ExitProcess", Linkage::Import, &signature)
+                    .map_err(|error| format!("failed to declare ExitProcess: {error}"))?,
+            )
+        } else {
+            None
+        };
         let wrapper_symbol = "stasis_aot_standalone_entry".to_string();
         let wrapper_id = module
             .declare_function(&wrapper_symbol, Linkage::Export, &entry_signature)
@@ -641,6 +656,8 @@ impl AotProcess {
         let mut context = module.make_context();
         context.func.signature = entry_signature;
         let entry_ref = module.declare_func_in_func(entry_id, &mut context.func);
+        let exit_process_ref =
+            exit_process_id.map(|id| module.declare_func_in_func(id, &mut context.func));
         let register_refs: BTreeMap<_, _> = register_functions
             .into_iter()
             .map(|(key, id)| (key, module.declare_func_in_func(id, &mut context.func)))
@@ -690,6 +707,9 @@ impl AotProcess {
             }
             let call = builder.ins().call(entry_ref, &[]);
             let result = builder.inst_results(call)[0];
+            if let Some(exit_process_ref) = exit_process_ref {
+                builder.ins().call(exit_process_ref, &[result]);
+            }
             builder.ins().return_(&[result]);
             builder.finalize();
         }
@@ -1975,6 +1995,36 @@ mod tests {
                 "standalone storage object missing symbol '{expected}': {symbols:?}"
             );
         }
+        #[cfg(windows)]
+        assert!(
+            symbols.contains("ExitProcess"),
+            "native Windows wrapper must terminate with the Stasis result: {symbols:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standalone_windows_entry_wraps_stateless_programs() {
+        let mut process = AotProcess::new();
+        process.upsert_file("main.stasis", "function main(): i32 { return 14; }\n");
+        process.compile().expect("compile stateless program");
+
+        let (bytes, wrapper) = process
+            .compile_standalone_storage_object("aot_fn_0")
+            .expect("standalone entry object")
+            .expect("native Windows entry wrapper required");
+        let object = File::parse(bytes.as_slice()).expect("parse entry object");
+        let symbols: BTreeSet<String> = object
+            .symbols()
+            .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+            .collect();
+
+        assert_eq!(wrapper, "stasis_aot_standalone_entry");
+        assert!(symbols.contains("aot_fn_0"), "missing Stasis entry import");
+        assert!(
+            symbols.contains("ExitProcess"),
+            "missing deterministic Windows process termination import"
+        );
     }
 
     #[test]
