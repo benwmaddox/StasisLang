@@ -1499,6 +1499,272 @@ mod tests {
 
     static CLIF_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
+    const GFX_CAPACITY_FIXTURE: &str =
+        include_str!("../../../../tests/stasis/seams/gfx_cmd_capacity_probe.stasis");
+    const GFX_CMD_SOURCE: &str = include_str!("../../../../src/stdlib/internal/gfx_cmd.stasis");
+    const GFX_CAPACITY_TRACE_ROOTS: [&str; 10] = [
+        "trace_geometry_capacity",
+        "trace_sprite_capacity",
+        "trace_cached_text_capacity",
+        "probe_raw_text_source",
+        "probe_direct_memcpy_destination",
+        "probe_parameter_memcpy_destination",
+        "probe_raw_text_metadata",
+        "probe_raw_text_destination",
+        "trace_raw_text_capacity",
+        "trace_text_capacity",
+    ];
+
+    struct GfxCapacityResult {
+        trace: i32,
+        i32s: Vec<i32>,
+        f32s: Vec<f32>,
+        u8s: Vec<u8>,
+        canaries_intact: bool,
+        stage_traces: Vec<i32>,
+    }
+
+    fn run_gfx_capacity_jit(gfx_source: &str) -> GfxCapacityResult {
+        const I32_COUNT: usize = 34_608;
+        const F32_COUNT: usize = 108_676;
+        const U8_COUNT: usize = 65_536;
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&GFX_CAPACITY_TRACE_ROOTS.map(str::to_string));
+        jit.set_project_root(project_root.to_string_lossy())
+            .expect("set project root");
+        jit.upsert_file(
+            "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
+            GFX_CAPACITY_FIXTURE,
+        );
+        jit.upsert_file("src/stdlib/internal/gfx_cmd.stasis", gfx_source);
+        jit.compile().expect("compile gfx capacity JIT fixture");
+
+        let mut i32_storage = vec![0; I32_COUNT + 2];
+        i32_storage[0] = 0x1357_2468;
+        i32_storage[I32_COUNT + 1] = 0x1357_2468;
+        let i32s = Box::leak(i32_storage.into_boxed_slice());
+        let mut f32_storage = vec![0.0; F32_COUNT + 2];
+        f32_storage[0] = f32::from_bits(0x4a55_aa55);
+        f32_storage[F32_COUNT + 1] = f32::from_bits(0x4a55_aa55);
+        let f32s = Box::leak(f32_storage.into_boxed_slice());
+        let mut u8_storage = vec![0; U8_COUNT + 2];
+        u8_storage[0] = 0xa5;
+        u8_storage[U8_COUNT + 1] = 0xa5;
+        let u8s = Box::leak(u8_storage.into_boxed_slice());
+        stasis_dynload::register_global_i32_array(
+            stasis_dynload::global_path_hash("gfx_cmd_i32"),
+            0,
+            i32s[1..=I32_COUNT].as_mut_ptr(),
+            I32_COUNT,
+        );
+        stasis_dynload::register_global_f32_array(
+            stasis_dynload::global_path_hash("gfx_cmd_f32"),
+            0,
+            f32s[1..=F32_COUNT].as_mut_ptr(),
+            F32_COUNT,
+        );
+        stasis_dynload::register_global_u8_array(
+            stasis_dynload::global_path_hash("gfx_cmd_u8"),
+            0,
+            u8s[1..=U8_COUNT].as_mut_ptr(),
+            U8_COUNT,
+        );
+        let trace = jit
+            .execute_i32_noarg_by_name("main")
+            .expect("execute gfx capacity JIT fixture");
+        let result_i32s = i32s[1..=I32_COUNT].to_vec();
+        let result_f32s = f32s[1..=F32_COUNT].to_vec();
+        let result_u8s = u8s[1..=U8_COUNT].to_vec();
+        let stage_traces = GFX_CAPACITY_TRACE_ROOTS
+            .iter()
+            .map(|name| {
+                jit.execute_i32_noarg_by_name(name)
+                    .unwrap_or_else(|error| panic!("execute {name}: {error}"))
+            })
+            .collect();
+        let canaries_intact = i32s[0] == 0x1357_2468
+            && i32s[I32_COUNT + 1] == 0x1357_2468
+            && f32s[0].to_bits() == 0x4a55_aa55
+            && f32s[F32_COUNT + 1].to_bits() == 0x4a55_aa55
+            && u8s[0] == 0xa5
+            && u8s[U8_COUNT + 1] == 0xa5;
+        GfxCapacityResult {
+            trace,
+            i32s: result_i32s,
+            f32s: result_f32s,
+            u8s: result_u8s,
+            canaries_intact,
+            stage_traces,
+        }
+    }
+
+    fn verify_gfx_capacity(result: &GfxCapacityResult) -> Result<(), String> {
+        let checks = [
+            ("line_count", 3, 5_000),
+            ("dropped_lines", 5, 1),
+            ("sprite_count", 4, 4_096),
+            ("dropped_sprites", 6, 1),
+            ("text_count", 7, 2_048),
+            ("dropped_text", 8, 2),
+            ("text_bytes_used", 9, 65_536),
+            ("order_count", 22, 16_144),
+            ("dropped_order", 23, 1),
+            ("rect_count", 24, 5_000),
+            ("dropped_rects", 25, 1),
+        ];
+        for (field, index, expected) in checks {
+            let actual = result.i32s[index];
+            if actual != expected {
+                return Err(format!("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field={field} expected={expected} actual={actual}"));
+            }
+        }
+        if !result.canaries_intact {
+            return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=host_buffers field=canaries expected=intact actual=modified".to_string());
+        }
+        if result.f32s[40_003].to_bits() != 1.0f32.to_bits()
+            || result.f32s[40_004].to_bits() != 5.0f32.to_bits()
+        {
+            return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=geometry_arena_boundary expected=adjacent actual=overlap".to_string());
+        }
+        if result.i32s[34_607] != 51_199 || result.u8s[65_535] != 0 {
+            return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=terminal_entries expected=written actual=missing".to_string());
+        }
+        if result.trace == 0 {
+            return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=trace expected=nonzero actual=0".to_string());
+        }
+        Ok(())
+    }
+
+    fn gfx_capacity_evidence_path() -> PathBuf {
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target")
+            })
+            .join("seam-tests/it-003-gfx-capacity.json")
+    }
+
+    #[test]
+    fn gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace() {
+        use sha2::{Digest, Sha256};
+
+        let jit_result = run_gfx_capacity_jit(GFX_CMD_SOURCE);
+        verify_gfx_capacity(&jit_result).expect("canonical gfx capacity probe");
+
+        let mutated = GFX_CMD_SOURCE.replacen(
+            "const GFX_MAX_SPRITES: i32 = 4096;",
+            "const GFX_MAX_SPRITES: i32 = 4095;",
+            1,
+        );
+        assert_ne!(mutated, GFX_CMD_SOURCE, "capacity mutation must apply");
+        let mutation_error = verify_gfx_capacity(&run_gfx_capacity_jit(&mutated))
+            .expect_err("capacity drift must fail");
+        assert_eq!(
+            mutation_error,
+            "gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=sprite_count expected=4096 actual=4095"
+        );
+
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut aot = AotProcess::new();
+        aot.set_required_emit_roots(&GFX_CAPACITY_TRACE_ROOTS.map(str::to_string));
+        aot.set_project_root(project_root.to_string_lossy())
+            .expect("set AOT project root");
+        aot.upsert_file(
+            "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
+            GFX_CAPACITY_FIXTURE,
+        );
+        aot.upsert_file("src/stdlib/internal/gfx_cmd.stasis", GFX_CMD_SOURCE);
+        aot.compile().expect("compile gfx capacity AOT fixture");
+        let state_layout = aot.state_layout();
+        for (path, expected) in [("full_text", 1_024), ("tail_text", 960)] {
+            let collection = state_layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == path)
+                .unwrap_or_else(|| panic!("missing fixed-text storage layout for {path}"));
+            assert_eq!(
+                collection.capacity, expected,
+                "fixed-text storage capacity drift for {path}"
+            );
+            assert_eq!(
+                collection.fields[0].storage_type_name, "u8",
+                "fixed-text standalone storage lane drift for {path}"
+            );
+        }
+
+        #[allow(unused_mut)]
+        let mut linked_aot_checks = 0usize;
+        #[cfg(windows)]
+        if let Some(link_config) = resolve_link_config_for_smoke() {
+            for (index, name) in GFX_CAPACITY_TRACE_ROOTS.iter().enumerate() {
+                if let Some(aot_trace) =
+                    run_linked_i32_noarg_fixture(&aot, name, name, &link_config)
+                {
+                    assert_eq!(
+                        aot_trace, jit_result.stage_traces[index],
+                        "JIT/AOT native trace drift in {name}"
+                    );
+                    linked_aot_checks += 1;
+                }
+            }
+            if let Some(aot_trace) =
+                run_linked_i32_noarg_fixture(&aot, "main", "gfx_capacity", &link_config)
+            {
+                assert_eq!(aot_trace, jit_result.trace, "JIT/AOT native trace drift");
+                linked_aot_checks += 1;
+            }
+        }
+
+        let stage_traces: BTreeMap<_, _> = GFX_CAPACITY_TRACE_ROOTS
+            .iter()
+            .copied()
+            .zip(jit_result.stage_traces.iter().copied())
+            .collect();
+        let fixture_revision = format!(
+            "{:x}",
+            Sha256::digest([GFX_CMD_SOURCE, GFX_CAPACITY_FIXTURE].concat())
+        );
+        let evidence = serde_json::json!({
+            "schema": "stasis.seam_test.v1",
+            "test_id": "IT-003",
+            "status": "passed",
+            "target": "jit+aot+native-trace",
+            "fixture_revision": fixture_revision,
+            "checks": 20 + linked_aot_checks,
+            "linked_aot_checks": linked_aot_checks,
+            "oracle": {
+                "line_count": 5000,
+                "rect_count": 5000,
+                "sprite_count": 4096,
+                "text_count": 2048,
+                "text_bytes_used": 65536,
+                "order_count": 16144,
+                "dropped": {
+                    "lines": 1,
+                    "rects": 1,
+                    "sprites": 1,
+                    "text": 2,
+                    "order": 1
+                },
+                "native_trace": jit_result.trace,
+                "stage_traces": stage_traces,
+                "canaries": "intact",
+                "mutation_diagnostic": mutation_error
+            }
+        });
+        let path = gfx_capacity_evidence_path();
+        fs::create_dir_all(path.parent().expect("evidence directory"))
+            .expect("create evidence directory");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+        )
+        .expect("write evidence");
+    }
+
     #[test]
     fn aot_failed_candidate_preserves_accepted_snapshot_and_artifacts() {
         let mut process = AotProcess::new();
