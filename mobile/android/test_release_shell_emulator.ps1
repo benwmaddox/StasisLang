@@ -7,13 +7,13 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
-$isWindows = [System.IO.Path]::DirectorySeparatorChar -eq [char]'\'
-$executableSuffix = if ($isWindows) { ".exe" } else { "" }
+$runningOnWindows = [System.IO.Path]::DirectorySeparatorChar -eq [char]'\'
+$executableSuffix = if ($runningOnWindows) { ".exe" } else { "" }
 $androidHome = if ($env:ANDROID_HOME) {
     $env:ANDROID_HOME
 } elseif ($env:ANDROID_SDK_ROOT) {
     $env:ANDROID_SDK_ROOT
-} elseif (-not $isWindows) {
+} elseif (-not $runningOnWindows) {
     Join-Path ([Environment]::GetFolderPath("UserProfile")) "Library/Android/sdk"
 } else {
     "C:\Android\Sdk"

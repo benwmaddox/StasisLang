@@ -57,6 +57,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
         self.assertIn('"adb$executableSuffix"', self.release_script)
         self.assertIn('"stasis$executableSuffix"', self.release_script)
+        self.assertIn("$runningOnWindows", self.release_script)
+        self.assertNotIn("$isWindows", self.release_script)
+        self.assertIn("$runningOnWindows", self.emulator_script)
+        self.assertNotIn("$isWindows", self.emulator_script)
         self.assertIn("[System.IO.Path]::Combine", self.release_script)
         self.assertNotIn('"platform-tools\\adb.exe"', self.release_script)
         self.assertNotIn('"android\\app\\build', self.release_script)
