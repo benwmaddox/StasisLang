@@ -44,7 +44,7 @@ typedef int (*stasis_tick_fn)(void);
 typedef void (*stasis_aot_bind_runtime_globals_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
-typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
+typedef void (*stasis_gfx_submit_u8_fn)(int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
 typedef void (*stasis_host_bulk_init_fn)(const int32_t *host_req_seq);
 typedef void (*stasis_host_bulk_apply_requests_fn)(
     const int32_t *host_req_seq,

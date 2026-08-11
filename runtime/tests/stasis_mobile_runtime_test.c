@@ -102,7 +102,7 @@ void stasis_host_bulk_apply_requests(
 }
 
 void stasis_gfx_submit_u8(
-    const int32_t *cmd_i32,
+    int32_t *cmd_i32,
     const float *cmd_f32,
     const uint8_t *cmd_u8
 ) {

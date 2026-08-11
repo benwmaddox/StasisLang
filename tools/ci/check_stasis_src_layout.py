@@ -108,6 +108,7 @@ def main() -> int:
                     "tests/stasis/rust_native_tick_input_snapshot.stasis",
                     "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
                     "tests/stasis/seams/desktop_input_frame_probe.stasis",
+                    "tests/stasis/seams/desktop_display_metrics_probe.stasis",
                     "tests/stasis/seams/window_request_mailbox_probe.stasis",
                 }
                 if not inside_stdlib and not integration_test:
