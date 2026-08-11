@@ -17,8 +17,8 @@ asset declared by `assets/manifest.json`.
 2. Release signing and Play publishing. Keep keystores and credentials outside
    the generated project; accept signing configuration only at the publishing
    boundary.
-3. Test-only x86_64 AOT output. Restore Workshop-versus-release renderer parity
-   on `Stasis_API_35` without distributing x86_64 in the Play bundle.
+3. Completed: test-only x86_64 AOT output restores release-shell emulator
+   coverage without distributing x86_64 in production or the Play bundle.
 4. Crash-loop and redacted support diagnostics. Persist bounded status codes and
    symbol-free native crash metadata; never include game state, user content,
    credentials, or absolute paths without explicit consent.

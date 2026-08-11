@@ -1,4 +1,4 @@
-# Android arm64 package
+# Android package
 
 Install JDK 17, Android SDK 35, NDK, CMake 3.22.1, Ninja, and Gradle 8.9.
 Set `ANDROID_HOME`, `STASIS_SDL3_SOURCE`, and `STASIS_SDL3_IMAGE_SOURCE` to
@@ -9,7 +9,9 @@ gradle :app:assembleDebug
 gradle :app:installDebug
 ```
 
-Only `arm64-v8a` is built. The app links the AOT objects under `../aot`, the
+Each generated project builds exactly one ABI: production `android-arm64`
+selects `arm64-v8a`, while development-only `android-x86_64` selects `x86_64`
+for emulator tests. The app links the AOT objects under `../aot`, the
 shared SDL-only Stasis runtime under `../runtime`, and bundled assets under
 `app/src/main/assets/stasis_game`. No Stasis compiler, JIT, watcher, dynamic
 game loader, or writable source is included.
@@ -26,8 +28,9 @@ The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for
 initialization, the first frame, stable frame 30, and fixture-owned probe
 sequence changes; ordinary app launches do not compile or enable the marker
-hooks. Run IT-017 against an attached device whose ABI list includes
-`arm64-v8a` with:
+hooks. CI runs IT-017 on a hosted API 35 x86_64 emulator. The same driver can be
+run against an ARM64 device with the default target, or an x86_64 emulator with
+`-Target android-x86_64`:
 
 ```powershell
 mobile/android/test_release_shell.ps1 -Serial <device-serial>
@@ -52,7 +55,9 @@ IT-019 drives an odd `1001 x 1601` display override through portrait,
 landscape, and restored portrait. Each stage waits for the AOT guest to observe
 the new HostFrame display generation during `tick`, injects a logical-coordinate
 touch, and verifies the same frame's guest metrics, pointer transform, command
-trace, and named pixel regions:
+trace, and named pixel regions. Native dimensions must match the configured
+surface; drawable dimensions must match the fitted 360 x 720 SDL letterbox
+viewport:
 
 ```powershell
 mobile/android/test_release_shell.ps1 -Serial <device-serial> `
@@ -62,3 +67,9 @@ mobile/android/test_release_shell.ps1 -Serial <device-serial> `
 The driver independently restores any prior display-size override, user and
 accelerometer rotation settings, immersive confirmation, package installation,
 and process state even when an assertion fails.
+
+`mobile/android/test_release_shell_emulator.ps1` is the CI entrypoint. It
+requires exactly one ready emulator, rejects physical-device serials, verifies
+`x86_64`, and runs IT-017, IT-018, and IT-019 sequentially. The GitHub
+workflow owns AVD startup and shutdown. Physical-device runs remain useful
+supplemental release evidence but do not gate CI readiness.

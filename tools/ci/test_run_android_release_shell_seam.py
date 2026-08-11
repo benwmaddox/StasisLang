@@ -31,6 +31,19 @@ def write_rgb_png(
 
 
 class AndroidReleaseShellSeamTests(unittest.TestCase):
+    def test_evidence_target_matches_packaged_android_abi(self):
+        self.assertEqual(
+            seam.release_shell_target({"target": "android-arm64"}),
+            "android-arm64-release-shell",
+        )
+        self.assertEqual(
+            seam.release_shell_target({"target": "android-x86_64"}),
+            "android-x86_64-release-shell",
+        )
+        for invalid in ("android-foo", "ios-arm64", None):
+            with self.assertRaisesRegex(seam.SeamError, "invalid Android package target"):
+                seam.release_shell_target({"target": invalid})
+
     def test_parses_and_validates_stable_marker(self):
         values = [
             {
@@ -156,6 +169,8 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 "state_checksum": 3215 if index == 5 else 0,
                 "command_trace": 77,
             }
+            if index == 5:
+                marker.update({"x": 259.183, "y": 518.118, "x_n": 0.72, "y_n": 0.7196})
             markers.append(marker)
             expected = {
                 "sequence": index,
@@ -170,6 +185,9 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             }
             if index == 5:
                 expected["state_checksum"] = 3215
+                expected.update(
+                    {"x_min": 240, "y_min": 480, "x_n": 0.75, "y_n": 0.75}
+                )
             expected_probes.append(expected)
         observed = seam.validate_touch_markers(
             markers,
@@ -219,7 +237,10 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         ]
         markers = []
         for sequence, kind, tick, generation, width, height, trace in stages:
-            scale = min(width / 360, height / 720)
+            native_scale = min(width / 360, height / 720)
+            drawable_width = int(360 * native_scale)
+            drawable_height = int(720 * native_scale)
+            scale = min(drawable_width / 360, drawable_height / 720)
             markers.append(
                 {
                     "event": "probe",
@@ -241,8 +262,8 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                     "logical_h": 720.0,
                     "native_w": width,
                     "native_h": height,
-                    "drawable_w": width,
-                    "drawable_h": height,
+                    "drawable_w": drawable_width,
+                    "drawable_h": drawable_height,
                     "display_generation": generation,
                     "density_generation": generation,
                     "frame_display_generation": generation,
@@ -333,14 +354,14 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             "logical_h": 720.0,
             "native_w": 1001,
             "native_h": 1601,
-            "drawable_w": 1001,
+            "drawable_w": 800,
             "drawable_h": 1601,
             "display_generation": 2,
             "density_generation": 1,
             "frame_display_generation": 2,
             "frame_density_generation": 1,
-            "content_scale": 1601 / 720,
-            "raster_scale": 1601 / 720,
+            "content_scale": 800 / 360,
+            "raster_scale": 800 / 360,
             "command_trace": 1,
         }
         markers = []

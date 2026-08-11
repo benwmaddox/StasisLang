@@ -251,8 +251,8 @@ exchange.
 | Android arm64 | Required in Workshop | Required published package | Named physical arm64 Workshop JIT plus AOT package evidence. |
 
 JIT must match the running host target; mismatches fail with `JIT_TARGET_MUST_MATCH_HOST`. The
-standard `Stasis_API_35` AVD is x86_64 and is useful smoke evidence but does not satisfy Android
-arm64. iOS remains AOT-only.
+standard `Stasis_API_35` AVD is x86_64 and is the generated release-shell software-seam readiness
+gate, but it does not certify Android arm64 hardware behavior. iOS remains AOT-only.
 
 Selective compilation and publication apply only to the running development JIT. Every production
 publish performs a coherent full AOT compile/package; AOT lanes verify diagnostics and behavioral

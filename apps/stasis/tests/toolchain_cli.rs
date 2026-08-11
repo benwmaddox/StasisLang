@@ -1420,7 +1420,11 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     )
     .expect("write asset manifest");
 
-    for (target, output) in [("android-arm64", "android"), ("ios-arm64", "ios")] {
+    for (target, output) in [
+        ("android-arm64", "android"),
+        ("android-x86_64", "android_x86"),
+        ("ios-arm64", "ios"),
+    ] {
         let packaged = stasis(
             &[
                 "package-mobile",
@@ -1546,6 +1550,14 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     assert!(project
         .join("android/android/app/src/main/assets/stasis_game/assets/manifest.json")
         .is_file());
+    let arm64_gradle = fs::read_to_string(project.join("android/android/app/build.gradle"))
+        .expect("read arm64 Gradle");
+    assert!(arm64_gradle.contains("abiFilters 'arm64-v8a'"));
+    assert!(!arm64_gradle.contains("abiFilters 'x86_64'"));
+    let x86_gradle = fs::read_to_string(project.join("android_x86/android/app/build.gradle"))
+        .expect("read x86_64 Gradle");
+    assert!(x86_gradle.contains("abiFilters 'x86_64'"));
+    assert!(!x86_gradle.contains("abiFilters 'arm64-v8a'"));
     assert!(project
         .join("ios/ios/StasisMobile.xcodeproj/project.pbxproj")
         .is_file());
@@ -1564,6 +1576,21 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     )
     .expect("read desktop graphics runtime");
     assert!(graphics_source.contains("Stasis package provenance: path=%s manifest=%s"));
+
+    let refused = stasis(
+        &[
+            "package-mobile",
+            "--target",
+            "android-x86_64",
+            "--out",
+            "x86_release",
+        ],
+        &project,
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr)
+        .contains("android-x86_64 is a test-only emulator target; pass --development-build"));
+    assert!(!project.join("x86_release").exists());
 
     fs::write(project.join("src/main.stasis"), "function main(: i32 {\n")
         .expect("write invalid mobile entry");
