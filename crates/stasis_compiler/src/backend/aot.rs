@@ -41,6 +41,7 @@ pub struct AotProcess {
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
     string_literals: BTreeMap<i32, String>,
+    referenced_string_literals: BTreeMap<FunctionId, BTreeSet<i32>>,
     collection_max_lengths: BTreeMap<String, i32>,
     program_snapshot: Option<ProgramSnapshot>,
     last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
@@ -85,6 +86,7 @@ impl AotProcess {
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
             string_literals: BTreeMap::new(),
+            referenced_string_literals: BTreeMap::new(),
             collection_max_lengths: BTreeMap::new(),
             program_snapshot: None,
             last_failed_source_diagnostic: None,
@@ -122,6 +124,7 @@ impl AotProcess {
         let accepted_artifacts = self.artifacts.clone();
         let accepted_object_bytes_len = self.object_bytes.len();
         let accepted_string_literals = self.string_literals.clone();
+        let accepted_referenced_string_literals = self.referenced_string_literals.clone();
         let accepted_collection_max_lengths = self.collection_max_lengths.clone();
         let accepted_program_snapshot = self.program_snapshot.clone();
         match self.compile_internal() {
@@ -136,6 +139,7 @@ impl AotProcess {
                 self.artifacts = accepted_artifacts;
                 self.object_bytes.truncate(accepted_object_bytes_len);
                 self.string_literals = accepted_string_literals;
+                self.referenced_string_literals = accepted_referenced_string_literals;
                 self.collection_max_lengths = accepted_collection_max_lengths;
                 self.program_snapshot = accepted_program_snapshot;
                 self.last_failed_source_diagnostic = diagnostic;
@@ -230,7 +234,7 @@ impl AotProcess {
             artifacts,
             object_bytes,
             optimization_profile,
-            string_literals,
+            referenced_string_literals,
             target,
         ) = (
             &mut self.compiler,
@@ -238,7 +242,7 @@ impl AotProcess {
             &mut self.artifacts,
             &mut self.object_bytes,
             self.optimization_profile,
-            &mut self.string_literals,
+            &mut self.referenced_string_literals,
             self.target.clone(),
         );
         let emit = compiler.emit_pass_for_ids_with(
@@ -250,6 +254,7 @@ impl AotProcess {
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
+                let mut function_string_literals = BTreeMap::new();
                 let bytes = compile_function_to_object_bytes(
                     meta,
                     hir,
@@ -259,12 +264,14 @@ impl AotProcess {
                     &mut type_table,
                     &analysis.global_path_types,
                     &analysis.constant_values,
-                    string_literals,
+                    &mut function_string_literals,
                     &target,
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
                     &direct_storage,
                 )?;
+                referenced_string_literals
+                    .insert(meta.id, function_string_literals.keys().copied().collect());
                 let object_index = *next_object_index;
                 *next_object_index = next_object_index.saturating_add(1);
                 object_bytes.push(bytes);
@@ -284,6 +291,7 @@ impl AotProcess {
 
         let reachable = snapshot.reachable_function_ids().clone();
         artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
+        referenced_string_literals.retain(|function_id, _| reachable.contains(function_id));
         compact_active_artifact_storage(artifacts, object_bytes);
         self.next_object_index = u32::try_from(self.object_bytes.len()).unwrap_or(u32::MAX);
         if let Some(snapshot) = self.program_snapshot.as_mut() {
@@ -499,12 +507,17 @@ impl AotProcess {
             }
         }
 
+        let standalone_literal_ids: BTreeSet<i32> = self
+            .referenced_string_literals
+            .values()
+            .flat_map(|ids| ids.iter().copied())
+            .collect();
         let layout = self.state_layout();
         let exits_windows_process =
             cfg!(windows) && matches!(self.target, stasis_jit::AotTarget::Native);
         if layout.scalars.is_empty()
             && layout.collections.is_empty()
-            && self.string_literals.is_empty()
+            && standalone_literal_ids.is_empty()
             && !exits_windows_process
         {
             return Ok(None);
@@ -549,12 +562,15 @@ impl AotProcess {
         let mut registrations = Vec::new();
         let mut literal_registrations = Vec::new();
 
-        for (id, value) in &self.string_literals {
+        for id in standalone_literal_ids {
+            let value = self.string_literals.get(&id).ok_or_else(|| {
+                format!("standalone AOT string literal {id} is missing from the program table")
+            })?;
             let mut bytes = value.as_bytes().to_vec();
             bytes.push(0);
-            let symbol = format!("__stasis_string_literal_{:08x}", *id as u32);
+            let symbol = format!("__stasis_string_literal_{:08x}", id as u32);
             let data_id = define_standalone_storage_data(&mut module, &symbol, bytes, 1)?;
-            literal_registrations.push((data_id, *id));
+            literal_registrations.push((data_id, id));
         }
 
         for scalar in &layout.scalars {
@@ -1162,7 +1178,7 @@ fn compile_function_to_object_bytes(
     type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
-    string_literals: &mut BTreeMap<i32, String>,
+    referenced_string_literals: &mut BTreeMap<i32, String>,
     target: &stasis_jit::AotTarget,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
@@ -1217,7 +1233,7 @@ fn compile_function_to_object_bytes(
         Some(direct_storage),
         None,
         false,
-        |statement| record_string_literals_in_stmt(statement, string_literals),
+        |statement| record_string_literals_in_stmt(statement, referenced_string_literals),
         |_meta, _func| {
             #[cfg(test)]
             maybe_invoke_clif_dump_hook(_meta, _func);
