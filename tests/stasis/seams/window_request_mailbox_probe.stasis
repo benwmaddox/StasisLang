@@ -1,0 +1,22 @@
+import "../../../src/stdlib/internal/host_window_request.stasis";
+
+global probe_tick: i32;
+
+function main(): i32 {
+    host_request_windowed(960, 540);
+    return 0;
+}
+
+function tick(): i32 {
+    probe_tick = probe_tick + 1;
+    if (probe_tick == 1) {
+        host_request_fullscreen(1);
+    }
+    if (probe_tick == 3) {
+        host_request_windowed(1280, 720);
+    }
+    if (probe_tick == 4) {
+        host_request_windowed(1280, 720);
+    }
+    return 0;
+}

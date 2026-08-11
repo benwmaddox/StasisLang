@@ -69,6 +69,9 @@ jobs:
       - name: Test startup asset extern ABI seam
         run: cargo test -p stasis_compiler startup_asset_externs_match_jit_and_linked_aot_recording_host -- --test-threads=1
 
+      - name: Test window request mailbox seam
+        run: cargo test -p stasis stasis_window_requests_apply_once_after_pre_main_baseline -- --test-threads=1
+
       - name: Run Cargo Test
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         run: cargo test --workspace --all-targets -- --test-threads=1
@@ -91,6 +94,9 @@ jobs:
 
       - name: Test startup asset extern ABI seam (linked AOT)
         run: cargo test -p stasis_compiler startup_asset_externs_match_jit_and_linked_aot_recording_host -- --test-threads=1
+
+      - name: Test window request mailbox seam
+        run: cargo test -p stasis stasis_window_requests_apply_once_after_pre_main_baseline -- --test-threads=1
 
       - name: Capture the real Windows SDL parity fixture
         shell: pwsh
