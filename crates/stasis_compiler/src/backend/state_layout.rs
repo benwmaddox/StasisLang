@@ -406,7 +406,7 @@ fn checked_memory_bytes(count: u64, element_bytes: u64) -> Result<u64, String> {
         .ok_or_else(|| "state memory report byte count overflow".to_string())
 }
 
-fn is_command_buffer_path(path: &str) -> bool {
+pub fn is_command_buffer_path(path: &str) -> bool {
     path.starts_with("gfx_cmd_")
         || path.starts_with("render_cmd_")
         || path.starts_with("audio_cmd_")

@@ -600,10 +600,7 @@ fn is_host_or_presentation_path(path: &str) -> bool {
     path == "host_i32"
         || path == "host_f32"
         || path.starts_with("host_req_")
-        || path.starts_with("gfx_cmd_")
-        || path.starts_with("audio_cmd_")
-        || path.contains(".gfx_cmd_")
-        || path.contains(".audio_cmd_")
+        || stasis_compiler::backend::state_layout::is_command_buffer_path(path)
 }
 
 fn collect_scenario_files(workspace: &Workspace, root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -879,7 +876,11 @@ mod tests {
             "host_f32",
             "host_req_flags",
             "gfx_cmd_i32",
+            "render_cmd_i32",
             "audio_cmd_i32",
+            "cmd_i32",
+            "world.render_cmd_i32",
+            "world.cmd_i32",
         ] {
             assert!(is_host_or_presentation_path(path), "{path}");
         }
