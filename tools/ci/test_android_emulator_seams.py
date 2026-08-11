@@ -17,11 +17,13 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
 
-    def test_workflow_uses_hosted_arm64_emulator(self):
-        self.assertIn("runs-on: macos-15", self.workflow)
+    def test_workflow_uses_hosted_x86_emulator(self):
+        self.assertIn("runs-on: ubuntu-latest", self.workflow)
+        self.assertNotIn("runs-on: macos-15", self.workflow)
         self.assertIn("reactivecircus/android-emulator-runner@v2", self.workflow)
         self.assertIn("api-level: 35", self.workflow)
-        self.assertIn("arch: arm64-v8a", self.workflow)
+        self.assertIn("arch: x86_64", self.workflow)
+        self.assertIn("Enable KVM", self.workflow)
         self.assertIn("pull_request:", self.workflow)
         self.assertIn('uses: actions/setup-python@v5', self.workflow)
         self.assertIn('python-version: "3.12"', self.workflow)
@@ -62,7 +64,8 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def test_emulator_entrypoint_rejects_physical_targets_and_runs_all_seams(self):
         self.assertIn("Expected exactly one ready Android emulator", self.emulator_script)
         self.assertIn("^emulator-\\d+$", self.emulator_script)
-        self.assertIn('"arm64-v8a" -notin $abiList', self.emulator_script)
+        self.assertIn('"x86_64" -notin $abiList', self.emulator_script)
+        self.assertIn("-Target android-x86_64", self.emulator_script)
         for project in (
             "samples/android_aot_seam",
             "samples/android_touch_seam",
@@ -71,7 +74,8 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.assertEqual(1, self.emulator_script.count(project))
 
     def test_strategy_makes_emulator_the_readiness_gate(self):
-        self.assertIn("hosted ARM64 emulator is the CI and readiness", self.strategy)
+        self.assertIn("hosted x86_64 emulator is the CI and readiness", self.strategy)
+        self.assertIn("Production Android packaging remains ARM64", self.strategy)
         for test_id in ("IT-017", "IT-018", "IT-019"):
             row = next(line for line in self.strategy.splitlines() if f"| {test_id} |" in line)
             self.assertTrue(row.endswith("| Emulator |"), row)

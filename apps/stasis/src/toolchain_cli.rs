@@ -525,12 +525,16 @@ enum BuildMode {
 enum PackageTarget {
     Desktop,
     AndroidArm64,
+    #[value(name = "android-x86_64")]
+    AndroidX86_64,
     IosArm64,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MobilePackageTarget {
     AndroidArm64,
+    #[value(name = "android-x86_64")]
+    AndroidX86_64,
     IosArm64,
 }
 
@@ -538,6 +542,7 @@ impl MobilePackageTarget {
     fn package_target(self) -> PackageTarget {
         match self {
             Self::AndroidArm64 => PackageTarget::AndroidArm64,
+            Self::AndroidX86_64 => PackageTarget::AndroidX86_64,
             Self::IosArm64 => PackageTarget::IosArm64,
         }
     }
@@ -548,7 +553,20 @@ impl PackageTarget {
         match self {
             Self::Desktop => "desktop",
             Self::AndroidArm64 => "android-arm64",
+            Self::AndroidX86_64 => "android-x86_64",
             Self::IosArm64 => "ios-arm64",
+        }
+    }
+
+    fn is_android(self) -> bool {
+        matches!(self, Self::AndroidArm64 | Self::AndroidX86_64)
+    }
+
+    fn android_abi(self) -> Option<&'static str> {
+        match self {
+            Self::AndroidArm64 => Some("arm64-v8a"),
+            Self::AndroidX86_64 => Some("x86_64"),
+            Self::Desktop | Self::IosArm64 => None,
         }
     }
 }
@@ -3564,6 +3582,11 @@ fn package_mobile_workspace(
     package_root: &Path,
     development_build: bool,
 ) -> Result<CommandResult, String> {
+    if matches!(target, PackageTarget::AndroidX86_64) && !development_build {
+        return Err(
+            "android-x86_64 is a test-only emulator target; pass --development-build".to_string(),
+        );
+    }
     if package_root.exists() {
         return Err(format!(
             "package output already exists: {}",
@@ -3631,7 +3654,7 @@ fn package_mobile_workspace(
             "output": display_path(package_root),
             "entry": display_path(entry),
             "project": match target {
-                PackageTarget::AndroidArm64 => "android",
+                PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
                 PackageTarget::IosArm64 => "ios/StasisMobile.xcodeproj",
                 PackageTarget::Desktop => unreachable!(),
             },
@@ -3651,7 +3674,7 @@ fn assemble_mobile_shell(
     let mobile_assets = bundled_mobile_assets_dir()?;
     let runtime = bundled_mobile_runtime_dir()?;
     let platform = match target {
-        PackageTarget::AndroidArm64 => "android",
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
         PackageTarget::IosArm64 => "ios",
         PackageTarget::Desktop => return Err("desktop is not a mobile package target".to_string()),
     };
@@ -3664,16 +3687,20 @@ fn assemble_mobile_shell(
     write_mobile_provenance_header(&common_destination, provenance)?;
 
     let asset_source = match target {
-        PackageTarget::AndroidArm64 => aot_root.join("apk_assets/stasis_game"),
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+            aot_root.join("apk_assets/stasis_game")
+        }
         PackageTarget::IosArm64 => aot_root.join("ios_assets/stasis_game"),
         PackageTarget::Desktop => unreachable!(),
     };
     let asset_destination = match target {
-        PackageTarget::AndroidArm64 => staging_root.join("android/app/src/main/assets/stasis_game"),
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+            staging_root.join("android/app/src/main/assets/stasis_game")
+        }
         PackageTarget::IosArm64 => staging_root.join("ios/StasisMobile/stasis_game"),
         PackageTarget::Desktop => unreachable!(),
     };
-    let android_manifest = if matches!(target, PackageTarget::AndroidArm64) {
+    let android_manifest = if target.is_android() {
         workspace.manifest.android.as_ref()
     } else {
         None
@@ -3706,6 +3733,7 @@ fn assemble_mobile_shell(
             android_version_code.as_str(),
         ),
         ("@STASIS_ANDROID_VERSION_NAME@", android_version_name),
+        ("@STASIS_ANDROID_ABI@", target.android_abi().unwrap_or("")),
     ];
     replace_shell_tokens(&common_destination, &replacements)?;
     replace_shell_tokens(&platform_destination, &replacements)?;
@@ -3740,7 +3768,9 @@ fn assemble_mobile_shell(
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
             "assets": match target {
-                PackageTarget::AndroidArm64 => "android/app/src/main/assets/stasis_game",
+                PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                    "android/app/src/main/assets/stasis_game"
+                }
                 PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game",
                 PackageTarget::Desktop => unreachable!(),
             },

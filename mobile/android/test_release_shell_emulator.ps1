@@ -35,8 +35,8 @@ if ($Serial -notmatch '^emulator-\d+$') {
 }
 
 $abiList = (& $adb -s $Serial shell getprop ro.product.cpu.abilist).Trim() -split ','
-if ($LASTEXITCODE -ne 0 -or "arm64-v8a" -notin $abiList) {
-    throw "Android CI seams require an arm64-v8a emulator; $Serial reports '$($abiList -join ',')'"
+if ($LASTEXITCODE -ne 0 -or "x86_64" -notin $abiList) {
+    throw "Android CI seams require an x86_64 emulator; $Serial reports '$($abiList -join ',')'"
 }
 
 $artifactRootPath = if ([System.IO.Path]::IsPathRooted($ArtifactRoot)) {
@@ -63,6 +63,7 @@ foreach ($seam in $seams) {
     & (Join-Path $scriptRoot "test_release_shell.ps1") `
         -Serial $Serial `
         -ProjectPath $seam.Project `
+        -Target android-x86_64 `
         -OutputPath (Join-Path $artifactRootPath $seam.Output) `
         -TotalTimeoutSeconds $PerSeamTimeoutSeconds
     if ($LASTEXITCODE -ne 0) {

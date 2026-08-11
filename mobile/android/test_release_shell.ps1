@@ -3,6 +3,8 @@ param(
     [string]$OutputPath = "",
     [string]$ProjectPath = "samples/android_aot_seam",
     [string]$ExpectationsPath = "",
+    [ValidateSet("android-arm64", "android-x86_64")]
+    [string]$Target = "android-arm64",
     [int]$TotalTimeoutSeconds = 900
 )
 
@@ -23,7 +25,8 @@ $androidHome = if ($env:ANDROID_HOME) {
 }
 $adb = Join-Path (Join-Path $androidHome "platform-tools") "adb$executableSuffix"
 if (-not (Test-Path $adb)) { throw "adb was not found: $adb" }
-if (-not $Serial) { throw "Pass -Serial or set ANDROID_SERIAL to one arm64 Android target" }
+if (-not $Serial) { throw "Pass -Serial or set ANDROID_SERIAL to one Android target" }
+$requiredAbi = if ($Target -eq "android-x86_64") { "x86_64" } else { "arm64-v8a" }
 $projectRoot = if ([System.IO.Path]::IsPathRooted($ProjectPath)) {
     [System.IO.Path]::GetFullPath($ProjectPath)
 } else {
@@ -83,8 +86,8 @@ if ($LASTEXITCODE -ne 0 -or $abiOutput.Count -eq 0) {
 }
 $abi = ($abiOutput -join "").Trim()
 $abiList = (& $adb -s $Serial shell getprop ro.product.cpu.abilist).Trim() -split ','
-if ($LASTEXITCODE -ne 0 -or "arm64-v8a" -notin $abiList) {
-    throw "$testId requires arm64-v8a support; $Serial reports '$abi' ($($abiList -join ','))"
+if ($LASTEXITCODE -ne 0 -or $requiredAbi -notin $abiList) {
+    throw "$testId requires $requiredAbi support; $Serial reports '$abi' ($($abiList -join ','))"
 }
 if (-not $env:STASIS_SDL3_SOURCE -or -not $env:STASIS_SDL3_IMAGE_SOURCE) {
     throw "Set STASIS_SDL3_SOURCE and STASIS_SDL3_IMAGE_SOURCE to the pinned source trees"
@@ -105,7 +108,7 @@ try {
     )
     if (-not (Test-Path $compiler)) { throw "Built Stasis compiler is missing: $compiler" }
     & $compiler --workspace $workspaceRoot package-mobile `
-        --target android-arm64 --out d --development-build
+        --target $Target --out d --development-build
     if ($LASTEXITCODE -ne 0) { throw "$testId package-mobile failed with exit code $LASTEXITCODE" }
     Assert-In-Time "package-mobile"
 

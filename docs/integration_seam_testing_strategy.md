@@ -177,14 +177,15 @@ named for the injected failure, and leave the production path unchanged.
 |---|---|---:|---|
 | Fast contract | every PR and `tools/validate_repo.sh` | 2 min | descriptor parity, JIT HostFrame, buffer bounds, diagnostic schemas |
 | Native integration | every PR, platform-sharded | 10 min | desktop real runtime, linked AOT/C runtime, package link and symbol audit |
-| Android emulator | merge/nightly and affected PRs | 15 min/test shard | Workshop JNI/JIT and ARM64 generated release-shell behavior |
+| Android emulator | merge/nightly and affected PRs | 15 min/test shard | Workshop JNI/JIT and generated release-shell behavior on a test-only x86_64 AOT build |
 | Physical device | optional release candidate and scheduled farm | 15 min/test shard | Supplemental OEM driver, density, lifecycle, and representative rendering evidence |
 
 Tests should be promoted toward the faster lane when a deterministic lower
-adapter becomes available. The hosted ARM64 emulator is the CI and readiness
+adapter becomes available. The hosted x86_64 emulator is the CI and readiness
 gate. Physical-device tests supplement release confidence for OEM-specific
 surface, driver, and density behavior, but device availability does not block
-ordinary CI or task readiness.
+ordinary CI or task readiness. Production Android packaging remains ARM64; the
+x86_64 package target exists only for deterministic development/emulator tests.
 
 ## Proposed integration tests
 

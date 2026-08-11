@@ -131,11 +131,12 @@ This builds the canonical `samples/render_parity` fixture in Workshop with the r
 ## Hosted release-shell emulator
 
 The `Android Emulator Seams` GitHub Actions workflow provisions an API 35
-`arm64-v8a` AVD on the hosted ARM64 `macos-15` runner. It runs IT-017, IT-018,
-and IT-019 through the production `android-arm64` AOT package, so CI does not
+`x86_64` AVD on an `ubuntu-latest` KVM runner. It runs IT-017, IT-018, and
+IT-019 through the test-only `android-x86_64` AOT package, so CI does not
 depend on an attached phone, a self-hosted runner, or a preinstalled local AVD.
 The workflow retains the lifecycle, touch, orientation, screenshot, and cleanup
-oracles and uploads one evidence artifact per seam.
+oracles and uploads one evidence artifact per seam. The public x86_64 target
+requires `--development-build`; production packages remain `android-arm64`.
 
 Physical-device runs are optional supplemental release evidence for OEM GPU,
 surface, and density behavior. They are not a CI or task-readiness gate.
