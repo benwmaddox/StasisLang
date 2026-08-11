@@ -177,12 +177,14 @@ named for the injected failure, and leave the production path unchanged.
 |---|---|---:|---|
 | Fast contract | every PR and `tools/validate_repo.sh` | 2 min | descriptor parity, JIT HostFrame, buffer bounds, diagnostic schemas |
 | Native integration | every PR, platform-sharded | 10 min | desktop real runtime, linked AOT/C runtime, package link and symbol audit |
-| Android emulator | merge/nightly and affected PRs | 15 min | Workshop JNI/JIT and generated release-shell behavior |
-| Physical device | release candidate and scheduled farm | 15 min/test shard | arm64 release shell, lifecycle/resource restoration, representative rendering |
+| Android emulator | merge/nightly and affected PRs | 15 min/test shard | Workshop JNI/JIT and ARM64 generated release-shell behavior |
+| Physical device | optional release candidate and scheduled farm | 15 min/test shard | Supplemental OEM driver, density, lifecycle, and representative rendering evidence |
 
 Tests should be promoted toward the faster lane when a deterministic lower
-adapter becomes available. Physical-device tests remain required for surface,
-driver, density, and packaged arm64 behavior that an x86 emulator cannot prove.
+adapter becomes available. The hosted ARM64 emulator is the CI and readiness
+gate. Physical-device tests supplement release confidence for OEM-specific
+surface, driver, and density behavior, but device availability does not block
+ordinary CI or task readiness.
 
 ## Proposed integration tests
 
@@ -225,9 +227,9 @@ in Maddox Tasks as Backlog children of the integration-test program.
 
 | ID | Pri | Test | Primary oracle | Lane |
 |---|---:|---|---|---|
-| IT-017 | 1 | Package, install, and launch the generated AOT Android release shell and prove a non-empty game reaches stable frames. | Lifecycle markers, state checksum, trace, capture | Device |
-| IT-018 | 1 | Send touch down/move/up through Android/SDL and prove HostFrame-to-Stasis state-to-frame behavior. | Pointer fields, state transition, frame trace | Device |
-| IT-019 | 1 | Rotate and resize the release shell and prove native/drawable/logical metrics and generations reach Stasis before the restored frame. | Metric/generation record and named pixel regions | Device |
+| IT-017 | 1 | Package, install, and launch the generated AOT Android release shell and prove a non-empty game reaches stable frames. | Lifecycle markers, state checksum, trace, capture | Emulator |
+| IT-018 | 1 | Send touch down/move/up through Android/SDL and prove HostFrame-to-Stasis state-to-frame behavior. | Pointer fields, state transition, frame trace | Emulator |
+| IT-019 | 1 | Rotate and resize the release shell and prove native/drawable/logical metrics and generations reach Stasis before the restored frame. | Metric/generation record and named pixel regions | Emulator |
 | IT-020 | 1 | Background/resume and recreate the release Activity after resources load; verify the first accepted frame restores sprite, fallback, and cached text. | Restore events, generation advance, capture | Device |
 | IT-021 | 2 | Package and load real sprite/font/text/audio assets in the release shell. | Manifest identity, render regions, offline/queued audio evidence | Device |
 | IT-022 | 2 | Build controlled packages with a missing, tampered, traversal, and oversized asset and verify deterministic startup rejection. | Structured user-visible/runtime diagnostic | Emulator |

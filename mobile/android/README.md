@@ -128,6 +128,18 @@ Run the blocking render end-to-end gate directly with:
 
 This builds the canonical `samples/render_parity` fixture in Workshop with the real x86_64 development JIT. It captures the OpenGL surface, normalizes the letterboxed 640x360 viewport, and checks Android regions for the background, procedural fallback, opaque/translucent/rotated SVG sprites, a filled rectangle, crossing lines, direct text, and cached text. Three spaced captures, at least 30 rendered frames, and a successful non-empty JIT compile are required. Release packages are checked separately by `build_release.ps1` and can be run on an arm64 device with `validate_device.ps1 -Release`.
 
+## Hosted release-shell emulator
+
+The `Android Emulator Seams` GitHub Actions workflow provisions an API 35
+`arm64-v8a` AVD on the hosted ARM64 `macos-15` runner. It runs IT-017, IT-018,
+and IT-019 through the production `android-arm64` AOT package, so CI does not
+depend on an attached phone, a self-hosted runner, or a preinstalled local AVD.
+The workflow retains the lifecycle, touch, orientation, screenshot, and cleanup
+oracles and uploads one evidence artifact per seam.
+
+Physical-device runs are optional supplemental release evidence for OEM GPU,
+surface, and density behavior. They are not a CI or task-readiness gate.
+
 Install the repository-owned source-format pre-commit hook once per clone:
 
 ```powershell

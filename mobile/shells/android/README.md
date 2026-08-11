@@ -26,8 +26,8 @@ The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for
 initialization, the first frame, stable frame 30, and fixture-owned probe
 sequence changes; ordinary app launches do not compile or enable the marker
-hooks. Run IT-017 against an attached device whose ABI list includes
-`arm64-v8a` with:
+hooks. CI runs IT-017 on a hosted API 35 ARM64 emulator. The same driver can be
+run against any emulator or device whose ABI list includes `arm64-v8a` with:
 
 ```powershell
 mobile/android/test_release_shell.ps1 -Serial <device-serial>
@@ -62,3 +62,9 @@ mobile/android/test_release_shell.ps1 -Serial <device-serial> `
 The driver independently restores any prior display-size override, user and
 accelerometer rotation settings, immersive confirmation, package installation,
 and process state even when an assertion fails.
+
+`mobile/android/test_release_shell_emulator.ps1` is the CI entrypoint. It
+requires exactly one ready emulator, rejects physical-device serials, verifies
+`arm64-v8a`, and runs IT-017, IT-018, and IT-019 sequentially. The GitHub
+workflow owns AVD startup and shutdown. Physical-device runs remain useful
+supplemental release evidence but do not gate CI readiness.
