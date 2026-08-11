@@ -19,10 +19,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int FLAG_CLEAR = 1;
     static final int FLAG_PRESENT = 2;
 
+    static final int I_MAGIC = 0;
+    static final int I_VERSION = 1;
     static final int I_FLAGS = 2;
     static final int I_LINE_COUNT = 3;
     static final int I_SPRITE_COUNT = 4;
+    static final int I_DROPPED_LINES = 5;
+    static final int I_DROPPED_SPRITES = 6;
     static final int I_TEXT_COUNT = 7;
+    static final int I_DROPPED_TEXT = 8;
     static final int I_TEXT_BYTES_USED = 9;
     static final int I_LOGICAL_W = 10;
     static final int I_LOGICAL_H = 11;
@@ -37,7 +42,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int I_DISPLAY_GENERATION = 20;
     static final int I_DENSITY_GENERATION = 21;
     static final int I_ORDER_COUNT = 22;
+    static final int I_DROPPED_ORDER = 23;
     static final int I_RECT_COUNT = 24;
+    static final int I_DROPPED_RECTS = 25;
     static final int I_SPRITE_BASE = 32;
     static final int F_LINE_BASE = 4;
     static final int MAX_GEOMETRY = 10_000;
@@ -446,11 +453,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         }
         int lineCount = clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES);
         int rectCount = clampedRectCount(
-                frameI32.get(1), lineCount, frameI32.get(I_RECT_COUNT));
+                frameI32.get(I_VERSION), lineCount, frameI32.get(I_RECT_COUNT));
         int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
         int textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
         int textBytes = clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY);
-        int orderCount = frameI32.get(1) >= RENDER_V3_VERSION
+        int orderCount = frameI32.get(I_VERSION) >= RENDER_V3_VERSION
                 ? clampCount(frameI32.get(I_ORDER_COUNT), MAX_ORDER) : 0;
         if (orderCount == 0) {
             drawLines(0, lineCount);
@@ -868,10 +875,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     static boolean isValidFrame(IntBuffer values) {
         return values != null && values.capacity() >= FRAME_I32_CAPACITY
-                && values.get(0) == RENDER_MAGIC
-                && (values.get(1) == RENDER_V2_VERSION
-                    || values.get(1) == RENDER_V3_VERSION
-                    || values.get(1) == RENDER_VERSION);
+                && values.get(I_MAGIC) == RENDER_MAGIC
+                && (values.get(I_VERSION) == RENDER_V2_VERSION
+                    || values.get(I_VERSION) == RENDER_V3_VERSION
+                    || values.get(I_VERSION) == RENDER_VERSION);
     }
 
     static boolean shouldPresent(IntBuffer values) {
@@ -931,7 +938,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         for (int index = 0; index < header.length; index += 1) header[index] = frameI32.get(index);
         int lineCount = clampCount(header[I_LINE_COUNT], MAX_LINES);
         int rectCount = clampedRectCount(
-                header[1], lineCount, header[I_RECT_COUNT]);
+                header[I_VERSION], lineCount, header[I_RECT_COUNT]);
         int spriteCount = clampCount(header[I_SPRITE_COUNT], MAX_SPRITES);
         int textCount = clampCount(header[I_TEXT_COUNT], MAX_TEXT);
         int textByteCount = clampCount(header[I_TEXT_BYTES_USED], TEXT_U8_CAPACITY);
@@ -940,7 +947,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             lines[index] = frameF32.get(F_LINE_BASE + index);
         }
         float[] rectangles = new float[activeRectF32Count(
-                header[1], lineCount, rectCount)];
+                header[I_VERSION], lineCount, rectCount)];
         for (int rect = 0; rect < rectCount; rect += 1) {
             int source = F_RECT_REVERSE_BASE - rect * GEOMETRY_F32_STRIDE;
             int destination = rect * GEOMETRY_F32_STRIDE;
@@ -968,7 +975,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         for (int index = 0; index < textBytes.length; index += 1) {
             textBytes[index] = frameU8Bytes.get(index);
         }
-        int orderCount = frameI32.get(1) >= RENDER_V3_VERSION
+        int orderCount = frameI32.get(I_VERSION) >= RENDER_V3_VERSION
                 ? clampCount(frameI32.get(I_ORDER_COUNT), MAX_ORDER) : 0;
         int[] order = new int[orderCount];
         for (int index = 0; index < order.length; index += 1) {
