@@ -624,6 +624,24 @@ Rules:
 - Tests run in deterministic sorted natural path order (numeric path segments compare numerically, not lexicographically).
 - Tests may call extern/runtime functions.
 
+### 10.1 Headless Scenario Tests
+
+Tooling may run schema-versioned scenario files beside language-level tests. A scenario uses the
+normal JIT compiler and lifecycle entries; it is not a second language execution path.
+
+Rules:
+- `main()` establishes fresh state, then an optional saved-state map is applied.
+- A bounded runtime snapshot is restored before each explicit property seed.
+- `tick()` runs an exact bounded count without wall-clock pacing and without calling `render()`.
+- Typed invariants are checked after every tick.
+- Replay hashes cover compiler-owned simulation scalars and collections in deterministic path
+  order with exact numeric bits.
+- Host input snapshots, host request mailboxes, and graphics/audio command buffers are outside the
+  simulation hash and cannot mutate gameplay state through the headless host.
+- Failure evidence records the scenario, seed, tick, reason, and observed hashes.
+- Cross-architecture hash claims require integer or Q16.16 simulation state; ordinary floating
+  point remains the platform-floating profile defined in section 4.3.1.
+
 ## 11. Memory Model
 
 - All persistent data is global.
