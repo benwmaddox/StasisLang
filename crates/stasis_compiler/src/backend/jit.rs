@@ -4972,6 +4972,35 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_propagates_soa_struct_parameter_through_recursive_cycle() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction even(value: Sample, depth: i32): i32 { if (depth <= 0) { return value.value; } return odd(value, depth - 1); }\nfunction odd(value: Sample, depth: i32): i32 { if (depth <= 0) { return value.value; } return even(value, depth - 1); }\nfunction main(): i32 { items[0].value = 9; return even(items[0], 3); }\n",
+        );
+        process.compile().expect("compile");
+        let summaries = process.compiler.data_flow_summaries_shared();
+        for function in ["even", "odd"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == function)
+                .expect("recursive helper summary");
+            assert_eq!(
+                summary.parameter_storage_kinds[0],
+                crate::data_flow::ParameterStorageKind::Soa,
+                "unexpected {function} provenance; summaries={summaries:#?}"
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            9
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_keeps_mixed_struct_parameter_provenance_dynamic() {
         let mut process = JitProcess::new();
         process.upsert_file(
