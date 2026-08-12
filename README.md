@@ -256,8 +256,22 @@ inclusive time, and maximum inclusive time. Only the named functions are instrum
 measurement overhead bounded and making nested exclusive time meaningful. The warmup is reset after
 the requested number of ticks so startup compilation and asset loading do not contaminate the sample.
 Nested stacks remain thread-local, while completed counters are merged process-wide across threads.
-This profiler currently applies to the JIT-backed `play` command, not AOT packages; aggressively
-inlined functions may need their caller selected instead.
+The desktop CLI path applies to the JIT-backed `play` command; aggressively inlined functions may
+need their caller selected instead.
+
+Development mobile packages can profile the same named functions in AOT code:
+
+```powershell
+stasis package-mobile --target android-x86_64 --development-build `
+  --profile-functions render,draw_board,draw_enemies `
+  --profile-warmup-frames 600 `
+  --profile-sample-frames 300
+```
+
+The mobile runtime writes one bounded `STASIS_PROFILE_START`, one `STASIS_PROFILE` row per selected
+function, and `STASIS_PROFILE_DONE` to the platform log. Android reports are available through
+logcat's `Stasis` tag. Mobile profiling is rejected for non-development packages so production
+artifacts remain uninstrumented.
 
 From a project containing `stasis.json`, `stasis tui` opens the manifest entry in the persistent live-workspace interface. Pass an entry path to override the manifest for one invocation.
 

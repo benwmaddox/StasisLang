@@ -24,6 +24,12 @@ void stasis_jit_register_global_u16_array(
 void stasis_jit_register_code_ptr(int32_t fn_id, int64_t code_ptr);
 void stasis_jit_clear_string_literal_table(void);
 void stasis_jit_upsert_string_literal(int32_t id, const char *value);
+void stasis_jit_profile_register_function(int32_t function_id, const char *name);
+void stasis_jit_profile_configure(int32_t warmup_frames, int32_t sample_frames);
+void stasis_jit_profile_frame_begin(void);
+void stasis_jit_profile_frame_end(void);
+void stasis_jit_profile_frame_enter(int32_t function_id);
+void stasis_jit_profile_frame_leave(int32_t function_id);
 int64_t stasis_jit_lookup_code_ptr(int32_t fn_id);
 int32_t stasis_jit_global_i32_load(int32_t hash);
 void stasis_jit_global_i32_store(int32_t hash, int32_t value);

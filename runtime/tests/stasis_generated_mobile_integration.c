@@ -91,6 +91,8 @@ void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us) {
     (void)tick_us;
     (void)render_us;
 }
+
+void stasis_host_log_message(const char *message) { (void)message; }
 void stasis_shutdown(void) { shutdowns += 1; }
 
 int stasis_audio_init(int rate, int channels, int latency) {

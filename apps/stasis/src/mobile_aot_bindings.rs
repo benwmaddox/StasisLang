@@ -10,6 +10,26 @@ pub fn write_mobile_aot_bindings_source(
     project_dir: &Path,
     output_path: &Path,
 ) -> Result<(), String> {
+    write_mobile_aot_bindings_source_with_profile(
+        manifest,
+        state_layout,
+        project_dir,
+        output_path,
+        &[],
+        0,
+        0,
+    )
+}
+
+pub fn write_mobile_aot_bindings_source_with_profile(
+    manifest: &serde_json::Value,
+    state_layout: &StateLayout,
+    project_dir: &Path,
+    output_path: &Path,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
+) -> Result<(), String> {
     let functions = manifest
         .get("functions")
         .and_then(serde_json::Value::as_array)
@@ -107,6 +127,25 @@ pub fn write_mobile_aot_bindings_source(
         out.push_str(&format!(
             "    stasis_jit_upsert_string_literal({id}, stasis_mobile_literal_{});\n",
             id.unsigned_abs()
+        ));
+    }
+    for name in profile_functions {
+        let function = functions
+            .iter()
+            .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
+            .ok_or_else(|| format!("mobile AOT profile function '{name}' was not emitted"))?;
+        let function_id = function
+            .get("function_id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("mobile AOT profile function '{name}' missing function_id"))?;
+        out.push_str(&format!(
+            "    stasis_jit_profile_register_function((int32_t)UINT32_C({function_id}), \"{}\");\n",
+            escape_mobile_c_string_literal(name)
+        ));
+    }
+    if !profile_functions.is_empty() {
+        out.push_str(&format!(
+            "    stasis_jit_profile_configure({profile_warmup_frames}, {profile_sample_frames});\n"
         ));
     }
     out.push_str("}\n");

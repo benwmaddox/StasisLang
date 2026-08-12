@@ -330,6 +330,13 @@ enum ToolchainCommand {
         /// Permit a visibly labeled package from a local/source toolchain.
         #[arg(long)]
         development_build: bool,
+        /// Select named Stasis functions for bounded mobile AOT profiling.
+        #[arg(long, value_delimiter = ',', value_name = "NAME[,NAME...]")]
+        profile_functions: Vec<String>,
+        #[arg(long, default_value_t = 120)]
+        profile_warmup_frames: u32,
+        #[arg(long, default_value_t = 300)]
+        profile_sample_frames: u32,
     },
     /// Report compiler-owned state memory, layout, and mobile budget information.
     Inspect {
@@ -1045,6 +1052,9 @@ fn execute(
                     entry,
                     out,
                     development_build,
+                    profile_functions,
+                    profile_warmup_frames,
+                    profile_sample_frames,
                 } => {
                     validate_optional_workspace_path(
                         &workspace,
@@ -1062,6 +1072,9 @@ fn execute(
                         entry.as_deref(),
                         out.as_deref(),
                         development_build,
+                        &profile_functions,
+                        profile_warmup_frames,
+                        profile_sample_frames,
                     )
                 }
                 ToolchainCommand::Inspect {
@@ -3425,6 +3438,9 @@ fn package_workspace(
             Path::new(&workspace.manifest.entry),
             &package_root,
             development_build,
+            &[],
+            0,
+            0,
         );
     }
     let staging_name = format!(
@@ -3559,6 +3575,9 @@ fn package_mobile_command(
     entry: Option<&Path>,
     output: Option<&Path>,
     development_build: bool,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
 ) -> Result<CommandResult, String> {
     let target = target.package_target();
     let entry = entry.unwrap_or_else(|| Path::new(&workspace.manifest.entry));
@@ -3572,7 +3591,16 @@ fn package_mobile_command(
             ))
         });
     validate_workspace_destination(workspace, "package output", &package_root)?;
-    package_mobile_workspace(workspace, target, entry, &package_root, development_build)
+    package_mobile_workspace(
+        workspace,
+        target,
+        entry,
+        &package_root,
+        development_build,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
+    )
 }
 
 fn package_mobile_workspace(
@@ -3581,11 +3609,28 @@ fn package_mobile_workspace(
     entry: &Path,
     package_root: &Path,
     development_build: bool,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
 ) -> Result<CommandResult, String> {
     if matches!(target, PackageTarget::AndroidX86_64) && !development_build {
         return Err(
             "android-x86_64 is a test-only emulator target; pass --development-build".to_string(),
         );
+    }
+    if !profile_functions.is_empty() && !development_build {
+        return Err("mobile function profiling requires --development-build".to_string());
+    }
+    if profile_functions.len() > 64 {
+        return Err("mobile function profiling supports at most 64 functions".to_string());
+    }
+    if !profile_functions.is_empty() && profile_sample_frames == 0 {
+        return Err("mobile function profiling requires at least one sample frame".to_string());
+    }
+    let unique_profile_functions: BTreeSet<&str> =
+        profile_functions.iter().map(String::as_str).collect();
+    if unique_profile_functions.len() != profile_functions.len() {
+        return Err("mobile function profiling function names must be unique".to_string());
     }
     if package_root.exists() {
         return Err(format!(
@@ -3613,7 +3658,8 @@ fn package_mobile_workspace(
         let aot_root = staging_root.join("aot");
         let executable = env::current_exe()
             .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
-        let child = Command::new(executable)
+        let mut child_command = Command::new(executable);
+        child_command
             .arg("mobile-aot-bundle")
             .arg("--target")
             .arg(target.as_str())
@@ -3622,7 +3668,17 @@ fn package_mobile_workspace(
             .arg("--entry-file")
             .arg(entry)
             .arg("--out-dir")
-            .arg(&aot_root)
+            .arg(&aot_root);
+        if !profile_functions.is_empty() {
+            child_command
+                .arg("--profile-functions")
+                .arg(profile_functions.join(","))
+                .arg("--profile-warmup-frames")
+                .arg(profile_warmup_frames.to_string())
+                .arg("--profile-sample-frames")
+                .arg(profile_sample_frames.to_string());
+        }
+        let child = child_command
             .output()
             .map_err(|error| format!("failed to launch mobile AOT packaging: {error}"))?;
         if !child.status.success() {
@@ -5916,6 +5972,7 @@ mod tests {
                 entry: Some(ref entry),
                 out: Some(ref out),
                 development_build: false,
+                ..
             } if entry == Path::new("src/mobile.stasis") && out == Path::new("dist/ios")
         ));
     }

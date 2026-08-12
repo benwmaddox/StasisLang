@@ -2,7 +2,8 @@
 
 use serde_json::json;
 use stasis::{
-    audit_mobile_aot_bindings, mobile_aot_function_for, write_mobile_aot_bindings_source,
+    audit_mobile_aot_bindings, mobile_aot_function_for,
+    write_mobile_aot_bindings_source_with_profile,
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::EngineEntrypoints;
@@ -91,6 +92,9 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     process
         .set_project_root(project.to_string_lossy())
         .expect("set native AOT project root");
+    process
+        .set_profile_functions(["render".to_string()])
+        .expect("configure native AOT profiler");
     process.upsert_file("src/main.stasis", FIXTURE);
     process.compile().expect("compile native mobile fixture");
     let bundle = process
@@ -101,10 +105,20 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     )
     .expect("parse engine manifest");
     let bindings_path = bundle_dir.join("published_aot_bindings.c");
-    write_mobile_aot_bindings_source(&manifest, &process.state_layout(), &project, &bindings_path)
-        .expect("write generated mobile bindings");
+    write_mobile_aot_bindings_source_with_profile(
+        &manifest,
+        &process.state_layout(),
+        &project,
+        &bindings_path,
+        &["render".to_string()],
+        1,
+        2,
+    )
+    .expect("write generated mobile bindings");
     let bindings = fs::read_to_string(&bindings_path).expect("read generated bindings");
     audit_mobile_aot_bindings(&manifest, &bindings).expect("audit generated bindings");
+    assert!(bindings.contains("stasis_jit_profile_register_function"));
+    assert!(bindings.contains("stasis_jit_profile_configure(1, 2);"));
 
     let (tick_symbol, _) = mobile_aot_function_for(&manifest, "tick").expect("tick symbol");
     let declaration = format!("extern int32_t {tick_symbol}(void);");
