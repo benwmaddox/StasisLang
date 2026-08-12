@@ -26,6 +26,7 @@ void stasis_gfx_submit_u8(
 uint64_t stasis_host_performance_counter(void);
 uint64_t stasis_host_performance_elapsed_us(uint64_t started, uint64_t finished);
 void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us);
+int stasis_host_performance_metrics_enabled(void);
 void stasis_shutdown(void);
 
 static int32_t *host_i32;
@@ -147,25 +148,28 @@ int32_t stasis_mobile_runtime_step(void) {
     stasis_host_get_frame(host_i32, host_f32);
     apply_guest_host_requests();
     stasis_jit_profile_frame_begin();
-    uint64_t tick_started = stasis_host_performance_counter();
+    const int measure_frame = stasis_host_performance_metrics_enabled();
+    uint64_t tick_started = measure_frame ? stasis_host_performance_counter() : 0;
     runtime_state.last_entry_result = runtime_state.entries.tick_entry();
-    uint64_t tick_finished = stasis_host_performance_counter();
+    uint64_t tick_finished = measure_frame ? stasis_host_performance_counter() : 0;
     if (runtime_state.last_entry_result != 0) {
         fprintf(stderr, "Stasis mobile tick entry requested stop with code %d\n",
             runtime_state.last_entry_result);
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
-    uint64_t render_started = stasis_host_performance_counter();
+    uint64_t render_started = measure_frame ? stasis_host_performance_counter() : 0;
     runtime_state.last_entry_result = runtime_state.entries.render_entry();
-    uint64_t render_finished = stasis_host_performance_counter();
+    uint64_t render_finished = measure_frame ? stasis_host_performance_counter() : 0;
     if (runtime_state.last_entry_result != 0) {
         fprintf(stderr, "Stasis mobile render entry requested stop with code %d\n",
             runtime_state.last_entry_result);
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
-    stasis_host_set_performance_metrics(
-        stasis_host_performance_elapsed_us(tick_started, tick_finished),
-        stasis_host_performance_elapsed_us(render_started, render_finished));
+    if (measure_frame) {
+        stasis_host_set_performance_metrics(
+            stasis_host_performance_elapsed_us(tick_started, tick_finished),
+            stasis_host_performance_elapsed_us(render_started, render_finished));
+    }
     /* Submission owns begin/present according to the guest command-buffer flags. */
     stasis_gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
     stasis_jit_profile_frame_end();

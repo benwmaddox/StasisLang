@@ -169,6 +169,7 @@ static int32_t g_render_last_display_generation = 0;
 static int32_t g_render_last_density_generation = 0;
 static uint32_t g_render_logged_validation_mask = 0;
 static bool g_render_contract_logged = false;
+static int g_render_trace_enabled = -1;
 typedef struct {
     int active;
     int logical_w;
@@ -893,6 +894,9 @@ static void stasis_pump_events(void) {
                 }
                 if (event.key.key == SDLK_F3 && !event.key.repeat) {
                     g_force_debug_overlay = !g_force_debug_overlay;
+                    g_perf_sample_count = 0;
+                    g_perf_sample_next = 0;
+                    g_perf_render_started_counter = 0;
                     if (g_force_debug_overlay) (void)stasis_perf_font();
                     SDL_Log("performance HUD %s (F3 toggles)", g_force_debug_overlay ? "on" : "off");
                 }
@@ -1178,8 +1182,14 @@ STASIS_EXPORT void stasis_host_bulk_apply_requests(
 
 STASIS_EXPORT void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us)
 {
+    if (!g_force_debug_overlay) return;
     g_perf_pending_tick_us = tick_us;
     g_perf_pending_guest_render_us = render_us;
+}
+
+STASIS_EXPORT int stasis_host_performance_metrics_enabled(void)
+{
+    return g_force_debug_overlay ? 1 : 0;
 }
 
 STASIS_EXPORT void stasis_host_report_runtime_error(const char* message)
@@ -4381,12 +4391,14 @@ STASIS_EXPORT void stasis_begin_frame(void) {
 }
 
 static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter) {
+    if (started_counter == 0 || finished_counter < started_counter) return 0;
     const uint64_t frequency = SDL_GetPerformanceFrequency();
-    if (started_counter == 0 || finished_counter < started_counter || frequency == 0) return 0;
+    if (frequency == 0) return 0;
     return ((finished_counter - started_counter) * 1000000u) / frequency;
 }
 
 STASIS_EXPORT uint64_t stasis_host_performance_counter(void) {
+    if (!g_force_debug_overlay) return 0;
     return SDL_GetPerformanceCounter();
 }
 
@@ -4397,6 +4409,10 @@ STASIS_EXPORT uint64_t stasis_host_performance_elapsed_us(
 }
 
 static void stasis_perf_finish_render_sample(void) {
+    if (!g_force_debug_overlay) {
+        g_perf_render_started_counter = 0;
+        return;
+    }
     const uint64_t now = SDL_GetPerformanceCounter();
     StasisPerfSample* sample = &g_perf_samples[g_perf_sample_next];
     sample->captured_counter = now;
@@ -4839,6 +4855,15 @@ static void stasis_stamp_display_metadata(int32_t* cmd_i32) {
     cmd_i32[STASIS_RENDER_I_DENSITY_GENERATION] = g_density_generation;
 }
 
+static bool stasis_render_trace_is_enabled(void) {
+    if (g_render_trace_enabled < 0) {
+        const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+        g_render_trace_enabled =
+            enabled && enabled[0] == '1' && enabled[1] == '\0';
+    }
+    return g_render_trace_enabled != 0;
+}
+
 static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     StasisRenderValidation validation = stasis_render_validate(cmd_i32, cmd_f32);
     if (validation != STASIS_RENDER_VALID) {
@@ -4861,13 +4886,17 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
     }
     g_render_accepted_frames++;
     g_render_last_validation = STASIS_RENDER_VALID;
-    g_render_last_trace = stasis_render_trace(cmd_i32, cmd_f32, cmd_u8);
+    if (!g_render_contract_logged || stasis_render_trace_is_enabled()) {
+        g_render_last_trace = stasis_render_trace(cmd_i32, cmd_f32, cmd_u8);
+    }
     stasis_stamp_display_metadata(cmd_i32);
     g_render_last_display_generation =
         cmd_i32[STASIS_RENDER_I_DISPLAY_GENERATION];
     g_render_last_density_generation =
         cmd_i32[STASIS_RENDER_I_DENSITY_GENERATION];
-    g_perf_render_started_counter = SDL_GetPerformanceCounter();
+    g_perf_render_started_counter = g_force_debug_overlay
+        ? SDL_GetPerformanceCounter()
+        : 0;
 
     const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
     const int32_t gfx_cmd_max_lines = STASIS_RENDER_MAX_LINES;
@@ -4895,7 +4924,7 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
         SDL_Log(
             "Stasis render contract v%d trace=%u flags=%d lines=%d rects=%d sprites=%d text=%d",
             cmd_i32[STASIS_RENDER_I_VERSION],
-            (unsigned int)stasis_render_trace(cmd_i32, cmd_f32, cmd_u8),
+            (unsigned int)g_render_last_trace,
             flags,
             line_count,
             rect_count,
@@ -6170,6 +6199,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
     g_render_last_density_generation = 0;
     g_render_logged_validation_mask = 0;
     g_render_contract_logged = false;
+    g_render_trace_enabled = -1;
     g_resource_frame_ready = false;
     SDL_Log("Stasis graphics shutdown");
 }
