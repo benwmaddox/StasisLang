@@ -116,7 +116,7 @@ test -d "${app}/Frameworks/SDL3.framework"
 test -d "${app}/Frameworks/SDL3_image.framework"
 test -f "${app}/stasis_game/assets/manifest.json"
 test -f "${app}/stasis_game/stasis_provenance.json"
-lipo -verify_arch arm64 "${executable}"
+lipo "${executable}" -verify_arch arm64
 otool -L "${executable}" | tee "${build_root}/linked-libraries.txt"
 grep -Fq '@rpath/SDL3.framework/SDL3' "${build_root}/linked-libraries.txt"
 grep -Fq '@rpath/SDL3_image.framework/SDL3_image' "${build_root}/linked-libraries.txt"
@@ -133,7 +133,7 @@ fi
 {
   xcodebuild -version
   printf 'app=%s\n' "${app}"
-  printf 'architectures=%s\n' "$(lipo -archs "${executable}")"
+  printf 'architectures=%s\n' "$(lipo "${executable}" -archs)"
   printf 'asset_manifest=%s\n' "${app}/stasis_game/assets/manifest.json"
   printf 'provenance=%s\n' "${app}/stasis_game/stasis_provenance.json"
   printf 'stasis_sources=0\n'
