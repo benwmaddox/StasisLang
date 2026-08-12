@@ -1475,6 +1475,7 @@ pub(crate) enum DirectStorageRef {
 pub(crate) struct DirectStorageRefs {
     pub(crate) scalars: BTreeMap<String, DirectStorageRef>,
     pub(crate) arrays: BTreeMap<(String, String), DirectArrayStorageRef>,
+    pub(crate) arrays_by_hash: BTreeMap<(i32, i32), DirectArrayStorageRef>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1587,6 +1588,7 @@ pub(crate) struct StructViewValue {
     pub(crate) index: Value,
     pub(crate) len: Value,
     pub(crate) storage_kind: StructViewStorageKind,
+    pub(crate) known_collection_hash: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1608,6 +1610,7 @@ pub(crate) struct StructViewBinding {
     pub(crate) index_var: Variable,
     pub(crate) len_var: Variable,
     pub(crate) storage_kind: StructViewStorageKind,
+    pub(crate) known_collection_hash: Option<i32>,
 }
 
 pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuilt, Finalize>(
@@ -1785,6 +1788,7 @@ where
                             index_var,
                             len_var,
                             storage_kind: StructViewStorageKind::Dynamic,
+                            known_collection_hash: None,
                         }),
                     )
                 } else {
@@ -4761,6 +4765,7 @@ pub(crate) fn emit_simple_statements(
                                 index_var,
                                 len_var,
                                 storage_kind: struct_view.storage_kind,
+                                known_collection_hash: struct_view.known_collection_hash,
                             }),
                         },
                     );
@@ -7150,6 +7155,7 @@ pub(crate) fn try_emit_struct_view_value(
                         index: builder.use_var(struct_view.index_var),
                         len: builder.use_var(struct_view.len_var),
                         storage_kind: struct_view.storage_kind,
+                        known_collection_hash: struct_view.known_collection_hash,
                     }));
                 }
             }
@@ -7165,6 +7171,10 @@ pub(crate) fn try_emit_struct_view_value(
                         index,
                         len,
                         storage_kind: StructViewStorageKind::Soa,
+                        known_collection_hash: match binding.collection_handle {
+                            ForeachCollectionHandle::PathHash(hash) => Some(hash),
+                            ForeachCollectionHandle::LocalVar(_) => None,
+                        },
                     }));
                 }
             }
@@ -7185,6 +7195,7 @@ pub(crate) fn try_emit_struct_view_value(
                         index,
                         len,
                         storage_kind: StructViewStorageKind::Aos,
+                        known_collection_hash: None,
                     }));
                 }
             }
@@ -7269,6 +7280,8 @@ pub(crate) fn try_emit_struct_view_value(
                 index: index_binding.value,
                 len: len_value,
                 storage_kind: StructViewStorageKind::Soa,
+                known_collection_hash: (!values_by_name.contains_key(collection_path))
+                    .then(|| hash_global_path(collection_path)),
             }))
         }
         _ => Ok(None),
@@ -8474,6 +8487,17 @@ pub(crate) fn emit_struct_view_field_load(
         ));
     }
     let index_value = builder.use_var(binding.index_var);
+    let direct_array = binding.known_collection_hash.and_then(|collection_hash| {
+        runtime_call_refs
+            .direct_storage
+            .as_ref()
+            .and_then(|storage| {
+                storage
+                    .arrays_by_hash
+                    .get(&(collection_hash, hash_foreach_field_suffix(suffix)))
+                    .copied()
+            })
+    });
     if binding.storage_kind == StructViewStorageKind::Aos {
         return emit_struct_view_field_load_for_storage(
             builder,
@@ -8484,6 +8508,7 @@ pub(crate) fn emit_struct_view_field_load(
             index_value,
             suffix,
             field_type,
+            None,
         );
     }
     if binding.storage_kind == StructViewStorageKind::Soa {
@@ -8496,6 +8521,7 @@ pub(crate) fn emit_struct_view_field_load(
             index_value,
             suffix,
             field_type,
+            direct_array,
         );
     }
     let aos_condition = builder
@@ -8521,6 +8547,7 @@ pub(crate) fn emit_struct_view_field_load(
         index_value,
         suffix,
         field_type,
+        None,
     )?
     .value;
     builder.ins().jump(merge_block, &[aos_value]);
@@ -8536,6 +8563,7 @@ pub(crate) fn emit_struct_view_field_load(
         index_value,
         suffix,
         field_type,
+        direct_array,
     )?
     .value;
     builder.ins().jump(merge_block, &[soa_value]);
@@ -8563,6 +8591,7 @@ fn emit_struct_view_field_load_for_storage(
     index_value: Value,
     suffix: &str,
     field_type: TypeId,
+    direct_array: Option<DirectArrayStorageRef>,
 ) -> Result<ValueBinding, String> {
     let value = if aos {
         let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
@@ -8587,6 +8616,16 @@ fn emit_struct_view_field_load_for_storage(
                 field_type, suffix
             ));
         }
+    } else if let Some(direct) = direct_array {
+        emit_direct_array_load(
+            builder,
+            direct.slot,
+            index_value,
+            field_type,
+            type_table,
+            direct.storage_bytes,
+            direct.static_len,
+        )?
     } else {
         let field_hash = builder
             .ins()
@@ -8647,6 +8686,17 @@ pub(crate) fn emit_struct_view_field_assignment(
     }
 
     let index_value = builder.use_var(binding.index_var);
+    let direct_array = binding.known_collection_hash.and_then(|collection_hash| {
+        runtime_call_refs
+            .direct_storage
+            .as_ref()
+            .and_then(|storage| {
+                storage
+                    .arrays_by_hash
+                    .get(&(collection_hash, hash_foreach_field_suffix(suffix)))
+                    .copied()
+            })
+    });
     match binding.storage_kind {
         StructViewStorageKind::Aos => {
             return emit_struct_view_field_assignment_for_storage(
@@ -8660,6 +8710,7 @@ pub(crate) fn emit_struct_view_field_assignment(
                 field_type,
                 op,
                 rhs,
+                None,
             );
         }
         StructViewStorageKind::Soa => {
@@ -8674,6 +8725,7 @@ pub(crate) fn emit_struct_view_field_assignment(
                 field_type,
                 op,
                 rhs,
+                direct_array,
             );
         }
         StructViewStorageKind::Dynamic => {}
@@ -8700,6 +8752,7 @@ pub(crate) fn emit_struct_view_field_assignment(
         field_type,
         op,
         rhs,
+        None,
     )?;
     builder.ins().jump(merge_block, &[]);
     builder.seal_block(aos_block);
@@ -8716,6 +8769,7 @@ pub(crate) fn emit_struct_view_field_assignment(
         field_type,
         op,
         rhs,
+        direct_array,
     )?;
     builder.ins().jump(merge_block, &[]);
     builder.seal_block(soa_block);
@@ -8737,6 +8791,7 @@ fn emit_struct_view_field_assignment_for_storage(
     field_type: TypeId,
     op: AssignOp,
     rhs: ValueBinding,
+    direct_array: Option<DirectArrayStorageRef>,
 ) -> Result<(), String> {
     let field_key = if aos {
         emit_local_struct_field_path_hash(base_hash, suffix, builder)
@@ -8745,6 +8800,56 @@ fn emit_struct_view_field_assignment_for_storage(
             .ins()
             .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)))
     };
+
+    if let Some(direct) = direct_array {
+        let lhs = if op == AssignOp::Set {
+            None
+        } else {
+            Some(emit_direct_array_load(
+                builder,
+                direct.slot,
+                index_value,
+                field_type,
+                type_table,
+                direct.storage_bytes,
+                direct.static_len,
+            )?)
+        };
+        let value = if is_i32_abi_compatible_type(field_type, type_table) {
+            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, field_type)
+        } else {
+            match op {
+                AssignOp::Set => rhs.value,
+                AssignOp::Add => builder
+                    .ins()
+                    .fadd(lhs.expect("compound assignment lhs"), rhs.value),
+                AssignOp::Sub => builder
+                    .ins()
+                    .fsub(lhs.expect("compound assignment lhs"), rhs.value),
+                AssignOp::Mul => builder
+                    .ins()
+                    .fmul(lhs.expect("compound assignment lhs"), rhs.value),
+                AssignOp::Div => builder
+                    .ins()
+                    .fdiv(lhs.expect("compound assignment lhs"), rhs.value),
+                AssignOp::Mod => {
+                    return Err(format!(
+                        "'%=' is unsupported for floating-point struct view field '{}'",
+                        suffix
+                    ))
+                }
+            }
+        };
+        return emit_direct_array_store(
+            builder,
+            direct.slot,
+            index_value,
+            value,
+            field_type,
+            direct.storage_bytes,
+            direct.static_len,
+        );
+    }
 
     if is_i32_scalar_lane_type(field_type, type_table) {
         let lhs = if op == AssignOp::Set {
@@ -10679,6 +10784,20 @@ fn resolve_direct_storage_refs(
             .map(|(key, binding)| {
                 Ok((
                     key.clone(),
+                    DirectArrayStorageRef {
+                        slot: resolve(module, func, &binding.slot)?,
+                        storage_bytes: binding.storage_bytes,
+                        static_len: binding.static_len,
+                    },
+                ))
+            })
+            .collect::<Result<_, String>>()?,
+        arrays_by_hash: bindings
+            .arrays
+            .iter()
+            .map(|((path, field), binding)| {
+                Ok((
+                    (hash_global_path(path), hash_foreach_field_suffix(field)),
                     DirectArrayStorageRef {
                         slot: resolve(module, func, &binding.slot)?,
                         storage_bytes: binding.storage_bytes,
