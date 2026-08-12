@@ -226,6 +226,12 @@ impl AotProcess {
             )
         })?;
         let analysis = &snapshot.analysis;
+        let data_flow_summaries = snapshot.data_flow_summaries();
+        let source_paths = snapshot
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
         self.string_literals = snapshot.literal_table().clone();
         self.collection_max_lengths =
             collect_fixed_collection_max_lengths(&analysis.global_path_types, &analysis_type_table)
@@ -278,6 +284,13 @@ impl AotProcess {
                 type_table.ensure_ascii_view_id()?;
                 let mut function_string_literals = BTreeMap::new();
                 let profile_instrumentation = profile_function_names.contains(&meta.name);
+                let data_flow_summary = source_paths.get(meta.file_id as usize).and_then(|file| {
+                    data_flow_summaries.iter().find(|summary| {
+                        summary.function == meta.name
+                            && summary.file == *file
+                            && summary.source_start == meta.source_range.start
+                    })
+                });
                 let bytes = compile_function_to_object_bytes(
                     meta,
                     hir,
@@ -291,6 +304,7 @@ impl AotProcess {
                     &target,
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
+                    data_flow_summary,
                     &direct_storage,
                     profile_instrumentation,
                 )?;
@@ -1206,6 +1220,7 @@ fn compile_function_to_object_bytes(
     target: &stasis_jit::AotTarget,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    data_flow_summary: Option<&crate::data_flow::FunctionDataFlowSummary>,
     direct_storage: &DirectStorageBindings,
     profile_instrumentation: bool,
 ) -> Result<Vec<u8>, String> {
@@ -1255,6 +1270,7 @@ fn compile_function_to_object_bytes(
         constant_values,
         collection_infos,
         named_struct_field_types,
+        data_flow_summary,
         Some(direct_storage),
         None,
         false,
@@ -2279,6 +2295,22 @@ mod tests {
         compile_result.expect("aot compile");
         let captured = captured.lock().expect("lock clif capture").clone();
         captured
+    }
+
+    #[test]
+    fn aot_caches_repeated_readonly_struct_parameter_field() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nfunction read_three(value: Sample): i32 { return value.value + value.value + value.value; }\nfunction main(): i32 { item.value = 3; return read_three(item); }\n",
+        );
+        let clif = capture_aot_clif_by_function(&mut process);
+        let read_three = clif.get("read_three").expect("read_three AOT CLIF");
+        assert_eq!(
+            read_three.matches("brif").count(),
+            1,
+            "AOT read-only field should resolve storage once per call:\n{read_three}"
+        );
     }
 
     fn parity_corpus_cases() -> &'static [ParityCorpusCase] {

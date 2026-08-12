@@ -1,5 +1,6 @@
 use crate::backend::runtime_exports::is_aot_runtime_export_symbol;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
+use crate::data_flow::FunctionDataFlowSummary;
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_type_layout, ParsedExternFunctionDeclaration,
     ParsedField,
@@ -1616,6 +1617,55 @@ pub(crate) struct StructViewBinding {
     pub(crate) bounds_proven: bool,
 }
 
+fn readonly_struct_parameter_fields(
+    meta: &FunctionMeta,
+    summary: &FunctionDataFlowSummary,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    type_table: &TypeTable,
+) -> Vec<(String, String, String, TypeId)> {
+    let mut fields = BTreeSet::new();
+    for (index, base) in meta.param_names.iter().enumerate() {
+        let Some(type_id) = meta.params.get(index).copied() else {
+            continue;
+        };
+        let Some(field_types) = named_struct_field_types.get(&type_id) else {
+            continue;
+        };
+        let is_written = summary.aggregate.parameter_writes.iter().any(|path| {
+            path == base
+                || path
+                    .strip_prefix(base)
+                    .is_some_and(|tail| tail.starts_with('.'))
+        });
+        if is_written {
+            continue;
+        }
+        for path in &summary.direct.parameter_reads {
+            let Some(suffix) = path
+                .strip_prefix(base)
+                .and_then(|tail| tail.strip_prefix('.'))
+            else {
+                continue;
+            };
+            // Nested struct/collection views still require reference identity. Cache
+            // only direct scalar fields that fit the ordinary value ABI.
+            if suffix.contains('.') || suffix.contains('[') {
+                continue;
+            }
+            let Some(field_type) = field_types.get(suffix).copied() else {
+                continue;
+            };
+            if is_struct_view_type(field_type, named_struct_field_types)
+                || is_collection_handle_type(field_type, type_table)
+            {
+                continue;
+            }
+            fields.insert((path.clone(), base.clone(), suffix.to_string(), field_type));
+        }
+    }
+    fields.into_iter().collect()
+}
+
 pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuilt, Finalize>(
     mut module: M,
     meta: &FunctionMeta,
@@ -1629,6 +1679,7 @@ pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuil
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    data_flow_summary: Option<&FunctionDataFlowSummary>,
     direct_storage: Option<&DirectStorageBindings>,
     defined_runtime_helper_trampolines: Option<&mut BTreeSet<String>>,
     debug_instrumentation: bool,
@@ -1837,6 +1888,57 @@ where
                 block_param_cursor,
                 block_params.len()
             ));
+        }
+
+        // A struct parameter is a reference-like view whose backing may be AoS or SoA.
+        // When whole-program effects prove that neither this function nor a transitive
+        // callee writes the parameter, resolve each directly-read scalar field once.
+        // Synthetic full-path locals then let all later uses reuse the SSA value while
+        // preserving the existing view ABI and mixed-storage caller behavior.
+        if let Some(summary) = data_flow_summary {
+            let parameter_fields = readonly_struct_parameter_fields(
+                meta,
+                summary,
+                named_struct_field_types,
+                type_table,
+            );
+            for (path, base, suffix, field_type) in parameter_fields {
+                let local = values_by_name.get(&base).copied().ok_or_else(|| {
+                    format!(
+                        "missing struct parameter '{}' while caching '{}'",
+                        base, path
+                    )
+                })?;
+                let struct_view = local.struct_view.ok_or_else(|| {
+                    format!("struct parameter '{}' is missing view metadata", base)
+                })?;
+                let base_hash = builder.use_var(local.var);
+                let loaded = emit_struct_view_field_load(
+                    &mut builder,
+                    &runtime_call_refs,
+                    type_table,
+                    struct_view,
+                    base_hash,
+                    &suffix,
+                    field_type,
+                )?;
+                let variable = declare_new_variable(
+                    &mut builder,
+                    &mut next_variable,
+                    loaded.value,
+                    loaded.type_id,
+                    type_table,
+                )?;
+                values_by_name.insert(
+                    path,
+                    LocalBinding {
+                        var: variable,
+                        type_id: loaded.type_id,
+                        struct_view: None,
+                        proven_index_upper: None,
+                    },
+                );
+            }
         }
 
         let empty_foreach_bindings = ForeachBindingMap::new();
@@ -7436,6 +7538,12 @@ pub(crate) fn emit_simple_expression(
             })
         }
         SimpleExpr::Identifier(name) => {
+            if let Some(local) = values_by_name.get(name).copied() {
+                return Ok(ValueBinding {
+                    value: builder.use_var(local.var),
+                    type_id: local.type_id,
+                });
+            }
             if let Some((base, suffix)) = name.split_once('.') {
                 if let Some(local) = values_by_name.get(base).copied() {
                     if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
@@ -7515,12 +7623,7 @@ pub(crate) fn emit_simple_expression(
                     }
                 }
             }
-            if let Some(local) = values_by_name.get(name).copied() {
-                Ok(ValueBinding {
-                    value: builder.use_var(local.var),
-                    type_id: local.type_id,
-                })
-            } else if let Some((binding, suffix)) =
+            if let Some((binding, suffix)) =
                 resolve_foreach_binding_for_path(name, foreach_bindings)
             {
                 emit_foreach_binding_load(builder, runtime_call_refs, type_table, binding, &suffix)

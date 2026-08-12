@@ -913,6 +913,7 @@ impl JitProcess {
             .iter()
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
+        let data_flow_summaries = self.compiler.data_flow_summaries_shared();
         let mut staged_debug_metadata = self.debug_metadata.clone();
         for function_id in &emit_function_ids {
             staged_debug_metadata.remove(function_id);
@@ -967,6 +968,13 @@ impl JitProcess {
                 }
                 let symbol = format!("jit_fn_{}", meta.id);
                 let profile_instrumentation = profile_function_names.contains(&meta.name);
+                let data_flow_summary = source_paths.get(meta.file_id as usize).and_then(|file| {
+                    data_flow_summaries.iter().find(|summary| {
+                        summary.function == meta.name
+                            && summary.file == *file
+                            && summary.source_start == meta.source_range.start
+                    })
+                });
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
@@ -985,6 +993,7 @@ impl JitProcess {
                         &analysis.constant_values,
                         &analysis.collection_infos,
                         &analysis.named_struct_field_types,
+                        data_flow_summary,
                         &analysis.extern_symbol_addresses,
                         &direct_storage,
                         local_runtime_helper_trampolines,
@@ -3121,6 +3130,7 @@ fn compile_function_into_jit_module(
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    data_flow_summary: Option<&crate::data_flow::FunctionDataFlowSummary>,
     extern_symbol_addresses: &ExternSymbolAddressMap,
     direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
@@ -3157,6 +3167,7 @@ fn compile_function_into_jit_module(
         constant_values,
         collection_infos,
         named_struct_field_types,
+        data_flow_summary,
         Some(direct_storage),
         Some(defined_runtime_helper_trampolines),
         debug_instrumentation,
@@ -4874,6 +4885,51 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_caches_repeated_readonly_struct_parameter_field() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nglobal items: Sample[1];\nfunction read_three(value: Sample): i32 { return value.value + value.value + value.value; }\nfunction main(): i32 {\n    item.value = 3;\n    items[0].value = 6;\n    return read_three(item) + read_three(items[0]);\n}\n",
+        );
+        process.compile().expect("compile");
+        let clif = process
+            .clif_for_function_name("read_three")
+            .expect("read_three CLIF");
+        assert_eq!(
+            clif.matches("brif").count(),
+            1,
+            "read-only field should resolve storage once per call:\n{clif}"
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 27);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_does_not_cache_transitively_written_struct_parameter_field() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nglobal items: Sample[1];\nfunction mutate(value: Sample) { value.value = 9; }\nfunction read_then_mutate(value: Sample): i32 { let before: i32 = value.value; mutate(value); return before + value.value; }\nfunction main(): i32 {\n    item.value = 2;\n    items[0].value = 4;\n    return read_then_mutate(item) + read_then_mutate(items[0]);\n}\n",
+        );
+        process.compile().expect("compile");
+        let clif = process
+            .clif_for_function_name("read_then_mutate")
+            .expect("read_then_mutate CLIF");
+        assert!(
+            clif.matches("brif").count() >= 2,
+            "transitively written field was incorrectly cached:\n{clif}"
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 24);
     }
 
     #[cfg(windows)]
