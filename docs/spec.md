@@ -99,6 +99,8 @@ Header access:
 `Type[]` call-site compatibility:
 - A `Type[]` parameter is a view/reference type and may accept storage values with different fixed capacities (`Type[N]`, `Type[M]`, ...).
 - The storage header still carries `max_length` so bounds metadata remains available at runtime.
+- Reads of `.max_length` through a statically named fixed collection are compile-time constants. Views
+  retain runtime `.max_length` metadata because their capacity belongs to the referenced collection.
 
 `ascii[N]` layout:
 - header `byte_length: i32`

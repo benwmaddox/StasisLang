@@ -3267,7 +3267,7 @@ mod tests {
     fn collection_contract_edit_rejits_only_consumers_and_callers() {
         fn source(capacity: usize) -> String {
             format!(
-                "global values: i32[{capacity}];\nfunction read_value(): i32 {{ return values[0]; }}\nfunction untouched(): i32 {{ return 7; }}\nfunction tick(): i32 {{ return read_value(); }}\nfunction render(): i32 {{ return untouched(); }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
+                "global values: i32[{capacity}];\nfunction read_value(): i32 {{ return values.max_length; }}\nfunction untouched(): i32 {{ return 7; }}\nfunction tick(): i32 {{ return read_value(); }}\nfunction render(): i32 {{ return untouched(); }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
             )
         }
 
@@ -3331,7 +3331,7 @@ mod tests {
             process
                 .execute_i32_noarg_by_name("main")
                 .expect("execute changed layout"),
-            7
+            10
         );
     }
 
@@ -5675,6 +5675,35 @@ mod tests {
         assert!(
             !clif.contains("trapz"),
             "proven loop retained array bounds trap:\n{clif}"
+        );
+        let loop_bound_loads = clif
+            .lines()
+            .filter(|line| line.trim_start().contains("load.i32"))
+            .count();
+        assert_eq!(
+            loop_bound_loads, 1,
+            "fixed max_length should be an immediate, leaving only the element load:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_keeps_view_max_length_dynamic() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "view_capacity.stasis",
+            "global storage: i32[4];\nfunction capacity(values: i32[]): i32 { return values.max_length; }\nfunction main(): i32 { return capacity(storage); }\n",
+        );
+        process.compile().expect("compile view capacity fixture");
+        let clif = process
+            .clif_for_function_name("capacity")
+            .expect("capacity CLIF");
+        assert!(
+            clif.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("call ") || line.contains(" = call ")
+            }),
+            "view max_length incorrectly became a static constant:\n{clif}"
         );
     }
 
