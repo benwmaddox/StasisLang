@@ -1069,6 +1069,183 @@ fn usage_compile_test_and_guest_exit_codes_are_stable() {
 }
 
 #[test]
+fn headless_ticks_and_seeded_scenarios_are_deterministic_and_reproducible() {
+    let parent = temp_dir("headless_scenarios");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(
+        project.join("src/main.stasis"),
+        "global ticks: i32;\nglobal render_calls: i32;\nglobal seed: i32;\nglobal base: i32;\nglobal bad: i32;\nglobal checksum: i32;\nglobal values: i32[2];\nfunction main(): i32 { ticks = 0; render_calls = 0; seed = 0; base = 0; bad = 0; checksum = 0; values[0] = 0; values[1] = 0; return 0; }\nfunction tick(): i32 { ticks += 1; seed += 1; values[1] += 1; checksum = base * 10000 + seed * 100 + ticks + values[0]; if (ticks > 3) { bad = 1; } return 0; }\nfunction render(): i32 { render_calls += 1; return 0; }\n",
+    )
+    .expect("write headless game");
+
+    let first = stasis(
+        &[
+            "--json",
+            "run",
+            "--headless",
+            "--ticks",
+            "3",
+            "--fast-forward",
+        ],
+        &project,
+    );
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json = json_stdout(&first);
+    assert_eq!(first_json["result"]["ticks_executed"], 3);
+    assert_eq!(first_json["result"]["fast_forward"], true);
+    let first_hash = first_json["result"]["state_hash"]
+        .as_str()
+        .expect("state hash")
+        .to_string();
+    assert_eq!(first_hash.len(), 64);
+
+    let second = stasis(
+        &[
+            "--json",
+            "run",
+            "--headless",
+            "--ticks",
+            "3",
+            "--fast-forward",
+        ],
+        &project,
+    );
+    assert_eq!(second.status.code(), Some(0));
+    assert_eq!(json_stdout(&second)["result"]["state_hash"], first_hash);
+
+    fs::write(
+        project.join("tests/baseline.state.json"),
+        "{\"base\":7,\"values[0]\":11}\n",
+    )
+    .expect("write saved state");
+    let scenario_path = project.join("tests/determinism with spaces.scenario.json");
+    fs::write(
+        &scenario_path,
+        r#"{
+  "schema_version": 1,
+  "name": "seeded isolation",
+  "ticks": 3,
+  "state_file": "baseline.state.json",
+  "invariants": [
+    {"path": "base", "op": "eq", "value": 7},
+    {"path": "bad", "op": "eq", "value": 0},
+    {"path": "values[0]", "op": "eq", "value": 11},
+    {"path": "values[1]", "op": "lte", "value": 3},
+    {"path": "render_calls", "op": "eq", "value": 0}
+  ],
+  "property": {"seed_path": "seed", "seeds": [2, 5]}
+}
+"#,
+    )
+    .expect("write passing scenario");
+    let scenarios = stasis(&["--json", "test"], &project);
+    assert_eq!(
+        scenarios.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&scenarios.stdout),
+        String::from_utf8_lossy(&scenarios.stderr)
+    );
+    let scenarios_json = json_stdout(&scenarios);
+    assert_eq!(scenarios_json["result"]["scenarios_discovered"], 1);
+    assert_eq!(scenarios_json["result"]["scenario_cases_run"], 2);
+    assert_eq!(scenarios_json["result"]["scenario_cases_passed"], 2);
+
+    fs::write(
+        &scenario_path,
+        r#"{
+  "schema_version": 1,
+  "name": "seeded isolation",
+  "ticks": 3,
+  "state_file": "baseline.state.json",
+  "invariants": [{"path": "ticks", "op": "lt", "value": 2}],
+  "property": {"seed_path": "seed", "seeds": [2, 5]}
+}
+"#,
+    )
+    .expect("write failing scenario");
+    let failed = stasis(&["--json", "test"], &project);
+    assert_eq!(failed.status.code(), Some(1));
+    let receipt_dir = project.join("build/headless-replays");
+    let receipts = fs::read_dir(&receipt_dir)
+        .expect("read receipt directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect receipts");
+    assert_eq!(receipts.len(), 1);
+    let receipt = receipts[0].path();
+    let receipt_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&receipt).expect("read deterministic failure receipt"),
+    )
+    .expect("parse deterministic failure receipt");
+    assert_eq!(receipt_json["seed"], 2);
+    assert_eq!(receipt_json["failed_tick"], 2);
+    assert_eq!(receipt_json["observed_hashes_truncated"], false);
+    assert_eq!(
+        receipt_json["observed_hashes"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        receipt_json["scenario"],
+        "tests/determinism with spaces.scenario.json"
+    );
+    assert_eq!(
+        receipt_json["rerun"],
+        "stasis test \"tests/determinism with spaces.scenario.json\""
+    );
+    assert_eq!(
+        receipt_json["rerun_argv"],
+        serde_json::json!(["test", "tests/determinism with spaces.scenario.json"])
+    );
+
+    fs::write(
+        &scenario_path,
+        r#"{
+  "schema_version": 1,
+  "name": "seeded isolation",
+  "ticks": 3,
+  "state_file": "baseline.state.json",
+  "invariants": [{"path": "values[0]", "op": "eq", "value": 11}],
+  "expected_hashes": [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "property": {"seed_path": "seed", "seeds": [2]}
+}
+"#,
+    )
+    .expect("write hash mismatch scenario");
+    let hash_failed = stasis(&["--json", "test"], &project);
+    assert_eq!(hash_failed.status.code(), Some(1));
+    let hash_receipt: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&receipt).expect("read hash mismatch receipt"))
+            .expect("parse hash mismatch receipt");
+    assert_eq!(hash_receipt["failed_tick"], 1);
+    assert!(hash_receipt["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("state hash mismatch")));
+    assert_eq!(
+        hash_receipt["observed_hashes"].as_array().map(Vec::len),
+        Some(1)
+    );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
 fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
     let parent = temp_dir("semantic_symbols");
     fs::create_dir_all(&parent).expect("create temp parent");

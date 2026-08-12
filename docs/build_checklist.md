@@ -60,6 +60,24 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 
 ## Slice Plan
 
+### Deterministic Headless Simulation Track
+
+#### HS1 - First-Class Bounded Scenarios
+
+- Maddox task: #156.
+- Language: `Rust + .stasis + JSON scenario fixtures`.
+- Scope: Run `main` plus exact unpaced ticks without SDL/render, restore a bounded runtime snapshot
+  between explicit seeds, apply saved state, check typed invariants per tick, hash simulation state
+  without host/presentation buffers, and write reproducible failure evidence.
+- Tests: CLI tick/no-render assertions, saved scalar and collection state, repeated hash identity,
+  per-seed isolation, invariant/hash failures, bounded receipts, and the
+  `samples/headless_scenario` end-to-end fixture.
+- Done gate: `stasis run --headless --ticks N --fast-forward` executes exactly N ticks; `stasis
+  test` discovers schema-v1 scenarios; repeated cases are isolated; deterministic failures retain
+  seed/tick/hash evidence; existing language tests remain unchanged.
+- Boundary: General input recording and the public replay/verify runtime remain owned by #148.
+- Status: `completed`.
+
 ### Selective Direct-Call JIT Patch Track
 
 The canonical ABI, state machine, failure table, platform matrix, and budgets are in

@@ -113,9 +113,14 @@ cloning a generated repository, reactivate the checked-in hook with
   editor integrations; it does not require a manifest and cannot be combined with `--check`,
   explicit paths, `--workspace`, or `--json`.
 - `check`: run the shared frontend and Cranelift JIT compilation path without executing `main`.
-- `test [PATH]`: run Stasis tests in one isolated JIT session.
-- `run [--headless]`: JIT-compile and execute no-argument `main(): i32` or `main(): void`; an
-  `i32` result is the process exit code. Headless execution is the default.
+- `test [PATH]`: run Stasis tests and schema-v1 `*.scenario.json` simulation cases. Each scenario
+  starts from fresh `main()`, applies its optional saved state, and restores one bounded runtime
+  snapshot before every property seed.
+- `run [--headless] [--ticks COUNT] [--fast-forward]`: JIT-compile and execute no-argument
+  `main(): i32` or `main(): void`; an `i32` result is the process exit code. Headless execution is
+  the default. `--ticks` invokes `tick()` exactly `COUNT` times without calling `render()` or
+  loading the graphics runtime. `--fast-forward` makes the no-pacing contract explicit and
+  requires a positive tick count.
 - `play [ENTRY]`: launch the graphical hot-swap runtime. Without an entry override, discover the
   nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
   and display `name`. Explicit entries discover their own ancestor manifest, so project-root
@@ -160,6 +165,51 @@ cloning a generated repository, reactivate the checked-in hook with
 
 `replay` and `verify` intentionally return deterministic unsupported diagnostics until the replay
 runtime contract lands; they do not fake successful behavior.
+
+### Headless scenarios
+
+Scenario files live under the manifest's test directory and end in `.scenario.json`. They are
+bounded host descriptions that use the normal JIT compiler, not a second Stasis language or
+execution path:
+
+```json
+{
+  "schema_version": 1,
+  "name": "seeded headless simulation",
+  "ticks": 4,
+  "state_file": "baseline.state.json",
+  "state": {"optional_inline_scalar": 3},
+  "invariants": [
+    {"path": "world.score", "op": "gte", "value": 0},
+    {"path": "world.enemies[0].hp", "op": "gt", "value": 0}
+  ],
+  "property": {"seed_path": "world.seed", "seeds": [1, 7, 42]},
+  "expected_hashes": []
+}
+```
+
+`state_file` is relative to the scenario and contains a JSON object from scalar or indexed state
+paths to values. Inline `state` entries are applied after the file and duplicate paths are rejected.
+The runtime calls `main()`, applies that saved state, captures one bounded full JIT snapshot, and
+restores it before each seed. Every case executes at most 1,000,000 ticks, while one invocation is
+preflighted before execution and limited to 1,024 cases and 10,000,000 total ticks. Discovery
+rejects links/reparse points and bounds directories, total entries, scenarios, seeds, invariants,
+state entries, and source bytes.
+
+Invariants run after every tick using the same typed scalar inspection and comparison operators as
+live validation. Optional `expected_hashes` contains one SHA-256 hash per tick and is intended for
+same-profile replay regressions. Hash input is compiler-owned scalar/collection layout plus exact
+value bits. Host input snapshots, host request mailboxes, and graphics/audio command buffers are
+excluded, so presentation extraction cannot change the simulation identity. Ordinary floating
+point remains same-target deterministic only; use the Q16.16 intrinsics for cross-architecture
+hash claims.
+
+On a failed invariant or hash, `stasis test` writes a bounded
+`<output>/headless-replays/*.replay.json` receipt with the scenario path, seed, failing tick,
+reason, observed hashes, a quoted rerun command, and exact `rerun_argv`. Receipt names include a
+scenario-path digest so distinct files cannot overwrite each other. General input-stream recording and the public
+`replay`/`verify` commands remain deliberately reserved for the separate replay-runtime slice.
+See `samples/headless_scenario` for an executable fixture.
 
 Official packaging fails if the installed compiler or renderer sources differ from the release
 manifest. When working from a source checkout, pass `--development-build` to `package` or

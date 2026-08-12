@@ -41,6 +41,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod dap;
 mod gauntlet;
+mod headless;
 mod live_tui;
 
 const MANIFEST_NAME: &str = "stasis.json";
@@ -264,6 +265,12 @@ enum ToolchainCommand {
         /// Explicitly select the headless runtime (currently the default).
         #[arg(long)]
         headless: bool,
+        /// Execute exactly this many simulation ticks after main().
+        #[arg(long, default_value_t = 0, value_name = "COUNT")]
+        ticks: u64,
+        /// Run bounded ticks without wall-clock pacing (headless only).
+        #[arg(long)]
+        fast_forward: bool,
     },
     /// Run the persistent Stasis language server.
     Lsp {
@@ -970,15 +977,26 @@ fn execute(
                     &tick,
                     &render,
                 ),
-                ToolchainCommand::Run { watch, headless } => {
+                ToolchainCommand::Run {
+                    watch,
+                    headless,
+                    ticks,
+                    fast_forward,
+                } => {
                     if watch && json_output {
                         Err("--json cannot be combined with --watch; watch mode is an unbounded event stream".to_string())
                     } else if watch && headless {
                         Err("--headless cannot be combined with --watch; watch mode uses the graphical hot-swap runner".to_string())
+                    } else if watch && ticks != 0 {
+                        Err("--ticks cannot be combined with --watch; use play --ticks for a bounded graphical run".to_string())
+                    } else if watch && fast_forward {
+                        Err("--fast-forward cannot be combined with --watch".to_string())
+                    } else if fast_forward && ticks == 0 {
+                        Err("--fast-forward requires --ticks greater than zero".to_string())
                     } else if watch {
                         run_workspace_watch(&workspace)
                     } else {
-                        run_workspace(&workspace, headless)
+                        run_workspace(&workspace, headless, ticks, fast_forward)
                     }
                 }
                 ToolchainCommand::Lsp { stdio } => {
@@ -2126,6 +2144,7 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
             .map(|_| ())
         },
     )?;
+    let scenarios = headless::run_scenarios(workspace, &directory)?;
     let data = json!({
         "files_discovered": summary.files_discovered,
         "files_with_tests": summary.files_with_tests,
@@ -2135,24 +2154,42 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         "tests_failed": summary.tests_failed,
         "passed_tests": summary.passed_tests,
         "failures": summary.failures,
+        "scenarios_discovered": scenarios.scenarios_discovered,
+        "scenario_cases_run": scenarios.cases_run,
+        "scenario_cases_passed": scenarios.cases_passed,
+        "scenario_cases_failed": scenarios.cases_failed,
+        "scenario_failures": scenarios.failures,
+        "scenario_failure_receipts": scenarios.failure_receipts,
     });
-    if summary.tests_failed > 0 {
+    if summary.tests_failed > 0 || scenarios.cases_failed > 0 {
         return Err(format!(
-            "{} test(s) failed: {}",
+            "{} test(s) and {} scenario case(s) failed: {}",
             summary.tests_failed,
-            summary.failures.join(" | ")
+            scenarios.cases_failed,
+            summary
+                .failures
+                .iter()
+                .chain(scenarios.failures.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ")
         ));
     }
     Ok(CommandResult::success(
         format!(
-            "{} test(s) passed in {} file(s)",
-            summary.tests_passed, summary.files_with_tests
+            "{} test(s) passed in {} file(s); {} scenario case(s) passed",
+            summary.tests_passed, summary.files_with_tests, scenarios.cases_passed
         ),
         data,
     ))
 }
 
-fn run_workspace(workspace: &Workspace, _headless: bool) -> Result<CommandResult, String> {
+fn run_workspace(
+    workspace: &Workspace,
+    _headless: bool,
+    ticks: u64,
+    fast_forward: bool,
+) -> Result<CommandResult, String> {
     let jit = compile_workspace_jit(workspace)?;
     let guest_exit = match jit.execute_i32_noarg_by_name("main") {
         Ok(value) => value,
@@ -2162,10 +2199,21 @@ fn run_workspace(workspace: &Workspace, _headless: bool) -> Result<CommandResult
         }
         Err(error) => return Err(error),
     };
+    let run = headless::run_ticks(&jit, ticks)?;
     Ok(CommandResult {
         code: guest_exit,
-        human: format!("program exited with code {guest_exit}"),
-        data: json!({"exit_code": guest_exit, "backend": "jit", "headless": true}),
+        human: format!(
+            "program exited with code {guest_exit} after {} headless tick(s)",
+            run.ticks_executed
+        ),
+        data: json!({
+            "exit_code": guest_exit,
+            "backend": "jit",
+            "headless": true,
+            "ticks_executed": run.ticks_executed,
+            "fast_forward": fast_forward,
+            "state_hash": run.state_hash,
+        }),
     })
 }
 
@@ -5692,7 +5740,7 @@ mod tests {
         let workspace = load_workspace(Some(&root)).expect("load workspace");
         check_workspace(&workspace).expect("check project");
         test_workspace(&workspace, None).expect("test project");
-        let run = run_workspace(&workspace, true).expect("run project");
+        let run = run_workspace(&workspace, true, 0, false).expect("run project");
         assert_eq!(run.code, 0);
         remove_temp(&root);
     }
@@ -5803,6 +5851,9 @@ mod tests {
             "run",
             "--headless",
             "--watch",
+            "--ticks",
+            "3",
+            "--fast-forward",
         ])
         .expect("parse run flags");
         assert!(matches!(
@@ -5810,6 +5861,8 @@ mod tests {
             ToolchainCommand::Run {
                 watch: true,
                 headless: true,
+                ticks: 3,
+                fast_forward: true,
                 ..
             }
         ));

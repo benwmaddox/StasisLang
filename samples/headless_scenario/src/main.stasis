@@ -1,0 +1,24 @@
+global tick_count: i32;
+global seed: i32;
+global energy: i32;
+global render_calls: i32;
+
+function main(): i32 {
+    tick_count = 0;
+    seed = 0;
+    energy = 0;
+    render_calls = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    tick_count += 1;
+    seed = seed * 1103515245 + 12345;
+    energy +=(seed % 7) + 7;
+    return 0;
+}
+
+function render(): i32 {
+    render_calls += 1;
+    return 0;
+}

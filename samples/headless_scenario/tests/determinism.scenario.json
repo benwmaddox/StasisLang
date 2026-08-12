@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "name": "seeded headless simulation",
+  "ticks": 4,
+  "state_file": "baseline.state.json",
+  "state": {
+    "seed": 42
+  },
+  "invariants": [
+    {
+      "path": "tick_count",
+      "op": "lte",
+      "value": 4
+    },
+    {
+      "path": "energy",
+      "op": "gte",
+      "value": 10
+    },
+    {
+      "path": "render_calls",
+      "op": "eq",
+      "value": 0
+    }
+  ],
+  "expected_hashes": [
+    "e0fc7095bd001a664285167f91d141b58a882443a519297af59a6ce2f40129f9",
+    "d6c6094aa80c083cb8d3ab6934c08a25b884276d9db0c577eb066a5b724dd7ea",
+    "30fb82782638d080374618cf997d2ce323e9501bddfc32855e78e09f0620181e",
+    "26cf8d0cd35becb13b75d3d6b8b82c9943d50b2fe216018b3a5d8510f6ed7b3a"
+  ]
+}

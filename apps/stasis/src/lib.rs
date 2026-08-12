@@ -21,7 +21,8 @@ pub use mobile_aot_bindings::{
     write_mobile_aot_bindings_source,
 };
 pub use stasis_test_runner::{
-    run_jit_tests_in_directory, run_jit_tests_in_directory_with_project_root_and_session,
+    natural_path_cmp, run_jit_tests_in_directory,
+    run_jit_tests_in_directory_with_project_root_and_session,
     run_jit_tests_in_directory_with_project_root_session_and_validator,
     run_jit_tests_in_directory_with_session, StasisTestRunSession, StasisTestRunSummary,
 };

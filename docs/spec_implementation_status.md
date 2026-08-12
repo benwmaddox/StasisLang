@@ -1,6 +1,6 @@
 # Spec Implementation Status (Rust Compiler)
 
-Last updated: 2026-03-03
+Last updated: 2026-08-11
 
 This document tracks how much of `docs/spec.md` is implemented in the Rust compiler/runtime pipeline.
 It is intended to be concrete and release-oriented (JIT + AOT).
@@ -31,7 +31,7 @@ Status legend:
 | 7. Functions and Calls | Partial | Function declarations and calls are stable; receiver-form call resolution is supported. Some AOT paths still rely on "stub fallback" for not-yet-supported lowering shapes. |
 | 8. Enums | Implemented | Enums are used by samples and supported by Rust lowering. |
 | 9. Modules and Imports | Implemented | `import` and project-local module resolution are implemented. |
-| 10. Testing Construct | Partial | `.test.stasis` discovery/execution exists in JIT dev/test workflows. AOT test execution parity is not a current priority. |
+| 10. Testing Construct | Implemented (JIT test profile) | `.test.stasis` discovery/execution and schema-v1 saved-state headless scenarios run through the normal JIT compiler. Scenarios provide bounded ticks, per-tick invariants, deterministic seed isolation, simulation-only hashes, and reproducible failure receipts. General recorded-input replay remains a separate planned runtime slice; AOT test execution parity is not a current priority. |
 | 11. Memory Model | Partial | Static globals and deterministic layout are central. Remaining gaps are mostly around richer compile-time enforcement and diagnostics, not basic execution. |
 | 12. Runtime Boundary and Extern | Partial | Host-set profile/registry plumbing exists. Required-host extraction/diagnostics are tracked separately (not complete). |
 | 12.2 Optional Plugin Libraries | Deferred (Out of Scope) | Plugin libraries are explicitly out of scope for the current release approach; do not plan features around them right now. |

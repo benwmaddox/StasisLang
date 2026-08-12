@@ -362,7 +362,7 @@ fn looks_like_test_declaration_source(source: &str) -> bool {
     source.contains("test") && source.contains('`')
 }
 
-fn natural_path_cmp(left: &str, right: &str) -> Ordering {
+pub fn natural_path_cmp(left: &str, right: &str) -> Ordering {
     let left_bytes = left.as_bytes();
     let right_bytes = right.as_bytes();
     let mut i = 0usize;
