@@ -511,6 +511,7 @@ pub struct JitProcess {
     required_emit_roots: Vec<String>,
     local_runtime_helper_trampolines: bool,
     debug_instrumentation: bool,
+    profile_function_names: BTreeSet<String>,
     debug_metadata: BTreeMap<FunctionId, JitDebugFunctionMetadata>,
     #[cfg(test)]
     _test_guard: Option<MutexGuard<'static, ()>>,
@@ -609,6 +610,7 @@ impl JitProcess {
             required_emit_roots: Vec::new(),
             local_runtime_helper_trampolines: false,
             debug_instrumentation: false,
+            profile_function_names: BTreeSet::new(),
             debug_metadata: BTreeMap::new(),
             #[cfg(test)]
             _test_guard,
@@ -623,6 +625,24 @@ impl JitProcess {
             );
         }
         self.debug_instrumentation = enabled;
+        Ok(())
+    }
+
+    pub fn set_profile_functions(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+    ) -> Result<(), String> {
+        if self.program_snapshot.is_some() || self.active_program_snapshot.is_some() {
+            return Err(
+                "JIT function profiling must be configured before the first compilation"
+                    .to_string(),
+            );
+        }
+        self.profile_function_names = names
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
         Ok(())
     }
 
@@ -657,6 +677,7 @@ impl JitProcess {
             .set_analysis_required_roots(&candidate.required_emit_roots);
         candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         candidate.debug_instrumentation = self.debug_instrumentation;
+        candidate.profile_function_names = self.profile_function_names.clone();
         candidate.debug_metadata = self.debug_metadata.clone();
         candidate
     }
@@ -998,6 +1019,7 @@ impl JitProcess {
         }
         let local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         let debug_instrumentation = self.debug_instrumentation;
+        let profile_function_names = self.profile_function_names.clone();
         let mut staged_module = if emit_function_ids.is_empty() {
             None
         } else {
@@ -1020,6 +1042,7 @@ impl JitProcess {
                         .insert(meta.id, debug_function_metadata(meta, hir, file)?);
                 }
                 let symbol = format!("jit_fn_{}", meta.id);
+                let profile_instrumentation = profile_function_names.contains(&meta.name);
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
@@ -1042,6 +1065,7 @@ impl JitProcess {
                         &direct_storage,
                         local_runtime_helper_trampolines,
                         debug_instrumentation,
+                        profile_instrumentation,
                         &mut defined_runtime_helper_trampolines,
                     )
                 }));
@@ -3135,6 +3159,8 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
         stasis_jit_debug_values_begin,
         stasis_jit_debug_value_i64,
         stasis_jit_debug_value_f64,
+        stasis_jit_profile_frame_enter,
+        stasis_jit_profile_frame_leave,
     );
     out
 }
@@ -3176,6 +3202,7 @@ fn compile_function_into_jit_module(
     direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
     debug_instrumentation: bool,
+    profile_instrumentation: bool,
     defined_runtime_helper_trampolines: &mut BTreeSet<String>,
 ) -> Result<(JITModule, cranelift_module::FuncId, String, usize), String> {
     let runtime_helper_addresses = local_runtime_helper_trampolines.then(|| {
@@ -3210,6 +3237,7 @@ fn compile_function_into_jit_module(
         Some(direct_storage),
         Some(defined_runtime_helper_trampolines),
         debug_instrumentation,
+        profile_instrumentation,
         |_| Ok(()),
         move |_, function| {
             *clif_capture.borrow_mut() = function.display().to_string();
@@ -5881,6 +5909,42 @@ mod tests {
         assert_eq!(report.index.parsed_functions, 1);
         assert_eq!(report.emit.emitted_functions, 1);
         assert!(process.artifacts()[0].code_ptr != 0);
+    }
+
+    #[test]
+    fn selectively_profiled_jit_reports_only_named_functions() {
+        let mut process = JitProcess::new();
+        process
+            .set_profile_functions(vec!["helper".to_string()])
+            .expect("configure profiler");
+        process.upsert_file(
+            "src/main.stasis",
+            "function helper(value: i32): i32 { return value * 2; }\nfunction main(): i32 { return helper(3) + helper(4); }\n",
+        );
+        process.compile().expect("profiled compile");
+        let helper_id = process
+            .program_snapshot()
+            .expect("program snapshot")
+            .functions()
+            .iter()
+            .find(|function| function.name == "helper")
+            .map(|function| function.id)
+            .expect("helper id");
+
+        stasis_dynload::enable_jit_profiler();
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute profiled main"),
+            14
+        );
+        stasis_dynload::disable_jit_profiler();
+        let samples = stasis_dynload::jit_profile_snapshot();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].function_id, helper_id);
+        assert_eq!(samples[0].calls, 2);
+        assert!(samples[0].inclusive_ns >= samples[0].exclusive_ns);
+        stasis_dynload::reset_jit_profile();
     }
 
     #[test]

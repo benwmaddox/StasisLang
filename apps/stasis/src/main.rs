@@ -17,9 +17,9 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use stasis::escape_mobile_c_string_literal;
 use stasis::{
     mobile_aot_function_for, run_jit_tests_in_directory_with_session,
-    run_play_in_process_with_input_script_and_window_title, run_self_host_aot_cli_with_options,
-    run_with_default_backend, run_with_real_backend, write_mobile_aot_bindings_source,
-    RunnerConfig, StasisTestRunSession,
+    run_play_in_process_with_input_script_window_title_and_profile,
+    run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
+    write_mobile_aot_bindings_source, PlayProfileConfig, RunnerConfig, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
@@ -122,6 +122,9 @@ struct PlayCliArgs {
     screenshot: Option<PathBuf>,
     screenshot_frame: u64,
     exit_after_screenshot: bool,
+    profile_functions: Vec<String>,
+    profile_warmup_ticks: u64,
+    profile_output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -513,6 +516,10 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut screenshot_frame: u64 = 1;
     let mut screenshot_frame_explicit = false;
     let mut exit_after_screenshot = false;
+    let mut profile_functions = Vec::new();
+    let mut profile_warmup_ticks = 60_u64;
+    let mut profile_warmup_explicit = false;
+    let mut profile_output: Option<PathBuf> = None;
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -606,6 +613,39 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
             i += 1;
             continue;
         }
+        if arg == "--profile-functions" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-functions <name[,name...]>".to_string());
+            }
+            profile_functions.extend(
+                args[i + 1]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
+            );
+            i += 2;
+            continue;
+        }
+        if arg == "--profile-warmup" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-warmup <ticks>".to_string());
+            }
+            profile_warmup_ticks = args[i + 1]
+                .parse::<u64>()
+                .map_err(|error| format!("invalid value for --profile-warmup: {error}"))?;
+            profile_warmup_explicit = true;
+            i += 2;
+            continue;
+        }
+        if arg == "--profile-output" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-output <path>".to_string());
+            }
+            profile_output = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
         i += 1;
     }
     if screenshot.is_none() && (screenshot_frame_explicit || exit_after_screenshot) {
@@ -616,6 +656,16 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     }
     if screenshot.is_some() && ticks.is_some_and(|count| count < screenshot_frame) {
         return Err("--ticks must be at least --screenshot-frame when capturing".to_string());
+    }
+    if profile_functions.is_empty() && (profile_warmup_explicit || profile_output.is_some()) {
+        return Err(
+            "--profile-warmup and --profile-output require --profile-functions".to_string(),
+        );
+    }
+    if !profile_functions.is_empty() && ticks.is_some_and(|count| count <= profile_warmup_ticks) {
+        return Err(
+            "--ticks must exceed --profile-warmup so at least one frame is measured".to_string(),
+        );
     }
     Ok(PlayCliArgs {
         watch_file,
@@ -628,6 +678,9 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         screenshot,
         screenshot_frame,
         exit_after_screenshot,
+        profile_functions,
+        profile_warmup_ticks,
+        profile_output,
     })
 }
 
@@ -882,7 +935,12 @@ fn try_run_play_subcommand() -> Option<i32> {
         }
     };
 
-    let play_result = run_play_in_process_with_input_script_and_window_title(
+    let profile = (!parsed.profile_functions.is_empty()).then(|| PlayProfileConfig {
+        functions: parsed.profile_functions.clone(),
+        warmup_ticks: parsed.profile_warmup_ticks,
+        output_path: parsed.profile_output.clone(),
+    });
+    let play_result = run_play_in_process_with_input_script_window_title_and_profile(
         &launch.watch_file,
         Some(&launch.watch_dir),
         parsed.data_bind_json.as_deref(),
@@ -891,6 +949,7 @@ fn try_run_play_subcommand() -> Option<i32> {
         parsed.tick_sleep_micros,
         parsed.ticks,
         launch.window_title.as_deref(),
+        profile,
     );
     match play_result {
         Ok(()) => {
@@ -2219,6 +2278,42 @@ mod tests {
                 "samples/bucket_catcher/data/config.struct-meta.json"
             ))
         );
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_selective_function_profiling() {
+        let args = vec![
+            "main.stasis".to_string(),
+            "--ticks".to_string(),
+            "240".to_string(),
+            "--profile-functions".to_string(),
+            "render,draw_board, draw_enemies".to_string(),
+            "--profile-warmup".to_string(),
+            "40".to_string(),
+            "--profile-output".to_string(),
+            "profile.json".to_string(),
+        ];
+        let parsed = parse_play_cli_args(&args).expect("parse profiling arguments");
+        assert_eq!(
+            parsed.profile_functions,
+            vec!["render", "draw_board", "draw_enemies"]
+        );
+        assert_eq!(parsed.profile_warmup_ticks, 40);
+        assert_eq!(parsed.profile_output, Some(PathBuf::from("profile.json")));
+    }
+
+    #[test]
+    fn parse_play_cli_args_requires_a_measured_frame_after_profile_warmup() {
+        let args = vec![
+            "main.stasis".to_string(),
+            "--ticks".to_string(),
+            "60".to_string(),
+            "--profile-functions".to_string(),
+            "render".to_string(),
+        ];
+        assert!(parse_play_cli_args(&args)
+            .expect_err("warmup consumes the bounded run")
+            .contains("must exceed --profile-warmup"));
     }
 
     #[test]

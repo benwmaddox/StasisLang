@@ -1413,6 +1413,8 @@ pub(crate) struct RuntimeCallImportIds {
     pub(crate) debug_values_begin: Option<FuncId>,
     pub(crate) debug_value_i64: Option<FuncId>,
     pub(crate) debug_value_f64: Option<FuncId>,
+    pub(crate) profile_frame_enter: Option<FuncId>,
+    pub(crate) profile_frame_leave: Option<FuncId>,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncId>,
 }
 
@@ -1439,6 +1441,7 @@ pub(crate) struct RuntimeCallRefs {
     pub(crate) collection_i32_load: FuncRef,
     pub(crate) collection_i32_store: FuncRef,
     pub(crate) debug: Option<DebugRuntimeRefs>,
+    pub(crate) profile: Option<ProfileRuntimeRefs>,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncRef>,
     pub(crate) direct_storage: Option<DirectStorageRefs>,
 }
@@ -1614,6 +1617,7 @@ pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuil
     direct_storage: Option<&DirectStorageBindings>,
     defined_runtime_helper_trampolines: Option<&mut BTreeSet<String>>,
     debug_instrumentation: bool,
+    profile_instrumentation: bool,
     mut before_statement: BeforeStatement,
     on_function_built: OnFunctionBuilt,
     finalize: Finalize,
@@ -1670,6 +1674,7 @@ where
                 type_table,
                 named_struct_field_types,
                 debug_instrumentation,
+                profile_instrumentation,
             )?
         }
     };
@@ -1838,6 +1843,9 @@ where
             }
             emit_debug_frame_boundary(&mut builder, debug.frame_enter, meta.id);
         }
+        if let Some(profile) = runtime_call_refs.profile.as_ref() {
+            emit_function_frame_boundary(&mut builder, profile.frame_enter, meta.id);
+        }
         let mut terminated = false;
         for (index, statement) in hir.statements.iter().enumerate() {
             if terminated {
@@ -1872,6 +1880,9 @@ where
             if meta.return_type == TYPE_ID_VOID {
                 if let Some(debug) = runtime_call_refs.debug.as_ref() {
                     emit_debug_frame_boundary(&mut builder, debug.frame_leave, meta.id);
+                }
+                if let Some(profile) = runtime_call_refs.profile.as_ref() {
+                    emit_function_frame_boundary(&mut builder, profile.frame_leave, meta.id);
                 }
                 builder.ins().return_(&[]);
             } else {
@@ -2506,6 +2517,12 @@ pub(crate) struct DebugRuntimeRefs {
     pub(crate) values_begin: FuncRef,
     pub(crate) value_i64: FuncRef,
     pub(crate) value_f64: FuncRef,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ProfileRuntimeRefs {
+    pub(crate) frame_enter: FuncRef,
+    pub(crate) frame_leave: FuncRef,
 }
 
 pub(crate) fn parse_simple_statements_with_debug(
@@ -4508,13 +4525,21 @@ pub(crate) fn debug_variable_slot(name: &str) -> u32 {
     hash
 }
 
-fn emit_debug_frame_boundary(
+fn emit_function_frame_boundary(
     builder: &mut FunctionBuilder<'_>,
     function: FuncRef,
     function_id: FunctionId,
 ) {
     let function_id = builder.ins().iconst(types::I32, i64::from(function_id));
     builder.ins().call(function, &[function_id]);
+}
+
+fn emit_debug_frame_boundary(
+    builder: &mut FunctionBuilder<'_>,
+    function: FuncRef,
+    function_id: FunctionId,
+) {
+    emit_function_frame_boundary(builder, function, function_id);
 }
 
 fn emit_debug_statement(
@@ -5692,6 +5717,9 @@ pub(crate) fn emit_simple_statements(
                 if let Some(debug) = debug_refs {
                     emit_debug_frame_boundary(builder, debug.frame_leave, function_id);
                 }
+                if let Some(profile) = runtime_call_refs.profile.as_ref() {
+                    emit_function_frame_boundary(builder, profile.frame_leave, function_id);
+                }
                 builder.ins().return_(&[value]);
                 return Ok(true);
             }
@@ -5699,6 +5727,9 @@ pub(crate) fn emit_simple_statements(
                 if expected_return_type == TYPE_ID_VOID {
                     if let Some(debug) = debug_refs {
                         emit_debug_frame_boundary(builder, debug.frame_leave, function_id);
+                    }
+                    if let Some(profile) = runtime_call_refs.profile.as_ref() {
+                        emit_function_frame_boundary(builder, profile.frame_leave, function_id);
                     }
                     builder.ins().return_(&[]);
                     return Ok(true);
@@ -10269,6 +10300,7 @@ fn build_direct_runtime_call_import_ids(
     type_table: &TypeTable,
     named_struct_field_types: &NamedStructFieldTypeMap,
     debug_instrumentation: bool,
+    profile_instrumentation: bool,
 ) -> Result<RuntimeCallImportIds, String> {
     let print_i32 = if referenced_call_targets
         .iter()
@@ -10401,6 +10433,12 @@ fn build_direct_runtime_call_import_ids(
         debug_value_f64: debug_instrumentation
             .then(|| declare_debug_value_f64_import(module, linkage))
             .transpose()?,
+        profile_frame_enter: profile_instrumentation
+            .then(|| declare_void_call_import(module, "stasis_jit_profile_frame_enter", linkage, 1))
+            .transpose()?,
+        profile_frame_leave: profile_instrumentation
+            .then(|| declare_void_call_import(module, "stasis_jit_profile_frame_leave", linkage, 1))
+            .transpose()?,
         extern_calls: declare_extern_call_imports(
             module,
             &referenced_extern_signatures,
@@ -10439,6 +10477,13 @@ pub(crate) fn build_runtime_call_refs(
                 }
             },
         );
+    let profile = imports
+        .profile_frame_enter
+        .zip(imports.profile_frame_leave)
+        .map(|(frame_enter, frame_leave)| ProfileRuntimeRefs {
+            frame_enter: module.declare_func_in_func(frame_enter, func),
+            frame_leave: module.declare_func_in_func(frame_leave, func),
+        });
     Ok(RuntimeCallRefs {
         print_i32: module.declare_func_in_func(imports.print_i32, func),
         print_string: module.declare_func_in_func(imports.print_string, func),
@@ -10462,6 +10507,7 @@ pub(crate) fn build_runtime_call_refs(
         collection_i32_load: module.declare_func_in_func(imports.collection_i32_load, func),
         collection_i32_store: module.declare_func_in_func(imports.collection_i32_store, func),
         debug,
+        profile,
         extern_calls: imports
             .extern_calls
             .iter()

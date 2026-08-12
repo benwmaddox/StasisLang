@@ -6,8 +6,8 @@ use std::ffi::{c_char, c_void, CString};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -38,6 +38,171 @@ pub struct JitHostEntryTargets {
 static JIT_HOST_ENTRY_TARGETS: AtomicUsize = AtomicUsize::new(0);
 
 static JIT_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+static JIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+static JIT_PROFILE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitProfileSample {
+    pub function_id: u32,
+    pub calls: u64,
+    pub inclusive_ns: u64,
+    pub exclusive_ns: u64,
+    pub max_inclusive_ns: u64,
+}
+
+struct JitProfileFrame {
+    function_id: u32,
+    generation: u64,
+    started: Instant,
+    child_ns: u64,
+}
+
+#[derive(Default)]
+struct JitProfileAggregate {
+    calls: AtomicU64,
+    inclusive_ns: AtomicU64,
+    exclusive_ns: AtomicU64,
+    max_inclusive_ns: AtomicU64,
+}
+
+#[derive(Default)]
+struct JitProfileState {
+    generation: u64,
+    frames: Vec<JitProfileFrame>,
+    aggregate_cache: HashMap<u32, Arc<JitProfileAggregate>>,
+}
+
+thread_local! {
+    static JIT_PROFILE_STATE: RefCell<JitProfileState> = RefCell::new(JitProfileState::default());
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn jit_profile_aggregates() -> &'static RwLock<HashMap<u32, Arc<JitProfileAggregate>>> {
+    static AGGREGATES: OnceLock<RwLock<HashMap<u32, Arc<JitProfileAggregate>>>> = OnceLock::new();
+    AGGREGATES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn sync_jit_profile_generation(state: &mut JitProfileState, generation: u64) {
+    if state.generation != generation {
+        state.generation = generation;
+        state.frames.clear();
+        state.aggregate_cache.clear();
+    }
+}
+
+pub fn enable_jit_profiler() {
+    reset_jit_profile();
+    JIT_PROFILE_ENABLED.store(true, Ordering::Release);
+}
+
+pub fn disable_jit_profiler() {
+    JIT_PROFILE_ENABLED.store(false, Ordering::Release);
+    JIT_PROFILE_STATE.with(|state| state.borrow_mut().frames.clear());
+}
+
+pub fn reset_jit_profile() {
+    JIT_PROFILE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    let aggregates = jit_profile_aggregates()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for aggregate in aggregates.values() {
+        aggregate.calls.store(0, Ordering::Relaxed);
+        aggregate.inclusive_ns.store(0, Ordering::Relaxed);
+        aggregate.exclusive_ns.store(0, Ordering::Relaxed);
+        aggregate.max_inclusive_ns.store(0, Ordering::Relaxed);
+    }
+}
+
+pub fn jit_profile_snapshot() -> Vec<JitProfileSample> {
+    let aggregates = jit_profile_aggregates()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut samples: Vec<JitProfileSample> = aggregates
+        .iter()
+        .map(|(function_id, aggregate)| JitProfileSample {
+            function_id: *function_id,
+            calls: aggregate.calls.load(Ordering::Relaxed),
+            inclusive_ns: aggregate.inclusive_ns.load(Ordering::Relaxed),
+            exclusive_ns: aggregate.exclusive_ns.load(Ordering::Relaxed),
+            max_inclusive_ns: aggregate.max_inclusive_ns.load(Ordering::Relaxed),
+        })
+        .filter(|sample| sample.calls > 0)
+        .collect();
+    samples.sort_by_key(|sample| sample.function_id);
+    samples
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_profile_frame_enter(function_id: i32) {
+    if !JIT_PROFILE_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let generation = JIT_PROFILE_GENERATION.load(Ordering::Acquire);
+    let started = Instant::now();
+    JIT_PROFILE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        sync_jit_profile_generation(&mut state, generation);
+        state.frames.push(JitProfileFrame {
+            function_id: function_id as u32,
+            generation,
+            started,
+            child_ns: 0,
+        });
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_profile_frame_leave(function_id: i32) {
+    if !JIT_PROFILE_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let generation = JIT_PROFILE_GENERATION.load(Ordering::Acquire);
+    JIT_PROFILE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        sync_jit_profile_generation(&mut state, generation);
+        let Some(frame) = state.frames.pop() else {
+            return;
+        };
+        if frame.generation != generation || frame.function_id != function_id as u32 {
+            state.frames.clear();
+            return;
+        }
+        let inclusive_ns = elapsed_ns(frame.started);
+        let exclusive_ns = inclusive_ns.saturating_sub(frame.child_ns);
+        if let Some(parent) = state.frames.last_mut() {
+            parent.child_ns = parent.child_ns.saturating_add(inclusive_ns);
+        }
+        let aggregate = if let Some(aggregate) = state.aggregate_cache.get(&frame.function_id) {
+            Arc::clone(aggregate)
+        } else {
+            let mut aggregates = jit_profile_aggregates()
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let aggregate = Arc::clone(
+                aggregates
+                    .entry(frame.function_id)
+                    .or_insert_with(|| Arc::new(JitProfileAggregate::default())),
+            );
+            state
+                .aggregate_cache
+                .insert(frame.function_id, Arc::clone(&aggregate));
+            aggregate
+        };
+        aggregate.calls.fetch_add(1, Ordering::Relaxed);
+        aggregate
+            .inclusive_ns
+            .fetch_add(inclusive_ns, Ordering::Relaxed);
+        aggregate
+            .exclusive_ns
+            .fetch_add(exclusive_ns, Ordering::Relaxed);
+        aggregate
+            .max_inclusive_ns
+            .fetch_max(inclusive_ns, Ordering::Relaxed);
+    });
+}
 
 fn jit_output_capture() -> &'static Mutex<Option<String>> {
     static CAPTURE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -5984,6 +6149,71 @@ mod tests {
         assert_eq!(stasis_jit_collection_i32_load(shared_id, 1), 6);
         assert_eq!(stasis_jit_collection_i32_load(shared_id, 2), 8);
         assert_eq!(stasis_jit_collection_i32_load(shared_id, 3), 6);
+    }
+
+    #[test]
+    fn jit_profiler_aggregates_nested_inclusive_and_exclusive_time() {
+        let _lock = test_lock();
+        enable_jit_profiler();
+        stasis_jit_profile_frame_enter(11);
+        stasis_jit_profile_frame_enter(22);
+        let mut value = 0_u64;
+        for i in 0..10_000_u64 {
+            value = std::hint::black_box(value.wrapping_add(i));
+        }
+        stasis_jit_profile_frame_leave(22);
+        stasis_jit_profile_frame_leave(11);
+        std::hint::black_box(value);
+        disable_jit_profiler();
+
+        let samples = jit_profile_snapshot();
+        let parent = samples
+            .iter()
+            .find(|sample| sample.function_id == 11)
+            .expect("parent sample");
+        let child = samples
+            .iter()
+            .find(|sample| sample.function_id == 22)
+            .expect("child sample");
+        assert_eq!(parent.calls, 1);
+        assert_eq!(child.calls, 1);
+        assert!(parent.inclusive_ns >= child.inclusive_ns);
+        assert!(parent.inclusive_ns >= parent.exclusive_ns);
+        assert!(child.inclusive_ns >= child.exclusive_ns);
+        assert_eq!(parent.max_inclusive_ns, parent.inclusive_ns);
+
+        reset_jit_profile();
+        assert!(jit_profile_snapshot().is_empty());
+    }
+
+    #[test]
+    fn jit_profiler_merges_samples_from_multiple_threads() {
+        let _lock = test_lock();
+        enable_jit_profiler();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..25 {
+                        stasis_jit_profile_frame_enter(33);
+                        std::hint::black_box(33);
+                        stasis_jit_profile_frame_leave(33);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("profile worker");
+        }
+        disable_jit_profiler();
+
+        let samples = jit_profile_snapshot();
+        let sample = samples
+            .iter()
+            .find(|sample| sample.function_id == 33)
+            .expect("cross-thread sample");
+        assert_eq!(sample.calls, 100);
+        assert!(sample.inclusive_ns >= sample.exclusive_ns);
+        assert!(sample.max_inclusive_ns > 0);
     }
 
     extern "C" fn host_entry_one() -> i32 {

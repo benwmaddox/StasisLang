@@ -242,6 +242,23 @@ review and commit the resulting Git changes with the compiler upgrade.
 
 For a graphical program, `stasis play path\to\main.stasis` keeps the process alive and watches the current import graph. From a project directory or any descendant, `stasis play` reads the entry and project name from the nearest ancestor `stasis.json`. Explicit entries still use that manifest root for project-root imports and asset preparation. Saving a `.stasis` file compiles a candidate in the background and attempts an all-or-nothing swap between ticks.
 
+`play` can selectively profile named Stasis functions in the JIT hot path:
+
+```powershell
+stasis play game.stasis --ticks 600 `
+  --profile-functions render,draw_board,draw_enemies `
+  --profile-warmup 120 `
+  --profile-output artifacts\render-profile.json
+```
+
+The report ranks functions by exclusive time and also includes calls, inclusive time, average
+inclusive time, and maximum inclusive time. Only the named functions are instrumented, keeping the
+measurement overhead bounded and making nested exclusive time meaningful. The warmup is reset after
+the requested number of ticks so startup compilation and asset loading do not contaminate the sample.
+Nested stacks remain thread-local, while completed counters are merged process-wide across threads.
+This profiler currently applies to the JIT-backed `play` command, not AOT packages; aggressively
+inlined functions may need their caller selected instead.
+
 From a project containing `stasis.json`, `stasis tui` opens the manifest entry in the persistent live-workspace interface. Pass an entry path to override the manifest for one invocation.
 
 Build distributable output with:
