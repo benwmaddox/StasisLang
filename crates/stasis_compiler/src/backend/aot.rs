@@ -2513,6 +2513,26 @@ mod tests {
     }
 
     #[test]
+    fn aot_elides_static_array_checks_only_for_in_bounds_literals() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "literal_bounds.stasis",
+            "global values: i32[4];\nfunction valid(): i32 { values[0] = 3; return values[3]; }\nfunction invalid(): i32 { return values[4]; }\nfunction main(): i32 { if (valid() < 0) { return invalid(); } return 0; }\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        let valid = captured.get("valid").expect("valid CLIF");
+        let invalid = captured.get("invalid").expect("invalid CLIF");
+        assert!(
+            !valid.contains("trapz"),
+            "in-bounds AOT literal retained bounds trap:\n{valid}"
+        );
+        assert!(
+            invalid.contains("trapz"),
+            "out-of-bounds AOT literal omitted fatal check:\n{invalid}"
+        );
+    }
+
+    #[test]
     fn aot_dynamic_global_array_fallback_uses_runtime_helper_signature() {
         let mut process = AotProcess::new();
         process.upsert_file(

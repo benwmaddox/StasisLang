@@ -6046,6 +6046,48 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_elides_static_array_checks_for_in_bounds_literal_indexes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "literal_bounds.stasis",
+            "global values: i32[4];\nfunction main(): i32 { values[0] = 3; values[3] = 4; return values[0] + values[3]; }\n",
+        );
+        process.compile().expect("compile literal bounds fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute literal bounds fixture"),
+            7
+        );
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(clif.contains("load.i32"), "expected direct loads:\n{clif}");
+        assert!(clif.contains("store"), "expected direct stores:\n{clif}");
+        assert!(
+            !clif.contains("trapz"),
+            "in-bounds literal indexes retained array bounds traps:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_retains_fatal_check_for_out_of_bounds_literal_index() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "literal_bounds.stasis",
+            "global values: i32[4];\nfunction read(): i32 { return values[4]; }\nfunction main(): i32 { if (values[0] < 0) { return read(); } return 0; }\n",
+        );
+        process
+            .compile()
+            .expect("compile invalid literal bounds fixture");
+        let clif = process.clif_for_function_name("read").expect("read CLIF");
+        assert!(
+            clif.contains("trapz"),
+            "out-of-bounds literal index omitted fatal check:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_rejects_backing_shorter_than_compiled_fixed_array() {
         let mut process = JitProcess::new();
         process.upsert_file(
