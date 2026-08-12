@@ -9,6 +9,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
+import java.util.Arrays;
 
 final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final String LOG_TAG = "StasisRenderer";
@@ -81,8 +82,13 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final int TEXTURE_VERTEX_FLOATS = 8;
     private static final int COLOR_VERTEX_BYTES = COLOR_VERTEX_FLOATS * 4;
     private static final int TEXTURE_VERTEX_BYTES = TEXTURE_VERTEX_FLOATS * 4;
+    private static final int PIPELINE_NONE = 0;
+    private static final int PIPELINE_COLOR = 1;
+    private static final int PIPELINE_TEXTURE = 2;
     private static final int MAX_CAPTURE_PIXELS = 8_000_000;
     private static final long MIN_RESTORE_LABEL_NANOS = 250_000_000L;
+    private static final int PERFORMANCE_WARMUP_FRAMES = 60;
+    private static final int PERFORMANCE_SAMPLE_FRAMES = 180;
     private static final String[] RESTORE_LABEL = {
             "   01110 11111 01110 01110 11111 01110   ",
             "   10001 00100 10001 10001 00100 10001   ",
@@ -188,6 +194,63 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    static final class FramePerformanceSamples {
+        private final int warmupFrames;
+        private final long[] totalNanos;
+        private final long[] resourceNanos;
+        private final long[] drawNanos;
+        private int seenFrames;
+        private int sampleCount;
+        private int minimumDrawCalls = Integer.MAX_VALUE;
+        private int maximumDrawCalls;
+        private boolean reported;
+
+        FramePerformanceSamples(int warmupFrames, int sampleFrames) {
+            if (warmupFrames < 0 || sampleFrames <= 0) {
+                throw new IllegalArgumentException("render performance sample bounds are invalid");
+            }
+            this.warmupFrames = warmupFrames;
+            totalNanos = new long[sampleFrames];
+            resourceNanos = new long[sampleFrames];
+            drawNanos = new long[sampleFrames];
+        }
+
+        String add(long total, long resources, long draw, int drawCalls,
+                int lines, int rectangles, int sprites, int text, int order) {
+            if (reported) return null;
+            seenFrames += 1;
+            if (seenFrames <= warmupFrames) return null;
+            totalNanos[sampleCount] = Math.max(0L, total);
+            resourceNanos[sampleCount] = Math.max(0L, resources);
+            drawNanos[sampleCount] = Math.max(0L, draw);
+            minimumDrawCalls = Math.min(minimumDrawCalls, drawCalls);
+            maximumDrawCalls = Math.max(maximumDrawCalls, drawCalls);
+            sampleCount += 1;
+            if (sampleCount < totalNanos.length) return null;
+            reported = true;
+            return "RenderPerformance: schema=1 warmup=" + warmupFrames
+                    + " samples=" + sampleCount
+                    + " total_p50_us=" + percentileMicros(totalNanos, 50)
+                    + " total_p95_us=" + percentileMicros(totalNanos, 95)
+                    + " resource_p50_us=" + percentileMicros(resourceNanos, 50)
+                    + " resource_p95_us=" + percentileMicros(resourceNanos, 95)
+                    + " draw_p50_us=" + percentileMicros(drawNanos, 50)
+                    + " draw_p95_us=" + percentileMicros(drawNanos, 95)
+                    + " draw_calls_min=" + minimumDrawCalls
+                    + " draw_calls_max=" + maximumDrawCalls
+                    + " lines=" + lines + " rects=" + rectangles
+                    + " sprites=" + sprites + " text=" + text + " order=" + order;
+        }
+
+        private static long percentileMicros(long[] values, int percentile) {
+            long[] ordered = values.clone();
+            Arrays.sort(ordered);
+            int rank = Math.min(ordered.length - 1,
+                    Math.max(0, (ordered.length * percentile + 99) / 100 - 1));
+            return ordered[rank] / 1_000L;
+        }
+    }
+
     private static final String VERTEX_SHADER =
             "attribute vec2 aPosition;" +
             "attribute vec4 aColor;" +
@@ -211,6 +274,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private final TextureProvider textures;
     private final TimingListener timing;
     private final RendererResourceLifecycle resourceLifecycle = new RendererResourceLifecycle();
+    private final FramePerformanceSamples performanceSamples = BuildConfig.STASIS_RENDER_ACCEPTANCE
+            ? new FramePerformanceSamples(PERFORMANCE_WARMUP_FRAMES, PERFORMANCE_SAMPLE_FRAMES)
+            : null;
     private final ByteBuffer frameI32Bytes = directBytes(FRAME_I32_CAPACITY * 4);
     private final ByteBuffer frameF32Bytes = directBytes(FRAME_F32_CAPACITY * 4);
     private final ByteBuffer frameU8Bytes = directBytes(TEXT_U8_CAPACITY);
@@ -220,8 +286,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             LINE_CHUNK_SIZE * 2 * COLOR_VERTEX_FLOATS * 4).asFloatBuffer();
     private final FloatBuffer spriteVertices = directBytes(
             SPRITE_CHUNK_SIZE * VERTICES_PER_QUAD * TEXTURE_VERTEX_FLOATS * 4).asFloatBuffer();
-    private final FloatBuffer textVertices = directBytes(
-            VERTICES_PER_QUAD * TEXTURE_VERTEX_FLOATS * 4).asFloatBuffer();
+    private final int[] frameSpriteTextures = new int[MAX_SPRITES];
+    private final int[] frameSpriteFilters = new int[MAX_SPRITES];
+    private final long[] frameTextTextures = new long[MAX_TEXT];
     private int colorProgram;
     private int colorPosition;
     private int colorValue;
@@ -243,6 +310,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private boolean restorePlaceholderPending;
     private long restorePlaceholderUntilNanos;
     private int renderAcceptanceFrameCount;
+    private int frameDrawCalls;
+    private int activePipeline;
 
     StasisPreviewRenderer(TextureProvider textures, TimingListener timing) {
         this.textures = textures;
@@ -333,6 +402,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         long started = System.nanoTime();
         CaptureCallback capture;
         LogicalFrameSnapshot capturedFrame;
+        long resourceNanos = 0L;
+        long drawNanos = 0L;
+        int drawCalls = 0;
+        int lineCount = 0;
+        int rectCount = 0;
+        int spriteCount = 0;
+        int textCount = 0;
+        int orderCount = 0;
+        boolean presented = false;
         synchronized (this) {
             if (restorePlaceholderPending
                     && System.nanoTime() < restorePlaceholderUntilNanos) {
@@ -341,13 +419,16 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 return;
             }
             restorePlaceholderPending = false;
+            long resourceStarted = performanceSamples == null ? 0L : System.nanoTime();
             boolean restoring = resourceLifecycle.beginRestore();
             textures.beginRestoreAttempt();
-            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
+            if (restoring) {
+                while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
+            }
             boolean hasFrame = shouldPresent(frameI32);
             if (hasFrame) prepareFrameResources();
             String resourceFailure = textures.consumeFailure();
-            int glError = GLES20.glGetError();
+            int glError = restoring ? GLES20.glGetError() : GLES20.GL_NO_ERROR;
             boolean restoreComplete = textures.isRestoreComplete();
             boolean restored = resourceFailure == null && glError == GLES20.GL_NO_ERROR
                     && restoreComplete;
@@ -380,7 +461,22 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (!restoreComplete && resourceFailure == null
                     && glError == GLES20.GL_NO_ERROR) drawRestorePlaceholder();
             if (hasFrame && restored && resourceLifecycle.canPresent()) {
+                lineCount = clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES);
+                rectCount = clampedRectCount(
+                        frameI32.get(I_VERSION), lineCount, frameI32.get(I_RECT_COUNT));
+                spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
+                textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
+                orderCount = frameI32.get(I_VERSION) >= RENDER_V3_VERSION
+                        ? clampCount(frameI32.get(I_ORDER_COUNT), MAX_ORDER) : 0;
+                resourceNanos = performanceSamples == null
+                        ? 0L : System.nanoTime() - resourceStarted;
+                long drawStarted = performanceSamples == null ? 0L : System.nanoTime();
+                frameDrawCalls = 0;
                 drawFrame();
+                drawNanos = performanceSamples == null
+                        ? 0L : System.nanoTime() - drawStarted;
+                drawCalls = frameDrawCalls;
+                presented = true;
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                     renderAcceptanceFrameCount += 1;
                     if (renderAcceptanceFrameCount == 1 || renderAcceptanceFrameCount % 30 == 0) {
@@ -393,7 +489,13 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             capturedFrame = capture == null ? null : captureLogicalFrame();
         }
         captureIfRequested(capture, capturedFrame);
-        timing.onRendered(System.nanoTime() - started);
+        long totalNanos = System.nanoTime() - started;
+        if (performanceSamples != null && presented) {
+            String report = performanceSamples.add(totalNanos, resourceNanos, drawNanos,
+                    drawCalls, lineCount, rectCount, spriteCount, textCount, orderCount);
+            if (report != null) Log.i(LOG_TAG, report);
+        }
+        timing.onRendered(totalNanos);
     }
 
     private void drawRestorePlaceholder() {
@@ -435,6 +537,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawFrame() {
+        activePipeline = PIPELINE_NONE;
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
         clearLetterboxBars();
@@ -456,14 +559,14 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 frameI32.get(I_VERSION), lineCount, frameI32.get(I_RECT_COUNT));
         int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
         int textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
-        int textBytes = clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY);
         int orderCount = frameI32.get(I_VERSION) >= RENDER_V3_VERSION
                 ? clampCount(frameI32.get(I_ORDER_COUNT), MAX_ORDER) : 0;
         if (orderCount == 0) {
             drawLines(0, lineCount);
             drawRects(0, rectCount);
             drawSprites(0, spriteCount);
-            drawText(0, textCount, textBytes);
+            drawText(0, textCount);
+            finishPipeline();
             return;
         }
         int position = 0;
@@ -488,18 +591,29 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (kind == ORDER_LINE) drawLines(index, run);
             else if (kind == ORDER_RECT) drawRects(index, run);
             else if (kind == ORDER_SPRITE) drawSprites(index, run);
-            else drawText(index, run, textBytes);
+            else drawText(index, run);
             position += run;
         }
+        finishPipeline();
     }
 
     private void prepareFrameResources() {
         updateDisplayMetrics();
         textures.onFrameStart();
+        resolveFrameResources(textures, frameI32, frameU8Bytes,
+                frameSpriteTextures, frameSpriteFilters, frameTextTextures);
+    }
+
+    static void resolveFrameResources(TextureProvider textures, IntBuffer frameI32,
+            ByteBuffer frameU8Bytes, int[] spriteTextures, int[] spriteFilters,
+            long[] textTextures) {
         int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
         for (int index = 0; index < spriteCount; index += 1) {
             int base = I_SPRITE_BASE + index * SPRITE_I32_STRIDE;
-            spriteTextureFor(frameI32.get(base));
+            int handle = frameI32.get(base);
+            int texture = textures.textureFor(handle);
+            spriteTextures[index] = texture == 0 ? textures.fallbackTexture() : texture;
+            spriteFilters[index] = textures.filterFor(handle);
         }
         int textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
         int bytesUsed = clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY);
@@ -508,12 +622,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             int font = frameI32.get(meta);
             int offset = frameI32.get(meta + 1);
             int length = frameI32.get(meta + 2);
-            if (font <= 0) continue;
+            long texture = 0L;
             if (offset < 0) {
-                if (offset != Integer.MIN_VALUE) textures.cachedTextTextureFor(-offset);
-            } else if (isValidTextSpan(offset, length, bytesUsed)) {
-                textures.textTextureFor(font, frameU8Bytes, offset, length);
+                if (font > 0 && offset != Integer.MIN_VALUE) {
+                    texture = textures.cachedTextTextureFor(-offset);
+                }
+            } else if (font > 0 && isValidTextSpan(offset, length, bytesUsed)) {
+                texture = textures.textTextureFor(font, frameU8Bytes, offset, length);
             }
+            textTextures[index] = texture;
         }
     }
 
@@ -709,21 +826,19 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     private void drawSprites(int first, int count) {
         if (count == 0) return;
-        beginTextureBatches(spriteVertices);
         int index = first;
         int end = first + count;
         while (index < end) {
             int base = I_SPRITE_BASE + index * SPRITE_I32_STRIDE;
-            int handle = frameI32.get(base);
-            int texture = spriteTextureFor(handle);
-            int filter = textures.filterFor(handle);
+            int texture = frameSpriteTextures[index];
+            int filter = frameSpriteFilters[index];
             spriteVertices.clear();
             appendSprite(base);
             int chunk = 1;
             while (index + chunk < end && chunk < SPRITE_CHUNK_SIZE) {
+                if (frameSpriteTextures[index + chunk] != texture
+                        || frameSpriteFilters[index + chunk] != filter) break;
                 int next = I_SPRITE_BASE + (index + chunk) * SPRITE_I32_STRIDE;
-                int nextHandle = frameI32.get(next);
-                if (spriteTextureFor(nextHandle) != texture || textures.filterFor(nextHandle) != filter) break;
                 appendSprite(next);
                 chunk += 1;
             }
@@ -731,7 +846,6 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             drawPreparedTextureBatch(chunk * VERTICES_PER_QUAD, texture);
             index += chunk;
         }
-        endTextureBatches();
     }
 
     private void appendSprite(int base) {
@@ -755,29 +869,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, 0, 1, 1, 1, 1, alpha);
     }
 
-    private int spriteTextureFor(int handle) {
-        int texture = textures.textureFor(handle);
-        return texture == 0 ? textures.fallbackTexture() : texture;
-    }
-
-    private void drawText(int first, int count, int bytesUsed) {
+    private void drawText(int first, int count) {
         if (count == 0) return;
-        beginTextureBatches(textVertices);
         int end = first + count;
         for (int index = first; index < end; index += 1) {
-            int meta = I_TEXT_BASE + index * TEXT_I32_STRIDE;
-            int font = frameI32.get(meta);
-            int offset = frameI32.get(meta + 1);
-            int length = frameI32.get(meta + 2);
-            if (font <= 0) continue;
-            long packed;
-            if (offset < 0) {
-                packed = offset == Integer.MIN_VALUE ? 0L
-                        : textures.cachedTextTextureFor(-offset);
-            } else {
-                if (!isValidTextSpan(offset, length, bytesUsed)) continue;
-                packed = textures.textTextureFor(font, frameU8Bytes, offset, length);
-            }
+            long packed = frameTextTextures[index];
             int texture = (int)packed;
             int width = (int)((packed >>> 32) & 0xffffL);
             int height = (int)((packed >>> 48) & 0xffffL);
@@ -785,14 +881,13 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             int values = F_TEXT_BASE + index * TEXT_F32_STRIDE;
             float left = frameF32.get(values);
             float top = frameF32.get(values + 1);
-            textVertices.clear();
-            appendAxisAlignedQuad(textVertices, left, top, left + width, top + height,
+            spriteVertices.clear();
+            appendAxisAlignedQuad(spriteVertices, left, top, left + width, top + height,
                     clampUnit(frameF32.get(values + 2)), clampUnit(frameF32.get(values + 3)),
                     clampUnit(frameF32.get(values + 4)), clampUnit(frameF32.get(values + 5)));
-            textVertices.flip();
+            spriteVertices.flip();
             drawPreparedTextureBatch(VERTICES_PER_QUAD, texture);
         }
-        endTextureBatches();
     }
 
     private static void appendAxisAlignedQuad(FloatBuffer output, float left, float top,
@@ -816,30 +911,41 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawColorBatch(FloatBuffer vertices, int vertexCount, int mode) {
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-        GLES20.glUseProgram(colorProgram);
-        GLES20.glUniform2f(colorResolution, logicalWidth, logicalHeight);
-        GLES20.glEnableVertexAttribArray(colorPosition);
-        GLES20.glEnableVertexAttribArray(colorValue);
+        beginColorBatches(vertices);
+        GLES20.glDrawArrays(mode, 0, vertexCount);
+        frameDrawCalls += 1;
+    }
+
+    private void beginColorBatches(FloatBuffer vertices) {
+        if (activePipeline != PIPELINE_COLOR) {
+            finishPipeline();
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+            GLES20.glUseProgram(colorProgram);
+            GLES20.glUniform2f(colorResolution, logicalWidth, logicalHeight);
+            GLES20.glEnableVertexAttribArray(colorPosition);
+            GLES20.glEnableVertexAttribArray(colorValue);
+            activePipeline = PIPELINE_COLOR;
+        }
         vertices.position(0);
         GLES20.glVertexAttribPointer(colorPosition, 2, GLES20.GL_FLOAT, false, COLOR_VERTEX_BYTES, vertices);
         vertices.position(2);
         GLES20.glVertexAttribPointer(colorValue, 4, GLES20.GL_FLOAT, false, COLOR_VERTEX_BYTES, vertices);
-        GLES20.glDrawArrays(mode, 0, vertexCount);
         vertices.position(0);
-        GLES20.glDisableVertexAttribArray(colorValue);
-        GLES20.glDisableVertexAttribArray(colorPosition);
     }
 
     private void beginTextureBatches(FloatBuffer vertices) {
-        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-        GLES20.glUseProgram(textureProgram);
-        GLES20.glUniform2f(textureResolution, logicalWidth, logicalHeight);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glUniform1i(textureSampler, 0);
-        GLES20.glEnableVertexAttribArray(texturePosition);
-        GLES20.glEnableVertexAttribArray(textureCoordinate);
-        GLES20.glEnableVertexAttribArray(textureColor);
+        if (activePipeline != PIPELINE_TEXTURE) {
+            finishPipeline();
+            GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+            GLES20.glUseProgram(textureProgram);
+            GLES20.glUniform2f(textureResolution, logicalWidth, logicalHeight);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glUniform1i(textureSampler, 0);
+            GLES20.glEnableVertexAttribArray(texturePosition);
+            GLES20.glEnableVertexAttribArray(textureCoordinate);
+            GLES20.glEnableVertexAttribArray(textureColor);
+            activePipeline = PIPELINE_TEXTURE;
+        }
         vertices.position(0);
         GLES20.glVertexAttribPointer(texturePosition, 2, GLES20.GL_FLOAT, false, TEXTURE_VERTEX_BYTES, vertices);
         vertices.position(2);
@@ -850,15 +956,23 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawPreparedTextureBatch(int vertexCount, int texture) {
+        beginTextureBatches(spriteVertices);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
+        frameDrawCalls += 1;
     }
 
-    private void endTextureBatches() {
-        GLES20.glDisableVertexAttribArray(textureColor);
-        GLES20.glDisableVertexAttribArray(textureCoordinate);
-        GLES20.glDisableVertexAttribArray(texturePosition);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+    private void finishPipeline() {
+        if (activePipeline == PIPELINE_COLOR) {
+            GLES20.glDisableVertexAttribArray(colorValue);
+            GLES20.glDisableVertexAttribArray(colorPosition);
+        } else if (activePipeline == PIPELINE_TEXTURE) {
+            GLES20.glDisableVertexAttribArray(textureColor);
+            GLES20.glDisableVertexAttribArray(textureCoordinate);
+            GLES20.glDisableVertexAttribArray(texturePosition);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+        activePipeline = PIPELINE_NONE;
     }
 
     static int clampCount(int value, int maximum) {

@@ -502,6 +502,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
         GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 2, 2, 0,
                 GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
         int error = GLES20.glGetError();

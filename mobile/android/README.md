@@ -128,6 +128,13 @@ Run the blocking render end-to-end gate directly with:
 
 This builds the canonical `samples/render_parity` fixture in Workshop with the real x86_64 development JIT. It captures the OpenGL surface, normalizes the letterboxed 640x360 viewport, and checks Android regions for the background, procedural fallback, opaque/translucent/rotated SVG sprites, a filled rectangle, crossing lines, direct text, and cached text. Three spaced captures, at least 30 rendered frames, and a successful non-empty JIT compile are required. Release packages are checked separately by `build_release.ps1` and can be run on an arm64 device with `validate_device.ps1 -Release`.
 
+Render-acceptance builds also emit one bounded performance sample after 60
+warm-up and 180 measured frames. Enforce the API 35 emulator thresholds with
+`-MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94`; the output directory then
+contains device/build identity, stage percentiles, logcat, and pixel captures.
+See `docs/android_preview_render_performance.md` for the baseline and ownership
+of the hardware-normalized limits.
+
 ## Hosted release-shell emulator
 
 The `Android Emulator Seams` GitHub Actions workflow provisions an API 35

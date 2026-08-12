@@ -4,10 +4,12 @@ import android.opengl.GLES20;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.IntBuffer;
 import java.nio.FloatBuffer;
+import java.nio.ByteBuffer;
 
 import org.junit.Test;
 
@@ -269,6 +271,83 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(2, StasisPreviewRenderer.horizontalRunLength(lines, 0, 4));
         assertEquals(1, StasisPreviewRenderer.horizontalRunLength(lines, 2, 4));
         assertEquals(1, StasisPreviewRenderer.horizontalRunLength(lines, 3, 4));
+    }
+
+    @Test
+    public void performanceSamplesExcludeWarmupAndUseNearestRankPercentiles() {
+        StasisPreviewRenderer.FramePerformanceSamples samples =
+                new StasisPreviewRenderer.FramePerformanceSamples(2, 4);
+        assertNull(samples.add(99_000, 90_000, 9_000, 9, 1, 2, 3, 4, 5));
+        assertNull(samples.add(98_000, 80_000, 8_000, 8, 1, 2, 3, 4, 5));
+        assertNull(samples.add(10_000, 4_000, 5_000, 3, 1, 2, 3, 4, 5));
+        assertNull(samples.add(20_000, 8_000, 10_000, 4, 1, 2, 3, 4, 5));
+        assertNull(samples.add(30_000, 12_000, 15_000, 5, 1, 2, 3, 4, 5));
+
+        String report = samples.add(40_000, 16_000, 20_000, 6, 1, 2, 3, 4, 5);
+
+        assertTrue(report.contains("warmup=2 samples=4"));
+        assertTrue(report.contains("total_p50_us=20 total_p95_us=40"));
+        assertTrue(report.contains("resource_p50_us=8 resource_p95_us=16"));
+        assertTrue(report.contains("draw_p50_us=10 draw_p95_us=20"));
+        assertTrue(report.contains("draw_calls_min=3 draw_calls_max=6"));
+        assertTrue(report.endsWith("lines=1 rects=2 sprites=3 text=4 order=5"));
+        assertNull(samples.add(1, 1, 1, 1, 0, 0, 0, 0, 0));
+    }
+
+    @Test
+    public void frameResourcesResolveOnceBeforeOrderedSubmission() {
+        IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        ByteBuffer textBytes = ByteBuffer.allocate(StasisPreviewRenderer.TEXT_U8_CAPACITY);
+        frame.put(StasisPreviewRenderer.I_SPRITE_COUNT, 2);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE, 7);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE + StasisPreviewRenderer.SPRITE_I32_STRIDE, 0);
+        frame.put(StasisPreviewRenderer.I_TEXT_COUNT, 2);
+        frame.put(StasisPreviewRenderer.I_TEXT_BYTES_USED, 4);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE, 11);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE + 1, 0);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE + 2, 3);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE + StasisPreviewRenderer.TEXT_I32_STRIDE, 11);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE + StasisPreviewRenderer.TEXT_I32_STRIDE + 1, -9);
+        int[] calls = new int[4];
+        StasisPreviewRenderer.TextureProvider provider = new StasisPreviewRenderer.TextureProvider() {
+            @Override public void onResourceGenerationChanged(int surfaceGeneration,
+                    int rendererGeneration, boolean discardGpuHandles, String transitionReason) {}
+            @Override public int textureFor(int handle) {
+                calls[0] += 1;
+                return handle == 0 ? 0 : 70;
+            }
+            @Override public int fallbackTexture() { return 99; }
+            @Override public int filterFor(int handle) {
+                calls[1] += 1;
+                return 100 + handle;
+            }
+            @Override public long textTextureFor(
+                    int font, ByteBuffer utf8, int offset, int length) {
+                calls[2] += 1;
+                return StasisPreviewRenderer.packTexture(12, 30, 10);
+            }
+            @Override public long cachedTextTextureFor(int runHandle) {
+                calls[3] += 1;
+                return StasisPreviewRenderer.packTexture(13, 31, 11);
+            }
+        };
+        int[] textures = new int[StasisPreviewRenderer.MAX_SPRITES];
+        int[] filters = new int[StasisPreviewRenderer.MAX_SPRITES];
+        long[] textTextures = new long[StasisPreviewRenderer.MAX_TEXT];
+
+        StasisPreviewRenderer.resolveFrameResources(
+                provider, frame, textBytes, textures, filters, textTextures);
+
+        assertEquals(2, calls[0]);
+        assertEquals(2, calls[1]);
+        assertEquals(1, calls[2]);
+        assertEquals(1, calls[3]);
+        assertEquals(70, textures[0]);
+        assertEquals(99, textures[1]);
+        assertEquals(107, filters[0]);
+        assertEquals(100, filters[1]);
+        assertEquals(12, (int)textTextures[0]);
+        assertEquals(13, (int)textTextures[1]);
     }
 
     private static void putLine(FloatBuffer lines, int index, float x1, float y1,
