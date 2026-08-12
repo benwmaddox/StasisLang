@@ -5680,6 +5680,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_elides_static_array_store_checks_for_canonical_max_length_loop() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "global values: i32[4];\nfunction main(): i32 {\n    let i: i32 = 0;\n    for (i = 0; i < values.max_length; i = i + 1) {\n        values[i] = i;\n    }\n    return 0;\n}\n",
+        );
+        process
+            .compile()
+            .expect("compile proven store bounds fixture");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(clif.contains("store"), "expected direct store:\n{clif}");
+        assert!(
+            !clif.contains("trapz"),
+            "proven loop retained array store bounds trap:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_preserves_proven_bounds_through_struct_element_alias() {
         let mut process = JitProcess::new();
         process.upsert_file(
@@ -5711,6 +5730,51 @@ mod tests {
         assert!(
             clif.contains("trapz"),
             "unproven static array index omitted fatal check:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_retains_fatal_check_for_unproven_static_array_store() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "global values: i32[4];\nfunction write(index: i32): i32 { values[index] = 7; return 0; }\nfunction main(): i32 { return write(0); }\n",
+        );
+        process
+            .compile()
+            .expect("compile checked store bounds fixture");
+        let clif = process.clif_for_function_name("write").expect("write CLIF");
+        assert!(
+            clif.contains("trapz"),
+            "unproven static array store omitted fatal check:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_checks_unproven_static_struct_view_once() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "struct Draw { x: f32; y: f32; opacity: i32; }\nglobal draws: Draw[4];\nfunction write(index: i32): i32 {\n    let draw: Draw = draws[index];\n    draw.x = 1.0;\n    draw.y = 2.0;\n    draw.opacity = 255;\n    return draw.opacity;\n}\nfunction main(): i32 { return write(0); }\n",
+        );
+        process
+            .compile()
+            .expect("compile checked struct view fixture");
+        let clif = process.clif_for_function_name("write").expect("write CLIF");
+        assert_eq!(
+            clif.matches("trapz").count(),
+            1,
+            "static struct view did not consolidate bounds checks at alias creation:\n{clif}"
+        );
+        assert!(
+            clif.contains("store"),
+            "expected direct field stores:\n{clif}"
+        );
+        assert!(
+            clif.contains("load.i32"),
+            "expected direct field load:\n{clif}"
         );
     }
 
