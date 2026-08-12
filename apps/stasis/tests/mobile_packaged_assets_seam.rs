@@ -223,6 +223,8 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
             "/nologo",
             "/W4",
             "/WX",
+            "/std:c11",
+            "/experimental:c11atomics",
             "/wd4244",
             "/wd4267",
             "/wd4456",
