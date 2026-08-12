@@ -226,6 +226,7 @@ impl AotProcess {
             )
         })?;
         let analysis = &snapshot.analysis;
+        let data_flow_summaries = snapshot.data_flow_summaries();
         self.string_literals = snapshot.literal_table().clone();
         self.collection_max_lengths =
             collect_fixed_collection_max_lengths(&analysis.global_path_types, &analysis_type_table)
@@ -278,6 +279,9 @@ impl AotProcess {
                 type_table.ensure_ascii_view_id()?;
                 let mut function_string_literals = BTreeMap::new();
                 let profile_instrumentation = profile_function_names.contains(&meta.name);
+                let data_flow_summary = data_flow_summaries
+                    .iter()
+                    .find(|summary| summary.internal_function_id == meta.storage_index);
                 let bytes = compile_function_to_object_bytes(
                     meta,
                     hir,
@@ -291,6 +295,7 @@ impl AotProcess {
                     &target,
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
+                    data_flow_summary,
                     &direct_storage,
                     profile_instrumentation,
                 )?;
@@ -1206,6 +1211,7 @@ fn compile_function_to_object_bytes(
     target: &stasis_jit::AotTarget,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    data_flow_summary: Option<&crate::data_flow::FunctionDataFlowSummary>,
     direct_storage: &DirectStorageBindings,
     profile_instrumentation: bool,
 ) -> Result<Vec<u8>, String> {
@@ -1255,6 +1261,7 @@ fn compile_function_to_object_bytes(
         constant_values,
         collection_infos,
         named_struct_field_types,
+        data_flow_summary,
         Some(direct_storage),
         None,
         false,
@@ -2347,7 +2354,33 @@ mod tests {
                     ("mutate", &["call", "iadd"]),
                 ],
             },
+            ParityCorpusCase {
+                label: "known_soa_struct_helper_chain",
+                source: "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { items[0].value = 7; return middle(items[0]); }\n",
+                expected_exit: 7,
+                expected_extern_symbols: &[],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[("items", 1)],
+                expected_clif_markers: &[("main", &["call"]), ("leaf", &["call"])],
+            },
         ]
+    }
+
+    #[test]
+    fn aot_eliminates_storage_dispatch_through_known_soa_helper_chain() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { items[0].value = 7; return middle(items[0]); }\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        for function in ["leaf", "middle"] {
+            let clif = captured.get(function).expect("helper CLIF");
+            assert!(
+                !clif.contains("brif"),
+                "known SoA provenance retained storage dispatch in {function}:\n{clif}"
+            );
+        }
     }
 
     fn run_parity_corpus_case(case: &ParityCorpusCase) {
