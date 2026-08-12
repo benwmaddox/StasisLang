@@ -101,7 +101,9 @@ and the generated release app.
 ## iOS arm64
 
 On macOS install Xcode and obtain device-capable `SDL3.xcframework` and
-`SDL3_image.xcframework` bundles in one directory. From generated `ios/` run:
+`SDL3_image.xcframework` bundles in one directory. The supported inputs are
+the official SDL3 3.4.10 and SDL3_image 3.4.4 release DMGs, matching the
+runtime's pinned source versions. From generated `ios/` run:
 
 ```text
 xcodebuild -project StasisMobile.xcodeproj -scheme StasisMobile \
@@ -113,4 +115,8 @@ xcodebuild -project StasisMobile.xcodeproj -scheme StasisMobile \
 The checked-in Xcode shell compiles the same runtime, links the iOS AOT objects,
 and copies `StasisMobile/stasis_game` into the app resources. Device arm64 is
 the v1 target; simulator and multi-architecture packaging are intentionally out
-of scope.
+of scope. Pull requests run `tools/ci/build_ios_package.sh` on macOS with code
+signing disabled; the driver builds `samples/mobile_storage_link` and verifies
+the arm64 executable, embedded SDL frameworks, packaged assets and provenance,
+and absence of Stasis source. A signed device install still requires the
+developer's `DEVELOPMENT_TEAM` and provisioning profile.

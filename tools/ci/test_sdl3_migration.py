@@ -76,6 +76,24 @@ class Sdl3MigrationContractTests(unittest.TestCase):
                 any("SDL3 must own the iOS main wrapper" in error for error in validate(root))
             )
 
+    def test_ios_ci_dependency_drift_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for relative, markers in PINNED.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("\n".join(markers) + "\n", encoding="utf-8")
+            driver = root / "tools/ci/build_ios_package.sh"
+            driver.write_text(
+                driver.read_text(encoding="utf-8").replace(
+                    "SDL3-3.4.10.dmg", "SDL3-rolling.dmg"
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("SDL3-3.4.10.dmg" in error for error in validate(root))
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

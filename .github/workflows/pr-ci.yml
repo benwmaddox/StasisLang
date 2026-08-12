@@ -354,3 +354,31 @@ jobs:
         with:
           name: android-native-link-evidence
           path: target/android-native-link-evidence.json
+
+  ios-package-link:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Stasis
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Package and link generated iOS game
+        env:
+          STASIS_IOS_BUILD_ROOT: ${{ github.workspace }}/target/ios-package-link
+        run: bash tools/ci/build_ios_package.sh
+
+      - name: Upload iOS package-link evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-package-link-evidence
+          if-no-files-found: warn
+          path: |
+            target/ios-package-link/evidence.txt
+            target/ios-package-link/xcode-version.txt
+            target/ios-package-link/xcodebuild.log
+            target/ios-package-link/linked-libraries.txt
