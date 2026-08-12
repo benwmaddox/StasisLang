@@ -4180,6 +4180,10 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
             target_collection, source_collection
         ));
     }
+    let source_bounds_proven =
+        static_index_bounds_proven(source_index, source_info.len as usize, values_by_name);
+    let target_bounds_proven =
+        static_index_bounds_proven(target_index, target_info.len as usize, values_by_name);
 
     for field_name in target_info.field_types.keys() {
         let source_value = emit_indexed_collection_load(
@@ -4190,7 +4194,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
             source_info,
             field_name,
             source_index_binding,
-            false,
+            source_bounds_proven,
         )?;
         emit_indexed_collection_assignment(
             builder,
@@ -4200,7 +4204,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
             target_info,
             field_name,
             target_index_binding,
-            false,
+            target_bounds_proven,
             AssignOp::Set,
             source_value,
         )?;
@@ -4412,6 +4416,8 @@ pub(crate) fn try_emit_struct_copy_from_indexed_to_global(
         named_struct_field_types,
         foreach_bindings,
     )?;
+    let source_bounds_proven =
+        static_index_bounds_proven(source_index, source_info.len as usize, values_by_name);
     for (field_name, field_type) in &source_info.field_types {
         let source_value = emit_indexed_collection_load(
             builder,
@@ -4421,7 +4427,7 @@ pub(crate) fn try_emit_struct_copy_from_indexed_to_global(
             source_info,
             field_name,
             source_index_binding,
-            false,
+            source_bounds_proven,
         )?;
         let target_field = format!("{target_prefix}{field_name}");
         emit_global_assignment(
@@ -4528,6 +4534,8 @@ pub(crate) fn try_emit_struct_copy_from_global_to_indexed(
         named_struct_field_types,
         foreach_bindings,
     )?;
+    let target_bounds_proven =
+        static_index_bounds_proven(target_index, target_info.len as usize, values_by_name);
     for (field_name, field_type) in &target_info.field_types {
         let source_field = format!("{source_prefix}{field_name}");
         let source_value = emit_global_load(
@@ -4545,7 +4553,7 @@ pub(crate) fn try_emit_struct_copy_from_global_to_indexed(
             target_info,
             field_name,
             target_index_binding,
-            false,
+            target_bounds_proven,
             AssignOp::Set,
             source_value,
         )?;
@@ -5485,9 +5493,11 @@ pub(crate) fn emit_simple_statements(
                             named_struct_field_types,
                             foreach_bindings,
                         )?;
-                        let bounds_proven = matches!(index, SimpleExpr::Identifier(name)
-                            if values_by_name.get(name).and_then(|binding| binding.proven_index_upper)
-                                == Some(collection_info.len as usize));
+                        let bounds_proven = static_index_bounds_proven(
+                            index,
+                            collection_info.len as usize,
+                            values_by_name,
+                        );
                         emit_indexed_collection_assignment(
                             builder,
                             runtime_call_refs,
@@ -5604,9 +5614,11 @@ pub(crate) fn emit_simple_statements(
                             named_struct_field_types,
                             foreach_bindings,
                         )?;
-                        let bounds_proven = matches!(index, SimpleExpr::Identifier(name)
-                            if values_by_name.get(name).and_then(|binding| binding.proven_index_upper)
-                                == Some(collection_info.len as usize));
+                        let bounds_proven = static_index_bounds_proven(
+                            index,
+                            collection_info.len as usize,
+                            values_by_name,
+                        );
                         emit_indexed_collection_assignment(
                             builder,
                             runtime_call_refs,
@@ -7338,9 +7350,7 @@ pub(crate) fn try_emit_struct_view_value(
                 known_collection_hash: (!values_by_name.contains_key(collection_path))
                     .then(|| hash_global_path(collection_path)),
                 bounds_proven: known_len.is_some_and(|len| {
-                    matches!(index.as_ref(), SimpleExpr::Identifier(name)
-                        if values_by_name.get(name).and_then(|binding| binding.proven_index_upper)
-                            == Some(len as usize))
+                    static_index_bounds_proven(index, len as usize, values_by_name)
                 }),
             }))
         }
@@ -7613,9 +7623,8 @@ pub(crate) fn emit_simple_expression(
                 named_struct_field_types,
                 foreach_bindings,
             )?;
-            let bounds_proven = matches!(index.as_ref(), SimpleExpr::Identifier(name)
-                if values_by_name.get(name).and_then(|binding| binding.proven_index_upper)
-                    == Some(collection_info.len as usize));
+            let bounds_proven =
+                static_index_bounds_proven(index, collection_info.len as usize, values_by_name);
             emit_indexed_collection_load(
                 builder,
                 runtime_call_refs,
@@ -9570,6 +9579,25 @@ fn emit_array_bounds_trap(builder: &mut FunctionBuilder<'_>, index: Value, len: 
     let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
     let valid = builder.ins().band(non_negative, below_len);
     builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
+}
+
+fn static_index_bounds_proven(
+    index: &SimpleExpr,
+    collection_len: usize,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+) -> bool {
+    if let Some(value) = eval_const_i64(index) {
+        return usize::try_from(value).is_ok_and(|value| value < collection_len);
+    }
+    match index {
+        SimpleExpr::Identifier(name) => {
+            values_by_name
+                .get(name)
+                .and_then(|binding| binding.proven_index_upper)
+                == Some(collection_len)
+        }
+        _ => false,
+    }
 }
 
 fn statement_assigns_local(statement: &SimpleStmt, name: &str) -> bool {
