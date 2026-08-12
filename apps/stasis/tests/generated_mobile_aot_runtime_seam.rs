@@ -146,6 +146,8 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
             "/W4",
             "/WX",
             "/wd4204",
+            "/std:c11",
+            "/experimental:c11atomics",
             "/D_CRT_SECURE_NO_WARNINGS",
         ])
         .arg(format!("/I{}", runtime.display()))
