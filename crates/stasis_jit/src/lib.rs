@@ -354,11 +354,16 @@ pub fn link_objects_to_executable(
         args.push(format!("/OUT:{}", output_executable.display()));
         args.push(format!("/ENTRY:{entry_symbol}"));
         args.push("/SUBSYSTEM:CONSOLE".to_string());
-        args.push("kernel32.lib".to_string());
         let windows_lib_paths = resolve_windows_link_lib_paths();
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
+        args.push(
+            resolve_windows_system_lib(&windows_lib_paths, "kernel32.lib")
+                .unwrap_or_else(|| PathBuf::from("kernel32.lib"))
+                .display()
+                .to_string(),
+        );
     } else if matches!(config.target, AotTarget::Native) {
         let source_path = output_executable.with_extension("entry.c");
         fs::write(
@@ -483,12 +488,72 @@ fn uses_msvc_linker_syntax(config: &AotLinkConfig) -> bool {
 
 #[cfg(windows)]
 fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
-    Vec::new()
+    let mut paths = Vec::new();
+    if let Some(value) = std::env::var_os("LIB") {
+        for path in std::env::split_paths(&value) {
+            push_existing_unique(&mut paths, path);
+        }
+    }
+    if let Some(value) = std::env::var_os("VCToolsInstallDir") {
+        push_existing_unique(&mut paths, PathBuf::from(value).join("lib").join("x64"));
+    }
+    for root in [
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
+        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
+    ] {
+        if let Some(version) = latest_child_dir(Path::new(root)) {
+            push_existing_unique(&mut paths, version.join("lib").join("x64"));
+        }
+    }
+    for root in [
+        r"C:\Program Files (x86)\Windows Kits\10\Lib",
+        r"C:\Program Files\Windows Kits\10\Lib",
+    ] {
+        if let Some(version) = latest_child_dir(Path::new(root)) {
+            push_existing_unique(&mut paths, version.join("um").join("x64"));
+            push_existing_unique(&mut paths, version.join("ucrt").join("x64"));
+        }
+    }
+    paths
 }
 
 #[cfg(not(windows))]
 fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
     Vec::new()
+}
+
+#[cfg(windows)]
+fn push_existing_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.is_dir() && !paths.contains(&path) {
+        paths.push(path);
+    }
+}
+
+#[cfg(windows)]
+fn latest_child_dir(root: &Path) -> Option<PathBuf> {
+    let mut directories = fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    directories.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    directories.into_iter().next()
+}
+
+#[cfg(windows)]
+fn resolve_windows_system_lib(paths: &[PathBuf], name: &str) -> Option<PathBuf> {
+    paths
+        .iter()
+        .map(|path| path.join(name))
+        .find(|path| path.is_file())
+}
+
+#[cfg(not(windows))]
+fn resolve_windows_system_lib(_paths: &[PathBuf], _name: &str) -> Option<PathBuf> {
+    None
 }
 
 fn run_link_command(command: &mut Command, mode: &str, linker: &Path) -> Result<(), String> {
@@ -572,6 +637,21 @@ mod tests {
         assert!(source.contains("manifest exceeds 65536 bytes"));
         assert!(source.contains("/proc/self/exe"));
         assert!(source.contains("_NSGetExecutablePath"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_linking_finds_kernel32_without_lib_environment() {
+        let previous = std::env::var_os("LIB");
+        std::env::remove_var("LIB");
+        let paths = resolve_windows_link_lib_paths();
+        if let Some(value) = previous {
+            std::env::set_var("LIB", value);
+        }
+        assert!(
+            resolve_windows_system_lib(&paths, "kernel32.lib").is_some(),
+            "installed Windows SDK must be discoverable without LIB"
+        );
     }
 
     #[test]

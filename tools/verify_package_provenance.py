@@ -60,6 +60,7 @@ def verify_mobile_shells(
             receipt.get("android_version_code") or "1"
         ),
         "@STASIS_ANDROID_VERSION_NAME@": receipt.get("android_version_name") or "1.0",
+        "@STASIS_ANDROID_ABI@": "arm64-v8a" if target == "android-arm64" else "",
     }
     expected_paths = set()
     for source_group in ("common", platform):
