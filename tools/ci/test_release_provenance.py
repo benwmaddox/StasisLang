@@ -49,6 +49,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 b"@STASIS_APP_NAME@ @STASIS_PACKAGE_ID@ "
                 b"@STASIS_JNI_PACKAGE@ @STASIS_ANDROID_ORIENTATION@ "
                 b"@STASIS_ANDROID_VERSION_CODE@ @STASIS_ANDROID_VERSION_NAME@\n"
+                b"@STASIS_ANDROID_ABI@\n"
             )
             manifest = {
                 "schema": "stasis.release_provenance.v1",
@@ -73,6 +74,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             (package / "common/main.c").write_bytes(common_shell)
             (package / "android/main.c").write_bytes(
                 b"Demo App com.example.demo com_example_demo sensorPortrait 7 2.1.0\n"
+                b"arm64-v8a\n"
             )
             (package / "stasis_mobile_package.json").write_text(
                 json.dumps(
