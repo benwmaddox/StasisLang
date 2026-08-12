@@ -490,6 +490,10 @@ Field access on a struct view:
   collection identity through local aliases. Field access can then use the collection's direct
   storage slot instead of re-entering the hash-based runtime registry. Aliases of local collection
   parameters retain the generic path because their concrete backing is supplied by the caller.
+- Creating an alias to an arbitrarily indexed element of a statically named fixed collection
+  performs the fatal bounds check once. Every field load or store through that unchanged alias
+  reuses the validated `{base, index, len}` provenance instead of repeating the check. A compiler-
+  proven index omits even the alias-creation check.
 
 Rationale:
 - This allows the same function signature to accept either a single global struct or an element view from a struct array.

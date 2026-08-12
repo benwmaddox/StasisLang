@@ -4192,6 +4192,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
             target_info,
             field_name,
             target_index_binding,
+            false,
             AssignOp::Set,
             source_value,
         )?;
@@ -4536,6 +4537,7 @@ pub(crate) fn try_emit_struct_copy_from_global_to_indexed(
             target_info,
             field_name,
             target_index_binding,
+            false,
             AssignOp::Set,
             source_value,
         )?;
@@ -4742,6 +4744,18 @@ pub(crate) fn emit_simple_statements(
                             name, local_type_id, struct_view.type_id
                         ));
                     }
+                    let mut view_bounds_proven = struct_view.bounds_proven;
+                    // A fixed global struct-array view with an arbitrary index must still fail
+                    // fatally, but the check belongs to creation of the alias rather than every
+                    // field access through that alias. Once validated, all loads and stores from
+                    // the same {base,index,len} view may reuse the fact.
+                    if !view_bounds_proven
+                        && struct_view.storage_kind == StructViewStorageKind::Soa
+                        && struct_view.known_collection_hash.is_some()
+                    {
+                        emit_array_bounds_trap(builder, struct_view.index, struct_view.len);
+                        view_bounds_proven = true;
+                    }
                     let variable = declare_new_variable(
                         builder,
                         next_variable,
@@ -4773,7 +4787,7 @@ pub(crate) fn emit_simple_statements(
                                 len_var,
                                 storage_kind: struct_view.storage_kind,
                                 known_collection_hash: struct_view.known_collection_hash,
-                                bounds_proven: struct_view.bounds_proven,
+                                bounds_proven: view_bounds_proven,
                             }),
                             proven_index_upper: None,
                         },
@@ -5463,6 +5477,9 @@ pub(crate) fn emit_simple_statements(
                             named_struct_field_types,
                             foreach_bindings,
                         )?;
+                        let bounds_proven = matches!(index, SimpleExpr::Identifier(name)
+                            if values_by_name.get(name).and_then(|binding| binding.proven_index_upper)
+                                == Some(collection_info.len as usize));
                         emit_indexed_collection_assignment(
                             builder,
                             runtime_call_refs,
@@ -5471,6 +5488,7 @@ pub(crate) fn emit_simple_statements(
                             collection_info,
                             suffix,
                             index_binding,
+                            bounds_proven,
                             *op,
                             rhs,
                         )?;
@@ -5578,6 +5596,9 @@ pub(crate) fn emit_simple_statements(
                             named_struct_field_types,
                             foreach_bindings,
                         )?;
+                        let bounds_proven = matches!(index, SimpleExpr::Identifier(name)
+                            if values_by_name.get(name).and_then(|binding| binding.proven_index_upper)
+                                == Some(collection_info.len as usize));
                         emit_indexed_collection_assignment(
                             builder,
                             runtime_call_refs,
@@ -5586,6 +5607,7 @@ pub(crate) fn emit_simple_statements(
                             collection_info,
                             suffix,
                             index_binding,
+                            bounds_proven,
                             AssignOp::Set,
                             converted,
                         )?;
@@ -8894,6 +8916,7 @@ fn emit_struct_view_field_assignment_for_storage(
             field_type,
             direct.storage_bytes,
             direct.static_len,
+            bounds_proven,
         );
     }
 
@@ -9474,6 +9497,7 @@ fn emit_direct_array_store(
     _type_id: TypeId,
     storage_bytes: u8,
     static_len: Option<usize>,
+    bounds_proven: bool,
 ) -> Result<(), String> {
     let data = emit_direct_slot_data_ptr(builder, slot_ref);
     let len = if let Some(len) = static_len {
@@ -9487,13 +9511,15 @@ fn emit_direct_array_store(
             stasis_dynload::JitStorageSlot::LEN_OFFSET,
         )
     };
-    let non_negative = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
     let index_i64 = builder.ins().sextend(types::I64, index);
-    let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index_i64, len);
-    let valid = builder.ins().band(non_negative, below_len);
-    builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
+    if !bounds_proven {
+        let non_negative = builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+        let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index_i64, len);
+        let valid = builder.ins().band(non_negative, below_len);
+        builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
+    }
     let shift = match storage_bytes {
         1 => 0,
         2 => 1,
@@ -9516,6 +9542,15 @@ fn emit_direct_array_store(
     };
     builder.ins().store(MemFlags::new(), stored, address, 0);
     Ok(())
+}
+
+fn emit_array_bounds_trap(builder: &mut FunctionBuilder<'_>, index: Value, len: Value) {
+    let non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+    let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+    let valid = builder.ins().band(non_negative, below_len);
+    builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
 }
 
 fn statement_assigns_local(statement: &SimpleStmt, name: &str) -> bool {
@@ -9696,6 +9731,7 @@ pub(crate) fn emit_indexed_collection_assignment(
     collection_info: &ForeachCollectionInfo,
     suffix: &str,
     index_binding: ValueBinding,
+    bounds_proven: bool,
     op: AssignOp,
     rhs: ValueBinding,
 ) -> Result<(), String> {
@@ -9752,6 +9788,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                 path_type,
                 direct.storage_bytes,
                 direct.static_len,
+                bounds_proven,
             )?;
         } else {
             builder.ins().call(
@@ -9777,6 +9814,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                 path_type,
                 direct.storage_bytes,
                 direct.static_len,
+                bounds_proven,
             )?;
         } else {
             builder.ins().call(
@@ -9861,6 +9899,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                 path_type,
                 direct.storage_bytes,
                 direct.static_len,
+                bounds_proven,
             )?;
         } else {
             builder.ins().call(
@@ -9945,6 +9984,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                 path_type,
                 direct.storage_bytes,
                 direct.static_len,
+                bounds_proven,
             )?;
         } else {
             builder.ins().call(
