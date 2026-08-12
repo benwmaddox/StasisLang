@@ -41,6 +41,16 @@ PINNED = {
         "STASIS_GRAPHICS_BUNDLE_SDL=ON",
         "libx11-dev",
         "libxrandr-dev",
+        "tools/ci/build_ios_package.sh",
+        "ios-package-link-evidence",
+    ),
+    "tools/ci/build_ios_package.sh": (
+        "SDL3-3.4.10.dmg",
+        "36f78737dcd13a6e47ee066a6e460501a3de7fca678fe97fc3deab7d5ebc8b0f",
+        "SDL3_image-3.4.4.dmg",
+        "7481d597f90be0d92546a0189008c14a1e6d7b86eaa56beace2ed9f631d85282",
+        "-sdk iphoneos",
+        "-arch arm64",
     ),
     "scripts/build_local_editor_release.ps1": (
         "STASIS_GRAPHICS_BUNDLE_SDL=ON",
