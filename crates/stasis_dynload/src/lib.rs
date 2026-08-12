@@ -1006,6 +1006,7 @@ pub struct StasisGraphicsApi {
     stasis_host_get_frame: usize,
     stasis_host_bulk_init: usize,
     stasis_host_bulk_apply_requests: usize,
+    stasis_host_performance_metrics_enabled: usize,
     stasis_host_set_performance_metrics: usize,
     stasis_gfx_submit_u8: usize,
     stasis_test_get_render_submission_state: Option<usize>,
@@ -1040,6 +1041,8 @@ impl StasisGraphicsApi {
             lib.symbol_address("stasis_host_bulk_apply_requests")?;
         let stasis_host_set_performance_metrics =
             lib.symbol_address("stasis_host_set_performance_metrics")?;
+        let stasis_host_performance_metrics_enabled =
+            lib.symbol_address("stasis_host_performance_metrics_enabled")?;
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
         let stasis_test_get_render_submission_state = lib
             .symbol_address("stasis_test_get_render_submission_state")
@@ -1051,6 +1054,7 @@ impl StasisGraphicsApi {
             stasis_host_get_frame,
             stasis_host_bulk_init,
             stasis_host_bulk_apply_requests,
+            stasis_host_performance_metrics_enabled,
             stasis_host_set_performance_metrics,
             stasis_gfx_submit_u8,
             stasis_test_get_render_submission_state,
@@ -1163,6 +1167,21 @@ impl StasisGraphicsApi {
                 unsafe { std::mem::transmute(self.stasis_host_set_performance_metrics) };
             callback(tick_micros, render_micros);
             Ok(())
+        }
+    }
+
+    pub fn host_performance_metrics_enabled(&self) -> Result<bool, String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn() -> i32 =
+                unsafe { std::mem::transmute(self.stasis_host_performance_metrics_enabled) };
+            return Ok(callback() != 0);
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn() -> i32 =
+                unsafe { std::mem::transmute(self.stasis_host_performance_metrics_enabled) };
+            Ok(callback() != 0)
         }
     }
 
