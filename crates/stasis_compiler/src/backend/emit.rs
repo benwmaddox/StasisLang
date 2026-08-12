@@ -1586,6 +1586,14 @@ pub(crate) struct StructViewValue {
     pub(crate) base: Value,
     pub(crate) index: Value,
     pub(crate) len: Value,
+    pub(crate) storage_kind: StructViewStorageKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StructViewStorageKind {
+    Dynamic,
+    Aos,
+    Soa,
 }
 
 #[derive(Clone, Copy)]
@@ -1599,6 +1607,7 @@ pub(crate) struct LocalBinding {
 pub(crate) struct StructViewBinding {
     pub(crate) index_var: Variable,
     pub(crate) len_var: Variable,
+    pub(crate) storage_kind: StructViewStorageKind,
 }
 
 pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuilt, Finalize>(
@@ -1770,7 +1779,14 @@ where
                         TYPE_ID_I32,
                         type_table,
                     )?;
-                    (base_var, Some(StructViewBinding { index_var, len_var }))
+                    (
+                        base_var,
+                        Some(StructViewBinding {
+                            index_var,
+                            len_var,
+                            storage_kind: StructViewStorageKind::Dynamic,
+                        }),
+                    )
                 } else {
                     let value = block_params
                         .get(block_param_cursor)
@@ -4741,7 +4757,11 @@ pub(crate) fn emit_simple_statements(
                         LocalBinding {
                             var: variable,
                             type_id: local_type_id,
-                            struct_view: Some(StructViewBinding { index_var, len_var }),
+                            struct_view: Some(StructViewBinding {
+                                index_var,
+                                len_var,
+                                storage_kind: struct_view.storage_kind,
+                            }),
                         },
                     );
                     continue;
@@ -7129,6 +7149,7 @@ pub(crate) fn try_emit_struct_view_value(
                         base: builder.use_var(local.var),
                         index: builder.use_var(struct_view.index_var),
                         len: builder.use_var(struct_view.len_var),
+                        storage_kind: struct_view.storage_kind,
                     }));
                 }
             }
@@ -7143,6 +7164,7 @@ pub(crate) fn try_emit_struct_view_value(
                         base,
                         index,
                         len,
+                        storage_kind: StructViewStorageKind::Soa,
                     }));
                 }
             }
@@ -7162,6 +7184,7 @@ pub(crate) fn try_emit_struct_view_value(
                         base,
                         index,
                         len,
+                        storage_kind: StructViewStorageKind::Aos,
                     }));
                 }
             }
@@ -7245,6 +7268,7 @@ pub(crate) fn try_emit_struct_view_value(
                 base: collection_handle,
                 index: index_binding.value,
                 len: len_value,
+                storage_kind: StructViewStorageKind::Soa,
             }))
         }
         _ => Ok(None),
@@ -8450,6 +8474,30 @@ pub(crate) fn emit_struct_view_field_load(
         ));
     }
     let index_value = builder.use_var(binding.index_var);
+    if binding.storage_kind == StructViewStorageKind::Aos {
+        return emit_struct_view_field_load_for_storage(
+            builder,
+            runtime_call_refs,
+            type_table,
+            true,
+            base_hash,
+            index_value,
+            suffix,
+            field_type,
+        );
+    }
+    if binding.storage_kind == StructViewStorageKind::Soa {
+        return emit_struct_view_field_load_for_storage(
+            builder,
+            runtime_call_refs,
+            type_table,
+            false,
+            base_hash,
+            index_value,
+            suffix,
+            field_type,
+        );
+    }
     let aos_condition = builder
         .ins()
         .icmp_imm(IntCC::SignedLessThan, index_value, 0);
@@ -8464,58 +8512,32 @@ pub(crate) fn emit_struct_view_field_load(
         .brif(aos_condition, aos_block, &[], soa_block, &[]);
 
     builder.switch_to_block(aos_block);
-    let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
-    let aos_value = if is_i32_abi_compatible_type(field_type, type_table) {
-        let call = builder
-            .ins()
-            .call(runtime_call_refs.global_i32_load, &[path_hash]);
-        builder.inst_results(call)[0]
-    } else if field_type == TYPE_ID_F32 {
-        let call = builder
-            .ins()
-            .call(runtime_call_refs.global_f32_load, &[path_hash]);
-        builder.inst_results(call)[0]
-    } else if field_type == TYPE_ID_F64 {
-        let call = builder
-            .ins()
-            .call(runtime_call_refs.global_f64_load, &[path_hash]);
-        builder.inst_results(call)[0]
-    } else {
-        return Err(format!(
-            "unsupported struct view field type {} for suffix '{}'",
-            field_type, suffix
-        ));
-    };
+    let aos_value = emit_struct_view_field_load_for_storage(
+        builder,
+        runtime_call_refs,
+        type_table,
+        true,
+        base_hash,
+        index_value,
+        suffix,
+        field_type,
+    )?
+    .value;
     builder.ins().jump(merge_block, &[aos_value]);
     builder.seal_block(aos_block);
 
     builder.switch_to_block(soa_block);
-    let field_hash = hash_foreach_field_suffix(suffix);
-    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
-    let soa_value = if is_i32_abi_compatible_type(field_type, type_table) {
-        let call = builder.ins().call(
-            runtime_call_refs.global_i32_array_load,
-            &[base_hash, field_hash_value, index_value],
-        );
-        builder.inst_results(call)[0]
-    } else if field_type == TYPE_ID_F32 {
-        let call = builder.ins().call(
-            runtime_call_refs.global_f32_array_load,
-            &[base_hash, field_hash_value, index_value],
-        );
-        builder.inst_results(call)[0]
-    } else if field_type == TYPE_ID_F64 {
-        let call = builder.ins().call(
-            runtime_call_refs.global_f64_array_load,
-            &[base_hash, field_hash_value, index_value],
-        );
-        builder.inst_results(call)[0]
-    } else {
-        return Err(format!(
-            "unsupported struct view field type {} for suffix '{}'",
-            field_type, suffix
-        ));
-    };
+    let soa_value = emit_struct_view_field_load_for_storage(
+        builder,
+        runtime_call_refs,
+        type_table,
+        false,
+        base_hash,
+        index_value,
+        suffix,
+        field_type,
+    )?
+    .value;
     builder.ins().jump(merge_block, &[soa_value]);
     builder.seal_block(soa_block);
 
@@ -8526,6 +8548,74 @@ pub(crate) fn emit_struct_view_field_load(
         .first()
         .copied()
         .ok_or_else(|| "struct view merge block missing value param".to_string())?;
+    Ok(ValueBinding {
+        value,
+        type_id: field_type,
+    })
+}
+
+fn emit_struct_view_field_load_for_storage(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    aos: bool,
+    base_hash: Value,
+    index_value: Value,
+    suffix: &str,
+    field_type: TypeId,
+) -> Result<ValueBinding, String> {
+    let value = if aos {
+        let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
+        if is_i32_abi_compatible_type(field_type, type_table) {
+            let call = builder
+                .ins()
+                .call(runtime_call_refs.global_i32_load, &[path_hash]);
+            builder.inst_results(call)[0]
+        } else if field_type == TYPE_ID_F32 {
+            let call = builder
+                .ins()
+                .call(runtime_call_refs.global_f32_load, &[path_hash]);
+            builder.inst_results(call)[0]
+        } else if field_type == TYPE_ID_F64 {
+            let call = builder
+                .ins()
+                .call(runtime_call_refs.global_f64_load, &[path_hash]);
+            builder.inst_results(call)[0]
+        } else {
+            return Err(format!(
+                "unsupported struct view field type {} for suffix '{}'",
+                field_type, suffix
+            ));
+        }
+    } else {
+        let field_hash = builder
+            .ins()
+            .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
+        if is_i32_abi_compatible_type(field_type, type_table) {
+            let call = builder.ins().call(
+                runtime_call_refs.global_i32_array_load,
+                &[base_hash, field_hash, index_value],
+            );
+            builder.inst_results(call)[0]
+        } else if field_type == TYPE_ID_F32 {
+            let call = builder.ins().call(
+                runtime_call_refs.global_f32_array_load,
+                &[base_hash, field_hash, index_value],
+            );
+            builder.inst_results(call)[0]
+        } else if field_type == TYPE_ID_F64 {
+            let call = builder.ins().call(
+                runtime_call_refs.global_f64_array_load,
+                &[base_hash, field_hash, index_value],
+            );
+            builder.inst_results(call)[0]
+        } else {
+            return Err(format!(
+                "unsupported struct view field type {} for suffix '{}'",
+                field_type, suffix
+            ));
+        }
+    };
     Ok(ValueBinding {
         value,
         type_id: field_type,
@@ -8557,6 +8647,37 @@ pub(crate) fn emit_struct_view_field_assignment(
     }
 
     let index_value = builder.use_var(binding.index_var);
+    match binding.storage_kind {
+        StructViewStorageKind::Aos => {
+            return emit_struct_view_field_assignment_for_storage(
+                builder,
+                runtime_call_refs,
+                type_table,
+                true,
+                base_hash,
+                index_value,
+                suffix,
+                field_type,
+                op,
+                rhs,
+            );
+        }
+        StructViewStorageKind::Soa => {
+            return emit_struct_view_field_assignment_for_storage(
+                builder,
+                runtime_call_refs,
+                type_table,
+                false,
+                base_hash,
+                index_value,
+                suffix,
+                field_type,
+                op,
+                rhs,
+            );
+        }
+        StructViewStorageKind::Dynamic => {}
+    }
     let aos_condition = builder
         .ins()
         .icmp_imm(IntCC::SignedLessThan, index_value, 0);
@@ -8568,193 +8689,197 @@ pub(crate) fn emit_struct_view_field_assignment(
         .brif(aos_condition, aos_block, &[], soa_block, &[]);
 
     builder.switch_to_block(aos_block);
-    let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
-    if is_i32_scalar_lane_type(field_type, type_table) {
-        let lhs = if op == AssignOp::Set {
-            None
-        } else {
-            let call = builder
-                .ins()
-                .call(runtime_call_refs.global_i32_load, &[path_hash]);
-            Some(builder.inst_results(call)[0])
-        };
-        let value =
-            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, field_type);
-        builder
-            .ins()
-            .call(runtime_call_refs.global_i32_store, &[path_hash, value]);
-    } else if field_type == TYPE_ID_BOOL {
-        if op != AssignOp::Set {
-            return Err(format!(
-                "bool assignment only supports '=' in current jit path for struct view field '{}'",
-                suffix
-            ));
-        }
-        builder
-            .ins()
-            .call(runtime_call_refs.global_i32_store, &[path_hash, rhs.value]);
-    } else if field_type == TYPE_ID_F32 {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
-                let call = builder
-                    .ins()
-                    .call(runtime_call_refs.global_f32_load, &[path_hash]);
-                let lhs = builder.inst_results(call)[0];
-                match op {
-                    AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
-                    AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
-                    AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
-                    AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
-                    AssignOp::Mod => unreachable!(),
-                    AssignOp::Set => unreachable!(),
-                }
-            }
-            AssignOp::Mod => {
-                return Err(format!(
-                    "'%=' is unsupported for f32 struct view field '{}'",
-                    suffix
-                ));
-            }
-        };
-        builder
-            .ins()
-            .call(runtime_call_refs.global_f32_store, &[path_hash, value]);
-    } else if field_type == TYPE_ID_F64 {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
-                let call = builder
-                    .ins()
-                    .call(runtime_call_refs.global_f64_load, &[path_hash]);
-                let lhs = builder.inst_results(call)[0];
-                match op {
-                    AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
-                    AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
-                    AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
-                    AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
-                    AssignOp::Mod => unreachable!(),
-                    AssignOp::Set => unreachable!(),
-                }
-            }
-            AssignOp::Mod => {
-                return Err(format!(
-                    "'%=' is unsupported for f64 struct view field '{}'",
-                    suffix
-                ));
-            }
-        };
-        builder
-            .ins()
-            .call(runtime_call_refs.global_f64_store, &[path_hash, value]);
-    } else {
-        return Err(format!(
-            "unsupported struct view field type {} for suffix '{}'",
-            field_type, suffix
-        ));
-    }
+    emit_struct_view_field_assignment_for_storage(
+        builder,
+        runtime_call_refs,
+        type_table,
+        true,
+        base_hash,
+        index_value,
+        suffix,
+        field_type,
+        op,
+        rhs,
+    )?;
     builder.ins().jump(merge_block, &[]);
     builder.seal_block(aos_block);
 
     builder.switch_to_block(soa_block);
-    let field_hash = hash_foreach_field_suffix(suffix);
-    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
-    if is_i32_scalar_lane_type(field_type, type_table) {
-        let lhs = if op == AssignOp::Set {
-            None
-        } else {
-            let call = builder.ins().call(
-                runtime_call_refs.global_i32_array_load,
-                &[base_hash, field_hash_value, index_value],
-            );
-            Some(builder.inst_results(call)[0])
-        };
-        let value =
-            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, field_type);
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[base_hash, field_hash_value, index_value, value],
-        );
-    } else if field_type == TYPE_ID_BOOL {
-        if op != AssignOp::Set {
-            return Err(format!(
-                "bool assignment only supports '=' in current jit path for struct view field '{}'",
-                suffix
-            ));
-        }
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[base_hash, field_hash_value, index_value, rhs.value],
-        );
-    } else if field_type == TYPE_ID_F32 {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
-                let call = builder.ins().call(
-                    runtime_call_refs.global_f32_array_load,
-                    &[base_hash, field_hash_value, index_value],
-                );
-                let lhs = builder.inst_results(call)[0];
-                match op {
-                    AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
-                    AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
-                    AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
-                    AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
-                    AssignOp::Mod => unreachable!(),
-                    AssignOp::Set => unreachable!(),
-                }
-            }
-            AssignOp::Mod => {
-                return Err(format!(
-                    "'%=' is unsupported for f32 struct view field '{}'",
-                    suffix
-                ));
-            }
-        };
-        builder.ins().call(
-            runtime_call_refs.global_f32_array_store,
-            &[base_hash, field_hash_value, index_value, value],
-        );
-    } else if field_type == TYPE_ID_F64 {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
-                let call = builder.ins().call(
-                    runtime_call_refs.global_f64_array_load,
-                    &[base_hash, field_hash_value, index_value],
-                );
-                let lhs = builder.inst_results(call)[0];
-                match op {
-                    AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
-                    AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
-                    AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
-                    AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
-                    AssignOp::Mod => unreachable!(),
-                    AssignOp::Set => unreachable!(),
-                }
-            }
-            AssignOp::Mod => {
-                return Err(format!(
-                    "'%=' is unsupported for f64 struct view field '{}'",
-                    suffix
-                ));
-            }
-        };
-        builder.ins().call(
-            runtime_call_refs.global_f64_array_store,
-            &[base_hash, field_hash_value, index_value, value],
-        );
-    } else {
-        return Err(format!(
-            "unsupported struct view field type {} for suffix '{}'",
-            field_type, suffix
-        ));
-    }
+    emit_struct_view_field_assignment_for_storage(
+        builder,
+        runtime_call_refs,
+        type_table,
+        false,
+        base_hash,
+        index_value,
+        suffix,
+        field_type,
+        op,
+        rhs,
+    )?;
     builder.ins().jump(merge_block, &[]);
     builder.seal_block(soa_block);
 
     builder.seal_block(merge_block);
     builder.switch_to_block(merge_block);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_struct_view_field_assignment_for_storage(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    aos: bool,
+    base_hash: Value,
+    index_value: Value,
+    suffix: &str,
+    field_type: TypeId,
+    op: AssignOp,
+    rhs: ValueBinding,
+) -> Result<(), String> {
+    let field_key = if aos {
+        emit_local_struct_field_path_hash(base_hash, suffix, builder)
+    } else {
+        builder
+            .ins()
+            .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)))
+    };
+
+    if is_i32_scalar_lane_type(field_type, type_table) {
+        let lhs = if op == AssignOp::Set {
+            None
+        } else if aos {
+            let call = builder
+                .ins()
+                .call(runtime_call_refs.global_i32_load, &[field_key]);
+            Some(builder.inst_results(call)[0])
+        } else {
+            let call = builder.ins().call(
+                runtime_call_refs.global_i32_array_load,
+                &[base_hash, field_key, index_value],
+            );
+            Some(builder.inst_results(call)[0])
+        };
+        let value =
+            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, field_type);
+        if aos {
+            builder
+                .ins()
+                .call(runtime_call_refs.global_i32_store, &[field_key, value]);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_i32_array_store,
+                &[base_hash, field_key, index_value, value],
+            );
+        }
+        return Ok(());
+    }
+
+    if field_type == TYPE_ID_BOOL {
+        if op != AssignOp::Set {
+            return Err(format!(
+                "bool assignment only supports '=' in current jit path for struct view field '{}'",
+                suffix
+            ));
+        }
+        if aos {
+            builder
+                .ins()
+                .call(runtime_call_refs.global_i32_store, &[field_key, rhs.value]);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_i32_array_store,
+                &[base_hash, field_key, index_value, rhs.value],
+            );
+        }
+        return Ok(());
+    }
+
+    let lhs = match (field_type, op) {
+        (_, AssignOp::Set) => None,
+        (TYPE_ID_F32, AssignOp::Mod) => {
+            return Err(format!(
+                "'%=' is unsupported for f32 struct view field '{}'",
+                suffix
+            ));
+        }
+        (TYPE_ID_F64, AssignOp::Mod) => {
+            return Err(format!(
+                "'%=' is unsupported for f64 struct view field '{}'",
+                suffix
+            ));
+        }
+        (TYPE_ID_F32, _) => {
+            let call = if aos {
+                builder
+                    .ins()
+                    .call(runtime_call_refs.global_f32_load, &[field_key])
+            } else {
+                builder.ins().call(
+                    runtime_call_refs.global_f32_array_load,
+                    &[base_hash, field_key, index_value],
+                )
+            };
+            Some(builder.inst_results(call)[0])
+        }
+        (TYPE_ID_F64, _) => {
+            let call = if aos {
+                builder
+                    .ins()
+                    .call(runtime_call_refs.global_f64_load, &[field_key])
+            } else {
+                builder.ins().call(
+                    runtime_call_refs.global_f64_array_load,
+                    &[base_hash, field_key, index_value],
+                )
+            };
+            Some(builder.inst_results(call)[0])
+        }
+        _ => {
+            return Err(format!(
+                "unsupported struct view field type {} for suffix '{}'",
+                field_type, suffix
+            ));
+        }
+    };
+    let value = match op {
+        AssignOp::Set => rhs.value,
+        AssignOp::Add => builder
+            .ins()
+            .fadd(lhs.expect("compound assignment lhs"), rhs.value),
+        AssignOp::Sub => builder
+            .ins()
+            .fsub(lhs.expect("compound assignment lhs"), rhs.value),
+        AssignOp::Mul => builder
+            .ins()
+            .fmul(lhs.expect("compound assignment lhs"), rhs.value),
+        AssignOp::Div => builder
+            .ins()
+            .fdiv(lhs.expect("compound assignment lhs"), rhs.value),
+        AssignOp::Mod => unreachable!(),
+    };
+    if field_type == TYPE_ID_F32 {
+        if aos {
+            builder
+                .ins()
+                .call(runtime_call_refs.global_f32_store, &[field_key, value]);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f32_array_store,
+                &[base_hash, field_key, index_value, value],
+            );
+        }
+    } else if aos {
+        builder
+            .ins()
+            .call(runtime_call_refs.global_f64_store, &[field_key, value]);
+    } else {
+        builder.ins().call(
+            runtime_call_refs.global_f64_array_store,
+            &[base_hash, field_key, index_value, value],
+        );
+    }
     Ok(())
 }
 

@@ -4823,10 +4823,88 @@ mod tests {
             "struct Enemy { hp: i32; }\nglobal enemies: Enemy[2];\nfunction bad(arr: Enemy[2]): i32 {\n    let enemy = arr[0];\n    enemy.hp = 10;\n    return arr[0].hp;\n}\nfunction main(): i32 { return bad(enemies); }\n",
         );
         process.compile().expect("compile");
+        let clif = process
+            .clif_for_function_name("bad")
+            .expect("bad function CLIF");
+        assert!(
+            !clif.contains("brif"),
+            "known SoA alias retained storage dispatch:\n{clif}"
+        );
+        assert!(
+            !clif.contains("icmp"),
+            "known SoA alias retained storage test:\n{clif}"
+        );
         let value = process
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 10);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_specializes_nested_struct_array_alias_as_soa() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nstruct Game { enemies: Enemy[2]; }\nglobal State { game: Game; }\nfunction main(): i32 {\n    let enemy: Enemy = State.game.enemies[1];\n    enemy.hp = 17;\n    return enemy.hp;\n}\n",
+        );
+        process.compile().expect("compile");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            !clif.contains("brif"),
+            "known nested SoA alias retained storage dispatch:\n{clif}"
+        );
+        assert!(
+            !clif.contains("icmp"),
+            "known nested SoA alias retained storage test:\n{clif}"
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 17);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_specializes_global_struct_alias_as_aos() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Pipe { active: bool; }\nstruct StateData { pipe: Pipe; }\nglobal State: StateData;\nfunction main(): i32 {\n    let alias: Pipe = State.pipe;\n    alias.active = true;\n    if (alias.active) { return 1; }\n    return 0;\n}\n",
+        );
+        process.compile().expect("compile");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert_eq!(
+            clif.matches("brif").count(),
+            1,
+            "known AoS alias added storage dispatch:\n{clif}"
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_retains_dynamic_dispatch_for_struct_parameter() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Pipe { active: bool; }\nglobal pipe: Pipe;\nglobal pipes: Pipe[1];\nfunction read_active(value: Pipe): i32 { if (value.active) { return 1; } return 0; }\nfunction main(): i32 {\n    pipe.active = true;\n    pipes[0].active = true;\n    return read_active(pipe) + read_active(pipes[0]);\n}\n",
+        );
+        process.compile().expect("compile");
+        let clif = process
+            .clif_for_function_name("read_active")
+            .expect("read_active CLIF");
+        assert!(
+            clif.matches("brif").count() >= 2,
+            "mixed struct parameter lost storage dispatch:\n{clif}"
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 2);
     }
 
     #[cfg(windows)]
