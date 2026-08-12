@@ -509,6 +509,29 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     return observed
 
 
+def capture_until_regions_match(
+    adb: Path,
+    serial: str | None,
+    capture: Path,
+    expectations: dict,
+    deadline: float,
+) -> list[dict]:
+    """Wait for the stable marker's frame to reach Android's compositor."""
+    last_error: SeamError | None = None
+    while time.monotonic() < deadline:
+        capture.write_bytes(
+            _run(adb, serial, "exec-out", "screencap", "-p", text=False)
+        )
+        try:
+            return validate_regions(capture, expectations)
+        except SeamError as error:
+            last_error = error
+            time.sleep(0.25)
+    if last_error is not None:
+        raise last_error
+    raise SeamError("capture region deadline expired before the first frame")
+
+
 def parse_wm_size_override(output: str) -> str | None:
     match = re.search(r"^Override size:\s*(\d+x\d+)\s*$", output, re.MULTILINE)
     return match.group(1) if match else None
@@ -946,22 +969,16 @@ def main() -> int:
                         f"Android orientation stage {stage['name']} did not reach "
                         f"probe sequence {stage['sequence']}"
                     )
-                stage_capture_path.write_bytes(
-                    _run(
-                        args.adb,
-                        args.serial,
-                        "exec-out",
-                        "screencap",
-                        "-p",
-                        text=False,
-                    )
-                )
                 stage_expectations = {
                     "logical_size": expectations["logical_size"],
                     "regions": stage["regions"],
                 }
-                stage_regions = validate_regions(
-                    stage_capture_path, stage_expectations
+                stage_regions = capture_until_regions_match(
+                    args.adb,
+                    args.serial,
+                    stage_capture_path,
+                    stage_expectations,
+                    min(deadline, time.monotonic() + 10),
                 )
                 orientation_evidence.append(
                     {
@@ -977,10 +994,13 @@ def main() -> int:
                 markers, expectations, surfaces
             )
         log_path.write_text(log, encoding="utf-8")
-        capture_path.write_bytes(
-            _run(args.adb, args.serial, "exec-out", "screencap", "-p", text=False)
+        regions = capture_until_regions_match(
+            args.adb,
+            args.serial,
+            capture_path,
+            expectations,
+            min(deadline, time.monotonic() + 10),
         )
-        regions = validate_regions(capture_path, expectations)
         time.sleep(1)
         second_pid = _run(
             args.adb, args.serial, "shell", "pidof", package_id, required=False
