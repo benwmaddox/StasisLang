@@ -7527,6 +7527,17 @@ pub(crate) fn emit_simple_expression(
             } else if let Some(constant) = constant_values.get(name) {
                 emit_constant_value(builder, constant)
             } else {
+                if let Some(collection_path) = name.strip_suffix(".max_length") {
+                    if let Some(max_length) = global_path_types
+                        .get(collection_path)
+                        .and_then(|type_id| type_table.fixed_collection_len(*type_id))
+                    {
+                        return Ok(ValueBinding {
+                            value: builder.ins().iconst(types::I32, i64::from(max_length)),
+                            type_id: TYPE_ID_I32,
+                        });
+                    }
+                }
                 let Some(path_type) = global_path_types.get(name).copied() else {
                     return Err(format!("unknown identifier '{}' in current jit path", name));
                 };

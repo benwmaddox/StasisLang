@@ -3522,6 +3522,24 @@ function end_frame(): void { return; }
 
     #[cfg(windows)]
     #[test]
+    fn aot_fixed_and_view_max_length_link_and_execute() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let source = "global storage: i32[4];\nfunction capacity(values: i32[]): i32 { return values.max_length; }\nfunction main(): i32 { return storage.max_length * 10 + capacity(storage); }\n";
+        let mut process = AotProcess::new();
+        process.upsert_file("max_length.stasis", source);
+        process.compile().expect("compile max_length fixture");
+        if let Some(exit_code) =
+            run_linked_i32_noarg_fixture(&process, "main", "max_length", &link_config)
+        {
+            assert_eq!(exit_code, 44);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn aot_and_jit_execute_receiver_overloads_with_different_arities() {
         let Some(link_config) = resolve_link_config_for_smoke() else {
             return;
