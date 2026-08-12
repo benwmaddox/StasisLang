@@ -44,6 +44,7 @@ pub enum PatchReason {
     BodyChanged,
     AddedOrSignatureChanged,
     BecameReachable,
+    CompilerLayoutChanged,
     LoweredContractChanged,
     SccPeer { changed: FunctionKey },
     DirectCaller { callee: FunctionKey },

@@ -128,9 +128,11 @@ Each function produces:
 Rules:
 
 - If `fnBodyHash` is unchanged -> reuse target-independent analysis/lowering inputs when safe
-- If a layout-affecting semantic fact changes -> seed every function whose lowered storage facts
-  changed, then expand its reverse caller closure
+- If any compiler-visible layout fact changes -> recompile every reachable function into one
+  coherent generation
 - Unchanged reachable functions may reuse their accepted live machine code and addresses in JIT dev
+  only while the compiler-layout digest is unchanged. This keeps ordinary body and constant edits
+  selective without requiring per-function proofs for embedded struct offsets or collection shapes.
 
 ### 4.4 Generation Compatibility Rule
 
