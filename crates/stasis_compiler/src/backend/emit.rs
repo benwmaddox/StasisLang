@@ -9586,8 +9586,10 @@ fn static_index_bounds_proven(
     collection_len: usize,
     values_by_name: &BTreeMap<String, LocalBinding>,
 ) -> bool {
+    if let Some(value) = eval_const_i64(index) {
+        return usize::try_from(value).is_ok_and(|value| value < collection_len);
+    }
     match index {
-        SimpleExpr::Int(value) => usize::try_from(*value).is_ok_and(|value| value < collection_len),
         SimpleExpr::Identifier(name) => {
             values_by_name
                 .get(name)

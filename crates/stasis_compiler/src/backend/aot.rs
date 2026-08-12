@@ -2517,7 +2517,7 @@ mod tests {
         let mut process = AotProcess::new();
         process.upsert_file(
             "literal_bounds.stasis",
-            "global values: i32[4];\nfunction valid(): i32 { values[0] = 3; return values[3]; }\nfunction invalid(): i32 { return values[4]; }\nfunction main(): i32 { if (valid() < 0) { return invalid(); } return 0; }\n",
+            "global values: i32[4];\nfunction valid(): i32 { values[0] = 3; return values[1 + 2]; }\nfunction invalid(): i32 { return values[2 * 2]; }\nfunction main(): i32 { if (valid() < 0) { return invalid(); } return 0; }\n",
         );
         let captured = capture_aot_clif_by_function(&mut process);
         let valid = captured.get("valid").expect("valid CLIF");

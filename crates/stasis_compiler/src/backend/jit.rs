@@ -6050,7 +6050,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "literal_bounds.stasis",
-            "global values: i32[4];\nfunction main(): i32 { values[0] = 3; values[3] = 4; return values[0] + values[3]; }\n",
+            "global values: i32[4];\nfunction main(): i32 { values[0] = 3; values[1 + 2] = 4; return values[0] + values[6 / 2]; }\n",
         );
         process.compile().expect("compile literal bounds fixture");
         assert_eq!(
@@ -6084,6 +6084,46 @@ mod tests {
             clif.contains("trapz"),
             "out-of-bounds literal index omitted fatal check:\n{clif}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_does_not_prove_unevaluable_constant_array_index() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "constant_bounds.stasis",
+            "global values: i32[4];\nfunction divide_by_zero(): i32 { return values[1 / 0]; }\nfunction main(): i32 { if (values[0] < 0) { return divide_by_zero(); } return 0; }\n",
+        );
+        process
+            .compile()
+            .expect("compile invalid constant bounds fixture");
+        let clif = process
+            .clif_for_function_name("divide_by_zero")
+            .expect("unevaluable constant function CLIF");
+        assert!(
+            clif.contains("trap"),
+            "unevaluable constant index was incorrectly proven safe:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_rejects_negative_constant_array_index() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "constant_bounds.stasis",
+            "global values: i32[4];\nfunction main(): i32 { return values[0 - 1]; }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("reject negative constant index");
+        match error {
+            crate::compiler::CompileError::Backend(message) => assert!(
+                message.contains("negative collection indices"),
+                "unexpected negative-index diagnostic: {message}"
+            ),
+            other => panic!("unexpected negative-index error: {other:?}"),
+        }
     }
 
     #[cfg(windows)]
