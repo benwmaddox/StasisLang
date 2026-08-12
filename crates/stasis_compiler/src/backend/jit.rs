@@ -3,7 +3,8 @@ use crate::backend::emit::{
     DirectStorageBindings, RuntimeHelperLinkage, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 use crate::backend::patch_plan::{
-    capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReasonChain,
+    capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReason,
+    PatchReasonChain,
 };
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::state_layout::{build_state_memory_report, is_named_scalar_state_path};
@@ -55,7 +56,6 @@ fn elapsed_micros(started: Instant) -> u64 {
 struct FunctionLoweringReferences {
     paths: BTreeSet<String>,
     calls: BTreeSet<String>,
-    type_ids: BTreeSet<crate::frontend::types::TypeId>,
 }
 
 fn path_is_local(path: &str, scopes: &[BTreeSet<String>]) -> bool {
@@ -136,29 +136,8 @@ fn collect_target_references(
     scopes: &[BTreeSet<String>],
 ) {
     match target {
-        AssignTarget::Local(path) => {
-            if !path_is_local(path, scopes) {
-                references.paths.insert(path.clone());
-            }
-        }
-        AssignTarget::GlobalPath(path) => {
-            if !path_is_local(path, scopes) {
-                references.paths.insert(path.clone());
-            }
-        }
-        AssignTarget::IndexedPath {
-            collection_path,
-            index,
-            suffix,
-        } => {
-            if !path_is_local(collection_path, scopes) {
-                references.paths.insert(collection_path.clone());
-                if !suffix.is_empty() {
-                    references
-                        .paths
-                        .insert(format!("{collection_path}.{suffix}"));
-                }
-            }
+        AssignTarget::Local(_) | AssignTarget::GlobalPath(_) => {}
+        AssignTarget::IndexedPath { index, .. } => {
             collect_expression_references(index, references, scopes);
         }
     }
@@ -172,12 +151,9 @@ fn collect_statement_references(
     for statement in statements {
         match statement {
             SimpleStmt::Let {
-                name,
-                type_id,
-                expression,
+                name, expression, ..
             } => {
                 collect_expression_references(expression, references, scopes);
-                references.type_ids.extend(*type_id);
                 scopes
                     .last_mut()
                     .expect("function dependency scope")
@@ -229,12 +205,9 @@ fn collect_statement_references(
             SimpleStmt::Foreach {
                 item_name,
                 index_name,
-                collection_path,
                 body_statements,
+                ..
             } => {
-                if !path_is_local(collection_path, scopes) {
-                    references.paths.insert(collection_path.clone());
-                }
                 scopes.push(BTreeSet::from_iter(
                     std::iter::once(item_name.clone()).chain(index_name.clone()),
                 ));
@@ -246,85 +219,25 @@ fn collect_statement_references(
     }
 }
 
-fn paths_overlap(reference: &str, contract_path: &str) -> bool {
-    reference == contract_path
-        || contract_path
-            .strip_prefix(reference)
-            .is_some_and(|suffix| suffix.starts_with('.'))
-        || reference
-            .strip_prefix(contract_path)
-            .is_some_and(|suffix| suffix.starts_with('.'))
-}
-
 fn function_lowering_contract_hash(
-    function: &FunctionMeta,
     references: &FunctionLoweringReferences,
     analysis: &CompileAnalysisCache,
-    type_table: &TypeTable,
 ) -> u64 {
-    let mut type_ids: BTreeSet<_> = function
-        .params
-        .iter()
-        .copied()
-        .chain(std::iter::once(function.return_type))
-        .chain(references.type_ids.iter().copied())
-        .collect();
-
     let mut facts = Vec::new();
     for path in &references.paths {
         if let Some(value) = analysis.constant_values.get(path) {
             facts.push(format!("constant:{path}:{value:?}"));
         }
     }
-    for (path, type_id) in &analysis.global_path_types {
-        if references
-            .paths
-            .iter()
-            .any(|reference| paths_overlap(reference, path))
-        {
-            facts.push(format!("global:{path}:{type_id:?}"));
-            type_ids.insert(*type_id);
-        }
-    }
-    for (path, info) in &analysis.collection_infos {
-        if references
-            .paths
-            .iter()
-            .any(|reference| paths_overlap(reference, path))
-        {
-            facts.push(format!("collection:{path}:{info:?}"));
-            type_ids.extend(info.element_type);
-            type_ids.extend(info.field_types.values().copied());
-        }
-    }
     for signature in &analysis.resolved_extern_signatures {
         if references.calls.contains(&signature.name) {
             facts.push(format!("extern:{signature:?}"));
-            type_ids.extend(signature.params.iter().copied());
-            type_ids.insert(signature.return_type);
             if let Some(address) = analysis.extern_symbol_addresses.get(&signature.symbol) {
                 facts.push(format!("extern_address:{}:{address}", signature.symbol));
             }
         }
     }
 
-    let mut pending_types: Vec<_> = type_ids.iter().copied().collect();
-    let mut seen_types = BTreeSet::new();
-    while let Some(type_id) = pending_types.pop() {
-        if !seen_types.insert(type_id) {
-            continue;
-        }
-        if let Some(info) = type_table.type_info(type_id) {
-            facts.push(format!("type:{type_id:?}:{info:?}"));
-        }
-        if let Some(element_type) = type_table.indexed_element_type_id(type_id) {
-            pending_types.push(element_type);
-        }
-        if let Some(fields) = analysis.named_struct_field_types.get(&type_id) {
-            facts.push(format!("struct:{type_id:?}:{fields:?}"));
-            pending_types.extend(fields.values().copied());
-        }
-    }
     facts.sort();
     hash_text(&facts.join("\n"))
 }
@@ -934,6 +847,12 @@ impl JitProcess {
         let mut lowering_references = BTreeMap::new();
         let mut lowering_contracts = BTreeMap::new();
         let mut lowered_contract_changes = BTreeSet::new();
+        let compiler_layout_changed =
+            self.active_program_snapshot
+                .as_ref()
+                .is_some_and(|accepted| {
+                    accepted.compiler_layout_digest() != snapshot.compiler_layout_digest()
+                });
         for function_id in &reachable_ids {
             let function = self
                 .compiler
@@ -951,13 +870,11 @@ impl JitProcess {
                     function.name
                 ))
             })?;
+            if compiler_layout_changed {
+                lowered_contract_changes.insert(key.clone());
+            }
             if let Some(references) = self.accepted_lowering_references.get(key) {
-                let hash = function_lowering_contract_hash(
-                    function,
-                    references,
-                    &analysis,
-                    self.compiler.types(),
-                );
+                let hash = function_lowering_contract_hash(references, &analysis);
                 if self.accepted_lowering_contracts.get(key) != Some(&hash) {
                     lowered_contract_changes.insert(key.clone());
                 }
@@ -981,6 +898,13 @@ impl JitProcess {
             &lowered_contract_changes,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
+        let mut patch_plan = patch_plan;
+        if compiler_layout_changed {
+            for reason in &mut patch_plan.reasons {
+                reason.reason = PatchReason::CompilerLayoutChanged;
+                reason.path_from_change.clear();
+            }
+        }
         let plan_micros = elapsed_micros(plan_started);
         let emit_function_ids = patch_plan.re_jit_ids.clone();
         let source_paths = self
@@ -1089,8 +1013,7 @@ impl JitProcess {
                     .cloned()
                     .ok_or_else(|| format!("emitted function '{}' has no stable key", meta.name))?;
                 let references = collect_function_lowering_references(meta, hir);
-                let contract_hash =
-                    function_lowering_contract_hash(meta, &references, &analysis, lowered_types);
+                let contract_hash = function_lowering_contract_hash(&references, &analysis);
                 lowering_references.insert(function_key.clone(), references);
                 lowering_contracts.insert(function_key.clone(), contract_hash);
                 staged_functions.push((
@@ -3264,7 +3187,7 @@ mod tests {
     use crate::backend::EngineEntrypoints;
 
     #[test]
-    fn collection_contract_edit_rejits_only_consumers_and_callers() {
+    fn collection_layout_edit_rejits_every_reachable_function() {
         fn source(capacity: usize) -> String {
             format!(
                 "global values: i32[{capacity}];\nfunction read_value(): i32 {{ return values.max_length; }}\nfunction untouched(): i32 {{ return 7; }}\nfunction tick(): i32 {{ return read_value(); }}\nfunction render(): i32 {{ return untouched(); }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
@@ -3299,8 +3222,12 @@ mod tests {
             .collect();
         assert_eq!(
             emitted_names,
-            BTreeSet::from(["main", "read_value", "tick"])
+            BTreeSet::from(["main", "read_value", "render", "tick", "untouched"])
         );
+        assert!(metadata
+            .patch_reasons
+            .iter()
+            .all(|reason| reason.reason == PatchReason::CompilerLayoutChanged));
         let reused_names: BTreeSet<_> = metadata
             .reused_function_ids
             .iter()
@@ -3315,7 +3242,7 @@ mod tests {
                     .as_str()
             })
             .collect();
-        assert_eq!(reused_names, BTreeSet::from(["render", "untouched"]));
+        assert!(reused_names.is_empty());
         for artifact in process.artifacts() {
             if reused_names.contains(artifact.function_key.name.as_str()) {
                 assert_eq!(
@@ -3326,12 +3253,61 @@ mod tests {
                 );
             }
         }
-        assert_eq!(report.emit.emitted_functions, 3);
+        assert_eq!(report.emit.emitted_functions, 5);
         assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")
                 .expect("execute changed layout"),
             10
+        );
+    }
+
+    #[test]
+    fn non_state_struct_layout_edit_rejits_every_reachable_function() {
+        fn source(extra_field: bool) -> String {
+            let fields = if extra_field {
+                "value: i32; extra: f32;"
+            } else {
+                "value: i32;"
+            };
+            format!(
+                "struct LocalOnly {{ {fields} }}\nfunction tick(): i32 {{ return 1; }}\nfunction render(): i32 {{ return 2; }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("local_layout.stasis", source(false));
+        process.compile().expect("compile initial local layout");
+        process.upsert_file("local_layout.stasis", source(true));
+        let report = process.compile().expect("compile changed local layout");
+
+        let metadata = process.generation_metadata().expect("generation metadata");
+        let emitted_names: BTreeSet<_> = metadata
+            .emitted_function_ids
+            .iter()
+            .map(|id| {
+                process
+                    .compiler
+                    .functions()
+                    .iter()
+                    .find(|function| function.id == *id)
+                    .expect("emitted identity")
+                    .name
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(emitted_names, BTreeSet::from(["main", "render", "tick"]));
+        assert!(metadata
+            .patch_reasons
+            .iter()
+            .all(|reason| reason.reason == PatchReason::CompilerLayoutChanged));
+        assert!(metadata.reused_function_ids.is_empty());
+        assert_eq!(report.emit.emitted_functions, 3);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute changed local layout"),
+            3
         );
     }
 
@@ -3382,7 +3358,7 @@ mod tests {
     }
 
     #[test]
-    fn dotted_local_assignment_does_not_depend_on_same_named_global() {
+    fn global_struct_layout_change_rejits_local_and_global_consumers() {
         fn source(extra_field: bool) -> String {
             let global_fields = if extra_field {
                 "flag: i32; extra: i32;"
@@ -3397,11 +3373,6 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file("local_global.stasis", source(false));
         process.compile().expect("compile initial global layout");
-        let old_pointers: BTreeMap<_, _> = process
-            .artifacts()
-            .iter()
-            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
-            .collect();
         process.upsert_file("local_global.stasis", source(true));
         process.compile().expect("compile changed global layout");
 
@@ -3420,17 +3391,11 @@ mod tests {
                     .as_str()
             })
             .collect();
-        assert_eq!(emitted_names, BTreeSet::from(["main", "render"]));
-        for artifact in process.artifacts() {
-            if matches!(artifact.function_key.name.as_str(), "local_user" | "tick") {
-                assert_eq!(
-                    old_pointers.get(&artifact.function_key.name),
-                    Some(&artifact.code_ptr),
-                    "{} pointer",
-                    artifact.function_key.name
-                );
-            }
-        }
+        assert_eq!(
+            emitted_names,
+            BTreeSet::from(["local_user", "main", "render", "tick"])
+        );
+        assert!(metadata.reused_function_ids.is_empty());
     }
 
     #[test]

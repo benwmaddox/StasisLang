@@ -75,9 +75,9 @@ The compiler retains the accepted revision's canonical function identities, sign
 hashes, reachability, forward call graph, reverse caller graph, layout facts, and active body
 addresses. After whole-file checking it builds an immutable `PatchPlan`.
 
-The seed set contains reachable functions whose body, signature, or lowered contract changed;
-affected SCC peers; newly reachable functions; and functions whose embedded layout/global access
-facts changed. The planner then adds reverse direct callers whenever the callee address, ABI, or
+When the accepted and candidate compiler-layout digests differ, the seed set is every reachable
+function. Otherwise it contains reachable functions whose body, signature, or non-layout lowered
+contract changed; affected SCC peers; and newly reachable functions. The planner then adds reverse direct callers whenever the callee address, ABI, or
 lowered call contract requires a new caller body. A host-entry trampoline ends propagation only for
 the external host caller, which is not a Stasis call-graph node. If another Stasis function directly
 calls a host-entry function, that real reverse edge continues through the normal closure.
@@ -204,10 +204,12 @@ the compiler-owned bounded migration plan and isolated candidate storage. The st
 `on_code_swap(): void` target runs after migration and before publication against candidate state.
 It may reject the patch. Failure destroys candidate state; active code/state were never modified.
 
-Layout invalidation is precise where compiler facts prove which bodies embed changed offsets or
-storage contracts. If precision is unavailable, the planner conservatively seeds every reachable
-body that may access the changed storage, then applies the normal reverse-caller closure. It does
-not silently fall back to whole-program warm emission without reporting the reason and affected set.
+The compiler-layout digest covers named-struct fields, global path types, collection shapes, and
+their transitively referenced type layouts, including types not stored in persistent state. Any
+change rebuilds every reachable body before publication. The separate state-layout digest remains
+the authority for whether isolated state migration is required and compatible. This explicit
+generation boundary favors coherent embedded offsets and simpler lowering over layout-edit latency;
+body-only, constant, and extern-contract edits remain selective.
 
 ## Code lifetime and restart reclamation
 

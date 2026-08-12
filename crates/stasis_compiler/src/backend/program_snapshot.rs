@@ -22,6 +22,7 @@ use crate::frontend::{
     parser::parse_string_literal_text,
 };
 use crate::identity::SymbolId;
+use sha2::{Digest, Sha256};
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +98,7 @@ pub struct ProgramSnapshot {
     asset_references: Vec<AssetReference>,
     state_layout: StateLayout,
     layout_digest: [u8; 32],
+    compiler_layout_digest: [u8; 32],
     data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
     global_type_ids: BTreeMap<String, u16>,
     collections: Vec<ProgramCollectionMetadata>,
@@ -107,6 +109,54 @@ pub struct ProgramSnapshot {
     // Lowering-only detail remains private to the backend. Public consumers use the
     // typed snapshot records above instead of reconstructing parser metadata.
     pub(crate) analysis: CompileAnalysisCache,
+}
+
+fn compiler_layout_digest(
+    analysis: &CompileAnalysisCache,
+    functions: &[FunctionMeta],
+    types: &TypeTable,
+) -> [u8; 32] {
+    let mut facts = Vec::new();
+    let mut pending_type_ids = Vec::new();
+    for (type_id, fields) in &analysis.named_struct_field_types {
+        facts.push(format!("struct:{type_id}:{fields:?}"));
+        pending_type_ids.push(*type_id);
+        pending_type_ids.extend(fields.values().copied());
+    }
+    for (path, type_id) in &analysis.global_path_types {
+        facts.push(format!("global:{path}:{type_id}"));
+        pending_type_ids.push(*type_id);
+    }
+    for (path, info) in &analysis.collection_infos {
+        facts.push(format!("collection:{path}:{info:?}"));
+        pending_type_ids.extend(info.element_type);
+        pending_type_ids.extend(info.field_types.values().copied());
+    }
+    for function in functions {
+        pending_type_ids.extend(function.params.iter().copied());
+        pending_type_ids.push(function.return_type);
+    }
+    for signature in &analysis.resolved_extern_signatures {
+        pending_type_ids.extend(signature.params.iter().copied());
+        pending_type_ids.push(signature.return_type);
+    }
+    let mut seen_type_ids = BTreeSet::new();
+    while let Some(type_id) = pending_type_ids.pop() {
+        if !seen_type_ids.insert(type_id) {
+            continue;
+        }
+        if let Some(info) = types.type_info(type_id) {
+            facts.push(format!("type:{type_id}:{info:?}"));
+        }
+        if let Some(element_type) = types.indexed_element_type_id(type_id) {
+            pending_type_ids.push(element_type);
+        }
+    }
+    facts.sort();
+    let digest = Sha256::digest(facts.join("\n").as_bytes());
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    bytes
 }
 
 impl ProgramSnapshot {
@@ -126,6 +176,7 @@ impl ProgramSnapshot {
             types,
         );
         let layout_digest = state_layout_digest(&state_layout)?;
+        let compiler_layout_digest = compiler_layout_digest(&analysis, functions, types);
         let collections = analysis
             .collection_infos
             .iter()
@@ -154,6 +205,7 @@ impl ProgramSnapshot {
             asset_references,
             state_layout,
             layout_digest,
+            compiler_layout_digest,
             data_flow_summaries,
             global_type_ids: analysis.global_path_types.clone(),
             collections,
@@ -199,6 +251,12 @@ impl ProgramSnapshot {
     }
     pub fn layout_digest(&self) -> [u8; 32] {
         self.layout_digest
+    }
+    /// Digest of compiler-visible storage and type layouts that may be embedded in machine code.
+    /// This is intentionally distinct from `layout_digest`, which versions persistent state and
+    /// governs migration compatibility.
+    pub(crate) fn compiler_layout_digest(&self) -> [u8; 32] {
+        self.compiler_layout_digest
     }
     pub fn data_flow_summaries(&self) -> &[FunctionDataFlowSummary] {
         &self.data_flow_summaries
@@ -433,6 +491,35 @@ mod tests {
             original,
             jit.program_snapshot().expect("snapshot").layout_digest()
         );
+    }
+
+    #[test]
+    fn non_state_struct_change_only_changes_compiler_layout_digest() {
+        fn source(extra_field: bool) -> String {
+            let fields = if extra_field {
+                "value: i32; extra: f32;"
+            } else {
+                "value: i32;"
+            };
+            format!(
+                "struct LocalOnly {{ {fields} }}\nglobal score: i32;\nfunction main(): i32 {{ return score; }}\n"
+            )
+        }
+
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source(false));
+        jit.compile().expect("compile original local layout");
+        let original_state = jit.program_snapshot().expect("snapshot").layout_digest();
+        let original_compiler = jit
+            .program_snapshot()
+            .expect("snapshot")
+            .compiler_layout_digest();
+
+        jit.upsert_file("main.stasis", source(true));
+        jit.compile().expect("compile changed local layout");
+        let changed = jit.program_snapshot().expect("snapshot");
+        assert_eq!(original_state, changed.layout_digest());
+        assert_ne!(original_compiler, changed.compiler_layout_digest());
     }
 
     #[test]
