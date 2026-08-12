@@ -5,6 +5,8 @@ param(
     [switch]$SkipBuild,
     [int]$RenderTimeoutSeconds = 45,
     [int]$TotalTimeoutSeconds = 900,
+    [double]$MaxRenderP50Millis = 0,
+    [double]$MaxRenderP95Millis = 0,
     [string]$OutputPath = ""
 )
 
@@ -374,6 +376,48 @@ function Assert-RenderedVariant(
     }
     if ($RequireJit -and -not ($log -match 'CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=[1-9][0-9]*')) {
         throw "$Name did not log a successful non-empty Workshop JIT compile; see $logFile"
+    }
+    $observedAvd = (Invoke-Adb @("emu", "avd", "name") | Select-Object -First 1).Trim()
+    $observedSdk = (Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") | Select-Object -First 1).Trim()
+    if ($observedAvd -ne $AvdName -or $observedSdk -ne "35") {
+        throw "$Name benchmark identity mismatch: requested=$AvdName/API35 observed=$observedAvd/API$observedSdk"
+    }
+    $sourceStatus = @(& git -C $repoRoot status --porcelain)
+    if ($LASTEXITCODE -ne 0) { throw "Git source status could not be read for benchmark evidence" }
+    if ($sourceStatus) {
+        throw "$Name benchmark source is dirty; commit or remove source changes before publishing evidence"
+    }
+    $packageDump = @(Invoke-Adb @("shell", "dumpsys", "package", $Package)) -join "`n"
+    $versionName = [regex]::Match($packageDump, '(?m)^\s*versionName=([^\r\n]+)').Groups[1].Value.Trim()
+    $versionCode = [regex]::Match($packageDump, '(?m)^\s*versionCode=(\d+)').Groups[1].Value
+    $metadataPath = Join-Path $artifactRoot "$Name-performance-metadata.json"
+    @{
+        scene = "render_parity"
+        git_revision = (& git -C $repoRoot rev-parse HEAD).Trim()
+        source_dirty = $false
+        apk_sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
+        package_version = "$versionName ($versionCode)"
+        device_model = (Invoke-Adb @("shell", "getprop", "ro.product.model") | Select-Object -First 1).Trim()
+        device_fingerprint = (Invoke-Adb @("shell", "getprop", "ro.build.fingerprint") | Select-Object -First 1).Trim()
+        serial = $serial
+        avd = $observedAvd
+        android_sdk = [int]$observedSdk
+    } | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
+    $performanceArguments = @(
+        (Join-Path $repoRoot "tools\ci\verify_android_render_performance.py"),
+        "--log", $logFile,
+        "--metadata", $metadataPath,
+        "--evidence", (Join-Path $artifactRoot "$Name-performance.json")
+    )
+    if ($MaxRenderP50Millis -gt 0) {
+        $performanceArguments += @("--max-p50-ms", "$MaxRenderP50Millis")
+    }
+    if ($MaxRenderP95Millis -gt 0) {
+        $performanceArguments += @("--max-p95-ms", "$MaxRenderP95Millis")
+    }
+    & python @performanceArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Name render performance evidence failed; see $logFile"
     }
     if (-not $renderPassed) {
         throw "$Name render acceptance timed out: $lastFailure; see $artifactRoot"
