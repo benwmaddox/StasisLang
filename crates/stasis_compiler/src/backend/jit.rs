@@ -2770,7 +2770,7 @@ fn build_direct_storage_bindings(
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
                     storage_bytes: storage_kind_bytes(kind),
-                    static_len: None,
+                    static_len: Some(info.len as usize),
                 },
             );
         }
@@ -2794,7 +2794,7 @@ fn build_direct_storage_bindings(
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
                     storage_bytes: storage_kind_bytes(kind),
-                    static_len: None,
+                    static_len: Some(info.len as usize),
                 },
             );
         }
@@ -3607,7 +3607,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_foreach_caps_iteration_at_rebound_storage_length() {
+    fn direct_foreach_rejects_backing_shorter_than_fixed_capacity() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "rebound_foreach.stasis",
@@ -3644,7 +3644,11 @@ mod tests {
             weights.len(),
         );
 
-        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 15);
+        assert_eq!(
+            process.execute_i32_noarg_by_name("main").unwrap(),
+            0,
+            "short host arrays must not replace fixed-capacity backing"
+        );
     }
 
     #[test]
@@ -5635,7 +5639,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "direct_storage.stasis",
-            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n    let negative: i32 = 0 - 1;\n    ints[negative] = 99;\n    ints[8] = 88;\n    let result: i32 = count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n    if (ints[negative] != 0) { return 1; }\n    if (ints[8] != 0) { return 2; }\n    if (ratio < 1.4) { return 3; }\n    if (precise < 2.4) { return 4; }\n    if (floats[1] < 3.4) { return 5; }\n    if (doubles[0] < 4.4) { return 6; }\n    if (enemies[0].speed < 6.4) { return 7; }\n    return result;\n}\n",
+            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n    let result: i32 = count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n    if (ratio < 1.4) { return 3; }\n    if (precise < 2.4) { return 4; }\n    if (floats[1] < 3.4) { return 5; }\n    if (doubles[0] < 4.4) { return 6; }\n    if (enemies[0].speed < 6.4) { return 7; }\n    return result;\n}\n",
         );
         process.compile().expect("compile direct storage fixture");
         assert_eq!(
@@ -5654,6 +5658,59 @@ mod tests {
         assert!(
             !has_call_instruction,
             "core global storage emitted a runtime call:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_elides_static_array_checks_for_canonical_max_length_loop() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "global values: i32[4];\nfunction main(): i32 {\n    let total: i32 = 0;\n    let i: i32 = 0;\n    for (i = 0; i < values.max_length; i = i + 1) {\n        total += values[i];\n    }\n    return total;\n}\n",
+        );
+        process.compile().expect("compile proven bounds fixture");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(clif.contains("load.i32"), "expected direct load:\n{clif}");
+        assert!(
+            !clif.contains("trapz"),
+            "proven loop retained array bounds trap:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_preserves_proven_bounds_through_struct_element_alias() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "struct Enemy { hp: i32; }\nglobal enemies: Enemy[4];\nfunction main(): i32 {\n    let total: i32 = 0;\n    let i: i32 = 0;\n    for (i = 0; i < enemies.max_length; i = i + 1) {\n        let enemy: Enemy = enemies[i];\n        total += enemy.hp;\n    }\n    return total;\n}\n",
+        );
+        process.compile().expect("compile alias bounds fixture");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            clif.contains("load.i32"),
+            "expected direct alias load:\n{clif}"
+        );
+        assert!(
+            !clif.contains("trapz"),
+            "proven struct alias retained array bounds trap:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_retains_fatal_check_for_unproven_static_array_index() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "global values: i32[4];\nfunction read(index: i32): i32 { return values[index]; }\nfunction main(): i32 { return read(0); }\n",
+        );
+        process.compile().expect("compile checked bounds fixture");
+        let clif = process.clif_for_function_name("read").expect("read CLIF");
+        assert!(
+            clif.contains("trapz"),
+            "unproven static array index omitted fatal check:\n{clif}"
         );
     }
 
@@ -5698,28 +5755,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_direct_array_bounds_follow_between_tick_rebinding() {
+    fn jit_rejects_backing_shorter_than_compiled_fixed_array() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "resize.stasis",
             "global values: i32[2];\nfunction main(): i32 { return values[3]; }\n",
         );
         process.compile().expect("compile resize fixture");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("initial run"),
-            0
-        );
-
         let hash = hash_global_path("values");
         let expanded = Box::leak(Box::new([1, 2, 3, 44]));
         stasis_dynload::register_global_i32_array(hash, 0, expanded.as_mut_ptr(), expanded.len());
         assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("expanded run"),
-            44
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash,
+                0,
+            ),
+            Some(expanded.len())
         );
 
         let contracted = Box::leak(Box::new([9]));
@@ -5730,10 +5782,13 @@ mod tests {
             contracted.len(),
         );
         assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("contracted run"),
-            0
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash,
+                0,
+            ),
+            Some(expanded.len()),
+            "short host backing replaced compiled fixed-array storage"
         );
     }
 

@@ -1613,6 +1613,19 @@ fn direct_storage_slots() -> &'static Mutex<HashMap<StorageKey, Box<JitStorageSl
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn direct_array_required_lengths() -> &'static Mutex<HashMap<StorageKey, usize>> {
+    static TABLE: OnceLock<Mutex<HashMap<StorageKey, usize>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn accepts_direct_array_rebind(key: StorageKey, len: usize) -> bool {
+    direct_array_required_lengths()
+        .lock()
+        .expect("direct array required-length table mutex poisoned")
+        .get(&key)
+        .is_none_or(|required| len >= *required)
+}
+
 fn guest_execution_count() -> &'static AtomicUsize {
     static COUNT: AtomicUsize = AtomicUsize::new(0);
     &COUNT
@@ -1676,6 +1689,19 @@ pub fn direct_array_storage_slot_address(
     direct_storage_slot_address(kind, collection_hash, field_hash)
 }
 
+#[doc(hidden)]
+pub fn direct_array_storage_slot_len_for_test(
+    kind: JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+) -> Option<usize> {
+    direct_storage_slots()
+        .lock()
+        .expect("direct storage slot table mutex poisoned")
+        .get(&(kind, collection_hash, field_hash))
+        .map(|slot| slot.len)
+}
+
 fn direct_storage_slot_address(
     kind: JitStorageKind,
     collection_hash: i32,
@@ -1736,6 +1762,10 @@ pub fn provision_direct_array_storage(
         }
     }
     let (data, actual_len) = registered_storage(kind, collection_hash, field_hash)?;
+    direct_array_required_lengths()
+        .lock()
+        .expect("direct array required-length table mutex poisoned")
+        .insert(key, len);
     update_direct_storage_slot(key, data, actual_len);
     Ok(())
 }
@@ -2375,6 +2405,10 @@ pub fn clear_registered_global_memory() {
         .lock()
         .expect("direct storage slot table mutex poisoned")
         .clear();
+    direct_array_required_lengths()
+        .lock()
+        .expect("direct array required-length table mutex poisoned")
+        .clear();
 }
 
 #[derive(Debug, Clone)]
@@ -2754,6 +2788,9 @@ pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::I32, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::I32);
     remove_replaced_owned_array(key, ptr as usize, owned_i32_arrays());
@@ -2806,6 +2843,9 @@ pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::F32, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     remove_replaced_owned_array(key, ptr as usize, owned_f32_arrays());
     let table = registered_f32_arrays();
@@ -2827,6 +2867,9 @@ pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::F64, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     remove_replaced_owned_array(key, ptr as usize, owned_f64_arrays());
     let table = registered_f64_arrays();
@@ -2909,6 +2952,9 @@ pub fn register_global_u16_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::U16, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::U16);
     remove_replaced_owned_array(key, ptr as usize, owned_u16_arrays());
@@ -2930,6 +2976,9 @@ pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::U8, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::U8);
     remove_replaced_owned_array(key, ptr as usize, owned_u8_arrays());

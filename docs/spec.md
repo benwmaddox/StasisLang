@@ -88,6 +88,13 @@ String-like storage is fixed-layout and deterministic.
 Header access:
 - Header fields are accessed via built-in properties (e.g. `.max_length`, `.length`, `.char_length`), not by indexing into the header.
 - Negative indices are not allowed in source-level collection indexing.
+- Access outside a fixed array's declared `0..max_length` range is a fatal runtime error. Reads do
+  not synthesize a default value and writes are not silently ignored.
+- JIT host backing may be rebound between guest execution windows only when it remains at least as
+  large as the compiled fixed-array declaration. Layout changes invalidate dependent compiled
+  functions through the normal selective-generation contract before new bounds become active.
+- A compiler-proven index range may omit the runtime check. The fatal semantics remain the fallback
+  whenever the proof is absent.
 
 `Type[]` call-site compatibility:
 - A `Type[]` parameter is a view/reference type and may accept storage values with different fixed capacities (`Type[N]`, `Type[M]`, ...).

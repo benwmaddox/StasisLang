@@ -12,7 +12,7 @@ use crate::ir::hir::{DebugStatement, FunctionHIR};
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
     immediates::{Ieee32, Ieee64},
-    types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, Value,
+    types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, TrapCode, Value,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
@@ -1589,6 +1589,7 @@ pub(crate) struct StructViewValue {
     pub(crate) len: Value,
     pub(crate) storage_kind: StructViewStorageKind,
     pub(crate) known_collection_hash: Option<i32>,
+    pub(crate) bounds_proven: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1603,6 +1604,7 @@ pub(crate) struct LocalBinding {
     pub(crate) var: Variable,
     pub(crate) type_id: TypeId,
     pub(crate) struct_view: Option<StructViewBinding>,
+    pub(crate) proven_index_upper: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -1611,6 +1613,7 @@ pub(crate) struct StructViewBinding {
     pub(crate) len_var: Variable,
     pub(crate) storage_kind: StructViewStorageKind,
     pub(crate) known_collection_hash: Option<i32>,
+    pub(crate) bounds_proven: bool,
 }
 
 pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuilt, Finalize>(
@@ -1789,6 +1792,7 @@ where
                             len_var,
                             storage_kind: StructViewStorageKind::Dynamic,
                             known_collection_hash: None,
+                            bounds_proven: false,
                         }),
                     )
                 } else {
@@ -1822,6 +1826,7 @@ where
                     var: variable,
                     type_id: param_type,
                     struct_view,
+                    proven_index_upper: None,
                 },
             );
         }
@@ -4177,6 +4182,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
             source_info,
             field_name,
             source_index_binding,
+            false,
         )?;
         emit_indexed_collection_assignment(
             builder,
@@ -4406,6 +4412,7 @@ pub(crate) fn try_emit_struct_copy_from_indexed_to_global(
             source_info,
             field_name,
             source_index_binding,
+            false,
         )?;
         let target_field = format!("{target_prefix}{field_name}");
         emit_global_assignment(
@@ -4766,7 +4773,9 @@ pub(crate) fn emit_simple_statements(
                                 len_var,
                                 storage_kind: struct_view.storage_kind,
                                 known_collection_hash: struct_view.known_collection_hash,
+                                bounds_proven: struct_view.bounds_proven,
                             }),
+                            proven_index_upper: None,
                         },
                     );
                     continue;
@@ -4828,6 +4837,7 @@ pub(crate) fn emit_simple_statements(
                         var: variable,
                         type_id: local_type_id,
                         struct_view: None,
+                        proven_index_upper: None,
                     },
                 );
             }
@@ -5886,6 +5896,17 @@ pub(crate) fn emit_simple_statements(
                     expected_return_type,
                     next_variable,
                 )?;
+                if let Some((index_name, upper)) = canonical_fixed_array_loop_bound(
+                    init,
+                    condition,
+                    step,
+                    body_statements,
+                    collection_infos,
+                ) {
+                    if let Some(binding) = loop_values.get_mut(&index_name) {
+                        binding.proven_index_upper = Some(upper);
+                    }
+                }
 
                 let condition_block = builder.create_block();
                 let body_block = builder.create_block();
@@ -6259,6 +6280,7 @@ pub(crate) fn emit_simple_statements(
                             var: index_var,
                             type_id: TYPE_ID_I32,
                             struct_view: None,
+                            proven_index_upper: Some(collection_info.len as usize),
                         },
                     );
                 }
@@ -7156,6 +7178,7 @@ pub(crate) fn try_emit_struct_view_value(
                         len: builder.use_var(struct_view.len_var),
                         storage_kind: struct_view.storage_kind,
                         known_collection_hash: struct_view.known_collection_hash,
+                        bounds_proven: struct_view.bounds_proven,
                     }));
                 }
             }
@@ -7175,6 +7198,7 @@ pub(crate) fn try_emit_struct_view_value(
                             ForeachCollectionHandle::PathHash(hash) => Some(hash),
                             ForeachCollectionHandle::LocalVar(_) => None,
                         },
+                        bounds_proven: true,
                     }));
                 }
             }
@@ -7196,6 +7220,7 @@ pub(crate) fn try_emit_struct_view_value(
                         len,
                         storage_kind: StructViewStorageKind::Aos,
                         known_collection_hash: None,
+                        bounds_proven: true,
                     }));
                 }
             }
@@ -7282,6 +7307,11 @@ pub(crate) fn try_emit_struct_view_value(
                 storage_kind: StructViewStorageKind::Soa,
                 known_collection_hash: (!values_by_name.contains_key(collection_path))
                     .then(|| hash_global_path(collection_path)),
+                bounds_proven: known_len.is_some_and(|len| {
+                    matches!(index.as_ref(), SimpleExpr::Identifier(name)
+                        if values_by_name.get(name).and_then(|binding| binding.proven_index_upper)
+                            == Some(len as usize))
+                }),
             }))
         }
         _ => Ok(None),
@@ -7542,6 +7572,9 @@ pub(crate) fn emit_simple_expression(
                 named_struct_field_types,
                 foreach_bindings,
             )?;
+            let bounds_proven = matches!(index.as_ref(), SimpleExpr::Identifier(name)
+                if values_by_name.get(name).and_then(|binding| binding.proven_index_upper)
+                    == Some(collection_info.len as usize));
             emit_indexed_collection_load(
                 builder,
                 runtime_call_refs,
@@ -7550,6 +7583,7 @@ pub(crate) fn emit_simple_expression(
                 collection_info,
                 suffix,
                 index_binding,
+                bounds_proven,
             )
         }
         SimpleExpr::Call { target, args } => {
@@ -8509,6 +8543,7 @@ pub(crate) fn emit_struct_view_field_load(
             suffix,
             field_type,
             None,
+            true,
         );
     }
     if binding.storage_kind == StructViewStorageKind::Soa {
@@ -8522,6 +8557,7 @@ pub(crate) fn emit_struct_view_field_load(
             suffix,
             field_type,
             direct_array,
+            binding.bounds_proven,
         );
     }
     let aos_condition = builder
@@ -8548,6 +8584,7 @@ pub(crate) fn emit_struct_view_field_load(
         suffix,
         field_type,
         None,
+        true,
     )?
     .value;
     builder.ins().jump(merge_block, &[aos_value]);
@@ -8564,6 +8601,7 @@ pub(crate) fn emit_struct_view_field_load(
         suffix,
         field_type,
         direct_array,
+        binding.bounds_proven,
     )?
     .value;
     builder.ins().jump(merge_block, &[soa_value]);
@@ -8592,6 +8630,7 @@ fn emit_struct_view_field_load_for_storage(
     suffix: &str,
     field_type: TypeId,
     direct_array: Option<DirectArrayStorageRef>,
+    bounds_proven: bool,
 ) -> Result<ValueBinding, String> {
     let value = if aos {
         let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
@@ -8625,6 +8664,7 @@ fn emit_struct_view_field_load_for_storage(
             type_table,
             direct.storage_bytes,
             direct.static_len,
+            bounds_proven,
         )?
     } else {
         let field_hash = builder
@@ -8711,6 +8751,7 @@ pub(crate) fn emit_struct_view_field_assignment(
                 op,
                 rhs,
                 None,
+                true,
             );
         }
         StructViewStorageKind::Soa => {
@@ -8726,6 +8767,7 @@ pub(crate) fn emit_struct_view_field_assignment(
                 op,
                 rhs,
                 direct_array,
+                binding.bounds_proven,
             );
         }
         StructViewStorageKind::Dynamic => {}
@@ -8753,6 +8795,7 @@ pub(crate) fn emit_struct_view_field_assignment(
         op,
         rhs,
         None,
+        true,
     )?;
     builder.ins().jump(merge_block, &[]);
     builder.seal_block(aos_block);
@@ -8770,6 +8813,7 @@ pub(crate) fn emit_struct_view_field_assignment(
         op,
         rhs,
         direct_array,
+        binding.bounds_proven,
     )?;
     builder.ins().jump(merge_block, &[]);
     builder.seal_block(soa_block);
@@ -8792,6 +8836,7 @@ fn emit_struct_view_field_assignment_for_storage(
     op: AssignOp,
     rhs: ValueBinding,
     direct_array: Option<DirectArrayStorageRef>,
+    bounds_proven: bool,
 ) -> Result<(), String> {
     let field_key = if aos {
         emit_local_struct_field_path_hash(base_hash, suffix, builder)
@@ -8813,6 +8858,7 @@ fn emit_struct_view_field_assignment_for_storage(
                 type_table,
                 direct.storage_bytes,
                 direct.static_len,
+                bounds_proven,
             )?)
         };
         let value = if is_i32_abi_compatible_type(field_type, type_table) {
@@ -9363,6 +9409,7 @@ fn emit_direct_array_load(
     type_table: &TypeTable,
     storage_bytes: u8,
     static_len: Option<usize>,
+    bounds_proven: bool,
 ) -> Result<Value, String> {
     let data = emit_direct_slot_data_ptr(builder, slot_ref);
     let len = if let Some(len) = static_len {
@@ -9376,15 +9423,7 @@ fn emit_direct_array_load(
             stasis_dynload::JitStorageSlot::LEN_OFFSET,
         )
     };
-    let non_negative = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
     let index_i64 = builder.ins().sextend(types::I64, index);
-    let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index_i64, len);
-    let valid = builder.ins().band(non_negative, below_len);
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
     let result_type = if is_i32_abi_compatible_type(type_id, type_table) {
         types::I32
     } else if type_id == TYPE_ID_F32 {
@@ -9394,11 +9433,14 @@ fn emit_direct_array_load(
     } else {
         return Err(format!("unsupported direct array load type {type_id}"));
     };
-    builder.append_block_param(merge_block, result_type);
-    builder
-        .ins()
-        .brif(valid, valid_block, &[], invalid_block, &[]);
-    builder.switch_to_block(valid_block);
+    if !bounds_proven {
+        let non_negative = builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+        let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index_i64, len);
+        let valid = builder.ins().band(non_negative, below_len);
+        builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
+    }
     let shift = match storage_bytes {
         1 => 0,
         2 => 1,
@@ -9421,21 +9463,7 @@ fn emit_direct_array_load(
     } else {
         builder.ins().load(result_type, MemFlags::new(), address, 0)
     };
-    builder.ins().jump(merge_block, &[value]);
-    builder.seal_block(valid_block);
-    builder.switch_to_block(invalid_block);
-    let zero = if result_type == types::F32 {
-        builder.ins().f32const(Ieee32::with_float(0.0))
-    } else if result_type == types::F64 {
-        builder.ins().f64const(Ieee64::with_float(0.0))
-    } else {
-        builder.ins().iconst(types::I32, 0)
-    };
-    builder.ins().jump(merge_block, &[zero]);
-    builder.seal_block(invalid_block);
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    Ok(builder.block_params(merge_block)[0])
+    Ok(value)
 }
 
 fn emit_direct_array_store(
@@ -9465,12 +9493,7 @@ fn emit_direct_array_store(
     let index_i64 = builder.ins().sextend(types::I64, index);
     let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index_i64, len);
     let valid = builder.ins().band(non_negative, below_len);
-    let store_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder
-        .ins()
-        .brif(valid, store_block, &[], merge_block, &[]);
-    builder.switch_to_block(store_block);
+    builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
     let shift = match storage_bytes {
         1 => 0,
         2 => 1,
@@ -9492,11 +9515,99 @@ fn emit_direct_array_store(
         value
     };
     builder.ins().store(MemFlags::new(), stored, address, 0);
-    builder.ins().jump(merge_block, &[]);
-    builder.seal_block(store_block);
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
     Ok(())
+}
+
+fn statement_assigns_local(statement: &SimpleStmt, name: &str) -> bool {
+    match statement {
+        SimpleStmt::Assign {
+            target: AssignTarget::Local(target),
+            ..
+        }
+        | SimpleStmt::Convert {
+            target: AssignTarget::Local(target),
+            ..
+        } => target == name,
+        SimpleStmt::If {
+            then_statements,
+            else_statements,
+            ..
+        } => {
+            then_statements
+                .iter()
+                .any(|statement| statement_assigns_local(statement, name))
+                || else_statements.as_ref().is_some_and(|statements| {
+                    statements
+                        .iter()
+                        .any(|statement| statement_assigns_local(statement, name))
+                })
+        }
+        SimpleStmt::For {
+            init,
+            step,
+            body_statements,
+            ..
+        } => {
+            statement_assigns_local(init, name)
+                || statement_assigns_local(step, name)
+                || body_statements
+                    .iter()
+                    .any(|statement| statement_assigns_local(statement, name))
+        }
+        SimpleStmt::Foreach {
+            body_statements, ..
+        } => body_statements
+            .iter()
+            .any(|statement| statement_assigns_local(statement, name)),
+        _ => false,
+    }
+}
+
+fn canonical_fixed_array_loop_bound(
+    init: &SimpleStmt,
+    condition: &SimpleCondition,
+    step: &SimpleStmt,
+    body_statements: &[SimpleStmt],
+    collection_infos: &CollectionInfoMap,
+) -> Option<(String, usize)> {
+    let SimpleStmt::Assign {
+        target: AssignTarget::Local(index_name),
+        op: AssignOp::Set,
+        expression: SimpleExpr::Int(0),
+    } = init
+    else {
+        return None;
+    };
+    let SimpleCondition::Comparison {
+        lhs: SimpleExpr::Identifier(condition_index),
+        op: ComparisonOp::Lt,
+        rhs: SimpleExpr::Identifier(max_length_path),
+    } = condition
+    else {
+        return None;
+    };
+    let collection_path = max_length_path.strip_suffix(".max_length")?;
+    let SimpleStmt::Assign {
+        target: AssignTarget::Local(step_index),
+        op: AssignOp::Set,
+        expression: SimpleExpr::Binary { lhs, op: '+', rhs },
+    } = step
+    else {
+        return None;
+    };
+    if condition_index != index_name
+        || step_index != index_name
+        || lhs.as_ref() != &SimpleExpr::Identifier(index_name.clone())
+        || rhs.as_ref() != &SimpleExpr::Int(1)
+        || body_statements
+            .iter()
+            .any(|statement| statement_assigns_local(statement, index_name))
+    {
+        return None;
+    }
+    collection_infos
+        .get(collection_path)
+        .map(|info| (index_name.clone(), info.len as usize))
 }
 
 pub(crate) fn emit_indexed_collection_load(
@@ -9507,6 +9618,7 @@ pub(crate) fn emit_indexed_collection_load(
     collection_info: &ForeachCollectionInfo,
     suffix: &str,
     index_binding: ValueBinding,
+    bounds_proven: bool,
 ) -> Result<ValueBinding, String> {
     let resolved = resolve_collection_value_type(collection_info, suffix)?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
@@ -9529,6 +9641,7 @@ pub(crate) fn emit_indexed_collection_load(
                 type_table,
                 direct.storage_bytes,
                 direct.static_len,
+                bounds_proven && direct.static_len == Some(collection_info.len as usize),
             )?,
             type_id: resolved,
         });
@@ -9623,6 +9736,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value,
             )
@@ -9684,6 +9798,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value;
                 builder.ins().fadd(lhs, rhs.value)
@@ -9697,6 +9812,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value;
                 builder.ins().fsub(lhs, rhs.value)
@@ -9710,6 +9826,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value;
                 builder.ins().fmul(lhs, rhs.value)
@@ -9723,6 +9840,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value;
                 builder.ins().fdiv(lhs, rhs.value)
@@ -9764,6 +9882,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value;
                 builder.ins().fadd(lhs, rhs.value)
@@ -9777,6 +9896,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value;
                 builder.ins().fsub(lhs, rhs.value)
@@ -9790,6 +9910,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value;
                 builder.ins().fmul(lhs, rhs.value)
@@ -9803,6 +9924,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                     collection_info,
                     suffix,
                     index_binding,
+                    false,
                 )?
                 .value;
                 builder.ins().fdiv(lhs, rhs.value)
