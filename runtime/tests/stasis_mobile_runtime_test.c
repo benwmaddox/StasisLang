@@ -37,6 +37,7 @@ static int32_t host_request_sequences[8];
 static int gfx_submit_calls;
 static int shutdown_calls;
 static uint64_t performance_counter;
+static int performance_metrics_enabled = 1;
 static int performance_metrics_calls;
 static uint64_t reported_tick_us;
 static uint64_t reported_render_us;
@@ -128,6 +129,10 @@ void stasis_shutdown(void) {
 uint64_t stasis_host_performance_counter(void) {
     performance_counter += 10;
     return performance_counter;
+}
+
+int stasis_host_performance_metrics_enabled(void) {
+    return performance_metrics_enabled;
 }
 
 uint64_t stasis_host_performance_elapsed_us(uint64_t started, uint64_t finished) {
@@ -311,6 +316,7 @@ static void reset_fakes(void) {
     gfx_submit_calls = 0;
     shutdown_calls = 0;
     performance_counter = 0;
+    performance_metrics_enabled = 1;
     performance_metrics_calls = 0;
     reported_tick_us = 0;
     reported_render_us = 0;
@@ -390,6 +396,20 @@ static void test_runs_mobile_lifecycle(void) {
     assert(shutdown_calls == 1);
     assert(stasis_mobile_runtime_is_initialized() == 0);
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_NOT_INITIALIZED);
+}
+
+static void test_skips_hidden_performance_hud_measurement(void) {
+    StasisMobileRuntimeConfig valid_config = config();
+    StasisMobileGameEntries valid_entries = entries();
+    performance_metrics_enabled = 0;
+
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(tick_calls == 1);
+    assert(render_calls == 1);
+    assert(performance_counter == 0);
+    assert(performance_metrics_calls == 0);
+    stasis_mobile_runtime_shutdown();
 }
 
 static void test_rejects_duplicate_initialization(void) {
@@ -477,6 +497,8 @@ int main(void) {
     reset_fakes();
     test_rejects_invalid_configuration();
     test_runs_mobile_lifecycle();
+    reset_fakes();
+    test_skips_hidden_performance_hud_measurement();
     reset_fakes();
     test_rejects_duplicate_initialization();
     reset_fakes();

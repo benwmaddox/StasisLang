@@ -6265,6 +6265,7 @@ mod tests {
         assert!(java.contains("new File(root, \".\")"));
         assert!(java.contains("event.getPointerCount() >= 3"));
         assert!(java.contains("nativeReadPerformanceMetrics"));
+        assert!(java.contains("nativeSetPerformanceMetricsEnabled(show)"));
         assert!(java.contains("nativeReadRuntimeError"));
         assert!(java.contains("hudText.append(\"tick=\")"));
         assert!(java.contains("hudText.append(\"  render=\")"));
@@ -6281,6 +6282,9 @@ mod tests {
                 .expect("read Android asset bridge");
         assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeSetAssetRoot"));
         assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeReadPerformanceMetrics"));
+        assert!(
+            jni.contains("Java_com_example_mobile_MainActivity_nativeSetPerformanceMetricsEnabled")
+        );
         assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeReadRuntimeError"));
         assert!(!jni.contains("@STASIS_"));
         let runtime_source = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.c"))

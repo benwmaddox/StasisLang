@@ -4,6 +4,7 @@
 #include <string.h>
 
 void stasis_host_get_latest_performance_metrics(uint32_t *tick_us, uint32_t *render_us);
+void stasis_host_set_performance_metrics_enabled(int enabled);
 int stasis_host_copy_runtime_error(char *output, size_t output_size);
 
 #if defined(STASIS_ENABLE_SEAM_TESTS)
@@ -67,6 +68,17 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeReadPerformanceMetrics(
     jfloat values[2] = {(jfloat)tick_us / 1000.0f, (jfloat)render_us / 1000.0f};
     (*env)->SetFloatArrayRegion(env, output, 0, 2, values);
     return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetPerformanceMetricsEnabled(
+    JNIEnv *env,
+    jclass activity,
+    jboolean enabled
+) {
+    (void)env;
+    (void)activity;
+    stasis_host_set_performance_metrics_enabled(enabled == JNI_TRUE ? 1 : 0);
 }
 
 JNIEXPORT jstring JNICALL

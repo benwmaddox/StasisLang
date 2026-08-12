@@ -2453,11 +2453,15 @@ fn run_play_in_process_inner(
         )?;
 
         let run_tick = live.as_ref().is_none_or(LiveWorkspace::should_run_tick);
+        let measure_hud = gfx.host_performance_metrics_enabled()?;
         let mut tick_micros = 0;
         if run_tick {
-            let tick_started = Instant::now();
+            let measure_tick = measure_hud || tick_budget.is_some();
+            let tick_started = measure_tick.then(Instant::now);
             let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
-            tick_micros = tick_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            if let Some(tick_started) = tick_started {
+                tick_micros = tick_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            }
             if let Some(budget) = tick_budget.as_mut() {
                 budget.record(tick_micros);
             }
@@ -2465,14 +2469,18 @@ fn run_play_in_process_inner(
                 break;
             }
         }
-        let render_started = Instant::now();
+        let render_started = measure_hud.then(Instant::now);
         let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
-        let render_micros = render_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        let render_micros = render_started
+            .map(|started| started.elapsed().as_micros().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
         if render_rc != 0 {
             break;
         }
 
-        gfx.host_set_performance_metrics(tick_micros, render_micros)?;
+        if measure_hud {
+            gfx.host_set_performance_metrics(tick_micros, render_micros)?;
+        }
         gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
         if let Some(evidence) = frame_evidence.as_mut() {
             let submission = gfx.test_render_submission_state()?.ok_or_else(|| {
@@ -4194,6 +4202,7 @@ mod tests {
     fn windows_performance_hud_uses_frame_work_and_60_fps_budget() {
         for required in [
             "event.key.key == SDLK_F3",
+            "stasis_host_performance_metrics_enabled",
             "stasis_host_set_performance_metrics",
             "g_perf_pending_guest_render_us",
             "stasis_perf_elapsed_us(g_perf_render_started_counter, now)",
@@ -4206,8 +4215,12 @@ mod tests {
             );
         }
         assert!(
-            STASIS_RUNNER_SOURCE.contains("host_set_performance_metrics(tick_us, render_us)"),
-            "Windows AOT runner should feed tick and render timing into the shared HUD"
+            STASIS_RUNNER_SOURCE.contains("const int measure_hud = host_performance_metrics_enabled")
+                && STASIS_RUNNER_SOURCE.contains("if (measure_hud) QueryPerformanceCounter")
+                && STASIS_RUNNER_SOURCE.contains(
+                    "if (measure_hud && host_set_performance_metrics)"
+                ),
+            "Windows AOT runner should only measure tick and render while the shared HUD is visible"
         );
     }
 

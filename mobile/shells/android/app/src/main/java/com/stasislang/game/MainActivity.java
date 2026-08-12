@@ -36,6 +36,7 @@ public final class MainActivity extends SDLActivity {
     private static native void nativeSetAssetRoot(String path);
     private static native void nativeSetSeamTestId(String testId);
     private static native boolean nativeReadPerformanceMetrics(float[] output);
+    private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
     private static native String nativeReadRuntimeError();
 
     private final Handler hudHandler = new Handler(Looper.getMainLooper());
@@ -101,6 +102,7 @@ public final class MainActivity extends SDLActivity {
 
     @Override
     protected void onDestroy() {
+        nativeSetPerformanceMetricsEnabled(false);
         stopPerformanceHudUpdates();
         super.onDestroy();
     }
@@ -159,8 +161,11 @@ public final class MainActivity extends SDLActivity {
     private void togglePerformanceHud() {
         if (performanceHud == null) return;
         boolean show = performanceHud.getVisibility() != View.VISIBLE;
+        nativeSetPerformanceMetricsEnabled(show);
         performanceHud.setVisibility(show ? View.VISIBLE : View.GONE);
         if (show) {
+            tickMetric.clear();
+            renderMetric.clear();
             updatePerformanceHud();
         }
     }
@@ -399,6 +404,11 @@ public final class MainActivity extends SDLActivity {
             values[next] = value;
             next = (next + 1) % CAPACITY;
             if (count < CAPACITY) count++;
+        }
+
+        void clear() {
+            next = 0;
+            count = 0;
         }
 
         double average() {

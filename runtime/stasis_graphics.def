@@ -7,6 +7,8 @@ EXPORTS
     stasis_host_bulk_apply_requests
     stasis_host_bulk_step
     stasis_host_copy_runtime_error
+    stasis_host_performance_metrics_enabled
+    stasis_host_set_performance_metrics_enabled
     stasis_init_window
     stasis_get_window_size
     stasis_get_display_metrics

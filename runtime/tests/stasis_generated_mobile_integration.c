@@ -84,6 +84,7 @@ void stasis_gfx_submit_u8(int32_t *i32s, const float *f32s, const uint8_t *u8s) 
     submit_render_score = stasis_jit_global_i32_load(hash_path("render_score"));
 }
 uint64_t stasis_host_performance_counter(void) { return 100; }
+int stasis_host_performance_metrics_enabled(void) { return 1; }
 uint64_t stasis_host_performance_elapsed_us(uint64_t started, uint64_t finished) {
     return finished - started;
 }
