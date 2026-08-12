@@ -475,6 +475,10 @@ Interpretation:
 Field access on a struct view:
 - If `index < 0` (AoS): compute `field_path_hash = hash_combine(base, "." + field_suffix)` and load/store the scalar field at that global path.
 - Otherwise (SoA): compute `field_hash = hash(field_suffix)` and load/store at `(base, field_hash, index)` in the SoA field arrays.
+- Lowering preserves statically known backing provenance through local aliases. A global or nested
+  singleton struct view emits only the AoS field path, while an indexed struct-array element emits
+  only the SoA field path. The runtime `index < 0` dispatch remains for parameters or other views
+  whose callers can supply either backing kind.
 
 Rationale:
 - This allows the same function signature to accept either a single global struct or an element view from a struct array.
