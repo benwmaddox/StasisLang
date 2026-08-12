@@ -36,6 +36,20 @@ static int has_saved_value;
 static char saved_ascii[64];
 static int saved_ascii_length;
 static char clipboard_ascii[64] = "GG1-clipboard";
+static int profile_start_logs;
+static int profile_row_logs;
+static int profile_done_logs;
+static char profile_row[256];
+
+void stasis_host_log_message(const char *message) {
+    if (message == NULL) return;
+    if (strncmp(message, "STASIS_PROFILE_START|", 21) == 0) profile_start_logs += 1;
+    if (strncmp(message, "STASIS_PROFILE|", 15) == 0) {
+        profile_row_logs += 1;
+        snprintf(profile_row, sizeof(profile_row), "%s", message);
+    }
+    if (strncmp(message, "STASIS_PROFILE_DONE|", 20) == 0) profile_done_logs += 1;
+}
 
 int stasis_audio_init(int rate, int channels, int latency) {
     return rate > 0 && channels == 2 && latency > 0;
@@ -253,6 +267,17 @@ int main(void) {
     stasis_jit_register_code_ptr(30, (int64_t)(uintptr_t)&add_two);
     CHECK(stasis_jit_call_i32_2(30, 5, 7) == 12);
     CHECK(stasis_jit_call_i32_0(999) == 0);
+
+    stasis_jit_profile_register_function(77, "render");
+    stasis_jit_profile_configure(0, 1);
+    stasis_jit_profile_frame_begin();
+    stasis_jit_profile_frame_enter(77);
+    stasis_jit_profile_frame_leave(77);
+    stasis_jit_profile_frame_end();
+    CHECK(profile_start_logs == 1);
+    CHECK(profile_row_logs == 1);
+    CHECK(strncmp(profile_row, "STASIS_PROFILE|render|1|", 24) == 0);
+    CHECK(profile_done_logs == 1);
 
     stasis_mobile_aot_reset();
     CHECK(stasis_jit_global_i32_load(10) == 0);
