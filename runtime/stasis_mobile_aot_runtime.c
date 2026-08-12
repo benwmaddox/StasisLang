@@ -1,16 +1,24 @@
 #include "stasis_mobile_aot_runtime.h"
 
 #include <math.h>
+#include <inttypes.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #define STASIS_MOBILE_MAX_SCALARS 2048
 #define STASIS_MOBILE_MAX_ARRAYS 512
 #define STASIS_MOBILE_MAX_FUNCTIONS 1024
 #define STASIS_MOBILE_INITIAL_STRING_CAPACITY 512
 #define STASIS_MOBILE_MAX_ARRAY_LENGTH 1048576
+#define STASIS_MOBILE_MAX_PROFILE_FUNCTIONS 64
+#define STASIS_MOBILE_MAX_PROFILE_DEPTH 256
 
 int stasis_audio_init(int sample_rate, int channels, int target_latency_frames);
 void stasis_audio_shutdown(void);
@@ -51,6 +59,7 @@ int stasis_storage_load_ascii(const char *scope, const char *key, char *out, int
 int stasis_storage_save_ascii(const char *scope, const char *key, const char *value, int length);
 int stasis_clipboard_load_ascii(char *out, int capacity);
 int stasis_clipboard_save_ascii(const char *value, int length);
+void stasis_host_log_message(const char *message);
 
 typedef union StasisScalarValue {
     int32_t i32_value;
@@ -102,6 +111,178 @@ static size_t code_ptr_count;
 static StasisStringLiteral *strings;
 static size_t string_count;
 static size_t string_capacity;
+
+typedef struct StasisProfileAggregate {
+    int32_t function_id;
+    const char *name;
+    _Atomic uint64_t calls;
+    _Atomic uint64_t inclusive_ns;
+    _Atomic uint64_t exclusive_ns;
+    _Atomic uint64_t max_inclusive_ns;
+} StasisProfileAggregate;
+
+typedef struct StasisProfileFrame {
+    size_t aggregate_index;
+    uint64_t started_ns;
+    uint64_t child_ns;
+} StasisProfileFrame;
+
+static StasisProfileAggregate profile_aggregates[STASIS_MOBILE_MAX_PROFILE_FUNCTIONS];
+static size_t profile_aggregate_count;
+static int32_t profile_warmup_frames;
+static int32_t profile_sample_frames;
+static int32_t profile_frame_index;
+static _Atomic int profile_enabled;
+static _Thread_local StasisProfileFrame profile_stack[STASIS_MOBILE_MAX_PROFILE_DEPTH];
+static _Thread_local size_t profile_stack_depth;
+
+static uint64_t stasis_profile_now_ns(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+    if (!QueryPerformanceCounter(&counter) || !QueryPerformanceFrequency(&frequency) ||
+        frequency.QuadPart <= 0) return 0;
+    return (uint64_t)(counter.QuadPart / frequency.QuadPart) * UINT64_C(1000000000) +
+        (uint64_t)((counter.QuadPart % frequency.QuadPart) * UINT64_C(1000000000) /
+            frequency.QuadPart);
+#else
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+#endif
+}
+
+static void stasis_profile_reset_samples(void) {
+    size_t index;
+    for (index = 0; index < profile_aggregate_count; index += 1) {
+        atomic_store_explicit(&profile_aggregates[index].calls, 0, memory_order_relaxed);
+        atomic_store_explicit(&profile_aggregates[index].inclusive_ns, 0, memory_order_relaxed);
+        atomic_store_explicit(&profile_aggregates[index].exclusive_ns, 0, memory_order_relaxed);
+        atomic_store_explicit(&profile_aggregates[index].max_inclusive_ns, 0, memory_order_relaxed);
+    }
+}
+
+static void stasis_profile_reset(void) {
+    atomic_store_explicit(&profile_enabled, 0, memory_order_release);
+    memset(profile_aggregates, 0, sizeof(profile_aggregates));
+    profile_aggregate_count = 0;
+    profile_warmup_frames = 0;
+    profile_sample_frames = 0;
+    profile_frame_index = 0;
+    profile_stack_depth = 0;
+}
+
+static size_t stasis_profile_find(int32_t function_id) {
+    size_t index;
+    for (index = 0; index < profile_aggregate_count; index += 1) {
+        if (profile_aggregates[index].function_id == function_id) return index;
+    }
+    return STASIS_MOBILE_MAX_PROFILE_FUNCTIONS;
+}
+
+void stasis_jit_profile_register_function(int32_t function_id, const char *name) {
+    StasisProfileAggregate *aggregate;
+    if (name == NULL || stasis_profile_find(function_id) < profile_aggregate_count ||
+        profile_aggregate_count >= STASIS_MOBILE_MAX_PROFILE_FUNCTIONS) return;
+    aggregate = &profile_aggregates[profile_aggregate_count++];
+    aggregate->function_id = function_id;
+    aggregate->name = name;
+}
+
+void stasis_jit_profile_configure(int32_t warmup_frames, int32_t sample_frames) {
+    profile_warmup_frames = warmup_frames < 0 ? 0 : warmup_frames;
+    profile_sample_frames = sample_frames < 0 ? 0 : sample_frames;
+    profile_frame_index = 0;
+    profile_stack_depth = 0;
+    stasis_profile_reset_samples();
+    atomic_store_explicit(&profile_enabled, 0, memory_order_release);
+}
+
+void stasis_jit_profile_frame_begin(void) {
+    char line[160];
+    if (profile_aggregate_count == 0 || profile_sample_frames <= 0) return;
+    if (profile_frame_index == profile_warmup_frames) {
+        profile_stack_depth = 0;
+        stasis_profile_reset_samples();
+        atomic_store_explicit(&profile_enabled, 1, memory_order_release);
+        snprintf(line, sizeof(line),
+            "STASIS_PROFILE_START|warmup_frames=%d|sample_frames=%d|functions=%zu",
+            profile_warmup_frames, profile_sample_frames, profile_aggregate_count);
+        stasis_host_log_message(line);
+    }
+}
+
+static void stasis_profile_report(void) {
+    size_t index;
+    char line[512];
+    for (index = 0; index < profile_aggregate_count; index += 1) {
+        StasisProfileAggregate *aggregate = &profile_aggregates[index];
+        snprintf(line, sizeof(line),
+            "STASIS_PROFILE|%s|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%" PRIu64,
+            aggregate->name,
+            atomic_load_explicit(&aggregate->calls, memory_order_relaxed),
+            atomic_load_explicit(&aggregate->inclusive_ns, memory_order_relaxed),
+            atomic_load_explicit(&aggregate->exclusive_ns, memory_order_relaxed),
+            atomic_load_explicit(&aggregate->max_inclusive_ns, memory_order_relaxed));
+        stasis_host_log_message(line);
+    }
+    snprintf(line, sizeof(line), "STASIS_PROFILE_DONE|frames=%d", profile_sample_frames);
+    stasis_host_log_message(line);
+}
+
+void stasis_jit_profile_frame_end(void) {
+    if (profile_aggregate_count == 0 || profile_sample_frames <= 0) return;
+    profile_frame_index += 1;
+    if (profile_frame_index == profile_warmup_frames + profile_sample_frames) {
+        atomic_store_explicit(&profile_enabled, 0, memory_order_release);
+        profile_stack_depth = 0;
+        stasis_profile_report();
+    }
+}
+
+void stasis_jit_profile_frame_enter(int32_t function_id) {
+    size_t aggregate_index;
+    StasisProfileFrame *frame;
+    if (!atomic_load_explicit(&profile_enabled, memory_order_acquire) ||
+        profile_stack_depth >= STASIS_MOBILE_MAX_PROFILE_DEPTH) return;
+    aggregate_index = stasis_profile_find(function_id);
+    if (aggregate_index >= profile_aggregate_count) return;
+    frame = &profile_stack[profile_stack_depth++];
+    frame->aggregate_index = aggregate_index;
+    frame->started_ns = stasis_profile_now_ns();
+    frame->child_ns = 0;
+}
+
+void stasis_jit_profile_frame_leave(int32_t function_id) {
+    StasisProfileFrame frame;
+    StasisProfileAggregate *aggregate;
+    uint64_t finished_ns;
+    uint64_t inclusive_ns;
+    uint64_t exclusive_ns;
+    uint64_t observed_max;
+    if (!atomic_load_explicit(&profile_enabled, memory_order_acquire) ||
+        profile_stack_depth == 0) return;
+    frame = profile_stack[--profile_stack_depth];
+    aggregate = &profile_aggregates[frame.aggregate_index];
+    if (aggregate->function_id != function_id) {
+        profile_stack_depth = 0;
+        return;
+    }
+    finished_ns = stasis_profile_now_ns();
+    inclusive_ns = finished_ns >= frame.started_ns ? finished_ns - frame.started_ns : 0;
+    exclusive_ns = inclusive_ns >= frame.child_ns ? inclusive_ns - frame.child_ns : 0;
+    if (profile_stack_depth > 0) {
+        profile_stack[profile_stack_depth - 1].child_ns += inclusive_ns;
+    }
+    atomic_fetch_add_explicit(&aggregate->calls, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&aggregate->inclusive_ns, inclusive_ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(&aggregate->exclusive_ns, exclusive_ns, memory_order_relaxed);
+    observed_max = atomic_load_explicit(&aggregate->max_inclusive_ns, memory_order_relaxed);
+    while (observed_max < inclusive_ns &&
+        !atomic_compare_exchange_weak_explicit(
+            &aggregate->max_inclusive_ns, &observed_max, inclusive_ns,
+            memory_order_relaxed, memory_order_relaxed)) {}
+}
 
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity) {
     static const char hex[] = "0123456789abcdef";
@@ -230,6 +411,7 @@ static void register_array(
 
 void stasis_mobile_aot_reset(void) {
     size_t index;
+    stasis_profile_reset();
     for (index = 0; index < array_count; index += 1) {
         if (!arrays[index].external) free(arrays[index].data);
     }

@@ -46,6 +46,7 @@ pub struct AotProcess {
     program_snapshot: Option<ProgramSnapshot>,
     last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
     required_emit_roots: Vec<String>,
+    profile_function_names: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +92,7 @@ impl AotProcess {
             program_snapshot: None,
             last_failed_source_diagnostic: None,
             required_emit_roots: Vec::new(),
+            profile_function_names: BTreeSet::new(),
         }
     }
 
@@ -114,6 +116,24 @@ impl AotProcess {
         self.required_emit_roots.clear();
         self.required_emit_roots.extend_from_slice(roots);
         self.compiler.set_analysis_required_roots(roots);
+    }
+
+    pub fn set_profile_functions(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+    ) -> Result<(), String> {
+        if self.program_snapshot.is_some() || !self.artifacts.is_empty() {
+            return Err(
+                "AOT function profiling must be configured before the first compilation"
+                    .to_string(),
+            );
+        }
+        self.profile_function_names = names
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        Ok(())
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
@@ -236,6 +256,7 @@ impl AotProcess {
             optimization_profile,
             referenced_string_literals,
             target,
+            profile_function_names,
         ) = (
             &mut self.compiler,
             &mut self.next_object_index,
@@ -244,6 +265,7 @@ impl AotProcess {
             self.optimization_profile,
             &mut self.referenced_string_literals,
             self.target.clone(),
+            self.profile_function_names.clone(),
         );
         let emit = compiler.emit_pass_for_ids_with(
             &emit_function_ids,
@@ -255,6 +277,7 @@ impl AotProcess {
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
                 let mut function_string_literals = BTreeMap::new();
+                let profile_instrumentation = profile_function_names.contains(&meta.name);
                 let bytes = compile_function_to_object_bytes(
                     meta,
                     hir,
@@ -269,6 +292,7 @@ impl AotProcess {
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
                     &direct_storage,
+                    profile_instrumentation,
                 )?;
                 referenced_string_literals
                     .insert(meta.id, function_string_literals.keys().copied().collect());
@@ -1183,6 +1207,7 @@ fn compile_function_to_object_bytes(
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
     direct_storage: &DirectStorageBindings,
+    profile_instrumentation: bool,
 ) -> Result<Vec<u8>, String> {
     let mut flag_builder = settings::builder();
     flag_builder
@@ -1233,6 +1258,7 @@ fn compile_function_to_object_bytes(
         Some(direct_storage),
         None,
         false,
+        profile_instrumentation,
         |statement| record_string_literals_in_stmt(statement, referenced_string_literals),
         |_meta, _func| {
             #[cfg(test)]
@@ -2510,6 +2536,27 @@ mod tests {
         assert_eq!(
             undefined_runtime_symbols(&process),
             BTreeSet::from(["stasis_jit_print_i32".to_string()])
+        );
+    }
+
+    #[test]
+    fn selectively_profiled_aot_exposes_hooks_only_for_named_function() {
+        let mut process = AotProcess::new();
+        process
+            .set_profile_functions(["helper".to_string()])
+            .expect("configure AOT profiler");
+        process.upsert_file(
+            "profile.stasis",
+            "function helper(): i32 { return 7; }\nfunction main(): i32 { return helper(); }\n",
+        );
+        process.compile().expect("compile profiled AOT fixture");
+
+        assert_eq!(
+            undefined_runtime_symbols(&process),
+            BTreeSet::from([
+                "stasis_jit_profile_frame_enter".to_string(),
+                "stasis_jit_profile_frame_leave".to_string(),
+            ])
         );
     }
 

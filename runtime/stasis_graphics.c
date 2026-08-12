@@ -112,6 +112,10 @@ static void log_package_provenance(void) {
 #define STASIS_EXPORT __attribute__((visibility("default")))
 #endif
 
+STASIS_EXPORT void stasis_host_log_message(const char* message) {
+    if (message && *message) SDL_Log("%s", message);
+}
+
 STASIS_EXPORT void stasis_set_window_size(int width, int height);
 STASIS_EXPORT int stasis_set_maximized(int maximized);
 STASIS_EXPORT int stasis_get_time_us(void);

@@ -40,6 +40,10 @@ static uint64_t performance_counter;
 static int performance_metrics_calls;
 static uint64_t reported_tick_us;
 static uint64_t reported_render_us;
+static int profile_start_logs;
+static int profile_row_logs;
+static int profile_done_logs;
+static char profile_row[256];
 static int32_t game_host_i32[768];
 static float game_host_f32[64];
 static int32_t game_gfx_cmd_i32[STASIS_RENDER_I32_COUNT];
@@ -134,6 +138,15 @@ void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us) {
     performance_metrics_calls += 1;
     reported_tick_us = tick_us;
     reported_render_us = render_us;
+}
+
+void stasis_host_log_message(const char *message) {
+    if (strncmp(message, "STASIS_PROFILE_START|", 21) == 0) profile_start_logs += 1;
+    if (strncmp(message, "STASIS_PROFILE|", 15) == 0) {
+        profile_row_logs += 1;
+        snprintf(profile_row, sizeof(profile_row), "%s", message);
+    }
+    if (strncmp(message, "STASIS_PROFILE_DONE|", 20) == 0) profile_done_logs += 1;
 }
 
 int stasis_audio_init(int rate, int channels, int latency) { return rate + channels + latency; }
@@ -238,6 +251,8 @@ static void bind_runtime(void) {
         hash_path("host_req_window_w_px"), &game_host_req_window_w_px);
     stasis_jit_register_global_i32_ptr(
         hash_path("host_req_window_h_px"), &game_host_req_window_h_px);
+    stasis_jit_profile_register_function(77, "render");
+    stasis_jit_profile_configure(1, 2);
 }
 
 static int32_t game_tick(void) {
@@ -246,9 +261,11 @@ static int32_t game_tick(void) {
 }
 
 static int32_t game_render(void) {
+    stasis_jit_profile_frame_enter(77);
     render_calls += 1;
     game_gfx_cmd_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V2_MAGIC;
     game_gfx_cmd_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V2_VERSION;
+    stasis_jit_profile_frame_leave(77);
     return render_result;
 }
 
@@ -297,6 +314,10 @@ static void reset_fakes(void) {
     performance_metrics_calls = 0;
     reported_tick_us = 0;
     reported_render_us = 0;
+    profile_start_logs = 0;
+    profile_row_logs = 0;
+    profile_done_logs = 0;
+    profile_row[0] = '\0';
     memset(game_host_i32, 0, sizeof(game_host_i32));
     memset(game_host_f32, 0, sizeof(game_host_f32));
     memset(game_gfx_cmd_i32, 0, sizeof(game_gfx_cmd_i32));
@@ -388,6 +409,21 @@ static void test_rejects_duplicate_initialization(void) {
     stasis_mobile_runtime_shutdown();
 }
 
+static void test_reports_bounded_profile_after_warmup(void) {
+    StasisMobileRuntimeConfig valid_config = config();
+    StasisMobileGameEntries valid_entries = entries();
+
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(profile_start_logs == 0 && profile_row_logs == 0 && profile_done_logs == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(profile_start_logs == 1 && profile_row_logs == 0 && profile_done_logs == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(profile_row_logs == 1 && profile_done_logs == 1);
+    assert(strstr(profile_row, "STASIS_PROFILE|render|2|") == profile_row);
+    stasis_mobile_runtime_shutdown();
+}
+
 static void test_reports_graphics_initialization_failure(void) {
     StasisMobileRuntimeConfig valid_config = config();
     StasisMobileGameEntries valid_entries = entries();
@@ -443,6 +479,8 @@ int main(void) {
     test_runs_mobile_lifecycle();
     reset_fakes();
     test_rejects_duplicate_initialization();
+    reset_fakes();
+    test_reports_bounded_profile_after_warmup();
     reset_fakes();
     test_reports_graphics_initialization_failure();
     reset_fakes();

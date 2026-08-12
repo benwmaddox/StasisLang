@@ -146,6 +146,7 @@ int32_t stasis_mobile_runtime_step(void) {
 
     stasis_host_get_frame(host_i32, host_f32);
     apply_guest_host_requests();
+    stasis_jit_profile_frame_begin();
     uint64_t tick_started = stasis_host_performance_counter();
     runtime_state.last_entry_result = runtime_state.entries.tick_entry();
     uint64_t tick_finished = stasis_host_performance_counter();
@@ -167,6 +168,7 @@ int32_t stasis_mobile_runtime_step(void) {
         stasis_host_performance_elapsed_us(render_started, render_finished));
     /* Submission owns begin/present according to the guest command-buffer flags. */
     stasis_gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+    stasis_jit_profile_frame_end();
     return STASIS_MOBILE_RUNTIME_OK;
 }
 

@@ -18,7 +18,7 @@ pub use events::RunnerEvent;
 pub use live_workspace::LiveRunConfig;
 pub use mobile_aot_bindings::{
     audit_mobile_aot_bindings, escape_mobile_c_string_literal, mobile_aot_function_for,
-    write_mobile_aot_bindings_source,
+    write_mobile_aot_bindings_source, write_mobile_aot_bindings_source_with_profile,
 };
 pub use stasis_test_runner::{
     natural_path_cmp, run_jit_tests_in_directory,
@@ -31,7 +31,7 @@ pub use window_config::WindowConfig;
 use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
 use live_workspace::LiveWorkspace;
 use runtime_exec::RuntimeLauncher;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
@@ -62,6 +62,118 @@ use watch::WatchService;
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
 const TICK_BUDGET_SAMPLE_LIMIT: usize = 4096;
 const DESKTOP_FRAME_EVIDENCE_ENV: &str = "STASIS_DESKTOP_FRAME_EVIDENCE";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayProfileConfig {
+    pub functions: Vec<String>,
+    pub warmup_ticks: u64,
+    pub output_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlayProfileRow {
+    function_id: u32,
+    function: String,
+    source: String,
+    calls: u64,
+    inclusive_ns: u64,
+    exclusive_ns: u64,
+    average_inclusive_ns: u64,
+    max_inclusive_ns: u64,
+}
+
+struct JitProfilerGuard;
+
+impl Drop for JitProfilerGuard {
+    fn drop(&mut self) {
+        stasis_dynload::disable_jit_profiler();
+    }
+}
+
+fn finish_play_profile(jit: &JitProcess, config: &PlayProfileConfig) -> Result<(), String> {
+    stasis_dynload::disable_jit_profiler();
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "profiled play session has no program snapshot".to_string())?;
+    let functions_by_id: BTreeMap<u32, (&str, &str)> = snapshot
+        .functions()
+        .iter()
+        .filter_map(|function| {
+            snapshot
+                .files()
+                .get(function.file_id as usize)
+                .map(|file| (function.id, (function.name.as_str(), file.path.as_str())))
+        })
+        .collect();
+    let mut rows: Vec<PlayProfileRow> = stasis_dynload::jit_profile_snapshot()
+        .into_iter()
+        .filter_map(|sample| {
+            let (name, source) = functions_by_id.get(&sample.function_id).copied()?;
+            Some(PlayProfileRow {
+                function_id: sample.function_id,
+                function: name.to_string(),
+                source: source.to_string(),
+                calls: sample.calls,
+                inclusive_ns: sample.inclusive_ns,
+                exclusive_ns: sample.exclusive_ns,
+                average_inclusive_ns: sample.inclusive_ns / sample.calls.max(1),
+                max_inclusive_ns: sample.max_inclusive_ns,
+            })
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        right
+            .exclusive_ns
+            .cmp(&left.exclusive_ns)
+            .then_with(|| right.inclusive_ns.cmp(&left.inclusive_ns))
+            .then_with(|| left.function.cmp(&right.function))
+    });
+
+    println!("PROFILE|function|calls|inclusive_us|exclusive_us|avg_inclusive_ns|max_inclusive_ns");
+    for row in &rows {
+        println!(
+            "PROFILE|{}|{}|{}|{}|{}|{}",
+            row.function,
+            row.calls,
+            row.inclusive_ns / 1_000,
+            row.exclusive_ns / 1_000,
+            row.average_inclusive_ns,
+            row.max_inclusive_ns
+        );
+    }
+    for requested in &config.functions {
+        if !rows.iter().any(|row| row.function == *requested) {
+            eprintln!(
+                "PROFILE_WARNING|function={requested}|reason=no completed calls; verify spelling, reachability, warmup, and @inline lowering"
+            );
+        }
+    }
+    if let Some(path) = config.output_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create profile output directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let document = serde_json::json!({
+            "schema_version": 1,
+            "clock": "native_monotonic",
+            "units": "nanoseconds",
+            "warmup_ticks": config.warmup_ticks,
+            "functions": rows,
+        });
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&document)
+                .map_err(|error| format!("failed to encode profile report: {error}"))?,
+        )
+        .map_err(|error| format!("failed to write profile report {}: {error}", path.display()))?;
+        println!("PROFILE_OUTPUT|{}", path.display());
+    }
+    Ok(())
+}
 
 struct DesktopFrameEvidence {
     file: fs::File,
@@ -1755,6 +1867,7 @@ pub fn run_play_in_process(
         max_ticks,
         None,
         None,
+        None,
     )
 }
 
@@ -1789,6 +1902,7 @@ pub fn run_play_in_process_with_window_title(
         tick_sleep_micros,
         max_ticks,
         Some(window_title),
+        None,
         None,
     )
 }
@@ -1825,6 +1939,31 @@ pub fn run_play_in_process_with_input_script_and_window_title(
     max_ticks: Option<u64>,
     window_title: Option<&str>,
 ) -> Result<(), String> {
+    run_play_in_process_with_input_script_window_title_and_profile(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_input_script_window_title_and_profile(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+) -> Result<(), String> {
     run_play_in_process_inner(
         watch_file,
         watch_dir,
@@ -1834,6 +1973,7 @@ pub fn run_play_in_process_with_input_script_and_window_title(
         tick_sleep_micros,
         max_ticks,
         window_title,
+        profile,
         None,
     )
 }
@@ -1878,6 +2018,7 @@ pub fn run_live_in_process_with_data(
         tick_sleep_micros,
         max_ticks,
         None,
+        None,
         Some((server, config)),
     )
 }
@@ -1892,11 +2033,20 @@ fn run_play_in_process_inner(
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
     window_title: Option<&str>,
+    mut profile: Option<PlayProfileConfig>,
     live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
 ) -> Result<(), String> {
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
     let launch_dir = std::env::current_dir()
         .map_err(|error| format!("failed to read current directory before play launch: {error}"))?;
+    if let Some(output_path) = profile
+        .as_mut()
+        .and_then(|profile| profile.output_path.as_mut())
+    {
+        if output_path.is_relative() {
+            *output_path = launch_dir.join(&*output_path);
+        }
+    }
     let data_binding_paths = resolve_play_data_binding_paths(
         watch_file,
         &launch_dir,
@@ -2040,6 +2190,9 @@ fn run_play_in_process_inner(
     let _ = gfx.init_window(800, 600, &title)?;
 
     let mut jit = JitProcess::new();
+    if let Some(profile) = profile.as_ref() {
+        jit.set_profile_functions(profile.functions.clone())?;
+    }
     jit.set_project_root(project_root.to_string_lossy())?;
     let root_source = fs::read_to_string(&root_path)
         .map_err(|error| format!("failed to read {}: {error}", root_path.display()))?;
@@ -2080,6 +2233,11 @@ fn run_play_in_process_inner(
     if max_ticks == Some(0) {
         return Ok(());
     }
+
+    let _profiler_guard = profile.as_ref().map(|_| {
+        stasis_dynload::enable_jit_profiler();
+        JitProfilerGuard
+    });
 
     stasis_dynload::begin_jit_host_entry_session(package.host_entry_targets(1)?)?;
     let mut tick_code_ptr = stasis_dynload::jit_host_tick_trampoline_ptr() as u64;
@@ -2156,6 +2314,13 @@ fn run_play_in_process_inner(
                             Ok(entrypoints) => {
                                 tick_code_ptr = entrypoints.tick_code_ptr;
                                 render_code_ptr = entrypoints.render_code_ptr;
+                                if profile.is_some() {
+                                    stasis_dynload::reset_jit_profile();
+                                    eprintln!(
+                                        "PROFILE_RESET|reason=code_swap|revision={}",
+                                        prepared.revision
+                                    );
+                                }
                                 if let Ok(Some(candidate_tick_budget)) = candidate_tick_budget {
                                     if let Some(report) = update_tick_budget_after_swap(
                                         &mut tick_budget,
@@ -2341,6 +2506,12 @@ fn run_play_in_process_inner(
                 break;
             }
         }
+        if profile
+            .as_ref()
+            .is_some_and(|profile| ticks_executed == profile.warmup_ticks)
+        {
+            stasis_dynload::reset_jit_profile();
+        }
     }
 
     if let Some(job) = watch_patch_job.take() {
@@ -2348,6 +2519,9 @@ fn run_play_in_process_inner(
     }
     if let Some(budget) = tick_budget {
         println!("{}", budget.report());
+    }
+    if let Some(profile) = profile.as_ref() {
+        finish_play_profile(&jit, profile)?;
     }
 
     Ok(())
@@ -4828,9 +5002,7 @@ mod tests {
             .map(|offset| cached_start + offset)
             .expect("cached text draw boundary");
         let cached_draw = &STASIS_GRAPHICS_SOURCE[cached_start..cached_end];
-        assert!(cached_draw.contains(
-            "run, font, x, y, color_r, color_g, color_b, color_a);"
-        ));
+        assert!(cached_draw.contains("run, font, x, y, color_r, color_g, color_b, color_a);"));
     }
 
     #[test]

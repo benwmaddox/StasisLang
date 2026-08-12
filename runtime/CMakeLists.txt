@@ -184,6 +184,9 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_aot_runtime.c
     )
     configure_stasis_target(stasis_mobile_runtime ON TRUE)
+    if(MSVC)
+        target_compile_options(stasis_mobile_runtime PRIVATE /experimental:c11atomics)
+    endif()
     target_include_directories(stasis_mobile_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
     set_target_properties(stasis_mobile_runtime PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -261,6 +264,11 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
     )
+    set_property(TARGET stasis_mobile_runtime_test PROPERTY C_STANDARD 11)
+    set_property(TARGET stasis_mobile_runtime_test PROPERTY C_STANDARD_REQUIRED ON)
+    if(MSVC)
+        target_compile_options(stasis_mobile_runtime_test PRIVATE /experimental:c11atomics)
+    endif()
     target_include_directories(stasis_mobile_runtime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME stasis_mobile_runtime_lifecycle COMMAND stasis_mobile_runtime_test)
     add_executable(
@@ -274,6 +282,11 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         tests/stasis_mobile_aot_runtime_test.c
         stasis_mobile_aot_runtime.c
     )
+    set_property(TARGET stasis_mobile_aot_runtime_test PROPERTY C_STANDARD 11)
+    set_property(TARGET stasis_mobile_aot_runtime_test PROPERTY C_STANDARD_REQUIRED ON)
+    if(MSVC)
+        target_compile_options(stasis_mobile_aot_runtime_test PRIVATE /experimental:c11atomics)
+    endif()
     target_include_directories(stasis_mobile_aot_runtime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     if(NOT WIN32)
         target_link_libraries(stasis_mobile_runtime_test PRIVATE m)

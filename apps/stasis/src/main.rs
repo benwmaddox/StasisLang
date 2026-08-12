@@ -17,9 +17,10 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use stasis::escape_mobile_c_string_literal;
 use stasis::{
     mobile_aot_function_for, run_jit_tests_in_directory_with_session,
-    run_play_in_process_with_input_script_and_window_title, run_self_host_aot_cli_with_options,
-    run_with_default_backend, run_with_real_backend, write_mobile_aot_bindings_source,
-    RunnerConfig, StasisTestRunSession,
+    run_play_in_process_with_input_script_window_title_and_profile,
+    run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
+    write_mobile_aot_bindings_source_with_profile, PlayProfileConfig, RunnerConfig,
+    StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
@@ -108,6 +109,9 @@ struct MobileAotBundleArgs {
     project_dir: PathBuf,
     entry_file: Option<PathBuf>,
     output_dir: PathBuf,
+    profile_functions: Vec<String>,
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +126,9 @@ struct PlayCliArgs {
     screenshot: Option<PathBuf>,
     screenshot_frame: u64,
     exit_after_screenshot: bool,
+    profile_functions: Vec<String>,
+    profile_warmup_ticks: u64,
+    profile_output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -513,6 +520,10 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut screenshot_frame: u64 = 1;
     let mut screenshot_frame_explicit = false;
     let mut exit_after_screenshot = false;
+    let mut profile_functions = Vec::new();
+    let mut profile_warmup_ticks = 60_u64;
+    let mut profile_warmup_explicit = false;
+    let mut profile_output: Option<PathBuf> = None;
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -606,6 +617,39 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
             i += 1;
             continue;
         }
+        if arg == "--profile-functions" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-functions <name[,name...]>".to_string());
+            }
+            profile_functions.extend(
+                args[i + 1]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
+            );
+            i += 2;
+            continue;
+        }
+        if arg == "--profile-warmup" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-warmup <ticks>".to_string());
+            }
+            profile_warmup_ticks = args[i + 1]
+                .parse::<u64>()
+                .map_err(|error| format!("invalid value for --profile-warmup: {error}"))?;
+            profile_warmup_explicit = true;
+            i += 2;
+            continue;
+        }
+        if arg == "--profile-output" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-output <path>".to_string());
+            }
+            profile_output = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
         i += 1;
     }
     if screenshot.is_none() && (screenshot_frame_explicit || exit_after_screenshot) {
@@ -616,6 +660,16 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     }
     if screenshot.is_some() && ticks.is_some_and(|count| count < screenshot_frame) {
         return Err("--ticks must be at least --screenshot-frame when capturing".to_string());
+    }
+    if profile_functions.is_empty() && (profile_warmup_explicit || profile_output.is_some()) {
+        return Err(
+            "--profile-warmup and --profile-output require --profile-functions".to_string(),
+        );
+    }
+    if !profile_functions.is_empty() && ticks.is_some_and(|count| count <= profile_warmup_ticks) {
+        return Err(
+            "--ticks must exceed --profile-warmup so at least one frame is measured".to_string(),
+        );
     }
     Ok(PlayCliArgs {
         watch_file,
@@ -628,6 +682,9 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         screenshot,
         screenshot_frame,
         exit_after_screenshot,
+        profile_functions,
+        profile_warmup_ticks,
+        profile_output,
     })
 }
 
@@ -882,7 +939,12 @@ fn try_run_play_subcommand() -> Option<i32> {
         }
     };
 
-    let play_result = run_play_in_process_with_input_script_and_window_title(
+    let profile = (!parsed.profile_functions.is_empty()).then(|| PlayProfileConfig {
+        functions: parsed.profile_functions.clone(),
+        warmup_ticks: parsed.profile_warmup_ticks,
+        output_path: parsed.profile_output.clone(),
+    });
+    let play_result = run_play_in_process_with_input_script_window_title_and_profile(
         &launch.watch_file,
         Some(&launch.watch_dir),
         parsed.data_bind_json.as_deref(),
@@ -891,6 +953,7 @@ fn try_run_play_subcommand() -> Option<i32> {
         parsed.tick_sleep_micros,
         parsed.ticks,
         launch.window_title.as_deref(),
+        profile,
     );
     match play_result {
         Ok(()) => {
@@ -1514,6 +1577,9 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
     let mut project_dir: Option<PathBuf> = None;
     let mut entry_file: Option<PathBuf> = None;
     let mut output_dir: Option<PathBuf> = None;
+    let mut profile_functions = Vec::new();
+    let mut profile_warmup_frames = 120_u32;
+    let mut profile_sample_frames = 300_u32;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1545,6 +1611,37 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
                 output_dir = Some(PathBuf::from(args[i + 1].clone()));
                 i += 2;
             }
+            "--profile-functions" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --profile-functions".to_string());
+                }
+                profile_functions.extend(
+                    args[i + 1]
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string),
+                );
+                i += 2;
+            }
+            "--profile-warmup-frames" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --profile-warmup-frames".to_string());
+                }
+                profile_warmup_frames = args[i + 1]
+                    .parse()
+                    .map_err(|error| format!("invalid --profile-warmup-frames: {error}"))?;
+                i += 2;
+            }
+            "--profile-sample-frames" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --profile-sample-frames".to_string());
+                }
+                profile_sample_frames = args[i + 1]
+                    .parse()
+                    .map_err(|error| format!("invalid --profile-sample-frames: {error}"))?;
+                i += 2;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown mobile AOT bundle flag '{other}'"));
             }
@@ -1569,6 +1666,9 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
         project_dir,
         entry_file,
         output_dir,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
     })
 }
 
@@ -1592,6 +1692,9 @@ fn try_run_mobile_aot_bundle_subcommand() -> Option<i32> {
         &parsed.project_dir,
         parsed.entry_file.as_deref(),
         &parsed.output_dir,
+        &parsed.profile_functions,
+        parsed.profile_warmup_frames,
+        parsed.profile_sample_frames,
     ) {
         Ok(summary) => {
             println!("mobile_aot_target={}", summary.target.as_str());
@@ -1702,6 +1805,9 @@ fn write_android_aot_engine_bundle(
         project_dir,
         entry_file,
         output_dir,
+        &[],
+        0,
+        0,
     )?;
     let cmake_file = summary
         .cmake_file
@@ -1721,10 +1827,14 @@ fn write_mobile_aot_engine_bundle(
     project_dir: &Path,
     entry_file: Option<&Path>,
     output_dir: &Path,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
 ) -> Result<MobileAotBundleSummary, String> {
     let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
     process.set_import_base_dir(project_dir);
     process.set_target(target.aot_target());
+    process.set_profile_functions(profile_functions.iter().cloned())?;
     let sources = collect_mobile_aot_sources(project_dir, entry_file)?;
     for (path, source) in &sources {
         process.upsert_file(path.clone(), source.clone());
@@ -1750,11 +1860,14 @@ fn write_mobile_aot_engine_bundle(
     let symbols_header = output_dir.join("published_aot_symbols.h");
     write_mobile_aot_symbols_header(&manifest_json, &symbols_header)?;
     let bindings_source = output_dir.join("published_aot_bindings.c");
-    write_mobile_aot_bindings_source(
+    write_mobile_aot_bindings_source_with_profile(
         &manifest_json,
         &process.state_layout(),
         project_dir,
         &bindings_source,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
     )?;
     let cmake_file = if matches!(
         target,
@@ -2219,6 +2332,42 @@ mod tests {
                 "samples/bucket_catcher/data/config.struct-meta.json"
             ))
         );
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_selective_function_profiling() {
+        let args = vec![
+            "main.stasis".to_string(),
+            "--ticks".to_string(),
+            "240".to_string(),
+            "--profile-functions".to_string(),
+            "render,draw_board, draw_enemies".to_string(),
+            "--profile-warmup".to_string(),
+            "40".to_string(),
+            "--profile-output".to_string(),
+            "profile.json".to_string(),
+        ];
+        let parsed = parse_play_cli_args(&args).expect("parse profiling arguments");
+        assert_eq!(
+            parsed.profile_functions,
+            vec!["render", "draw_board", "draw_enemies"]
+        );
+        assert_eq!(parsed.profile_warmup_ticks, 40);
+        assert_eq!(parsed.profile_output, Some(PathBuf::from("profile.json")));
+    }
+
+    #[test]
+    fn parse_play_cli_args_requires_a_measured_frame_after_profile_warmup() {
+        let args = vec![
+            "main.stasis".to_string(),
+            "--ticks".to_string(),
+            "60".to_string(),
+            "--profile-functions".to_string(),
+            "render".to_string(),
+        ];
+        assert!(parse_play_cli_args(&args)
+            .expect_err("warmup consumes the bounded run")
+            .contains("must exceed --profile-warmup"));
     }
 
     #[test]
@@ -2783,6 +2932,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_mobile_aot_bundle_args_accepts_bounded_function_profile() {
+        let args = vec![
+            "--target".to_string(),
+            "android-x86_64".to_string(),
+            "--project-dir".to_string(),
+            "samples/render_parity".to_string(),
+            "--out-dir".to_string(),
+            "target/profiled-mobile-aot".to_string(),
+            "--profile-functions".to_string(),
+            "render,draw_board".to_string(),
+            "--profile-warmup-frames".to_string(),
+            "30".to_string(),
+            "--profile-sample-frames".to_string(),
+            "90".to_string(),
+        ];
+        let parsed = parse_mobile_aot_bundle_args(&args).expect("parse profile flags");
+        assert_eq!(parsed.profile_functions, ["render", "draw_board"]);
+        assert_eq!(parsed.profile_warmup_frames, 30);
+        assert_eq!(parsed.profile_sample_frames, 90);
+    }
+
+    #[test]
     fn android_aot_bundle_writes_pong_symbols_header() {
         use object::{Object, ObjectSymbol};
 
@@ -3156,6 +3327,9 @@ function frame_width(): i32 { return 360; }
             &project_dir,
             Some(Path::new("src/main.stasis")),
             &output_dir,
+            &[],
+            0,
+            0,
         ) {
             Ok(_) => panic!("cyclic imports must be rejected by the compiler graph"),
             Err(error) => error,
@@ -3195,6 +3369,9 @@ function frame_width(): i32 { return 360; }
             &project_dir,
             Some(Path::new("src/main.stasis")),
             &output_dir,
+            &[],
+            0,
+            0,
         )
         .expect("missing on_code_swap should be accepted for mobile");
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
@@ -3235,6 +3412,9 @@ function frame_width(): i32 { return 360; }
             &project_dir,
             Some(Path::new("src/main.stasis")),
             &output_dir,
+            &[],
+            0,
+            0,
         )
         .expect("write iOS mobile AOT bundle");
 
