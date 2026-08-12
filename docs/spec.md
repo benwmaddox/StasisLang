@@ -479,6 +479,10 @@ Field access on a struct view:
   singleton struct view emits only the AoS field path, while an indexed struct-array element emits
   only the SoA field path. The runtime `index < 0` dispatch remains for parameters or other views
   whose callers can supply either backing kind.
+- For indexed elements of a statically named global collection, lowering also preserves the
+  collection identity through local aliases. Field access can then use the collection's direct
+  storage slot instead of re-entering the hash-based runtime registry. Aliases of local collection
+  parameters retain the generic path because their concrete backing is supplied by the caller.
 
 Rationale:
 - This allows the same function signature to accept either a single global struct or an element view from a struct array.

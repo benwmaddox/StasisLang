@@ -4850,13 +4850,13 @@ mod tests {
         );
         process.compile().expect("compile");
         let clif = process.clif_for_function_name("main").expect("main CLIF");
+        let has_call_instruction = clif.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("call ") || line.contains(" = call ")
+        });
         assert!(
-            !clif.contains("brif"),
-            "known nested SoA alias retained storage dispatch:\n{clif}"
-        );
-        assert!(
-            !clif.contains("icmp"),
-            "known nested SoA alias retained storage test:\n{clif}"
+            !has_call_instruction,
+            "known nested SoA alias lost direct storage:\n{clif}"
         );
         let value = process
             .execute_i32_noarg_by_name("main")
