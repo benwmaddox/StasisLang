@@ -66,9 +66,19 @@ pub struct FunctionDataFlowSummary {
     #[serde(skip)]
     pub(crate) internal_syntax_fingerprint: u64,
     #[serde(skip)]
-    internal_function_id: u32,
+    pub(crate) internal_function_id: u32,
     #[serde(skip)]
     internal_signature_hash: u64,
+    #[serde(skip)]
+    pub(crate) parameter_storage_kinds: Vec<ParameterStorageKind>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum ParameterStorageKind {
+    #[default]
+    Dynamic,
+    Aos,
+    Soa,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,11 +383,20 @@ pub(crate) fn build_function_data_flow_summaries(
     {
         return Ok((None, context.fingerprint));
     }
+    if can_reuse_aggregates {
+        for function in functions {
+            if included_function_ids.contains(&function.id) {
+                direct_by_id[function.storage_index as usize] =
+                    analyze_function_effects(function, statements_by_id, &context)?;
+            }
+        }
+    }
     let aggregate_by_id = if can_reuse_aggregates {
         None
     } else {
         Some(build_aggregate_effects(&direct_by_id)?)
     };
+    let parameter_storage_kinds = infer_parameter_storage_kinds(functions, &direct_by_id, &context);
     let mut out = Vec::with_capacity(functions.len());
     for function in functions {
         if !included_function_ids.contains(&function.id) {
@@ -434,6 +453,10 @@ pub(crate) fn build_function_data_flow_summaries(
             // Explicitly internal dense storage position; the public compiler identity is FnId.
             internal_function_id: function.storage_index,
             internal_signature_hash: function.signature_hash,
+            parameter_storage_kinds: parameter_storage_kinds
+                .get(function.storage_index as usize)
+                .cloned()
+                .unwrap_or_default(),
         });
     }
     out.sort_by(|left, right| {
@@ -443,6 +466,108 @@ pub(crate) fn build_function_data_flow_summaries(
             .then(left.function.cmp(&right.function))
     });
     Ok((Some(out), context.fingerprint))
+}
+
+fn infer_parameter_storage_kinds(
+    functions: &[FunctionMeta],
+    direct_by_id: &[EffectSets],
+    context: &AnalysisContext<'_>,
+) -> Vec<Vec<ParameterStorageKind>> {
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    enum Evidence {
+        #[default]
+        Unknown,
+        Aos,
+        Soa,
+        Dynamic,
+    }
+
+    fn merge(current: Evidence, next: Evidence) -> Evidence {
+        match (current, next) {
+            (Evidence::Dynamic, _) | (_, Evidence::Dynamic) => Evidence::Dynamic,
+            (Evidence::Unknown, value) | (value, Evidence::Unknown) => value,
+            (Evidence::Aos, Evidence::Aos) => Evidence::Aos,
+            (Evidence::Soa, Evidence::Soa) => Evidence::Soa,
+            _ => Evidence::Dynamic,
+        }
+    }
+
+    fn source_parameter_index(path: &str) -> Option<usize> {
+        let symbolic = path.strip_prefix('$')?;
+        let digits = symbolic.bytes().take_while(u8::is_ascii_digit).count();
+        (digits > 0)
+            .then(|| symbolic[..digits].parse().ok())
+            .flatten()
+    }
+
+    let mut evidence = functions
+        .iter()
+        .map(|function| vec![Evidence::Unknown; function.params.len()])
+        .collect::<Vec<_>>();
+    let mut has_callers = functions
+        .iter()
+        .map(|function| vec![false; function.params.len()])
+        .collect::<Vec<_>>();
+
+    loop {
+        let previous = evidence.clone();
+        for (caller_index, effects) in direct_by_id.iter().enumerate() {
+            for call_site in &effects.call_sites {
+                let Some(target_views) = context
+                    .view_parameters_by_function
+                    .get(&call_site.target_id)
+                else {
+                    continue;
+                };
+                for &parameter_index in target_views {
+                    let Some(target) = evidence
+                        .get_mut(call_site.target_id as usize)
+                        .and_then(|parameters| parameters.get_mut(parameter_index))
+                    else {
+                        continue;
+                    };
+                    has_callers[call_site.target_id as usize][parameter_index] = true;
+                    let next = match call_site
+                        .arguments
+                        .get(parameter_index)
+                        .and_then(Option::as_deref)
+                    {
+                        Some(path) if path.contains("[*]") => Evidence::Soa,
+                        Some(path) if path.starts_with('$') => source_parameter_index(path)
+                            .and_then(|index| previous.get(caller_index)?.get(index).copied())
+                            .unwrap_or(Evidence::Unknown),
+                        Some(path) if context.path_types.contains_key(path) => Evidence::Aos,
+                        _ => Evidence::Dynamic,
+                    };
+                    *target = merge(*target, next);
+                }
+            }
+        }
+        if evidence == previous {
+            break;
+        }
+    }
+
+    evidence
+        .into_iter()
+        .enumerate()
+        .map(|(function_index, parameters)| {
+            parameters
+                .into_iter()
+                .enumerate()
+                .map(|(parameter_index, kind)| {
+                    if !has_callers[function_index][parameter_index] {
+                        return ParameterStorageKind::Dynamic;
+                    }
+                    match kind {
+                        Evidence::Aos => ParameterStorageKind::Aos,
+                        Evidence::Soa => ParameterStorageKind::Soa,
+                        Evidence::Unknown | Evidence::Dynamic => ParameterStorageKind::Dynamic,
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn analyze_function_effects(
@@ -1378,6 +1503,12 @@ fn expression_type(
             suffix,
             ..
         } => {
+            if let Some(type_id) = context
+                .path_types
+                .get(&indexed_state_path(collection_path, suffix))
+            {
+                return Some(*type_id);
+            }
             let collection = path_type(collection_path, context, local_types, aliases)?;
             let element = context.types.indexed_element_type_id(collection)?;
             field_suffix_type(element, suffix, &context.field_types)

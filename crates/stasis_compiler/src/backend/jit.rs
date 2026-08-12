@@ -222,8 +222,9 @@ fn collect_statement_references(
 fn function_lowering_contract_hash(
     references: &FunctionLoweringReferences,
     analysis: &CompileAnalysisCache,
+    parameter_storage_kinds: Option<&[crate::data_flow::ParameterStorageKind]>,
 ) -> u64 {
-    let mut facts = Vec::new();
+    let mut facts = vec![format!("parameter_storage:{parameter_storage_kinds:?}")];
     for path in &references.paths {
         if let Some(value) = analysis.constant_values.get(path) {
             facts.push(format!("constant:{path}:{value:?}"));
@@ -874,7 +875,15 @@ impl JitProcess {
                 lowered_contract_changes.insert(key.clone());
             }
             if let Some(references) = self.accepted_lowering_references.get(key) {
-                let hash = function_lowering_contract_hash(references, &analysis);
+                let hash = function_lowering_contract_hash(
+                    references,
+                    &analysis,
+                    self.compiler
+                        .function_data_flow_summaries()
+                        .iter()
+                        .find(|summary| summary.internal_function_id == function.storage_index)
+                        .map(|summary| summary.parameter_storage_kinds.as_slice()),
+                );
                 if self.accepted_lowering_contracts.get(key) != Some(&hash) {
                     lowered_contract_changes.insert(key.clone());
                 }
@@ -913,6 +922,7 @@ impl JitProcess {
             .iter()
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
+        let data_flow_summaries = self.compiler.data_flow_summaries_shared();
         let mut staged_debug_metadata = self.debug_metadata.clone();
         for function_id in &emit_function_ids {
             staged_debug_metadata.remove(function_id);
@@ -967,6 +977,9 @@ impl JitProcess {
                 }
                 let symbol = format!("jit_fn_{}", meta.id);
                 let profile_instrumentation = profile_function_names.contains(&meta.name);
+                let data_flow_summary = data_flow_summaries
+                    .iter()
+                    .find(|summary| summary.internal_function_id == meta.storage_index);
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
@@ -985,6 +998,7 @@ impl JitProcess {
                         &analysis.constant_values,
                         &analysis.collection_infos,
                         &analysis.named_struct_field_types,
+                        data_flow_summary,
                         &analysis.extern_symbol_addresses,
                         &direct_storage,
                         local_runtime_helper_trampolines,
@@ -1013,7 +1027,11 @@ impl JitProcess {
                     .cloned()
                     .ok_or_else(|| format!("emitted function '{}' has no stable key", meta.name))?;
                 let references = collect_function_lowering_references(meta, hir);
-                let contract_hash = function_lowering_contract_hash(&references, &analysis);
+                let contract_hash = function_lowering_contract_hash(
+                    &references,
+                    &analysis,
+                    data_flow_summary.map(|summary| summary.parameter_storage_kinds.as_slice()),
+                );
                 lowering_references.insert(function_key.clone(), references);
                 lowering_contracts.insert(function_key.clone(), contract_hash);
                 staged_functions.push((
@@ -3121,6 +3139,7 @@ fn compile_function_into_jit_module(
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    data_flow_summary: Option<&crate::data_flow::FunctionDataFlowSummary>,
     extern_symbol_addresses: &ExternSymbolAddressMap,
     direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
@@ -3157,6 +3176,7 @@ fn compile_function_into_jit_module(
         constant_values,
         collection_infos,
         named_struct_field_types,
+        data_flow_summary,
         Some(direct_storage),
         Some(defined_runtime_helper_trampolines),
         debug_instrumentation,
@@ -4874,6 +4894,190 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_propagates_soa_struct_parameter_through_helper_chain() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { items[0].value = 7; return middle(items[0]); }\n",
+        );
+        process.compile().expect("compile");
+        let summaries = process.compiler.data_flow_summaries_shared();
+        for function in ["leaf", "middle"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == function)
+                .expect("helper summary");
+            assert_eq!(
+                summary.parameter_storage_kinds,
+                vec![crate::data_flow::ParameterStorageKind::Soa],
+                "unexpected {function} provenance; summaries={summaries:#?}"
+            );
+        }
+        for function in ["leaf", "middle"] {
+            let clif = process
+                .clif_for_function_name(function)
+                .expect("helper CLIF");
+            assert!(
+                !clif.contains("brif"),
+                "known SoA provenance retained storage dispatch in {function}:\n{clif}"
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            7
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_propagates_aos_struct_parameter_through_helper_chain() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { item.value = 8; return middle(item); }\n",
+        );
+        process.compile().expect("compile");
+        let summaries = process.compiler.data_flow_summaries_shared();
+        for function in ["leaf", "middle"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == function)
+                .expect("helper summary");
+            assert_eq!(
+                summary.parameter_storage_kinds,
+                vec![crate::data_flow::ParameterStorageKind::Aos],
+                "unexpected {function} provenance; summaries={summaries:#?}"
+            );
+            let clif = process
+                .clif_for_function_name(function)
+                .expect("helper CLIF");
+            assert!(
+                !clif.contains("brif"),
+                "known AoS provenance retained storage dispatch in {function}:\n{clif}"
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            8
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_keeps_mixed_struct_parameter_provenance_dynamic() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { item.value = 3; items[0].value = 4; return middle(item) + middle(items[0]); }\n",
+        );
+        process.compile().expect("compile");
+        let summaries = process.compiler.data_flow_summaries_shared();
+        for function in ["leaf", "middle"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == function)
+                .expect("helper summary");
+            assert_eq!(
+                summary.parameter_storage_kinds,
+                vec![crate::data_flow::ParameterStorageKind::Dynamic],
+                "unexpected {function} provenance; summaries={summaries:#?}"
+            );
+        }
+        let leaf_clif = process.clif_for_function_name("leaf").expect("leaf CLIF");
+        assert!(
+            leaf_clif.contains("brif"),
+            "mixed provenance incorrectly specialized leaf:\n{leaf_clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            7
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_storage_specialization_preserves_live_aliases() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nfunction observe(first: Sample, second: Sample): i32 { let before: i32 = first.value; second.value = 9; return before + first.value; }\nfunction main(): i32 { item.value = 2; return observe(item, item); }\n",
+        );
+        process.compile().expect("compile");
+        let summary = process
+            .compiler
+            .data_flow_summaries_shared()
+            .iter()
+            .find(|summary| summary.function == "observe")
+            .cloned()
+            .expect("observe summary");
+        assert_eq!(
+            summary.parameter_storage_kinds,
+            vec![
+                crate::data_flow::ParameterStorageKind::Aos,
+                crate::data_flow::ParameterStorageKind::Aos,
+            ]
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            11
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_recompiles_helper_when_call_storage_provenance_changes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction main(): i32 { items[0].value = 7; return leaf(items[0]); }\n",
+        );
+        process.compile().expect("initial compile");
+        let initial_leaf_ptr = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "leaf")
+            .expect("initial leaf artifact")
+            .code_ptr;
+        assert!(!process
+            .clif_for_function_name("leaf")
+            .expect("initial leaf CLIF")
+            .contains("brif"));
+
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction main(): i32 { item.value = 3; items[0].value = 4; return leaf(item) + leaf(items[0]); }\n",
+        );
+        let report = process.compile().expect("mixed-provenance patch");
+        assert_eq!(report.emit.emitted_functions, 2);
+        let patched_leaf_ptr = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "leaf")
+            .expect("patched leaf artifact")
+            .code_ptr;
+        assert_ne!(initial_leaf_ptr, patched_leaf_ptr);
+        assert!(process
+            .clif_for_function_name("leaf")
+            .expect("patched leaf CLIF")
+            .contains("brif"));
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute patched main"),
+            7
+        );
     }
 
     #[cfg(windows)]

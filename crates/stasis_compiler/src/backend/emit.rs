@@ -1,5 +1,6 @@
 use crate::backend::runtime_exports::is_aot_runtime_export_symbol;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
+use crate::data_flow::{FunctionDataFlowSummary, ParameterStorageKind};
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_type_layout, ParsedExternFunctionDeclaration,
     ParsedField,
@@ -1629,6 +1630,7 @@ pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuil
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    data_flow_summary: Option<&FunctionDataFlowSummary>,
     direct_storage: Option<&DirectStorageBindings>,
     defined_runtime_helper_trampolines: Option<&mut BTreeSet<String>>,
     debug_instrumentation: bool,
@@ -1790,7 +1792,13 @@ where
                         Some(StructViewBinding {
                             index_var,
                             len_var,
-                            storage_kind: StructViewStorageKind::Dynamic,
+                            storage_kind: data_flow_summary
+                                .and_then(|summary| summary.parameter_storage_kinds.get(index))
+                                .map_or(StructViewStorageKind::Dynamic, |kind| match kind {
+                                    ParameterStorageKind::Dynamic => StructViewStorageKind::Dynamic,
+                                    ParameterStorageKind::Aos => StructViewStorageKind::Aos,
+                                    ParameterStorageKind::Soa => StructViewStorageKind::Soa,
+                                }),
                             known_collection_hash: None,
                             bounds_proven: false,
                         }),
