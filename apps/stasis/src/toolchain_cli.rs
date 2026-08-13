@@ -3756,7 +3756,7 @@ fn package_web_workspace(
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
         fs::write(
             staging_root.join("index.html"),
-            WEB_INDEX_HTML.replace("__STASIS_GAME_TITLE__", &workspace.manifest.name),
+            web_index_html(&workspace.manifest.name, development_build),
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
 
@@ -3801,6 +3801,21 @@ fn package_web_workspace(
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+fn web_index_html(title: &str, development_build: bool) -> String {
+    let (hud_style, hud) = if development_build {
+        (
+            "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
+            r#"<div id="stasis-hud" role="status">Starting Wasm...</div>"#,
+        )
+    } else {
+        ("", "")
+    };
+    WEB_INDEX_HTML
+        .replace("__STASIS_GAME_TITLE__", title)
+        .replace("__STASIS_PERFORMANCE_HUD_STYLE__", hud_style)
+        .replace("__STASIS_PERFORMANCE_HUD__", hud)
 }
 
 fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Value {
@@ -5574,6 +5589,17 @@ mod tests {
     use super::*;
     use stasis_ai::live_tool_specs;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn release_web_index_omits_performance_hud() {
+        let release = web_index_html("release-game", false);
+        assert!(!release.contains("stasis-hud"));
+        assert!(!release.contains("__STASIS_"));
+
+        let development = web_index_html("development-game", true);
+        assert!(development.contains(r#"id="stasis-hud""#));
+        assert!(!development.contains("__STASIS_"));
+    }
 
     #[test]
     fn successful_live_runner_allows_terminal_acknowledgement_to_finish() {

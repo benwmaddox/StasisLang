@@ -583,7 +583,9 @@
       worstRender = Math.max(worstRender, renderMs);
     }
     const underBudget = worstTick < 16 && worstRender < 16;
-    hud.textContent = `Wasm frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)})\nrender ${renderMs.toFixed(3)} ms (worst ${worstRender.toFixed(3)})\n${underBudget ? "UNDER 16 ms" : "OVER BUDGET"}`;
+    if (hud) {
+      hud.textContent = `Wasm frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)})\nrender ${renderMs.toFixed(3)} ms (worst ${worstRender.toFixed(3)})\n${underBudget ? "UNDER 16 ms" : "OVER BUDGET"}`;
+    }
     document.body.dataset.frames = String(frames);
     document.body.dataset.tickMs = tickMs.toFixed(3);
     document.body.dataset.renderMs = renderMs.toFixed(3);

@@ -10,7 +10,7 @@
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #07111f; color: #dff6ff; }
     main { position: relative; width: min(960px, 100vw); }
     canvas { display: block; width: 100%; aspect-ratio: 16 / 9; background: #091b2d; touch-action: none; }
-    #stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }
+    __STASIS_PERFORMANCE_HUD_STYLE__
     #stasis-audio { position: absolute; top: 10px; right: 10px; border: 1px solid #53d8fb; background: #0b263d; color: white; padding: 8px 12px; cursor: pointer; }
     #stasis-error { color: #ff8f8f; white-space: pre-wrap; }
   </style>
@@ -18,7 +18,7 @@
 <body>
   <main>
     <canvas id="stasis-canvas" width="640" height="360" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
-    <div id="stasis-hud" role="status">Starting Wasm…</div>
+    __STASIS_PERFORMANCE_HUD__
     <button id="stasis-audio" type="button">Enable sound</button>
     <pre id="stasis-error"></pre>
   </main>
