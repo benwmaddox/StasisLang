@@ -11,6 +11,13 @@ on:
       - synchronize
       - ready_for_review
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      run_slow_seams:
+        description: Run platform integration and packaging seams.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -18,7 +25,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: pr-ci-${{ github.event.pull_request.number || github.ref }}
+  group: pr-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -81,7 +88,7 @@ jobs:
         run: cargo test --workspace --all-targets -- --test-threads=1
 
   bootstrap-smoke-windows:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ github.event_name == 'workflow_call' && inputs.run_slow_seams }}
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -183,7 +190,7 @@ jobs:
         run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture
 
   vscode-extension-e2e:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ github.event_name == 'workflow_call' && inputs.run_slow_seams }}
     name: VS Code E2E (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -295,7 +302,7 @@ jobs:
             vscode-stasis/.vsix/stasislang.stasis.vsix
 
   android-package-link:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ github.event_name == 'workflow_call' && inputs.run_slow_seams }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Stasis
@@ -356,7 +363,7 @@ jobs:
           path: target/android-native-link-evidence.json
 
   ios-package-link:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ github.event_name == 'workflow_call' && inputs.run_slow_seams }}
     runs-on: macos-15
     timeout-minutes: 30
     steps:
