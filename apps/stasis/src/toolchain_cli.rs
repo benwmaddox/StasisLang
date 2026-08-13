@@ -3600,36 +3600,45 @@ fn prepare_web_wasm(
     }
 
     let configured = env::var_os("STASIS_WASM_OPT");
-    let executable = configured
-        .clone()
-        .unwrap_or_else(|| OsString::from("wasm-opt"));
+    let executables = configured.clone().map_or_else(
+        || vec![OsString::from("wasm-opt"), OsString::from("wasmopt")],
+        |executable| vec![executable],
+    );
     let input_path = staging_root.join(".game.unoptimized.wasm");
     let output_path = staging_root.join(".game.optimized.wasm");
     fs::write(&input_path, module_bytes)
         .map_err(|error| format!("failed to stage {}: {error}", input_path.display()))?;
-    let result = Command::new(&executable)
-        .arg("-Oz")
-        .arg(&input_path)
-        .arg("-o")
-        .arg(&output_path)
-        .output();
+    let mut result = None;
+    for executable in &executables {
+        match Command::new(executable)
+            .arg("-Oz")
+            .arg(&input_path)
+            .arg("-o")
+            .arg(&output_path)
+            .output()
+        {
+            Ok(output) => {
+                result = Some((executable, output));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound && configured.is_none() => {}
+            Err(error) => {
+                let _ = fs::remove_file(&input_path);
+                return Err(format!(
+                    "failed to run wasm-opt at {}: {error}",
+                    Path::new(executable).display()
+                ));
+            }
+        }
+    }
     let _ = fs::remove_file(&input_path);
 
-    let output = match result {
-        Ok(output) => output,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && configured.is_none() => {
-            return Ok(WebWasmArtifact {
-                bytes: module_bytes.to_vec(),
-                optimized: false,
-                input_bytes: module_bytes.len(),
-            });
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to run wasm-opt at {}: {error}",
-                Path::new(&executable).display()
-            ));
-        }
+    let Some((_, output)) = result else {
+        return Ok(WebWasmArtifact {
+            bytes: module_bytes.to_vec(),
+            optimized: false,
+            input_bytes: module_bytes.len(),
+        });
     };
     if !output.status.success() {
         let _ = fs::remove_file(&output_path);
