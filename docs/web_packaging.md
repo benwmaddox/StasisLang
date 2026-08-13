@@ -14,6 +14,13 @@ Release toolchains omit `--development-build`. The default output is
 - `assets/`: the same reachable, prepared release assets selected for Android/desktop packaging;
 - `stasis_provenance.json`: the normal package provenance receipt.
 
+Release packaging runs Binaryen's `wasm-opt -Oz` when `wasm-opt` is on `PATH`. Set
+`STASIS_WASM_OPT` to an explicit executable path for pinned toolchains or CI. A configured
+optimizer that fails aborts packaging; when no optimizer is discoverable, packaging succeeds with
+the original module and reports `wasm_optimized: false` in JSON output. Development packages skip
+optimization so their full diagnostic names remain available. The optimized bytes are shared by
+`play/game.wasm` and the self-contained HTML file.
+
 The static bundle must be served over HTTP. The self-contained HTML package does not fetch local
 files and can also be opened directly.
 
@@ -46,8 +53,9 @@ gesture unlocks the audio context.
 
 Release Wasm exports lifecycle/host-access functions and memory, but keeps Stasis globals private.
 Development packages additionally export globals and full reachable function names for diagnostics;
-release name metadata retains only exported function names. Called overload families that cannot be
-selected from HIR identity still fail with deterministic diagnostics.
+release export names remain in the Wasm export section while `wasm-opt` may discard the optional
+custom name section. Called overload families that cannot be selected from HIR identity still fail
+with deterministic diagnostics.
 
 `samples/web_export_smoke` is the end-to-end acceptance project. It verifies compiled movement,
 keyboard and pointer input, Canvas rendering, a Stasis-triggered WebAudio tone, the performance HUD,
@@ -84,3 +92,15 @@ Theory gained: matching native collection layout is not sufficient by itself; co
 semantics and host-visible view mutation are also part of the cross-target ABI. The observed
 negative-region guard predicts any future sentinel-index pattern will remain safe because Web now
 short-circuits before bounded memory access.
+
+Release optimization reflection:
+
+- Good: optimizing the already-linked Wasm module preserves a single compiler/runtime path while
+  reducing both the hosted payload and the standalone base64 payload.
+- Bad: relying only on process `PATH` makes long-running build agents miss newly installed tools.
+- Adjustment: release packaging accepts an explicit `STASIS_WASM_OPT` path and reports whether
+  optimization was actually applied, including before/after byte counts.
+
+Theory gained: Wasm size optimization belongs after semantic lowering and linking but before either
+package layout is assembled. The same optimized byte vector can therefore feed both outputs without
+creating target-specific behavior, and a browser acceptance pass validates the preserved host ABI.

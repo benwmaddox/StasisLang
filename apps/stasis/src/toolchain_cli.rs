@@ -3580,6 +3580,83 @@ const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
 const WEB_STANDALONE_HTML: &str = include_str!("../../../runtime/web/standalone.html");
 const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
 
+struct WebWasmArtifact {
+    bytes: Vec<u8>,
+    optimized: bool,
+    input_bytes: usize,
+}
+
+fn prepare_web_wasm(
+    module_bytes: &[u8],
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<WebWasmArtifact, String> {
+    if development_build {
+        return Ok(WebWasmArtifact {
+            bytes: module_bytes.to_vec(),
+            optimized: false,
+            input_bytes: module_bytes.len(),
+        });
+    }
+
+    let configured = env::var_os("STASIS_WASM_OPT");
+    let executable = configured
+        .clone()
+        .unwrap_or_else(|| OsString::from("wasm-opt"));
+    let input_path = staging_root.join(".game.unoptimized.wasm");
+    let output_path = staging_root.join(".game.optimized.wasm");
+    fs::write(&input_path, module_bytes)
+        .map_err(|error| format!("failed to stage {}: {error}", input_path.display()))?;
+    let result = Command::new(&executable)
+        .arg("-Oz")
+        .arg(&input_path)
+        .arg("-o")
+        .arg(&output_path)
+        .output();
+    let _ = fs::remove_file(&input_path);
+
+    let output = match result {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && configured.is_none() => {
+            return Ok(WebWasmArtifact {
+                bytes: module_bytes.to_vec(),
+                optimized: false,
+                input_bytes: module_bytes.len(),
+            });
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to run wasm-opt at {}: {error}",
+                Path::new(&executable).display()
+            ));
+        }
+    };
+    if !output.status.success() {
+        let _ = fs::remove_file(&output_path);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "wasm-opt failed with status {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let bytes = fs::read(&output_path)
+        .map_err(|error| format!("failed to read {}: {error}", output_path.display()))?;
+    let _ = fs::remove_file(&output_path);
+    if !bytes.starts_with(b"\0asm\x01\0\0\0") {
+        return Err("wasm-opt produced an invalid WebAssembly module header".to_string());
+    }
+    Ok(WebWasmArtifact {
+        bytes,
+        optimized: true,
+        input_bytes: module_bytes.len(),
+    })
+}
+
 fn package_web_workspace(
     workspace: &Workspace,
     package_root: &Path,
@@ -3603,7 +3680,7 @@ fn package_web_workspace(
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
 
-    let assembled = (|| -> Result<PathBuf, String> {
+    let assembled = (|| -> Result<(PathBuf, bool, usize, usize), String> {
         let files =
             load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
         let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
@@ -3638,6 +3715,7 @@ fn package_web_workspace(
                 format!("{error:?}")
             }
         })?;
+        let wasm = prepare_web_wasm(process.module_bytes(), &staging_root, development_build)?;
 
         let validation_jit = compile_workspace_jit(workspace)?;
         let resolved = validate_compiled_workspace_assets(workspace, &validation_jit)?;
@@ -3669,7 +3747,7 @@ fn package_web_workspace(
             .map_err(|error| format!("failed to create {}: {error}", play_root.display()))?;
 
         let wasm_path = play_root.join("game.wasm");
-        fs::write(&wasm_path, process.module_bytes())
+        fs::write(&wasm_path, &wasm.bytes)
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
         fs::write(play_root.join("game.js"), &runtime_bundle)
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
@@ -3683,15 +3761,20 @@ fn package_web_workspace(
         let standalone_path = staging_root.join(&standalone_name);
         let standalone = WEB_STANDALONE_HTML
             .replace("__STASIS_GAME_TITLE__", &workspace.manifest.name)
-            .replace("__STASIS_WASM_BASE64__", &base64(process.module_bytes()))
+            .replace("__STASIS_WASM_BASE64__", &base64(&wasm.bytes))
             .replace("__STASIS_RUNTIME_JS__", &embedded_runtime_bundle);
         fs::write(&standalone_path, standalone)
             .map_err(|error| format!("failed to write {}: {error}", standalone_path.display()))?;
         write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
-        Ok(PathBuf::from(standalone_name))
+        Ok((
+            PathBuf::from(standalone_name),
+            wasm.optimized,
+            wasm.input_bytes,
+            wasm.bytes.len(),
+        ))
     })();
-    let standalone = match assembled {
-        Ok(path) => path,
+    let (standalone, wasm_optimized, wasm_input_bytes, wasm_output_bytes) = match assembled {
+        Ok(package) => package,
         Err(error) => {
             let _ = fs::remove_dir_all(&staging_root);
             return Err(error);
@@ -3704,14 +3787,27 @@ fn package_web_workspace(
             package_root.display()
         )
     })?;
+    let optimization = if wasm_optimized {
+        "wasm-opt -Oz"
+    } else if development_build {
+        "development Wasm"
+    } else {
+        "unoptimized Wasm; wasm-opt not found"
+    };
     Ok(CommandResult::success(
-        format!("packaged web at {}", package_root.display()),
+        format!(
+            "packaged web at {} ({optimization})",
+            package_root.display()
+        ),
         json!({
             "target": "web",
             "output": display_path(package_root),
             "standalone": relative_display(package_root, &package_root.join(&standalone)),
             "play": "play/index.html",
             "wasm": "play/game.wasm",
+            "wasm_optimized": wasm_optimized,
+            "wasm_input_bytes": wasm_input_bytes,
+            "wasm_output_bytes": wasm_output_bytes,
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
         }),
@@ -5978,6 +6074,34 @@ mod tests {
 
     fn remove_temp(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn development_web_wasm_keeps_diagnostic_module_unchanged() {
+        let root = temp_dir("development_web_wasm");
+        fs::create_dir_all(&root).expect("create optimizer fixture");
+        let module = b"\0asm\x01\0\0\0diagnostic-names";
+        let artifact = prepare_web_wasm(module, &root, true).expect("prepare development Wasm");
+        assert!(!artifact.optimized);
+        assert_eq!(artifact.input_bytes, module.len());
+        assert_eq!(artifact.bytes, module);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn configured_wasm_opt_produces_a_valid_release_module() {
+        if env::var_os("STASIS_WASM_OPT").is_none() {
+            return;
+        }
+        let root = temp_dir("release_web_wasm");
+        fs::create_dir_all(&root).expect("create optimizer fixture");
+        let module = b"\0asm\x01\0\0\0";
+        let artifact = prepare_web_wasm(module, &root, false).expect("optimize release Wasm");
+        assert!(artifact.optimized);
+        assert!(artifact.bytes.starts_with(b"\0asm\x01\0\0\0"));
+        assert!(!root.join(".game.unoptimized.wasm").exists());
+        assert!(!root.join(".game.optimized.wasm").exists());
+        remove_temp(&root);
     }
 
     #[test]

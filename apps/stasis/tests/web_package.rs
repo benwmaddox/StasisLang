@@ -38,6 +38,11 @@ fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&result.stdout).contains("\"wasm_optimized\":false"),
+        "development package unexpectedly optimized Wasm: {}",
+        String::from_utf8_lossy(&result.stdout)
+    );
     output
 }
 
