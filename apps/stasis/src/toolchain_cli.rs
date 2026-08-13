@@ -3638,10 +3638,17 @@ fn package_web_workspace(
             }
         })?;
 
+        let runtime_config = web_runtime_config(workspace, &process)?;
+        let runtime_json = serde_json::to_string(&runtime_config)
+            .map_err(|error| format!("failed to encode web runtime metadata: {error}"))?
+            .replace("</", "<\\/");
+        let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{WEB_RUNTIME_JS}");
+        copy_dir_if_exists(&workspace.root.join("assets"), &staging_root.join("assets"))?;
+
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, process.module_bytes())
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
-        fs::write(staging_root.join("game.js"), WEB_RUNTIME_JS)
+        fs::write(staging_root.join("game.js"), &runtime_bundle)
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
         fs::write(
             staging_root.join("index.html"),
@@ -3654,7 +3661,7 @@ fn package_web_workspace(
         let standalone = WEB_STANDALONE_HTML
             .replace("__STASIS_GAME_TITLE__", &workspace.manifest.name)
             .replace("__STASIS_WASM_BASE64__", &base64(process.module_bytes()))
-            .replace("__STASIS_RUNTIME_JS__", WEB_RUNTIME_JS);
+            .replace("__STASIS_RUNTIME_JS__", &runtime_bundle);
         fs::write(&standalone_path, standalone)
             .map_err(|error| format!("failed to write {}: {error}", standalone_path.display()))?;
         write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
@@ -3685,6 +3692,115 @@ fn package_web_workspace(
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Result<Value, String> {
+    fn collect_assets(
+        root: &Path,
+        directory: &Path,
+        out: &mut BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if !directory.exists() {
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(directory)
+            .map_err(|error| format!("failed to read web assets {}: {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to enumerate web assets: {error}"))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let file_type = entry.file_type().map_err(|error| {
+                format!(
+                    "failed to inspect web asset {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            if file_type.is_symlink() {
+                return Err(format!(
+                    "web package assets cannot contain symlinks: {}",
+                    entry.path().display()
+                ));
+            }
+            if file_type.is_dir() {
+                collect_assets(root, &entry.path(), out)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|_| format!("web asset escaped {}", root.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let bytes = fs::read(entry.path()).map_err(|error| {
+                format!(
+                    "failed to read web asset {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            let mime = match entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "png" => "image/png",
+                "svg" => "image/svg+xml",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "ttf" => "font/ttf",
+                "otf" => "font/otf",
+                "woff" => "font/woff",
+                "woff2" => "font/woff2",
+                "wav" => "audio/wav",
+                "mp3" => "audio/mpeg",
+                "ogg" => "audio/ogg",
+                _ => "application/octet-stream",
+            };
+            out.insert(
+                format!("assets/{relative}"),
+                format!("data:{mime};base64,{}", base64(&bytes)),
+            );
+        }
+        Ok(())
+    }
+
+    let mut assets = BTreeMap::new();
+    collect_assets(
+        &workspace.root.join("assets"),
+        &workspace.root.join("assets"),
+        &mut assets,
+    )?;
+    let strings = process
+        .string_literals()
+        .iter()
+        .map(|(id, value)| (id.to_string(), Value::String(value.clone())))
+        .collect::<serde_json::Map<_, _>>();
+    let memory = process
+        .memory_layout()
+        .iter()
+        .map(|(path, layout)| {
+            (
+                path.clone(),
+                json!({
+                    "offset": layout.offset,
+                    "type_id": layout.type_id,
+                    "length": layout.length,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Ok(json!({
+        "name": workspace.manifest.name,
+        "strings": strings,
+        "memory": memory,
+        "assets": assets,
+    }))
 }
 
 fn base64(bytes: &[u8]) -> String {

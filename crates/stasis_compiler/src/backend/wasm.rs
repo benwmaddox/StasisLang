@@ -10,19 +10,23 @@ use crate::backend::emit::{
 };
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
 use crate::frontend::types::{
-    TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
-    TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+    TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
 use std::collections::{BTreeMap, BTreeSet};
 
 const I32: u8 = 0x7f;
+const F32: u8 = 0x7d;
+const F64: u8 = 0x7c;
 
 #[derive(Debug, Clone, Default)]
 pub struct WasmProcess {
     compiler: Compiler,
     required_roots: Vec<String>,
     module: Vec<u8>,
+    string_literals: BTreeMap<i32, String>,
+    memory_layout: BTreeMap<String, WasmMemoryLayout>,
 }
 
 impl WasmProcess {
@@ -47,6 +51,14 @@ impl WasmProcess {
         &self.module
     }
 
+    pub fn string_literals(&self) -> &BTreeMap<i32, String> {
+        &self.string_literals
+    }
+
+    pub fn memory_layout(&self) -> &BTreeMap<String, WasmMemoryLayout> {
+        &self.memory_layout
+    }
+
     pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
         self.compiler.last_source_diagnostic()
     }
@@ -66,10 +78,15 @@ impl WasmProcess {
         .map_err(CompileError::Backend)?;
         *self.compiler.types_mut() = types.clone();
 
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            self.compiler.functions(),
+            &self.required_roots,
+        );
         let function_ids = self
             .compiler
             .functions()
             .iter()
+            .filter(|function| reachable.contains(&function.id))
             .map(|function| function.id)
             .collect::<Vec<_>>();
         let mut lowered = Vec::new();
@@ -91,6 +108,22 @@ impl WasmProcess {
             }
         }
 
+        self.string_literals = collect_string_literals(&lowered);
+        let (memory_bindings, _) =
+            build_memory_bindings(&analysis).map_err(CompileError::Backend)?;
+        self.memory_layout = memory_bindings
+            .into_iter()
+            .map(|(path, binding)| {
+                (
+                    path,
+                    WasmMemoryLayout {
+                        offset: binding.offset,
+                        type_id: binding.type_id,
+                        length: binding.len,
+                    },
+                )
+            })
+            .collect();
         self.module = encode_module(&lowered, &analysis, &types).map_err(CompileError::Backend)?;
         Ok(CompileReport { index, emit })
     }
@@ -109,15 +142,115 @@ fn is_i32_lane(type_id: TypeId) -> bool {
     )
 }
 
+fn wasm_value_type(type_id: TypeId) -> Result<u8, String> {
+    if is_i32_lane(type_id) {
+        Ok(I32)
+    } else if type_id == TYPE_ID_F32 {
+        Ok(F32)
+    } else if type_id == TYPE_ID_F64 {
+        Ok(F64)
+    } else if type_id != TYPE_ID_VOID {
+        // String/view handles and opaque host handles cross the web ABI as i32.
+        Ok(I32)
+    } else {
+        Err("void is not a WebAssembly value".to_string())
+    }
+}
+
 fn validate_signature(name: &str, signature: &Signature) -> Result<(), String> {
-    if signature.params.iter().any(|value| !is_i32_lane(*value))
-        || (signature.result != TYPE_ID_VOID && !is_i32_lane(signature.result))
-    {
-        return Err(format!(
-            "web scalar lane does not yet support non-i32 signature for '{name}'"
-        ));
+    for type_id in &signature.params {
+        wasm_value_type(*type_id)
+            .map_err(|_| format!("web backend does not support parameter type for '{name}'"))?;
+    }
+    if signature.result != TYPE_ID_VOID {
+        wasm_value_type(signature.result)
+            .map_err(|_| format!("web backend does not support return type for '{name}'"))?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct MemoryBinding {
+    offset: u32,
+    type_id: TypeId,
+    len: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmMemoryLayout {
+    pub offset: u32,
+    pub type_id: TypeId,
+    pub length: i32,
+}
+
+fn storage_width(type_id: TypeId) -> Result<u32, String> {
+    match type_id {
+        TYPE_ID_BOOL | TYPE_ID_U8 => Ok(1),
+        TYPE_ID_U16 => Ok(2),
+        TYPE_ID_I32 | TYPE_ID_U32 | TYPE_ID_F32 => Ok(4),
+        TYPE_ID_F64 => Ok(8),
+        _ => Err(format!(
+            "web memory does not support element type id {type_id}"
+        )),
+    }
+}
+
+fn align_up(value: u32, alignment: u32) -> Result<u32, String> {
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value / alignment * alignment)
+        .ok_or_else(|| "web memory layout overflow".to_string())
+}
+
+fn build_memory_bindings(
+    analysis: &crate::backend::emit::CompileAnalysisCache,
+) -> Result<(BTreeMap<String, MemoryBinding>, u32), String> {
+    let mut offset = 0u32;
+    let mut bindings = BTreeMap::new();
+    for (path, collection) in &analysis.collection_infos {
+        if let Some(type_id) = collection.element_type {
+            let width = storage_width(type_id)?;
+            offset = align_up(offset, width)?;
+            bindings.insert(
+                path.clone(),
+                MemoryBinding {
+                    offset,
+                    type_id,
+                    len: collection.len,
+                },
+            );
+            offset = offset
+                .checked_add(
+                    u32::try_from(collection.len)
+                        .map_err(|_| format!("negative web collection length for '{path}'"))?
+                        .checked_mul(width)
+                        .ok_or_else(|| "web memory layout overflow".to_string())?,
+                )
+                .ok_or_else(|| "web memory layout overflow".to_string())?;
+        }
+        for (field, type_id) in &collection.field_types {
+            let width = storage_width(*type_id)?;
+            offset = align_up(offset, width)?;
+            let field_path = format!("{path}.{field}");
+            bindings.insert(
+                field_path,
+                MemoryBinding {
+                    offset,
+                    type_id: *type_id,
+                    len: collection.len,
+                },
+            );
+            offset = offset
+                .checked_add(
+                    u32::try_from(collection.len)
+                        .map_err(|_| format!("negative web collection length for '{path}'"))?
+                        .checked_mul(width)
+                        .ok_or_else(|| "web memory layout overflow".to_string())?,
+                )
+                .ok_or_else(|| "web memory layout overflow".to_string())?;
+        }
+    }
+    Ok((bindings, offset))
 }
 
 fn encode_module(
@@ -125,17 +258,16 @@ fn encode_module(
     analysis: &crate::backend::emit::CompileAnalysisCache,
     types: &TypeTable,
 ) -> Result<Vec<u8>, String> {
-    let mut internal_by_name = BTreeMap::new();
+    let mut internal_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, (function, _)) in functions.iter().enumerate() {
-        if internal_by_name
-            .insert(function.name.clone(), index)
-            .is_some()
-        {
-            return Err(format!(
-                "web scalar lane requires unique function names; '{}' is overloaded",
-                function.name
-            ));
-        }
+        internal_by_name
+            .entry(function.name.clone())
+            .or_default()
+            .push(index);
+        internal_by_name
+            .entry(format!("{}.{}", function.module_alias, function.name))
+            .or_default()
+            .push(index);
     }
 
     let mut called = BTreeSet::new();
@@ -164,6 +296,14 @@ fn encode_module(
         if !internal_by_name.contains_key(target) && !imported_names.contains(target) {
             return Err(format!("unresolved web call target '{target}'"));
         }
+        if internal_by_name
+            .get(target)
+            .is_some_and(|candidates| candidates.len() > 1)
+        {
+            return Err(format!(
+                "web backend cannot yet resolve called overload family '{target}'"
+            ));
+        }
     }
 
     let mut signatures = imports
@@ -179,27 +319,47 @@ fn encode_module(
         signatures.push(signature);
     }
 
+    let (memory_bindings, memory_bytes) = build_memory_bindings(analysis)?;
     let mut globals = Vec::new();
     for (name, type_id) in &analysis.global_path_types {
-        if name.contains('.') {
+        if memory_bindings.contains_key(name) {
+            continue;
+        }
+        let Some(info) = types.type_info(*type_id) else {
             return Err(format!(
-                "web scalar lane does not yet support structured state path '{name}'"
+                "web backend found unknown global type id {type_id}"
+            ));
+        };
+        if info.category == TypeCategory::Named
+            || matches!(
+                info.category,
+                TypeCategory::ArrayFixed
+                    | TypeCategory::ArrayView
+                    | TypeCategory::AsciiFixed
+                    | TypeCategory::AsciiView
+                    | TypeCategory::Utf8Fixed
+                    | TypeCategory::Utf8View
+            )
+        {
+            continue;
+        }
+        if wasm_value_type(*type_id).is_err() {
+            return Err(format!(
+                "web backend does not support global '{name}' with type {}",
+                info.name
             ));
         }
-        if !is_i32_lane(*type_id) {
-            return Err(format!(
-                "web scalar lane does not yet support global '{name}' with type {}",
-                types
-                    .type_info(*type_id)
-                    .map_or("unknown", |info| info.name.as_str())
-            ));
-        }
-        globals.push((name.clone(), *type_id));
+        let initial_i32 = [".length", ".max_length"].iter().find_map(|suffix| {
+            name.strip_suffix(suffix)
+                .and_then(|path| analysis.collection_infos.get(path))
+                .map(|collection| collection.len)
+        });
+        globals.push((name.clone(), *type_id, initial_i32));
     }
     let global_indices = globals
         .iter()
         .enumerate()
-        .map(|(index, (name, _))| (name.clone(), index as u32))
+        .map(|(index, (name, _, _))| (name.clone(), index as u32))
         .collect::<BTreeMap<_, _>>();
 
     let import_indices = imports
@@ -207,11 +367,21 @@ fn encode_module(
         .enumerate()
         .map(|(index, (name, _, _))| (name.clone(), index as u32))
         .collect::<BTreeMap<_, _>>();
-    let internal_indices = functions
-        .iter()
-        .enumerate()
-        .map(|(index, (function, _))| (function.name.clone(), (imports.len() + index) as u32))
-        .collect::<BTreeMap<_, _>>();
+    let mut internal_indices = BTreeMap::new();
+    for (index, (function, _)) in functions.iter().enumerate() {
+        let function_index = (imports.len() + index) as u32;
+        for name in [
+            function.name.clone(),
+            format!("{}.{}", function.module_alias, function.name),
+        ] {
+            if internal_by_name
+                .get(&name)
+                .is_some_and(|candidates| candidates.len() == 1)
+            {
+                internal_indices.insert(name, function_index);
+            }
+        }
+    }
 
     let mut module = b"\0asm\x01\0\0\0".to_vec();
 
@@ -220,11 +390,13 @@ fn encode_module(
     for signature in &signatures {
         type_section.push(0x60);
         uleb(signature.params.len() as u32, &mut type_section);
-        type_section.extend(std::iter::repeat_n(I32, signature.params.len()));
+        for type_id in &signature.params {
+            type_section.push(wasm_value_type(*type_id)?);
+        }
         if signature.result == TYPE_ID_VOID {
             type_section.push(0);
         } else {
-            type_section.extend([1, I32]);
+            type_section.extend([1, wasm_value_type(signature.result)?]);
         }
     }
     section(1, type_section, &mut module);
@@ -251,29 +423,63 @@ fn encode_module(
     }
     section(3, function_section, &mut module);
 
+    if memory_bytes > 0 {
+        let mut memory_section = vec![1, 0];
+        uleb(memory_bytes.div_ceil(65_536).max(1), &mut memory_section);
+        section(5, memory_section, &mut module);
+    }
+
     if !globals.is_empty() {
         let mut global_section = Vec::new();
         uleb(globals.len() as u32, &mut global_section);
-        for _ in &globals {
-            global_section.extend([I32, 1, 0x41, 0, 0x0b]);
+        for (_, type_id, initial_i32) in &globals {
+            global_section.extend([wasm_value_type(*type_id)?, 1]);
+            if let Some(value) = initial_i32 {
+                global_section.push(0x41);
+                sleb(*value, &mut global_section);
+            } else {
+                encode_zero(*type_id, &mut global_section)?;
+            }
+            global_section.push(0x0b);
         }
         section(6, global_section, &mut module);
     }
 
     let mut export_section = Vec::new();
     uleb(
-        functions.len() as u32 + globals.len() as u32,
+        functions
+            .iter()
+            .filter(|(function, _)| {
+                matches!(
+                    function.name.as_str(),
+                    "main" | "tick" | "render" | "on_code_swap"
+                )
+            })
+            .count() as u32
+            + globals.len() as u32
+            + u32::from(memory_bytes > 0),
         &mut export_section,
     );
     for (index, (function, _)) in functions.iter().enumerate() {
+        if !matches!(
+            function.name.as_str(),
+            "main" | "tick" | "render" | "on_code_swap"
+        ) {
+            continue;
+        }
         string(&function.name, &mut export_section);
         export_section.push(0);
         uleb((imports.len() + index) as u32, &mut export_section);
     }
-    for (index, (name, _)) in globals.iter().enumerate() {
+    for (index, (name, _, _)) in globals.iter().enumerate() {
         string(name, &mut export_section);
         export_section.push(3);
         uleb(index as u32, &mut export_section);
+    }
+    if memory_bytes > 0 {
+        string("memory", &mut export_section);
+        export_section.push(2);
+        uleb(0, &mut export_section);
     }
     section(7, export_section, &mut module);
 
@@ -285,6 +491,8 @@ fn encode_module(
             hir,
             &analysis.constant_values,
             &global_indices,
+            &analysis.global_path_types,
+            &memory_bindings,
             &import_indices,
             &internal_indices,
             &signatures,
@@ -386,59 +594,91 @@ fn encode_function(
     hir: &FunctionHIR,
     constants: &BTreeMap<String, ConstantValue>,
     globals: &BTreeMap<String, u32>,
+    global_types: &BTreeMap<String, TypeId>,
+    memory: &BTreeMap<String, MemoryBinding>,
     imports: &BTreeMap<String, u32>,
     internals: &BTreeMap<String, u32>,
     signatures: &[Signature],
 ) -> Result<Vec<u8>, String> {
-    let mut local_names = Vec::new();
-    collect_locals(&hir.statements, &mut local_names)?;
+    let mut local_declarations = Vec::new();
+    collect_locals(&hir.statements, &mut local_declarations)?;
     let mut locals = function
         .param_names
         .iter()
+        .zip(function.params.iter())
         .enumerate()
-        .map(|(index, name)| (name.clone(), index as u32))
+        .map(|(index, (name, type_id))| {
+            (
+                name.clone(),
+                LocalBinding {
+                    index: index as u32,
+                    type_id: *type_id,
+                },
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    for name in &local_names {
+    for (name, type_id) in &local_declarations {
         if locals.contains_key(name) {
             return Err(format!("duplicate local '{name}' in '{}'", function.name));
         }
-        locals.insert(name.clone(), locals.len() as u32);
+        locals.insert(
+            name.clone(),
+            LocalBinding {
+                index: locals.len() as u32,
+                type_id: *type_id,
+            },
+        );
     }
 
     let mut body = Vec::new();
-    if local_names.is_empty() {
-        body.push(0);
-    } else {
-        body.push(1);
-        uleb(local_names.len() as u32, &mut body);
-        body.push(I32);
+    uleb(local_declarations.len() as u32 + 4, &mut body);
+    for (_, type_id) in &local_declarations {
+        uleb(1, &mut body);
+        body.push(wasm_value_type(*type_id)?);
+    }
+    let scratch_index = locals.len() as u32;
+    let scratch_i32 = scratch_index + 1;
+    let scratch_f32 = scratch_index + 2;
+    let scratch_f64 = scratch_index + 3;
+    for value_type in [I32, I32, F32, F64] {
+        uleb(1, &mut body);
+        body.push(value_type);
     }
     let context = EncodeContext {
         locals: &locals,
         globals,
+        global_types,
+        memory,
         constants,
         imports,
         internals,
         signatures,
+        scratch_index,
+        return_type: function.return_type,
+        scratch_i32,
+        scratch_f32,
+        scratch_f64,
     };
     encode_statements(&hir.statements, &context, &mut body)?;
     if function.return_type != TYPE_ID_VOID {
-        body.extend([0x41, 0]);
+        encode_zero(function.return_type, &mut body)?;
     }
     body.push(0x0b);
     Ok(body)
 }
 
-fn collect_locals(statements: &[SimpleStmt], out: &mut Vec<String>) -> Result<(), String> {
+fn collect_locals(
+    statements: &[SimpleStmt],
+    out: &mut Vec<(String, TypeId)>,
+) -> Result<(), String> {
     for statement in statements {
         match statement {
             SimpleStmt::Let { name, type_id, .. } => {
-                if type_id.is_some_and(|value| !is_i32_lane(value)) {
-                    return Err(format!(
-                        "web scalar lane requires i32-compatible local '{name}'"
-                    ));
-                }
-                out.push(name.clone());
+                let type_id = type_id.ok_or_else(|| {
+                    format!("web backend requires an explicit type for local '{name}'")
+                })?;
+                wasm_value_type(type_id)?;
+                out.push((name.clone(), type_id));
             }
             SimpleStmt::If {
                 then_statements,
@@ -470,12 +710,25 @@ fn collect_locals(statements: &[SimpleStmt], out: &mut Vec<String>) -> Result<()
 }
 
 struct EncodeContext<'a> {
-    locals: &'a BTreeMap<String, u32>,
+    locals: &'a BTreeMap<String, LocalBinding>,
     globals: &'a BTreeMap<String, u32>,
+    global_types: &'a BTreeMap<String, TypeId>,
+    memory: &'a BTreeMap<String, MemoryBinding>,
     constants: &'a BTreeMap<String, ConstantValue>,
     imports: &'a BTreeMap<String, u32>,
     internals: &'a BTreeMap<String, u32>,
     signatures: &'a [Signature],
+    scratch_index: u32,
+    return_type: TypeId,
+    scratch_i32: u32,
+    scratch_f32: u32,
+    scratch_f64: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalBinding {
+    index: u32,
+    type_id: TypeId,
 }
 
 fn encode_statements(
@@ -489,21 +742,25 @@ fn encode_statements(
             SimpleStmt::Let {
                 name, expression, ..
             } => {
-                encode_expr(expression, context, out)?;
+                let binding = local_binding(context, name)?;
+                let value_type = encode_expr_as(expression, Some(binding.type_id), context, out)?;
+                require_same_type(binding.type_id, value_type, "local initializer")?;
                 out.push(0x21);
-                uleb(local(context, name)?, out);
+                uleb(binding.index, out);
             }
             SimpleStmt::Assign {
                 target,
                 op,
                 expression,
             } => {
+                let target_type = target_type(target, context)?;
                 if *op != AssignOp::Set {
                     encode_target_get(target, context, out)?;
                 }
-                encode_expr(expression, context, out)?;
+                let value_type = encode_expr_as(expression, Some(target_type), context, out)?;
+                require_same_type(target_type, value_type, "assignment")?;
                 if *op != AssignOp::Set {
-                    out.push(arithmetic_opcode(*op)?);
+                    out.push(arithmetic_opcode(*op, target_type)?);
                 }
                 encode_target_set(target, context, out)?;
             }
@@ -514,7 +771,7 @@ fn encode_statements(
                 }
             }
             SimpleStmt::Return(expression) => {
-                encode_expr(expression, context, out)?;
+                encode_expr_as(expression, Some(context.return_type), context, out)?;
                 out.push(0x0f);
             }
             SimpleStmt::ReturnVoid => out.push(0x0f),
@@ -549,8 +806,11 @@ fn encode_statements(
             SimpleStmt::Continue => {
                 return Err("web scalar lane does not yet support continue".to_string())
             }
-            SimpleStmt::Convert { .. } => {
-                return Err("web scalar lane does not yet support conversions".to_string())
+            SimpleStmt::Convert { target, source, .. } => {
+                let target_type = target_type(target, context)?;
+                let source_type = encode_expr(source, context, out)?;
+                encode_conversion(source_type, target_type, out)?;
+                encode_target_set(target, context, out)?;
             }
             SimpleStmt::Foreach { .. } => {
                 return Err("web scalar lane does not yet support foreach".to_string())
@@ -560,14 +820,42 @@ fn encode_statements(
     Ok(())
 }
 
-fn arithmetic_opcode(op: AssignOp) -> Result<u8, String> {
-    match op {
-        AssignOp::Add => Ok(0x6a),
-        AssignOp::Sub => Ok(0x6b),
-        AssignOp::Mul => Ok(0x6c),
-        AssignOp::Div => Ok(0x6d),
-        AssignOp::Mod => Ok(0x6f),
-        AssignOp::Set => Err("set has no arithmetic opcode".to_string()),
+fn encode_conversion(from: TypeId, to: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
+    let from = wasm_value_type(from)?;
+    let to = wasm_value_type(to)?;
+    if from == to {
+        return Ok(());
+    }
+    out.push(match (from, to) {
+        (I32, F32) => 0xb2,
+        (I32, F64) => 0xb7,
+        (F32, I32) => 0xa8,
+        (F64, I32) => 0xaa,
+        (F32, F64) => 0xbb,
+        (F64, F32) => 0xb6,
+        _ => return Err("unsupported web conversion".to_string()),
+    });
+    Ok(())
+}
+
+fn arithmetic_opcode(op: AssignOp, type_id: TypeId) -> Result<u8, String> {
+    match (op, wasm_value_type(type_id)?) {
+        (AssignOp::Add, I32) => Ok(0x6a),
+        (AssignOp::Sub, I32) => Ok(0x6b),
+        (AssignOp::Mul, I32) => Ok(0x6c),
+        (AssignOp::Div, I32) => Ok(0x6d),
+        (AssignOp::Mod, I32) => Ok(0x6f),
+        (AssignOp::Add, F32) => Ok(0x92),
+        (AssignOp::Sub, F32) => Ok(0x93),
+        (AssignOp::Mul, F32) => Ok(0x94),
+        (AssignOp::Div, F32) => Ok(0x95),
+        (AssignOp::Add, F64) => Ok(0xa0),
+        (AssignOp::Sub, F64) => Ok(0xa1),
+        (AssignOp::Mul, F64) => Ok(0xa2),
+        (AssignOp::Div, F64) => Ok(0xa3),
+        (AssignOp::Mod, F32 | F64) => Err("web float remainder is unsupported".to_string()),
+        (AssignOp::Set, _) => Err("set has no arithmetic opcode".to_string()),
+        _ => Err("unsupported web arithmetic lane".to_string()),
     }
 }
 
@@ -575,26 +863,33 @@ fn encode_target_get(
     target: &AssignTarget,
     context: &EncodeContext<'_>,
     out: &mut Vec<u8>,
-) -> Result<(), String> {
+) -> Result<TypeId, String> {
     match target {
         AssignTarget::Local(name) => {
-            if let Some(index) = context.locals.get(name) {
+            if let Some(binding) = context.locals.get(name) {
                 out.push(0x20);
-                uleb(*index, out);
-                Ok(())
+                uleb(binding.index, out);
+                Ok(binding.type_id)
             } else {
                 out.push(0x23);
                 uleb(global(context, name)?, out);
-                Ok(())
+                global_type(context, name)
             }
         }
         AssignTarget::GlobalPath(name) => {
             out.push(0x23);
             uleb(global(context, name)?, out);
-            Ok(())
+            global_type(context, name)
         }
-        AssignTarget::IndexedPath { .. } => {
-            Err("web scalar lane does not yet support indexed assignment".to_string())
+        AssignTarget::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            let binding = memory_binding(context, collection_path, suffix)?;
+            encode_memory_address(binding, index, context, out)?;
+            encode_memory_load(binding.type_id, out)?;
+            Ok(binding.type_id)
         }
     }
 }
@@ -606,9 +901,9 @@ fn encode_target_set(
 ) -> Result<(), String> {
     match target {
         AssignTarget::Local(name) => {
-            if let Some(index) = context.locals.get(name) {
+            if let Some(binding) = context.locals.get(name) {
                 out.push(0x21);
-                uleb(*index, out);
+                uleb(binding.index, out);
                 Ok(())
             } else {
                 out.push(0x24);
@@ -621,13 +916,33 @@ fn encode_target_set(
             uleb(global(context, name)?, out);
             Ok(())
         }
-        AssignTarget::IndexedPath { .. } => {
-            Err("web scalar lane does not yet support indexed assignment".to_string())
+        AssignTarget::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            let binding = memory_binding(context, collection_path, suffix)?;
+            let temp_index = scratch_local(context, binding.type_id)?;
+            out.push(0x21);
+            uleb(temp_index, out);
+            encode_memory_address(binding, index, context, out)?;
+            out.push(0x20);
+            uleb(temp_index, out);
+            encode_memory_store(binding.type_id, out)
         }
     }
 }
 
-fn local(context: &EncodeContext<'_>, name: &str) -> Result<u32, String> {
+fn scratch_local(context: &EncodeContext<'_>, type_id: TypeId) -> Result<u32, String> {
+    match wasm_value_type(type_id)? {
+        I32 => Ok(context.scratch_i32),
+        F32 => Ok(context.scratch_f32),
+        F64 => Ok(context.scratch_f64),
+        _ => Err("unsupported web scratch type".to_string()),
+    }
+}
+
+fn local_binding(context: &EncodeContext<'_>, name: &str) -> Result<LocalBinding, String> {
     context
         .locals
         .get(name)
@@ -643,78 +958,266 @@ fn global(context: &EncodeContext<'_>, name: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("unknown web global '{name}'"))
 }
 
+fn global_type(context: &EncodeContext<'_>, name: &str) -> Result<TypeId, String> {
+    context
+        .global_types
+        .get(name)
+        .copied()
+        .ok_or_else(|| format!("unknown web global type '{name}'"))
+}
+
+fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<TypeId, String> {
+    match target {
+        AssignTarget::Local(name) => context
+            .locals
+            .get(name)
+            .map(|binding| binding.type_id)
+            .or_else(|| context.global_types.get(name).copied())
+            .ok_or_else(|| format!("unknown web assignment target '{name}'")),
+        AssignTarget::GlobalPath(name) => global_type(context, name),
+        AssignTarget::IndexedPath {
+            collection_path,
+            suffix,
+            ..
+        } => Ok(memory_binding(context, collection_path, suffix)?.type_id),
+    }
+}
+
+fn memory_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    collection_path: &str,
+    suffix: &str,
+) -> Result<&'a MemoryBinding, String> {
+    let path = if suffix.is_empty() {
+        collection_path.to_string()
+    } else {
+        format!("{collection_path}.{suffix}")
+    };
+    context
+        .memory
+        .get(&path)
+        .ok_or_else(|| format!("unknown web collection storage '{path}'"))
+}
+
+fn encode_memory_address(
+    binding: &MemoryBinding,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let index_type = encode_expr(index, context, out)?;
+    if !is_i32_lane(index_type) {
+        return Err("web collection index must be i32-compatible".to_string());
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+    out.push(0x20);
+    uleb(context.scratch_index, out);
+    out.extend([0x41, 0, 0x48, 0x04, 0x40, 0x00, 0x0b]);
+    out.push(0x20);
+    uleb(context.scratch_index, out);
+    out.push(0x41);
+    sleb(binding.len, out);
+    out.extend([0x4e, 0x04, 0x40, 0x00, 0x0b]);
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    out.push(0x20);
+    uleb(context.scratch_index, out);
+    out.push(0x41);
+    sleb(storage_width(binding.type_id)? as i32, out);
+    out.push(0x6c);
+    out.push(0x6a);
+    Ok(())
+}
+
+fn encode_memory_load(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
+    let (opcode, align) = match type_id {
+        TYPE_ID_BOOL | TYPE_ID_U8 => (0x2d, 0),
+        TYPE_ID_U16 => (0x2f, 1),
+        TYPE_ID_I32 | TYPE_ID_U32 => (0x28, 2),
+        TYPE_ID_F32 => (0x2a, 2),
+        TYPE_ID_F64 => (0x2b, 3),
+        _ => return Err(format!("unsupported web memory load type id {type_id}")),
+    };
+    out.push(opcode);
+    uleb(align, out);
+    uleb(0, out);
+    Ok(())
+}
+
+fn encode_memory_store(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
+    let (opcode, align) = match type_id {
+        TYPE_ID_BOOL | TYPE_ID_U8 => (0x3a, 0),
+        TYPE_ID_U16 => (0x3b, 1),
+        TYPE_ID_I32 | TYPE_ID_U32 => (0x36, 2),
+        TYPE_ID_F32 => (0x38, 2),
+        TYPE_ID_F64 => (0x39, 3),
+        _ => return Err(format!("unsupported web memory store type id {type_id}")),
+    };
+    out.push(opcode);
+    uleb(align, out);
+    uleb(0, out);
+    Ok(())
+}
+
+fn require_same_type(expected: TypeId, actual: TypeId, context: &str) -> Result<(), String> {
+    if wasm_value_type(expected)? == wasm_value_type(actual)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "web {context} type mismatch: expected {expected}, found {actual}"
+        ))
+    }
+}
+
 fn encode_expr(
     value: &SimpleExpr,
     context: &EncodeContext<'_>,
     out: &mut Vec<u8>,
-) -> Result<(), String> {
+) -> Result<TypeId, String> {
+    encode_expr_as(value, None, context, out)
+}
+
+fn encode_expr_as(
+    value: &SimpleExpr,
+    expected: Option<TypeId>,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
     match value {
         SimpleExpr::Int(value) => {
             out.push(0x41);
             sleb(*value as i32, out);
+            Ok(expected
+                .filter(|type_id| is_i32_lane(*type_id))
+                .unwrap_or(TYPE_ID_I32))
         }
-        SimpleExpr::Bool(value) => out.extend([0x41, u8::from(*value)]),
+        SimpleExpr::Float(value) => {
+            let type_id = expected
+                .filter(|type_id| matches!(*type_id, TYPE_ID_F32 | TYPE_ID_F64))
+                .unwrap_or(TYPE_ID_F32);
+            if type_id == TYPE_ID_F64 {
+                out.push(0x44);
+                out.extend(value.to_le_bytes());
+            } else {
+                out.push(0x43);
+                out.extend((*value as f32).to_le_bytes());
+            }
+            Ok(type_id)
+        }
+        SimpleExpr::Bool(value) => {
+            out.extend([0x41, u8::from(*value)]);
+            Ok(TYPE_ID_BOOL)
+        }
+        SimpleExpr::StringLiteral(value) => {
+            out.push(0x41);
+            sleb(crate::backend::emit::hash_string_literal(value), out);
+            Ok(expected.unwrap_or(TYPE_ID_I32))
+        }
         SimpleExpr::Identifier(name) => {
-            if let Some(index) = context.locals.get(name) {
+            if let Some(binding) = context.locals.get(name) {
                 out.push(0x20);
-                uleb(*index, out);
+                uleb(binding.index, out);
+                Ok(binding.type_id)
             } else if let Some(index) = context.globals.get(name) {
                 out.push(0x23);
                 uleb(*index, out);
+                global_type(context, name)
             } else if let Some(value) = context.constants.get(name) {
-                encode_constant(value, out)?;
+                encode_constant(value, expected, out)
             } else {
-                return Err(format!("unknown web value '{name}'"));
+                Err(format!("unknown web value '{name}'"))
             }
         }
         SimpleExpr::Call { target, args } => {
-            for arg in args {
-                encode_expr(arg, context, out)?;
-            }
-            out.push(0x10);
             let index = context
                 .imports
                 .get(target)
                 .or_else(|| context.internals.get(target))
                 .copied()
                 .ok_or_else(|| format!("unknown web call '{target}'"))?;
+            let signature = context
+                .signatures
+                .get(index as usize)
+                .ok_or_else(|| format!("missing web signature for '{target}'"))?;
+            if args.len() != signature.params.len() {
+                return Err(format!(
+                    "web call '{target}' expected {} arguments, found {}",
+                    signature.params.len(),
+                    args.len()
+                ));
+            }
+            for (arg, param_type) in args.iter().zip(signature.params.iter()) {
+                let actual = encode_expr_as(arg, Some(*param_type), context, out)?;
+                require_same_type(*param_type, actual, "call argument")?;
+            }
+            out.push(0x10);
             uleb(index, out);
+            Ok(signature.result)
         }
         SimpleExpr::Binary { lhs, op, rhs } => {
-            encode_expr(lhs, context, out)?;
-            encode_expr(rhs, context, out)?;
-            out.push(match op {
-                '+' => 0x6a,
-                '-' => 0x6b,
-                '*' => 0x6c,
-                '/' => 0x6d,
-                '%' => 0x6f,
+            let lhs_type = encode_expr_as(lhs, expected, context, out)?;
+            let rhs_type = encode_expr_as(rhs, Some(lhs_type), context, out)?;
+            require_same_type(lhs_type, rhs_type, "binary expression")?;
+            let assign_op = match op {
+                '+' => AssignOp::Add,
+                '-' => AssignOp::Sub,
+                '*' => AssignOp::Mul,
+                '/' => AssignOp::Div,
+                '%' => AssignOp::Mod,
                 other => return Err(format!("unsupported web binary operator '{other}'")),
-            });
+            };
+            out.push(arithmetic_opcode(assign_op, lhs_type)?);
+            Ok(lhs_type)
         }
-        SimpleExpr::Condition(condition) => encode_condition(condition, context, out)?,
-        SimpleExpr::Float(_) => {
-            return Err("web scalar lane does not yet support float expressions".to_string())
+        SimpleExpr::Condition(condition) => {
+            encode_condition(condition, context, out)?;
+            Ok(TYPE_ID_BOOL)
         }
-        SimpleExpr::StringLiteral(_) => {
-            return Err("web scalar lane does not yet support string expressions".to_string())
-        }
-        SimpleExpr::IndexedPath { .. } => {
-            return Err("web scalar lane does not yet support indexed expressions".to_string())
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            let binding = memory_binding(context, collection_path, suffix)?;
+            encode_memory_address(binding, index, context, out)?;
+            encode_memory_load(binding.type_id, out)?;
+            Ok(binding.type_id)
         }
     }
-    Ok(())
 }
 
-fn encode_constant(value: &ConstantValue, out: &mut Vec<u8>) -> Result<(), String> {
-    let value = match value {
-        ConstantValue::I32 { value, .. } => *value,
-        ConstantValue::Bool(value) => i32::from(*value),
-        _ => return Err("web scalar lane only supports i32-compatible constants".to_string()),
-    };
-    out.push(0x41);
-    sleb(value, out);
-    Ok(())
+fn encode_constant(
+    value: &ConstantValue,
+    expected: Option<TypeId>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    match value {
+        ConstantValue::I32 { value, type_id } => {
+            out.push(0x41);
+            sleb(*value, out);
+            Ok(*type_id)
+        }
+        ConstantValue::Bool(value) => {
+            out.extend([0x41, u8::from(*value)]);
+            Ok(TYPE_ID_BOOL)
+        }
+        ConstantValue::F32(value) => {
+            out.push(0x43);
+            out.extend(value.to_le_bytes());
+            Ok(TYPE_ID_F32)
+        }
+        ConstantValue::F64(value) => {
+            out.push(0x44);
+            out.extend(value.to_le_bytes());
+            Ok(TYPE_ID_F64)
+        }
+        ConstantValue::String { value, type_id } => {
+            out.push(0x41);
+            sleb(crate::backend::emit::hash_string_literal(value), out);
+            Ok(expected.unwrap_or(*type_id))
+        }
+    }
 }
 
 fn encode_condition(
@@ -724,18 +1227,14 @@ fn encode_condition(
 ) -> Result<(), String> {
     match value {
         SimpleCondition::Comparison { lhs, op, rhs } => {
-            encode_expr(lhs, context, out)?;
-            encode_expr(rhs, context, out)?;
-            out.push(match op {
-                ComparisonOp::Eq => 0x46,
-                ComparisonOp::Ne => 0x47,
-                ComparisonOp::Lt => 0x48,
-                ComparisonOp::Le => 0x4c,
-                ComparisonOp::Gt => 0x4a,
-                ComparisonOp::Ge => 0x4e,
-            });
+            let lhs_type = encode_expr(lhs, context, out)?;
+            let rhs_type = encode_expr_as(rhs, Some(lhs_type), context, out)?;
+            require_same_type(lhs_type, rhs_type, "comparison")?;
+            out.push(comparison_opcode(*op, lhs_type)?);
         }
-        SimpleCondition::Expr(value) => encode_expr(value, context, out)?,
+        SimpleCondition::Expr(value) => {
+            encode_expr(value, context, out)?;
+        }
         SimpleCondition::And(lhs, rhs) => {
             encode_condition(lhs, context, out)?;
             encode_condition(rhs, context, out)?;
@@ -754,6 +1253,30 @@ fn encode_condition(
     Ok(())
 }
 
+fn comparison_opcode(op: ComparisonOp, type_id: TypeId) -> Result<u8, String> {
+    match (op, wasm_value_type(type_id)?) {
+        (ComparisonOp::Eq, I32) => Ok(0x46),
+        (ComparisonOp::Ne, I32) => Ok(0x47),
+        (ComparisonOp::Lt, I32) => Ok(0x48),
+        (ComparisonOp::Gt, I32) => Ok(0x4a),
+        (ComparisonOp::Le, I32) => Ok(0x4c),
+        (ComparisonOp::Ge, I32) => Ok(0x4e),
+        (ComparisonOp::Eq, F32) => Ok(0x5b),
+        (ComparisonOp::Ne, F32) => Ok(0x5c),
+        (ComparisonOp::Lt, F32) => Ok(0x5d),
+        (ComparisonOp::Gt, F32) => Ok(0x5e),
+        (ComparisonOp::Le, F32) => Ok(0x5f),
+        (ComparisonOp::Ge, F32) => Ok(0x60),
+        (ComparisonOp::Eq, F64) => Ok(0x61),
+        (ComparisonOp::Ne, F64) => Ok(0x62),
+        (ComparisonOp::Lt, F64) => Ok(0x63),
+        (ComparisonOp::Gt, F64) => Ok(0x64),
+        (ComparisonOp::Le, F64) => Ok(0x65),
+        (ComparisonOp::Ge, F64) => Ok(0x66),
+        _ => Err("unsupported web comparison lane".to_string()),
+    }
+}
+
 fn expression_returns_value(
     value: &SimpleExpr,
     context: &EncodeContext<'_>,
@@ -768,6 +1291,107 @@ fn expression_returns_value(
         return Ok(context.signatures[index].result != TYPE_ID_VOID);
     }
     Ok(true)
+}
+
+fn encode_zero(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
+    match wasm_value_type(type_id)? {
+        I32 => out.extend([0x41, 0]),
+        F32 => {
+            out.push(0x43);
+            out.extend(0.0f32.to_le_bytes());
+        }
+        F64 => {
+            out.push(0x44);
+            out.extend(0.0f64.to_le_bytes());
+        }
+        _ => return Err("unsupported web zero value".to_string()),
+    }
+    Ok(())
+}
+
+fn collect_string_literals(functions: &[(FunctionMeta, FunctionHIR)]) -> BTreeMap<i32, String> {
+    fn expression(value: &SimpleExpr, out: &mut BTreeMap<i32, String>) {
+        match value {
+            SimpleExpr::StringLiteral(value) => {
+                out.insert(
+                    crate::backend::emit::hash_string_literal(value),
+                    value.clone(),
+                );
+            }
+            SimpleExpr::Condition(value) => condition(value, out),
+            SimpleExpr::IndexedPath { index, .. } => expression(index, out),
+            SimpleExpr::Call { args, .. } => {
+                for arg in args {
+                    expression(arg, out);
+                }
+            }
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, out);
+                expression(rhs, out);
+            }
+            _ => {}
+        }
+    }
+    fn condition(value: &SimpleCondition, out: &mut BTreeMap<i32, String>) {
+        match value {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                expression(lhs, out);
+                expression(rhs, out);
+            }
+            SimpleCondition::Expr(value) => expression(value, out),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                condition(lhs, out);
+                condition(rhs, out);
+            }
+            SimpleCondition::Not(value) => condition(value, out),
+        }
+    }
+    fn statements(values: &[SimpleStmt], out: &mut BTreeMap<i32, String>) {
+        for value in values {
+            match value {
+                SimpleStmt::Let {
+                    expression: value, ..
+                }
+                | SimpleStmt::Assign {
+                    expression: value, ..
+                }
+                | SimpleStmt::Expr(value)
+                | SimpleStmt::Return(value) => expression(value, out),
+                SimpleStmt::Convert { source, .. } => expression(source, out),
+                SimpleStmt::If {
+                    condition: value,
+                    then_statements,
+                    else_statements,
+                } => {
+                    condition(value, out);
+                    statements(then_statements, out);
+                    if let Some(values) = else_statements {
+                        statements(values, out);
+                    }
+                }
+                SimpleStmt::For {
+                    init,
+                    condition: value,
+                    step,
+                    body_statements,
+                } => {
+                    statements(std::slice::from_ref(init), out);
+                    condition(value, out);
+                    statements(std::slice::from_ref(step), out);
+                    statements(body_statements, out);
+                }
+                SimpleStmt::Foreach {
+                    body_statements, ..
+                } => statements(body_statements, out),
+                SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    for (_, hir) in functions {
+        statements(&hir.statements, &mut out);
+    }
+    out
 }
 
 fn section(id: u8, payload: Vec<u8>, module: &mut Vec<u8>) {
