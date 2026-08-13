@@ -66,7 +66,7 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 #[test]
-fn web_package_contains_runnable_wasm_static_bundle_and_standalone_file() {
+fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let workspace = repo_root().join("samples/web_export_smoke");
     let stamp = stamp();
     let relative_output = PathBuf::from(format!("build/web-package-test-{stamp}"));
@@ -98,12 +98,11 @@ fn web_package_contains_runnable_wasm_static_bundle_and_standalone_file() {
             "missing web runtime data {expected}"
         );
     }
-    let standalone =
-        fs::read_to_string(output.join("web_export_smoke.html")).expect("standalone web package");
-    assert!(standalone.contains("window.STASIS_WASM_BASE64"));
-    assert!(!standalone.contains("__STASIS_"));
+    assert!(!runtime.contains("STASIS_WASM_BASE64"));
+    assert!(!runtime.contains("data:application/wasm;base64,"));
     assert!(output.join("play/index.html").is_file());
     assert!(output.join("stasis_provenance.json").is_file());
+    assert!(!output.join("web_export_smoke.html").exists());
 
     fs::remove_dir_all(&output).expect("clean web package test output");
 }
@@ -118,8 +117,6 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     assert!(wasm.starts_with(b"\0asm\x01\0\0\0"));
     assert!(wasm.windows(6).any(|window| window == b"memory"));
     let runtime = fs::read_to_string(output.join("play/game.js")).expect("existing game runtime");
-    let standalone = fs::read_to_string(output.join("windows_launch_smoke.html"))
-        .expect("existing game standalone runtime");
     for expected in ["gfx_cmd_i32", "gfx_cmd_f32", "stasis_jit_gfx_cache_text"] {
         assert!(
             runtime.contains(expected),
@@ -132,12 +129,8 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
         "data:font/ttf;base64,",
     ] {
         assert!(
-            standalone.contains(expected),
-            "missing embedded asset {expected}"
-        );
-        assert!(
             !runtime.contains(expected),
-            "static runtime embedded {expected}"
+            "web runtime embedded {expected}"
         );
     }
     assert!(output.join("assets/smoke.png").is_file());
@@ -158,8 +151,6 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
     let output = package(&workspace, Path::new("build/web-package"));
 
     let runtime = fs::read_to_string(output.join("play/game.js")).expect("audio game runtime");
-    let standalone = fs::read_to_string(output.join("audio_asset_playback.html"))
-        .expect("audio standalone runtime");
     for expected in [
         "stasis_jit_audio_load_music",
         "stasis_jit_audio_load_effect",
@@ -172,12 +163,8 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
     }
     for expected in ["data:audio/mpeg;base64,", "data:audio/wav;base64,"] {
         assert!(
-            standalone.contains(expected),
-            "missing embedded audio {expected}"
-        );
-        assert!(
             !runtime.contains(expected),
-            "static runtime embedded {expected}"
+            "web runtime embedded {expected}"
         );
     }
     assert!(output.join("assets/tone.mp3").is_file());

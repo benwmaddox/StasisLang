@@ -3585,7 +3585,6 @@ fn package_workspace(
 }
 
 const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
-const WEB_STANDALONE_HTML: &str = include_str!("../../../runtime/web/standalone.html");
 const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
 
 struct WebWasmArtifact {
@@ -3697,7 +3696,7 @@ fn package_web_workspace(
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
 
-    let assembled = (|| -> Result<(PathBuf, bool, usize, usize), String> {
+    let assembled = (|| -> Result<(bool, usize, usize), String> {
         let files =
             load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
         let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
@@ -3745,19 +3744,11 @@ fn package_web_workspace(
             })
             .transpose()?;
         stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
-        let runtime_config = web_runtime_config(workspace, &process, &staging_root.join("assets"))?;
-        let embedded_runtime_json = serde_json::to_string(&runtime_config)
-            .map_err(|error| format!("failed to encode web runtime metadata: {error}"))?
-            .replace("</", "<\\/");
-        let mut static_runtime_config = runtime_config.clone();
-        static_runtime_config["assets"] = json!({});
-        let static_runtime_json = serde_json::to_string(&static_runtime_config)
+        let runtime_config = web_runtime_config(workspace, &process);
+        let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
             .replace("</", "<\\/");
-        let runtime_bundle =
-            format!("window.STASIS_GAME = {static_runtime_json};\n{WEB_RUNTIME_JS}");
-        let embedded_runtime_bundle =
-            format!("window.STASIS_GAME = {embedded_runtime_json};\n{WEB_RUNTIME_JS}");
+        let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{WEB_RUNTIME_JS}");
         let play_root = staging_root.join("play");
         fs::create_dir_all(&play_root)
             .map_err(|error| format!("failed to create {}: {error}", play_root.display()))?;
@@ -3773,23 +3764,10 @@ fn package_web_workspace(
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
 
-        let standalone_name = format!("{}.html", workspace.manifest.name);
-        let standalone_path = staging_root.join(&standalone_name);
-        let standalone = WEB_STANDALONE_HTML
-            .replace("__STASIS_GAME_TITLE__", &workspace.manifest.name)
-            .replace("__STASIS_WASM_BASE64__", &base64(&wasm.bytes))
-            .replace("__STASIS_RUNTIME_JS__", &embedded_runtime_bundle);
-        fs::write(&standalone_path, standalone)
-            .map_err(|error| format!("failed to write {}: {error}", standalone_path.display()))?;
         write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
-        Ok((
-            PathBuf::from(standalone_name),
-            wasm.optimized,
-            wasm.input_bytes,
-            wasm.bytes.len(),
-        ))
+        Ok((wasm.optimized, wasm.input_bytes, wasm.bytes.len()))
     })();
-    let (standalone, wasm_optimized, wasm_input_bytes, wasm_output_bytes) = match assembled {
+    let (wasm_optimized, wasm_input_bytes, wasm_output_bytes) = match assembled {
         Ok(package) => package,
         Err(error) => {
             let _ = fs::remove_dir_all(&staging_root);
@@ -3818,7 +3796,6 @@ fn package_web_workspace(
         json!({
             "target": "web",
             "output": display_path(package_root),
-            "standalone": relative_display(package_root, &package_root.join(&standalone)),
             "play": "play/index.html",
             "wasm": "play/game.wasm",
             "wasm_optimized": wasm_optimized,
@@ -3830,88 +3807,7 @@ fn package_web_workspace(
     ))
 }
 
-fn web_runtime_config(
-    workspace: &Workspace,
-    process: &WasmProcess,
-    asset_root: &Path,
-) -> Result<Value, String> {
-    fn collect_assets(
-        root: &Path,
-        directory: &Path,
-        out: &mut BTreeMap<String, String>,
-    ) -> Result<(), String> {
-        if !directory.exists() {
-            return Ok(());
-        }
-        let mut entries = fs::read_dir(directory)
-            .map_err(|error| format!("failed to read web assets {}: {error}", directory.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to enumerate web assets: {error}"))?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let file_type = entry.file_type().map_err(|error| {
-                format!(
-                    "failed to inspect web asset {}: {error}",
-                    entry.path().display()
-                )
-            })?;
-            if file_type.is_symlink() {
-                return Err(format!(
-                    "web package assets cannot contain symlinks: {}",
-                    entry.path().display()
-                ));
-            }
-            if file_type.is_dir() {
-                collect_assets(root, &entry.path(), out)?;
-                continue;
-            }
-            if !file_type.is_file() {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(root)
-                .map_err(|_| format!("web asset escaped {}", root.display()))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            let bytes = fs::read(entry.path()).map_err(|error| {
-                format!(
-                    "failed to read web asset {}: {error}",
-                    entry.path().display()
-                )
-            })?;
-            let mime = match entry
-                .path()
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "png" => "image/png",
-                "svg" => "image/svg+xml",
-                "jpg" | "jpeg" => "image/jpeg",
-                "gif" => "image/gif",
-                "webp" => "image/webp",
-                "ttf" => "font/ttf",
-                "otf" => "font/otf",
-                "woff" => "font/woff",
-                "woff2" => "font/woff2",
-                "wav" => "audio/wav",
-                "mp3" => "audio/mpeg",
-                "ogg" => "audio/ogg",
-                _ => "application/octet-stream",
-            };
-            out.insert(
-                format!("assets/{relative}"),
-                format!("data:{mime};base64,{}", base64(&bytes)),
-            );
-        }
-        Ok(())
-    }
-
-    let mut assets = BTreeMap::new();
-    collect_assets(asset_root, asset_root, &mut assets)?;
+fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Value {
     let strings = process
         .string_literals()
         .iter()
@@ -3947,37 +3843,14 @@ fn web_runtime_config(
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    Ok(json!({
+    json!({
         "name": workspace.manifest.name,
         "strings": strings,
         "memory": memory,
         "views": views,
         "globals": globals,
-        "assets": assets,
-    }))
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-        output.push(ALPHABET[(a >> 2) as usize] as char);
-        output.push(ALPHABET[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
-        output.push(if chunk.len() > 1 {
-            ALPHABET[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            ALPHABET[(c & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    output
+        "assets": {},
+    })
 }
 
 #[cfg(windows)]
