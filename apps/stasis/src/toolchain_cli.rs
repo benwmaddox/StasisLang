@@ -12,6 +12,7 @@ use stasis_assets::{
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
+use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
@@ -538,6 +539,7 @@ enum BuildMode {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum PackageTarget {
     Desktop,
+    Web,
     AndroidArm64,
     #[value(name = "android-x86_64")]
     AndroidX86_64,
@@ -566,6 +568,7 @@ impl PackageTarget {
     fn as_str(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
+            Self::Web => "web",
             Self::AndroidArm64 => "android-arm64",
             Self::AndroidX86_64 => "android-x86_64",
             Self::IosArm64 => "ios-arm64",
@@ -580,7 +583,7 @@ impl PackageTarget {
         match self {
             Self::AndroidArm64 => Some("arm64-v8a"),
             Self::AndroidX86_64 => Some("x86_64"),
-            Self::Desktop | Self::IosArm64 => None,
+            Self::Desktop | Self::Web | Self::IosArm64 => None,
         }
     }
 }
@@ -3479,6 +3482,9 @@ fn package_workspace(
             package_root.display()
         ));
     }
+    if matches!(target, PackageTarget::Web) {
+        return package_web_workspace(workspace, &package_root, development_build);
+    }
     if !matches!(target, PackageTarget::Desktop) {
         return package_mobile_workspace(
             workspace,
@@ -3568,6 +3574,394 @@ fn package_workspace(
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
+const WEB_STANDALONE_HTML: &str = include_str!("../../../runtime/web/standalone.html");
+const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
+
+struct WebWasmArtifact {
+    bytes: Vec<u8>,
+    optimized: bool,
+    input_bytes: usize,
+}
+
+fn prepare_web_wasm(
+    module_bytes: &[u8],
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<WebWasmArtifact, String> {
+    if development_build {
+        return Ok(WebWasmArtifact {
+            bytes: module_bytes.to_vec(),
+            optimized: false,
+            input_bytes: module_bytes.len(),
+        });
+    }
+
+    let configured = env::var_os("STASIS_WASM_OPT");
+    let executable = configured
+        .clone()
+        .unwrap_or_else(|| OsString::from("wasm-opt"));
+    let input_path = staging_root.join(".game.unoptimized.wasm");
+    let output_path = staging_root.join(".game.optimized.wasm");
+    fs::write(&input_path, module_bytes)
+        .map_err(|error| format!("failed to stage {}: {error}", input_path.display()))?;
+    let result = Command::new(&executable)
+        .arg("-Oz")
+        .arg(&input_path)
+        .arg("-o")
+        .arg(&output_path)
+        .output();
+    let _ = fs::remove_file(&input_path);
+
+    let output = match result {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && configured.is_none() => {
+            return Ok(WebWasmArtifact {
+                bytes: module_bytes.to_vec(),
+                optimized: false,
+                input_bytes: module_bytes.len(),
+            });
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to run wasm-opt at {}: {error}",
+                Path::new(&executable).display()
+            ));
+        }
+    };
+    if !output.status.success() {
+        let _ = fs::remove_file(&output_path);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "wasm-opt failed with status {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let bytes = fs::read(&output_path)
+        .map_err(|error| format!("failed to read {}: {error}", output_path.display()))?;
+    let _ = fs::remove_file(&output_path);
+    if !bytes.starts_with(b"\0asm\x01\0\0\0") {
+        return Err("wasm-opt produced an invalid WebAssembly module header".to_string());
+    }
+    Ok(WebWasmArtifact {
+        bytes,
+        optimized: true,
+        input_bytes: module_bytes.len(),
+    })
+}
+
+fn package_web_workspace(
+    workspace: &Workspace,
+    package_root: &Path,
+    development_build: bool,
+) -> Result<CommandResult, String> {
+    let staging_name = format!(
+        ".{}.staging",
+        package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("stasis-web-package")
+    );
+    let staging_root = package_root.with_file_name(staging_name);
+    if staging_root.exists() {
+        return Err(format!(
+            "package staging output already exists: {}",
+            staging_root.display()
+        ));
+    }
+    let provenance = resolve_package_provenance(development_build)?;
+    fs::create_dir_all(&staging_root)
+        .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
+
+    let assembled = (|| -> Result<(PathBuf, bool, usize, usize), String> {
+        let files =
+            load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+        let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
+        let mut process = WasmProcess::new();
+        process.set_debug_symbols(development_build);
+        process.set_project_root(display_path(&workspace.root))?;
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        let mut sources = BTreeMap::new();
+        for file in files {
+            let path = workspace.root.join(&file.path);
+            let path = path.canonicalize().unwrap_or(path);
+            let compiler_path = path.to_string_lossy().to_string();
+            sources.insert(compiler_path.clone(), file.source.clone());
+            process.upsert_file(compiler_path, file.source);
+        }
+        process.compile().map_err(|error| {
+            if let Some(diagnostic) = process.last_source_diagnostic() {
+                let source = sources
+                    .get(&diagnostic.path)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let (line, column) = line_column(source, diagnostic.start);
+                format!(
+                    "{}:{}:{}: {}",
+                    diagnostic.path, line, column, diagnostic.message
+                )
+            } else {
+                format!("{error:?}")
+            }
+        })?;
+        let wasm = prepare_web_wasm(process.module_bytes(), &staging_root, development_build)?;
+
+        let validation_jit = compile_workspace_jit(workspace)?;
+        let resolved = validate_compiled_workspace_assets(workspace, &validation_jit)?;
+        let retained = resolved
+            .as_ref()
+            .map(|manifest| {
+                let snapshot = validation_jit.program_snapshot().ok_or_else(|| {
+                    "web asset validation produced no ProgramSnapshot".to_string()
+                })?;
+                crate::release_assets::retain_snapshot_assets(&workspace.root, snapshot, manifest)
+            })
+            .transpose()?;
+        stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
+        let runtime_config = web_runtime_config(workspace, &process, &staging_root.join("assets"))?;
+        let embedded_runtime_json = serde_json::to_string(&runtime_config)
+            .map_err(|error| format!("failed to encode web runtime metadata: {error}"))?
+            .replace("</", "<\\/");
+        let mut static_runtime_config = runtime_config.clone();
+        static_runtime_config["assets"] = json!({});
+        let static_runtime_json = serde_json::to_string(&static_runtime_config)
+            .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
+            .replace("</", "<\\/");
+        let runtime_bundle =
+            format!("window.STASIS_GAME = {static_runtime_json};\n{WEB_RUNTIME_JS}");
+        let embedded_runtime_bundle =
+            format!("window.STASIS_GAME = {embedded_runtime_json};\n{WEB_RUNTIME_JS}");
+        let play_root = staging_root.join("play");
+        fs::create_dir_all(&play_root)
+            .map_err(|error| format!("failed to create {}: {error}", play_root.display()))?;
+
+        let wasm_path = play_root.join("game.wasm");
+        fs::write(&wasm_path, &wasm.bytes)
+            .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
+        fs::write(play_root.join("game.js"), &runtime_bundle)
+            .map_err(|error| format!("failed to write web runtime: {error}"))?;
+        fs::write(
+            play_root.join("index.html"),
+            WEB_INDEX_HTML.replace("__STASIS_GAME_TITLE__", &workspace.manifest.name),
+        )
+        .map_err(|error| format!("failed to write web index: {error}"))?;
+
+        let standalone_name = format!("{}.html", workspace.manifest.name);
+        let standalone_path = staging_root.join(&standalone_name);
+        let standalone = WEB_STANDALONE_HTML
+            .replace("__STASIS_GAME_TITLE__", &workspace.manifest.name)
+            .replace("__STASIS_WASM_BASE64__", &base64(&wasm.bytes))
+            .replace("__STASIS_RUNTIME_JS__", &embedded_runtime_bundle);
+        fs::write(&standalone_path, standalone)
+            .map_err(|error| format!("failed to write {}: {error}", standalone_path.display()))?;
+        write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
+        Ok((
+            PathBuf::from(standalone_name),
+            wasm.optimized,
+            wasm.input_bytes,
+            wasm.bytes.len(),
+        ))
+    })();
+    let (standalone, wasm_optimized, wasm_input_bytes, wasm_output_bytes) = match assembled {
+        Ok(package) => package,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(error);
+        }
+    };
+    fs::rename(&staging_root, package_root).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging_root);
+        format!(
+            "failed to publish package {}: {error}",
+            package_root.display()
+        )
+    })?;
+    let optimization = if wasm_optimized {
+        "wasm-opt -Oz"
+    } else if development_build {
+        "development Wasm"
+    } else {
+        "unoptimized Wasm; wasm-opt not found"
+    };
+    Ok(CommandResult::success(
+        format!(
+            "packaged web at {} ({optimization})",
+            package_root.display()
+        ),
+        json!({
+            "target": "web",
+            "output": display_path(package_root),
+            "standalone": relative_display(package_root, &package_root.join(&standalone)),
+            "play": "play/index.html",
+            "wasm": "play/game.wasm",
+            "wasm_optimized": wasm_optimized,
+            "wasm_input_bytes": wasm_input_bytes,
+            "wasm_output_bytes": wasm_output_bytes,
+            "provenance": PACKAGE_PROVENANCE_NAME,
+            "development_build": provenance["development_build"],
+        }),
+    ))
+}
+
+fn web_runtime_config(
+    workspace: &Workspace,
+    process: &WasmProcess,
+    asset_root: &Path,
+) -> Result<Value, String> {
+    fn collect_assets(
+        root: &Path,
+        directory: &Path,
+        out: &mut BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if !directory.exists() {
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(directory)
+            .map_err(|error| format!("failed to read web assets {}: {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to enumerate web assets: {error}"))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let file_type = entry.file_type().map_err(|error| {
+                format!(
+                    "failed to inspect web asset {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            if file_type.is_symlink() {
+                return Err(format!(
+                    "web package assets cannot contain symlinks: {}",
+                    entry.path().display()
+                ));
+            }
+            if file_type.is_dir() {
+                collect_assets(root, &entry.path(), out)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|_| format!("web asset escaped {}", root.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let bytes = fs::read(entry.path()).map_err(|error| {
+                format!(
+                    "failed to read web asset {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            let mime = match entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "png" => "image/png",
+                "svg" => "image/svg+xml",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "ttf" => "font/ttf",
+                "otf" => "font/otf",
+                "woff" => "font/woff",
+                "woff2" => "font/woff2",
+                "wav" => "audio/wav",
+                "mp3" => "audio/mpeg",
+                "ogg" => "audio/ogg",
+                _ => "application/octet-stream",
+            };
+            out.insert(
+                format!("assets/{relative}"),
+                format!("data:{mime};base64,{}", base64(&bytes)),
+            );
+        }
+        Ok(())
+    }
+
+    let mut assets = BTreeMap::new();
+    collect_assets(asset_root, asset_root, &mut assets)?;
+    let strings = process
+        .string_literals()
+        .iter()
+        .map(|(id, value)| (id.to_string(), Value::String(value.clone())))
+        .collect::<serde_json::Map<_, _>>();
+    let memory = process
+        .memory_layout()
+        .iter()
+        .map(|(path, layout)| {
+            (
+                path.clone(),
+                json!({
+                    "offset": layout.offset,
+                    "type_id": layout.type_id,
+                    "length": layout.length,
+                    "stride": layout.stride,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let views = process
+        .struct_views()
+        .iter()
+        .map(|(base, fields)| (base.to_string(), json!(fields)))
+        .collect::<serde_json::Map<_, _>>();
+    let globals = process
+        .global_types()
+        .iter()
+        .map(|(path, type_id)| {
+            (
+                path.clone(),
+                json!({"hash": stasis_compiler::backend::wasm::wasm_global_hash(path), "type_id": type_id}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Ok(json!({
+        "name": workspace.manifest.name,
+        "strings": strings,
+        "memory": memory,
+        "views": views,
+        "globals": globals,
+        "assets": assets,
+    }))
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        output.push(ALPHABET[(a >> 2) as usize] as char);
+        output.push(ALPHABET[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            ALPHABET[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            ALPHABET[(c & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 #[cfg(windows)]
@@ -3760,7 +4154,7 @@ fn package_mobile_workspace(
             "project": match target {
                 PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
                 PackageTarget::IosArm64 => "ios/StasisMobile.xcodeproj",
-                PackageTarget::Desktop => unreachable!(),
+                PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
@@ -3780,7 +4174,9 @@ fn assemble_mobile_shell(
     let platform = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
         PackageTarget::IosArm64 => "ios",
-        PackageTarget::Desktop => return Err("desktop is not a mobile package target".to_string()),
+        PackageTarget::Desktop | PackageTarget::Web => {
+            return Err("selected target is not a mobile package target".to_string())
+        }
     };
     let common_destination = staging_root.join("common");
     let platform_destination = staging_root.join(platform);
@@ -3795,14 +4191,14 @@ fn assemble_mobile_shell(
             aot_root.join("apk_assets/stasis_game")
         }
         PackageTarget::IosArm64 => aot_root.join("ios_assets/stasis_game"),
-        PackageTarget::Desktop => unreachable!(),
+        PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
     };
     let asset_destination = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
             staging_root.join("android/app/src/main/assets/stasis_game")
         }
         PackageTarget::IosArm64 => staging_root.join("ios/StasisMobile/stasis_game"),
-        PackageTarget::Desktop => unreachable!(),
+        PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
     };
     let android_manifest = if target.is_android() {
         workspace.manifest.android.as_ref()
@@ -3876,7 +4272,7 @@ fn assemble_mobile_shell(
                     "android/app/src/main/assets/stasis_game"
                 }
                 PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game",
-                PackageTarget::Desktop => unreachable!(),
+                PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
         }))
         .map_err(|error| format!("failed to encode mobile package manifest: {error}"))?
@@ -5678,6 +6074,34 @@ mod tests {
 
     fn remove_temp(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn development_web_wasm_keeps_diagnostic_module_unchanged() {
+        let root = temp_dir("development_web_wasm");
+        fs::create_dir_all(&root).expect("create optimizer fixture");
+        let module = b"\0asm\x01\0\0\0diagnostic-names";
+        let artifact = prepare_web_wasm(module, &root, true).expect("prepare development Wasm");
+        assert!(!artifact.optimized);
+        assert_eq!(artifact.input_bytes, module.len());
+        assert_eq!(artifact.bytes, module);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn configured_wasm_opt_produces_a_valid_release_module() {
+        if env::var_os("STASIS_WASM_OPT").is_none() {
+            return;
+        }
+        let root = temp_dir("release_web_wasm");
+        fs::create_dir_all(&root).expect("create optimizer fixture");
+        let module = b"\0asm\x01\0\0\0";
+        let artifact = prepare_web_wasm(module, &root, false).expect("optimize release Wasm");
+        assert!(artifact.optimized);
+        assert!(artifact.bytes.starts_with(b"\0asm\x01\0\0\0"));
+        assert!(!root.join(".game.unoptimized.wasm").exists());
+        assert!(!root.join(".game.optimized.wasm").exists());
+        remove_temp(&root);
     }
 
     #[test]

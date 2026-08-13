@@ -1,0 +1,97 @@
+const SCREEN_WIDTH: i32 = 640;
+const PLAYER_WIDTH: i32 = 64;
+
+global player_x: i32;
+global score: i32;
+global tone_latched: bool;
+global fullscreen_latched: bool;
+global fullscreen_enabled: bool;
+global host_i32: i32[768];
+global host_f32: f32[64];
+global host_req_seq: i32;
+global host_req_flags: i32;
+global host_req_window_w_px: i32;
+global host_req_window_h_px: i32;
+global audio_samples: f32[4800];
+
+function @extern("web_begin_frame") web_begin_frame(red: i32, green: i32, blue: i32): void;
+function @extern("web_draw_rect") web_draw_rect(x: i32, y: i32, width: i32, height: i32, red: i32, green: i32, blue: i32): void;
+function @extern("web_draw_text") web_draw_text(x: i32, y: i32, value: i32): void;
+extern function audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
+extern function audio_push_f32_interleaved(samples: f32[], frame_count: i32): i32;
+
+function main(): i32 {
+    player_x = 288;
+    score = 0;
+    tone_latched = false;
+    fullscreen_latched = false;
+    fullscreen_enabled = false;
+    host_req_flags = 1;
+    host_req_window_w_px = 640;
+    host_req_window_h_px = 360;
+    host_req_seq = host_req_seq + 1;
+    let i: i32 = 0;
+    for (i = 0; i < 4800; i = i + 1) {
+        if (i % 120 < 60) {
+            audio_samples[i] = 0.08;
+        } else {
+            audio_samples[i] = -0.08;
+        }
+    }
+    audio_init(48000, 2, 2048);
+    return 0;
+}
+
+function tick(): i32 {
+    if (host_i32[32 + 9] != 0) {
+        if (!fullscreen_latched) {
+            if (fullscreen_enabled) {
+                fullscreen_enabled = false;
+                host_req_flags = 1;
+            } else {
+                fullscreen_enabled = true;
+                host_req_flags = 2;
+            }
+            host_req_seq = host_req_seq + 1;
+            fullscreen_latched = true;
+        }
+    } else {
+        fullscreen_latched = false;
+    }
+    if (host_i32[545] != 0) {
+        let pointer_x: i32 = 0;
+        pointer_x.from_f32(host_f32[0]);
+        player_x = pointer_x - PLAYER_WIDTH / 2;
+    } else {
+        if (host_i32[32 + 80] != 0) {
+            player_x -= 5;
+        }
+        if (host_i32[32 + 79] != 0) {
+            player_x += 5;
+        }
+    }
+    if (player_x < 0) {
+        player_x = 0;
+    }
+    if (player_x > SCREEN_WIDTH - PLAYER_WIDTH) {
+        player_x = SCREEN_WIDTH - PLAYER_WIDTH;
+    }
+    if (host_i32[32 + 44] != 0 || host_i32[545] != 0) {
+        if (!tone_latched) {
+            audio_push_f32_interleaved(audio_samples, 2400);
+            score += 1;
+            tone_latched = true;
+        }
+    } else {
+        tone_latched = false;
+    }
+    return 0;
+}
+
+function render(): i32 {
+    web_begin_frame(7, 17, 31);
+    web_draw_rect(0, 300, 640, 60, 11, 38, 61);
+    web_draw_rect(player_x, 270, PLAYER_WIDTH, 24, 83, 216, 251);
+    web_draw_text(18, 32, score);
+    return 0;
+}
