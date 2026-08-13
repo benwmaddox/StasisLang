@@ -3807,7 +3807,7 @@ fn web_index_html(title: &str, development_build: bool) -> String {
     let (hud_style, hud) = if development_build {
         (
             "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
-            r#"<div id="stasis-hud" role="status">Starting Wasm…</div>"#,
+            r#"<div id="stasis-hud" role="status">Starting Wasm...</div>"#,
         )
     } else {
         ("", "")
