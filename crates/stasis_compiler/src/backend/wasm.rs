@@ -1061,7 +1061,9 @@ fn encode_function(
         foreach: BTreeMap::new(),
     };
     encode_statements(&hir.statements, &context, &mut body)?;
-    if function.return_type != TYPE_ID_VOID && !statements_terminate(&hir.statements) {
+    // Structured statements use void block types, so only a direct return proves that
+    // the function end does not need its declared result on the operand stack.
+    if function.return_type != TYPE_ID_VOID && !ends_with_explicit_return(&hir.statements) {
         encode_zero(function.return_type, &mut body)?;
     }
     body.push(0x0b);
@@ -1086,16 +1088,11 @@ fn encode_local_declarations(types: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-fn statements_terminate(statements: &[SimpleStmt]) -> bool {
-    statements.last().is_some_and(|statement| match statement {
-        SimpleStmt::Return(_) | SimpleStmt::ReturnVoid => true,
-        SimpleStmt::If {
-            then_statements,
-            else_statements: Some(else_statements),
-            ..
-        } => statements_terminate(then_statements) && statements_terminate(else_statements),
-        _ => false,
-    })
+fn ends_with_explicit_return(statements: &[SimpleStmt]) -> bool {
+    matches!(
+        statements.last(),
+        Some(SimpleStmt::Return(_) | SimpleStmt::ReturnVoid)
+    )
 }
 
 fn collect_locals(
@@ -2828,15 +2825,17 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_proven_terminal_statement_paths() {
+    fn omits_fallback_only_after_an_explicit_return() {
         let return_zero = SimpleStmt::Return(SimpleExpr::Int(0));
-        assert!(statements_terminate(std::slice::from_ref(&return_zero)));
-        assert!(statements_terminate(&[SimpleStmt::If {
+        assert!(ends_with_explicit_return(std::slice::from_ref(
+            &return_zero
+        )));
+        assert!(!ends_with_explicit_return(&[SimpleStmt::If {
             condition: SimpleCondition::Expr(SimpleExpr::Bool(true)),
             then_statements: vec![return_zero.clone()],
             else_statements: Some(vec![return_zero]),
         }]));
-        assert!(!statements_terminate(&[SimpleStmt::If {
+        assert!(!ends_with_explicit_return(&[SimpleStmt::If {
             condition: SimpleCondition::Expr(SimpleExpr::Bool(true)),
             then_statements: vec![SimpleStmt::Return(SimpleExpr::Int(0))],
             else_statements: None,
