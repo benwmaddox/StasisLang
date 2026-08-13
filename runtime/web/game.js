@@ -640,10 +640,6 @@
   });
 
   async function wasmBytes() {
-    if (window.STASIS_WASM_BASE64) {
-      const binary = atob(window.STASIS_WASM_BASE64);
-      return Uint8Array.from(binary, value => value.charCodeAt(0));
-    }
     const response = await fetch("game.wasm");
     if (!response.ok) throw new Error(`failed to load game.wasm: ${response.status}`);
     return response.arrayBuffer();
