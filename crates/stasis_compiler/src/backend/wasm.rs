@@ -1019,27 +1019,14 @@ fn encode_function(
         };
     }
 
-    let mut body = Vec::new();
-    let physical_local_count = local_declarations
-        .iter()
-        .map(|(_, type_id)| {
-            if is_struct_view_type(*type_id, named_structs) {
-                3
-            } else {
-                1
-            }
-        })
-        .sum::<usize>();
-    uleb(physical_local_count as u32 + 6, &mut body);
+    let mut local_types = Vec::new();
     for (_, type_id) in &local_declarations {
         if is_struct_view_type(*type_id, named_structs) {
             for _ in 0..3 {
-                uleb(1, &mut body);
-                body.push(I32);
+                local_types.push(I32);
             }
         } else {
-            uleb(1, &mut body);
-            body.push(wasm_value_type(*type_id)?);
+            local_types.push(wasm_value_type(*type_id)?);
         }
     }
     let scratch_index = physical_cursor;
@@ -1048,10 +1035,9 @@ fn encode_function(
     let scratch_i32_c = scratch_index + 3;
     let scratch_f32 = scratch_index + 4;
     let scratch_f64 = scratch_index + 5;
-    for value_type in [I32, I32, I32, I32, F32, F64] {
-        uleb(1, &mut body);
-        body.push(value_type);
-    }
+    local_types.extend([I32, I32, I32, I32, F32, F64]);
+    let mut body = Vec::new();
+    encode_local_declarations(&local_types, &mut body);
     let context = EncodeContext {
         locals: &locals,
         globals,
@@ -1075,11 +1061,41 @@ fn encode_function(
         foreach: BTreeMap::new(),
     };
     encode_statements(&hir.statements, &context, &mut body)?;
-    if function.return_type != TYPE_ID_VOID {
+    if function.return_type != TYPE_ID_VOID && !statements_terminate(&hir.statements) {
         encode_zero(function.return_type, &mut body)?;
     }
     body.push(0x0b);
     Ok(body)
+}
+
+fn encode_local_declarations(types: &[u8], out: &mut Vec<u8>) {
+    let mut runs = Vec::new();
+    for &value_type in types {
+        if let Some((count, previous)) = runs.last_mut() {
+            if *previous == value_type {
+                *count += 1;
+                continue;
+            }
+        }
+        runs.push((1u32, value_type));
+    }
+    uleb(runs.len() as u32, out);
+    for (count, value_type) in runs {
+        uleb(count, out);
+        out.push(value_type);
+    }
+}
+
+fn statements_terminate(statements: &[SimpleStmt]) -> bool {
+    statements.last().is_some_and(|statement| match statement {
+        SimpleStmt::Return(_) | SimpleStmt::ReturnVoid => true,
+        SimpleStmt::If {
+            then_statements,
+            else_statements: Some(else_statements),
+            ..
+        } => statements_terminate(then_statements) && statements_terminate(else_statements),
+        _ => false,
+    })
 }
 
 fn collect_locals(
@@ -1934,12 +1950,9 @@ fn encode_struct_collection_copy(
 fn emit_index_bounds_check(index_local: u32, len: i32, out: &mut Vec<u8>) {
     out.push(0x20);
     uleb(index_local, out);
-    out.extend([0x41, 0, 0x48, 0x04, 0x40, 0x00, 0x0b]);
-    out.push(0x20);
-    uleb(index_local, out);
     out.push(0x41);
     sleb(len, out);
-    out.extend([0x4e, 0x04, 0x40, 0x00, 0x0b]);
+    out.extend([0x4f, 0x04, 0x40, 0x00, 0x0b]);
 }
 
 fn struct_field_binding<'a>(
@@ -2196,14 +2209,7 @@ fn encode_memory_address(
     }
     out.push(0x21);
     uleb(context.scratch_index, out);
-    out.push(0x20);
-    uleb(context.scratch_index, out);
-    out.extend([0x41, 0, 0x48, 0x04, 0x40, 0x00, 0x0b]);
-    out.push(0x20);
-    uleb(context.scratch_index, out);
-    out.push(0x41);
-    sleb(binding.len, out);
-    out.extend([0x4e, 0x04, 0x40, 0x00, 0x0b]);
+    emit_index_bounds_check(context.scratch_index, binding.len, out);
     out.push(0x41);
     sleb(binding.offset as i32, out);
     out.push(0x20);
@@ -2799,6 +2805,43 @@ fn sleb64(mut value: i64, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_one_unsigned_bounds_trap_for_both_invalid_regions() {
+        let mut bytes = Vec::new();
+        emit_index_bounds_check(3, 7, &mut bytes);
+        assert_eq!(bytes, [0x20, 3, 0x41, 7, 0x4f, 0x04, 0x40, 0x00, 0x0b]);
+        for index in [-1, 0, 6, 7, i32::MAX] {
+            assert_eq!(
+                (index as u32) >= 7,
+                index < 0 || index >= 7,
+                "unsigned comparison changed bounds semantics for {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn groups_adjacent_wasm_local_types() {
+        let mut bytes = Vec::new();
+        encode_local_declarations(&[I32, I32, I32, F32, F64, F64], &mut bytes);
+        assert_eq!(bytes, [3, 3, I32, 1, F32, 2, F64]);
+    }
+
+    #[test]
+    fn recognizes_only_proven_terminal_statement_paths() {
+        let return_zero = SimpleStmt::Return(SimpleExpr::Int(0));
+        assert!(statements_terminate(std::slice::from_ref(&return_zero)));
+        assert!(statements_terminate(&[SimpleStmt::If {
+            condition: SimpleCondition::Expr(SimpleExpr::Bool(true)),
+            then_statements: vec![return_zero.clone()],
+            else_statements: Some(vec![return_zero]),
+        }]));
+        assert!(!statements_terminate(&[SimpleStmt::If {
+            condition: SimpleCondition::Expr(SimpleExpr::Bool(true)),
+            then_statements: vec![SimpleStmt::Return(SimpleExpr::Int(0))],
+            else_statements: None,
+        }]));
+    }
 
     #[test]
     fn emits_valid_wasm_header_and_real_entry_exports() {

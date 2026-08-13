@@ -14,7 +14,8 @@ Release toolchains omit `--development-build`. The default output is
 - `assets/`: the same reachable, prepared release assets selected for Android/desktop packaging;
 - `stasis_provenance.json`: the normal package provenance receipt.
 
-Release packaging runs Binaryen's `wasm-opt -Oz` when `wasm-opt` is on `PATH`. Set
+Release packaging runs Binaryen's `wasm-opt -Oz` when `wasm-opt` is on `PATH` and also accepts the
+unhyphenated `wasmopt` executable name used by some Windows tool layouts. Set
 `STASIS_WASM_OPT` to an explicit executable path for pinned toolchains or CI. A configured
 optimizer that fails aborts packaging; when no optimizer is discoverable, packaging succeeds with
 the original module and reports `wasm_optimized: false` in JSON output. Development packages skip
@@ -90,3 +91,16 @@ Release optimization reflection:
 Theory gained: Wasm size optimization belongs after semantic lowering and linking but before either
 package layout is assembled. The same optimized byte vector can therefore feed both outputs without
 creating target-specific behavior, and a browser acceptance pass validates the preserved host ABI.
+
+Emitter cleanup reflection:
+
+- Good: replacing paired signed bounds traps with one unsigned comparison preserved negative and
+  upper-bound rejection while materially shrinking a large unchanged game module.
+- Bad: the initial encoder represented every local as a separate declaration group and appended a
+  fallback result even when every terminal branch already returned.
+- Adjustment: keep local Wasm cleanup limited to directly provable encodings; leave inlining,
+  stackification, and cross-function optimization to Binaryen.
+
+Theory gained: for a nonnegative collection length, `index >=u length` is exactly the union of
+`index < 0` and `index >=s length`. Together with grouped local declarations and proven terminal
+returns, this reduces the guest before Binaryen without creating a second semantic pipeline.
