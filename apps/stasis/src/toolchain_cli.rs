@@ -3608,6 +3608,7 @@ fn package_web_workspace(
             load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
         let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
         let mut process = WasmProcess::new();
+        process.set_debug_symbols(development_build);
         process.set_project_root(display_path(&workspace.root))?;
         process.set_required_emit_roots(&[
             "main".to_string(),
@@ -3638,20 +3639,42 @@ fn package_web_workspace(
             }
         })?;
 
-        let runtime_config = web_runtime_config(workspace, &process)?;
-        let runtime_json = serde_json::to_string(&runtime_config)
+        let validation_jit = compile_workspace_jit(workspace)?;
+        let resolved = validate_compiled_workspace_assets(workspace, &validation_jit)?;
+        let retained = resolved
+            .as_ref()
+            .map(|manifest| {
+                let snapshot = validation_jit.program_snapshot().ok_or_else(|| {
+                    "web asset validation produced no ProgramSnapshot".to_string()
+                })?;
+                crate::release_assets::retain_snapshot_assets(&workspace.root, snapshot, manifest)
+            })
+            .transpose()?;
+        stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
+        let runtime_config = web_runtime_config(workspace, &process, &staging_root.join("assets"))?;
+        let embedded_runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode web runtime metadata: {error}"))?
             .replace("</", "<\\/");
-        let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{WEB_RUNTIME_JS}");
-        copy_dir_if_exists(&workspace.root.join("assets"), &staging_root.join("assets"))?;
+        let mut static_runtime_config = runtime_config.clone();
+        static_runtime_config["assets"] = json!({});
+        let static_runtime_json = serde_json::to_string(&static_runtime_config)
+            .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
+            .replace("</", "<\\/");
+        let runtime_bundle =
+            format!("window.STASIS_GAME = {static_runtime_json};\n{WEB_RUNTIME_JS}");
+        let embedded_runtime_bundle =
+            format!("window.STASIS_GAME = {embedded_runtime_json};\n{WEB_RUNTIME_JS}");
+        let play_root = staging_root.join("play");
+        fs::create_dir_all(&play_root)
+            .map_err(|error| format!("failed to create {}: {error}", play_root.display()))?;
 
-        let wasm_path = staging_root.join("game.wasm");
+        let wasm_path = play_root.join("game.wasm");
         fs::write(&wasm_path, process.module_bytes())
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
-        fs::write(staging_root.join("game.js"), &runtime_bundle)
+        fs::write(play_root.join("game.js"), &runtime_bundle)
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
         fs::write(
-            staging_root.join("index.html"),
+            play_root.join("index.html"),
             WEB_INDEX_HTML.replace("__STASIS_GAME_TITLE__", &workspace.manifest.name),
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
@@ -3661,7 +3684,7 @@ fn package_web_workspace(
         let standalone = WEB_STANDALONE_HTML
             .replace("__STASIS_GAME_TITLE__", &workspace.manifest.name)
             .replace("__STASIS_WASM_BASE64__", &base64(process.module_bytes()))
-            .replace("__STASIS_RUNTIME_JS__", &runtime_bundle);
+            .replace("__STASIS_RUNTIME_JS__", &embedded_runtime_bundle);
         fs::write(&standalone_path, standalone)
             .map_err(|error| format!("failed to write {}: {error}", standalone_path.display()))?;
         write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
@@ -3687,14 +3710,19 @@ fn package_web_workspace(
             "target": "web",
             "output": display_path(package_root),
             "standalone": relative_display(package_root, &package_root.join(&standalone)),
-            "wasm": "game.wasm",
+            "play": "play/index.html",
+            "wasm": "play/game.wasm",
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
         }),
     ))
 }
 
-fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Result<Value, String> {
+fn web_runtime_config(
+    workspace: &Workspace,
+    process: &WasmProcess,
+    asset_root: &Path,
+) -> Result<Value, String> {
     fn collect_assets(
         root: &Path,
         directory: &Path,
@@ -3771,11 +3799,7 @@ fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Result<Va
     }
 
     let mut assets = BTreeMap::new();
-    collect_assets(
-        &workspace.root.join("assets"),
-        &workspace.root.join("assets"),
-        &mut assets,
-    )?;
+    collect_assets(asset_root, asset_root, &mut assets)?;
     let strings = process
         .string_literals()
         .iter()
@@ -3791,7 +3815,23 @@ fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Result<Va
                     "offset": layout.offset,
                     "type_id": layout.type_id,
                     "length": layout.length,
+                    "stride": layout.stride,
                 }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let views = process
+        .struct_views()
+        .iter()
+        .map(|(base, fields)| (base.to_string(), json!(fields)))
+        .collect::<serde_json::Map<_, _>>();
+    let globals = process
+        .global_types()
+        .iter()
+        .map(|(path, type_id)| {
+            (
+                path.clone(),
+                json!({"hash": stasis_compiler::backend::wasm::wasm_global_hash(path), "type_id": type_id}),
             )
         })
         .collect::<serde_json::Map<_, _>>();
@@ -3799,6 +3839,8 @@ fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Result<Va
         "name": workspace.manifest.name,
         "strings": strings,
         "memory": memory,
+        "views": views,
+        "globals": globals,
         "assets": assets,
     }))
 }

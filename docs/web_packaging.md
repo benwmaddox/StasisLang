@@ -10,7 +10,8 @@ Release toolchains omit `--development-build`. The default output is
 `dist/<project-name>-web/` and contains:
 
 - `<project-name>.html`: one self-contained package file that embeds the Wasm guest and browser runtime;
-- `index.html`, `game.js`, and `game.wasm`: an inspectable static-hosting bundle;
+- `play/index.html`, `play/game.js`, and `play/game.wasm`: an inspectable static-hosting bundle;
+- `assets/`: the same reachable, prepared release assets selected for Android/desktop packaging;
 - `stasis_provenance.json`: the normal package provenance receipt.
 
 The static bundle must be served over HTTP. The self-contained HTML package does not fetch local
@@ -20,8 +21,9 @@ files and can also be opened directly.
 
 The browser owns `requestAnimationFrame`, input collection, Canvas 2D command execution, WebAudio,
 and the performance HUD. The compiled Wasm guest owns `main`, `tick`, `render`, and game state.
-Browser calls are explicit `@extern` functions in the `web_*` namespace. Draw imports enqueue
-commands and the host executes the queue after `render()` returns.
+The browser populates the canonical HostFrame arrays and consumes the existing graphics command
+buffers, matching Android/Windows. Browser policy (fullscreen gestures, Clipboard API, local
+storage, and WebAudio unlocking) remains in JavaScript.
 
 The HUD reports current and worst observed `tick` and `render` time separately. Both must remain
 below 16 ms. Browser audio is unlocked by the **Enable sound** user gesture; subsequent
@@ -31,19 +33,21 @@ below 16 ms. Browser audio is unlocked by the **Enable sound** user gesture; sub
 
 The web backend emits a real WebAssembly module from the same reachable HIR used by JIT and AOT. It
 supports integer, boolean, `f32`, and `f64` values; scalar and structured-global fields; fixed
-primitive/SoA collection storage in exported Wasm memory; strings as stable compiler handles;
-conversions; calls; arithmetic; conditions; `if`; and `for`. Every indexed access receives a bounded
-Wasm trap check.
+primitive/SoA collection storage; native-shape three-word struct views; internal collection views;
+strings as stable compiler handles; conversions; calls; arithmetic; short-circuit conditions;
+`if`; `for`; and `foreach`. Every indexed access receives a bounded Wasm trap check.
 
 The browser reads the existing `gfx_cmd_i32`, `gfx_cmd_f32`, and `gfx_cmd_u8` command buffers. This
 keeps clear, line, rectangle, ordered sprite, and cached/dynamic text rendering on the same guest ABI
-as desktop/mobile. PNG, SVG, TTF, WAV, and MP3 assets are copied into the static bundle and embedded
-as data URLs in the standalone file. WebAudio playback requested during `main()` is queued until the
-required user gesture unlocks the audio context.
+as desktop/mobile. Release asset validation and preparation retain only reachable manifest assets;
+PNG, SVG, TTF, WAV, and MP3 files are placed under `assets/` and embedded as data URLs only in the
+standalone file. WebAudio playback requested during `main()` is queued until the required user
+gesture unlocks the audio context.
 
-`foreach`, general array-view parameters, native system helpers, and called overload families that
-cannot yet be selected from HIR identity still fail with deterministic web-backend diagnostics. They
-are not substituted or interpreted in JavaScript.
+Release Wasm exports lifecycle/host-access functions and memory, but keeps Stasis globals private.
+Development packages additionally export globals and full reachable function names for diagnostics;
+release name metadata retains only exported function names. Called overload families that cannot be
+selected from HIR identity still fail with deterministic diagnostics.
 
 `samples/web_export_smoke` is the end-to-end acceptance project. It verifies compiled movement,
 keyboard and pointer input, Canvas rendering, a Stasis-triggered WebAudio tone, the performance HUD,
@@ -66,3 +70,17 @@ Theory gained: the durable cross-platform boundary is a reachable Wasm guest tha
 writes the existing command buffers; JavaScript owns only browser policy and host resources. The
 same mapping predicts that another bounded renderer command can be added in the browser without
 changing gameplay code or introducing a second compiler path.
+
+ChessTD scale-gate reflection:
+
+- Good: compiling ChessTD unchanged exposed struct-view, short-circuit, storage, clipboard, portrait
+  window, and release-asset behavior that small fixtures could not represent.
+- Bad: copying the source asset tree initially produced a 92.5 MB standalone and duplicated embedded
+  assets into the static runtime.
+- Adjustment: Web packages now use the shared retained/prepared asset pipeline and keep embedded
+  data URLs exclusive to the standalone file.
+
+Theory gained: matching native collection layout is not sufficient by itself; control-flow
+semantics and host-visible view mutation are also part of the cross-target ABI. The observed
+negative-region guard predicts any future sentinel-index pattern will remain safe because Web now
+short-circuits before bounded memory access.
