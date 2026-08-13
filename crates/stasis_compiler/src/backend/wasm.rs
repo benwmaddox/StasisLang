@@ -9,6 +9,7 @@ use crate::backend::emit::{
     resolve_extern_call_signatures_with, AssignOp, AssignTarget, ComparisonOp, ConstantValue,
     SimpleCondition, SimpleExpr, SimpleStmt,
 };
+use crate::backend::program_snapshot::ProgramSnapshot;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
@@ -35,6 +36,7 @@ pub struct WasmProcess {
     struct_views: BTreeMap<i32, BTreeMap<String, String>>,
     debug_symbols: bool,
     global_types: BTreeMap<String, TypeId>,
+    program_snapshot: Option<ProgramSnapshot>,
 }
 
 impl WasmProcess {
@@ -79,6 +81,10 @@ impl WasmProcess {
         &self.global_types
     }
 
+    pub fn program_snapshot(&self) -> Option<&ProgramSnapshot> {
+        self.program_snapshot.as_ref()
+    }
+
     pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
         self.compiler.last_source_diagnostic()
     }
@@ -86,11 +92,16 @@ impl WasmProcess {
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
         let index = self.compiler.index_pass()?;
         let mut types = self.compiler.types().clone();
+        let source_revision =
+            crate::backend::program_snapshot::semantic_revision_with_required_roots(
+                compute_files_fingerprint(self.compiler.files()),
+                &self.required_roots,
+            );
         let analysis = build_compile_analysis_cache(
             self.compiler.files(),
             self.compiler.functions(),
             &mut types,
-            compute_files_fingerprint(self.compiler.files()),
+            source_revision,
             |signatures| {
                 resolve_extern_call_signatures_with(signatures, |_signature, _candidate| Some(0))
             },
@@ -172,6 +183,19 @@ impl WasmProcess {
         }
         self.module = encode_module(&lowered, &analysis, &types, self.debug_symbols)
             .map_err(CompileError::Backend)?;
+        self.program_snapshot = Some(
+            ProgramSnapshot::build(
+                source_revision,
+                self.compiler.files(),
+                self.compiler.module_graph(),
+                self.compiler.functions(),
+                &types,
+                self.compiler.data_flow_summaries_shared(),
+                &self.required_roots,
+                analysis,
+            )
+            .map_err(CompileError::Backend)?,
+        );
         Ok(CompileReport { index, emit })
     }
 }
@@ -1061,7 +1085,9 @@ fn encode_function(
         foreach: BTreeMap::new(),
     };
     encode_statements(&hir.statements, &context, &mut body)?;
-    if function.return_type != TYPE_ID_VOID && !statements_terminate(&hir.statements) {
+    // Structured statements use void block types, so only a direct return proves that
+    // the function end does not need its declared result on the operand stack.
+    if function.return_type != TYPE_ID_VOID && !ends_with_explicit_return(&hir.statements) {
         encode_zero(function.return_type, &mut body)?;
     }
     body.push(0x0b);
@@ -1086,16 +1112,11 @@ fn encode_local_declarations(types: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-fn statements_terminate(statements: &[SimpleStmt]) -> bool {
-    statements.last().is_some_and(|statement| match statement {
-        SimpleStmt::Return(_) | SimpleStmt::ReturnVoid => true,
-        SimpleStmt::If {
-            then_statements,
-            else_statements: Some(else_statements),
-            ..
-        } => statements_terminate(then_statements) && statements_terminate(else_statements),
-        _ => false,
-    })
+fn ends_with_explicit_return(statements: &[SimpleStmt]) -> bool {
+    matches!(
+        statements.last(),
+        Some(SimpleStmt::Return(_) | SimpleStmt::ReturnVoid)
+    )
 }
 
 fn collect_locals(
@@ -2828,15 +2849,17 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_proven_terminal_statement_paths() {
+    fn omits_fallback_only_after_an_explicit_return() {
         let return_zero = SimpleStmt::Return(SimpleExpr::Int(0));
-        assert!(statements_terminate(std::slice::from_ref(&return_zero)));
-        assert!(statements_terminate(&[SimpleStmt::If {
+        assert!(ends_with_explicit_return(std::slice::from_ref(
+            &return_zero
+        )));
+        assert!(!ends_with_explicit_return(&[SimpleStmt::If {
             condition: SimpleCondition::Expr(SimpleExpr::Bool(true)),
             then_statements: vec![return_zero.clone()],
             else_statements: Some(vec![return_zero]),
         }]));
-        assert!(!statements_terminate(&[SimpleStmt::If {
+        assert!(!ends_with_explicit_return(&[SimpleStmt::If {
             condition: SimpleCondition::Expr(SimpleExpr::Bool(true)),
             then_statements: vec![SimpleStmt::Return(SimpleExpr::Int(0))],
             else_statements: None,
@@ -2853,6 +2876,13 @@ mod tests {
         );
         process.compile().expect("compile web module");
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+        assert_eq!(
+            process
+                .program_snapshot()
+                .expect("web ProgramSnapshot")
+                .global_type_ids()["x"],
+            TYPE_ID_I32
+        );
         for name in ["main", "tick", "render"] {
             assert!(process
                 .module_bytes()
@@ -2921,7 +2951,7 @@ mod tests {
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
             "foreach.stasis",
-            "struct Item { value: i32, active: bool } global items: Item[4]; function main(): i32 { items[2].value = 7; items[2].active = true; return 0; } function tick(): i32 { foreach (let item, i in items) { if (item.active) { item.value += i; } } return items[2].value; } function render(): i32 { return 0; }",
+            "struct Item { value: i32; active: bool; } global items: Item[4]; function main(): i32 { items[2].value = 7; items[2].active = true; return 0; } function tick(): i32 { foreach (let item, i in items) { if (item.active) { item.value += i; } } return items[2].value; } function render(): i32 { return 0; }",
         );
         process.compile().expect("compile web foreach module");
         assert_eq!(process.memory_layout()["items.value"].length, 4);
@@ -2934,7 +2964,7 @@ mod tests {
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
             "views.stasis",
-            "struct Item { value: i32, active: bool } global items: Item[4]; global chosen: Item; function read(item: Item): i32 { if (item.active) { return item.value; } return 0; } function main(): i32 { chosen.value = 3; chosen.active = true; items[2].value = 7; items[2].active = true; items[1] = items[2]; let selected: Item = items[1]; selected.value += read(chosen); return read(selected); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+            "struct Item { value: i32; active: bool; } global items: Item[4]; global chosen: Item; function read(item: Item): i32 { if (item.active) { return item.value; } return 0; } function main(): i32 { chosen.value = 3; chosen.active = true; items[2].value = 7; items[2].active = true; items[1] = items[2]; let selected: Item = items[1]; selected.value += read(chosen); return read(selected); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
         );
         process.compile().expect("compile web struct views");
         assert_eq!(process.memory_layout()["items.value"].length, 4);

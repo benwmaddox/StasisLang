@@ -11,6 +11,7 @@ use stasis_assets::{
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::formatter::format_source;
@@ -1893,6 +1894,16 @@ fn validate_compiled_workspace_assets(
     workspace: &Workspace,
     jit: &JitProcess,
 ) -> Result<Option<stasis_assets::ResolvedAssetManifest>, String> {
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "asset validation compile produced no ProgramSnapshot".to_string())?;
+    validate_program_snapshot_assets(workspace, snapshot)
+}
+
+fn validate_program_snapshot_assets(
+    workspace: &Workspace,
+    snapshot: &ProgramSnapshot,
+) -> Result<Option<stasis_assets::ResolvedAssetManifest>, String> {
     let manifest = if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
         Some(
             load_project_asset_manifest(&workspace.root, AssetLimits::default())
@@ -1901,9 +1912,6 @@ fn validate_compiled_workspace_assets(
     } else {
         None
     };
-    let snapshot = jit
-        .program_snapshot()
-        .ok_or_else(|| "asset validation compile produced no ProgramSnapshot".to_string())?;
     crate::release_assets::validate_snapshot_assets(&workspace.root, snapshot, manifest.as_ref())?;
     Ok(manifest)
 }
@@ -3726,14 +3734,13 @@ fn package_web_workspace(
         })?;
         let wasm = prepare_web_wasm(process.module_bytes(), &staging_root, development_build)?;
 
-        let validation_jit = compile_workspace_jit(workspace)?;
-        let resolved = validate_compiled_workspace_assets(workspace, &validation_jit)?;
+        let snapshot = process
+            .program_snapshot()
+            .ok_or_else(|| "web compile produced no ProgramSnapshot".to_string())?;
+        let resolved = validate_program_snapshot_assets(workspace, snapshot)?;
         let retained = resolved
             .as_ref()
             .map(|manifest| {
-                let snapshot = validation_jit.program_snapshot().ok_or_else(|| {
-                    "web asset validation produced no ProgramSnapshot".to_string()
-                })?;
                 crate::release_assets::retain_snapshot_assets(&workspace.root, snapshot, manifest)
             })
             .transpose()?;
