@@ -30,6 +30,7 @@ out/
 
 # Build artifacts
 dist/stasis-editor-release-*/
+samples/*/dist/
 *.dll
 *.exe
 *.so
