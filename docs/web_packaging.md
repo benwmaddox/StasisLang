@@ -35,8 +35,9 @@ The browser populates the canonical HostFrame arrays and consumes the existing g
 buffers, matching Android/Windows. Browser policy (fullscreen gestures, Clipboard API, local
 storage, and WebAudio unlocking) remains in JavaScript.
 
-The HUD reports current and worst observed `tick` and `render` time separately. Both must remain
-below 16 ms. Browser audio is unlocked by the **Enable sound** user gesture; subsequent
+Development packages show a HUD with current and worst observed `tick` and `render` time; both must
+remain below 16 ms. Release packages omit the performance HUD. Browser audio is unlocked by the
+**Enable sound** user gesture; subsequent
 `web_play_tone` calls originate in Stasis game logic.
 
 ## Current compiler and host lane

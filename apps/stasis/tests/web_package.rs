@@ -101,6 +101,9 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     assert!(!runtime.contains("STASIS_WASM_BASE64"));
     assert!(!runtime.contains("data:application/wasm;base64,"));
     assert!(output.join("index.html").is_file());
+    let index = fs::read_to_string(output.join("index.html")).expect("index.html");
+    assert!(index.contains(r#"id="stasis-hud""#));
+    assert!(!index.contains("__STASIS_"));
     assert!(!output.join("play").exists());
     assert!(output.join("stasis_provenance.json").is_file());
     assert!(!output.join("web_export_smoke.html").exists());
