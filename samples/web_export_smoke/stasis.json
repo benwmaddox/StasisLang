@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "web_export_smoke",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build"
+}

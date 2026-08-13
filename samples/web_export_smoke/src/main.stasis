@@ -1,0 +1,54 @@
+const SCREEN_WIDTH: i32 = 640;
+const PLAYER_WIDTH: i32 = 64;
+
+global player_x: i32;
+global score: i32;
+global tone_latched: bool;
+
+function @extern("web_input_axis") web_input_axis(): i32;
+function @extern("web_input_fire") web_input_fire(): bool;
+function @extern("web_pointer_x") web_pointer_x(): i32;
+function @extern("web_pointer_down") web_pointer_down(): bool;
+function @extern("web_begin_frame") web_begin_frame(red: i32, green: i32, blue: i32): void;
+function @extern("web_draw_rect") web_draw_rect(x: i32, y: i32, width: i32, height: i32, red: i32, green: i32, blue: i32): void;
+function @extern("web_draw_text") web_draw_text(x: i32, y: i32, value: i32): void;
+function @extern("web_play_tone") web_play_tone(frequency: i32, duration_ms: i32): void;
+
+function main(): i32 {
+    player_x = 288;
+    score = 0;
+    tone_latched = false;
+    return 0;
+}
+
+function tick(): i32 {
+    if (web_pointer_down()) {
+        player_x = web_pointer_x() - PLAYER_WIDTH / 2;
+    } else {
+        player_x += web_input_axis() * 5;
+    }
+    if (player_x < 0) {
+        player_x = 0;
+    }
+    if (player_x > SCREEN_WIDTH - PLAYER_WIDTH) {
+        player_x = SCREEN_WIDTH - PLAYER_WIDTH;
+    }
+    if (web_input_fire()) {
+        if (!tone_latched) {
+            web_play_tone(440 + score * 20, 100);
+            score += 1;
+            tone_latched = true;
+        }
+    } else {
+        tone_latched = false;
+    }
+    return 0;
+}
+
+function render(): i32 {
+    web_begin_frame(7, 17, 31);
+    web_draw_rect(0, 300, 640, 60, 11, 38, 61);
+    web_draw_rect(player_x, 270, PLAYER_WIDTH, 24, 83, 216, 251);
+    web_draw_text(18, 32, score);
+    return 0;
+}

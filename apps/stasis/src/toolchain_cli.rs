@@ -12,6 +12,7 @@ use stasis_assets::{
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
+use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
@@ -538,6 +539,7 @@ enum BuildMode {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum PackageTarget {
     Desktop,
+    Web,
     AndroidArm64,
     #[value(name = "android-x86_64")]
     AndroidX86_64,
@@ -566,6 +568,7 @@ impl PackageTarget {
     fn as_str(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
+            Self::Web => "web",
             Self::AndroidArm64 => "android-arm64",
             Self::AndroidX86_64 => "android-x86_64",
             Self::IosArm64 => "ios-arm64",
@@ -580,7 +583,7 @@ impl PackageTarget {
         match self {
             Self::AndroidArm64 => Some("arm64-v8a"),
             Self::AndroidX86_64 => Some("x86_64"),
-            Self::Desktop | Self::IosArm64 => None,
+            Self::Desktop | Self::Web | Self::IosArm64 => None,
         }
     }
 }
@@ -3479,6 +3482,9 @@ fn package_workspace(
             package_root.display()
         ));
     }
+    if matches!(target, PackageTarget::Web) {
+        return package_web_workspace(workspace, &package_root, development_build);
+    }
     if !matches!(target, PackageTarget::Desktop) {
         return package_mobile_workspace(
             workspace,
@@ -3568,6 +3574,140 @@ fn package_workspace(
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
+const WEB_STANDALONE_HTML: &str = include_str!("../../../runtime/web/standalone.html");
+const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
+
+fn package_web_workspace(
+    workspace: &Workspace,
+    package_root: &Path,
+    development_build: bool,
+) -> Result<CommandResult, String> {
+    let staging_name = format!(
+        ".{}.staging",
+        package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("stasis-web-package")
+    );
+    let staging_root = package_root.with_file_name(staging_name);
+    if staging_root.exists() {
+        return Err(format!(
+            "package staging output already exists: {}",
+            staging_root.display()
+        ));
+    }
+    let provenance = resolve_package_provenance(development_build)?;
+    fs::create_dir_all(&staging_root)
+        .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
+
+    let assembled = (|| -> Result<PathBuf, String> {
+        let files =
+            load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+        let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
+        let mut process = WasmProcess::new();
+        process.set_project_root(display_path(&workspace.root))?;
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        let mut sources = BTreeMap::new();
+        for file in files {
+            let path = workspace.root.join(&file.path);
+            let path = path.canonicalize().unwrap_or(path);
+            let compiler_path = path.to_string_lossy().to_string();
+            sources.insert(compiler_path.clone(), file.source.clone());
+            process.upsert_file(compiler_path, file.source);
+        }
+        process.compile().map_err(|error| {
+            if let Some(diagnostic) = process.last_source_diagnostic() {
+                let source = sources
+                    .get(&diagnostic.path)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let (line, column) = line_column(source, diagnostic.start);
+                format!(
+                    "{}:{}:{}: {}",
+                    diagnostic.path, line, column, diagnostic.message
+                )
+            } else {
+                format!("{error:?}")
+            }
+        })?;
+
+        let wasm_path = staging_root.join("game.wasm");
+        fs::write(&wasm_path, process.module_bytes())
+            .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
+        fs::write(staging_root.join("game.js"), WEB_RUNTIME_JS)
+            .map_err(|error| format!("failed to write web runtime: {error}"))?;
+        fs::write(
+            staging_root.join("index.html"),
+            WEB_INDEX_HTML.replace("__STASIS_GAME_TITLE__", &workspace.manifest.name),
+        )
+        .map_err(|error| format!("failed to write web index: {error}"))?;
+
+        let standalone_name = format!("{}.html", workspace.manifest.name);
+        let standalone_path = staging_root.join(&standalone_name);
+        let standalone = WEB_STANDALONE_HTML
+            .replace("__STASIS_GAME_TITLE__", &workspace.manifest.name)
+            .replace("__STASIS_WASM_BASE64__", &base64(process.module_bytes()))
+            .replace("__STASIS_RUNTIME_JS__", WEB_RUNTIME_JS);
+        fs::write(&standalone_path, standalone)
+            .map_err(|error| format!("failed to write {}: {error}", standalone_path.display()))?;
+        write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
+        Ok(PathBuf::from(standalone_name))
+    })();
+    let standalone = match assembled {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(error);
+        }
+    };
+    fs::rename(&staging_root, package_root).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging_root);
+        format!(
+            "failed to publish package {}: {error}",
+            package_root.display()
+        )
+    })?;
+    Ok(CommandResult::success(
+        format!("packaged web at {}", package_root.display()),
+        json!({
+            "target": "web",
+            "output": display_path(package_root),
+            "standalone": relative_display(package_root, &package_root.join(&standalone)),
+            "wasm": "game.wasm",
+            "provenance": PACKAGE_PROVENANCE_NAME,
+            "development_build": provenance["development_build"],
+        }),
+    ))
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        output.push(ALPHABET[(a >> 2) as usize] as char);
+        output.push(ALPHABET[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            ALPHABET[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            ALPHABET[(c & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 #[cfg(windows)]
@@ -3760,7 +3900,7 @@ fn package_mobile_workspace(
             "project": match target {
                 PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
                 PackageTarget::IosArm64 => "ios/StasisMobile.xcodeproj",
-                PackageTarget::Desktop => unreachable!(),
+                PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
@@ -3780,7 +3920,9 @@ fn assemble_mobile_shell(
     let platform = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
         PackageTarget::IosArm64 => "ios",
-        PackageTarget::Desktop => return Err("desktop is not a mobile package target".to_string()),
+        PackageTarget::Desktop | PackageTarget::Web => {
+            return Err("selected target is not a mobile package target".to_string())
+        }
     };
     let common_destination = staging_root.join("common");
     let platform_destination = staging_root.join(platform);
@@ -3795,14 +3937,14 @@ fn assemble_mobile_shell(
             aot_root.join("apk_assets/stasis_game")
         }
         PackageTarget::IosArm64 => aot_root.join("ios_assets/stasis_game"),
-        PackageTarget::Desktop => unreachable!(),
+        PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
     };
     let asset_destination = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
             staging_root.join("android/app/src/main/assets/stasis_game")
         }
         PackageTarget::IosArm64 => staging_root.join("ios/StasisMobile/stasis_game"),
-        PackageTarget::Desktop => unreachable!(),
+        PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
     };
     let android_manifest = if target.is_android() {
         workspace.manifest.android.as_ref()
@@ -3876,7 +4018,7 @@ fn assemble_mobile_shell(
                     "android/app/src/main/assets/stasis_game"
                 }
                 PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game",
-                PackageTarget::Desktop => unreachable!(),
+                PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
         }))
         .map_err(|error| format!("failed to encode mobile package manifest: {error}"))?

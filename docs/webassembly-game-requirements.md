@@ -8,6 +8,12 @@ This is based on the current `main` codebase, not on a hypothetical redesign.
 
 ## Executive Summary
 
+Implementation status (2026-08-13): the first scalar web export lane is implemented. `stasis
+package --target web` emits a real Wasm guest, a browser host, and both static and self-contained
+HTML packages. See `docs/web_packaging.md` for the supported compiler lane and acceptance project.
+Structured state, collections, float/string expressions, and packaged asset APIs remain explicit
+follow-on work.
+
 Stasis game code is already structurally close to a browser-friendly model:
 
 - gameplay state is explicit
