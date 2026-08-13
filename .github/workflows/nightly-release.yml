@@ -16,6 +16,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  integration_seams:
+    uses: ./.github/workflows/pr-ci.yml
+    with:
+      run_slow_seams: true
+
+  android_device_seams:
+    uses: ./.github/workflows/android-device-seams.yml
+
   detect:
     runs-on: ubuntu-latest
     outputs:
@@ -441,7 +449,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [detect, build, vscode_extension]
+    needs: [detect, build, vscode_extension, integration_seams, android_device_seams]
     if: needs.detect.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:

@@ -1,32 +1,11 @@
 name: Android Emulator Seams
 
 on:
-  workflow_dispatch:
-  pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - ready_for_review
-    paths:
-      - ".github/workflows/android-device-seams.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "apps/stasis/**"
-      - "crates/**"
-      - "mobile/android/**"
-      - "mobile/shells/**"
-      - "runtime/**"
-      - "samples/android_aot_seam/**"
-      - "samples/android_touch_seam/**"
-      - "samples/android_orientation_seam/**"
-      - "src/**"
-      - "tools/cargo_cache.py"
-      - "tools/ci/run_android_release_shell_seam.py"
+  workflow_call:
 
 concurrency:
-  group: android-emulator-seams-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: android-emulator-seams-nightly
+  cancel-in-progress: false
 
 jobs:
   generated-release-shell:

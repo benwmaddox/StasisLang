@@ -14,6 +14,8 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.workflow = read(".github/workflows/android-device-seams.yml")
+        cls.nightly_workflow = read(".github/workflows/nightly-release.yml")
+        cls.pr_workflow = read(".github/workflows/pr-ci.yml")
         cls.release_script = read("mobile/android/test_release_shell.ps1")
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
@@ -28,13 +30,26 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("api-level: 35", self.workflow)
         self.assertIn("arch: x86_64", self.workflow)
         self.assertIn("Enable KVM", self.workflow)
-        self.assertIn("pull_request:", self.workflow)
+        self.assertIn("workflow_call:", self.workflow)
+        self.assertNotIn("pull_request:", self.workflow)
+        self.assertNotIn("workflow_dispatch:", self.workflow)
         self.assertIn('uses: actions/setup-python@v5', self.workflow)
         self.assertIn('python-version: "3.12"', self.workflow)
-        self.assertIn("group: android-emulator-seams-", self.workflow)
-        self.assertIn("cancel-in-progress: true", self.workflow)
-        for dependency_path in ('"Cargo.lock"', '"Cargo.toml"', '"crates/**"', '"src/**"'):
-            self.assertIn(dependency_path, self.workflow)
+        self.assertIn("group: android-emulator-seams-nightly", self.workflow)
+        self.assertIn("cancel-in-progress: false", self.workflow)
+        self.assertIn("uses: ./.github/workflows/android-device-seams.yml", self.nightly_workflow)
+        self.assertIn(
+            "needs: [detect, build, vscode_extension, integration_seams, android_device_seams]",
+            self.nightly_workflow,
+        )
+        self.assertIn("uses: ./.github/workflows/pr-ci.yml", self.nightly_workflow)
+        self.assertIn("run_slow_seams: true", self.nightly_workflow)
+        self.assertEqual(
+            4,
+            self.pr_workflow.count(
+                "if: ${{ github.event_name == 'workflow_call' && inputs.run_slow_seams }}"
+            ),
+        )
         self.assertNotIn("self-hosted", self.workflow)
         self.assertNotIn("runs-on: [self-hosted, Windows, android-device]", self.workflow)
         self.assertNotIn("ANDROID_SERIAL", self.workflow)

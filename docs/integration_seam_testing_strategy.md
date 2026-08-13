@@ -176,8 +176,8 @@ named for the injected failure, and leave the production path unchanged.
 | Lane | Trigger | Budget | Contents |
 |---|---|---:|---|
 | Fast contract | every PR and `tools/validate_repo.sh` | 2 min | descriptor parity, JIT HostFrame, buffer bounds, diagnostic schemas |
-| Native integration | every PR, platform-sharded | 10 min | desktop real runtime, linked AOT/C runtime, package link and symbol audit |
-| Android emulator | merge/nightly and affected PRs | 15 min/test shard | Workshop JNI/JIT and generated release-shell behavior on a test-only x86_64 AOT build |
+| Native integration | nightly, platform-sharded | 15 min | desktop real runtime, linked AOT/C runtime, package link and symbol audit |
+| Android emulator | nightly | 15 min/test shard | Workshop JNI/JIT and generated release-shell behavior on a test-only x86_64 AOT build |
 | Physical device | optional release candidate and scheduled farm | 15 min/test shard | Supplemental OEM driver, density, lifecycle, and representative rendering evidence |
 
 Tests should be promoted toward the faster lane when a deterministic lower
