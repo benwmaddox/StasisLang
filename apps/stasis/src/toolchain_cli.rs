@@ -3744,22 +3744,18 @@ fn package_web_workspace(
             })
             .transpose()?;
         stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
-        let runtime_config = web_runtime_config(workspace, &process, &staging_root.join("assets"))?;
+        let runtime_config = web_runtime_config(workspace, &process);
         let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
             .replace("</", "<\\/");
         let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{WEB_RUNTIME_JS}");
-        let play_root = staging_root.join("play");
-        fs::create_dir_all(&play_root)
-            .map_err(|error| format!("failed to create {}: {error}", play_root.display()))?;
-
-        let wasm_path = play_root.join("game.wasm");
+        let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
-        fs::write(play_root.join("game.js"), &runtime_bundle)
+        fs::write(staging_root.join("game.js"), &runtime_bundle)
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
         fs::write(
-            play_root.join("index.html"),
+            staging_root.join("index.html"),
             WEB_INDEX_HTML.replace("__STASIS_GAME_TITLE__", &workspace.manifest.name),
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
@@ -3796,8 +3792,8 @@ fn package_web_workspace(
         json!({
             "target": "web",
             "output": display_path(package_root),
-            "play": "play/index.html",
-            "wasm": "play/game.wasm",
+            "play": "index.html",
+            "wasm": "game.wasm",
             "wasm_optimized": wasm_optimized,
             "wasm_input_bytes": wasm_input_bytes,
             "wasm_output_bytes": wasm_output_bytes,
@@ -3807,60 +3803,7 @@ fn package_web_workspace(
     ))
 }
 
-fn web_runtime_config(
-    workspace: &Workspace,
-    process: &WasmProcess,
-    asset_root: &Path,
-) -> Result<Value, String> {
-    fn collect_assets(
-        root: &Path,
-        directory: &Path,
-        out: &mut BTreeMap<String, String>,
-    ) -> Result<(), String> {
-        if !directory.exists() {
-            return Ok(());
-        }
-        let mut entries = fs::read_dir(directory)
-            .map_err(|error| format!("failed to read web assets {}: {error}", directory.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to enumerate web assets: {error}"))?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let file_type = entry.file_type().map_err(|error| {
-                format!(
-                    "failed to inspect web asset {}: {error}",
-                    entry.path().display()
-                )
-            })?;
-            if file_type.is_symlink() {
-                return Err(format!(
-                    "web package assets cannot contain symlinks: {}",
-                    entry.path().display()
-                ));
-            }
-            if file_type.is_dir() {
-                collect_assets(root, &entry.path(), out)?;
-                continue;
-            }
-            if !file_type.is_file() {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(root)
-                .map_err(|_| format!("web asset escaped {}", root.display()))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.insert(
-                format!("assets/{relative}"),
-                format!("../assets/{relative}"),
-            );
-        }
-        Ok(())
-    }
-
-    let mut assets = BTreeMap::new();
-    collect_assets(asset_root, asset_root, &mut assets)?;
+fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Value {
     let strings = process
         .string_literals()
         .iter()
@@ -3896,14 +3839,14 @@ fn web_runtime_config(
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    Ok(json!({
+    json!({
         "name": workspace.manifest.name,
         "strings": strings,
         "memory": memory,
         "views": views,
         "globals": globals,
-        "assets": assets,
-    }))
+        "assets": {},
+    })
 }
 
 #[cfg(windows)]

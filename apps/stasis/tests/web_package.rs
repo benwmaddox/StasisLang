@@ -72,7 +72,7 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let relative_output = PathBuf::from(format!("build/web-package-test-{stamp}"));
     let output = package(&workspace, &relative_output);
 
-    let wasm = fs::read(output.join("play/game.wasm")).expect("play/game.wasm");
+    let wasm = fs::read(output.join("game.wasm")).expect("game.wasm");
     assert!(wasm.starts_with(b"\0asm\x01\0\0\0"));
     for export in ["main", "tick", "render", "player_x"] {
         assert!(
@@ -81,7 +81,7 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
             "missing Wasm export {export}"
         );
     }
-    let runtime = fs::read_to_string(output.join("play/game.js")).expect("play/game.js");
+    let runtime = fs::read_to_string(output.join("game.js")).expect("game.js");
     for expected in [
         "requestAnimationFrame(frame)",
         "web_play_tone",
@@ -100,7 +100,8 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     }
     assert!(!runtime.contains("STASIS_WASM_BASE64"));
     assert!(!runtime.contains("data:application/wasm;base64,"));
-    assert!(output.join("play/index.html").is_file());
+    assert!(output.join("index.html").is_file());
+    assert!(!output.join("play").exists());
     assert!(output.join("stasis_provenance.json").is_file());
     assert!(!output.join("web_export_smoke.html").exists());
 
@@ -113,26 +114,18 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     let relative_output = PathBuf::from(format!("build/web-package-test-{}", stamp()));
     let output = package(&workspace, &relative_output);
 
-    let wasm = fs::read(output.join("play/game.wasm")).expect("existing game Wasm");
+    let wasm = fs::read(output.join("game.wasm")).expect("existing game Wasm");
     assert!(wasm.starts_with(b"\0asm\x01\0\0\0"));
     assert!(wasm.windows(6).any(|window| window == b"memory"));
-    let runtime = fs::read_to_string(output.join("play/game.js")).expect("existing game runtime");
+    let runtime = fs::read_to_string(output.join("game.js")).expect("existing game runtime");
     for expected in ["gfx_cmd_i32", "gfx_cmd_f32", "stasis_jit_gfx_cache_text"] {
         assert!(
             runtime.contains(expected),
             "missing web runtime data {expected}"
         );
     }
-    for expected in [
-        r#""assets/smoke.png":"../assets/smoke.png""#,
-        r#""assets/smoke.svg":"../assets/smoke.svg""#,
-        r#""assets/smoke.ttf":"../assets/smoke.ttf""#,
-    ] {
-        assert!(
-            runtime.contains(expected),
-            "missing hosted asset map {expected}"
-        );
-    }
+    assert!(runtime.contains(r#""assets":{}"#));
+    assert!(!runtime.contains("../assets/"));
     for expected in [
         "data:image/png;base64,",
         "data:image/svg+xml;base64,",
@@ -160,7 +153,7 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
     copy_tree(&root.join("src"), &workspace.join("vendor/stasis/src"));
     let output = package(&workspace, Path::new("build/web-package"));
 
-    let runtime = fs::read_to_string(output.join("play/game.js")).expect("audio game runtime");
+    let runtime = fs::read_to_string(output.join("game.js")).expect("audio game runtime");
     for expected in [
         "stasis_jit_audio_load_music",
         "stasis_jit_audio_load_effect",
@@ -177,15 +170,8 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
             "web runtime embedded {expected}"
         );
     }
-    for expected in [
-        r#""assets/tone.mp3":"../assets/tone.mp3""#,
-        r#""assets/tone.wav":"../assets/tone.wav""#,
-    ] {
-        assert!(
-            runtime.contains(expected),
-            "missing hosted asset map {expected}"
-        );
-    }
+    assert!(runtime.contains(r#""assets":{}"#));
+    assert!(!runtime.contains("../assets/"));
     assert!(output.join("assets/tone.mp3").is_file());
     assert!(output.join("assets/tone.wav").is_file());
 

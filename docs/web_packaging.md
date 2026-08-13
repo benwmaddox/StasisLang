@@ -9,7 +9,7 @@ stasis package --target web --development-build
 Release toolchains omit `--development-build`. The default output is
 `dist/<project-name>-web/` and contains:
 
-- `play/index.html`, `play/game.js`, and `play/game.wasm`: an inspectable static-hosting bundle;
+- `index.html`, `game.js`, and `game.wasm`: an inspectable static-hosting bundle;
 - `assets/`: the same reachable, prepared release assets selected for Android/desktop packaging;
 - `stasis_provenance.json`: the normal package provenance receipt.
 
@@ -19,10 +19,10 @@ unhyphenated `wasmopt` executable name used by some Windows tool layouts. Set
 optimizer that fails aborts packaging; when no optimizer is discoverable, packaging succeeds with
 the original module and reports `wasm_optimized: false` in JSON output. Development packages skip
 optimization so their full diagnostic names remain available. The optimized bytes are written to
-`play/game.wasm`.
+`game.wasm`.
 
 The package must be served over HTTP. From the package root, for example, run
-`python -m http.server 8000` and open `http://localhost:8000/play/`.
+`python -m http.server 8000` and open `http://localhost:8000/`.
 Self-contained single-file HTML output is intentionally deferred; web packages keep Wasm and
 assets external so hosted output remains compact and follows the same asset preparation path as
 Android and desktop packages.
