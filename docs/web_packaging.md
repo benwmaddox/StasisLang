@@ -79,20 +79,6 @@ writes the existing command buffers; JavaScript owns only browser policy and hos
 same mapping predicts that another bounded renderer command can be added in the browser without
 changing gameplay code or introducing a second compiler path.
 
-ChessTD scale-gate reflection:
-
-- Good: compiling ChessTD unchanged exposed struct-view, short-circuit, storage, clipboard, portrait
-  window, and release-asset behavior that small fixtures could not represent.
-- Bad: copying the source asset tree initially produced a 92.5 MB standalone and duplicated embedded
-  assets into the static runtime.
-- Adjustment: Web packages now use the shared retained/prepared asset pipeline and keep embedded
-  data URLs exclusive to the standalone file.
-
-Theory gained: matching native collection layout is not sufficient by itself; control-flow
-semantics and host-visible view mutation are also part of the cross-target ABI. The observed
-negative-region guard predicts any future sentinel-index pattern will remain safe because Web now
-short-circuits before bounded memory access.
-
 Release optimization reflection:
 
 - Good: optimizing the already-linked Wasm module preserves a single compiler/runtime path while
