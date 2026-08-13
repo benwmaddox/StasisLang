@@ -124,6 +124,16 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
         );
     }
     for expected in [
+        r#""assets/smoke.png":"../assets/smoke.png""#,
+        r#""assets/smoke.svg":"../assets/smoke.svg""#,
+        r#""assets/smoke.ttf":"../assets/smoke.ttf""#,
+    ] {
+        assert!(
+            runtime.contains(expected),
+            "missing hosted asset map {expected}"
+        );
+    }
+    for expected in [
         "data:image/png;base64,",
         "data:image/svg+xml;base64,",
         "data:font/ttf;base64,",
@@ -165,6 +175,15 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
         assert!(
             !runtime.contains(expected),
             "web runtime embedded {expected}"
+        );
+    }
+    for expected in [
+        r#""assets/tone.mp3":"../assets/tone.mp3""#,
+        r#""assets/tone.wav":"../assets/tone.wav""#,
+    ] {
+        assert!(
+            runtime.contains(expected),
+            "missing hosted asset map {expected}"
         );
     }
     assert!(output.join("assets/tone.mp3").is_file());
