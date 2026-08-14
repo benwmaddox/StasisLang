@@ -71,6 +71,12 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let stamp = stamp();
     let relative_output = PathBuf::from(format!("build/web-package-test-{stamp}"));
     let output = package(&workspace, &relative_output);
+    fs::write(output.join("stale.txt"), "old package").expect("write stale package file");
+    let output = package(&workspace, &relative_output);
+    assert!(
+        !output.join("stale.txt").exists(),
+        "replacement retained a stale package file"
+    );
 
     let wasm = fs::read(output.join("game.wasm")).expect("game.wasm");
     assert!(wasm.starts_with(b"\0asm\x01\0\0\0"));
