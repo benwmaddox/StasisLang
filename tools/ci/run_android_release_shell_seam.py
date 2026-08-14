@@ -509,16 +509,65 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     return observed
 
 
+def ensure_test_activity_foreground(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    component: str,
+) -> bool:
+    windows = _run(
+        adb,
+        serial,
+        "shell",
+        "dumpsys",
+        "window",
+        "windows",
+        required=False,
+    )
+    current_focus = next(
+        (line for line in windows.splitlines() if "mCurrentFocus=" in line),
+        "",
+    )
+    if package_id in current_focus:
+        return False
+    if current_focus:
+        _run(
+            adb,
+            serial,
+            "shell",
+            "input",
+            "keyevent",
+            "KEYCODE_BACK",
+            required=False,
+        )
+    _run(
+        adb,
+        serial,
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        component,
+        required=False,
+    )
+    return True
+
+
 def capture_until_regions_match(
     adb: Path,
     serial: str | None,
     capture: Path,
     expectations: dict,
     deadline: float,
+    package_id: str,
+    component: str,
 ) -> list[dict]:
     """Wait for the stable marker's frame to reach Android's compositor."""
     last_error: SeamError | None = None
     while time.monotonic() < deadline:
+        if ensure_test_activity_foreground(adb, serial, package_id, component):
+            time.sleep(0.25)
         capture.write_bytes(
             _run(adb, serial, "exec-out", "screencap", "-p", text=False)
         )
@@ -979,6 +1028,8 @@ def main() -> int:
                     stage_capture_path,
                     stage_expectations,
                     min(deadline, time.monotonic() + 10),
+                    package_id,
+                    component,
                 )
                 orientation_evidence.append(
                     {
@@ -1000,6 +1051,8 @@ def main() -> int:
             capture_path,
             expectations,
             min(deadline, time.monotonic() + 10),
+            package_id,
+            component,
         )
         time.sleep(1)
         second_pid = _run(
