@@ -429,7 +429,11 @@
       context.globalAlpha = Math.max(0, Math.min(1, i32[baseI + 2] / 255));
       context.translate(x + width / 2, y + height / 2);
       context.rotate(i32[baseI + 1] * Math.PI / 180);
-      context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, -width / 2, -height / 2, width, height);
+      if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1) {
+        context.drawImage(image, -width / 2, -height / 2, width, height);
+      } else {
+        context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, -width / 2, -height / 2, width, height);
+      }
       context.restore();
     };
     const drawText = index => {

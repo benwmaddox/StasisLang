@@ -93,6 +93,8 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "function applyWindowRequest",
         "function sdlScancode",
         "const spriteStride = version >= 5 ? 8 : 4;",
+        "if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1)",
+        "context.drawImage(image, -width / 2, -height / 2, width, height);",
         "context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight",
     ] {
         assert!(
