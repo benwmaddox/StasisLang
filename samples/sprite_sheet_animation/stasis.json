@@ -1,0 +1,8 @@
+{
+  "manifest_version": 1,
+  "name": "sprite_sheet_animation",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain"
+}

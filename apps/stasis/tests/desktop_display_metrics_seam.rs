@@ -289,7 +289,7 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
     let mut host_i32 = vec![0; 768];
     let mut host_f32 = vec![0.0; 64];
     let mut gfx_i32 = vec![0; 34608];
-    let mut gfx_f32 = vec![0.0; 108676];
+    let mut gfx_f32 = vec![0.0; 125060];
     let mut gfx_u8 = vec![0; 65536];
     register_global_i32_array(
         global_path_hash("host_i32"),

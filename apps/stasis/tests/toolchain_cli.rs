@@ -1706,7 +1706,7 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
         )
         .expect("read engine manifest");
         assert!(
-            engine_manifest.contains("\"path\":\"gfx_cmd_f32\",\"max_length\":108676"),
+            engine_manifest.contains("\"path\":\"gfx_cmd_f32\",\"max_length\":125060"),
             "mobile render ABI must publish the full f32 command buffer"
         );
         assert!(aot_manifest["objects"]

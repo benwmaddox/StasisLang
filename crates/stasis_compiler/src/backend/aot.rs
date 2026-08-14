@@ -1639,7 +1639,7 @@ mod tests {
 
     fn run_gfx_capacity_jit(gfx_source: &str) -> GfxCapacityResult {
         const I32_COUNT: usize = 34_608;
-        const F32_COUNT: usize = 108_676;
+        const F32_COUNT: usize = 125_060;
         const U8_COUNT: usize = 65_536;
         let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut jit = JitProcess::new();
@@ -1744,7 +1744,7 @@ mod tests {
             return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=terminal_entries expected=written actual=missing".to_string());
         }
         if result.trace == 0 {
-            return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=trace expected=nonzero actual=0".to_string());
+            return Err(format!("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=trace expected=nonzero actual=0 stages={:?}", result.stage_traces));
         }
         Ok(())
     }

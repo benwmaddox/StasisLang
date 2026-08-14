@@ -176,3 +176,18 @@ The receiver is a mutable view into global-backed state, matching Stasis's exist
 Future work may add explicit downscale, fit, or intentionally upscaled operations. Those APIs must remain distinct from canonical `draw` and must validate against the resource's logical painted envelope. Asset-manifest IDs may eventually supply the logical size so paths and dimensions also have one declaration.
 
 Theory gained: a drawable's logical painted envelope belongs to the loaded resource, not to each draw command. The existing graphics path proves that physical raster density is already a host concern while Stasis draw commands still duplicate logical size. This predicts that receiver-owned logical dimensions can remove silent enlargement from ordinary drawing without changing the renderer or command-buffer architecture.
+
+## Sprite sheets and deterministic clips
+
+`Sprite.draw` remains a full-texture draw. `SpriteSheet.load_sprite_sheet_from(path, columns, rows, cell_width, cell_height)` loads one asset transactionally and records a validated uniform grid; `draw_frame` selects a row-major cell while preserving its logical painted dimensions. The sheet abstraction owns normalized source-region details, so ordinary game code cannot accidentally issue malformed UV commands.
+
+`AnimationClip` is a pure helper for authored frame mappings. Its `first_frame`, `frame_count`, `ticks_per_frame`, and integer playback mode are data-driven; the standard constants are `ANIMATION_PLAYBACK_ONCE`, `ANIMATION_PLAYBACK_LOOP`, and `ANIMATION_PLAYBACK_PING_PONG`. `frame_at(elapsed_ticks)` clamps negative time and wraps or reflects deterministically, while `finished(elapsed_ticks)` reports completion for once-only clips. Games should bind frame mapping and timing from JSON; StasisLang owns UV sampling and playback mechanics.
+The executable reference is `samples/sprite_sheet_animation`. It loads one 2x2 PNG, draws all four row-major cells, and packages the single source image for both JIT and AOT builds. The fixture verifier and language tests are:
+
+```powershell
+python tools/verify_sprite_sheet_fixture.py
+stasis --workspace samples/sprite_sheet_animation check
+stasis --workspace samples/sprite_sheet_animation build
+```
+
+Good: one texture and one sprite command represent every cell, so animation frames do not duplicate GPU resources or asset-manifest records. Bad: nested resource structs and arbitrary annotated wrapper calls are not yet supported by the current JIT call boundary. Adjustment: `SpriteSheet` uses a flat resource layout and one compiler-recognized loader while keeping clip timing independent and data-driven. Theory gained: a generic renderer needs only validated source regions plus deterministic frame selection; game-specific states, pacing, and clip mappings remain configuration data rather than engine policy.

@@ -69,7 +69,7 @@ int main(int argc, char **argv) {
     CHECK(stasis_mobile_render_entry() == 0);
 
     gfx_i32 = stasis_jit_global_i32_array_ptr(hash_path("gfx_cmd_i32"), 0, 34608);
-    gfx_f32 = stasis_jit_global_f32_array_ptr(hash_path("gfx_cmd_f32"), 0, 108676);
+    gfx_f32 = stasis_jit_global_f32_array_ptr(hash_path("gfx_cmd_f32"), 0, 125060);
     gfx_u8 = stasis_jit_global_u8_array_ptr(hash_path("gfx_cmd_u8"), 0, 65536);
     CHECK(gfx_i32 != NULL && gfx_f32 != NULL && gfx_u8 != NULL);
     CHECK(gfx_i32[4] == 1 && gfx_i32[7] == 2 && gfx_i32[22] == 3);

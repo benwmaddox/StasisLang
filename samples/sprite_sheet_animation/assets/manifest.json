@@ -1,0 +1,18 @@
+{
+  "schema": "stasis-assets",
+  "version": 2,
+  "assets": [
+    {
+      "id": "sprite-sheet-2x2",
+      "path": "assets/sprite_sheet_2x2.png",
+      "content_sha256": "88c828d5d7e90a79657ffa8271f0cd0452b6279e9f2783b1eb260aa4d212a14d",
+      "format": {
+        "kind": "sprite",
+        "encoding": "png",
+        "width": 2,
+        "height": 2
+      },
+      "dependencies": []
+    }
+  ]
+}

@@ -4244,7 +4244,7 @@ function render(): void {
             frame_u8.len(),
         );
         assert_eq!(status, 0);
-        assert_eq!(&frame_i32[..5], &[1196967473, 3, 3, 1, 1]);
+        assert_eq!(&frame_i32[..5], &[1196967473, 5, 3, 1, 1]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
         assert_eq!(&frame_i32[20..22], &[1, 1]);
@@ -4256,7 +4256,8 @@ function render(): void {
         assert_eq!(frame_f32[4], 180.0);
         assert_eq!(frame_f32[5], 360.0);
         assert_eq!(&frame_f32[80004..80008], &[10.25, 20.5, 30.75, 40.125]);
-        assert_eq!(frame_f32[96388], 12.0);
+        assert_eq!(&frame_f32[80008..80012], &[0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(frame_f32[112772], 12.0);
         assert_eq!(&frame_u8[..2], &[65, 0]);
         fs::remove_dir_all(&root).ok();
     }
