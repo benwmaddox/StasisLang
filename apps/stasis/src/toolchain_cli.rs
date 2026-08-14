@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
-    load_and_apply_play_data_bindings, resolve_play_data_binding_paths, run_live_in_process,
-    run_live_in_process_with_data, run_play_in_process_with_window_title,
+    load_and_apply_play_data_bindings_for_test, resolve_play_data_binding_paths,
+    run_live_in_process, run_live_in_process_with_data, run_play_in_process_with_window_title,
     run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_assets::{
@@ -2172,7 +2172,7 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
                 snapshot,
                 manifest.as_ref(),
             )?;
-            load_and_apply_play_data_bindings(&data_binding_paths, Some(jit))
+            load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)
         },
     )?;
     let scenarios = headless::run_scenarios(workspace, &directory)?;
@@ -6315,6 +6315,26 @@ mod tests {
         );
         let workspace = load_workspace(Some(&root)).expect("workspace");
         test_workspace(&workspace, None).expect("bound test project");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn workspace_tests_skip_project_bindings_outside_the_test_import_graph() {
+        let root = temp_dir("test_data_binding_scoped_imports");
+        write_data_binding_test_project(
+            &root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
+            Some(DATA_BINDING_META),
+        );
+        fs::write(
+            root.join("tests/independent.test.stasis"),
+            "global independent_value: i32;\ntest `independent test omits project globals`(): bool { return independent_value == 0; }\n",
+        )
+        .expect("write independent test");
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let result = test_workspace(&workspace, None).expect("scoped binding test project");
+        assert_eq!(result.data["tests_run"], 2);
+        assert_eq!(result.data["tests_passed"], 2);
         remove_temp(&root);
     }
 

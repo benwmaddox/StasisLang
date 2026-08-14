@@ -1444,6 +1444,21 @@ pub fn load_and_apply_play_data_bindings(
     paths: &[(PathBuf, PathBuf)],
     jit: Option<&JitProcess>,
 ) -> Result<(), String> {
+    load_and_apply_play_data_bindings_with_scope(paths, jit, false)
+}
+
+pub fn load_and_apply_play_data_bindings_for_test(
+    paths: &[(PathBuf, PathBuf)],
+    jit: &JitProcess,
+) -> Result<(), String> {
+    load_and_apply_play_data_bindings_with_scope(paths, Some(jit), true)
+}
+
+fn load_and_apply_play_data_bindings_with_scope(
+    paths: &[(PathBuf, PathBuf)],
+    jit: Option<&JitProcess>,
+    skip_missing_global_roots: bool,
+) -> Result<(), String> {
     let mut loaded = Vec::new();
     for (data_path, meta_path) in paths {
         let meta_source = fs::read_to_string(meta_path).map_err(|error| {
@@ -1508,10 +1523,18 @@ pub fn load_and_apply_play_data_bindings(
     for (_, data_root, metadata) in &loaded {
         validate_play_binding_source(data_root, metadata)?;
         if let Some(jit) = jit {
+            if skip_missing_global_roots && !jit.has_global_path(&metadata.global_name) {
+                continue;
+            }
             validate_play_binding_targets(metadata, jit)?;
         }
     }
     for (_, json_root, metadata) in loaded {
+        if skip_missing_global_roots
+            && jit.is_some_and(|jit| !jit.has_global_path(&metadata.global_name))
+        {
+            continue;
+        }
         apply_play_data_binding_value(&json_root, &metadata)?;
     }
     Ok(())
