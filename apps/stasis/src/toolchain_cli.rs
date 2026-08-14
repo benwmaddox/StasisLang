@@ -3744,7 +3744,7 @@ fn package_web_workspace(
             })
             .transpose()?;
         stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
-        let runtime_config = web_runtime_config(workspace, &process);
+        let runtime_config = web_runtime_config(workspace, &process, development_build);
         let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
             .replace("</", "<\\/");
@@ -3818,7 +3818,28 @@ fn web_index_html(title: &str, development_build: bool) -> String {
         .replace("__STASIS_PERFORMANCE_HUD__", hud)
 }
 
-fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Value {
+// Keep these aligned with the metadata reads in runtime/web/game.js. Development
+// packages retain the complete reflection tables for inspection and tooling.
+const WEB_RESOURCE_BINDING_FIELDS: [&str; 4] = ["handle", "width", "height", "font"];
+const WEB_RUNTIME_BUFFERS: [&str; 5] = [
+    "gfx_cmd_i32",
+    "gfx_cmd_f32",
+    "gfx_cmd_u8",
+    "host_i32",
+    "host_f32",
+];
+const WEB_HOST_GLOBALS: [&str; 4] = [
+    "host_req_seq",
+    "host_req_flags",
+    "host_req_window_w_px",
+    "host_req_window_h_px",
+];
+
+fn web_runtime_config(
+    workspace: &Workspace,
+    process: &WasmProcess,
+    development_build: bool,
+) -> Value {
     let strings = process
         .string_literals()
         .iter()
@@ -3854,14 +3875,50 @@ fn web_runtime_config(workspace: &Workspace, process: &WasmProcess) -> Value {
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    json!({
+    let mut config = json!({
         "name": workspace.manifest.name,
         "strings": strings,
         "memory": memory,
         "views": views,
         "globals": globals,
         "assets": {},
-    })
+    });
+    if !development_build {
+        prune_release_web_runtime_config(&mut config);
+    }
+    config
+}
+
+fn prune_release_web_runtime_config(config: &mut Value) {
+    let views = config["views"].as_object_mut().expect("generated views");
+    views.retain(|_, fields| {
+        let fields = fields.as_object_mut().expect("generated view fields");
+        fields.retain(|field, _| WEB_RESOURCE_BINDING_FIELDS.contains(&field.as_str()));
+        !fields.is_empty()
+    });
+    let retained_paths = views
+        .values()
+        .flat_map(|fields| {
+            fields
+                .as_object()
+                .expect("generated view fields")
+                .values()
+                .filter_map(Value::as_str)
+        })
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    config["memory"]
+        .as_object_mut()
+        .expect("generated memory layouts")
+        .retain(|path, _| {
+            retained_paths.contains(path.as_str()) || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
+        });
+    config["globals"]
+        .as_object_mut()
+        .expect("generated globals")
+        .retain(|path, _| {
+            retained_paths.contains(path.as_str()) || WEB_HOST_GLOBALS.contains(&path.as_str())
+        });
 }
 
 #[cfg(windows)]
@@ -5599,6 +5656,76 @@ mod tests {
         let development = web_index_html("development-game", true);
         assert!(development.contains(r#"id="stasis-hud""#));
         assert!(!development.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn release_web_runtime_keeps_only_required_host_interop() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let entry = Path::new("tests/stasis/seams/asset_extern_abi_probe.stasis");
+        let files =
+            load_workshop_edit_workspace(&source_root, entry).expect("load asset ABI sample files");
+        let files = workshop_reachable_files(&files, entry).expect("prune asset ABI sample files");
+        let mut process = WasmProcess::new();
+        process
+            .set_project_root(display_path(&source_root))
+            .expect("set web sample root");
+        process.set_required_emit_roots(&["main".to_string()]);
+        for file in files {
+            process.upsert_file(source_root.join(file.path).to_string_lossy(), file.source);
+        }
+        process.compile().expect("compile web sample");
+
+        let release = web_runtime_config(&workspace, &process, false);
+        let release_views = release["views"].as_object().expect("release views");
+        assert!(!release_views.is_empty());
+        assert!(release_views.values().all(|fields| fields
+            .as_object()
+            .expect("release view fields")
+            .keys()
+            .all(|field| WEB_RESOURCE_BINDING_FIELDS.contains(&field.as_str()))));
+        assert!(release_views.values().any(|fields| fields
+            .as_object()
+            .expect("release view fields")
+            .contains_key("handle")));
+        let retained_view_paths = release_views
+            .values()
+            .flat_map(|fields| fields.as_object().expect("release view fields").values())
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        let release_memory = release["memory"].as_object().expect("release memory");
+        assert!(release_memory
+            .keys()
+            .all(|path| retained_view_paths.contains(path.as_str())
+                || WEB_RUNTIME_BUFFERS.contains(&path.as_str())));
+        let release_globals = release["globals"].as_object().expect("release globals");
+        assert!(release_globals.keys().all(|path| {
+            WEB_HOST_GLOBALS.contains(&path.as_str()) || retained_view_paths.contains(path.as_str())
+        }));
+        for path in retained_view_paths {
+            assert!(release_memory.contains_key(path) || release_globals.contains_key(path));
+        }
+
+        let development = web_runtime_config(&workspace, &process, true);
+        assert!(development.get("views").is_some());
+        assert!(development.get("globals").is_some());
+        assert!(development.get("memory").is_some());
+        assert!(
+            development["views"]
+                .as_object()
+                .expect("development views")
+                .len()
+                >= release_views.len()
+        );
+        assert!(
+            serde_json::to_vec(&release)
+                .expect("encode release runtime")
+                .len()
+                < serde_json::to_vec(&development)
+                    .expect("encode development runtime")
+                    .len()
+        );
     }
 
     #[test]
