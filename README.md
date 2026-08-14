@@ -327,6 +327,8 @@ Editable runtime data can live in a project-level `data/` directory. JSON and CS
 
 Binding is schema-strict in both directions: unknown data properties, missing metadata paths, absent compiled globals, duplicate CSV keys, and capacity overflow are errors. A bad edit is rejected without partially changing the running state.
 
+The workspace stasis test command discovers and applies the same data pairs before each test file, so tests observe the authored JSON values. Projects without a data/ directory keep their normal zero-initialized globals.
+
 While `stasis play` runs, valid data edits are rebound between ticks. AOT packages stage the same data and compile its values into the runtime bridge, keeping development and shipped behavior aligned. See [docs/toolchain_cli.md](docs/toolchain_cli.md) for the complete binding contract.
 
 ## Deterministic Automation
