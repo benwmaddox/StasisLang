@@ -26,7 +26,6 @@ fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
         .arg(workspace)
         .arg("--target")
         .arg("web")
-        .arg("--development-build")
         .arg("--out")
         .arg(relative_output)
         .arg("--json")
@@ -39,10 +38,16 @@ fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&result.stdout).contains("\"wasm_optimized\":false"),
-        "development package unexpectedly optimized Wasm: {}",
+        String::from_utf8_lossy(&result.stdout).contains("\"development_build\":false"),
+        "source-built package did not select local release provenance: {}",
         String::from_utf8_lossy(&result.stdout)
     );
+    let provenance: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("stasis_provenance.json")).expect("read web provenance"),
+    )
+    .expect("parse web provenance");
+    assert_eq!(provenance["build_class"], "local_release");
+    assert_eq!(provenance["development_build"], false);
     output
 }
 
@@ -82,6 +87,9 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         );
     }
     let runtime = fs::read_to_string(output.join("game.js")).expect("game.js");
+    let index = fs::read_to_string(output.join("index.html")).expect("index.html");
+    assert!(!index.contains("stasis-audio"));
+    assert!(!index.contains("Enable sound"));
     for expected in [
         "requestAnimationFrame(frame)",
         "web_play_tone",
@@ -91,6 +99,9 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "audio_push_f32_interleaved",
         "function writeHostFrame",
         "function applyWindowRequest",
+        "const enableWebAudio = () =>",
+        "addEventListener(\"pointerdown\", () => { void enableWebAudio(); }",
+        "void enableWebAudio();",
         "function sdlScancode",
         "const spriteStride = version >= 5 ? 8 : 4;",
         "if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1)",
@@ -187,6 +198,7 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
             "web runtime embedded {expected}"
         );
     }
+    assert!(!runtime.contains("audioButton"));
     assert!(runtime.contains(r#""assets":{}"#));
     assert!(!runtime.contains("../assets/"));
     assert!(output.join("assets/tone.mp3").is_file());

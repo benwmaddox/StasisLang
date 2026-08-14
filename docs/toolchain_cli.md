@@ -151,6 +151,10 @@ cloning a generated repository, reactivate the checked-in hook with
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
   Xcode app shell.
 - `package --target android-arm64|ios-arm64`: compatibility spelling that uses the manifest entry.
+- Successful human-readable `build`, `package`, and `package-mobile` commands end with a
+  `Completed in ...` line. Durations use milliseconds for sub-second work, seconds for work under
+  one minute, and minutes plus seconds for longer builds. JSON output remains deterministic and
+  does not include wall-clock timing.
 - `inspect [--capacity PATH=COUNT] [--mobile-budget-bytes N]`: compile the manifest entry and
   report the canonical direct-storage model: bytes and alignment by state path/field, struct
   rollups, capacity versus active count, snapshot size, the eight largest pools, recognized
@@ -212,8 +216,9 @@ scenario-path digest so distinct files cannot overwrite each other. General inpu
 See `samples/headless_scenario` for an executable fixture.
 
 Official packaging fails if the installed compiler or renderer sources differ from the release
-manifest. When working from a source checkout, pass `--development-build` to `package` or
-`package-mobile`; the resulting package is permanently labeled non-release. See
+manifest. Without an installed release manifest, source-built toolchains generate optimized local
+releases with `build_class: "local_release"` and content-addressed provenance. Pass
+`--development-build` to explicitly request visibly labeled development output. See
 [Release and package provenance](release_provenance.md).
 
 Add `--json` to receive one stable JSON result object. Usage errors exit 2, command/compile/test

@@ -94,6 +94,63 @@ fn json_stderr(output: &Output) -> Value {
 }
 
 #[test]
+fn help_explains_how_to_build_each_supported_target() {
+    let output = stasis(&["help"], Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help output");
+
+    for expected in [
+        "Build targets:",
+        "Windows, Linux, or macOS (current host)",
+        "stasis build --mode release",
+        "stasis package --target desktop",
+        "stasis package --target web",
+        "stasis package-mobile --target android-arm64",
+        "stasis package-mobile --target android-x86_64 --development-build",
+        "stasis package-mobile --target ios-arm64",
+        "Mobile commands create Gradle or Xcode projects",
+    ] {
+        assert!(help.contains(expected), "missing help text: {expected}");
+    }
+}
+
+#[test]
+fn build_confirmation_reports_elapsed_time() {
+    let project = temp_dir("build_elapsed");
+    fs::create_dir_all(project.join("src")).expect("source directory");
+    fs::write(
+        project.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"build_elapsed","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("workspace manifest");
+    fs::write(
+        project.join("src/main.stasis"),
+        "function main(): i32 { return 0; }\n",
+    )
+    .expect("entry source");
+
+    let output = stasis(&["build", "--mode", "dev"], &project);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 build output");
+    let confirmation = stdout.lines().last().expect("elapsed confirmation");
+    assert!(confirmation.starts_with("Completed in "), "{stdout}");
+    assert!(confirmation.ends_with('.'), "{stdout}");
+
+    let json_output = stasis(&["--json", "build", "--mode", "dev"], &project);
+    let json = json_stdout(&json_output);
+    assert_eq!(json["command"], "build");
+    assert!(json["result"].get("elapsed_ms").is_none());
+
+    fs::remove_dir_all(project).ok();
+}
+
+#[test]
 fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
     let project = temp_dir("asset_validation");
     fs::create_dir_all(project.join("src")).expect("source directory");
@@ -1621,6 +1678,11 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
             "stdout={} stderr={}",
             String::from_utf8_lossy(&packaged.stdout),
             String::from_utf8_lossy(&packaged.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&packaged.stdout).contains("\nCompleted in "),
+            "stdout={}",
+            String::from_utf8_lossy(&packaged.stdout)
         );
         assert!(project
             .join(output)

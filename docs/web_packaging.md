@@ -27,6 +27,10 @@ Self-contained single-file HTML output is intentionally deferred; web packages k
 assets external so hosted output remains compact and follows the same asset preparation path as
 Android and desktop packages.
 
+Web packages do not render an audio-enable control. The runtime requests audio immediately and
+automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts
+the audio context suspended.
+
 ## Runtime contract
 
 The browser owns `requestAnimationFrame`, input collection, Canvas 2D command execution, WebAudio,
