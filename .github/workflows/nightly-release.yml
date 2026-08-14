@@ -5,6 +5,8 @@ env:
 
 permissions:
   contents: write
+  pull-requests: read
+  actions: read
 
 on:
   schedule:

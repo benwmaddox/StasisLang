@@ -54,6 +54,11 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("runs-on: [self-hosted, Windows, android-device]", self.workflow)
         self.assertNotIn("ANDROID_SERIAL", self.workflow)
 
+    def test_nightly_grants_reusable_ci_read_permissions(self):
+        self.assertIn("  contents: write", self.nightly_workflow)
+        self.assertIn("  pull-requests: read", self.nightly_workflow)
+        self.assertIn("  actions: read", self.nightly_workflow)
+
     def test_workflow_supplies_build_inputs_and_uploads_each_seam(self):
         self.assertIn("gradle-version: \"8.9\"", self.workflow)
         self.assertIn("ndk: 27.0.12077973", self.workflow)
