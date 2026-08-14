@@ -9,6 +9,7 @@ import re
 import struct
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 
@@ -509,6 +510,48 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     return observed
 
 
+def dismiss_system_dialog_action(adb: Path, serial: str | None) -> bool:
+    hierarchy = _run(
+        adb,
+        serial,
+        "shell",
+        "uiautomator",
+        "dump",
+        "/dev/tty",
+        required=False,
+    )
+    start = hierarchy.find("<?xml")
+    end = hierarchy.rfind("</hierarchy>")
+    if start < 0 or end < start:
+        return False
+    try:
+        root = ET.fromstring(hierarchy[start : end + len("</hierarchy>")])
+    except ET.ParseError:
+        return False
+    actions = {
+        node.attrib.get("text", ""): node.attrib.get("bounds", "")
+        for node in root.iter("node")
+    }
+    for label in ("Close app", "Wait"):
+        bounds = actions.get(label, "")
+        match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+        if match is None:
+            continue
+        left, top, right, bottom = (int(value) for value in match.groups())
+        _run(
+            adb,
+            serial,
+            "shell",
+            "input",
+            "tap",
+            str((left + right) // 2),
+            str((top + bottom) // 2),
+            required=False,
+        )
+        return True
+    return False
+
+
 def ensure_test_activity_foreground(
     adb: Path,
     serial: str | None,
@@ -530,7 +573,8 @@ def ensure_test_activity_foreground(
     )
     if package_id in current_focus:
         return False
-    if current_focus:
+    dismissed = dismiss_system_dialog_action(adb, serial) if current_focus else False
+    if current_focus and not dismissed:
         _run(
             adb,
             serial,
