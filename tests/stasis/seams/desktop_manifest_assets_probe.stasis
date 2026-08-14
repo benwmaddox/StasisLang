@@ -7,7 +7,7 @@ function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: st
 function @extern("stasis_jit_gfx_measure_text_cached") gfx_measure_text_cached(handle: i32): f32;
 
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_f32: f32[125060];
 global gfx_cmd_u8: u8[65536];
 global seam_sprite_handle: i32;
 global seam_font_handle: i32;

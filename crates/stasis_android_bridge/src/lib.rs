@@ -4184,7 +4184,7 @@ global host_f32: f32[64];
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_f32: f32[125060];
 global gfx_cmd_u8: u8[65536];
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
@@ -4273,7 +4273,7 @@ function render(): void {
 global host_i32: i32[768];
 global host_f32: f32[64];
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_f32: f32[125060];
 global gfx_cmd_u8: u8[65536];
 function main(): void { gfx_load_sprite(\"../assets/missing.svg\", 32, 32); }
 function tick(): void {}

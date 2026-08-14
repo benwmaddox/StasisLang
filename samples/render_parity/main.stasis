@@ -21,7 +21,7 @@ function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, p
 function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
 
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_f32: f32[125060];
 global gfx_cmd_u8: u8[65536];
 global host_i32: i32[768];
 global host_f32: f32[64];
