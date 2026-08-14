@@ -170,6 +170,44 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             ("shell", "input", "keyevent", "KEYCODE_BACK"),
             calls,
         )
+
+    def test_foreground_check_taps_system_dialog_action_before_restarting(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "dumpsys", "window", "windows"):
+                return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
+            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+                return (
+                    "UI hierarchy dumped\n<?xml version='1.0' encoding='UTF-8' "
+                    "standalone='yes'?><hierarchy><node text=\"Close app\" "
+                    "bounds=\"[120,600][420,720]\" /></hierarchy>"
+                )
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertTrue(changed)
+        self.assertIn(("shell", "input", "tap", "270", "660"), calls)
+        self.assertNotIn(("shell", "input", "keyevent", "KEYCODE_BACK"), calls)
+        self.assertIn(
+            (
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-n",
+                "com.example.seam/.MainActivity",
+            ),
+            calls,
+        )
         self.assertIn(
             (
                 "shell",
