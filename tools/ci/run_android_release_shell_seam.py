@@ -532,7 +532,9 @@ def dismiss_system_dialog_action(adb: Path, serial: str | None) -> bool:
         node.attrib.get("text", ""): node.attrib.get("bounds", "")
         for node in root.iter("node")
     }
-    for label in ("Close app", "Wait"):
+    # Keep the system component alive when Android offers the non-destructive
+    # action. Closing Pixel Launcher can leave the emulator compositor black.
+    for label in ("Wait", "Close app"):
         bounds = actions.get(label, "")
         match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
         if match is None:
