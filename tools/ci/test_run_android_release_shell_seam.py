@@ -127,6 +127,61 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             )
             self.assertEqual([item["name"] for item in observed], ["red", "teal"])
 
+    def test_foreground_check_leaves_test_activity_untouched(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            return "mCurrentFocus=Window{123 u0 com.example.seam/.MainActivity}"
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertFalse(changed)
+        self.assertEqual(
+            calls,
+            [("shell", "dumpsys", "window", "windows")],
+        )
+
+    def test_foreground_check_dismisses_system_dialog_and_restarts(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "dumpsys", "window", "windows"):
+                return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertTrue(changed)
+        self.assertIn(
+            ("shell", "input", "keyevent", "KEYCODE_BACK"),
+            calls,
+        )
+        self.assertIn(
+            (
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-n",
+                "com.example.seam/.MainActivity",
+            ),
+            calls,
+        )
+
     def test_selects_real_letterbox_for_each_surface_orientation(self):
         self.assertEqual(
             seam.outside_letterbox_point([360, 720], (1080, 2400)),
