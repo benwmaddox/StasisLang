@@ -3491,7 +3491,7 @@ fn package_workspace(
             ))
         });
     validate_workspace_destination(workspace, "package output", &package_root)?;
-    if package_root.exists() {
+    if package_root.exists() && !matches!(target, PackageTarget::Web) {
         return Err(format!(
             "package output already exists: {}",
             package_root.display()
@@ -3777,13 +3777,7 @@ fn package_web_workspace(
             return Err(error);
         }
     };
-    fs::rename(&staging_root, package_root).map_err(|error| {
-        let _ = fs::remove_dir_all(&staging_root);
-        format!(
-            "failed to publish package {}: {error}",
-            package_root.display()
-        )
-    })?;
+    publish_package_output(&staging_root, package_root)?;
     let optimization = if wasm_optimized {
         "wasm-opt -Oz"
     } else if development_build {
@@ -3808,6 +3802,56 @@ fn package_web_workspace(
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+fn publish_package_output(staging_root: &Path, package_root: &Path) -> Result<(), String> {
+    let previous_root = package_root.with_file_name(format!(
+        ".{}.previous",
+        package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("stasis-package")
+    ));
+    let replacing = package_root.exists();
+    if replacing {
+        if previous_root.exists() {
+            let _ = fs::remove_dir_all(staging_root);
+            return Err(format!(
+                "package replacement backup already exists: {}",
+                previous_root.display()
+            ));
+        }
+        fs::rename(package_root, &previous_root).map_err(|error| {
+            let _ = fs::remove_dir_all(staging_root);
+            format!(
+                "failed to prepare package replacement {}: {error}",
+                package_root.display()
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(staging_root, package_root) {
+        let rollback = if replacing {
+            fs::rename(&previous_root, package_root)
+                .map_err(|rollback_error| format!("; rollback failed: {rollback_error}"))
+        } else {
+            Ok(())
+        };
+        let _ = fs::remove_dir_all(staging_root);
+        return Err(format!(
+            "failed to publish package {}: {error}{}",
+            package_root.display(),
+            rollback.err().unwrap_or_default()
+        ));
+    }
+    if replacing {
+        fs::remove_dir_all(&previous_root).map_err(|error| {
+            format!(
+                "published package but failed to remove previous output {}: {error}",
+                previous_root.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn web_index_html(title: &str, development_build: bool) -> String {
