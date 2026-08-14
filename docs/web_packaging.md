@@ -21,6 +21,20 @@ the original module and reports `wasm_optimized: false` in JSON output. Developm
 optimization so their full diagnostic names remain available. The optimized bytes are written to
 `game.wasm`.
 
+## State storage
+
+The Wasm backend keeps persistent fields flattened from named structs in one
+linear-memory allocation. Fixed collections retain their structure-of-arrays
+field planes in that allocation, and scalar struct fields plus collection
+metadata receive compiler-reported offsets alongside them. True top-level
+scalar globals may remain Wasm globals; function parameters and temporary
+values remain Wasm locals.
+
+The exported `__stasis_global_get_*` and `__stasis_global_set_*` reflection
+helpers preserve path-hash access for both physical storage lanes. This keeps
+host inspection independent of whether a path is backed by linear memory or a
+Wasm global.
+
 The package must be served over HTTP. From the package root, for example, run
 `python -m http.server 8000` and open `http://localhost:8000/`.
 Self-contained single-file HTML output is intentionally deferred; web packages keep Wasm and

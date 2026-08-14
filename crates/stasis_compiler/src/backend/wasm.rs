@@ -311,6 +311,7 @@ struct MemoryBinding {
     len: i32,
     width: u32,
     stride: u32,
+    scalar: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -325,12 +326,12 @@ struct StructCollectionBinding {
 struct StructScalarBinding {
     base: i32,
     type_id: TypeId,
-    fields: BTreeMap<String, (u32, TypeId)>,
+    fields: BTreeMap<String, MemoryBinding>,
 }
 
 fn build_struct_scalars(
     analysis: &crate::backend::emit::CompileAnalysisCache,
-    globals: &BTreeMap<String, u32>,
+    memory: &BTreeMap<String, MemoryBinding>,
 ) -> BTreeMap<String, StructScalarBinding> {
     let mut out = BTreeMap::new();
     for (path, type_id) in &analysis.global_path_types {
@@ -340,10 +341,11 @@ fn build_struct_scalars(
         let fields = field_types
             .iter()
             .filter_map(|(suffix, field_type)| {
-                globals
+                memory
                     .get(&format!("{path}.{suffix}"))
-                    .copied()
-                    .map(|index| (suffix.clone(), (index, *field_type)))
+                    .filter(|binding| binding.scalar && binding.type_id == *field_type)
+                    .cloned()
+                    .map(|binding| (suffix.clone(), binding))
             })
             .collect::<BTreeMap<_, _>>();
         if !fields.is_empty() {
@@ -403,6 +405,38 @@ fn align_up(value: u32, alignment: u32) -> Result<u32, String> {
         .ok_or_else(|| "web memory layout overflow".to_string())
 }
 
+fn struct_memory_scalar_paths(
+    analysis: &crate::backend::emit::CompileAnalysisCache,
+) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for (struct_path, type_id) in &analysis.global_path_types {
+        let Some(fields) = analysis.named_struct_field_types.get(type_id) else {
+            continue;
+        };
+        paths.extend(
+            fields
+                .keys()
+                .map(|suffix| format!("{struct_path}.{suffix}")),
+        );
+        let prefix = format!("{struct_path}.");
+        for collection_path in analysis
+            .collection_infos
+            .keys()
+            .filter(|path| path.starts_with(&prefix))
+        {
+            let collection_prefix = format!("{collection_path}.");
+            paths.extend(
+                analysis
+                    .global_path_types
+                    .keys()
+                    .filter(|path| path.starts_with(&collection_prefix))
+                    .cloned(),
+            );
+        }
+    }
+    paths
+}
+
 fn build_memory_bindings(
     analysis: &crate::backend::emit::CompileAnalysisCache,
     types: &TypeTable,
@@ -423,6 +457,7 @@ fn build_memory_bindings(
                     len: collection.len,
                     width,
                     stride: width,
+                    scalar: false,
                 },
             );
             offset = offset
@@ -451,6 +486,7 @@ fn build_memory_bindings(
                     len: collection.len,
                     width,
                     stride: width,
+                    scalar: false,
                 },
             );
             offset = offset
@@ -463,7 +499,62 @@ fn build_memory_bindings(
                 .ok_or_else(|| "web memory layout overflow".to_string())?;
         }
     }
+    for path in struct_memory_scalar_paths(analysis) {
+        if bindings.contains_key(&path) {
+            continue;
+        }
+        let type_id = analysis.global_path_types[&path];
+        if analysis.named_struct_field_types.contains_key(&type_id) {
+            continue;
+        }
+        let Some(info) = types.type_info(type_id) else {
+            return Err(format!(
+                "web backend found unknown state field type id {type_id}"
+            ));
+        };
+        if matches!(
+            info.category,
+            TypeCategory::ArrayFixed
+                | TypeCategory::ArrayView
+                | TypeCategory::AsciiFixed
+                | TypeCategory::AsciiView
+                | TypeCategory::Utf8Fixed
+                | TypeCategory::Utf8View
+        ) {
+            continue;
+        }
+        let width =
+            storage_width(type_id, types, &analysis.named_struct_field_types).map_err(|error| {
+                format!("web state field '{path}' has unsupported storage: {error}")
+            })?;
+        offset = align_up(offset, width)?;
+        bindings.insert(
+            path.clone(),
+            MemoryBinding {
+                offset,
+                type_id,
+                len: 1,
+                width,
+                stride: width,
+                scalar: true,
+            },
+        );
+        offset = offset
+            .checked_add(width)
+            .ok_or_else(|| "web memory layout overflow".to_string())?;
+    }
     Ok((bindings, offset))
+}
+
+fn initial_i32_for_path(
+    path: &str,
+    analysis: &crate::backend::emit::CompileAnalysisCache,
+) -> Option<i32> {
+    [".length", ".max_length"].iter().find_map(|suffix| {
+        path.strip_suffix(suffix)
+            .and_then(|collection_path| analysis.collection_infos.get(collection_path))
+            .map(|collection| collection.len)
+    })
 }
 
 fn build_struct_collections(
@@ -639,11 +730,7 @@ fn encode_module(
                 info.name
             ));
         }
-        let initial_i32 = [".length", ".max_length"].iter().find_map(|suffix| {
-            name.strip_suffix(suffix)
-                .and_then(|path| analysis.collection_infos.get(path))
-                .map(|collection| collection.len)
-        });
+        let initial_i32 = initial_i32_for_path(name, analysis);
         globals.push((name.clone(), *type_id, initial_i32));
     }
     let global_indices = globals
@@ -651,7 +738,7 @@ fn encode_module(
         .enumerate()
         .map(|(index, (name, _, _))| (name.clone(), index as u32))
         .collect::<BTreeMap<_, _>>();
-    let struct_scalars = build_struct_scalars(analysis, &global_indices);
+    let struct_scalars = build_struct_scalars(analysis, &memory_bindings);
 
     let accessor_signatures = [
         WasmSignature {
@@ -849,11 +936,45 @@ fn encode_module(
         code_section.extend(body);
     }
     for (lane, setter) in [(I32, false), (I32, true), (F32, false), (F32, true)] {
-        let body = encode_global_accessor(&globals, lane, setter)?;
+        let body = encode_global_accessor(&globals, &memory_bindings, lane, setter)?;
         uleb(body.len() as u32, &mut code_section);
         code_section.extend(body);
     }
     section(10, code_section, &mut module);
+    let mut initial_memory = memory_bindings
+        .iter()
+        .filter_map(|(path, binding)| {
+            binding
+                .scalar
+                .then(|| initial_i32_for_path(path, analysis))
+                .flatten()
+                .map(|value| (binding, value))
+        })
+        .collect::<Vec<_>>();
+    initial_memory.sort_by_key(|(binding, _)| binding.offset);
+    if !initial_memory.is_empty() {
+        let mut data_section = Vec::new();
+        uleb(initial_memory.len() as u32, &mut data_section);
+        for (binding, value) in initial_memory {
+            data_section.push(0);
+            data_section.push(0x41);
+            sleb(binding.offset as i32, &mut data_section);
+            data_section.push(0x0b);
+            let bytes = match binding.width {
+                1 => vec![value as u8],
+                2 => (value as u16).to_le_bytes().to_vec(),
+                4 => value.to_le_bytes().to_vec(),
+                width => {
+                    return Err(format!(
+                        "web state field initializer has unsupported width {width}"
+                    ))
+                }
+            };
+            uleb(bytes.len() as u32, &mut data_section);
+            data_section.extend(bytes);
+        }
+        section(11, data_section, &mut module);
+    }
     let function_names = if debug_symbols {
         let mut names = imports
             .iter()
@@ -884,18 +1005,31 @@ fn encode_module(
     Ok(module)
 }
 
+#[derive(Clone)]
+enum ScalarAccessorStorage {
+    Global(u32),
+    Memory(MemoryBinding),
+}
+
+#[derive(Clone)]
+struct ScalarAccessorBinding {
+    name: String,
+    storage: ScalarAccessorStorage,
+}
+
 fn encode_global_accessor(
     globals: &[(String, TypeId, Option<i32>)],
+    memory: &BTreeMap<String, MemoryBinding>,
     lane: u8,
     setter: bool,
 ) -> Result<Vec<u8>, String> {
     fn branch(
-        globals: &[(usize, &(String, TypeId, Option<i32>))],
+        bindings: &[ScalarAccessorBinding],
         lane: u8,
         setter: bool,
         out: &mut Vec<u8>,
     ) -> Result<(), String> {
-        let Some(((index, (name, type_id, _)), rest)) = globals.split_first() else {
+        let Some((binding, rest)) = bindings.split_first() else {
             if setter || lane == I32 {
                 out.extend([0x41, 0]);
             } else {
@@ -905,28 +1039,55 @@ fn encode_global_accessor(
             return Ok(());
         };
         out.extend([0x20, 0, 0x41]);
-        sleb(hash_global_path(name), out);
+        sleb(hash_global_path(&binding.name), out);
         out.extend([0x46, 0x04, if setter { I32 } else { lane }]);
-        if setter {
-            out.extend([0x20, 1, 0x24]);
-            uleb(*index as u32, out);
-            out.extend([0x41, 1]);
-        } else {
-            out.push(0x23);
-            uleb(*index as u32, out);
+        match (&binding.storage, setter) {
+            (ScalarAccessorStorage::Global(index), true) => {
+                out.extend([0x20, 1, 0x24]);
+                uleb(*index, out);
+                out.extend([0x41, 1]);
+            }
+            (ScalarAccessorStorage::Global(index), false) => {
+                out.push(0x23);
+                uleb(*index, out);
+            }
+            (ScalarAccessorStorage::Memory(memory), true) => {
+                out.push(0x41);
+                sleb(memory.offset as i32, out);
+                out.extend([0x20, 1]);
+                encode_memory_store(memory.type_id, out)?;
+                out.extend([0x41, 1]);
+            }
+            (ScalarAccessorStorage::Memory(memory), false) => {
+                out.push(0x41);
+                sleb(memory.offset as i32, out);
+                encode_memory_load(memory.type_id, out)?;
+            }
         }
         out.push(0x05);
         branch(rest, lane, setter, out)?;
         out.push(0x0b);
-        let _ = type_id;
         Ok(())
     }
 
-    let matching = globals
+    let mut matching = globals
         .iter()
         .enumerate()
         .filter(|(_, (_, type_id, _))| wasm_value_type(*type_id).is_ok_and(|value| value == lane))
+        .map(|(index, (name, _, _))| ScalarAccessorBinding {
+            name: name.clone(),
+            storage: ScalarAccessorStorage::Global(index as u32),
+        })
         .collect::<Vec<_>>();
+    matching.extend(memory.iter().filter_map(|(name, binding)| {
+        (binding.scalar && wasm_value_type(binding.type_id).is_ok_and(|value| value == lane)).then(
+            || ScalarAccessorBinding {
+                name: name.clone(),
+                storage: ScalarAccessorStorage::Memory(binding.clone()),
+            },
+        )
+    }));
+    matching.sort_by(|left, right| left.name.cmp(&right.name));
     let mut body = vec![0];
     branch(&matching, lane, setter, &mut body)?;
     body.push(0x0b);
@@ -1506,6 +1667,9 @@ fn encode_target_get(
                 out.push(0x20);
                 uleb(binding.index, out);
                 Ok(binding.type_id)
+            } else if let Some(binding) = scalar_memory_binding(context, name) {
+                encode_scalar_memory_load(binding, out)?;
+                Ok(binding.type_id)
             } else {
                 out.push(0x23);
                 uleb(global(context, name)?, out);
@@ -1521,6 +1685,9 @@ fn encode_target_get(
                 Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
+            } else if let Some(binding) = scalar_memory_binding(context, name) {
+                encode_scalar_memory_load(binding, out)?;
+                Ok(binding.type_id)
             } else {
                 out.push(0x23);
                 uleb(global(context, name)?, out);
@@ -1580,6 +1747,8 @@ fn encode_target_set(
                 out.push(0x21);
                 uleb(binding.index, out);
                 Ok(())
+            } else if let Some(binding) = scalar_memory_binding(context, name) {
+                encode_scalar_memory_store_from_stack(binding, context, out)
             } else {
                 out.push(0x24);
                 uleb(global(context, name)?, out);
@@ -1609,6 +1778,8 @@ fn encode_target_set(
                 out.push(0x21);
                 uleb(temp, out);
                 encode_struct_field_store_from_local(binding, suffix, temp, context, out)
+            } else if let Some(binding) = scalar_memory_binding(context, name) {
+                encode_scalar_memory_store_from_stack(binding, context, out)
             } else {
                 out.push(0x24);
                 uleb(global(context, name)?, out);
@@ -1680,6 +1851,34 @@ fn global_type(context: &EncodeContext<'_>, name: &str) -> Result<TypeId, String
         .get(name)
         .copied()
         .ok_or_else(|| format!("unknown web global type '{name}'"))
+}
+
+fn scalar_memory_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    name: &str,
+) -> Option<&'a MemoryBinding> {
+    context.memory.get(name).filter(|binding| binding.scalar)
+}
+
+fn encode_scalar_memory_load(binding: &MemoryBinding, out: &mut Vec<u8>) -> Result<(), String> {
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    encode_memory_load(binding.type_id, out)
+}
+
+fn encode_scalar_memory_store_from_stack(
+    binding: &MemoryBinding,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let temp = scratch_local(context, binding.type_id)?;
+    out.push(0x21);
+    uleb(temp, out);
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    out.push(0x20);
+    uleb(temp, out);
+    encode_memory_store(binding.type_id, out)
 }
 
 fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<TypeId, String> {
@@ -2130,14 +2329,13 @@ fn encode_scalar_field_load(
         out.push(0x00);
         return Ok(());
     };
-    let (global_index, type_id) = candidate.fields[suffix];
+    let field = &candidate.fields[suffix];
     out.push(0x20);
     uleb(base_local, out);
     out.push(0x41);
     sleb(candidate.base, out);
-    out.extend([0x46, 0x04, wasm_value_type(type_id)?]);
-    out.push(0x23);
-    uleb(global_index, out);
+    out.extend([0x46, 0x04, wasm_value_type(field.type_id)?]);
+    encode_scalar_memory_load(field, out)?;
     out.push(0x05);
     encode_scalar_field_load(base_local, suffix, rest, out)?;
     out.push(0x0b);
@@ -2177,15 +2375,16 @@ fn encode_scalar_field_store(
         out.push(0x00);
         return Ok(());
     };
-    let (global_index, _) = candidate.fields[suffix];
+    let field = &candidate.fields[suffix];
     out.push(0x20);
     uleb(base_local, out);
     out.push(0x41);
     sleb(candidate.base, out);
-    out.extend([0x46, 0x04, 0x40, 0x20]);
+    out.extend([0x46, 0x04, 0x40, 0x41]);
+    sleb(field.offset as i32, out);
+    out.push(0x20);
     uleb(value_local, out);
-    out.push(0x24);
-    uleb(global_index, out);
+    encode_memory_store(field.type_id, out)?;
     out.push(0x05);
     encode_scalar_field_store(base_local, suffix, value_local, rest, out)?;
     out.push(0x0b);
@@ -2415,9 +2614,14 @@ fn encode_expr_as(
                 uleb(binding.index, out);
                 Ok(binding.type_id)
             } else if let Some(binding) = context.memory.get(name) {
-                out.push(0x41);
-                sleb(binding.offset as i32, out);
-                Ok(expected.unwrap_or(TYPE_ID_I32))
+                if binding.scalar {
+                    encode_scalar_memory_load(binding, out)?;
+                    Ok(binding.type_id)
+                } else {
+                    out.push(0x41);
+                    sleb(binding.offset as i32, out);
+                    Ok(expected.unwrap_or(TYPE_ID_I32))
+                }
             } else if let Some(index) = context.globals.get(name) {
                 out.push(0x23);
                 uleb(*index, out);
@@ -2879,18 +3083,18 @@ mod tests {
         }
     }
 
-    fn type_section_entry_count(module: &[u8]) -> u32 {
+    fn section_entry_count(module: &[u8], expected_section_id: u8) -> u32 {
         let mut cursor = 8;
         while cursor < module.len() {
             let section_id = module[cursor];
             cursor += 1;
             let section_len = read_test_uleb(module, &mut cursor) as usize;
-            if section_id == 1 {
+            if section_id == expected_section_id {
                 return read_test_uleb(module, &mut cursor);
             }
             cursor += section_len;
         }
-        panic!("missing Wasm type section");
+        0
     }
 
     #[test]
@@ -2943,7 +3147,7 @@ mod tests {
         process.compile().expect("compile web module");
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
         assert_eq!(
-            type_section_entry_count(process.module_bytes()),
+            section_entry_count(process.module_bytes(), 1),
             6,
             "equivalent import, internal, and accessor signatures should share Wasm types"
         );
@@ -3040,6 +3244,39 @@ mod tests {
         process.compile().expect("compile web struct views");
         assert_eq!(process.memory_layout()["items.value"].length, 4);
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn stores_flattened_struct_state_in_linear_memory() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "linear_state.stasis",
+            "struct Inner { value: i32; } struct State { inner: Inner; enabled: bool; values: i32[4]; } global state: State; global standalone: i32; function main(): i32 { state.inner.value = 7; state.enabled = true; state.values.length = 2; standalone = 9; return state.inner.value + state.values.length + standalone; } function tick(): i32 { return state.values.max_length; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile linear struct state module");
+
+        for path in [
+            "state.inner.value",
+            "state.enabled",
+            "state.values.length",
+            "state.values.max_length",
+        ] {
+            let binding = &process.memory_layout()[path];
+            assert_eq!(binding.length, 1, "{path} should be scalar memory");
+        }
+        assert_eq!(
+            section_entry_count(process.module_bytes(), 6),
+            1,
+            "only the true top-level scalar should remain a Wasm global"
+        );
+        assert_eq!(
+            section_entry_count(process.module_bytes(), 11),
+            2,
+            "collection length metadata should receive memory initializers"
+        );
     }
 
     #[test]
