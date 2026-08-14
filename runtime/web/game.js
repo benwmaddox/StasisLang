@@ -20,6 +20,7 @@
   let audioChannels = 2;
   let audioNextStart = 0;
   let audioUnderruns = 0;
+  let audioSuspendedByLifecycle = false;
   const audioAssets = new Map();
   const audioVoices = new Map();
   const pendingAudio = [];
@@ -152,6 +153,40 @@
     if (voice) voice.source.stop();
     audioVoices.delete(handle);
   };
+  const updateAudioState = () => {
+    document.body.dataset.audioState = audioContext?.state || "closed";
+  };
+  const suspendWebAudio = () => {
+    if (!audioContext) return;
+    audioSuspendedByLifecycle = true;
+    if (audioContext.state === "running") {
+      void audioContext.suspend().then(updateAudioState).catch(() => {});
+    }
+  };
+  const resumeWebAudio = () => {
+    if (!audioSuspendedByLifecycle || !audioContext || audioContext.state === "closed") return;
+    audioSuspendedByLifecycle = false;
+    const resumingContext = audioContext;
+    void resumingContext.resume().then(() => {
+      if (audioSuspendedByLifecycle && resumingContext === audioContext) {
+        void resumingContext.suspend().then(updateAudioState).catch(() => {});
+      } else {
+        updateAudioState();
+      }
+    }).catch(() => {
+      if (resumingContext === audioContext) audioSuspendedByLifecycle = true;
+    });
+  };
+  const shutdownWebAudio = () => {
+    audioSuspendedByLifecycle = false;
+    pendingAudio.length = 0;
+    for (const handle of Array.from(audioVoices.keys())) stopAudio(handle);
+    const closingContext = audioContext;
+    audioContext = undefined;
+    audioNextStart = 0;
+    if (closingContext && closingContext.state !== "closed") void closingContext.close();
+    updateAudioState();
+  };
   const pushAudio = (byteOffset, frameCount) => {
     if (!instance?.exports.memory || frameCount <= 0) return 0;
     const sampleCount = frameCount * audioChannels;
@@ -260,10 +295,7 @@
       return 1;
     },
     audio_shutdown: () => {
-      for (const handle of Array.from(audioVoices.keys())) stopAudio(handle);
-      if (audioContext) void audioContext.close();
-      audioContext = undefined;
-      audioNextStart = 0;
+      shutdownWebAudio();
     },
     audio_is_available: () => 1,
     audio_get_sample_rate: () => audioSampleRate,
@@ -307,6 +339,17 @@
 
   document.addEventListener("paste", event => {
     clipboardText = event.clipboardData?.getData("text/plain") || clipboardText;
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) suspendWebAudio();
+    else resumeWebAudio();
+  });
+  addEventListener("pagehide", event => {
+    if (event.persisted) suspendWebAudio();
+    else shutdownWebAudio();
+  });
+  addEventListener("pageshow", event => {
+    if (event.persisted && !document.hidden) resumeWebAudio();
   });
 
   function executeCommands() {
@@ -637,7 +680,7 @@
     for (const start of pendingAudio.splice(0)) await start();
     audioButton.textContent = "Sound enabled";
     audioButton.disabled = true;
-    document.body.dataset.audioState = audioContext.state;
+    updateAudioState();
     canvas.focus();
   });
 

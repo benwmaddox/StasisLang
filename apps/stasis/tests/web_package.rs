@@ -161,6 +161,16 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
         "stasis_jit_audio_load_music",
         "stasis_jit_audio_load_effect",
         "decodeAudioData",
+        "document.addEventListener(\"visibilitychange\"",
+        "addEventListener(\"pagehide\"",
+        "addEventListener(\"pageshow\"",
+        "if (event.persisted) suspendWebAudio()",
+        "else shutdownWebAudio()",
+        "pendingAudio.length = 0",
+        "audioContext.suspend()",
+        "resumingContext.resume()",
+        "resumingContext.suspend()",
+        "closingContext.close()",
     ] {
         assert!(
             runtime.contains(expected),
