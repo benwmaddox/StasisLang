@@ -206,6 +206,44 @@ struct Signature {
     result: TypeId,
 }
 
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct WasmSignature {
+    params: Vec<u8>,
+    result: Option<u8>,
+}
+
+fn lower_wasm_signature(
+    signature: &Signature,
+    named_structs: &crate::backend::emit::NamedStructFieldTypeMap,
+) -> Result<WasmSignature, String> {
+    let mut params = Vec::with_capacity(physical_param_count(&signature.params, named_structs));
+    for type_id in &signature.params {
+        if is_struct_view_type(*type_id, named_structs) {
+            params.extend([I32, I32, I32]);
+        } else {
+            params.push(wasm_value_type(*type_id)?);
+        }
+    }
+    let result = (signature.result != TYPE_ID_VOID)
+        .then(|| wasm_value_type(signature.result))
+        .transpose()?;
+    Ok(WasmSignature { params, result })
+}
+
+fn intern_wasm_signature(
+    signature: WasmSignature,
+    indices: &mut BTreeMap<WasmSignature, u32>,
+    signatures: &mut Vec<WasmSignature>,
+) -> u32 {
+    if let Some(index) = indices.get(&signature) {
+        return *index;
+    }
+    let index = signatures.len() as u32;
+    indices.insert(signature.clone(), index);
+    signatures.push(signature);
+    index
+}
+
 fn is_i32_lane(type_id: TypeId) -> bool {
     matches!(
         type_id,
@@ -615,6 +653,38 @@ fn encode_module(
         .collect::<BTreeMap<_, _>>();
     let struct_scalars = build_struct_scalars(analysis, &global_indices);
 
+    let accessor_signatures = [
+        WasmSignature {
+            params: vec![I32],
+            result: Some(I32),
+        },
+        WasmSignature {
+            params: vec![I32, I32],
+            result: Some(I32),
+        },
+        WasmSignature {
+            params: vec![I32],
+            result: Some(F32),
+        },
+        WasmSignature {
+            params: vec![I32, F32],
+            result: Some(I32),
+        },
+    ];
+    let mut wasm_signatures = Vec::new();
+    let mut wasm_signature_indices = BTreeMap::new();
+    let signature_type_indices = signatures
+        .iter()
+        .map(|signature| {
+            lower_wasm_signature(signature, &analysis.named_struct_field_types).map(|signature| {
+                intern_wasm_signature(signature, &mut wasm_signature_indices, &mut wasm_signatures)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let accessor_type_indices = accessor_signatures.map(|signature| {
+        intern_wasm_signature(signature, &mut wasm_signature_indices, &mut wasm_signatures)
+    });
+
     let import_indices = imports
         .iter()
         .enumerate()
@@ -639,50 +709,26 @@ fn encode_module(
     let mut module = b"\0asm\x01\0\0\0".to_vec();
 
     let mut type_section = Vec::new();
-    uleb(signatures.len() as u32 + 4, &mut type_section);
-    for signature in &signatures {
+    uleb(wasm_signatures.len() as u32, &mut type_section);
+    for signature in &wasm_signatures {
         type_section.push(0x60);
-        uleb(
-            physical_param_count(&signature.params, &analysis.named_struct_field_types) as u32,
-            &mut type_section,
-        );
-        for type_id in &signature.params {
-            if is_struct_view_type(*type_id, &analysis.named_struct_field_types) {
-                type_section.extend([I32, I32, I32]);
-            } else {
-                type_section.push(wasm_value_type(*type_id)?);
-            }
+        uleb(signature.params.len() as u32, &mut type_section);
+        type_section.extend(&signature.params);
+        match signature.result {
+            Some(result) => type_section.extend([1, result]),
+            None => type_section.push(0),
         }
-        if signature.result == TYPE_ID_VOID {
-            type_section.push(0);
-        } else {
-            type_section.extend([1, wasm_value_type(signature.result)?]);
-        }
-    }
-    for (params, result) in [
-        (&[I32][..], I32),
-        (&[I32, I32][..], I32),
-        (&[I32][..], F32),
-        (&[I32, F32][..], I32),
-    ] {
-        type_section.push(0x60);
-        uleb(params.len() as u32, &mut type_section);
-        type_section.extend(params);
-        type_section.extend([1, result]);
     }
     section(1, type_section, &mut module);
 
     if !imports.is_empty() {
         let mut import_section = Vec::new();
         uleb(imports.len() as u32, &mut import_section);
-        for (_, symbol, _) in &imports {
+        for (index, (_, symbol, _)) in imports.iter().enumerate() {
             string("env", &mut import_section);
             string(symbol, &mut import_section);
             import_section.push(0);
-            uleb(
-                import_section_type_index(&imports, symbol)?,
-                &mut import_section,
-            );
+            uleb(signature_type_indices[index], &mut import_section);
         }
         section(2, import_section, &mut module);
     }
@@ -690,10 +736,13 @@ fn encode_module(
     let mut function_section = Vec::new();
     uleb(functions.len() as u32 + 4, &mut function_section);
     for index in 0..functions.len() {
-        uleb((imports.len() + index) as u32, &mut function_section);
+        uleb(
+            signature_type_indices[imports.len() + index],
+            &mut function_section,
+        );
     }
-    for index in 0..4 {
-        uleb(signatures.len() as u32 + index, &mut function_section);
+    for index in accessor_type_indices {
+        uleb(index, &mut function_section);
     }
     section(3, function_section, &mut module);
 
@@ -897,17 +946,6 @@ fn append_name_section(function_names: &[(u32, String)], module: &mut Vec<u8>) {
     uleb(function_subsection.len() as u32, &mut payload);
     payload.extend(function_subsection);
     section(0, payload, module);
-}
-
-fn import_section_type_index(
-    imports: &[(String, String, Signature)],
-    symbol: &str,
-) -> Result<u32, String> {
-    imports
-        .iter()
-        .position(|(_, candidate, _)| candidate == symbol)
-        .map(|index| index as u32)
-        .ok_or_else(|| format!("missing web import type for '{symbol}'"))
 }
 
 fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
@@ -2827,6 +2865,34 @@ fn sleb64(mut value: i64, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
+    fn read_test_uleb(bytes: &[u8], cursor: &mut usize) -> u32 {
+        let mut value = 0;
+        let mut shift = 0;
+        loop {
+            let byte = bytes[*cursor];
+            *cursor += 1;
+            value |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+
+    fn type_section_entry_count(module: &[u8]) -> u32 {
+        let mut cursor = 8;
+        while cursor < module.len() {
+            let section_id = module[cursor];
+            cursor += 1;
+            let section_len = read_test_uleb(module, &mut cursor) as usize;
+            if section_id == 1 {
+                return read_test_uleb(module, &mut cursor);
+            }
+            cursor += section_len;
+        }
+        panic!("missing Wasm type section");
+    }
+
     #[test]
     fn encodes_one_unsigned_bounds_trap_for_both_invalid_regions() {
         let mut bytes = Vec::new();
@@ -2872,10 +2938,15 @@ mod tests {
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
             "web.stasis",
-            "global x: i32; function main(): i32 { x = 3; return x; } function tick(): i32 { x += 1; return x; } function render(): i32 { return x; }",
+            "global x: i32; function truth(value: bool): i32 { if (value) { return 1; } return 0; } function main(): i32 { print_i32(1); print_int(2); x = 3; return x + truth(true); } function tick(): i32 { x += 1; return x; } function render(): i32 { return x; }",
         );
         process.compile().expect("compile web module");
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+        assert_eq!(
+            type_section_entry_count(process.module_bytes()),
+            6,
+            "equivalent import, internal, and accessor signatures should share Wasm types"
+        );
         assert_eq!(
             process
                 .program_snapshot()
