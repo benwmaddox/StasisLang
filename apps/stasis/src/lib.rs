@@ -881,7 +881,7 @@ fn resolve_play_sidecar_path(path: &Path, launch_dir: &Path) -> PathBuf {
     launch_dir.join(path)
 }
 
-fn resolve_play_data_binding_paths(
+pub fn resolve_play_data_binding_paths(
     watch_file: &Path,
     launch_dir: &Path,
     data_bind_json: Option<&Path>,
@@ -1440,7 +1440,7 @@ fn apply_play_data_binding_value(
     Ok(())
 }
 
-fn load_and_apply_play_data_bindings(
+pub fn load_and_apply_play_data_bindings(
     paths: &[(PathBuf, PathBuf)],
     jit: Option<&JitProcess>,
 ) -> Result<(), String> {

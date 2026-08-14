@@ -113,7 +113,7 @@ cloning a generated repository, reactivate the checked-in hook with
   editor integrations; it does not require a manifest and cannot be combined with `--check`,
   explicit paths, `--workspace`, or `--json`.
 - `check`: run the shared frontend and Cranelift JIT compilation path without executing `main`.
-- `test [PATH]`: run Stasis tests and schema-v1 `*.scenario.json` simulation cases. Each scenario
+- `test [PATH]`: discover project `data/` JSON/CSV pairs with matching `.struct-meta.json` metadata and apply them before running Stasis tests, then run schema-v1 `*.scenario.json` simulation cases. Binding is strict and invalid or missing metadata fails the command; a project without data is unchanged. Each scenario
   starts from fresh `main()`, applies its optional saved state, and restores one bounded runtime
   snapshot before every property seed.
 - `run [--headless] [--ticks COUNT] [--fast-forward]`: JIT-compile and execute no-argument

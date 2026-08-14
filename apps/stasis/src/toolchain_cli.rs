@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
-    run_live_in_process, run_live_in_process_with_data, run_play_in_process_with_window_title,
+    load_and_apply_play_data_bindings, resolve_play_data_binding_paths, run_live_in_process,
+    run_live_in_process_with_data, run_play_in_process_with_window_title,
     run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_assets::{
@@ -2151,6 +2152,12 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
     } else {
         None
     };
+    let data_binding_paths = resolve_play_data_binding_paths(
+        &workspace.root.join(&workspace.manifest.entry),
+        &workspace.root,
+        None,
+        None,
+    )?;
     let mut session = StasisTestRunSession::new();
     let summary = stasis::run_jit_tests_in_directory_with_project_root_session_and_validator(
         &directory,
@@ -2164,8 +2171,8 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
                 &workspace.root,
                 snapshot,
                 manifest.as_ref(),
-            )
-            .map(|_| ())
+            )?;
+            load_and_apply_play_data_bindings(&data_binding_paths, Some(jit))
         },
     )?;
     let scenarios = headless::run_scenarios(workspace, &directory)?;
@@ -6136,6 +6143,118 @@ mod tests {
         remove_temp(&root);
     }
 
+    fn write_data_binding_test_project(root: &Path, data: Option<&str>, metadata: Option<&str>) {
+        create_project(root.to_path_buf(), "data_binding_test".to_string())
+            .expect("create project");
+        fs::write(
+            root.join("src/main.stasis"),
+            "struct Config { loaded: bool; scalar: i32; values: i32[2]; }\nstruct State { config: Config; }\nglobal state: State;\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\ntest `bound data reaches globals`(): bool { return state.config.loaded && state.config.scalar == 17 && state.config.values[0] == 4 && state.config.values[1] == 9; }\n",
+        )
+        .expect("write test");
+        if let Some(data) = data {
+            fs::create_dir_all(root.join("data")).expect("data directory");
+            fs::write(root.join("data/gameplay.json"), data).expect("write data");
+        }
+        if let Some(metadata) = metadata {
+            fs::create_dir_all(root.join("data")).expect("data directory");
+            fs::write(root.join("data/gameplay.struct-meta.json"), metadata)
+                .expect("write metadata");
+        }
+    }
+
+    const DATA_BINDING_META: &str = r#"{
+  "version": 1,
+  "globalName": "state",
+  "totalSize": 0,
+  "fields": [
+    {"name":"state__config__loaded","jsonPath":"config.loaded","offset":0,"size":1,"type":"bool","arrayCount":1},
+    {"name":"state__config__scalar","jsonPath":"config.scalar","offset":4,"size":4,"type":"i32","arrayCount":1},
+    {"name":"state__config__values","jsonPath":"config.values","offset":8,"size":8,"type":"i32","arrayCount":2}
+  ]
+}"#;
+
+    #[test]
+    fn workspace_tests_apply_project_json_scalar_and_array_bindings() {
+        let root = temp_dir("test_data_binding");
+        write_data_binding_test_project(
+            &root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
+            Some(DATA_BINDING_META),
+        );
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        test_workspace(&workspace, None).expect("bound test project");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn workspace_tests_reject_invalid_project_json_binding_deterministically() {
+        let root = temp_dir("test_data_binding_invalid");
+        write_data_binding_test_project(
+            &root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9],"extra":1}}"#),
+            Some(DATA_BINDING_META),
+        );
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let error = test_workspace(&workspace, None).expect_err("extra data property rejected");
+        assert!(
+            error.contains("binding source property config.extra"),
+            "{error}"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn workspace_tests_reject_malformed_and_missing_project_metadata() {
+        let malformed_root = temp_dir("test_data_binding_malformed");
+        write_data_binding_test_project(
+            &malformed_root,
+            Some("{not-json"),
+            Some(DATA_BINDING_META),
+        );
+        let malformed_workspace = load_workspace(Some(&malformed_root)).expect("workspace");
+        let malformed =
+            test_workspace(&malformed_workspace, None).expect_err("malformed data rejected");
+        assert!(
+            malformed.contains("failed to parse data JSON"),
+            "{malformed}"
+        );
+        remove_temp(&malformed_root);
+
+        let missing_root = temp_dir("test_data_binding_missing_meta");
+        write_data_binding_test_project(
+            &missing_root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
+            None,
+        );
+        let missing_workspace = load_workspace(Some(&missing_root)).expect("workspace");
+        let missing =
+            test_workspace(&missing_workspace, None).expect_err("missing metadata rejected");
+        assert!(missing.contains("requires matching metadata"), "{missing}");
+        remove_temp(&missing_root);
+    }
+    #[test]
+    fn workspace_tests_without_project_data_keep_zero_initialized_globals() {
+        let root = temp_dir("test_data_binding_none");
+        create_project(root.clone(), "data_binding_none".to_string()).expect("create project");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global value: i32;\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\ntest `no data leaves defaults`(): bool { return value == 0; }\n",
+        )
+        .expect("write test");
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        test_workspace(&workspace, None).expect("no-data test project");
+        remove_temp(&root);
+    }
     #[test]
     fn vendor_upgrade_only_rewrites_the_release_when_content_changes() {
         let root = temp_dir("vendor_upgrade");
