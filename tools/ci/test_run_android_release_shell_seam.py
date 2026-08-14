@@ -209,6 +209,34 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             calls,
         )
 
+    def test_foreground_check_prefers_wait_over_closing_system_component(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "dumpsys", "window", "windows"):
+                return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
+            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+                return (
+                    "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node text=\"Close app\" bounds=\"[120,600][420,720]\" />"
+                    "<node text=\"Wait\" bounds=\"[120,720][420,840]\" />"
+                    "</hierarchy>"
+                )
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertTrue(changed)
+        self.assertIn(("shell", "input", "tap", "270", "780"), calls)
+        self.assertNotIn(("shell", "input", "tap", "270", "660"), calls)
+
     def test_foreground_check_dismisses_layered_anr_over_focused_activity(self):
         calls = []
 
