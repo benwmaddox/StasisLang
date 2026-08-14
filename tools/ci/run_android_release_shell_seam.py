@@ -571,10 +571,15 @@ def ensure_test_activity_foreground(
         (line for line in windows.splitlines() if "mCurrentFocus=" in line),
         "",
     )
-    if package_id in current_focus:
+    system_dialog_present = "AppNotRespondingDialog" in windows
+    if package_id in current_focus and not system_dialog_present:
         return False
-    dismissed = dismiss_system_dialog_action(adb, serial) if current_focus else False
-    if current_focus and not dismissed:
+    dismissed = (
+        dismiss_system_dialog_action(adb, serial)
+        if current_focus or system_dialog_present
+        else False
+    )
+    if (current_focus or system_dialog_present) and not dismissed:
         _run(
             adb,
             serial,
