@@ -16,7 +16,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int RENDER_MAGIC = 0x47584631;
     static final int RENDER_V2_VERSION = 2;
     static final int RENDER_V3_VERSION = 3;
-    static final int RENDER_VERSION = 4;
+    static final int RENDER_V4_VERSION = 4;
+    static final int RENDER_VERSION = 5;
     static final int FLAG_CLEAR = 1;
     static final int FLAG_PRESENT = 2;
 
@@ -54,7 +55,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int LINE_F32_STRIDE = GEOMETRY_F32_STRIDE;
     static final int MAX_SPRITES = 4_096;
     static final int SPRITE_I32_STRIDE = 3;
-    static final int SPRITE_F32_STRIDE = 4;
+    static final int LEGACY_SPRITE_F32_STRIDE = 4;
+    static final int SPRITE_F32_STRIDE = 8;
     static final int MAX_TEXT = 2_048;
     static final int TEXT_I32_STRIDE = 3;
     static final int TEXT_F32_STRIDE = 6;
@@ -68,6 +70,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int I_TEXT_BASE = I_SPRITE_BASE + MAX_SPRITES * SPRITE_I32_STRIDE;
     static final int F_SPRITE_BASE = F_LINE_BASE + MAX_LINES * LINE_F32_STRIDE;
     static final int F_RECT_REVERSE_BASE = F_SPRITE_BASE - GEOMETRY_F32_STRIDE;
+    static final int LEGACY_F_TEXT_BASE = F_SPRITE_BASE + MAX_SPRITES * LEGACY_SPRITE_F32_STRIDE;
     static final int F_TEXT_BASE = F_SPRITE_BASE + MAX_SPRITES * SPRITE_F32_STRIDE;
     static final int I_ORDER_BASE = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
     static final int FRAME_I32_CAPACITY = I_ORDER_BASE + MAX_ORDER;
@@ -861,12 +864,17 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         float cosine = (float)Math.cos(radians);
         float sine = (float)Math.sin(radians);
         float alpha = clampUnit(frameI32.get(base + 2) / 255.0f);
-        putTextureVertex(spriteVertices, left, top, centerX, centerY, cosine, sine, 0, 0, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, 1, 0, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, 0, 1, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, 1, 0, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, right, bottom, centerX, centerY, cosine, sine, 1, 1, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, 0, 1, 1, 1, 1, alpha);
+        float u0 = frameF32.get(values + 4);
+        float v0 = frameF32.get(values + 5);
+        float u1 = frameF32.get(values + 6);
+        float v1 = frameF32.get(values + 7);
+        if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return;
+        putTextureVertex(spriteVertices, left, top, centerX, centerY, cosine, sine, u0, v0, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, u1, v0, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, u0, v1, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, u1, v0, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, right, bottom, centerX, centerY, cosine, sine, u1, v1, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, u0, v1, 1, 1, 1, alpha);
     }
 
     private void drawText(int first, int count) {
@@ -992,6 +1000,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 && values.get(I_MAGIC) == RENDER_MAGIC
                 && (values.get(I_VERSION) == RENDER_V2_VERSION
                     || values.get(I_VERSION) == RENDER_V3_VERSION
+                    || values.get(I_VERSION) == RENDER_V4_VERSION
                     || values.get(I_VERSION) == RENDER_VERSION);
     }
 
@@ -1021,7 +1030,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     static int clampedRectCount(int version, int lineCount, int rectCount) {
-        if (version != RENDER_VERSION) return 0;
+        if (version < RENDER_V4_VERSION) return 0;
         int lines = clampCount(lineCount, MAX_GEOMETRY);
         return clampCount(rectCount, MAX_GEOMETRY - lines);
     }

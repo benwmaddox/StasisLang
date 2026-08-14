@@ -333,6 +333,10 @@
     const i32 = new Int32Array(instance.exports.memory.buffer, iLayout.offset, iLayout.length);
     const f32 = new Float32Array(instance.exports.memory.buffer, fLayout.offset, fLayout.length);
     if (i32[0] !== 1196967473) return;
+    const version = i32[1];
+    if (version < 2 || version > 5) return;
+    const spriteStride = version >= 5 ? 8 : 4;
+    const textBase = version >= 5 ? 112772 : 96388;
     const flags = i32[2];
     if (flags & 1) {
       context.save();
@@ -362,23 +366,32 @@
     };
     const drawSprite = index => {
       const baseI = 32 + index * 3;
-      const baseF = 80004 + index * 4;
+      const baseF = 80004 + index * spriteStride;
       const image = sprites.get(i32[baseI]);
       if (!image || !image.complete || !image.naturalWidth) return;
       const x = f32[baseF];
       const y = f32[baseF + 1];
       const width = f32[baseF + 2];
       const height = f32[baseF + 3];
+      const u0 = version >= 5 ? f32[baseF + 4] : 0;
+      const v0 = version >= 5 ? f32[baseF + 5] : 0;
+      const u1 = version >= 5 ? f32[baseF + 6] : 1;
+      const v1 = version >= 5 ? f32[baseF + 7] : 1;
+      if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return;
+      const sourceX = u0 * image.naturalWidth;
+      const sourceY = v0 * image.naturalHeight;
+      const sourceWidth = (u1 - u0) * image.naturalWidth;
+      const sourceHeight = (v1 - v0) * image.naturalHeight;
       context.save();
       context.globalAlpha = Math.max(0, Math.min(1, i32[baseI + 2] / 255));
       context.translate(x + width / 2, y + height / 2);
       context.rotate(i32[baseI + 1] * Math.PI / 180);
-      context.drawImage(image, -width / 2, -height / 2, width, height);
+      context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, -width / 2, -height / 2, width, height);
       context.restore();
     };
     const drawText = index => {
       const baseI = 12320 + index * 3;
-      const baseF = 96388 + index * 6;
+      const baseF = textBase + index * 6;
       const offset = i32[baseI + 1];
       const cached = offset < 0 ? cachedText.get(-offset) : null;
       const fontHandle = cached ? cached.font : i32[baseI];
@@ -400,8 +413,8 @@
     const lineCount = Math.max(0, Math.min(i32[3], 10000));
     const spriteCount = Math.max(0, Math.min(i32[4], 4096));
     const textCount = Math.max(0, Math.min(i32[7], 2048));
-    const rectCount = Math.max(0, Math.min(i32[24], 10000 - lineCount));
-    const orderCount = Math.max(0, Math.min(i32[22], 16144));
+    const rectCount = version >= 4 ? Math.max(0, Math.min(i32[24], 10000 - lineCount)) : 0;
+    const orderCount = version >= 3 ? Math.max(0, Math.min(i32[22], 16144)) : 0;
     if (orderCount > 0) {
       for (let order = 0; order < orderCount; order += 1) {
         const encoded = i32[18464 + order];

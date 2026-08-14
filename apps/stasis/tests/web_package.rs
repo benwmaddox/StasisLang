@@ -92,6 +92,8 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "function writeHostFrame",
         "function applyWindowRequest",
         "function sdlScancode",
+        "const spriteStride = version >= 5 ? 8 : 4;",
+        "context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight",
     ] {
         assert!(
             runtime.contains(expected),

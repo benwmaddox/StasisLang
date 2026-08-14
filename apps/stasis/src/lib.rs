@@ -2125,7 +2125,7 @@ fn run_play_in_process_inner(
     let mut host_i32: Vec<i32> = vec![0; 768];
     let mut host_f32: Vec<f32> = vec![0.0; 64];
     let mut gfx_cmd_i32: Vec<i32> = vec![0; 34608];
-    let mut gfx_cmd_f32: Vec<f32> = vec![0.0; 108676];
+    let mut gfx_cmd_f32: Vec<f32> = vec![0.0; 125060];
     let mut gfx_cmd_u8: Vec<u8> = vec![0; 65536];
 
     let mut host_req_seq: i32 = 0;
@@ -4944,15 +4944,17 @@ mod tests {
             "STASIS_RENDER_V2_VERSION 2",
             "STASIS_RENDER_V3_VERSION 3",
             "STASIS_RENDER_V4_VERSION 4",
-            "STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V4_VERSION",
+            "STASIS_RENDER_V5_VERSION 5",
+            "STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V5_VERSION",
             "STASIS_RENDER_V2_TRACE_VERSION 2",
             "STASIS_RENDER_V3_TRACE_VERSION 3",
             "STASIS_RENDER_V4_TRACE_VERSION 4",
+            "STASIS_RENDER_V5_TRACE_VERSION 5",
             "STASIS_RENDER_I_ORDER_BASE",
             "STASIS_RENDER_I_RECT_COUNT",
             "STASIS_RENDER_MAX_ORDER",
             "STASIS_RENDER_ORDER_RECT",
-            "STASIS_RENDER_SPRITE_F32_STRIDE 4",
+            "STASIS_RENDER_SPRITE_F32_STRIDE 8",
             "STASIS_RENDER_I32_COUNT",
             "STASIS_RENDER_F32_COUNT",
             "stasis_render_validate",

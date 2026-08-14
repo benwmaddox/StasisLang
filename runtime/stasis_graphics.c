@@ -291,7 +291,7 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 typedef struct SpriteEntry SpriteEntry;
 static SpriteEntry* sprite_get(int handle);
 static SpriteEntry* sprite_fallback_get(void);
-static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float w, float h, int rot_degrees, int a, int do_hash);
+static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float w, float h, int rot_degrees, int a, float src_u0, float src_v0, float src_u1, float src_v1, int do_hash);
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
 static void stasis_sync_display_metrics(void);
 static void stasis_set_logical_size(int width, int height);
@@ -4784,12 +4784,18 @@ static void flush_ordered_sprites(void) {
 static void stasis_draw_ordered_sprite(
     const int32_t* cmd_i32,
     const float* cmd_f32,
+    int32_t version,
     int32_t index
 ) {
     const int32_t* sprite_i32 = cmd_i32 + STASIS_RENDER_I_SPRITE_BASE;
     const float* sprite_f32 = cmd_f32 + STASIS_RENDER_F_SPRITE_BASE;
+    const int stride_f = stasis_render_sprite_f32_stride(version);
     const int base_i = index * STASIS_RENDER_SPRITE_I32_STRIDE;
-    const int base_f = index * STASIS_RENDER_SPRITE_F32_STRIDE;
+    const int base_f = index * stride_f;
+    const float src_u0 = version >= STASIS_RENDER_V5_VERSION ? sprite_f32[base_f + 4] : 0.0f;
+    const float src_v0 = version >= STASIS_RENDER_V5_VERSION ? sprite_f32[base_f + 5] : 0.0f;
+    const float src_u1 = version >= STASIS_RENDER_V5_VERSION ? sprite_f32[base_f + 6] : 1.0f;
+    const float src_v1 = version >= STASIS_RENDER_V5_VERSION ? sprite_f32[base_f + 7] : 1.0f;
     stasis_gfx_draw_sprite_internal(
         sprite_i32[base_i + 0],
         sprite_f32[base_f + 0],
@@ -4798,11 +4804,12 @@ static void stasis_draw_ordered_sprite(
         sprite_f32[base_f + 3],
         sprite_i32[base_i + 1],
         sprite_i32[base_i + 2],
+        src_u0, src_v0, src_u1, src_v1,
         g_debug_hash_enabled);
 }
-
 static void stasis_draw_ordered_text(
     const int32_t* cmd_i32,
+    int32_t version,
     const float* cmd_f32,
     const uint8_t* cmd_u8,
     int32_t text_bytes_used,
@@ -4815,7 +4822,7 @@ static void stasis_draw_ordered_text(
     const int byte_len = cmd_i32[base_i + 2];
     if (font <= 0) return;
 
-    const int base_f = STASIS_RENDER_F_TEXT_BASE +
+    const int base_f = stasis_render_f_text_base(version) +
         index * STASIS_RENDER_TEXT_F32_STRIDE;
     const float x = cmd_f32[base_f + 0];
     const float y = cmd_f32[base_f + 1];
@@ -4977,13 +4984,13 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
                 pending_kind = kind;
             } else if (kind == STASIS_RENDER_ORDER_SPRITE && index < sprite_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
-                stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
+                stasis_draw_ordered_sprite(cmd_i32, cmd_f32, version, index);
                 pending_kind = kind;
             } else if (kind == STASIS_RENDER_ORDER_TEXT && index < text_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
                 if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
                 stasis_draw_ordered_text(
-                    cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
+                    cmd_i32, version, cmd_f32, cmd_u8, text_bytes_used, index);
                 pending_kind = kind;
             } else if (kind == STASIS_RENDER_ORDER_RECT && index < rect_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
@@ -5003,11 +5010,11 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
             stasis_draw_ordered_rect(cmd_f32, index);
         }
         for (int32_t index = 0; index < sprite_count; index++) {
-            stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
+            stasis_draw_ordered_sprite(cmd_i32, cmd_f32, version, index);
         }
         if (sprite_count > 0) flush_ordered_sprites();
         for (int32_t index = 0; index < text_count; index++) {
-            stasis_draw_ordered_text(cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
+            stasis_draw_ordered_text(cmd_i32, version, cmd_f32, cmd_u8, text_bytes_used, index);
         }
     }
 
@@ -5457,7 +5464,8 @@ STASIS_EXPORT void stasis_gfx_release_sprite(int handle) {
  * a: alpha 0-255
  */
 static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float w, float h,
-                                           int rot_degrees, int a, int do_hash) {
+                                           int rot_degrees, int a, float src_u0, float src_v0,
+                                           float src_u1, float src_v1, int do_hash) {
     if (do_hash) {
         gfx_debug_hash_i32(handle);
         gfx_debug_hash_f32(x);
@@ -5472,6 +5480,8 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
     if (!e) return;
 
     if (w <= 0 || h <= 0) return;
+    if (src_u0 < 0.0f || src_v0 < 0.0f || src_u1 > 1.0f || src_v1 > 1.0f ||
+        src_u0 >= src_u1 || src_v0 >= src_v1) return;
     if (a < 0) a = 0;
     if (a > 255) a = 255;
 
@@ -5509,7 +5519,9 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
         SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
         SDL_SetTextureColorMod(e->sdl_tex, 255, 255, 255);
         SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)a);
-        SDL_RenderTextureRotated(g_renderer, e->sdl_tex, NULL, &dst, (double)rot_degrees, &center, SDL_FLIP_NONE);
+        SDL_FRect src = { src_u0 * e->w, src_v0 * e->h,
+            (src_u1 - src_u0) * e->w, (src_v1 - src_v0) * e->h };
+        SDL_RenderTextureRotated(g_renderer, e->sdl_tex, &src, &dst, (double)rot_degrees, &center, SDL_FLIP_NONE);
         return;
     }
 
@@ -5542,7 +5554,10 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
     float p3x = fx + x0 * c - y1 * s;
     float p3y = fy + x0 * s + y1 * c;
 
-    float u0 = e->u0, v0 = e->v0, u1 = e->u1, v1 = e->v1;
+    float u0 = e->u0 + (e->u1 - e->u0) * src_u0;
+    float v0 = e->v0 + (e->v1 - e->v0) * src_v0;
+    float u1 = e->u0 + (e->u1 - e->u0) * src_u1;
+    float v1 = e->v0 + (e->v1 - e->v0) * src_v1;
 
     SpriteVertex* v = &g_sprite_vertices[g_sprite_vert_count];
     /* tri 1: 0,1,2 */
@@ -5558,7 +5573,7 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
 
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, float x, float y, float w, float h,
                                           int rot_degrees, int a) {
-    stasis_gfx_draw_sprite_internal(handle, x, y, w, h, rot_degrees, a, 1);
+    stasis_gfx_draw_sprite_internal(handle, x, y, w, h, rot_degrees, a, 0.0f, 0.0f, 1.0f, 1.0f, 1);
 }
 
 /*
@@ -5578,6 +5593,7 @@ STASIS_EXPORT void stasis_gfx_draw_sprites(const int32_t* cmd_i32, const float* 
             cmd_f32[base_f + 3],
             cmd_i32[base_i + 1],
             cmd_i32[base_i + 2],
+            0.0f, 0.0f, 1.0f, 1.0f,
             g_debug_hash_enabled);
     }
 }

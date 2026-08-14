@@ -929,7 +929,7 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
-const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 2;
+const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 3;
 
 fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
     let address = lib
@@ -3220,12 +3220,13 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
 
 pub const STASIS_RENDER_I32_COUNT: usize = 34_608;
 const STASIS_RENDER_V2_I32_COUNT: usize = 18_464;
-pub const STASIS_RENDER_F32_COUNT: usize = 108_676;
+pub const STASIS_RENDER_F32_COUNT: usize = 125_060;
 pub const STASIS_RENDER_U8_COUNT: usize = 65_536;
 const STASIS_RENDER_MAGIC: i32 = 0x4758_4631;
 const STASIS_RENDER_V2_VERSION: i32 = 2;
 const STASIS_RENDER_V3_VERSION: i32 = 3;
-const STASIS_RENDER_VERSION: i32 = 4;
+const STASIS_RENDER_V4_VERSION: i32 = 4;
+const STASIS_RENDER_VERSION: i32 = 5;
 const STASIS_RENDER_HEADER_I32_COUNT: usize = 10;
 const STASIS_RENDER_ORDER_COUNT_INDEX: usize = 22;
 const STASIS_RENDER_ORDER_HEADER_END: usize = 24;
@@ -3239,9 +3240,11 @@ const STASIS_RENDER_LINE_STRIDE: usize = 8;
 const STASIS_RENDER_MAX_SPRITES: usize = 4_096;
 const STASIS_RENDER_SPRITE_STRIDE_I32: usize = 3;
 const STASIS_RENDER_SPRITE_BASE_F32: usize = 80_004;
-const STASIS_RENDER_SPRITE_STRIDE_F32: usize = 4;
+const STASIS_RENDER_LEGACY_SPRITE_STRIDE_F32: usize = 4;
+const STASIS_RENDER_SPRITE_STRIDE_F32: usize = 8;
 const STASIS_RENDER_TEXT_BASE_I32: usize = 12_320;
-const STASIS_RENDER_TEXT_BASE_F32: usize = 96_388;
+const STASIS_RENDER_LEGACY_TEXT_BASE_F32: usize = 96_388;
+const STASIS_RENDER_TEXT_BASE_F32: usize = 112_772;
 const STASIS_RENDER_MAX_TEXT: usize = 2_048;
 const STASIS_RENDER_TEXT_STRIDE_I32: usize = 3;
 const STASIS_RENDER_TEXT_STRIDE_F32: usize = 6;
@@ -3289,14 +3292,21 @@ pub fn copy_jit_render_active(
     let version = unsafe { *i32_header_ptr.add(1) };
     let source_i32_count = match version {
         STASIS_RENDER_V2_VERSION => STASIS_RENDER_V2_I32_COUNT,
-        STASIS_RENDER_V3_VERSION | STASIS_RENDER_VERSION => STASIS_RENDER_I32_COUNT,
+        STASIS_RENDER_V3_VERSION | STASIS_RENDER_V4_VERSION | STASIS_RENDER_VERSION => {
+            STASIS_RENDER_I32_COUNT
+        }
         _ => return Err("JIT frame is not a supported production gfx_cmd frame".to_string()),
+    };
+    let source_f32_count = if version >= STASIS_RENDER_VERSION {
+        STASIS_RENDER_F32_COUNT
+    } else {
+        STASIS_RENDER_LEGACY_TEXT_BASE_F32 + STASIS_RENDER_MAX_TEXT * STASIS_RENDER_TEXT_STRIDE_F32
     };
     let i32_ptr = stasis_jit_global_i32_array_ptr(i32_id, 0, source_i32_count as i32);
     let f32_ptr = stasis_jit_global_f32_array_ptr(
         global_path_hash("gfx_cmd_f32"),
         0,
-        STASIS_RENDER_F32_COUNT as i32,
+        source_f32_count as i32,
     );
     let u8_ptr = global_u8_array_ptr(
         global_path_hash("gfx_cmd_u8"),
@@ -3307,12 +3317,15 @@ pub fn copy_jit_render_active(
         return Err("production render buffers were not registered by the JIT".to_string());
     }
     let source_i32 = unsafe { std::slice::from_raw_parts(i32_ptr, source_i32_count) };
-    let source_f32 = unsafe { std::slice::from_raw_parts(f32_ptr, STASIS_RENDER_F32_COUNT) };
+    let source_f32 = unsafe { std::slice::from_raw_parts(f32_ptr, source_f32_count) };
     let source_u8 = unsafe { std::slice::from_raw_parts(u8_ptr, STASIS_RENDER_U8_COUNT) };
     if source_i32[0] != STASIS_RENDER_MAGIC
         || !matches!(
             source_i32[1],
-            STASIS_RENDER_V2_VERSION | STASIS_RENDER_V3_VERSION | STASIS_RENDER_VERSION
+            STASIS_RENDER_V2_VERSION
+                | STASIS_RENDER_V3_VERSION
+                | STASIS_RENDER_V4_VERSION
+                | STASIS_RENDER_VERSION
         )
     {
         return Err("JIT frame is not a supported production gfx_cmd frame".to_string());
@@ -3321,7 +3334,7 @@ pub fn copy_jit_render_active(
     let lines = source_i32[3].clamp(0, STASIS_RENDER_MAX_LINES as i32) as usize;
     let counts = RenderActiveCounts {
         lines,
-        rects: if source_i32[1] == STASIS_RENDER_VERSION {
+        rects: if source_i32[1] >= STASIS_RENDER_V4_VERSION {
             source_i32[STASIS_RENDER_RECT_COUNT_INDEX]
                 .clamp(0, (STASIS_RENDER_MAX_LINES - lines) as i32) as usize
         } else {
@@ -3342,7 +3355,7 @@ pub fn copy_jit_render_active(
     out_i32[STASIS_RENDER_ORDER_COUNT_INDEX..STASIS_RENDER_ORDER_HEADER_END].fill(0);
     out_i32[STASIS_RENDER_ORDER_COUNT_INDEX] = counts.order as i32;
     out_i32[STASIS_RENDER_RECT_COUNT_INDEX..STASIS_RENDER_RECT_HEADER_END].fill(0);
-    if source_i32[1] == STASIS_RENDER_VERSION {
+    if source_i32[1] >= STASIS_RENDER_V4_VERSION {
         out_i32[STASIS_RENDER_RECT_COUNT_INDEX..STASIS_RENDER_RECT_HEADER_END].copy_from_slice(
             &source_i32[STASIS_RENDER_RECT_COUNT_INDEX..STASIS_RENDER_RECT_HEADER_END],
         );
@@ -3364,13 +3377,30 @@ pub fn copy_jit_render_active(
     let rect_start = STASIS_RENDER_SPRITE_BASE_F32 - counts.rects * STASIS_RENDER_LINE_STRIDE;
     out_f32[rect_start..STASIS_RENDER_SPRITE_BASE_F32]
         .copy_from_slice(&source_f32[rect_start..STASIS_RENDER_SPRITE_BASE_F32]);
-    let sprite_f32_end =
-        STASIS_RENDER_SPRITE_BASE_F32 + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_F32;
-    out_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]
-        .copy_from_slice(&source_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]);
-    let text_f32_end = STASIS_RENDER_TEXT_BASE_F32 + counts.text * STASIS_RENDER_TEXT_STRIDE_F32;
-    out_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]
-        .copy_from_slice(&source_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]);
+    if version >= STASIS_RENDER_VERSION {
+        let sprite_f32_end =
+            STASIS_RENDER_SPRITE_BASE_F32 + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_F32;
+        out_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]
+            .copy_from_slice(&source_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]);
+    } else {
+        for index in 0..counts.sprites {
+            let source =
+                STASIS_RENDER_SPRITE_BASE_F32 + index * STASIS_RENDER_LEGACY_SPRITE_STRIDE_F32;
+            let destination =
+                STASIS_RENDER_SPRITE_BASE_F32 + index * STASIS_RENDER_SPRITE_STRIDE_F32;
+            out_f32[destination..destination + 4].copy_from_slice(&source_f32[source..source + 4]);
+            out_f32[destination + 4..destination + 8].copy_from_slice(&[0.0, 0.0, 1.0, 1.0]);
+        }
+        out_i32[1] = STASIS_RENDER_VERSION;
+    }
+    let source_text_base = if version >= STASIS_RENDER_VERSION {
+        STASIS_RENDER_TEXT_BASE_F32
+    } else {
+        STASIS_RENDER_LEGACY_TEXT_BASE_F32
+    };
+    let text_values = counts.text * STASIS_RENDER_TEXT_STRIDE_F32;
+    out_f32[STASIS_RENDER_TEXT_BASE_F32..STASIS_RENDER_TEXT_BASE_F32 + text_values]
+        .copy_from_slice(&source_f32[source_text_base..source_text_base + text_values]);
     out_u8[..counts.text_bytes].copy_from_slice(&source_u8[..counts.text_bytes]);
     Ok(counts)
 }
@@ -3392,11 +3422,15 @@ pub unsafe extern "C" fn stasis_jit_render_v2_trace(
     cmd_u8_id: i32,
     cmd_u8_len: i32,
 ) -> i32 {
+    let legacy_f32_count =
+        STASIS_RENDER_LEGACY_TEXT_BASE_F32 + STASIS_RENDER_MAX_TEXT * STASIS_RENDER_TEXT_STRIDE_F32;
     if !matches!(
         cmd_i32_len as usize,
         STASIS_RENDER_V2_I32_COUNT | STASIS_RENDER_I32_COUNT
-    ) || cmd_f32_len != STASIS_RENDER_F32_COUNT as i32
-        || cmd_u8_len != STASIS_RENDER_U8_COUNT as i32
+    ) || !matches!(
+        cmd_f32_len as usize,
+        value if value == legacy_f32_count || value == STASIS_RENDER_F32_COUNT
+    ) || cmd_u8_len != STASIS_RENDER_U8_COUNT as i32
     {
         return 0;
     }
@@ -3406,23 +3440,32 @@ pub unsafe extern "C" fn stasis_jit_render_v2_trace(
     }
     let magic = *cmd_i32_header;
     let version = *cmd_i32_header.add(1);
-    let version_matches_len = matches!(
-        (version, cmd_i32_len as usize),
-        (STASIS_RENDER_V2_VERSION, STASIS_RENDER_V2_I32_COUNT)
-            | (STASIS_RENDER_VERSION, STASIS_RENDER_I32_COUNT)
-    );
-    if magic != STASIS_RENDER_MAGIC || !version_matches_len {
+    let i32_len_matches = match version {
+        STASIS_RENDER_V2_VERSION => cmd_i32_len as usize == STASIS_RENDER_V2_I32_COUNT,
+        STASIS_RENDER_V3_VERSION | STASIS_RENDER_V4_VERSION | STASIS_RENDER_VERSION => {
+            cmd_i32_len as usize == STASIS_RENDER_I32_COUNT
+        }
+        _ => false,
+    };
+    let f32_len_matches = if version >= STASIS_RENDER_VERSION {
+        cmd_f32_len as usize == STASIS_RENDER_F32_COUNT
+    } else {
+        matches!(
+            version,
+            STASIS_RENDER_V2_VERSION | STASIS_RENDER_V3_VERSION | STASIS_RENDER_V4_VERSION
+        ) && cmd_f32_len as usize == legacy_f32_count
+    };
+    if magic != STASIS_RENDER_MAGIC || !i32_len_matches || !f32_len_matches {
         return 0;
     }
     let cmd_i32 = stasis_jit_global_i32_array_ptr(cmd_i32_id, 0, cmd_i32_len);
-    let cmd_f32 = stasis_jit_global_f32_array_ptr(cmd_f32_id, 0, STASIS_RENDER_F32_COUNT as i32);
+    let cmd_f32 = stasis_jit_global_f32_array_ptr(cmd_f32_id, 0, cmd_f32_len);
     let cmd_u8 = global_u8_array_ptr(cmd_u8_id, 0, STASIS_RENDER_U8_COUNT as i32);
     if cmd_i32.is_null() || cmd_f32.is_null() || cmd_u8.is_null() {
         return 0;
     }
     stasis_render_v2_trace_native(cmd_i32, cmd_f32, cmd_u8) as i32
 }
-
 fn jit_text_buffer_is_registered(value_id: i32) -> bool {
     if jit_collection_runtime_metadata_is_registered(value_id) {
         return true;
@@ -5829,12 +5872,14 @@ mod tests {
     }
 
     #[test]
-    fn render_v2_buffers_keep_their_historical_i32_capacity() {
+    fn render_v2_buffers_keep_their_historical_capacities() {
         let _lock = test_lock();
         clear_registered_global_memory();
 
+        let legacy_f32_count = STASIS_RENDER_LEGACY_TEXT_BASE_F32
+            + STASIS_RENDER_MAX_TEXT * STASIS_RENDER_TEXT_STRIDE_F32;
         let mut i32s = vec![0i32; STASIS_RENDER_V2_I32_COUNT];
-        let mut f32s = vec![0.0f32; STASIS_RENDER_F32_COUNT];
+        let mut f32s = vec![0.0f32; legacy_f32_count];
         let mut u8s = vec![0u8; STASIS_RENDER_U8_COUNT];
         i32s[0] = STASIS_RENDER_MAGIC;
         i32s[1] = STASIS_RENDER_V2_VERSION;
@@ -5851,7 +5896,7 @@ mod tests {
         let expected =
             unsafe { stasis_render_v2_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) }
                 as i32;
-        let v2_with_current_len = unsafe {
+        let v2_with_current_lengths = unsafe {
             stasis_jit_render_v2_trace(
                 i32_id,
                 STASIS_RENDER_I32_COUNT as i32,
@@ -5861,13 +5906,13 @@ mod tests {
                 STASIS_RENDER_U8_COUNT as i32,
             )
         };
-        assert_eq!(v2_with_current_len, 0);
+        assert_eq!(v2_with_current_lengths, 0);
         let actual = unsafe {
             stasis_jit_render_v2_trace(
                 i32_id,
                 STASIS_RENDER_V2_I32_COUNT as i32,
                 f32_id,
-                STASIS_RENDER_F32_COUNT as i32,
+                legacy_f32_count as i32,
                 u8_id,
                 STASIS_RENDER_U8_COUNT as i32,
             )
@@ -5876,17 +5921,17 @@ mod tests {
         assert_eq!(actual, expected);
 
         i32s[1] = STASIS_RENDER_VERSION;
-        let v3_with_legacy_len = unsafe {
+        let v5_with_legacy_lengths = unsafe {
             stasis_jit_render_v2_trace(
                 i32_id,
                 STASIS_RENDER_V2_I32_COUNT as i32,
                 f32_id,
-                STASIS_RENDER_F32_COUNT as i32,
+                legacy_f32_count as i32,
                 u8_id,
                 STASIS_RENDER_U8_COUNT as i32,
             )
         };
-        assert_eq!(v3_with_legacy_len, 0);
+        assert_eq!(v5_with_legacy_lengths, 0);
         i32s[1] = STASIS_RENDER_V2_VERSION;
 
         let mut out_i32 = vec![0i32; STASIS_RENDER_I32_COUNT];
@@ -5896,13 +5941,12 @@ mod tests {
             .expect("copy historical v2 buffer");
         assert_eq!(counts.lines, 1);
         assert_eq!(counts.order, 0);
-        assert_eq!(out_i32[1], STASIS_RENDER_V2_VERSION);
+        assert_eq!(out_i32[1], STASIS_RENDER_VERSION);
         assert_eq!(out_i32[STASIS_RENDER_ORDER_COUNT_INDEX], 0);
         assert_eq!(&out_f32[4..12], &f32s[4..12]);
 
         clear_registered_global_memory();
     }
-
     #[test]
     fn active_render_copy_preserves_reverse_v4_rectangles() {
         let _lock = test_lock();

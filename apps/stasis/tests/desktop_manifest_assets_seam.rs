@@ -178,7 +178,7 @@ fn manifest_assets_survive_wrong_cwd_and_render_sprite_direct_and_cached_text() 
     let native = NativeAssetHarness::load(&runtime_path);
 
     let mut gfx_i32 = vec![0; 34608];
-    let mut gfx_f32 = vec![0.0; 108676];
+    let mut gfx_f32 = vec![0.0; 125060];
     let mut gfx_u8 = vec![0; 65536];
     register_global_i32_array(
         global_path_hash("gfx_cmd_i32"),

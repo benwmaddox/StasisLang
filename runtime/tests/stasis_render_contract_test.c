@@ -46,7 +46,9 @@ static void build_representative_frame(
         sizeof(rect));
 
     const int32_t sprite_i32[] = {17, 45, 192};
-    const float sprite_f32[] = {10.25f, 20.5f, 30.75f, 40.125f};
+    const float sprite_f32[] = {
+        10.25f, 20.5f, 30.75f, 40.125f, 0.25f, 0.5f, 0.75f, 1.0f
+    };
     memcpy(i32s + STASIS_RENDER_I_SPRITE_BASE, sprite_i32, sizeof(sprite_i32));
     memcpy(f32s + STASIS_RENDER_F_SPRITE_BASE, sprite_f32, sizeof(sprite_f32));
 
@@ -115,6 +117,9 @@ int main(void) {
     CHECK(first_trace == stasis_render_trace(second_i32, second_f32, second_u8));
 
     second_f32[STASIS_RENDER_F_SPRITE_BASE + 1] += 0.5f;
+    CHECK(first_trace != stasis_render_trace(second_i32, second_f32, second_u8));
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_f32[STASIS_RENDER_F_SPRITE_BASE + 4] += 0.125f;
     CHECK(first_trace != stasis_render_trace(second_i32, second_f32, second_u8));
     build_representative_frame(second_i32, second_f32, second_u8);
     second_f32[STASIS_RENDER_F_RECT_REVERSE_BASE + 2] += 0.5f;

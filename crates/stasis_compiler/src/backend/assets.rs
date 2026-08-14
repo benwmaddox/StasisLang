@@ -10,7 +10,7 @@ use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{
     parse_local_declarations, parse_string_literal_text, parse_top_level_extern_functions,
-    ParsedFunctionAnnotationArgumentKind, ParsedLocalDeclaration,
+    parse_top_level_functions, ParsedFunctionAnnotationArgumentKind, ParsedLocalDeclaration,
 };
 
 const ASSET_ANNOTATION: &str = "asset_path";
@@ -182,6 +182,27 @@ fn collect_asset_loaders(
                 );
             }
         }
+        for declaration in parse_top_level_functions(&file.content).map_err(|error| {
+            format!(
+                "failed parsing asset wrapper declarations in {}: {error}",
+                file.path
+            )
+        })? {
+            if let Some(index) = legacy_asset_parameter(&declaration.name) {
+                if declaration
+                    .params
+                    .get(index)
+                    .is_some_and(|parameter| parameter.type_name == "string")
+                {
+                    insert_loader(
+                        &mut loaders,
+                        &declaration.name,
+                        declaration.params.len(),
+                        index,
+                    );
+                }
+            }
+        }
     }
     Ok(loaders)
 }
@@ -205,7 +226,7 @@ fn legacy_asset_parameter(name: &str) -> Option<usize> {
     match name {
         "audio_load_effect" | "audio_load_music" | "audio_load_wav" | "gfx_load_sprite"
         | "load_font" => Some(0),
-        "load_sprite_from" => Some(1),
+        "load_sprite_from" | "load_sprite_sheet_from" => Some(1),
         _ => None,
     }
 }
@@ -769,6 +790,26 @@ mod tests {
                 .get("custom_load"),
             Some(&vec![AssetLoader {
                 parameter_count: 2,
+                path_parameter: 1,
+            }])
+        );
+    }
+
+    #[test]
+    fn built_in_wrapper_metadata_uses_the_path_parameter() {
+        let source = "function load_sprite_sheet_from(self: i32, path: string, columns: i32): bool { return columns > 0; }";
+        let files = vec![SourceFile {
+            path: "custom.stasis".into(),
+            content: source.into(),
+            hash: 0,
+            functions: Vec::new(),
+        }];
+        assert_eq!(
+            collect_asset_loaders(&files)
+                .expect("wrapper metadata")
+                .get("load_sprite_sheet_from"),
+            Some(&vec![AssetLoader {
+                parameter_count: 3,
                 path_parameter: 1,
             }])
         );

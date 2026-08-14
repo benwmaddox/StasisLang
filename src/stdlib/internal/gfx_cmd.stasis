@@ -1,6 +1,6 @@
 import "../stdlib.stasis";
 
-// Graphics command buffer (v4)
+// Graphics command buffer (v5)
 //
 // Policy:
 // - Ordering: line, rectangle, sprite, and text calls append to one bounded order stream.
@@ -10,7 +10,7 @@ import "../stdlib.stasis";
 
 const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 
-const GFX_CMD_VERSION: i32 = 4;
+const GFX_CMD_VERSION: i32 = 5;
 
 // i32 header indices
 const GFX_I_MAGIC: i32 = 0;
@@ -57,8 +57,8 @@ const GFX_LINE_STRIDE_F32: i32 = 8;
 const GFX_MAX_SPRITES: i32 = 4096;
 const GFX_SPRITE_STRIDE_I32: i32 = 3; // handle,rot_deg,a
 
-const GFX_SPRITE_STRIDE_F32: i32 = 4; // x,y,w,h
-
+// x,y,w,h,u0,v0,u1,v1. UVs are normalized source coordinates.
+const GFX_SPRITE_STRIDE_F32: i32 = 8;
 const GFX_MAX_TEXT: i32 = 2048;
 const GFX_TEXT_STRIDE_I32: i32 = 3; // font, byte_offset, byte_len
 
@@ -80,16 +80,16 @@ const GFX_F_CLEAR_A: i32 = 3;
 const GFX_F_LINE_BASE: i32 = 4;
 const GFX_F_SPRITE_BASE: i32 = 80004;
 const GFX_F_RECT_REVERSE_BASE: i32 = 79996;
-const GFX_F_TEXT_BASE: i32 = 96388;
+const GFX_F_TEXT_BASE: i32 = 112772;
 
 // NOTE: Array sizes must be integer literals in Stasis today.
 // Keep these in sync with the constants above:
 // - i32 count = 32 + (4096*3) + (2048*3) + 16144 = 34608
-// - f32 count = 4 + (10000*8) + (4096*4) + (2048*6) = 108676
+// - f32 count = 4 + (10000*8) + (4096*8) + (2048*6) = 125060
 const GFX_I_TEXT_BASE: i32 = 12320;
 
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_f32: f32[125060];
 global gfx_cmd_u8: u8[65536];
 
 // Begin a new frame, resetting all counts (typical immediate-mode usage).
@@ -197,15 +197,10 @@ function gfx_cmd_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a:
 
 function gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
     let i: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
-    if (i >= GFX_MAX_SPRITES) {
+    if (i >= GFX_MAX_SPRITES || !gfx_cmd_append_order(GFX_ORDER_SPRITE, i)) {
         gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] + 1;
         return;
     }
-    if (!gfx_cmd_append_order(GFX_ORDER_SPRITE, i)) {
-        gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] + 1;
-        return;
-    }
-
     let base_i: i32 = GFX_I_SPRITE_BASE + i * GFX_SPRITE_STRIDE_I32;
     let base_f: i32 = GFX_F_SPRITE_BASE + i * GFX_SPRITE_STRIDE_F32;
     gfx_cmd_i32[base_i + 0] = handle;
@@ -215,8 +210,26 @@ function gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i3
     gfx_cmd_f32[base_f + 1] = y;
     gfx_cmd_f32[base_f + 2] = w;
     gfx_cmd_f32[base_f + 3] = h;
-
+    gfx_cmd_f32[base_f + 4] = 0.0;
+    gfx_cmd_f32[base_f + 5] = 0.0;
+    gfx_cmd_f32[base_f + 6] = 1.0;
+    gfx_cmd_f32[base_f + 7] = 1.0;
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = i + 1;
+}
+
+function gfx_cmd_set_last_sprite_uv(u0: f32, v0: f32, u1: f32, v1: f32): void {
+    if (u0 < 0.0 || v0 < 0.0 || u1 > 1.0 || v1 > 1.0 || u0 >= u1 || v0 >= v1) {
+        return;
+    }
+    let count: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
+    if (count <= 0 || count > GFX_MAX_SPRITES) {
+        return;
+    }
+    let base_f: i32 = GFX_F_SPRITE_BASE +(count - 1) * GFX_SPRITE_STRIDE_F32;
+    gfx_cmd_f32[base_f + 4] = u0;
+    gfx_cmd_f32[base_f + 5] = v0;
+    gfx_cmd_f32[base_f + 6] = u1;
+    gfx_cmd_f32[base_f + 7] = v1;
 }
 
 function gfx_cmd_set_sprite_at(index: i32, handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
@@ -232,6 +245,10 @@ function gfx_cmd_set_sprite_at(index: i32, handle: i32, x: f32, y: f32, w: f32, 
     gfx_cmd_f32[base_f + 1] = y;
     gfx_cmd_f32[base_f + 2] = w;
     gfx_cmd_f32[base_f + 3] = h;
+    gfx_cmd_f32[base_f + 4] = 0.0;
+    gfx_cmd_f32[base_f + 5] = 0.0;
+    gfx_cmd_f32[base_f + 6] = 1.0;
+    gfx_cmd_f32[base_f + 7] = 1.0;
 }
 
 function gfx_cmd_lines_from(lines: f32[], count: i32): void {
