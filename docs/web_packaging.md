@@ -54,9 +54,9 @@ buffers, matching Android/Windows. Browser policy (fullscreen gestures, Clipboar
 storage, and WebAudio unlocking) remains in JavaScript.
 
 Development packages show a HUD with current and worst observed `tick` and `render` time; both must
-remain below 16 ms. Release packages omit the performance HUD. Browser audio is unlocked by the
-**Enable sound** user gesture; subsequent
-`web_play_tone` calls originate in Stasis game logic.
+remain below 16 ms. Release packages omit the performance HUD. Browser audio is requested
+immediately and retried on the first pointer or keyboard gesture when autoplay policy initially
+suspends it; subsequent `web_play_tone` calls originate in Stasis game logic.
 
 ## Current compiler and host lane
 
@@ -70,8 +70,8 @@ The browser reads the existing `gfx_cmd_i32`, `gfx_cmd_f32`, and `gfx_cmd_u8` co
 keeps clear, line, rectangle, ordered sprite, and cached/dynamic text rendering on the same guest ABI
 as desktop/mobile. Release asset validation and preparation retain only reachable manifest assets;
 PNG, SVG, TTF, WAV, and MP3 files are placed under `assets/` and loaded as external package files.
-WebAudio playback requested during `main()` is queued until the required user
-gesture unlocks the audio context.
+WebAudio playback requested during `main()` is queued until the audio context starts or a user
+gesture unlocks it.
 
 Release Wasm exports lifecycle/host-access functions and memory, but keeps Stasis globals private.
 Development packages additionally export globals and full reachable function names for diagnostics;
@@ -79,9 +79,21 @@ release export names remain in the Wasm export section while `wasm-opt` may disc
 custom name section. Called overload families that cannot be selected from HIR identity still fail
 with deterministic diagnostics.
 
+Web packaging carries the reachable Wasm import set into host linking. Scalar games that use only
+the direct canvas/math/print bridge receive a small generated JavaScript host containing exactly
+those imported functions. Games using the shared graphics buffers retain the full renderer, while
+audio declarations, helpers, imports, and the sound-unlock UI are removed unless a reachable
+function imports audio. JIT and AOT continue to use the same function-reachability closure before
+backend emission, so unreachable Stasis functions are excluded consistently across targets.
+
 `samples/web_export_smoke` is the end-to-end acceptance project. It verifies compiled movement,
 keyboard and pointer input, Canvas rendering, a Stasis-triggered WebAudio tone, the performance HUD,
 and the static package layout.
+
+`samples/pong_web_minimal` is the dependency-linking acceptance project. It is an autonomous Pong
+game drawn only with canvas rectangles and text. It intentionally declares unreachable audio and
+keyboard helpers; package tests require those helpers and host functions to be absent from both
+`game.wasm` and `game.js`, and require the sound UI to be absent from `index.html`.
 
 The existing `samples/windows_launch_smoke` and `samples/audio_asset_playback` fixtures are also web
 package gates. Together they cover the shared graphics command buffers, PNG/SVG/font assets, and
@@ -124,3 +136,17 @@ Emitter cleanup reflection:
 Theory gained: for a nonnegative collection length, `index >=u length` is exactly the union of
 `index < 0` and `index >=s length`. Together with grouped local declarations and proven terminal
 returns, this reduces the guest before Binaryen without creating a second semantic pipeline.
+
+Function-level host-linking reflection (2026-08-15):
+
+- Good: reusing the Wasm emitter's reachable import set made browser host selection a direct linker
+  decision instead of a second source scanner.
+- Bad: the original static browser host mixed optional audio policy with mandatory frame/render
+  policy, so dead guest functions were removed while their JavaScript support remained.
+- Adjustment: optional browser capability blocks must be keyed from reachable imports, with an
+  end-to-end sample that contains deliberately unreachable feature calls.
+
+Theory gained: a target package is only as dependency-aware as both sides of its ABI. Reachable HIR
+selects guest functions and imports; carrying that same import set into host linking removes unused
+browser policy without inventing target-specific reachability. An adjacent prediction is that
+storage, clipboard, and sprite/font support can move behind the same import-keyed host blocks.

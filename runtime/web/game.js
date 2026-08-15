@@ -13,6 +13,7 @@
   const cachedText = new Map();
   let nextHandle = 1;
   let instance;
+  // @stasis-feature audio begin
   let audioContext;
   let audioEnablePromise;
   let audioEvents = 0;
@@ -24,6 +25,7 @@
   const audioAssets = new Map();
   const audioVoices = new Map();
   const pendingAudio = [];
+  // @stasis-feature audio end
   const assetTasks = new Map();
   let nextAssetTask = 1;
   const volatileStorage = new Map();
@@ -110,19 +112,6 @@
     font.load().then(loaded => document.fonts.add(loaded)).catch(error => console.error(error));
     return handle;
   };
-  const ensureAudio = () => {
-    audioContext ||= new AudioContext();
-    return audioContext;
-  };
-  const loadAudio = pathId => {
-    const handle = nextHandle++;
-    const uri = assetValue(pathId);
-    const decoded = fetch(uri)
-      .then(response => response.arrayBuffer())
-      .then(bytes => ensureAudio().decodeAudioData(bytes));
-    audioAssets.set(handle, decoded);
-    return handle;
-  };
   const requestSprite = pathId => {
     const task = nextAssetTask++;
     const handle = nextHandle++;
@@ -135,6 +124,20 @@
     image.src = assetValue(pathId);
     sprites.set(handle, image);
     return task;
+  };
+  // @stasis-feature audio begin
+  const ensureAudio = () => {
+    audioContext ||= new AudioContext();
+    return audioContext;
+  };
+  const loadAudio = pathId => {
+    const handle = nextHandle++;
+    const uri = assetValue(pathId);
+    const decoded = fetch(uri)
+      .then(response => response.arrayBuffer())
+      .then(bytes => ensureAudio().decodeAudioData(bytes));
+    audioAssets.set(handle, decoded);
+    return handle;
   };
   const requestAudio = pathId => {
     const task = nextAssetTask++;
@@ -151,14 +154,6 @@
       })
       .catch(() => { if (entry.state < 3) entry.state = 4; });
     return task;
-  };
-  const cancelAssetTask = task => {
-    const entry = assetTasks.get(task);
-    if (!entry) return;
-    entry.state = 5;
-    if (entry.kind === "sprite") sprites.delete(entry.handle);
-    else audioAssets.delete(entry.handle);
-    assetTasks.delete(task);
   };
   const startAudio = (handle, loop, volume) => {
     const start = async () => {
@@ -280,6 +275,15 @@
     else void start();
     return frameCount;
   };
+  // @stasis-feature audio end
+  const cancelAssetTask = task => {
+    const entry = assetTasks.get(task);
+    if (!entry) return;
+    entry.state = 5;
+    if (entry.kind === "sprite") sprites.delete(entry.handle);
+    else audioAssets.delete(entry.handle);
+    assetTasks.delete(task);
+  };
   const imports = { env: {
     sin_fast: value => Math.sin(value),
     cos_fast: value => Math.cos(value),
@@ -294,6 +298,7 @@
     web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },
     web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),
     web_draw_text: (x, y, value) => commands.push([2, x, y, value]),
+    // @stasis-feature audio begin
     web_play_tone: (frequency, durationMs) => {
       if (!audioContext || audioContext.state !== "running") return;
       const oscillator = audioContext.createOscillator();
@@ -308,10 +313,13 @@
       audioEvents += 1;
       document.body.dataset.audioEvents = String(audioEvents);
     },
+    // @stasis-feature audio end
     gfx_load_sprite: pathId => loadSprite(pathId),
     stasis_gfx_load_sprite: pathId => loadSprite(pathId),
     stasis_jit_asset_request_sprite: pathId => requestSprite(pathId),
+    // @stasis-feature audio begin
     stasis_jit_asset_request_audio: pathId => requestAudio(pathId),
+    // @stasis-feature audio end
     stasis_jit_asset_task_poll: task => assetTasks.get(task)?.state || 0,
     stasis_jit_asset_task_take_handle: task => {
       const entry = assetTasks.get(task);
@@ -363,6 +371,7 @@
       if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(clipboardText).catch(() => {});
       return 1;
     },
+    // @stasis-feature audio begin
     audio_init: (sampleRate, channels) => {
       audioSampleRate = Math.max(8000, Math.min(sampleRate || 48000, 192000));
       audioChannels = Math.max(1, Math.min(channels || 2, 2));
@@ -409,12 +418,14 @@
     stasis_jit_audio_set_music_volume: (handle, volume) => {
       const voice = audioVoices.get(handle);
       if (voice) voice.gain.gain.value = Math.max(0, Math.min(1, volume));
-    }
+    },
+    // @stasis-feature audio end
   }};
 
   document.addEventListener("paste", event => {
     clipboardText = event.clipboardData?.getData("text/plain") || clipboardText;
   });
+  // @stasis-feature audio begin
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) suspendWebAudio();
     else resumeWebAudio();
@@ -426,6 +437,7 @@
   addEventListener("pageshow", event => {
     if (event.persisted && !document.hidden) resumeWebAudio();
   });
+  // @stasis-feature audio end
 
   function executeCommands() {
     for (const command of commands) {
@@ -744,13 +756,17 @@
   }
   addEventListener("keydown", event => {
     keys.add(event.code);
+    // @stasis-feature audio begin
     void enableWebAudio();
+    // @stasis-feature audio end
     void applyFullscreenGesture();
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(event.code)) event.preventDefault();
   });
   addEventListener("keyup", event => { keys.delete(event.code); void applyFullscreenGesture(); });
   canvas.addEventListener("pointermove", updatePointer);
+  // @stasis-feature audio begin
   addEventListener("pointerdown", () => { void enableWebAudio(); }, { passive: true });
+  // @stasis-feature audio end
   canvas.addEventListener("pointerdown", event => {
     updatePointer(event);
     pointer.down = true;
@@ -767,7 +783,9 @@
   canvas.addEventListener("pointercancel", () => { pointer.down = false; pointer.wentUp = true; });
   addEventListener("resize", () => { resized = true; displayGeneration += 1; });
   document.addEventListener("fullscreenchange", () => { resized = true; displayGeneration += 1; });
+  // @stasis-feature audio begin
   void enableWebAudio();
+  // @stasis-feature audio end
 
   async function wasmBytes() {
     const response = await fetch("game.wasm");

@@ -728,6 +728,7 @@ Archived priority override (2026-02-13, historical):
 - local `foreach` over fixed-size local array bindings
 - `for` headers require `init`, `condition`, and `step` segments (no missing-segment forms such as `for (; cond; step)`).
 - Reachability-gated emission now compiles roots (`main`, `tick`, `render`, `on_code_swap`) plus reachable callees; same-name overload siblings are included to preserve receiver overload behavior.
+- Web packages now carry the reachable Wasm import set into JavaScript host linking: direct scalar/vector games receive an exact small host, audio support/UI is omitted without reachable audio imports, and `samples/pong_web_minimal` verifies unreachable audio/input dependencies are absent from both outputs.
 - Non-engine JIT contract assembly now consumes only emitted symbol code pointers (unemitted, unreachable functions are excluded from override patch emission).
 - Host memory intrinsics used by stdlib/gfx paths are now real externs with Rust-native bindings:
 - `sys_memcpy_u8/i32/f32`

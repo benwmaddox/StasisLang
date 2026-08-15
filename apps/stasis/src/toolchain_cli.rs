@@ -3641,6 +3641,7 @@ fn package_workspace(
 
 const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
 const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
+const WEB_MINIMAL_RUNTIME_JS: &str = include_str!("../../../runtime/web/game_minimal.js");
 
 struct WebWasmArtifact {
     bytes: Vec<u8>,
@@ -3804,7 +3805,11 @@ fn package_web_workspace(
         let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
             .replace("</", "<\\/");
-        let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{WEB_RUNTIME_JS}");
+        let audio_enabled = process.imported_symbols().iter().any(|symbol| {
+            symbol.starts_with("audio_") || symbol.contains("_audio_") || symbol == "web_play_tone"
+        });
+        let linked_runtime = link_web_runtime(&process, audio_enabled);
+        let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
@@ -3916,6 +3921,64 @@ fn web_index_html(title: &str, development_build: bool) -> String {
         .replace("__STASIS_GAME_TITLE__", title)
         .replace("__STASIS_PERFORMANCE_HUD_STYLE__", hud_style)
         .replace("__STASIS_PERFORMANCE_HUD__", hud)
+}
+
+fn lean_web_runtime(process: &WasmProcess) -> Option<String> {
+    if WEB_RUNTIME_BUFFERS
+        .iter()
+        .any(|path| process.memory_layout().contains_key(*path))
+        || WEB_HOST_GLOBALS
+            .iter()
+            .any(|path| process.global_types().contains_key(*path))
+    {
+        return None;
+    }
+    let snippets = BTreeMap::from([
+        ("cos_fast", "    cos_fast: value => Math.cos(value),"),
+        ("print_char", "    print_char: value => console.log(String.fromCodePoint(value)),"),
+        ("print_i32", "    print_i32: value => console.log(value),"),
+        ("print_int", "    print_int: value => console.log(value),"),
+        ("print_string", "    print_string: value => console.log(stringValue(value)),"),
+        ("sin_fast", "    sin_fast: value => Math.sin(value),"),
+        ("web_begin_frame", "    web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },"),
+        ("web_draw_rect", "    web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),"),
+        ("web_draw_text", "    web_draw_text: (x, y, value) => commands.push([2, x, y, value]),"),
+    ]);
+    let imports = process
+        .imported_symbols()
+        .iter()
+        .map(|symbol| snippets.get(symbol.as_str()).copied())
+        .collect::<Option<Vec<_>>>()?;
+    Some(WEB_MINIMAL_RUNTIME_JS.replace("__STASIS_IMPORTS__", &imports.join("\n")))
+}
+
+fn link_web_runtime(process: &WasmProcess, audio_enabled: bool) -> String {
+    if let Some(runtime) = lean_web_runtime(process) {
+        return runtime;
+    }
+    strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled)
+}
+
+fn strip_web_runtime_feature(source: &str, feature: &str, enabled: bool) -> String {
+    let begin = format!("// @stasis-feature {feature} begin");
+    let end = format!("// @stasis-feature {feature} end");
+    let mut inside = false;
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed == begin {
+                inside = true;
+                return None;
+            }
+            if trimmed == end {
+                inside = false;
+                return None;
+            }
+            (enabled || !inside).then_some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // Keep these aligned with the metadata reads in runtime/web/game.js. Development
@@ -5764,6 +5827,22 @@ mod tests {
         let development = web_index_html("development-game", true);
         assert!(development.contains(r#"id="stasis-hud""#));
         assert!(!development.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn lean_web_runtime_defers_window_mailbox_games_to_full_host() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        process.upsert_file(
+            "window.stasis",
+            "global host_req_seq: i32; global host_req_flags: i32; global host_req_window_w_px: i32; global host_req_window_h_px: i32; function main(): i32 { host_req_flags = 1; host_req_window_w_px = 640; host_req_window_h_px = 360; host_req_seq += 1; return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile window mailbox game");
+        assert!(lean_web_runtime(&process).is_none());
     }
 
     #[test]
