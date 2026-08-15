@@ -13,11 +13,7 @@ struct AssetTask {
     state: i32;
 }
 
-function @extern("stasis_jit_asset_request_sprite") asset_request_sprite(
-    path: string,
-    width: i32,
-    height: i32
-): i32;
+function @extern("stasis_jit_asset_request_sprite") asset_request_sprite(path: string, width: i32, height: i32): i32;
 function @extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
 function @extern("stasis_jit_asset_task_poll") asset_task_poll(request: i32): i32;
 function @extern("stasis_jit_asset_task_take_handle") asset_task_take_handle(request: i32): i32;

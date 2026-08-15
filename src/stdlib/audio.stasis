@@ -1,4 +1,5 @@
 @link("stasis_graphics");
+
 import "graphics.stasis";
 
 struct AudioAsset {
