@@ -32,6 +32,10 @@ not publish a partial app project.
 }
 ```
 
+`orientation` accepts `unspecified`, `sensorLandscape`, `sensorPortrait`, or
+Android's `fullSensor`. Use `fullSensor` when the app owns responsive logical
+canvases for all four physical device rotations.
+
 Each output contains the same pieces:
 
 - `aot/`: target-native game objects, generated entry bindings, ABI metadata

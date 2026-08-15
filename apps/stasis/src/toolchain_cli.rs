@@ -713,10 +713,10 @@ impl ProjectManifest {
             }
             if !matches!(
                 android.orientation.as_str(),
-                "unspecified" | "sensorLandscape" | "sensorPortrait"
+                "unspecified" | "sensorLandscape" | "sensorPortrait" | "fullSensor"
             ) {
                 return Err(
-                    "android orientation must be unspecified, sensorLandscape, or sensorPortrait"
+                    "android orientation must be unspecified, sensorLandscape, sensorPortrait, or fullSensor"
                         .to_string(),
                 );
             }
@@ -7005,7 +7005,7 @@ mod tests {
                 android: Some(AndroidProjectManifest {
                     application_id: "com.example.mobile".to_string(),
                     label: "Mobile Smoke".to_string(),
-                    orientation: "sensorPortrait".to_string(),
+                    orientation: "fullSensor".to_string(),
                     version_code: 7,
                     version_name: "2.1.0".to_string(),
                 }),
@@ -7042,7 +7042,7 @@ mod tests {
             fs::read_to_string(android.join("android/app/src/main/AndroidManifest.xml"))
                 .expect("read Android manifest");
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
-        assert!(android_manifest.contains("android:screenOrientation=\"sensorPortrait\""));
+        assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
             .expect("read shared mobile main");
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
@@ -7235,6 +7235,21 @@ mod tests {
             ..ProjectManifest::new("example_game".to_string())
         };
         assert!(valid.validate().is_ok());
+
+        for orientation in [
+            "unspecified",
+            "sensorLandscape",
+            "sensorPortrait",
+            "fullSensor",
+        ] {
+            let mut oriented = valid.clone();
+            oriented.android.as_mut().unwrap().orientation = orientation.to_string();
+            assert!(oriented.validate().is_ok(), "rejected {orientation}");
+        }
+
+        let mut invalid_orientation = valid.clone();
+        invalid_orientation.android.as_mut().unwrap().orientation = "sensor".to_string();
+        assert!(invalid_orientation.validate().is_err());
 
         for application_id in ["game", "com.example.bad-name", "com.1game"] {
             let mut invalid = valid.clone();
