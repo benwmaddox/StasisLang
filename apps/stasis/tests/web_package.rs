@@ -139,7 +139,7 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
 }
 
 #[test]
-fn minimal_pong_omits_unreachable_audio_and_input_from_wasm_and_js() {
+fn minimal_pong_and_standard_reference_omit_audio_and_input() {
     let workspace = repo_root().join("samples/pong_web_minimal");
     let relative_output = PathBuf::from(format!("build/web-package-test-{}", stamp()));
     let output = package(&workspace, &relative_output);
@@ -177,6 +177,34 @@ fn minimal_pong_omits_unreachable_audio_and_input_from_wasm_and_js() {
         "minimal runtime was {} bytes",
         runtime.len()
     );
+
+    let standard = repo_root().join("samples/pong_web_standard");
+    let standard_runtime =
+        fs::read_to_string(standard.join("game.js")).expect("standard Pong runtime");
+    let standard_index =
+        fs::read_to_string(standard.join("index.html")).expect("standard Pong index");
+    for omitted in ["AudioContext", "keydown", "pointerdown"] {
+        assert!(
+            !standard_runtime.contains(omitted),
+            "standard JS retained {omitted}"
+        );
+        assert!(
+            !standard_index.contains(omitted),
+            "standard HTML retained {omitted}"
+        );
+    }
+    for expected in [
+        "requestAnimationFrame(frame)",
+        "context.fillRect",
+        "context.fillText",
+        "SCREEN_WIDTH = 640",
+        "SCREEN_HEIGHT = 360",
+    ] {
+        assert!(
+            standard_runtime.contains(expected),
+            "standard JS missing {expected}"
+        );
+    }
 
     fs::remove_dir_all(&output).expect("clean minimal Pong package");
 }

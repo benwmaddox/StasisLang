@@ -95,6 +95,10 @@ game drawn only with canvas rectangles and text. It intentionally declares unrea
 keyboard helpers; package tests require those helpers and host functions to be absent from both
 `game.wasm` and `game.js`, and require the sound UI to be absent from `index.html`.
 
+`samples/pong_web_standard` is an idiomatic, plain HTML and JavaScript implementation of the same
+gameplay and presentation. It provides a direct size and behavior comparison for the Stasis web
+package without adding audio, input, image, font, or framework dependencies.
+
 The existing `samples/windows_launch_smoke` and `samples/audio_asset_playback` fixtures are also web
 package gates. Together they cover the shared graphics command buffers, PNG/SVG/font assets, and
 decoded WAV/MP3 WebAudio playback.
