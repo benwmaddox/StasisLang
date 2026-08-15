@@ -202,6 +202,41 @@ fn collect_asset_loaders(
                     );
                 }
             }
+            for annotation in declaration
+                .annotations
+                .iter()
+                .filter(|annotation| annotation.name == ASSET_ANNOTATION)
+            {
+                if !annotation.has_parentheses || annotation.arguments.len() != 1 {
+                    return Err(format!(
+                        "@asset_path on '{}' must name exactly one path parameter",
+                        declaration.name
+                    ));
+                }
+                let argument = &annotation.arguments[0];
+                if argument.kind != ParsedFunctionAnnotationArgumentKind::Identifier {
+                    return Err(format!(
+                        "@asset_path on '{}' must use a parameter name",
+                        declaration.name
+                    ));
+                }
+                let index = declaration
+                    .params
+                    .iter()
+                    .position(|parameter| parameter.name == argument.text)
+                    .ok_or_else(|| {
+                        format!(
+                            "@asset_path on '{}' names unknown parameter '{}'",
+                            declaration.name, argument.text
+                        )
+                    })?;
+                insert_loader(
+                    &mut loaders,
+                    &declaration.name,
+                    declaration.params.len(),
+                    index,
+                );
+            }
         }
     }
     Ok(loaders)
