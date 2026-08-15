@@ -528,6 +528,17 @@ def dismiss_system_dialog_action(adb: Path, serial: str | None) -> bool:
         root = ET.fromstring(hierarchy[start : end + len("</hierarchy>")])
     except ET.ParseError:
         return False
+    system_anr_titles = {
+        "Pixel Launcher isn't responding",
+        "System UI isn't responding",
+    }
+    alert_titles = {
+        node.attrib.get("text", "")
+        for node in root.iter("node")
+        if node.attrib.get("resource-id", "") == "android:id/alertTitle"
+    }
+    if system_anr_titles.isdisjoint(alert_titles):
+        return False
     actions = {
         node.attrib.get("text", ""): node.attrib.get("bounds", "")
         for node in root.iter("node")
@@ -629,8 +640,8 @@ def capture_until_regions_match(
             # Android 15 may layer a launcher ANR above the focused test
             # activity without reporting AppNotRespondingDialog through
             # dumpsys window. Only inspect the UI hierarchy after a capture
-            # mismatch, then dismiss a known system action and restore the
-            # test activity before trying the framebuffer again.
+            # mismatch, then dismiss a verified launcher/System UI ANR and
+            # restore the test activity before trying the framebuffer again.
             if dismiss_system_dialog_action(adb, serial):
                 _run(
                     adb,

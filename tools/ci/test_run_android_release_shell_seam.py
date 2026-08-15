@@ -181,7 +181,10 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
                 return (
                     "UI hierarchy dumped\n<?xml version='1.0' encoding='UTF-8' "
-                    "standalone='yes'?><hierarchy><node text=\"Close app\" "
+                    "standalone='yes'?><hierarchy><node "
+                    "resource-id=\"android:id/alertTitle\" "
+                    "text=\"Pixel Launcher isn't responding\" />"
+                    "<node text=\"Close app\" "
                     "bounds=\"[120,600][420,720]\" /></hierarchy>"
                 )
             return ""
@@ -219,6 +222,8 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
                 return (
                     "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node resource-id=\"android:id/alertTitle\" "
+                    "text=\"System UI isn't responding\" />"
                     "<node text=\"Close app\" bounds=\"[120,600][420,720]\" />"
                     "<node text=\"Wait\" bounds=\"[120,720][420,840]\" />"
                     "</hierarchy>"
@@ -250,6 +255,8 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
                 return (
                     "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node resource-id=\"android:id/alertTitle\" "
+                    "text=\"Pixel Launcher isn't responding\" />"
                     "<node text=\"Close app\" bounds=\"[120,600][420,720]\" />"
                     "</hierarchy>"
                 )
@@ -287,6 +294,27 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             ),
             calls,
         )
+
+    def test_dialog_action_does_not_hide_product_anr(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+                return (
+                    "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node resource-id=\"android:id/alertTitle\" "
+                    "text=\"Stasis Android Seam isn't responding\" />"
+                    "<node text=\"Wait\" bounds=\"[120,720][420,840]\" />"
+                    "</hierarchy>"
+                )
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            dismissed = seam.dismiss_system_dialog_action(Path("adb"), "device")
+
+        self.assertFalse(dismissed)
+        self.assertNotIn(("shell", "input", "tap", "270", "780"), calls)
 
     def test_capture_mismatch_dismisses_undetected_system_dialog(self):
         calls = []
