@@ -626,6 +626,23 @@ def capture_until_regions_match(
             return validate_regions(capture, expectations)
         except SeamError as error:
             last_error = error
+            # Android 15 may layer a launcher ANR above the focused test
+            # activity without reporting AppNotRespondingDialog through
+            # dumpsys window. Only inspect the UI hierarchy after a capture
+            # mismatch, then dismiss a known system action and restore the
+            # test activity before trying the framebuffer again.
+            if dismiss_system_dialog_action(adb, serial):
+                _run(
+                    adb,
+                    serial,
+                    "shell",
+                    "am",
+                    "start",
+                    "-W",
+                    "-n",
+                    component,
+                    required=False,
+                )
             time.sleep(0.25)
     if last_error is not None:
         raise last_error
