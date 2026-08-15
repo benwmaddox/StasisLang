@@ -181,7 +181,10 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
                 return (
                     "UI hierarchy dumped\n<?xml version='1.0' encoding='UTF-8' "
-                    "standalone='yes'?><hierarchy><node text=\"Close app\" "
+                    "standalone='yes'?><hierarchy><node "
+                    "resource-id=\"android:id/alertTitle\" "
+                    "text=\"Pixel Launcher isn't responding\" />"
+                    "<node text=\"Close app\" "
                     "bounds=\"[120,600][420,720]\" /></hierarchy>"
                 )
             return ""
@@ -219,6 +222,8 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
                 return (
                     "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node resource-id=\"android:id/alertTitle\" "
+                    "text=\"System UI isn't responding\" />"
                     "<node text=\"Close app\" bounds=\"[120,600][420,720]\" />"
                     "<node text=\"Wait\" bounds=\"[120,720][420,840]\" />"
                     "</hierarchy>"
@@ -250,6 +255,8 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
                 return (
                     "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node resource-id=\"android:id/alertTitle\" "
+                    "text=\"Pixel Launcher isn't responding\" />"
                     "<node text=\"Close app\" bounds=\"[120,600][420,720]\" />"
                     "</hierarchy>"
                 )
@@ -276,6 +283,76 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             ),
             calls,
         )
+        self.assertIn(
+            (
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-n",
+                "com.example.seam/.MainActivity",
+            ),
+            calls,
+        )
+
+    def test_dialog_action_does_not_hide_product_anr(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+                return (
+                    "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node resource-id=\"android:id/alertTitle\" "
+                    "text=\"Stasis Android Seam isn't responding\" />"
+                    "<node text=\"Wait\" bounds=\"[120,720][420,840]\" />"
+                    "</hierarchy>"
+                )
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            dismissed = seam.dismiss_system_dialog_action(Path("adb"), "device")
+
+        self.assertFalse(dismissed)
+        self.assertNotIn(("shell", "input", "tap", "270", "780"), calls)
+
+    def test_capture_mismatch_dismisses_undetected_system_dialog(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("exec-out", "screencap", "-p"):
+                return b"capture"
+            return ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "frame.png"
+            with (
+                mock.patch.object(seam, "_run", side_effect=fake_run),
+                mock.patch.object(
+                    seam, "ensure_test_activity_foreground", return_value=False
+                ),
+                mock.patch.object(
+                    seam, "validate_regions",
+                    side_effect=[seam.SeamError("covered"), [{"name": "red"}]],
+                ),
+                mock.patch.object(
+                    seam, "dismiss_system_dialog_action", return_value=True
+                ) as dismiss,
+                mock.patch.object(seam.time, "sleep"),
+            ):
+                observed = seam.capture_until_regions_match(
+                    Path("adb"),
+                    "device",
+                    capture,
+                    {"logical_size": [640, 360], "regions": []},
+                    seam.time.monotonic() + 5,
+                    "com.example.seam",
+                    "com.example.seam/.MainActivity",
+                )
+
+        self.assertEqual(observed, [{"name": "red"}])
+        dismiss.assert_called_once_with(Path("adb"), "device")
         self.assertIn(
             (
                 "shell",
