@@ -182,7 +182,6 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 return (
                     "UI hierarchy dumped\n<?xml version='1.0' encoding='UTF-8' "
                     "standalone='yes'?><hierarchy><node "
-                    "resource-id=\"android:id/alertTitle\" "
                     "text=\"Pixel Launcher isn't responding\" />"
                     "<node text=\"Close app\" "
                     "bounds=\"[120,600][420,720]\" /></hierarchy>"

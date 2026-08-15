@@ -535,7 +535,6 @@ def dismiss_system_dialog_action(adb: Path, serial: str | None) -> bool:
     alert_titles = {
         node.attrib.get("text", "")
         for node in root.iter("node")
-        if node.attrib.get("resource-id", "") == "android:id/alertTitle"
     }
     if system_anr_titles.isdisjoint(alert_titles):
         return False
