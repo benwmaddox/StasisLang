@@ -816,6 +816,27 @@ mod tests {
     }
 
     #[test]
+    fn annotated_asset_task_wrapper_owns_packaging_for_its_raw_host_call() {
+        let source = r#"
+function @extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
+function @asset_path(path) request_audio_load(path: string): i32 {
+    return asset_request_audio(path);
+}
+function main(): i32 { return request_audio_load("assets/voice.mp3"); }
+"#;
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile().expect("compile asset task wrapper fixture");
+        let references = jit.program_snapshot().expect("snapshot").asset_references();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].api, "request_audio_load");
+        assert_eq!(
+            references[0].logical_path.as_deref(),
+            Some("assets/voice.mp3")
+        );
+    }
+
+    #[test]
     fn snapshot_discovers_only_reachable_annotated_asset_calls() {
         let source = r#"
 extern function @asset_path(path) load_font(path: string, size: i32): i32;

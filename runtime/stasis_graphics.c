@@ -283,6 +283,8 @@ STASIS_EXPORT int stasis_host_performance_metrics_enabled(void);
 STASIS_EXPORT void stasis_host_set_performance_metrics_enabled(int enabled);
 STASIS_EXPORT int stasis_set_fullscreen(int fullscreen);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, float x, float y, float w, float h, int rot_degrees, int a);
+STASIS_EXPORT void stasis_gfx_release_sprite(int handle);
+STASIS_EXPORT void stasis_audio_release(int asset_handle);
 STASIS_EXPORT void stasis_gfx_submit_u8(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
 STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int32_t capacity);
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
@@ -299,6 +301,7 @@ static void stasis_reset_text_cache(void);
 static void stasis_invalidate_renderer_resources(int discard_gpu_handles);
 static int stasis_restore_renderer_resources(void);
 static void stasis_present_gpu_loading(void);
+static void stasis_asset_tasks_shutdown(void);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -349,6 +352,42 @@ static int g_sprite_max_dimension = -1;
 static int g_sprite_max_pixels = -1;
 static int g_sprite_max_file_bytes = -1;
 static SpriteEntry g_sprite_fallback;
+
+#define STASIS_ASSET_TASK_CAPACITY 64
+#define STASIS_ASSET_TASK_NONE 0
+#define STASIS_ASSET_TASK_PENDING 1
+#define STASIS_ASSET_TASK_LOADING 2
+#define STASIS_ASSET_TASK_LOADED 3
+#define STASIS_ASSET_TASK_FAILED 4
+#define STASIS_ASSET_TASK_CANCELLED 5
+#define STASIS_ASSET_TASK_DECODED 6
+#define STASIS_ASSET_TASK_PUBLISHING 7
+#define STASIS_ASSET_KIND_SPRITE 1
+#define STASIS_ASSET_KIND_AUDIO 2
+
+typedef struct {
+    int id;
+    int kind;
+    int state;
+    int handle;
+    int release_requested;
+    char path[1024];
+    int max_w;
+    int max_h;
+    int raster_w;
+    int raster_h;
+    unsigned char* pixels;
+    int pixel_w;
+    int pixel_h;
+    StasisDecodedAudio audio;
+} StasisAssetTask;
+
+static StasisAssetTask g_asset_tasks[STASIS_ASSET_TASK_CAPACITY];
+static SDL_Mutex* g_asset_task_mutex;
+static SDL_Condition* g_asset_task_condition;
+static SDL_Thread* g_asset_task_thread;
+static int g_asset_task_stop;
+static int g_asset_task_next_id = 1;
 
 /* Font rendering with stb_truetype. */
 #define MAX_FONTS 8
@@ -3115,6 +3154,144 @@ static int bake_image_to_rgba_sized(const char* path, int max_w, int max_h,
     return bake_raster_to_rgba_sized(path, max_w, max_h, out_pixels, out_w, out_h);
 }
 
+static void stasis_asset_task_clear(StasisAssetTask* task) {
+    if (!task) return;
+    free(task->pixels);
+    stasis_audio_decoded_free(&task->audio);
+    memset(task, 0, sizeof(*task));
+}
+
+static int stasis_asset_task_worker(void* unused) {
+    (void)unused;
+    for (;;) {
+        SDL_LockMutex(g_asset_task_mutex);
+        int slot = -1;
+        while (!g_asset_task_stop && slot < 0) {
+            int decoded_backlog = 0;
+            for (int i = 0; i < STASIS_ASSET_TASK_CAPACITY; i++) {
+                if (g_asset_tasks[i].state == STASIS_ASSET_TASK_DECODED) {
+                    decoded_backlog = 1;
+                    break;
+                }
+            }
+            if (!decoded_backlog) {
+                for (int i = 0; i < STASIS_ASSET_TASK_CAPACITY; i++) {
+                    if (g_asset_tasks[i].state == STASIS_ASSET_TASK_PENDING) {
+                        slot = i;
+                        g_asset_tasks[i].state = STASIS_ASSET_TASK_LOADING;
+                        break;
+                    }
+                }
+            }
+            if (slot < 0) SDL_WaitCondition(g_asset_task_condition, g_asset_task_mutex);
+        }
+        if (g_asset_task_stop) {
+            SDL_UnlockMutex(g_asset_task_mutex);
+            return 0;
+        }
+
+        StasisAssetTask* task = &g_asset_tasks[slot];
+        int task_id = task->id;
+        int kind = task->kind;
+        char path[1024];
+        memcpy(path, task->path, sizeof(path));
+        int raster_w = task->raster_w;
+        int raster_h = task->raster_h;
+        SDL_UnlockMutex(g_asset_task_mutex);
+
+        unsigned char* pixels = NULL;
+        int pixel_w = 0;
+        int pixel_h = 0;
+        StasisDecodedAudio audio;
+        memset(&audio, 0, sizeof(audio));
+        int ok = kind == STASIS_ASSET_KIND_SPRITE
+            ? bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &pixel_w, &pixel_h)
+            : stasis_audio_decode(path, &audio);
+
+        SDL_LockMutex(g_asset_task_mutex);
+        task = &g_asset_tasks[slot];
+        if (task->id != task_id || task->release_requested ||
+            task->state == STASIS_ASSET_TASK_CANCELLED) {
+            free(pixels);
+            stasis_audio_decoded_free(&audio);
+            stasis_asset_task_clear(task);
+        } else if (!ok) {
+            task->state = STASIS_ASSET_TASK_FAILED;
+        } else {
+            task->pixels = pixels;
+            task->pixel_w = pixel_w;
+            task->pixel_h = pixel_h;
+            task->audio = audio;
+            task->state = STASIS_ASSET_TASK_DECODED;
+        }
+        SDL_UnlockMutex(g_asset_task_mutex);
+    }
+}
+
+static int stasis_asset_tasks_ensure_started(void) {
+    if (g_asset_task_thread) return 1;
+    g_asset_task_mutex = SDL_CreateMutex();
+    g_asset_task_condition = SDL_CreateCondition();
+    if (!g_asset_task_mutex || !g_asset_task_condition) goto fail;
+    g_asset_task_stop = 0;
+    g_asset_task_thread = SDL_CreateThread(stasis_asset_task_worker, "stasis-assets", NULL);
+    if (!g_asset_task_thread) goto fail;
+    return 1;
+
+fail:
+    if (g_asset_task_condition) SDL_DestroyCondition(g_asset_task_condition);
+    if (g_asset_task_mutex) SDL_DestroyMutex(g_asset_task_mutex);
+    g_asset_task_condition = NULL;
+    g_asset_task_mutex = NULL;
+    return 0;
+}
+
+static int stasis_asset_task_request(
+    int kind,
+    const char* path,
+    int max_w,
+    int max_h
+) {
+    char resolved[1024];
+    if (!path || !*path || !resolve_asset_path(path, resolved, sizeof(resolved))) return 0;
+    if (kind == STASIS_ASSET_KIND_SPRITE) {
+        if (!g_window || max_w <= 0 || max_h <= 0) return 0;
+    } else if (kind == STASIS_ASSET_KIND_AUDIO && !stasis_audio_ensure_init()) {
+        return 0;
+    }
+    if (!stasis_asset_tasks_ensure_started()) return 0;
+
+    SDL_LockMutex(g_asset_task_mutex);
+    int slot = -1;
+    for (int i = 0; i < STASIS_ASSET_TASK_CAPACITY; i++) {
+        if (g_asset_tasks[i].state == STASIS_ASSET_TASK_NONE) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        SDL_UnlockMutex(g_asset_task_mutex);
+        return 0;
+    }
+    StasisAssetTask* task = &g_asset_tasks[slot];
+    memset(task, 0, sizeof(*task));
+    task->id = g_asset_task_next_id++;
+    if (g_asset_task_next_id <= 0) g_asset_task_next_id = 1;
+    task->kind = kind;
+    task->state = STASIS_ASSET_TASK_PENDING;
+    task->max_w = max_w;
+    task->max_h = max_h;
+    task->raster_w = kind == STASIS_ASSET_KIND_SPRITE
+        ? stasis_display_scaled_extent(max_w, g_pixel_scale) : 0;
+    task->raster_h = kind == STASIS_ASSET_KIND_SPRITE
+        ? stasis_display_scaled_extent(max_h, g_pixel_scale) : 0;
+    memcpy(task->path, resolved, strlen(resolved) + 1);
+    int id = task->id;
+    SDL_SignalCondition(g_asset_task_condition);
+    SDL_UnlockMutex(g_asset_task_mutex);
+    return id;
+}
+
 static int write_bmp_bgra32(const char* path, int w, int h, const uint8_t* bgra, int is_bottom_up) {
     if (!path || !*path || w <= 0 || h <= 0 || !bgra) return 0;
 
@@ -5120,20 +5297,15 @@ static void sprite_set_gl_region(SpriteEntry* e, int page_index, int sprite_x, i
 /*
  * Build sprite at specified max size. Used for sized loading and re-rasterization.
  */
-static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h) {
-    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
-    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
-    if (!sprite_source_within_limits(path, raster_w, raster_h)) {
-        return 0;
-    }
-    unsigned char* pixels = NULL;
-    int w = 0, h = 0;
-    if (!bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &w, &h)) {
-        SDL_Log("gfx_load_sprite: failed to bake %s at logical=%dx%d raster=%dx%d",
-            path, max_w, max_h, raster_w, raster_h);
-        return 0;
-    }
-
+static int sprite_publish_pixels_into_entry(
+    SpriteEntry* e,
+    const char* path,
+    int max_w,
+    int max_h,
+    unsigned char* pixels,
+    int w,
+    int h
+) {
     if (g_use_sdl_renderer) {
         if (!g_renderer) {
             free(pixels);
@@ -5244,6 +5416,22 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
     free(pixels);
     return 0;
 #endif
+}
+
+static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h) {
+    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
+    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
+    if (!sprite_source_within_limits(path, raster_w, raster_h)) {
+        return 0;
+    }
+    unsigned char* pixels = NULL;
+    int w = 0, h = 0;
+    if (!bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &w, &h)) {
+        SDL_Log("gfx_load_sprite: failed to bake %s at logical=%dx%d raster=%dx%d",
+            path, max_w, max_h, raster_w, raster_h);
+        return 0;
+    }
+    return sprite_publish_pixels_into_entry(e, path, max_w, max_h, pixels, w, h);
 }
 
 static void gfx_asset_watch_apply_pending_changes(void) {
@@ -5372,6 +5560,175 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
                 g_sprite_capacity);
     }
     return sprite_handle_for_slot(slot);
+}
+
+static int stasis_gfx_publish_sprite_task(StasisAssetTask* task) {
+    if (!task || !task->pixels || task->pixel_w <= 0 || task->pixel_h <= 0) return 0;
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        SpriteEntry* cached = &g_sprites[i];
+        if (!cached->used || !cached->path) continue;
+        if (cached->max_w != task->max_w || cached->max_h != task->max_h) continue;
+        if (strcmp(cached->path, task->path) != 0) continue;
+        if (cached->ref_count == INT_MAX) return 0;
+        cached->ref_count++;
+        free(task->pixels);
+        task->pixels = NULL;
+        return sprite_handle_for_slot(i);
+    }
+
+    if (!ensure_sprite_table_capacity(1)) return 0;
+    int slot = -1;
+    while (slot < 0) {
+        for (int i = 0; i < g_sprite_capacity; i++) {
+            if (!g_sprites[i].used && !g_sprites[i].retired) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0 && !ensure_sprite_table_capacity(g_sprite_capacity + 1)) return 0;
+    }
+
+    SpriteEntry* entry = &g_sprites[slot];
+    uint32_t generation = entry->generation;
+    memset(entry, 0, sizeof(*entry));
+    entry->generation = generation;
+    entry->page_index = -1;
+    entry->path = stasis_strdup(task->path);
+    if (!entry->path) return 0;
+    entry->used = 1;
+    entry->ref_count = 1;
+    unsigned char* pixels = task->pixels;
+    task->pixels = NULL;
+    if (!sprite_publish_pixels_into_entry(
+            entry,
+            task->path,
+            task->max_w,
+            task->max_h,
+            pixels,
+            task->pixel_w,
+            task->pixel_h)) {
+        free(entry->path);
+        memset(entry, 0, sizeof(*entry));
+        entry->generation = generation;
+        entry->page_index = -1;
+        return 0;
+    }
+    g_sprite_count++;
+    return sprite_handle_for_slot(slot);
+}
+
+STASIS_EXPORT int stasis_asset_request_sprite(const char* path, int max_w, int max_h) {
+    return stasis_asset_task_request(STASIS_ASSET_KIND_SPRITE, path, max_w, max_h);
+}
+
+STASIS_EXPORT int stasis_asset_request_audio(const char* path) {
+    return stasis_asset_task_request(STASIS_ASSET_KIND_AUDIO, path, 0, 0);
+}
+
+static StasisAssetTask* stasis_asset_task_find_locked(int task_id) {
+    if (task_id <= 0) return NULL;
+    for (int i = 0; i < STASIS_ASSET_TASK_CAPACITY; i++) {
+        if (g_asset_tasks[i].id == task_id &&
+            g_asset_tasks[i].state != STASIS_ASSET_TASK_NONE) return &g_asset_tasks[i];
+    }
+    return NULL;
+}
+
+STASIS_EXPORT int stasis_asset_task_poll(int task_id) {
+    if (!g_asset_task_mutex) return STASIS_ASSET_TASK_NONE;
+    SDL_LockMutex(g_asset_task_mutex);
+    StasisAssetTask* task = stasis_asset_task_find_locked(task_id);
+    if (!task) {
+        SDL_UnlockMutex(g_asset_task_mutex);
+        return STASIS_ASSET_TASK_NONE;
+    }
+    if (task->state != STASIS_ASSET_TASK_DECODED) {
+        int state = task->state;
+        SDL_UnlockMutex(g_asset_task_mutex);
+        return state;
+    }
+    if (task->kind == STASIS_ASSET_KIND_SPRITE) {
+        int current_raster_w = stasis_display_scaled_extent(task->max_w, g_pixel_scale);
+        int current_raster_h = stasis_display_scaled_extent(task->max_h, g_pixel_scale);
+        if (task->raster_w != current_raster_w || task->raster_h != current_raster_h) {
+            free(task->pixels);
+            task->pixels = NULL;
+            task->pixel_w = 0;
+            task->pixel_h = 0;
+            task->raster_w = current_raster_w;
+            task->raster_h = current_raster_h;
+            task->state = STASIS_ASSET_TASK_PENDING;
+            SDL_SignalCondition(g_asset_task_condition);
+            SDL_UnlockMutex(g_asset_task_mutex);
+            return STASIS_ASSET_TASK_PENDING;
+        }
+    }
+    task->state = STASIS_ASSET_TASK_PUBLISHING;
+    int kind = task->kind;
+    SDL_SignalCondition(g_asset_task_condition);
+    SDL_UnlockMutex(g_asset_task_mutex);
+
+    int handle = 0;
+    if (kind == STASIS_ASSET_KIND_SPRITE) {
+        handle = stasis_gfx_publish_sprite_task(task);
+    } else if (kind == STASIS_ASSET_KIND_AUDIO && g_audio_stream) {
+        SDL_LockAudioStream(g_audio_stream);
+        handle = stasis_audio_assets_store_decoded(&g_audio_assets, &task->audio);
+        SDL_UnlockAudioStream(g_audio_stream);
+    }
+
+    SDL_LockMutex(g_asset_task_mutex);
+    task = stasis_asset_task_find_locked(task_id);
+    if (!task) {
+        SDL_UnlockMutex(g_asset_task_mutex);
+        return STASIS_ASSET_TASK_NONE;
+    }
+    task->handle = handle;
+    task->state = handle > 0 ? STASIS_ASSET_TASK_LOADED : STASIS_ASSET_TASK_FAILED;
+    int state = task->state;
+    SDL_UnlockMutex(g_asset_task_mutex);
+    return state;
+}
+
+STASIS_EXPORT int stasis_asset_task_take_handle(int task_id) {
+    if (!g_asset_task_mutex) return 0;
+    SDL_LockMutex(g_asset_task_mutex);
+    StasisAssetTask* task = stasis_asset_task_find_locked(task_id);
+    if (!task || task->state != STASIS_ASSET_TASK_LOADED) {
+        SDL_UnlockMutex(g_asset_task_mutex);
+        return 0;
+    }
+    int handle = task->handle;
+    task->handle = 0;
+    stasis_asset_task_clear(task);
+    SDL_UnlockMutex(g_asset_task_mutex);
+    return handle;
+}
+
+STASIS_EXPORT void stasis_asset_task_cancel(int task_id) {
+    if (!g_asset_task_mutex) return;
+    int kind = 0;
+    int handle = 0;
+    SDL_LockMutex(g_asset_task_mutex);
+    StasisAssetTask* task = stasis_asset_task_find_locked(task_id);
+    if (!task) {
+        SDL_UnlockMutex(g_asset_task_mutex);
+        return;
+    }
+    if (task->state == STASIS_ASSET_TASK_LOADING ||
+        task->state == STASIS_ASSET_TASK_PUBLISHING) {
+        task->release_requested = 1;
+        task->state = STASIS_ASSET_TASK_CANCELLED;
+        SDL_UnlockMutex(g_asset_task_mutex);
+        return;
+    }
+    kind = task->kind;
+    handle = task->handle;
+    task->handle = 0;
+    stasis_asset_task_clear(task);
+    SDL_UnlockMutex(g_asset_task_mutex);
+    if (handle > 0 && kind == STASIS_ASSET_KIND_SPRITE) stasis_gfx_release_sprite(handle);
+    if (handle > 0 && kind == STASIS_ASSET_KIND_AUDIO) stasis_audio_release(handle);
 }
 
 static SpriteEntry* sprite_fallback_get(void) {
@@ -6137,10 +6494,37 @@ STASIS_EXPORT int stasis_gfx_window_resized(void) {
     return result;
 }
 
+static void stasis_asset_tasks_shutdown(void) {
+    if (!g_asset_task_mutex) return;
+    SDL_LockMutex(g_asset_task_mutex);
+    g_asset_task_stop = 1;
+    if (g_asset_task_condition) SDL_BroadcastCondition(g_asset_task_condition);
+    SDL_UnlockMutex(g_asset_task_mutex);
+    if (g_asset_task_thread) SDL_WaitThread(g_asset_task_thread, NULL);
+    g_asset_task_thread = NULL;
+
+    for (int i = 0; i < STASIS_ASSET_TASK_CAPACITY; i++) {
+        StasisAssetTask* task = &g_asset_tasks[i];
+        int kind = task->kind;
+        int handle = task->handle;
+        task->handle = 0;
+        stasis_asset_task_clear(task);
+        if (handle > 0 && kind == STASIS_ASSET_KIND_SPRITE) stasis_gfx_release_sprite(handle);
+        if (handle > 0 && kind == STASIS_ASSET_KIND_AUDIO) stasis_audio_release(handle);
+    }
+    if (g_asset_task_condition) SDL_DestroyCondition(g_asset_task_condition);
+    SDL_DestroyMutex(g_asset_task_mutex);
+    g_asset_task_condition = NULL;
+    g_asset_task_mutex = NULL;
+    g_asset_task_stop = 0;
+    g_asset_task_next_id = 1;
+}
+
 /*
  * Cleanup and shutdown
  */
 STASIS_EXPORT void stasis_shutdown(void) {
+    stasis_asset_tasks_shutdown();
     stasis_audio_shutdown_internal();
     gfx_asset_watch_shutdown();
 

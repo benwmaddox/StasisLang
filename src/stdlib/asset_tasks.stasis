@@ -1,0 +1,24 @@
+@link("stasis_graphics");
+
+const ASSET_TASK_NONE: i32 = 0;
+const ASSET_TASK_PENDING: i32 = 1;
+const ASSET_TASK_LOADING: i32 = 2;
+const ASSET_TASK_LOADED: i32 = 3;
+const ASSET_TASK_FAILED: i32 = 4;
+const ASSET_TASK_CANCELLED: i32 = 5;
+
+struct AssetTask {
+    request: i32;
+    handle: i32;
+    state: i32;
+}
+
+function @extern("stasis_jit_asset_request_sprite") asset_request_sprite(
+    path: string,
+    width: i32,
+    height: i32
+): i32;
+function @extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
+function @extern("stasis_jit_asset_task_poll") asset_task_poll(request: i32): i32;
+function @extern("stasis_jit_asset_task_take_handle") asset_task_take_handle(request: i32): i32;
+function @extern("stasis_jit_asset_task_cancel") asset_task_cancel(request: i32): void;

@@ -238,6 +238,22 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     add_test(NAME stasis_renderer_lifecycle_contract COMMAND stasis_renderer_lifecycle_test)
     if(TARGET stasis_graphics_static)
         add_executable(
+            stasis_asset_tasks_test
+            tests/stasis_asset_tasks_test.c
+        )
+        target_link_libraries(stasis_asset_tasks_test PRIVATE stasis_graphics_static)
+        target_compile_definitions(
+            stasis_asset_tasks_test
+            PRIVATE
+                STASIS_TEST_SPRITE_PATH="${CMAKE_SOURCE_DIR}/../samples/sprite_sheet_animation/assets/sprite_sheet_2x2.png"
+                STASIS_TEST_AUDIO_PATH="${CMAKE_SOURCE_DIR}/../samples/audio_asset_playback/assets/tone.mp3"
+        )
+        add_test(NAME stasis_asset_tasks_contract COMMAND stasis_asset_tasks_test)
+        set_tests_properties(
+            stasis_asset_tasks_contract
+            PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy"
+        )
+        add_executable(
             stasis_font_cache_test
             tests/stasis_font_cache_test.c
         )

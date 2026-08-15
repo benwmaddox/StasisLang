@@ -24,6 +24,8 @@
   const audioAssets = new Map();
   const audioVoices = new Map();
   const pendingAudio = [];
+  const assetTasks = new Map();
+  let nextAssetTask = 1;
   const volatileStorage = new Map();
   let clipboardText = "";
   let frames = 0;
@@ -120,6 +122,43 @@
       .then(bytes => ensureAudio().decodeAudioData(bytes));
     audioAssets.set(handle, decoded);
     return handle;
+  };
+  const requestSprite = pathId => {
+    const task = nextAssetTask++;
+    const handle = nextHandle++;
+    const image = new Image();
+    const entry = { state: 1, handle, kind: "sprite" };
+    assetTasks.set(task, entry);
+    image.addEventListener("load", () => { if (entry.state < 3) entry.state = 3; });
+    image.addEventListener("error", () => { if (entry.state < 3) entry.state = 4; });
+    entry.state = 2;
+    image.src = assetValue(pathId);
+    sprites.set(handle, image);
+    return task;
+  };
+  const requestAudio = pathId => {
+    const task = nextAssetTask++;
+    const handle = nextHandle++;
+    const entry = { state: 2, handle, kind: "audio" };
+    assetTasks.set(task, entry);
+    fetch(assetValue(pathId))
+      .then(response => response.arrayBuffer())
+      .then(bytes => ensureAudio().decodeAudioData(bytes))
+      .then(decoded => {
+        if (entry.state >= 3) return;
+        audioAssets.set(handle, Promise.resolve(decoded));
+        entry.state = 3;
+      })
+      .catch(() => { if (entry.state < 3) entry.state = 4; });
+    return task;
+  };
+  const cancelAssetTask = task => {
+    const entry = assetTasks.get(task);
+    if (!entry) return;
+    entry.state = 5;
+    if (entry.kind === "sprite") sprites.delete(entry.handle);
+    else audioAssets.delete(entry.handle);
+    assetTasks.delete(task);
   };
   const startAudio = (handle, loop, volume) => {
     const start = async () => {
@@ -271,6 +310,16 @@
     },
     gfx_load_sprite: pathId => loadSprite(pathId),
     stasis_gfx_load_sprite: pathId => loadSprite(pathId),
+    stasis_jit_asset_request_sprite: pathId => requestSprite(pathId),
+    stasis_jit_asset_request_audio: pathId => requestAudio(pathId),
+    stasis_jit_asset_task_poll: task => assetTasks.get(task)?.state || 0,
+    stasis_jit_asset_task_take_handle: task => {
+      const entry = assetTasks.get(task);
+      if (!entry || entry.state !== 3) return 0;
+      assetTasks.delete(task);
+      return entry.handle;
+    },
+    stasis_jit_asset_task_cancel: task => cancelAssetTask(task),
     load_font: (pathId, size) => loadFont(pathId, size),
     stasis_load_font: (pathId, size) => loadFont(pathId, size),
     stasis_jit_sprite_load_from: (base, index, _len, pathId, width, height) => {

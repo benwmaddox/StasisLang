@@ -187,6 +187,11 @@ int stasis_audio_play_effect(int asset_handle, float volume) {
     return asset_handle + (int)volume;
 }
 int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) { return path && max_w && max_h; }
+int stasis_asset_request_sprite(const char *path, int max_w, int max_h) { return path && max_w && max_h ? 31 : 0; }
+int stasis_asset_request_audio(const char *path) { return path ? 32 : 0; }
+int stasis_asset_task_poll(int task) { return task > 0 ? 3 : 0; }
+int stasis_asset_task_take_handle(int task) { return task > 0 ? 33 : 0; }
+void stasis_asset_task_cancel(int task) { (void)task; }
 void stasis_gfx_release_sprite(int handle) { (void)handle; }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
 int stasis_gfx_dump_png(const char *path) { return path != NULL; }

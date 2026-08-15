@@ -1250,6 +1250,11 @@ impl StasisGraphicsApi {
 struct StasisGraphicsAssetsApi {
     _lib: Library,
     stasis_gfx_load_sprite: usize,
+    stasis_asset_request_sprite: Option<usize>,
+    stasis_asset_request_audio: Option<usize>,
+    stasis_asset_task_poll: Option<usize>,
+    stasis_asset_task_take_handle: Option<usize>,
+    stasis_asset_task_cancel: Option<usize>,
     stasis_gfx_release_sprite: usize,
     stasis_gfx_dump_bmp: usize,
     stasis_gfx_dump_png: Option<usize>,
@@ -1316,6 +1321,11 @@ impl StasisGraphicsAssetsApi {
         verify_graphics_runtime_abi(&lib, path)?;
         Ok(Self {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
+            stasis_asset_request_sprite: lib.symbol_address("stasis_asset_request_sprite").ok(),
+            stasis_asset_request_audio: lib.symbol_address("stasis_asset_request_audio").ok(),
+            stasis_asset_task_poll: lib.symbol_address("stasis_asset_task_poll").ok(),
+            stasis_asset_task_take_handle: lib.symbol_address("stasis_asset_task_take_handle").ok(),
+            stasis_asset_task_cancel: lib.symbol_address("stasis_asset_task_cancel").ok(),
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
             // PNG capture was added after the original asset ABI. Keep older runtimes usable for
@@ -3676,6 +3686,90 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
         eprintln!("gfx_load_sprite failed for {}", path.to_string_lossy());
     }
     handle
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_request_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_asset_request_sprite else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    callback(path.as_ptr(), max_w, max_h)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_request_audio(path_id: i32) -> i32 {
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_asset_request_audio else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(path.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_task_poll(task: i32) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_asset_task_poll else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(task)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_task_take_handle(task: i32) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_asset_task_take_handle else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(task)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_task_cancel(task: i32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_asset_task_cancel else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(address) };
+    callback(task);
 }
 
 #[no_mangle]

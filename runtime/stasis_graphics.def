@@ -75,6 +75,11 @@ EXPORTS
     stasis_test_get_render_submission_state
     stasis_gfx_notify_file_changed
     stasis_gfx_load_sprite
+    stasis_asset_request_sprite
+    stasis_asset_request_audio
+    stasis_asset_task_poll
+    stasis_asset_task_take_handle
+    stasis_asset_task_cancel
     stasis_gfx_release_sprite
     stasis_gfx_draw_sprite
     stasis_gfx_submit
