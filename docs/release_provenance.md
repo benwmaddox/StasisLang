@@ -24,13 +24,18 @@ sidecar manifest from the resolved runtime payload directory during initializati
 embedded manifest and exposes the release/development classification to build
 audit tools.
 
-## Development builds
+## Local release and development builds
 
 A source checkout has no authority to claim an official release. Local proof
-packages therefore require the explicit `--development-build` flag. Their
-manifest sets `development_build` and `dirty_state` to `true`, uses a null
-release tag, and logs `non-release development build` at runtime. This flag
-permits local iteration; it never disables asset or compiler validation.
+packages therefore use `build_class: "local_release"` when the installed
+toolchain has no `stasis_release_provenance.json`. They still use optimized release behavior and
+set `development_build` to `false`, while recording the real source commit, dirty state, compiler
+hash, and runtime/template hashes. Their release tag remains null and mobile runtimes label them
+`local release`, so they cannot be confused with a verified official archive.
+
+`--development-build` explicitly selects development behavior and provenance. Those packages use
+`build_class: "development"`, set `development_build` to `true`, and log
+`non-release development build` at runtime. The flag never disables asset or compiler validation.
 Manually dispatched bootstrap artifacts use the same development classification;
 only a published `v*` release or generated `nightly-*` release is official.
 
@@ -38,7 +43,8 @@ only a published `v*` release or generated `nightly-*` release is official.
 
 - A source-proof build demonstrates behavior from a named commit but is not a
   distributable release.
-- A local proof package uses `--development-build` and is visibly non-release.
+- A local release package is optimized release output with content-addressed local provenance.
+- A local development package uses `--development-build` and is visibly non-release.
 - An official artifact comes from the release workflow and must pass manifest
   hash verification when it regenerates its Android and iOS smoke packages.
 

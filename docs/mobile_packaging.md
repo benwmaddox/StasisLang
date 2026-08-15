@@ -9,8 +9,9 @@ stasis --workspace path/to/game package-mobile --target ios-arm64
 ```
 
 Official release archives verify their compiler and runtime sources against
-`stasis_release_provenance.json` before packaging. A source checkout must add
-`--development-build`; that output is explicitly labeled non-release. See
+`stasis_release_provenance.json` before packaging. When that manifest is absent,
+a source-built toolchain automatically emits content-addressed local-release provenance and keeps
+optimized release behavior. `--development-build` explicitly selects development output. See
 `release_provenance.md` for the manifest and repinning contract.
 
 `stasis.json` supplies the entry source. Its optional Android object supplies

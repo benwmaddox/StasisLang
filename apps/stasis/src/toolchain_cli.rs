@@ -40,7 +40,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod dap;
 mod gauntlet;
@@ -134,6 +134,26 @@ if ! git diff --quiet -- ':(glob)**/*.stasis'; then
     exit 1
 fi
 "#;
+const TARGET_BUILD_HELP: &str = r#"Build targets:
+  Windows, Linux, or macOS (current host)
+    stasis build --mode release
+    stasis package --target desktop
+
+  Web (WebAssembly browser bundle)
+    stasis package --target web
+
+  Android devices (64-bit ARM app project)
+    stasis package-mobile --target android-arm64
+
+  Android emulator (x86-64 test app project)
+    stasis package-mobile --target android-x86_64 --development-build
+
+  iPhone and iPad (64-bit ARM app project)
+    stasis package-mobile --target ios-arm64
+
+Desktop builds target the operating system running stasis. Web output is a static bundle to
+serve over HTTP. Mobile commands create Gradle or Xcode projects for final SDK builds; source
+toolchains create local release packages when official provenance is absent."#;
 const COMMANDS: &[&str] = &[
     "new",
     "init",
@@ -168,7 +188,8 @@ const COMMANDS: &[&str] = &[
     name = "stasis",
     version,
     about = "The batteries-included Stasis toolchain",
-    long_about = "Create, format, check, test, run, live-edit, build, inspect, and package Stasis projects without invoking Cargo."
+    long_about = "Create, format, check, test, run, live-edit, build, inspect, and package Stasis projects without invoking Cargo.",
+    after_help = TARGET_BUILD_HELP
 )]
 struct ToolchainCli {
     #[arg(
@@ -325,7 +346,7 @@ enum ToolchainCommand {
         target: PackageTarget,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Permit a visibly labeled package from a local/source toolchain.
+        /// Force a visibly labeled development package.
         #[arg(long)]
         development_build: bool,
     },
@@ -337,7 +358,7 @@ enum ToolchainCommand {
         entry: Option<PathBuf>,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Permit a visibly labeled package from a local/source toolchain.
+        /// Force a visibly labeled development package.
         #[arg(long)]
         development_build: bool,
         /// Select named Stasis functions for bounded mobile AOT profiling.
@@ -796,8 +817,19 @@ pub(super) fn try_run() -> Option<i32> {
     };
     let command_name = command_name(&parsed.command);
     let raw_output = matches!(&parsed.command, ToolchainCommand::Fmt { stdin: true, .. });
+    let started_at = (!parsed.json
+        && matches!(
+            &parsed.command,
+            ToolchainCommand::Build { .. }
+                | ToolchainCommand::Package { .. }
+                | ToolchainCommand::PackageMobile { .. }
+        ))
+    .then(Instant::now);
     match execute(parsed.command, parsed.workspace, parsed.json) {
-        Ok(result) => {
+        Ok(mut result) => {
+            if let Some(started_at) = started_at {
+                append_elapsed_confirmation(&mut result.human, started_at.elapsed());
+            }
             if parsed.json {
                 println!(
                     "{}",
@@ -837,6 +869,22 @@ pub(super) fn try_run() -> Option<i32> {
             }
             Some(1)
         }
+    }
+}
+
+fn append_elapsed_confirmation(output: &mut String, elapsed: Duration) {
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str("Completed in ");
+    if elapsed.as_secs() >= 60 {
+        let minutes = elapsed.as_secs() / 60;
+        let seconds = elapsed.as_secs_f64() - minutes as f64 * 60.0;
+        output.push_str(&format!("{minutes}m {seconds:.1}s."));
+    } else if elapsed.as_secs() >= 1 {
+        output.push_str(&format!("{:.2}s.", elapsed.as_secs_f64()));
+    } else {
+        output.push_str(&format!("{}ms.", elapsed.as_millis()));
     }
 }
 
@@ -3700,6 +3748,7 @@ fn package_web_workspace(
         ));
     }
     let provenance = resolve_package_provenance(development_build)?;
+    let development_build = provenance["development_build"].as_bool() == Some(true);
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
 
@@ -4402,21 +4451,16 @@ fn content_hashes(root: &Path, prefix: &str) -> Result<serde_json::Map<String, V
     Ok(output)
 }
 
-fn release_provenance_path() -> Result<PathBuf, String> {
+fn release_provenance_path() -> Result<Option<PathBuf>, String> {
     let executable = env::current_exe()
         .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
     let directory = executable.parent().unwrap_or(Path::new("."));
-    for candidate in [
+    Ok([
         directory.join(RELEASE_PROVENANCE_NAME),
         directory.join("..").join(RELEASE_PROVENANCE_NAME),
-    ] {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "installed toolchain is missing {RELEASE_PROVENANCE_NAME}; reinstall an official release or pass --development-build for a visibly labeled local package"
-    ))
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file()))
 }
 
 fn provenance_string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
@@ -4535,7 +4579,7 @@ fn git_text(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn development_provenance() -> Result<Value, String> {
+fn local_provenance(development_build: bool) -> Result<Value, String> {
     let executable = env::current_exe()
         .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
     let runtime = bundled_mobile_runtime_dir()?;
@@ -4547,12 +4591,21 @@ fn development_provenance() -> Result<Value, String> {
             Value::String(sha256_file(&runtime.join(name))?),
         );
     }
+    let dirty_state = development_build
+        || git_text(&["status", "--porcelain", "--untracked-files=no"])
+            .map_or(true, |status| !status.is_empty());
+    let build_class = if development_build {
+        "development"
+    } else {
+        "local_release"
+    };
     Ok(json!({
         "schema": "stasis.release_provenance.v1",
+        "build_class": build_class,
         "release_tag": Value::Null,
         "source_commit": git_text(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string()),
-        "dirty_state": true,
-        "development_build": true,
+        "dirty_state": dirty_state,
+        "development_build": development_build,
         "compiler": {
             "path": executable.file_name().unwrap_or_default().to_string_lossy(),
             "sha256": sha256_file(&executable)?,
@@ -4564,7 +4617,7 @@ fn development_provenance() -> Result<Value, String> {
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
         "dependencies": {
             "stasis": env!("CARGO_PKG_VERSION"),
-            "toolchain": "development",
+            "toolchain": build_class,
             "sdl3": "3.4.10-static",
             "sdl3_image": "3.4.4-static",
         },
@@ -4573,9 +4626,11 @@ fn development_provenance() -> Result<Value, String> {
 
 fn resolve_package_provenance(development_build: bool) -> Result<Value, String> {
     if development_build {
-        development_provenance()
+        local_provenance(true)
+    } else if let Some(path) = release_provenance_path()? {
+        verify_release_provenance(&path)
     } else {
-        verify_release_provenance(&release_provenance_path()?)
+        local_provenance(false)
     }
 }
 
@@ -4589,6 +4644,8 @@ fn write_mobile_provenance_header(destination: &Path, provenance: &Value) -> Res
     let commit = provenance["source_commit"].as_str().unwrap_or("unknown");
     let label = if provenance["development_build"].as_bool() == Some(true) {
         "non-release development build"
+    } else if provenance["build_class"] == "local_release" {
+        "local release"
     } else {
         "official release"
     };
@@ -6151,6 +6208,22 @@ mod tests {
     }
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn elapsed_confirmation_uses_readable_units() {
+        for (elapsed, expected) in [
+            (Duration::from_millis(482), "built\nCompleted in 482ms."),
+            (Duration::from_millis(1_250), "built\nCompleted in 1.25s."),
+            (
+                Duration::from_millis(301_500),
+                "built\nCompleted in 5m 1.5s.",
+            ),
+        ] {
+            let mut output = "built".to_string();
+            append_elapsed_confirmation(&mut output, elapsed);
+            assert_eq!(output, expected);
+        }
+    }
+
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -6676,6 +6749,31 @@ mod tests {
     }
 
     #[test]
+    fn local_release_provenance_keeps_release_behavior_without_claiming_official_status() {
+        let provenance = local_provenance(false).expect("local release provenance");
+        assert_eq!(provenance["build_class"], "local_release");
+        assert_eq!(provenance["development_build"], false);
+        assert!(provenance["release_tag"].is_null());
+        assert!(provenance["compiler"]["sha256"].as_str().is_some());
+
+        let root = temp_dir("local_release_provenance");
+        fs::create_dir_all(&root).expect("local release header directory");
+        write_mobile_provenance_header(&root, &provenance).expect("local release header");
+        assert!(fs::read_to_string(root.join("stasis_package_provenance.h"))
+            .expect("read local release header")
+            .contains("local release"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn development_provenance_is_always_marked_dirty() {
+        let provenance = local_provenance(true).expect("development provenance");
+        assert_eq!(provenance["build_class"], "development");
+        assert_eq!(provenance["development_build"], true);
+        assert_eq!(provenance["dirty_state"], true);
+    }
+
+    #[test]
     fn release_provenance_rejects_substituted_renderer_sources() {
         let root = temp_dir("release_provenance_mismatch");
         let runtime = root.join("runtime");
@@ -6825,7 +6923,7 @@ mod tests {
 
         let android = root.join("android-package");
         fs::create_dir_all(&android).expect("create Android staging");
-        let provenance = development_provenance().expect("development provenance");
+        let provenance = local_provenance(true).expect("development provenance");
         assemble_mobile_shell(
             &workspace,
             PackageTarget::AndroidArm64,
