@@ -11,7 +11,7 @@
     main { position: relative; width: min(960px, 100vw); }
     canvas { display: block; width: 100%; aspect-ratio: 16 / 9; background: #091b2d; touch-action: none; }
     __STASIS_PERFORMANCE_HUD_STYLE__
-    #stasis-audio { position: absolute; top: 10px; right: 10px; border: 1px solid #53d8fb; background: #0b263d; color: white; padding: 8px 12px; cursor: pointer; }
+    __STASIS_AUDIO_BUTTON_STYLE__
     #stasis-error { color: #ff8f8f; white-space: pre-wrap; }
   </style>
 </head>
@@ -19,7 +19,7 @@
   <main>
     <canvas id="stasis-canvas" width="640" height="360" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
     __STASIS_PERFORMANCE_HUD__
-    <button id="stasis-audio" type="button">Enable sound</button>
+    __STASIS_AUDIO_BUTTON__
     <pre id="stasis-error"></pre>
   </main>
   <script src="game.js"></script>

@@ -3593,6 +3593,7 @@ fn package_workspace(
 
 const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
 const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
+const WEB_MINIMAL_RUNTIME_JS: &str = include_str!("../../../runtime/web/game_minimal.js");
 
 struct WebWasmArtifact {
     bytes: Vec<u8>,
@@ -3755,7 +3756,11 @@ fn package_web_workspace(
         let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
             .replace("</", "<\\/");
-        let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{WEB_RUNTIME_JS}");
+        let audio_enabled = process.imported_symbols().iter().any(|symbol| {
+            symbol.starts_with("audio_") || symbol.contains("_audio_") || symbol == "web_play_tone"
+        });
+        let linked_runtime = link_web_runtime(&process, audio_enabled);
+        let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
@@ -3763,7 +3768,7 @@ fn package_web_workspace(
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
         fs::write(
             staging_root.join("index.html"),
-            web_index_html(&workspace.manifest.name, development_build),
+            web_index_html(&workspace.manifest.name, development_build, audio_enabled),
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
 
@@ -3810,7 +3815,7 @@ fn package_web_workspace(
     ))
 }
 
-fn web_index_html(title: &str, development_build: bool) -> String {
+fn web_index_html(title: &str, development_build: bool, audio_enabled: bool) -> String {
     let (hud_style, hud) = if development_build {
         (
             "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
@@ -3823,6 +3828,69 @@ fn web_index_html(title: &str, development_build: bool) -> String {
         .replace("__STASIS_GAME_TITLE__", title)
         .replace("__STASIS_PERFORMANCE_HUD_STYLE__", hud_style)
         .replace("__STASIS_PERFORMANCE_HUD__", hud)
+        .replace(
+            "__STASIS_AUDIO_BUTTON_STYLE__",
+            if audio_enabled { "#stasis-audio { position: absolute; top: 10px; right: 10px; border: 1px solid #53d8fb; background: #0b263d; color: white; padding: 8px 12px; cursor: pointer; }" } else { "" },
+        )
+        .replace(
+            "__STASIS_AUDIO_BUTTON__",
+            if audio_enabled { r#"<button id="stasis-audio" type="button">Enable sound</button>"# } else { "" },
+        )
+}
+
+fn lean_web_runtime(process: &WasmProcess) -> Option<String> {
+    if WEB_RUNTIME_BUFFERS
+        .iter()
+        .any(|path| process.memory_layout().contains_key(*path))
+    {
+        return None;
+    }
+    let snippets = BTreeMap::from([
+        ("cos_fast", "    cos_fast: value => Math.cos(value),"),
+        ("print_char", "    print_char: value => console.log(String.fromCodePoint(value)),"),
+        ("print_i32", "    print_i32: value => console.log(value),"),
+        ("print_int", "    print_int: value => console.log(value),"),
+        ("print_string", "    print_string: value => console.log(stringValue(value)),"),
+        ("sin_fast", "    sin_fast: value => Math.sin(value),"),
+        ("web_begin_frame", "    web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },"),
+        ("web_draw_rect", "    web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),"),
+        ("web_draw_text", "    web_draw_text: (x, y, value) => commands.push([2, x, y, value]),"),
+    ]);
+    let imports = process
+        .imported_symbols()
+        .iter()
+        .map(|symbol| snippets.get(symbol.as_str()).copied())
+        .collect::<Option<Vec<_>>>()?;
+    Some(WEB_MINIMAL_RUNTIME_JS.replace("__STASIS_IMPORTS__", &imports.join("\n")))
+}
+
+fn link_web_runtime(process: &WasmProcess, audio_enabled: bool) -> String {
+    if let Some(runtime) = lean_web_runtime(process) {
+        return runtime;
+    }
+    strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled)
+}
+
+fn strip_web_runtime_feature(source: &str, feature: &str, enabled: bool) -> String {
+    let begin = format!("// @stasis-feature {feature} begin");
+    let end = format!("// @stasis-feature {feature} end");
+    let mut inside = false;
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed == begin {
+                inside = true;
+                return None;
+            }
+            if trimmed == end {
+                inside = false;
+                return None;
+            }
+            (enabled || !inside).then_some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // Keep these aligned with the metadata reads in runtime/web/game.js. Development
@@ -5656,12 +5724,14 @@ mod tests {
 
     #[test]
     fn release_web_index_omits_performance_hud() {
-        let release = web_index_html("release-game", false);
+        let release = web_index_html("release-game", false, false);
         assert!(!release.contains("stasis-hud"));
+        assert!(!release.contains("stasis-audio"));
         assert!(!release.contains("__STASIS_"));
 
-        let development = web_index_html("development-game", true);
+        let development = web_index_html("development-game", true, true);
         assert!(development.contains(r#"id="stasis-hud""#));
+        assert!(development.contains(r#"id="stasis-audio""#));
         assert!(!development.contains("__STASIS_"));
     }
 

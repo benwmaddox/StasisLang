@@ -3,7 +3,9 @@
   const canvas = document.getElementById("stasis-canvas");
   const context = canvas.getContext("2d", { alpha: false });
   const hud = document.getElementById("stasis-hud");
+  // @stasis-feature audio begin
   const audioButton = document.getElementById("stasis-audio");
+  // @stasis-feature audio end
   const errorBox = document.getElementById("stasis-error");
   const keys = new Set();
   const pointer = { id: 0, x: 0, y: 0, dx: 0, dy: 0, down: false, wentDown: false, wentUp: false };
@@ -14,6 +16,7 @@
   const cachedText = new Map();
   let nextHandle = 1;
   let instance;
+  // @stasis-feature audio begin
   let audioContext;
   let audioEvents = 0;
   let audioSampleRate = 48000;
@@ -23,6 +26,7 @@
   const audioAssets = new Map();
   const audioVoices = new Map();
   const pendingAudio = [];
+  // @stasis-feature audio end
   const volatileStorage = new Map();
   let clipboardText = "";
   let frames = 0;
@@ -107,6 +111,7 @@
     font.load().then(loaded => document.fonts.add(loaded)).catch(error => console.error(error));
     return handle;
   };
+  // @stasis-feature audio begin
   const ensureAudio = () => {
     audioContext ||= new AudioContext();
     return audioContext;
@@ -180,6 +185,7 @@
     else void start();
     return frameCount;
   };
+  // @stasis-feature audio end
   const imports = { env: {
     sin_fast: value => Math.sin(value),
     cos_fast: value => Math.cos(value),
@@ -194,6 +200,7 @@
     web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },
     web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),
     web_draw_text: (x, y, value) => commands.push([2, x, y, value]),
+    // @stasis-feature audio begin
     web_play_tone: (frequency, durationMs) => {
       if (!audioContext || audioContext.state !== "running") return;
       const oscillator = audioContext.createOscillator();
@@ -208,6 +215,7 @@
       audioEvents += 1;
       document.body.dataset.audioEvents = String(audioEvents);
     },
+    // @stasis-feature audio end
     gfx_load_sprite: pathId => loadSprite(pathId),
     stasis_gfx_load_sprite: pathId => loadSprite(pathId),
     load_font: (pathId, size) => loadFont(pathId, size),
@@ -253,6 +261,7 @@
       if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(clipboardText).catch(() => {});
       return 1;
     },
+    // @stasis-feature audio begin
     audio_init: (sampleRate, channels) => {
       audioSampleRate = Math.max(8000, Math.min(sampleRate || 48000, 192000));
       audioChannels = Math.max(1, Math.min(channels || 2, 2));
@@ -302,7 +311,8 @@
     stasis_jit_audio_set_music_volume: (handle, volume) => {
       const voice = audioVoices.get(handle);
       if (voice) voice.gain.gain.value = Math.max(0, Math.min(1, volume));
-    }
+    },
+    // @stasis-feature audio end
   }};
 
   document.addEventListener("paste", event => {
@@ -643,6 +653,7 @@
   canvas.addEventListener("pointercancel", () => { pointer.down = false; pointer.wentUp = true; });
   addEventListener("resize", () => { resized = true; displayGeneration += 1; });
   document.addEventListener("fullscreenchange", () => { resized = true; displayGeneration += 1; });
+  // @stasis-feature audio begin
   audioButton.addEventListener("click", async () => {
     await applyFullscreenGesture();
     audioContext ||= new AudioContext();
@@ -653,6 +664,7 @@
     document.body.dataset.audioState = audioContext.state;
     canvas.focus();
   });
+  // @stasis-feature audio end
 
   async function wasmBytes() {
     const response = await fetch("game.wasm");

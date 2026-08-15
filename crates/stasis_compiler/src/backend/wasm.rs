@@ -36,6 +36,7 @@ pub struct WasmProcess {
     struct_views: BTreeMap<i32, BTreeMap<String, String>>,
     debug_symbols: bool,
     global_types: BTreeMap<String, TypeId>,
+    imported_symbols: BTreeSet<String>,
     program_snapshot: Option<ProgramSnapshot>,
 }
 
@@ -79,6 +80,10 @@ impl WasmProcess {
 
     pub fn global_types(&self) -> &BTreeMap<String, TypeId> {
         &self.global_types
+    }
+
+    pub fn imported_symbols(&self) -> &BTreeSet<String> {
+        &self.imported_symbols
     }
 
     pub fn program_snapshot(&self) -> Option<&ProgramSnapshot> {
@@ -181,8 +186,9 @@ impl WasmProcess {
                 );
             }
         }
-        self.module = encode_module(&lowered, &analysis, &types, self.debug_symbols)
-            .map_err(CompileError::Backend)?;
+        (self.module, self.imported_symbols) =
+            encode_module(&lowered, &analysis, &types, self.debug_symbols)
+                .map_err(CompileError::Backend)?;
         self.program_snapshot = Some(
             ProgramSnapshot::build(
                 source_revision,
@@ -205,6 +211,8 @@ struct Signature {
     params: Vec<TypeId>,
     result: TypeId,
 }
+
+type WasmImport = (String, String, Signature);
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 struct WasmSignature {
@@ -513,24 +521,10 @@ fn build_struct_collections(
     Ok(out)
 }
 
-fn encode_module(
+fn collect_imports(
     functions: &[(FunctionMeta, FunctionHIR)],
     analysis: &crate::backend::emit::CompileAnalysisCache,
-    types: &TypeTable,
-    debug_symbols: bool,
-) -> Result<Vec<u8>, String> {
-    let mut internal_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (index, (function, _)) in functions.iter().enumerate() {
-        internal_by_name
-            .entry(function.name.clone())
-            .or_default()
-            .push(index);
-        internal_by_name
-            .entry(format!("{}.{}", function.module_alias, function.name))
-            .or_default()
-            .push(index);
-    }
-
+) -> Result<(BTreeSet<String>, Vec<WasmImport>), String> {
     let mut called = BTreeSet::new();
     for (_, hir) in functions {
         collect_calls(&hir.statements, &mut called);
@@ -572,6 +566,28 @@ fn encode_module(
         }
     }
     imports.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok((called, imports))
+}
+
+fn encode_module(
+    functions: &[(FunctionMeta, FunctionHIR)],
+    analysis: &crate::backend::emit::CompileAnalysisCache,
+    types: &TypeTable,
+    debug_symbols: bool,
+) -> Result<(Vec<u8>, BTreeSet<String>), String> {
+    let mut internal_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, (function, _)) in functions.iter().enumerate() {
+        internal_by_name
+            .entry(function.name.clone())
+            .or_default()
+            .push(index);
+        internal_by_name
+            .entry(format!("{}.{}", function.module_alias, function.name))
+            .or_default()
+            .push(index);
+    }
+
+    let (called, imports) = collect_imports(functions, analysis)?;
 
     let imported_names = imports
         .iter()
@@ -732,7 +748,6 @@ fn encode_module(
         }
         section(2, import_section, &mut module);
     }
-
     let mut function_section = Vec::new();
     uleb(functions.len() as u32 + 4, &mut function_section);
     for index in 0..functions.len() {
@@ -881,7 +896,8 @@ fn encode_module(
             .collect()
     };
     append_name_section(&function_names, &mut module);
-    Ok(module)
+    let imported_symbols = imports.into_iter().map(|(_, symbol, _)| symbol).collect();
+    Ok((module, imported_symbols))
 }
 
 fn encode_global_accessor(
@@ -2960,6 +2976,25 @@ mod tests {
                 .windows(name.len())
                 .any(|window| window == name.as_bytes()));
         }
+    }
+
+    #[test]
+    fn reports_only_imports_called_by_reachable_functions() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "imports.stasis",
+            "extern function live(): i32; extern function dead(): i32; function main(): i32 { return live(); } function tick(): i32 { return 0; } function render(): i32 { return 0; } function unused(): i32 { return dead(); }",
+        );
+        process.compile().expect("compile reachable web imports");
+        assert_eq!(
+            process.imported_symbols(),
+            &BTreeSet::from(["live".to_string()])
+        );
+        assert!(!process
+            .module_bytes()
+            .windows("dead".len())
+            .any(|window| window == b"dead"));
     }
 
     #[test]
