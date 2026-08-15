@@ -37,14 +37,6 @@ struct Sprite {
     height: i32;
 }
 
-struct ImageAsset {
-    handle: i32;
-    request: i32;
-    state: i32;
-    width: i32;
-    height: i32;
-}
-
 struct TextRun {
     font: i32;
     handle: i32;
@@ -75,52 +67,22 @@ struct SpriteSheet {
 
 function @asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function @extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(self: SpriteSheet, path: string, width: i32, height: i32): bool;
-function @extern("stasis_jit_gfx_release_sprite") gfx_release_sprite(handle: i32): void;
 
-function @asset_path(path) request_image_load(self: ImageAsset, path: string, width: i32, height: i32): bool {
-    if (self.request > 0) {
-        asset_task_cancel(self.request);
-    }
-    if (self.handle > 0) {
-        gfx_release_sprite(self.handle);
-    }
-    self.handle = 0;
-    self.request = asset_request_sprite(path, width, height);
-    self.width = width;
-    self.height = height;
-    if (self.request <= 0) {
-        self.state = ASSET_TASK_FAILED;
+function publish(self: ImageAsset, target: Sprite): bool {
+    if (!self.ready()) {
         return false;
     }
-    self.state = ASSET_TASK_PENDING;
-    return true;
-}
-
-function poll_image_load(self: ImageAsset): i32 {
-    if (self.request <= 0) {
-        return self.state;
+    if (target.handle > 0 && target.handle != self.handle) {
+        gfx_release_sprite(target.handle);
     }
-    self.state = asset_task_poll(self.request);
-    if (self.state == ASSET_TASK_LOADED) {
-        self.handle = asset_task_take_handle(self.request);
-        self.request = 0;
-        if (self.handle <= 0) {
-            self.state = ASSET_TASK_FAILED;
-        }
-    }
-    return self.state;
-}
-
-function release_image(self: ImageAsset): void {
-    if (self.request > 0) {
-        asset_task_cancel(self.request);
-    }
-    if (self.handle > 0) {
-        gfx_release_sprite(self.handle);
-    }
-    self.request = 0;
+    target.handle = self.handle;
+    target.width = self.width;
+    target.height = self.height;
     self.handle = 0;
-    self.state = ASSET_TASK_NONE;
+    self.width = 0;
+    self.height = 0;
+    self.state = AssetState.None;
+    return true;
 }
 
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {

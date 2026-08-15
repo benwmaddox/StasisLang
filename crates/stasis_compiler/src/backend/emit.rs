@@ -1674,10 +1674,16 @@ where
         .declare_function(symbol, Linkage::Export, &context.func.signature)
         .map_err(|error| format!("failed to declare function {symbol}: {error}"))?;
     let referenced_call_targets = collect_call_targets_from_hir(hir);
-    let uses_runtime_storage =
-        backend_mode == SharedCompileBackendMode::JitDirect || !global_path_types.is_empty();
-    let uses_collection_runtime =
-        backend_mode == SharedCompileBackendMode::JitDirect || !collection_infos.is_empty();
+    let has_struct_view_param = meta
+        .params
+        .iter()
+        .any(|type_id| is_struct_view_type(*type_id, named_struct_field_types));
+    let uses_runtime_storage = backend_mode == SharedCompileBackendMode::JitDirect
+        || !global_path_types.is_empty()
+        || has_struct_view_param;
+    let uses_collection_runtime = backend_mode == SharedCompileBackendMode::JitDirect
+        || !collection_infos.is_empty()
+        || has_struct_view_param;
     let runtime_call_imports = match backend_mode {
         SharedCompileBackendMode::JitDirect | SharedCompileBackendMode::AotDirect => {
             build_direct_runtime_call_import_ids(

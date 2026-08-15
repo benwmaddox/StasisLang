@@ -112,6 +112,7 @@
     font.load().then(loaded => document.fonts.add(loaded)).catch(error => console.error(error));
     return handle;
   };
+  const releaseSprite = handle => { sprites.delete(handle); };
   const requestSprite = pathId => {
     const task = nextAssetTask++;
     const handle = nextHandle++;
@@ -280,7 +281,7 @@
     const entry = assetTasks.get(task);
     if (!entry) return;
     entry.state = 5;
-    if (entry.kind === "sprite") sprites.delete(entry.handle);
+    if (entry.kind === "sprite") releaseSprite(entry.handle);
     else audioAssets.delete(entry.handle);
     assetTasks.delete(task);
   };
@@ -316,6 +317,9 @@
     // @stasis-feature audio end
     gfx_load_sprite: pathId => loadSprite(pathId),
     stasis_gfx_load_sprite: pathId => loadSprite(pathId),
+    gfx_release_sprite: handle => releaseSprite(handle),
+    stasis_gfx_release_sprite: handle => releaseSprite(handle),
+    stasis_jit_gfx_release_sprite: handle => releaseSprite(handle),
     stasis_jit_asset_request_sprite: pathId => requestSprite(pathId),
     // @stasis-feature audio begin
     stasis_jit_asset_request_audio: pathId => requestAudio(pathId),

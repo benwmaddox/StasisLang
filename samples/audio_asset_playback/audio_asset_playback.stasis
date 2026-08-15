@@ -1,9 +1,10 @@
 import "/vendor/stasis/src/stdlib/audio.stasis";
 import "/vendor/stasis/src/stdlib/graphics.stasis";
 
-global music: i32;
-global effect: i32;
+global music: AudioAsset;
+global effect: AudioAsset;
 global ticks: i32;
+global playback_started: bool;
 
 function main(): i32 {
     init_window(480, 270, "Stasis Compressed Audio Playback");
@@ -13,35 +14,42 @@ function main(): i32 {
     if (!audio_is_available() || audio_get_sample_rate() != 48000 || audio_get_channels() != 2) {
         return 4;
     }
-    music = audio_load_music("assets/tone.mp3");
-    effect = audio_load_effect("assets/tone.wav");
-    if (music <= 0 || effect <= 0) {
+    if (!music.load_audio("assets/tone.mp3") || !effect.load_audio("assets/tone.wav")) {
         return 2;
-    }
-    if (!audio_play_music(music, true, 0.18)) {
-        return 3;
     }
     ticks = 0;
     return 0;
 }
 
 function tick(): i32 {
+    if (!playback_started) {
+        if (music.failed() || effect.failed()) {
+            return 2;
+        }
+        if (!music.ready() || !effect.ready()) {
+            return 0;
+        }
+        if (!music.play_music(true, 0.18)) {
+            return 3;
+        }
+        playback_started = true;
+    }
     ticks += 1;
     if (ticks == 120) {
-        audio_pause_music(music, true);
+        music.pause_music(true);
     }
     if (ticks == 180) {
-        audio_set_music_volume(music, 0.08);
-        audio_pause_music(music, false);
+        music.set_music_volume(0.08);
+        music.pause_music(false);
     }
     if (ticks == 240) {
-        audio_play_effect(effect, 0.25);
+        effect.play_effect(0.25);
     }
     if (ticks == 300) {
-        audio_stop_music(music);
+        music.stop_music();
     }
     if (ticks == 360) {
-        audio_play_music(music, true, 0.12);
+        music.play_music(true, 0.12);
     }
     return 0;
 }

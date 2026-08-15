@@ -5,9 +5,9 @@
 //! target-specific substitute implementation.
 
 use crate::backend::emit::{
-    build_compile_analysis_cache, compute_files_fingerprint, hash_global_path,
-    resolve_extern_call_signatures_with, AssignOp, AssignTarget, ComparisonOp, ConstantValue,
-    SimpleCondition, SimpleExpr, SimpleStmt,
+    are_call_argument_and_param_compatible, build_compile_analysis_cache,
+    compute_files_fingerprint, hash_global_path, resolve_extern_call_signatures_with, AssignOp,
+    AssignTarget, ComparisonOp, ConstantValue, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 use crate::backend::program_snapshot::ProgramSnapshot;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
@@ -691,14 +691,6 @@ fn encode_module(
         {
             return Err(format!("unresolved web call target '{target}'"));
         }
-        if internal_by_name
-            .get(target)
-            .is_some_and(|candidates| candidates.len() > 1)
-        {
-            return Err(format!(
-                "web backend cannot yet resolve called overload family '{target}'"
-            ));
-        }
     }
 
     let mut signatures = imports
@@ -808,6 +800,19 @@ fn encode_module(
             }
         }
     }
+    let internal_overloads = internal_by_name
+        .iter()
+        .filter(|(_, candidates)| candidates.len() > 1)
+        .map(|(name, candidates)| {
+            (
+                name.clone(),
+                candidates
+                    .iter()
+                    .map(|index| (imports.len() + index) as u32)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut module = b"\0asm\x01\0\0\0".to_vec();
 
@@ -945,6 +950,7 @@ fn encode_module(
             types,
             &import_indices,
             &internal_indices,
+            &internal_overloads,
             &signatures,
         )?;
         uleb(body.len() as u32, &mut code_section);
@@ -1212,6 +1218,7 @@ fn encode_function(
     types: &TypeTable,
     imports: &BTreeMap<String, u32>,
     internals: &BTreeMap<String, u32>,
+    internal_overloads: &BTreeMap<String, Vec<u32>>,
     signatures: &[Signature],
 ) -> Result<Vec<u8>, String> {
     let mut local_declarations = Vec::new();
@@ -1289,6 +1296,7 @@ fn encode_function(
         constants,
         imports,
         internals,
+        internal_overloads,
         signatures,
         scratch_index,
         return_type: function.return_type,
@@ -1413,6 +1421,7 @@ struct EncodeContext<'a> {
     constants: &'a BTreeMap<String, ConstantValue>,
     imports: &'a BTreeMap<String, u32>,
     internals: &'a BTreeMap<String, u32>,
+    internal_overloads: &'a BTreeMap<String, Vec<u32>>,
     signatures: &'a [Signature],
     scratch_index: u32,
     return_type: TypeId,
@@ -2251,11 +2260,6 @@ fn struct_field_binding<'a>(
                     .is_some_and(|field| field.type_id == field_type)
         })
         .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Err(format!(
-            "web struct field {type_id}.{suffix} has no reachable SoA storage"
-        ));
-    }
     Ok(candidates)
 }
 
@@ -2314,6 +2318,21 @@ fn encode_struct_field_address(
     uleb(view.len, out);
     out.extend([0x4e, 0x04, 0x40, 0x00, 0x0b]);
     let candidates = struct_field_binding(context, binding.type_id, suffix)?;
+    if candidates.is_empty() {
+        let field_type = context.named_structs[&binding.type_id][suffix];
+        let width = storage_width(field_type, context.types, context.named_structs)?;
+        // A scalar-only struct receiver can never arrive with a collection index.
+        // Keep the unreachable collection arm valid without inventing storage.
+        out.push(0x00);
+        return Ok(MemoryBinding {
+            offset: 0,
+            type_id: field_type,
+            len: 0,
+            width,
+            stride: width,
+            scalar: false,
+        });
+    }
     let field = encode_selected_field_offset(binding.index, suffix, &candidates, out)?;
     out.push(0x20);
     uleb(view.index, out);
@@ -2575,6 +2594,168 @@ fn encode_expr(
     encode_expr_as(value, None, context, out)
 }
 
+fn encode_call_arguments(
+    target: &str,
+    args: &[SimpleExpr],
+    signature: &Signature,
+    context: &EncodeContext<'_>,
+) -> Result<Vec<u8>, String> {
+    if args.len() != signature.params.len() {
+        return Err(format!(
+            "web call '{target}' expected {} arguments, found {}",
+            signature.params.len(),
+            args.len()
+        ));
+    }
+    let mut encoded = Vec::new();
+    for (arg, param_type) in args.iter().zip(signature.params.iter()) {
+        if is_struct_view_type(*param_type, context.named_structs) {
+            let actual = encode_struct_view_expr(arg, context, &mut encoded)?;
+            require_same_struct_type(*param_type, actual, "call argument")?;
+        } else {
+            let actual = encode_expr_as(arg, Some(*param_type), context, &mut encoded)?;
+            if !are_call_argument_and_param_compatible(
+                actual,
+                *param_type,
+                context.types,
+                context.named_structs,
+            ) {
+                return Err(format!(
+                    "web call argument type mismatch: expected {param_type}, found {actual}"
+                ));
+            }
+        }
+    }
+    Ok(encoded)
+}
+
+fn resolve_call(
+    target: &str,
+    args: &[SimpleExpr],
+    expected: Option<TypeId>,
+    context: &EncodeContext<'_>,
+) -> Result<(u32, Vec<u8>), String> {
+    if let Some(index) = context
+        .imports
+        .get(target)
+        .or_else(|| context.internals.get(target))
+        .copied()
+    {
+        let signature = context
+            .signatures
+            .get(index as usize)
+            .ok_or_else(|| format!("missing web signature for '{target}'"))?;
+        return Ok((
+            index,
+            encode_call_arguments(target, args, signature, context)?,
+        ));
+    }
+    let Some(candidates) = context.internal_overloads.get(target) else {
+        return Err(format!("unknown web call '{target}'"));
+    };
+    let mut argument_types = Vec::with_capacity(args.len());
+    for argument in args {
+        if let Some(type_id) = infer_struct_view_type(argument, context) {
+            argument_types.push(type_id);
+            continue;
+        }
+        let type_id = if matches!(argument, SimpleExpr::StringLiteral(_)) {
+            context
+                .types
+                .string_literal_type_id()
+                .unwrap_or(TYPE_ID_I32)
+        } else {
+            encode_expr_as(argument, None, context, &mut Vec::new())?
+        };
+        argument_types.push(type_id);
+    }
+    let mut matches = Vec::new();
+    for index in candidates {
+        let Some(signature) = context.signatures.get(*index as usize) else {
+            continue;
+        };
+        if signature.params.len() != argument_types.len() {
+            continue;
+        }
+        if expected.is_some_and(|expected_type| {
+            !are_call_argument_and_param_compatible(
+                signature.result,
+                expected_type,
+                context.types,
+                context.named_structs,
+            )
+        }) {
+            continue;
+        }
+        if argument_types
+            .iter()
+            .zip(signature.params.iter())
+            .all(|(argument, parameter)| {
+                are_call_argument_and_param_compatible(
+                    *argument,
+                    *parameter,
+                    context.types,
+                    context.named_structs,
+                )
+            })
+        {
+            matches.push(*index);
+        }
+    }
+    match matches.len() {
+        1 => {
+            let index = matches.pop().expect("one web overload match");
+            let signature = context
+                .signatures
+                .get(index as usize)
+                .ok_or_else(|| format!("missing web signature for '{target}'"))?;
+            Ok((
+                index,
+                encode_call_arguments(target, args, signature, context)?,
+            ))
+        }
+        0 => Err(format!(
+            "web call '{target}' does not match any of {} overloads",
+            candidates.len()
+        )),
+        count => Err(format!(
+            "web call '{target}' is ambiguous across {count} overloads"
+        )),
+    }
+}
+
+fn infer_struct_view_type(value: &SimpleExpr, context: &EncodeContext<'_>) -> Option<TypeId> {
+    match value {
+        SimpleExpr::Identifier(name) => context
+            .locals
+            .get(name)
+            .filter(|binding| binding.struct_view.is_some())
+            .map(|binding| binding.type_id)
+            .or_else(|| {
+                context
+                    .foreach
+                    .get(name)
+                    .and_then(|binding| context.struct_collections.get(&binding.collection_path))
+                    .map(|binding| binding.type_id)
+            })
+            .or_else(|| {
+                context
+                    .struct_scalars
+                    .get(name)
+                    .map(|binding| binding.type_id)
+            }),
+        SimpleExpr::IndexedPath {
+            collection_path,
+            suffix,
+            ..
+        } if suffix.is_empty() => context
+            .struct_collections
+            .get(collection_path)
+            .map(|binding| binding.type_id),
+        _ => None,
+    }
+}
+
 fn encode_expr_as(
     value: &SimpleExpr,
     expected: Option<TypeId>,
@@ -2652,32 +2833,12 @@ fn encode_expr_as(
             if is_inline_intrinsic(target) {
                 return encode_inline_intrinsic(target, args, context, out);
             }
-            let index = context
-                .imports
-                .get(target)
-                .or_else(|| context.internals.get(target))
-                .copied()
-                .ok_or_else(|| format!("unknown web call '{target}'"))?;
+            let (index, encoded_args) = resolve_call(target, args, expected, context)?;
             let signature = context
                 .signatures
                 .get(index as usize)
                 .ok_or_else(|| format!("missing web signature for '{target}'"))?;
-            if args.len() != signature.params.len() {
-                return Err(format!(
-                    "web call '{target}' expected {} arguments, found {}",
-                    signature.params.len(),
-                    args.len()
-                ));
-            }
-            for (arg, param_type) in args.iter().zip(signature.params.iter()) {
-                if is_struct_view_type(*param_type, context.named_structs) {
-                    let actual = encode_struct_view_expr(arg, context, out)?;
-                    require_same_struct_type(*param_type, actual, "call argument")?;
-                } else {
-                    let actual = encode_expr_as(arg, Some(*param_type), context, out)?;
-                    require_same_type(*param_type, actual, "call argument")?;
-                }
-            }
+            out.extend(encoded_args);
             out.push(0x10);
             uleb(index, out);
             Ok(signature.result)
@@ -2916,14 +3077,9 @@ fn expression_returns_value(
     value: &SimpleExpr,
     context: &EncodeContext<'_>,
 ) -> Result<bool, String> {
-    if let SimpleExpr::Call { target, .. } = value {
-        let index = context
-            .imports
-            .get(target)
-            .or_else(|| context.internals.get(target))
-            .copied()
-            .ok_or_else(|| format!("unknown web call '{target}'"))? as usize;
-        return Ok(context.signatures[index].result != TYPE_ID_VOID);
+    if let SimpleExpr::Call { target, args } = value {
+        let (index, _) = resolve_call(target, args, None, context)?;
+        return Ok(context.signatures[index as usize].result != TYPE_ID_VOID);
     }
     Ok(true)
 }
@@ -3279,6 +3435,45 @@ mod tests {
         process.compile().expect("compile web struct views");
         assert_eq!(process.memory_layout()["items.value"].length, 4);
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn resolves_internal_overloads_from_struct_receiver_types() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "overloads.stasis",
+            "struct ImageAsset { image_handle: i32; } struct AudioAsset { audio_handle: i32; } global image: ImageAsset; global audio: AudioAsset; function ready(self: ImageAsset): bool { return self.image_handle == 1; } function ready(self: AudioAsset): bool { return self.audio_handle == 2; } function main(): i32 { image.image_handle = 1; audio.audio_handle = 2; if (image.ready() && audio.ready()) { return 0; } return 1; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile receiver overloads for web");
+    }
+
+    #[test]
+    fn resolves_internal_overloads_from_enum_receiver_types() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "enum_overloads.stasis",
+            "enum ImageState { None, Ready } enum AudioState { None, Ready } global image: ImageState; global audio: AudioState; function ready(self: ImageState): bool { return self == ImageState.Ready; } function ready(self: AudioState): bool { return self == AudioState.Ready; } function main(): i32 { image = ImageState.Ready; audio = AudioState.Ready; if (image.ready() && audio.ready()) { return 0; } return 1; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile enum receiver overloads for web");
+    }
+
+    #[test]
+    fn resolves_internal_overloads_before_encoding_float_literals() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "float_overloads.stasis",
+            "function select(value: f32): i32 { return 1; } function select(value: f64): i32 { return 2; } function main(): i32 { return select(1.0); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile semantic float overload for web");
     }
 
     #[test]

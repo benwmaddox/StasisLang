@@ -168,10 +168,17 @@ code.
 
 Asynchronous asset tasks use one bounded 64-entry queue and one host worker. File access, image
 rasterization, and audio decoding happen off the frame thread. `asset_task_poll` performs only the
-required main-thread publication step (texture upload or mixer-table insertion), and
-`asset_task_take_handle` transfers ownership to `ImageAsset`/`AudioAsset` or equivalent game state.
-Games should cancel failed, abandoned, or superseded requests so their bounded task slots can be
-reused. The web host maps the same states onto browser image and audio promises.
+required main-thread publication step (texture upload or mixer-table insertion). `ImageAsset` and
+`AudioAsset` expose this as `load_*()`, `ready()`, `failed()`, `play()`/`publish()`, and `release()`;
+their `AssetState` and opaque handles are driven by the host task. Games should release abandoned
+or superseded assets so their bounded task slots can be reused. The web host maps the same states
+onto browser image and audio promises.
+
+`LoadingProgress.advance(total_count, loaded_count, failed_count)` derives the real completed and
+in-progress counts and percentage for a loading screen. Failed work counts as finished so callers
+can decide whether to continue or retry. `displayed_percent` advances by at most one percentage
+point per tick, while `complete()` always uses the real counts. An empty batch reports 0% and is
+already complete.
 
 `play` and the native runner use HostFrame bulk snapshots for per-tick input/state now.
 Application code should read keyboard/pointer/quit state through the public wrappers in
