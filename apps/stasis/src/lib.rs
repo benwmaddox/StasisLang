@@ -4803,7 +4803,12 @@ mod tests {
             STASIS_WINDOW_REQUEST_STDLIB.contains("const HOST_REQ_FLAG_MAXIMIZED: i32 = 4;")
                 && STASIS_WINDOW_REQUEST_STDLIB
                     .contains("function host_request_maximized(enabled: i32): void")
-                && STASIS_GRAPHICS_STDLIB.contains("function set_maximized(enabled: i32): i32"),
+                && STASIS_WINDOW_REQUEST_STDLIB.contains(
+                    "function host_request_maximized_canvas(width: i32, height: i32): void"
+                )
+                && STASIS_GRAPHICS_STDLIB.contains("function set_maximized(enabled: i32): i32")
+                && STASIS_GRAPHICS_STDLIB
+                    .contains("function set_maximized_canvas(width: i32, height: i32): i32"),
             "stdlib should expose a first-class maximized presentation request"
         );
 

@@ -75,6 +75,9 @@ Desktop presentation is explicit and independent from the logical canvas:
 - `set_maximized(1)` fills the window-manager usable work area while preserving
   taskbars, docks, panels, and normal window chrome. It does not change the
   logical size last requested by `init_window` or `set_window_size`.
+- `set_maximized_canvas(width, height)` changes the logical canvas and keeps the
+  native presentation maximized. SDL aspect-fits that canvas with letterbox or
+  pillarbox buffers when its aspect ratio differs from the native surface.
 - `set_maximized(0)` restores a windowed presentation using the retained logical
   dimensions.
 - `set_fullscreen(1)` remains borderless desktop fullscreen and is not an alias
@@ -91,6 +94,16 @@ boundary in both JIT and packaged AOT runners. A common portrait setup is:
 init_window(360, 720, "Portrait Game");
 set_maximized(1);
 ```
+
+A responsive game can switch between purpose-built logical canvases without
+restoring or resizing the desktop window:
+
+```stasis
+set_maximized_canvas(720, 360);
+```
+
+On Android and iOS the native surface remains platform-owned fullscreen while
+the requested logical canvas changes through the same between-tick mailbox.
 
 The title argument remains a compatibility parameter for guest source. The
 native title is owned by the project/CLI launch configuration because the
