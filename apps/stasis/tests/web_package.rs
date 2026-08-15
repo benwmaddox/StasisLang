@@ -139,6 +139,49 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
 }
 
 #[test]
+fn minimal_pong_omits_unreachable_audio_and_input_from_wasm_and_js() {
+    let workspace = repo_root().join("samples/pong_web_minimal");
+    let relative_output = PathBuf::from(format!("build/web-package-test-{}", stamp()));
+    let output = package(&workspace, &relative_output);
+
+    let wasm = fs::read(output.join("game.wasm")).expect("minimal Pong Wasm");
+    let runtime = fs::read_to_string(output.join("game.js")).expect("minimal Pong runtime");
+    let index = fs::read_to_string(output.join("index.html")).expect("minimal Pong index");
+    for reachable in ["main", "tick", "render", "web_draw_rect"] {
+        assert!(
+            wasm.windows(reachable.len())
+                .any(|window| window == reachable.as_bytes()),
+            "missing reachable Pong dependency {reachable}"
+        );
+    }
+    for omitted in [
+        "unused_audio_feature",
+        "unused_keyboard_feature",
+        "web_play_tone",
+        "web_input_axis",
+    ] {
+        assert!(
+            !wasm
+                .windows(omitted.len())
+                .any(|window| window == omitted.as_bytes()),
+            "Wasm retained unreachable dependency {omitted}"
+        );
+        assert!(!runtime.contains(omitted), "JS retained {omitted}");
+    }
+    assert!(!runtime.contains("AudioContext"));
+    assert!(!runtime.contains("keydown"));
+    assert!(!runtime.contains("pointerdown"));
+    assert!(!index.contains("Enable sound"));
+    assert!(
+        runtime.len() < 10_000,
+        "minimal runtime was {} bytes",
+        runtime.len()
+    );
+
+    fs::remove_dir_all(&output).expect("clean minimal Pong package");
+}
+
+#[test]
 fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     let workspace = repo_root().join("samples/windows_launch_smoke");
     let relative_output = PathBuf::from(format!("build/web-package-test-{}", stamp()));
@@ -154,6 +197,10 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
             "missing web runtime data {expected}"
         );
     }
+    assert!(!runtime.contains("AudioContext"));
+    assert!(!runtime.contains("audio_init"));
+    let index = fs::read_to_string(output.join("index.html")).expect("existing game index");
+    assert!(!index.contains("Enable sound"));
     assert!(runtime.contains(r#""assets":{}"#));
     assert!(!runtime.contains("../assets/"));
     for expected in [
