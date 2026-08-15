@@ -1,5 +1,57 @@
 @link("stasis_graphics");
 
+import "graphics.stasis";
+
+struct AudioAsset {
+    handle: i32;
+    request: i32;
+    state: i32;
+}
+
+function @asset_path(path) request_audio_load(self: AudioAsset, path: string): bool {
+    if (self.request > 0) {
+        asset_task_cancel(self.request);
+    }
+    if (self.handle > 0) {
+        audio_release(self.handle);
+    }
+    self.handle = 0;
+    self.request = asset_request_audio(path);
+    if (self.request <= 0) {
+        self.state = ASSET_TASK_FAILED;
+        return false;
+    }
+    self.state = ASSET_TASK_PENDING;
+    return true;
+}
+
+function poll_audio_load(self: AudioAsset): i32 {
+    if (self.request <= 0) {
+        return self.state;
+    }
+    self.state = asset_task_poll(self.request);
+    if (self.state == ASSET_TASK_LOADED) {
+        self.handle = asset_task_take_handle(self.request);
+        self.request = 0;
+        if (self.handle <= 0) {
+            self.state = ASSET_TASK_FAILED;
+        }
+    }
+    return self.state;
+}
+
+function release_audio(self: AudioAsset): void {
+    if (self.request > 0) {
+        asset_task_cancel(self.request);
+    }
+    if (self.handle > 0) {
+        audio_release(self.handle);
+    }
+    self.request = 0;
+    self.handle = 0;
+    self.state = ASSET_TASK_NONE;
+}
+
 // Audio/runtime bindings (marker module).
 // From a generated project: import "/vendor/stasis/stdlib/audio.stasis";
 

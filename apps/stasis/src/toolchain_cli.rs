@@ -5846,6 +5846,19 @@ mod tests {
     }
 
     #[test]
+    fn sprite_asset_tasks_survive_audio_feature_stripping() {
+        let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", false);
+        assert!(runtime.contains("const assetTasks = new Map()"));
+        assert!(runtime.contains("const requestSprite = pathId =>"));
+        assert!(runtime.contains("stasis_jit_asset_request_sprite"));
+        assert!(runtime.contains("stasis_jit_asset_task_poll"));
+        assert!(!runtime.contains("const requestAudio = pathId =>"));
+        assert!(!runtime.contains("stasis_jit_asset_request_audio"));
+        assert!(!runtime.contains("let audioContext"));
+        assert!(!runtime.contains("@stasis-feature audio"));
+    }
+
+    #[test]
     fn release_web_runtime_keeps_only_required_host_interop() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
         let workspace = load_workspace(Some(&root)).expect("load web sample workspace");

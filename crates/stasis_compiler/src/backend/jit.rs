@@ -2798,7 +2798,22 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_load_sprite" | "stasis_gfx_load_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_load_sprite as *const ())
         }
-        "gfx_release_sprite" | "stasis_gfx_release_sprite" => {
+        "stasis_jit_asset_request_sprite" | "asset_request_sprite" => {
+            function_address(stasis_dynload::stasis_jit_asset_request_sprite as *const ())
+        }
+        "stasis_jit_asset_request_audio" | "asset_request_audio" => {
+            function_address(stasis_dynload::stasis_jit_asset_request_audio as *const ())
+        }
+        "stasis_jit_asset_task_poll" | "asset_task_poll" => {
+            function_address(stasis_dynload::stasis_jit_asset_task_poll as *const ())
+        }
+        "stasis_jit_asset_task_take_handle" | "asset_task_take_handle" => {
+            function_address(stasis_dynload::stasis_jit_asset_task_take_handle as *const ())
+        }
+        "stasis_jit_asset_task_cancel" | "asset_task_cancel" => {
+            function_address(stasis_dynload::stasis_jit_asset_task_cancel as *const ())
+        }
+        "gfx_release_sprite" | "stasis_gfx_release_sprite" | "stasis_jit_gfx_release_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_release_sprite as *const ())
         }
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
@@ -3204,6 +3219,15 @@ fn compile_function_into_jit_module(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn async_asset_task_externs_resolve_to_builtin_bridges() {
+        assert!(builtin_host_symbol_address("stasis_jit_asset_request_sprite").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_asset_request_audio").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_asset_task_poll").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_asset_task_take_handle").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_asset_task_cancel").is_some());
+    }
     use crate::backend::EngineEntrypoints;
 
     #[test]

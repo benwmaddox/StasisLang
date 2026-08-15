@@ -202,6 +202,41 @@ fn collect_asset_loaders(
                     );
                 }
             }
+            for annotation in declaration
+                .annotations
+                .iter()
+                .filter(|annotation| annotation.name == ASSET_ANNOTATION)
+            {
+                if !annotation.has_parentheses || annotation.arguments.len() != 1 {
+                    return Err(format!(
+                        "@asset_path on '{}' must name exactly one path parameter",
+                        declaration.name
+                    ));
+                }
+                let argument = &annotation.arguments[0];
+                if argument.kind != ParsedFunctionAnnotationArgumentKind::Identifier {
+                    return Err(format!(
+                        "@asset_path on '{}' must use a parameter name",
+                        declaration.name
+                    ));
+                }
+                let index = declaration
+                    .params
+                    .iter()
+                    .position(|parameter| parameter.name == argument.text)
+                    .ok_or_else(|| {
+                        format!(
+                            "@asset_path on '{}' names unknown parameter '{}'",
+                            declaration.name, argument.text
+                        )
+                    })?;
+                insert_loader(
+                    &mut loaders,
+                    &declaration.name,
+                    declaration.params.len(),
+                    index,
+                );
+            }
         }
     }
     Ok(loaders)
@@ -812,6 +847,27 @@ mod tests {
                 parameter_count: 3,
                 path_parameter: 1,
             }])
+        );
+    }
+
+    #[test]
+    fn annotated_asset_task_wrapper_owns_packaging_for_its_raw_host_call() {
+        let source = r#"
+function @extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
+function @asset_path(path) request_audio_load(path: string): i32 {
+    return asset_request_audio(path);
+}
+function main(): i32 { return request_audio_load("assets/voice.mp3"); }
+"#;
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile().expect("compile asset task wrapper fixture");
+        let references = jit.program_snapshot().expect("snapshot").asset_references();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].api, "request_audio_load");
+        assert_eq!(
+            references[0].logical_path.as_deref(),
+            Some("assets/voice.mp3")
         );
     }
 
