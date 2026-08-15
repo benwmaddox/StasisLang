@@ -2686,6 +2686,33 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
     }
 
     #[test]
+    fn indexed_receiver_call_keeps_imported_method_reachable() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"assets.stasis\"; struct State { assets: Asset[2]; } global state: State; function main(): i32 { return state.assets[1].poll(); }",
+        );
+        compiler.upsert_file(
+            "assets.stasis",
+            "struct Asset { state: i32; } function poll(self: Asset): i32 { return self.state; }",
+        );
+        compiler
+            .index_pass()
+            .expect("indexed receiver dependency resolution");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        let poll = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "poll")
+            .expect("poll method");
+        assert_eq!(main.dependencies, vec![poll.id]);
+    }
+
+    #[test]
     fn importer_can_call_directly_imported_child() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(

@@ -153,6 +153,21 @@ fn collect_dependencies(body_text: &str) -> Result<Vec<IndexedCallDependency>, S
         if tokens.get(index.wrapping_sub(1)).is_some_and(|previous| {
             previous.kind == TokenKind::Other && &body_text[previous.start..previous.end] == "."
         }) {
+            let receiver_method_already_collected = tokens
+                .get(index.wrapping_sub(2))
+                .is_some_and(|receiver| receiver.kind == TokenKind::Identifier);
+            if !receiver_method_already_collected
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.kind == TokenKind::LParen)
+            {
+                dependencies.push(IndexedCallDependency {
+                    qualifier: None,
+                    qualifier_span: None,
+                    name: identifier.to_string(),
+                    name_span: token.start as u32..token.end as u32,
+                });
+            }
             continue;
         }
         if tokens
@@ -238,5 +253,29 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn collects_method_dependencies_from_indexed_and_chained_receivers() {
+        let mut types = TypeTable::new();
+        let source = concat!(
+            "function main(index: i32): i32 { ",
+            "return state.assets[index].poll() + state.current.release(); ",
+            "}\n"
+        );
+        let indexed = index_file(source, &mut types).expect("index");
+        let main = indexed
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        assert_eq!(
+            main.dependencies
+                .iter()
+                .map(|dependency| dependency.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["poll", "release"]
+        );
+        assert_eq!(main.dependencies[0].qualifier, None);
+        assert_eq!(main.dependencies[1].qualifier.as_deref(), Some("current"));
     }
 }
