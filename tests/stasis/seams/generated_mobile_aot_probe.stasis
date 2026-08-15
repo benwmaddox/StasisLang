@@ -1,7 +1,7 @@
 global host_i32: i32[768];
 global host_f32: f32[64];
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_f32: f32[125060];
 global gfx_cmd_u8: u8[65536];
 global host_req_seq: i32;
 global host_req_flags: i32;

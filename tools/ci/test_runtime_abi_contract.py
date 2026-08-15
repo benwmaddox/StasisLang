@@ -41,8 +41,8 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_java_version_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.JAVA_RENDERER,
-            "static final int RENDER_VERSION = 4;",
             "static final int RENDER_VERSION = 5;",
+            "static final int RENDER_VERSION = 6;",
         )
         self.assertTrue(any(failure.field == "STASIS_RENDER_CURRENT_VERSION" for failure in failures))
 
@@ -65,8 +65,8 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_generated_aot_registration_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.AOT,
-            "gfx_cmd_f32, 108676);",
-            "gfx_cmd_f32, 108675);",
+            "gfx_cmd_f32, 125060);",
+            "gfx_cmd_f32, 125059);",
         )
         self.assertTrue(any(failure.field == "gfx_cmd_f32.registration_length" for failure in failures))
 

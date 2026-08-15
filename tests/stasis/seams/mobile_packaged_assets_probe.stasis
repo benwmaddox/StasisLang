@@ -9,7 +9,7 @@ extern function audio_load_wav(path: string): i32;
 extern function audio_play(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
 
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_f32: f32[125060];
 global gfx_cmd_u8: u8[65536];
 global seam_sprite_handle: i32;
 global seam_font_handle: i32;

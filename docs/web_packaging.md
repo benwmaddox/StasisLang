@@ -21,11 +21,29 @@ the original module and reports `wasm_optimized: false` in JSON output. Developm
 optimization so their full diagnostic names remain available. The optimized bytes are written to
 `game.wasm`.
 
+## State storage
+
+The Wasm backend keeps persistent fields flattened from named structs in one
+linear-memory allocation. Fixed collections retain their structure-of-arrays
+field planes in that allocation, and scalar struct fields plus collection
+metadata receive compiler-reported offsets alongside them. True top-level
+scalar globals may remain Wasm globals; function parameters and temporary
+values remain Wasm locals.
+
+The exported `__stasis_global_get_*` and `__stasis_global_set_*` reflection
+helpers preserve path-hash access for both physical storage lanes. This keeps
+host inspection independent of whether a path is backed by linear memory or a
+Wasm global.
+
 The package must be served over HTTP. From the package root, for example, run
 `python -m http.server 8000` and open `http://localhost:8000/`.
 Self-contained single-file HTML output is intentionally deferred; web packages keep Wasm and
 assets external so hosted output remains compact and follows the same asset preparation path as
 Android and desktop packages.
+
+Web packages do not render an audio-enable control. The runtime requests audio immediately and
+automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts
+the audio context suspended.
 
 ## Runtime contract
 
@@ -36,9 +54,9 @@ buffers, matching Android/Windows. Browser policy (fullscreen gestures, Clipboar
 storage, and WebAudio unlocking) remains in JavaScript.
 
 Development packages show a HUD with current and worst observed `tick` and `render` time; both must
-remain below 16 ms. Release packages omit the performance HUD. Browser audio is unlocked by the
-**Enable sound** user gesture; subsequent
-`web_play_tone` calls originate in Stasis game logic.
+remain below 16 ms. Release packages omit the performance HUD. Browser audio is requested
+immediately and retried on the first pointer or keyboard gesture when autoplay policy initially
+suspends it; subsequent `web_play_tone` calls originate in Stasis game logic.
 
 ## Current compiler and host lane
 
@@ -52,8 +70,8 @@ The browser reads the existing `gfx_cmd_i32`, `gfx_cmd_f32`, and `gfx_cmd_u8` co
 keeps clear, line, rectangle, ordered sprite, and cached/dynamic text rendering on the same guest ABI
 as desktop/mobile. Release asset validation and preparation retain only reachable manifest assets;
 PNG, SVG, TTF, WAV, and MP3 files are placed under `assets/` and loaded as external package files.
-WebAudio playback requested during `main()` is queued until the required user
-gesture unlocks the audio context.
+WebAudio playback requested during `main()` is queued until the audio context starts or a user
+gesture unlocks it.
 
 Release Wasm exports lifecycle/host-access functions and memory, but keeps Stasis globals private.
 Development packages additionally export globals and full reachable function names for diagnostics;

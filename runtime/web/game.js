@@ -3,9 +3,6 @@
   const canvas = document.getElementById("stasis-canvas");
   const context = canvas.getContext("2d", { alpha: false });
   const hud = document.getElementById("stasis-hud");
-  // @stasis-feature audio begin
-  const audioButton = document.getElementById("stasis-audio");
-  // @stasis-feature audio end
   const errorBox = document.getElementById("stasis-error");
   const keys = new Set();
   const pointer = { id: 0, x: 0, y: 0, dx: 0, dy: 0, down: false, wentDown: false, wentUp: false };
@@ -18,11 +15,13 @@
   let instance;
   // @stasis-feature audio begin
   let audioContext;
+  let audioEnablePromise;
   let audioEvents = 0;
   let audioSampleRate = 48000;
   let audioChannels = 2;
   let audioNextStart = 0;
   let audioUnderruns = 0;
+  let audioSuspendedByLifecycle = false;
   const audioAssets = new Map();
   const audioVoices = new Map();
   const pendingAudio = [];
@@ -157,6 +156,66 @@
     if (voice) voice.source.stop();
     audioVoices.delete(handle);
   };
+  const updateAudioState = () => {
+    document.body.dataset.audioState = audioContext?.state || "closed";
+  };
+  const enableWebAudio = () => {
+    const audio = ensureAudio();
+    if (audio.state === "running") {
+      for (const start of pendingAudio.splice(0)) void start();
+      updateAudioState();
+      return Promise.resolve(true);
+    }
+    if (audioEnablePromise) return audioEnablePromise;
+    const attempt = audio.resume().then(() => {
+      if (audio === audioContext && audio.state === "running") {
+        for (const start of pendingAudio.splice(0)) void start();
+        updateAudioState();
+        return true;
+      }
+      updateAudioState();
+      return false;
+    }).catch(() => {
+      updateAudioState();
+      return false;
+    }).finally(() => {
+      if (audioEnablePromise === attempt) audioEnablePromise = undefined;
+    });
+    audioEnablePromise = attempt;
+    return attempt;
+  };
+  const suspendWebAudio = () => {
+    if (!audioContext) return;
+    audioSuspendedByLifecycle = true;
+    if (audioContext.state === "running") {
+      void audioContext.suspend().then(updateAudioState).catch(() => {});
+    }
+  };
+  const resumeWebAudio = () => {
+    if (!audioSuspendedByLifecycle || !audioContext || audioContext.state === "closed") return;
+    audioSuspendedByLifecycle = false;
+    const resumingContext = audioContext;
+    void resumingContext.resume().then(() => {
+      if (audioSuspendedByLifecycle && resumingContext === audioContext) {
+        void resumingContext.suspend().then(updateAudioState).catch(() => {});
+      } else {
+        updateAudioState();
+      }
+    }).catch(() => {
+      if (resumingContext === audioContext) audioSuspendedByLifecycle = true;
+    });
+  };
+  const shutdownWebAudio = () => {
+    audioSuspendedByLifecycle = false;
+    pendingAudio.length = 0;
+    for (const handle of Array.from(audioVoices.keys())) stopAudio(handle);
+    const closingContext = audioContext;
+    audioContext = undefined;
+    audioEnablePromise = undefined;
+    audioNextStart = 0;
+    if (closingContext && closingContext.state !== "closed") void closingContext.close();
+    updateAudioState();
+  };
   const pushAudio = (byteOffset, frameCount) => {
     if (!instance?.exports.memory || frameCount <= 0) return 0;
     const sampleCount = frameCount * audioChannels;
@@ -269,10 +328,7 @@
       return 1;
     },
     audio_shutdown: () => {
-      for (const handle of Array.from(audioVoices.keys())) stopAudio(handle);
-      if (audioContext) void audioContext.close();
-      audioContext = undefined;
-      audioNextStart = 0;
+      shutdownWebAudio();
     },
     audio_is_available: () => 1,
     audio_get_sample_rate: () => audioSampleRate,
@@ -318,6 +374,19 @@
   document.addEventListener("paste", event => {
     clipboardText = event.clipboardData?.getData("text/plain") || clipboardText;
   });
+  // @stasis-feature audio begin
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) suspendWebAudio();
+    else resumeWebAudio();
+  });
+  addEventListener("pagehide", event => {
+    if (event.persisted) suspendWebAudio();
+    else shutdownWebAudio();
+  });
+  addEventListener("pageshow", event => {
+    if (event.persisted && !document.hidden) resumeWebAudio();
+  });
+  // @stasis-feature audio end
 
   function executeCommands() {
     for (const command of commands) {
@@ -396,7 +465,11 @@
       context.globalAlpha = Math.max(0, Math.min(1, i32[baseI + 2] / 255));
       context.translate(x + width / 2, y + height / 2);
       context.rotate(i32[baseI + 1] * Math.PI / 180);
-      context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, -width / 2, -height / 2, width, height);
+      if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1) {
+        context.drawImage(image, -width / 2, -height / 2, width, height);
+      } else {
+        context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, -width / 2, -height / 2, width, height);
+      }
       context.restore();
     };
     const drawText = index => {
@@ -632,11 +705,17 @@
   }
   addEventListener("keydown", event => {
     keys.add(event.code);
+    // @stasis-feature audio begin
+    void enableWebAudio();
+    // @stasis-feature audio end
     void applyFullscreenGesture();
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(event.code)) event.preventDefault();
   });
   addEventListener("keyup", event => { keys.delete(event.code); void applyFullscreenGesture(); });
   canvas.addEventListener("pointermove", updatePointer);
+  // @stasis-feature audio begin
+  addEventListener("pointerdown", () => { void enableWebAudio(); }, { passive: true });
+  // @stasis-feature audio end
   canvas.addEventListener("pointerdown", event => {
     updatePointer(event);
     pointer.down = true;
@@ -654,16 +733,7 @@
   addEventListener("resize", () => { resized = true; displayGeneration += 1; });
   document.addEventListener("fullscreenchange", () => { resized = true; displayGeneration += 1; });
   // @stasis-feature audio begin
-  audioButton.addEventListener("click", async () => {
-    await applyFullscreenGesture();
-    audioContext ||= new AudioContext();
-    await audioContext.resume();
-    for (const start of pendingAudio.splice(0)) await start();
-    audioButton.textContent = "Sound enabled";
-    audioButton.disabled = true;
-    document.body.dataset.audioState = audioContext.state;
-    canvas.focus();
-  });
+  void enableWebAudio();
   // @stasis-feature audio end
 
   async function wasmBytes() {

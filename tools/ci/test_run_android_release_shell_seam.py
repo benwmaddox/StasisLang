@@ -127,6 +127,167 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             )
             self.assertEqual([item["name"] for item in observed], ["red", "teal"])
 
+    def test_foreground_check_leaves_test_activity_untouched(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            return "mCurrentFocus=Window{123 u0 com.example.seam/.MainActivity}"
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertFalse(changed)
+        self.assertEqual(
+            calls,
+            [("shell", "dumpsys", "window", "windows")],
+        )
+
+    def test_foreground_check_dismisses_system_dialog_and_restarts(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "dumpsys", "window", "windows"):
+                return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertTrue(changed)
+        self.assertIn(
+            ("shell", "input", "keyevent", "KEYCODE_BACK"),
+            calls,
+        )
+
+    def test_foreground_check_taps_system_dialog_action_before_restarting(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "dumpsys", "window", "windows"):
+                return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
+            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+                return (
+                    "UI hierarchy dumped\n<?xml version='1.0' encoding='UTF-8' "
+                    "standalone='yes'?><hierarchy><node text=\"Close app\" "
+                    "bounds=\"[120,600][420,720]\" /></hierarchy>"
+                )
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertTrue(changed)
+        self.assertIn(("shell", "input", "tap", "270", "660"), calls)
+        self.assertNotIn(("shell", "input", "keyevent", "KEYCODE_BACK"), calls)
+        self.assertIn(
+            (
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-n",
+                "com.example.seam/.MainActivity",
+            ),
+            calls,
+        )
+
+    def test_foreground_check_prefers_wait_over_closing_system_component(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "dumpsys", "window", "windows"):
+                return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
+            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+                return (
+                    "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node text=\"Close app\" bounds=\"[120,600][420,720]\" />"
+                    "<node text=\"Wait\" bounds=\"[120,720][420,840]\" />"
+                    "</hierarchy>"
+                )
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertTrue(changed)
+        self.assertIn(("shell", "input", "tap", "270", "780"), calls)
+        self.assertNotIn(("shell", "input", "tap", "270", "660"), calls)
+
+    def test_foreground_check_dismisses_layered_anr_over_focused_activity(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("shell", "dumpsys", "window", "windows"):
+                return (
+                    "mCurrentFocus=Window{123 u0 com.example.seam/.MainActivity}\n"
+                    "Window #2 Window{456 u0 android/.AppNotRespondingDialog}"
+                )
+            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+                return (
+                    "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node text=\"Close app\" bounds=\"[120,600][420,720]\" />"
+                    "</hierarchy>"
+                )
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            changed = seam.ensure_test_activity_foreground(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+            )
+
+        self.assertTrue(changed)
+        self.assertIn(("shell", "input", "tap", "270", "660"), calls)
+        self.assertIn(
+            (
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-n",
+                "com.example.seam/.MainActivity",
+            ),
+            calls,
+        )
+        self.assertIn(
+            (
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-n",
+                "com.example.seam/.MainActivity",
+            ),
+            calls,
+        )
+
     def test_selects_real_letterbox_for_each_surface_orientation(self):
         self.assertEqual(
             seam.outside_letterbox_point([360, 720], (1080, 2400)),

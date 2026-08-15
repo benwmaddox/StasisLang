@@ -26,7 +26,6 @@ fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
         .arg(workspace)
         .arg("--target")
         .arg("web")
-        .arg("--development-build")
         .arg("--out")
         .arg(relative_output)
         .arg("--json")
@@ -39,10 +38,16 @@ fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&result.stdout).contains("\"wasm_optimized\":false"),
-        "development package unexpectedly optimized Wasm: {}",
+        String::from_utf8_lossy(&result.stdout).contains("\"development_build\":false"),
+        "source-built package did not select local release provenance: {}",
         String::from_utf8_lossy(&result.stdout)
     );
+    let provenance: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("stasis_provenance.json")).expect("read web provenance"),
+    )
+    .expect("parse web provenance");
+    assert_eq!(provenance["build_class"], "local_release");
+    assert_eq!(provenance["development_build"], false);
     output
 }
 
@@ -71,17 +76,32 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let stamp = stamp();
     let relative_output = PathBuf::from(format!("build/web-package-test-{stamp}"));
     let output = package(&workspace, &relative_output);
+    fs::write(output.join("stale.txt"), "old package").expect("write stale package file");
+    let output = package(&workspace, &relative_output);
+    assert!(
+        !output.join("stale.txt").exists(),
+        "replacement retained a stale package file"
+    );
 
     let wasm = fs::read(output.join("game.wasm")).expect("game.wasm");
     assert!(wasm.starts_with(b"\0asm\x01\0\0\0"));
-    for export in ["main", "tick", "render", "player_x"] {
+    for export in ["main", "tick", "render"] {
         assert!(
             wasm.windows(export.len())
                 .any(|window| window == export.as_bytes()),
             "missing Wasm export {export}"
         );
     }
+    assert!(
+        !wasm
+            .windows("player_x".len())
+            .any(|window| window == b"player_x"),
+        "local release retained development-only Wasm symbols"
+    );
     let runtime = fs::read_to_string(output.join("game.js")).expect("game.js");
+    let index = fs::read_to_string(output.join("index.html")).expect("index.html");
+    assert!(!index.contains("stasis-audio"));
+    assert!(!index.contains("Enable sound"));
     for expected in [
         "requestAnimationFrame(frame)",
         "web_play_tone",
@@ -91,8 +111,13 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "audio_push_f32_interleaved",
         "function writeHostFrame",
         "function applyWindowRequest",
+        "const enableWebAudio = () =>",
+        "addEventListener(\"pointerdown\", () => { void enableWebAudio(); }",
+        "void enableWebAudio();",
         "function sdlScancode",
         "const spriteStride = version >= 5 ? 8 : 4;",
+        "if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1)",
+        "context.drawImage(image, -width / 2, -height / 2, width, height);",
         "context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight",
     ] {
         assert!(
@@ -104,7 +129,7 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     assert!(!runtime.contains("data:application/wasm;base64,"));
     assert!(output.join("index.html").is_file());
     let index = fs::read_to_string(output.join("index.html")).expect("index.html");
-    assert!(index.contains(r#"id="stasis-hud""#));
+    assert!(!index.contains(r#"id="stasis-hud""#));
     assert!(!index.contains("__STASIS_"));
     assert!(!output.join("play").exists());
     assert!(output.join("stasis_provenance.json").is_file());
@@ -210,6 +235,16 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
         "stasis_jit_audio_load_music",
         "stasis_jit_audio_load_effect",
         "decodeAudioData",
+        "document.addEventListener(\"visibilitychange\"",
+        "addEventListener(\"pagehide\"",
+        "addEventListener(\"pageshow\"",
+        "if (event.persisted) suspendWebAudio()",
+        "else shutdownWebAudio()",
+        "pendingAudio.length = 0",
+        "audioContext.suspend()",
+        "resumingContext.resume()",
+        "resumingContext.suspend()",
+        "closingContext.close()",
     ] {
         assert!(
             runtime.contains(expected),
@@ -222,6 +257,7 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
             "web runtime embedded {expected}"
         );
     }
+    assert!(!runtime.contains("audioButton"));
     assert!(runtime.contains(r#""assets":{}"#));
     assert!(!runtime.contains("../assets/"));
     assert!(output.join("assets/tone.mp3").is_file());

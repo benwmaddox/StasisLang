@@ -9,6 +9,7 @@ import re
 import struct
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 
@@ -509,16 +510,115 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     return observed
 
 
+def dismiss_system_dialog_action(adb: Path, serial: str | None) -> bool:
+    hierarchy = _run(
+        adb,
+        serial,
+        "shell",
+        "uiautomator",
+        "dump",
+        "/dev/tty",
+        required=False,
+    )
+    start = hierarchy.find("<?xml")
+    end = hierarchy.rfind("</hierarchy>")
+    if start < 0 or end < start:
+        return False
+    try:
+        root = ET.fromstring(hierarchy[start : end + len("</hierarchy>")])
+    except ET.ParseError:
+        return False
+    actions = {
+        node.attrib.get("text", ""): node.attrib.get("bounds", "")
+        for node in root.iter("node")
+    }
+    # Keep the system component alive when Android offers the non-destructive
+    # action. Closing Pixel Launcher can leave the emulator compositor black.
+    for label in ("Wait", "Close app"):
+        bounds = actions.get(label, "")
+        match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+        if match is None:
+            continue
+        left, top, right, bottom = (int(value) for value in match.groups())
+        _run(
+            adb,
+            serial,
+            "shell",
+            "input",
+            "tap",
+            str((left + right) // 2),
+            str((top + bottom) // 2),
+            required=False,
+        )
+        return True
+    return False
+
+
+def ensure_test_activity_foreground(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    component: str,
+) -> bool:
+    windows = _run(
+        adb,
+        serial,
+        "shell",
+        "dumpsys",
+        "window",
+        "windows",
+        required=False,
+    )
+    current_focus = next(
+        (line for line in windows.splitlines() if "mCurrentFocus=" in line),
+        "",
+    )
+    system_dialog_present = "AppNotRespondingDialog" in windows
+    if package_id in current_focus and not system_dialog_present:
+        return False
+    dismissed = (
+        dismiss_system_dialog_action(adb, serial)
+        if current_focus or system_dialog_present
+        else False
+    )
+    if (current_focus or system_dialog_present) and not dismissed:
+        _run(
+            adb,
+            serial,
+            "shell",
+            "input",
+            "keyevent",
+            "KEYCODE_BACK",
+            required=False,
+        )
+    _run(
+        adb,
+        serial,
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        component,
+        required=False,
+    )
+    return True
+
+
 def capture_until_regions_match(
     adb: Path,
     serial: str | None,
     capture: Path,
     expectations: dict,
     deadline: float,
+    package_id: str,
+    component: str,
 ) -> list[dict]:
     """Wait for the stable marker's frame to reach Android's compositor."""
     last_error: SeamError | None = None
     while time.monotonic() < deadline:
+        if ensure_test_activity_foreground(adb, serial, package_id, component):
+            time.sleep(0.25)
         capture.write_bytes(
             _run(adb, serial, "exec-out", "screencap", "-p", text=False)
         )
@@ -979,6 +1079,8 @@ def main() -> int:
                     stage_capture_path,
                     stage_expectations,
                     min(deadline, time.monotonic() + 10),
+                    package_id,
+                    component,
                 )
                 orientation_evidence.append(
                     {
@@ -1000,6 +1102,8 @@ def main() -> int:
             capture_path,
             expectations,
             min(deadline, time.monotonic() + 10),
+            package_id,
+            component,
         )
         time.sleep(1)
         second_pid = _run(
