@@ -2885,18 +2885,16 @@ mod tests {
         let source = sample
             .replace("import \"/vendor/stasis/src/stdlib/audio.stasis\";", "")
             .replace("import \"/vendor/stasis/src/stdlib/graphics.stasis\";", "");
+        let asset_tasks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/asset_tasks.stasis"
+        ));
+        let audio = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/audio.stasis"
+        ))
+        .replace("import \"graphics.stasis\";", "");
         let declarations = r#"
-function @extern("stasis_jit_audio_init") audio_init(sample_rate: i32, channels: i32, latency: i32): bool;
-function @extern("stasis_jit_audio_is_available") audio_is_available(): bool;
-function @extern("stasis_jit_audio_get_sample_rate") audio_get_sample_rate(): i32;
-function @extern("stasis_jit_audio_get_channels") audio_get_channels(): i32;
-function @extern("stasis_jit_audio_load_music") audio_load_music(path: string): i32;
-function @extern("stasis_jit_audio_load_effect") audio_load_effect(path: string): i32;
-function @extern("stasis_jit_audio_play_music") audio_play_music(handle: i32, loop: bool, volume: f32): bool;
-function @extern("stasis_jit_audio_pause_music") audio_pause_music(handle: i32, paused: bool): void;
-function @extern("stasis_jit_audio_set_music_volume") audio_set_music_volume(handle: i32, volume: f32): void;
-function @extern("stasis_jit_audio_stop_music") audio_stop_music(handle: i32): void;
-function @extern("stasis_jit_audio_play_effect") audio_play_effect(handle: i32, volume: f32): bool;
 function init_window(width: i32, height: i32, title: string): bool { return true; }
 function begin_frame(): void { return; }
 function clear(r: f32, g: f32, b: f32, a: f32): void { return; }
@@ -2905,7 +2903,7 @@ function end_frame(): void { return; }
         let mut process = AotProcess::new();
         process.upsert_file(
             "samples/audio_asset_playback/audio_asset_playback.stasis",
-            format!("{declarations}\n{source}"),
+            format!("{declarations}\n{asset_tasks}\n{audio}\n{source}"),
         );
         process.compile().expect("aot compile playback sample");
     }

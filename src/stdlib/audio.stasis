@@ -2,54 +2,43 @@
 
 import "graphics.stasis";
 
-struct AudioAsset {
-    handle: i32;
-    request: i32;
-    state: i32;
+function play(self: AudioAsset, loop: bool, volume: f32, pan: f32): i32 {
+    if (!self.ready()) {
+        return 0;
+    }
+    return audio_play(self.handle, loop, volume, pan);
 }
 
-function @asset_path(path) request_audio_load(self: AudioAsset, path: string): bool {
-    if (self.request > 0) {
-        asset_task_cancel(self.request);
-    }
-    if (self.handle > 0) {
-        audio_release(self.handle);
-    }
-    self.handle = 0;
-    self.request = asset_request_audio(path);
-    if (self.request <= 0) {
-        self.state = ASSET_TASK_FAILED;
+function play_effect(self: AudioAsset, volume: f32): bool {
+    if (!self.ready()) {
         return false;
     }
-    self.state = ASSET_TASK_PENDING;
-    return true;
+    return audio_play_effect(self.handle, volume);
 }
 
-function poll_audio_load(self: AudioAsset): i32 {
-    if (self.request <= 0) {
-        return self.state;
+function play_music(self: AudioAsset, loop: bool, volume: f32): bool {
+    if (!self.ready()) {
+        return false;
     }
-    self.state = asset_task_poll(self.request);
-    if (self.state == ASSET_TASK_LOADED) {
-        self.handle = asset_task_take_handle(self.request);
-        self.request = 0;
-        if (self.handle <= 0) {
-            self.state = ASSET_TASK_FAILED;
-        }
-    }
-    return self.state;
+    return audio_play_music(self.handle, loop, volume);
 }
 
-function release_audio(self: AudioAsset): void {
-    if (self.request > 0) {
-        asset_task_cancel(self.request);
-    }
+function stop_music(self: AudioAsset): void {
     if (self.handle > 0) {
-        audio_release(self.handle);
+        audio_stop_music(self.handle);
     }
-    self.request = 0;
-    self.handle = 0;
-    self.state = ASSET_TASK_NONE;
+}
+
+function pause_music(self: AudioAsset, paused: bool): void {
+    if (self.handle > 0) {
+        audio_pause_music(self.handle, paused);
+    }
+}
+
+function set_music_volume(self: AudioAsset, volume: f32): void {
+    if (self.handle > 0) {
+        audio_set_music_volume(self.handle, volume);
+    }
 }
 
 // Audio/runtime bindings (marker module).
@@ -68,7 +57,6 @@ extern function audio_push_f32_interleaved(samples: f32[], frame_count: i32): i3
 // mono or stereo little-endian PCM16 WAV files. The music/effect helpers accept WAV or MP3.
 // Compressed input stays compressed on disk and is decoded into bounded host memory at load.
 extern function @asset_path(path) audio_load_wav(path: string): i32;
-extern function audio_release(asset_handle: i32): void;
 extern function audio_play(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
 extern function audio_stop(voice_handle: i32): void;
 extern function audio_voice_is_playing(voice_handle: i32): bool;

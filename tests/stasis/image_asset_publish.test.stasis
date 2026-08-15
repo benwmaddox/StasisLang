@@ -1,0 +1,20 @@
+import "../../src/stdlib/graphics.stasis";
+
+global asset: ImageAsset;
+global target: Sprite;
+
+test `publishing an image transfers its host handle and replaces the target`(): bool {
+    asset.handle = 22;
+    asset.state = AssetState.Loaded;
+    asset.width = 64;
+    asset.height = 48;
+
+    target.handle = 11;
+    target.width = 8;
+    target.height = 8;
+
+    if (!asset.publish(target)) {
+        return false;
+    }
+    return target.handle == 22 && target.width == 64 && target.height == 48 && asset.handle == 0 && asset.state == AssetState.None;
+}
