@@ -147,7 +147,7 @@ fn minimal_pong_omits_unreachable_audio_and_input_from_wasm_and_js() {
     let wasm = fs::read(output.join("game.wasm")).expect("minimal Pong Wasm");
     let runtime = fs::read_to_string(output.join("game.js")).expect("minimal Pong runtime");
     let index = fs::read_to_string(output.join("index.html")).expect("minimal Pong index");
-    for reachable in ["reset_ball", "follow_ball", "web_draw_rect"] {
+    for reachable in ["main", "tick", "render", "web_draw_rect"] {
         assert!(
             wasm.windows(reachable.len())
                 .any(|window| window == reachable.as_bytes()),
