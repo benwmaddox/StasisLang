@@ -79,13 +79,19 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
 
     let wasm = fs::read(output.join("game.wasm")).expect("game.wasm");
     assert!(wasm.starts_with(b"\0asm\x01\0\0\0"));
-    for export in ["main", "tick", "render", "player_x"] {
+    for export in ["main", "tick", "render"] {
         assert!(
             wasm.windows(export.len())
                 .any(|window| window == export.as_bytes()),
             "missing Wasm export {export}"
         );
     }
+    assert!(
+        !wasm
+            .windows("player_x".len())
+            .any(|window| window == b"player_x"),
+        "local release retained development-only Wasm symbols"
+    );
     let runtime = fs::read_to_string(output.join("game.js")).expect("game.js");
     let index = fs::read_to_string(output.join("index.html")).expect("index.html");
     assert!(!index.contains("stasis-audio"));
@@ -117,7 +123,7 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     assert!(!runtime.contains("data:application/wasm;base64,"));
     assert!(output.join("index.html").is_file());
     let index = fs::read_to_string(output.join("index.html")).expect("index.html");
-    assert!(index.contains(r#"id="stasis-hud""#));
+    assert!(!index.contains(r#"id="stasis-hud""#));
     assert!(!index.contains("__STASIS_"));
     assert!(!output.join("play").exists());
     assert!(output.join("stasis_provenance.json").is_file());

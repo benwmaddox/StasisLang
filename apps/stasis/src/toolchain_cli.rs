@@ -4547,8 +4547,9 @@ fn local_provenance(development_build: bool) -> Result<Value, String> {
             Value::String(sha256_file(&runtime.join(name))?),
         );
     }
-    let dirty_state = git_text(&["status", "--porcelain", "--untracked-files=no"])
-        .map_or(true, |status| !status.is_empty());
+    let dirty_state = development_build
+        || git_text(&["status", "--porcelain", "--untracked-files=no"])
+            .map_or(true, |status| !status.is_empty());
     let build_class = if development_build {
         "development"
     } else {
@@ -6718,6 +6719,14 @@ mod tests {
             .expect("read local release header")
             .contains("local release"));
         remove_temp(&root);
+    }
+
+    #[test]
+    fn development_provenance_is_always_marked_dirty() {
+        let provenance = local_provenance(true).expect("development provenance");
+        assert_eq!(provenance["build_class"], "development");
+        assert_eq!(provenance["development_build"], true);
+        assert_eq!(provenance["dirty_state"], true);
     }
 
     #[test]
