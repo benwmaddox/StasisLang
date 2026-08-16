@@ -6,6 +6,10 @@ Geometry is authoritative data plus an explicit collision policy. Rendering may
 show a sprite, tile, or primitive, but collision should read the simulation's
 position and shape data directly.
 
+Stasis does not prescribe one collision API. The bundled example demonstrates
+stable IDs and query/materialize/commit with attacks; the geometric policies on
+this page are general design guidance rather than claims about example code.
+
 ## Coordinate and shape contract
 
 Declare one coordinate contract for the simulation:
@@ -96,7 +100,8 @@ removed object and keep that decision consistent across systems.
 - Test equal-priority candidates and verify the stable tie-breaker.
 - Test one contact that defeats an object and verify no later system acts on it.
 - Test that query/materialize does not mutate authoritative state.
-- Test that render projection reads the result without changing it.
+- Test that render projection may write presentation data without changing
+  authoritative gameplay state.
 
 These are design influences, not additional Stasis semantics:
 

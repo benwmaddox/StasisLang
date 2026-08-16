@@ -24,19 +24,23 @@ evidence for the concepts in this library:
   tick boundaries.
 - `system order lets a due enemy move and receive damage` checks the declared
   system sequence.
-- `spawn cursor advances by a bounded amount` and `capacity exhaustion
-  preserves the pending event` check bounded work and capacity behavior.
+- `target ties choose the lower stable slot id` checks the explicit targeting
+  tie-breaker.
+- `spawn cursor advances by a bounded amount` checks the per-step spawn limit.
+- `capacity exhaustion preserves the pending event` checks that failed
+  allocation does not consume the wave event.
 - `cooldown becomes ready on its exact boundary` checks countdown semantics.
 - `removal keeps surviving stable ids and permits reuse` checks lifecycle
   stability.
 - `attack query does not mutate gameplay before commit` separates decision
   materialization from mutation.
-- `render projection preserves authoritative gameplay` checks read-only
-  presentation.
+- `render projection preserves authoritative gameplay` checks that selected
+  gameplay fields stay unchanged and populated render slots retain stable ID
+  order.
 - `unsorted wave data is rejected without activation` checks data validation
   before activation.
 
-The exact transition test is the smallest useful model for tick-driven rules:
+A focused exact-transition test makes tick-driven rules inspectable:
 
 ```stasis
 test `logical ticks drive exact wave transitions`(): bool {
@@ -189,9 +193,10 @@ explicit and retain field-level evidence for a useful diagnosis. A trace of
 named state transitions identifies the first divergence more effectively than
 comparing only final output.
 
-The original [Age of Empires architecture paper](https://www.gamedeveloper.com/programming/1500-archers-on-a-28-8-network-programming-in-age-of-empires-and-beyond)
-is a conceptual reference for synchronous simulation, checksums, and tracing
-the first divergence. It does not imply that Stasis is a networked simulation.
+The [Age of Empires architecture paper](https://www.gamedeveloper.com/programming/1500-archers-on-a-28-8-network-programming-in-age-of-empires-and-beyond)
+is a conceptual reference for identical-command synchronous simulation,
+checksums, replayable bug cases, and synchronization diagnostics. It does not
+imply that Stasis is a networked simulation.
 
 Other non-normative design influences include [Handmade Hero Day 26](https://guide.handmadehero.org/code/day026/),
 [Handmade Hero Day 63](https://guide.handmadehero.org/code/day063/), [Handmade Hero Day 88](https://guide.handmadehero.org/code/day088/),

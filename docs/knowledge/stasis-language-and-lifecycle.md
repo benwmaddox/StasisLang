@@ -11,6 +11,13 @@ into presentation data. Keep those responsibilities visible even when the
 implementation is small. These ownership rules are project invariants, not
 restrictions enforced by the language.
 
+Stasis treats `main`, `tick`, `render`, and optional `on_code_swap` as lifecycle
+roots when they are present. `main()` establishes fresh program state. An
+interactive host calls `tick()` and then `render()`; an exact headless tick run
+does not call `render()`. A staged live-code migration may call
+`on_code_swap()` at a between-tick safe point before publishing the candidate;
+failure preserves the active code and state.
+
 The checked example exposes one public transition operation. Its `tick()`
 advances exactly one `simulation_step()` and then returns:
 
@@ -42,9 +49,9 @@ the simulation, and rendering remains a consumer.
 ## Authoritative state and identity
 
 Keep durable rules in explicit state. The example stores the current logical
-tick, wave cursor, cooldown, capacity status, and counters in
+tick, bounded wave cursor, cooldown, capacity status, and counters in
 `SimulationState`. Enemy slots hold mutable gameplay data. A slot index is a
-stable identity while that slot is active; removal leaves other active slots in
+stable slot ID while that slot is active; removal leaves other active slots in
 place, and allocation reuses the lowest available slot deterministically.
 
 Separate authored definitions from runtime state when they have different

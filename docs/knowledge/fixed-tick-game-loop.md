@@ -155,7 +155,7 @@ or a deterministic validation point. In the example, `select_target()` queries
 the current state, `materialize_attack()` records the selected target and damage
 in `pending_attack`, and `commit_attack()` is the only one of those operations
 that changes target health and starts the cooldown. The test asserts that
-materializing the attack leaves gameplay unchanged:
+materializing the attack leaves target health and cooldown unchanged:
 
 ```stasis
 test `attack query does not mutate gameplay before commit`(): bool {
@@ -173,9 +173,11 @@ test `attack query does not mutate gameplay before commit`(): bool {
 }
 ```
 
-Rendering remains a read-only projection. Use render records or a bounded
-command collection when that makes presentation ordering explicit; do not let
-rendering choose targets, apply damage, advance a cooldown, or remove state.
+Rendering remains a read-only gameplay render projection: it may write
+presentation records but does not mutate gameplay. Use render records or a
+bounded command collection when that makes presentation ordering explicit; do
+not let rendering choose targets, apply damage, advance a cooldown, or remove
+state.
 
 ## Verification checklist
 
@@ -186,7 +188,8 @@ rendering choose targets, apply damage, advance a cooldown, or remove state.
 - Capacity exhaustion leaves pending work observable and recoverable.
 - Stable slot IDs do not shift while occupied; reuse is an explicit identity
   boundary.
-- Query and materialization functions do not mutate authoritative gameplay.
+- Queries do not mutate state; materialization writes only the pending intent;
+  commit owns the resulting gameplay mutation.
 - Render projection preserves authoritative state.
 
 Useful repository references include `samples/headless_scenario/`,
