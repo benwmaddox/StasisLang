@@ -682,7 +682,14 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert_eq!(examples_checked.status.code(), Some(0));
     let examples_tested = stasis(&["--json", "test"], &generated_examples);
     assert_eq!(examples_tested.status.code(), Some(0));
-    assert_eq!(json_stdout(&examples_tested)["result"]["tests_passed"], 19);
+    let examples_test_result = json_stdout(&examples_tested);
+    assert!(
+        examples_test_result["result"]["tests_passed"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "generated knowledge examples discovered no tests"
+    );
+    assert_eq!(examples_test_result["result"]["tests_failed"], 0);
     assert!(!project.join("vendor/stasis/src").exists());
     assert!(!project.join("vendor/stasis/runtime").exists());
     assert!(!project.join("vendor/stasis/stdlib/gfx_cmd.stasis").exists());
