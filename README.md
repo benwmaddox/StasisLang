@@ -355,7 +355,7 @@ This turns a graphical interaction into a repeatable test artifact. PNG bytes ar
 
 Stasis is fast-moving and breaking changes are expected. Nightly release archives are published from `main` on the [GitHub Releases page](https://github.com/benwmaddox/StasisLang/releases).
 
-Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, native build tools, runtime libraries, standard library, samples, mobile shells, and agent workflow guide needed for offline use.
+Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, native build tools, runtime libraries, standard library, samples, mobile shells, agent workflow guide, and Stasis knowledge library needed for offline use.
 
 To build the repository from source:
 
@@ -384,7 +384,7 @@ cargo run -p stasis --release -- play `
 
 - `docs/project_architecture.md` - recommended input, tick, state, and render
   structure for Stasis projects
-
+- `docs/knowledge/README.md` — concise language, tool, data, and fixed-tick game patterns
 - `docs/spec.md` — canonical language semantics
 - `docs/live-compilation-prd.md` — hot-swap product and architecture requirements
 - `docs/toolchain_cli.md` — CLI and workspace contract
