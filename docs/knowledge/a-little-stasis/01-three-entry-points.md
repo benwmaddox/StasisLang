@@ -15,15 +15,8 @@ function main(): i32 {
 }
 ```
 
-```stasis
-function tick(): i32 {
-    simulation_step();
-    return 0;
-}
-```
-
-Later nuggets define the state owners, the recipe called by `tick`, and the
-projection built by `render`.
+Later nuggets define the state owners, show the recipe directly inside `tick`,
+and build the projection inside `render`.
 
 **Keep:** Stasis owns the lifecycle boundary; project code gives each root one
 clear responsibility.

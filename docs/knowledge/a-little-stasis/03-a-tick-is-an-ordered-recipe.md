@@ -5,7 +5,7 @@ If each system works alone, can the game still be wrong?
 Yes. The order in which systems observe and change state is part of the rule. Write that order in one small recipe:
 
 ```stasis
-function simulation_step(): void {
+function tick(): i32 {
     apply_pending_inputs();
     advance_cooldown();
     spawn_due_events();
@@ -14,6 +14,7 @@ function simulation_step(): void {
     commit_attack();
     remove_defeated();
     state.tick_index += 1;
+    return 0;
 }
 ```
 

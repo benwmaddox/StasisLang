@@ -251,7 +251,13 @@ function active_enemy_count(): i32 {
     return count;
 }
 
-function simulation_step(): void {
+function main(): i32 {
+    reset_simulation();
+    configure_example_wave();
+    return 0;
+}
+
+function tick(): i32 {
     apply_pending_inputs();
     advance_cooldown();
     spawn_due_events();
@@ -260,16 +266,6 @@ function simulation_step(): void {
     commit_attack();
     remove_defeated();
     state.tick_index += 1;
-}
-
-function main(): i32 {
-    reset_simulation();
-    configure_example_wave();
-    return 0;
-}
-
-function tick(): i32 {
-    simulation_step();
     return 0;
 }
 
