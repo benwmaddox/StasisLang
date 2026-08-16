@@ -4,6 +4,7 @@
   "entry": "main.stasis",
   "tests": "tests",
   "output": "build",
+  "stdlib": "toolchain",
   "android": {
     "application_id": "com.stasislang.seam.it019",
     "label": "Stasis Android Orientation Seam",

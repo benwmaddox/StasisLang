@@ -2788,6 +2788,393 @@ mod tests {
     }
 
     #[test]
+    fn android_workshop_host_frame_preserves_edges_across_orientation_changes() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("orientation_host_frame");
+        let source = format!(
+            "{}\n\
+             global observed_release_actions: i32;\n\
+             global observed_resized: i32;\n\
+             global observed_native_w: i32;\n\
+             global observed_native_h: i32;\n\
+             global observed_drawable_w: i32;\n\
+             global observed_drawable_h: i32;\n\
+             global observed_display_generation: i32;\n\
+             global observed_density_generation: i32;\n\
+             global observed_pointer_count: i32;\n\
+             global observed_pointer_id: i32;\n\
+             global observed_is_down: i32;\n\
+             global observed_went_down: i32;\n\
+             global observed_went_up: i32;\n\
+             global observed_logical_ok: i32;\n\
+             global observed_normalized_ok: i32;\n\
+             global host_req_window_w_px: i32;\n\
+             global host_req_window_h_px: i32;\n\
+             function main(): void {{ observed_release_actions = 0; host_req_window_w_px = 360; host_req_window_h_px = 720; }}\n\
+             function tick(): void {{\n\
+                 observed_native_w = host_native_w_px();\n\
+                 observed_native_h = host_native_h_px();\n\
+                 observed_drawable_w = host_drawable_w_px();\n\
+                 observed_drawable_h = host_drawable_h_px();\n\
+                 observed_display_generation = host_display_generation();\n\
+                 observed_density_generation = host_density_generation();\n\
+                 observed_resized = 0;\n\
+                 if (host_resized()) {{ observed_resized = 1; }}\n\
+                 observed_pointer_count = host_pointer_count();\n\
+                 observed_pointer_id = host_pointer_id(0);\n\
+                 observed_is_down = 0;\n\
+                 if (host_pointer_is_down(0)) {{ observed_is_down = 1; }}\n\
+                 observed_went_down = 0;\n\
+                 if (host_pointer_went_down(0)) {{ observed_went_down = 1; }}\n\
+                 observed_went_up = 0;\n\
+                 if (host_pointer_went_up(0)) {{\n\
+                     observed_went_up = 1;\n\
+                     observed_release_actions += 1;\n\
+                 }}\n\
+                 observed_logical_ok = 0;\n\
+                 if (host_logical_width() == 360.0 && host_logical_height() == 720.0) {{ observed_logical_ok = 1; }}\n\
+                 observed_normalized_ok = 0;\n\
+                 if (host_pointer_x_n(0) == 0.5 && host_pointer_y_n(0) == 0.5) {{ observed_normalized_ok = 1; }}\n\
+             }}\n",
+            include_str!("../../../src/stdlib/internal/host_frame.stasis")
+        );
+        fs::write(root.join("src/main.stasis"), source).expect("write orientation fixture");
+        let entry = Path::new("src/main.stasis");
+        let frame = |touch_active: i32, screen_w: i32, screen_h: i32| {
+            run_android_workshop_tick(
+                &root,
+                entry,
+                AndroidBridgeTickInput {
+                    touch_x: screen_w / 2,
+                    touch_y: screen_h / 2,
+                    touch_active,
+                    screen_w,
+                    screen_h,
+                },
+            )
+            .expect("run orientation frame")
+        };
+
+        let portrait_down = frame(1, 360, 720);
+        assert_eq!(portrait_down.tick_count, 1);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_display_generation").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_density_generation").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_resized").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_logical_ok").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_native_w").unwrap(),
+            360
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_native_h").unwrap(),
+            720
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_drawable_w").unwrap(),
+            360
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_drawable_h").unwrap(),
+            720
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_pointer_count").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_pointer_id").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_is_down").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_down").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_up").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_release_actions").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_logical_ok").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_normalized_ok").unwrap(),
+            1
+        );
+
+        frame(0, 360, 720);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_display_generation").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_density_generation").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_resized").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_pointer_count").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_is_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_up").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_release_actions").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_logical_ok").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_normalized_ok").unwrap(),
+            1
+        );
+
+        frame(1, 720, 360);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_display_generation").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_density_generation").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_resized").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_native_w").unwrap(),
+            720
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_native_h").unwrap(),
+            360
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_drawable_w").unwrap(),
+            720
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_drawable_h").unwrap(),
+            360
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_pointer_count").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_pointer_id").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_is_down").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_down").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_up").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_release_actions").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_logical_ok").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_normalized_ok").unwrap(),
+            1
+        );
+
+        frame(0, 720, 360);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_display_generation").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_density_generation").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_resized").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_pointer_count").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_is_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_up").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_release_actions").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_logical_ok").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_normalized_ok").unwrap(),
+            1
+        );
+
+        let restored = frame(0, 360, 720);
+        assert_eq!(restored.tick_count, 5);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_display_generation").unwrap(),
+            3
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_density_generation").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_resized").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_native_w").unwrap(),
+            360
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_native_h").unwrap(),
+            720
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_drawable_w").unwrap(),
+            360
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_drawable_h").unwrap(),
+            720
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_pointer_count").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_is_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_up").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_release_actions").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_logical_ok").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_normalized_ok").unwrap(),
+            1
+        );
+
+        let quiet = frame(0, 360, 720);
+        assert_eq!(quiet.tick_count, 6);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_display_generation").unwrap(),
+            3
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_density_generation").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_resized").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_pointer_count").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_is_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_went_up").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_release_actions").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_logical_ok").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "observed_normalized_ok").unwrap(),
+            1
+        );
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
     fn android_bridge_uses_shared_asset_manifest_resolver() {
         let root = temp_project("shared_assets");
         fs::create_dir_all(root.join("assets")).expect("create assets");
@@ -4184,7 +4571,7 @@ global host_f32: f32[64];
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[125060];
+global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
@@ -4273,7 +4660,7 @@ function render(): void {
 global host_i32: i32[768];
 global host_f32: f32[64];
 global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[125060];
+global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
 function main(): void { gfx_load_sprite(\"../assets/missing.svg\", 32, 32); }
 function tick(): void {}

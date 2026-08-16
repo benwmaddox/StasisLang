@@ -43,7 +43,30 @@ function input_testkit_set_pointer_count_raw(count: i32): void {
     host_i32[HOST_I_POINTER_COUNT] = count;
 }
 
+function input_testkit_set_display_snapshot_with_logical(native_w_px: i32, native_h_px: i32, logical_w_px: i32, logical_h_px: i32, generation: i32): void {
+    host_i32[HOST_I_NATIVE_W_PX] = native_w_px;
+    host_i32[HOST_I_NATIVE_H_PX] = native_h_px;
+    host_i32[HOST_I_DRAWABLE_W_PX] = native_w_px;
+    host_i32[HOST_I_DRAWABLE_H_PX] = native_h_px;
+    host_i32[HOST_I_DISPLAY_GENERATION] = generation;
+    host_i32[HOST_I_DENSITY_GENERATION] = generation;
+    host_f32[HOST_F_CONTENT_SCALE] = 1.0;
+    host_f32[HOST_F_RASTER_SCALE] = 1.0;
+    host_f32[HOST_F_LOGICAL_W] = i32_to_f32(logical_w_px);
+    host_f32[HOST_F_LOGICAL_H] = i32_to_f32(logical_h_px);
+    host_f32[HOST_F_SAFE_X] = 0.0;
+    host_f32[HOST_F_SAFE_Y] = 0.0;
+    host_f32[HOST_F_SAFE_W] = i32_to_f32(logical_w_px);
+    host_f32[HOST_F_SAFE_H] = i32_to_f32(logical_h_px);
+}
+
+function input_testkit_set_display_snapshot(width_px: i32, height_px: i32, generation: i32): void {
+    input_testkit_set_display_snapshot_with_logical(width_px, height_px, width_px, height_px, generation);
+}
+
 function input_testkit_set_pointer(index: i32, id: i32, is_down: bool, went_down: bool, went_up: bool, x_px: f32, y_px: f32): void {
+    let logical_w: f32 = host_f32[HOST_F_LOGICAL_W];
+    let logical_h: f32 = host_f32[HOST_F_LOGICAL_H];
     if (index < 0 || index >= HOST_MAX_POINTERS) {
         return;
     }
@@ -65,4 +88,14 @@ function input_testkit_set_pointer(index: i32, id: i32, is_down: bool, went_down
     }
     host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 0] = x_px;
     host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 1] = y_px;
+    if (logical_w > 0.0) {
+        host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 4] = x_px / logical_w;
+    } else {
+        host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 4] = 0.0;
+    }
+    if (logical_h > 0.0) {
+        host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 5] = y_px / logical_h;
+    } else {
+        host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 5] = 0.0;
+    }
 }
