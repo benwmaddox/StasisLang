@@ -80,6 +80,17 @@ const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md"
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
+const KNOWLEDGE_DOCUMENTS: &[&str] = &[
+    "README.md",
+    "data-driven-apps.md",
+    "deterministic-tests-and-repair.md",
+    "fixed-tick-game-loop.md",
+    "geometry-and-collision.md",
+    "semantic-edit-and-validation.md",
+    "stasis-language-and-lifecycle.md",
+    "state-machines-cooldowns-waves.md",
+    "worked-patterns.md",
+];
 const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
 import "/vendor/stasis/stdlib/audio.stasis";
@@ -1178,13 +1189,7 @@ fn create_project_with_options(
         require_git()?;
     }
     let root = absolute_path(&path)?;
-    let bundled_stdlib = bundled_stdlib_dir()?;
-    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
-        format!(
-            "bundled stdlib has no src parent: {}",
-            bundled_stdlib.display()
-        )
-    })?;
+    let vendor_manifest = current_vendor_manifest()?;
     let manifest_path = root.join(MANIFEST_NAME);
     let mut reserved_paths = vec![
         manifest_path.clone(),
@@ -1234,10 +1239,10 @@ fn create_project_with_options(
     fs::create_dir_all(root.join("tests"))
         .map_err(|error| format!("failed to create tests directory: {error}"))?;
     let mut manifest = ProjectManifest::new(name.clone());
-    manifest.vendor = Some(current_vendor_manifest(bundled_source)?);
+    manifest.vendor = Some(vendor_manifest);
     write_manifest(&manifest_path, &manifest)?;
     let vendor_package = root.join("vendor/stasis");
-    copy_dir_if_exists(&bundled_stdlib, &vendor_package.join("stdlib"))?;
+    copy_bundled_vendor_package(&vendor_package)?;
     write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
     write_new_file(&root.join("CLAUDE.md"), PROJECT_CLAUDE_GUIDE)?;
     write_new_file(
@@ -1466,54 +1471,82 @@ fn sync_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn directory_sha256(root: &Path) -> Result<String, String> {
-    fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
-        let mut entries = fs::read_dir(directory)
-            .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to enumerate {}: {error}", directory.display()))?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let kind = entry.file_type().map_err(|error| {
-                format!("failed to inspect {}: {error}", entry.path().display())
-            })?;
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                collect(root, &entry.path(), files)?;
-            } else if kind.is_file() {
-                files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
-            }
+fn collect_mapped_files(
+    root: &Path,
+    directory: &Path,
+    prefix: &Path,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to enumerate {}: {error}", directory.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", entry.path().display()))?;
+        if kind.is_symlink() {
+            continue;
         }
-        Ok(())
+        if kind.is_dir() {
+            collect_mapped_files(root, &entry.path(), prefix, files)?;
+        } else if kind.is_file() {
+            let physical = entry.path();
+            let relative = physical
+                .strip_prefix(root)
+                .map_err(|_| format!("file escaped mapped directory {}", root.display()))?;
+            files.push((prefix.join(relative), physical));
+        }
     }
+    Ok(())
+}
 
-    let mut files = Vec::new();
-    collect(root, root, &mut files)?;
+fn mapped_files_sha256(mut files: Vec<(PathBuf, PathBuf)>) -> Result<String, String> {
+    files.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest = Sha256::new();
-    for relative in files {
+    for (relative, physical) in files {
         digest.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
         digest.update([0]);
-        let bytes = fs::read(root.join(&relative))
-            .map_err(|error| format!("failed to read {}: {error}", relative.display()))?;
+        let bytes = fs::read(&physical)
+            .map_err(|error| format!("failed to read {}: {error}", physical.display()))?;
         digest.update(bytes);
         digest.update([0]);
     }
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn directory_sha256(root: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect_mapped_files(root, root, Path::new(""), &mut files)?;
+    mapped_files_sha256(files)
+}
+
+fn bundled_vendor_sha256() -> Result<String, String> {
+    let stdlib = bundled_stdlib_dir()?;
+    let docs = bundled_knowledge_docs_dir()?;
+    let mut files = Vec::new();
+    collect_mapped_files(&stdlib, &stdlib, Path::new("stdlib"), &mut files)?;
+    collect_mapped_files(&docs, &docs, Path::new("docs"), &mut files)?;
+    mapped_files_sha256(files)
+}
+
 fn current_release_id() -> &'static str {
     option_env!("STASIS_RELEASE_ID").unwrap_or("development")
 }
 
-fn current_vendor_manifest(source: &Path) -> Result<VendorManifest, String> {
+fn current_vendor_manifest() -> Result<VendorManifest, String> {
     Ok(VendorManifest {
         stasis: StasisVendorManifest {
             release_id: current_release_id().to_string(),
-            sha256: directory_sha256(source)?,
+            sha256: bundled_vendor_sha256()?,
         },
     })
+}
+
+fn copy_bundled_vendor_package(destination: &Path) -> Result<(), String> {
+    copy_dir_if_exists(&bundled_stdlib_dir()?, &destination.join("stdlib"))?;
+    copy_dir_if_exists(&bundled_knowledge_docs_dir()?, &destination.join("docs"))
 }
 
 fn validate_vendor_sources(source_root: &Path) -> Result<(), String> {
@@ -1574,14 +1607,7 @@ fn inspect_project_vendor(
     workspace_root: &Path,
     manifest: &ProjectManifest,
 ) -> Result<VendorStatus, String> {
-    let bundled_stdlib = bundled_stdlib_dir()?;
-    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
-        format!(
-            "bundled stdlib has no src parent: {}",
-            bundled_stdlib.display()
-        )
-    })?;
-    let installed = current_vendor_manifest(bundled_source)?.stasis;
+    let installed = current_vendor_manifest()?.stasis;
     let recorded = manifest.vendor.as_ref().map(|vendor| vendor.stasis.clone());
     let vendor_package = workspace_root.join("vendor/stasis");
     let actual_sha256 = if vendor_package.exists() {
@@ -1653,13 +1679,6 @@ fn update_vendor_snapshot(
     {
         return Ok(false);
     }
-    let bundled_stdlib = bundled_stdlib_dir()?;
-    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
-        format!(
-            "bundled stdlib has no src parent: {}",
-            bundled_stdlib.display()
-        )
-    })?;
     let vendor_root = workspace_root.join("vendor");
     fs::create_dir_all(&vendor_root)
         .map_err(|error| format!("failed to create {}: {error}", vendor_root.display()))?;
@@ -1680,7 +1699,7 @@ fn update_vendor_snapshot(
     let manifest_staging = workspace_root.join(format!("{MANIFEST_NAME}.vendor-sync-{suffix}"));
     let manifest_backup = workspace_root.join(format!("{MANIFEST_NAME}.vendor-previous-{suffix}"));
 
-    if let Err(error) = copy_dir_if_exists(bundled_source, &staging) {
+    if let Err(error) = copy_bundled_vendor_package(&staging) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -5625,6 +5644,24 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
     Err("installed toolchain is missing the complete src/stdlib hierarchy; reinstall the complete release archive".to_string())
 }
 
+fn bundled_knowledge_docs_dir() -> Result<PathBuf, String> {
+    let directory = bundled_toolchain_directory("docs/ai_knowledge", "Stasis knowledge library")?;
+    let missing: Vec<_> = KNOWLEDGE_DOCUMENTS
+        .iter()
+        .filter(|document| !directory.join(document).is_file())
+        .copied()
+        .collect();
+    if missing.is_empty() {
+        Ok(directory)
+    } else {
+        Err(format!(
+            "installed toolchain has an incomplete Stasis knowledge library at {} (missing {}); reinstall the complete release archive",
+            directory.display(),
+            missing.join(", ")
+        ))
+    }
+}
+
 fn bundled_mobile_assets_dir() -> Result<PathBuf, String> {
     bundled_toolchain_directory("mobile/shells", "mobile shell templates")
 }
@@ -6672,6 +6709,7 @@ mod tests {
         load_workspace(Some(&root)).expect("upgrade legacy vendor layout");
 
         assert!(vendor_root.join("stdlib/stdlib.stasis").is_file());
+        assert!(vendor_root.join("docs/README.md").is_file());
         assert!(!vendor_root.join("src").exists());
         remove_temp(&root);
     }
@@ -6682,12 +6720,15 @@ mod tests {
         create_project(root.clone(), "vendor_local_edits".to_string()).expect("create project");
         let edited = root.join("vendor/stasis/stdlib/audio.stasis");
         fs::write(&edited, "// local vendor edit\n").expect("edit vendor source");
+        let removed_doc = root.join("vendor/stasis/docs/worked-patterns.md");
+        fs::remove_file(&removed_doc).expect("remove vendor knowledge document");
 
         let current = load_workspace(Some(&root)).expect("automatic vendor replacement");
         assert_ne!(
             fs::read_to_string(&edited).expect("read restored vendor"),
             "// local vendor edit\n"
         );
+        assert!(removed_doc.is_file());
         assert_eq!(
             current
                 .manifest

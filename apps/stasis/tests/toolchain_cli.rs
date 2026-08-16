@@ -591,6 +591,25 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert!(project
         .join("vendor/stasis/stdlib/internal/gfx_cmd.stasis")
         .is_file());
+    let knowledge_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/ai_knowledge");
+    for document in [
+        "README.md",
+        "data-driven-apps.md",
+        "deterministic-tests-and-repair.md",
+        "fixed-tick-game-loop.md",
+        "geometry-and-collision.md",
+        "semantic-edit-and-validation.md",
+        "stasis-language-and-lifecycle.md",
+        "state-machines-cooldowns-waves.md",
+        "worked-patterns.md",
+    ] {
+        assert_eq!(
+            fs::read(project.join("vendor/stasis/docs").join(document))
+                .expect("read generated knowledge document"),
+            fs::read(knowledge_source.join(document)).expect("read source knowledge document"),
+            "generated knowledge document differs: {document}"
+        );
+    }
     assert!(!project.join("vendor/stasis/src").exists());
     assert!(!project.join("vendor/stasis/runtime").exists());
     assert!(!project.join("vendor/stasis/stdlib/gfx_cmd.stasis").exists());
