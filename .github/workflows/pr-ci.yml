@@ -36,6 +36,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Check Stasis src layout
         run: |
           python tools/ci/check_stasis_src_layout.py
@@ -61,6 +66,9 @@ jobs:
           python -m unittest tools.ci.test_verify_android_render_performance
           python -m unittest tools.ci.test_verify_render_parity
           python tools/ci/verify_render_parity.py
+
+      - name: Test web orientation HostFrame seam
+        run: node --test runtime/web/tests/orientation_host_frame.test.mjs
 
       - name: Test native render contract and lifecycle matrix
         run: |
@@ -93,7 +101,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
       - name: Check Stasis src layout
         run: python tools/ci/check_stasis_src_layout.py
 
@@ -215,7 +222,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

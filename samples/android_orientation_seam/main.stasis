@@ -1,4 +1,4 @@
-import "/vendor/stasis/src/stdlib/graphics.stasis";
+import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
 
 global seam_state_checksum: i32;
 global seam_probe_sequence: i32;

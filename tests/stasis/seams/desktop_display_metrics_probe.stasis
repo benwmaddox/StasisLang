@@ -22,9 +22,16 @@ global metric_pointer_x: f32;
 global metric_pointer_y: f32;
 global metric_pointer_x_n: f32;
 global metric_pointer_y_n: f32;
+global metric_pointer_id: i32;
+global metric_pointer_count: i32;
+global metric_pointer_is_down: i32;
+global metric_pointer_went_down: i32;
+global metric_pointer_went_up: i32;
+global metric_release_actions: i32;
 
 function main(): i32 {
     metric_tick = 0;
+    metric_release_actions = 0;
     return 0;
 }
 
@@ -46,11 +53,35 @@ function tick(): i32 {
     metric_safe_h = host_safe_height();
     metric_content_scale = host_content_scale();
     metric_raster_scale = host_raster_scale();
+    metric_pointer_count = host_pointer_count();
     if (host_pointer_count() > 1) {
+        metric_pointer_id = host_pointer_id(1);
+        metric_pointer_is_down = 0;
+        if (host_pointer_is_down(1)) {
+            metric_pointer_is_down = 1;
+        }
+        metric_pointer_went_down = 0;
+        if (host_pointer_went_down(1)) {
+            metric_pointer_went_down = 1;
+        }
+        metric_pointer_went_up = 0;
+        if (host_pointer_went_up(1)) {
+            metric_pointer_went_up = 1;
+            metric_release_actions += 1;
+        }
         metric_pointer_x = host_pointer_x_logical(1);
         metric_pointer_y = host_pointer_y_logical(1);
         metric_pointer_x_n = host_pointer_x_n(1);
         metric_pointer_y_n = host_pointer_y_n(1);
+    } else {
+        metric_pointer_id = 0;
+        metric_pointer_is_down = 0;
+        metric_pointer_went_down = 0;
+        metric_pointer_went_up = 0;
+        metric_pointer_x = 0.0;
+        metric_pointer_y = 0.0;
+        metric_pointer_x_n = 0.0;
+        metric_pointer_y_n = 0.0;
     }
     return 0;
 }

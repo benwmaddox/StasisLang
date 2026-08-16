@@ -16,10 +16,18 @@ const WINDOW_MINIMIZED: i32 = 2;
 const WINDOW_RESTORED: i32 = 3;
 const POINTER_DOWN: i32 = 3;
 const POINTER_MOVE: i32 = 4;
+const POINTER_UP: i32 = 5;
 const TOUCH_ID: i32 = 91;
-const ODD_TRACE: i32 = -873_412_109;
-const MINIMIZED_TRACE: i32 = 1_700_295_147;
-const RESTORED_TRACE: i32 = -683_859_671;
+const POINTER_SLOT_ID: i32 = 1;
+const ODD_TRACE: i32 = 896_184_146;
+const MINIMIZED_TRACE: i32 = -1_273_339_326;
+const RESTORED_TRACE: i32 = -1_200_835_344;
+const PORTRAIT_RELEASE_TRACE: i32 = 1_386_315_686;
+const PORTRAIT_DOWN_TRACE: i32 = 569_769_344;
+const LANDSCAPE_DOWN_TRACE: i32 = 569_769_344;
+const LANDSCAPE_RELEASE_TRACE: i32 = 569_769_344;
+const RESTORED_PORTRAIT_TRACE: i32 = 773_912_317;
+const QUIET_TRACE: i32 = 773_912_317;
 
 #[derive(Clone, Copy)]
 struct DisplaySample {
@@ -48,6 +56,44 @@ const ODD_FRACTIONAL: DisplaySample = DisplaySample {
     density_generation: 2,
 };
 
+const ORIENTATION_PORTRAIT: DisplaySample = DisplaySample {
+    logical: [360, 720],
+    native: [360, 720],
+    drawable: [360, 720],
+    safe_native: [0, 0, 360, 720],
+    safe_logical: [0.0, 0.0, 360.0, 720.0],
+    safe_rounded: [0, 0, 360, 720],
+    content_scale: 1.0,
+    raster_scale: 1.0,
+    display_generation: 4,
+    density_generation: 4,
+};
+
+const ORIENTATION_LANDSCAPE: DisplaySample = DisplaySample {
+    logical: [360, 720],
+    native: [720, 360],
+    drawable: [720, 360],
+    safe_native: [0, 0, 720, 360],
+    safe_logical: [0.0, 0.0, 360.0, 720.0],
+    safe_rounded: [0, 0, 360, 720],
+    content_scale: 0.5,
+    raster_scale: 1.0,
+    display_generation: 5,
+    density_generation: 4,
+};
+
+const RESTORED_PORTRAIT: DisplaySample = DisplaySample {
+    logical: [360, 720],
+    native: [360, 720],
+    drawable: [360, 720],
+    safe_native: [0, 0, 360, 720],
+    safe_logical: [0.0, 0.0, 360.0, 720.0],
+    safe_rounded: [0, 0, 360, 720],
+    content_scale: 1.0,
+    raster_scale: 1.0,
+    display_generation: 6,
+    density_generation: 4,
+};
 const RESTORED_SCALE: DisplaySample = DisplaySample {
     logical: [400, 300],
     native: [801, 601],
@@ -157,6 +203,56 @@ fn assert_close(actual: f32, expected: f32, field: &str) {
         (actual - expected).abs() <= 0.002,
         "{field} mismatch: expected={expected} actual={actual}"
     );
+}
+
+fn assert_pointer_release(
+    host_i32: &[i32],
+    host_f32: &[f32],
+    expected_x: f32,
+    expected_y: f32,
+    expected_x_n: f32,
+    expected_y_n: f32,
+    expected_actions: i32,
+) {
+    assert_eq!(
+        host_i32[7], 2,
+        "touch release keeps slot 1 visible for this frame"
+    );
+    assert_eq!(&host_i32[548..552], &[POINTER_SLOT_ID, 0, 0, 1]);
+    assert_close(host_f32[6], expected_x, "touch release logical x");
+    assert_close(host_f32[7], expected_y, "touch release logical y");
+    assert_close(host_f32[10], expected_x_n, "touch release normalized x");
+    assert_close(host_f32[11], expected_y_n, "touch release normalized y");
+    assert_eq!(scalar_i32("metric_pointer_id"), POINTER_SLOT_ID);
+    assert_eq!(scalar_i32("metric_pointer_count"), 2);
+    assert_eq!(scalar_i32("metric_pointer_is_down"), 0);
+    assert_eq!(scalar_i32("metric_pointer_went_up"), 1);
+    assert_eq!(scalar_i32("metric_release_actions"), expected_actions);
+}
+fn assert_pointer_down(
+    host_i32: &[i32],
+    host_f32: &[f32],
+    expected_x: f32,
+    expected_y: f32,
+    expected_x_n: f32,
+    expected_y_n: f32,
+    expected_actions: i32,
+) {
+    assert_eq!(
+        host_i32[7], 2,
+        "touch down keeps slot 1 visible for this frame"
+    );
+    assert_eq!(&host_i32[548..552], &[POINTER_SLOT_ID, 1, 1, 0]);
+    assert_close(host_f32[6], expected_x, "touch down logical x");
+    assert_close(host_f32[7], expected_y, "touch down logical y");
+    assert_close(host_f32[10], expected_x_n, "touch down normalized x");
+    assert_close(host_f32[11], expected_y_n, "touch down normalized y");
+    assert_eq!(scalar_i32("metric_pointer_id"), POINTER_SLOT_ID);
+    assert_eq!(scalar_i32("metric_pointer_count"), 2);
+    assert_eq!(scalar_i32("metric_pointer_is_down"), 1);
+    assert_eq!(scalar_i32("metric_pointer_went_down"), 1);
+    assert_eq!(scalar_i32("metric_pointer_went_up"), 0);
+    assert_eq!(scalar_i32("metric_release_actions"), expected_actions);
 }
 
 fn assert_metrics(
@@ -438,6 +534,132 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
     assert_eq!(restored_trace, RESTORED_TRACE);
     assert_eq!(duplicate_trace, RESTORED_TRACE);
 
+    native.display(DISPLAY_CHANGED, ORIENTATION_PORTRAIT);
+    native.pointer(POINTER_UP, 200.0, 150.0);
+    let portrait_release_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        ORIENTATION_PORTRAIT,
+        false,
+        true,
+    );
+    assert_pointer_release(
+        &host_i32,
+        &host_f32,
+        200.0,
+        150.0,
+        200.0 / 360.0,
+        150.0 / 720.0,
+        1,
+    );
+    assert_eq!(portrait_release_trace, PORTRAIT_RELEASE_TRACE);
+
+    native.pointer(POINTER_DOWN, 270.0, 540.0);
+    let portrait_down_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        ORIENTATION_PORTRAIT,
+        false,
+        false,
+    );
+    assert_pointer_down(&host_i32, &host_f32, 270.0, 540.0, 0.75, 0.75, 1);
+    assert_eq!(portrait_down_trace, PORTRAIT_DOWN_TRACE);
+
+    native.display(DISPLAY_CHANGED, ORIENTATION_LANDSCAPE);
+    let landscape_down_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        ORIENTATION_LANDSCAPE,
+        false,
+        true,
+    );
+    assert_eq!(scalar_i32("metric_display_generation"), 5);
+    assert_eq!(scalar_i32("metric_density_generation"), 4);
+    assert_eq!(&host_i32[548..552], &[POINTER_SLOT_ID, 1, 0, 0]);
+    assert_eq!(scalar_i32("metric_pointer_is_down"), 1);
+    assert_eq!(scalar_i32("metric_pointer_went_down"), 0);
+    assert_eq!(scalar_i32("metric_pointer_went_up"), 0);
+    assert_eq!(landscape_down_trace, LANDSCAPE_DOWN_TRACE);
+
+    native.pointer(POINTER_UP, 270.0, 540.0);
+    let landscape_release_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        ORIENTATION_LANDSCAPE,
+        false,
+        false,
+    );
+    assert_pointer_release(&host_i32, &host_f32, 270.0, 540.0, 0.75, 0.75, 2);
+    assert_eq!(landscape_release_trace, LANDSCAPE_RELEASE_TRACE);
+
+    native.display(DISPLAY_CHANGED, RESTORED_PORTRAIT);
+    let restored_portrait_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        RESTORED_PORTRAIT,
+        false,
+        true,
+    );
+    assert_eq!(host_i32[7], 1, "restored frame has idle mouse only");
+    assert_eq!(host_i32[11], 1, "restored portrait reports resize once");
+    assert_eq!(
+        host_i32[548..552],
+        [POINTER_SLOT_ID, 0, 0, 0],
+        "restored frame clears absent touch slot"
+    );
+    assert_eq!(scalar_i32("metric_pointer_id"), 0);
+    assert_eq!(scalar_i32("metric_pointer_count"), 1);
+    assert_eq!(scalar_i32("metric_pointer_is_down"), 0);
+    assert_eq!(scalar_i32("metric_pointer_went_down"), 0);
+    assert_eq!(scalar_i32("metric_pointer_went_up"), 0);
+    assert_eq!(scalar_i32("metric_release_actions"), 2);
+    assert_eq!(restored_portrait_trace, RESTORED_PORTRAIT_TRACE);
+
+    let quiet_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        RESTORED_PORTRAIT,
+        false,
+        false,
+    );
+    assert_eq!(host_i32[7], 1);
+    assert_eq!(host_i32[11], 0, "next quiet frame clears resized");
+    assert_eq!(host_i32[30], 6);
+    assert_eq!(host_i32[31], 4);
+    assert_eq!(scalar_i32("metric_pointer_went_up"), 0);
+    assert_eq!(scalar_i32("metric_release_actions"), 2);
+    assert_eq!(quiet_trace, QUIET_TRACE);
+
     let evidence = json!({
         "schema": "stasis.seam_test.v1",
         "test_id": "IT-007",
@@ -447,9 +669,15 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
             {"stage": "odd_fractional", "logical": ODD_FRACTIONAL.logical, "native": ODD_FRACTIONAL.native, "drawable": ODD_FRACTIONAL.drawable, "safe": ODD_FRACTIONAL.safe_logical, "display_generation": 2, "density_generation": 2, "trace": odd_trace},
             {"stage": "minimized", "display_generation": 2, "density_generation": 2, "trace": minimized_trace},
             {"stage": "restored_scale", "logical": RESTORED_SCALE.logical, "native": RESTORED_SCALE.native, "drawable": RESTORED_SCALE.drawable, "display_generation": 3, "density_generation": 3, "trace": restored_trace},
-            {"stage": "duplicate_restore", "display_generation": 3, "density_generation": 3, "trace": duplicate_trace}
+            {"stage": "duplicate_restore", "display_generation": 3, "density_generation": 3, "trace": duplicate_trace},
+            {"stage": "portrait_release", "logical": ORIENTATION_PORTRAIT.logical, "native": ORIENTATION_PORTRAIT.native, "drawable": ORIENTATION_PORTRAIT.drawable, "display_generation": 4, "density_generation": 4, "pointer_went_up": 1, "release_actions": 1, "trace": portrait_release_trace},
+            {"stage": "portrait_down", "logical": ORIENTATION_PORTRAIT.logical, "native": ORIENTATION_PORTRAIT.native, "drawable": ORIENTATION_PORTRAIT.drawable, "display_generation": 4, "density_generation": 4, "pointer_went_down": 1, "pointer_went_up": 0, "release_actions": 1, "trace": portrait_down_trace},
+            {"stage": "landscape_down", "logical": ORIENTATION_LANDSCAPE.logical, "native": ORIENTATION_LANDSCAPE.native, "drawable": ORIENTATION_LANDSCAPE.drawable, "display_generation": 5, "density_generation": 4, "pointer_went_down": 0, "pointer_went_up": 0, "release_actions": 1, "trace": landscape_down_trace},
+            {"stage": "landscape_release", "logical": ORIENTATION_LANDSCAPE.logical, "native": ORIENTATION_LANDSCAPE.native, "drawable": ORIENTATION_LANDSCAPE.drawable, "display_generation": 5, "density_generation": 4, "pointer_went_up": 1, "release_actions": 2, "trace": landscape_release_trace},
+            {"stage": "restored_portrait", "logical": RESTORED_PORTRAIT.logical, "native": RESTORED_PORTRAIT.native, "drawable": RESTORED_PORTRAIT.drawable, "display_generation": 6, "density_generation": 4, "pointer_went_up": 0, "release_actions": 2, "trace": restored_portrait_trace},
+            {"stage": "quiet", "logical": RESTORED_PORTRAIT.logical, "native": RESTORED_PORTRAIT.native, "drawable": RESTORED_PORTRAIT.drawable, "display_generation": 6, "density_generation": 4, "pointer_went_up": 0, "release_actions": 2, "trace": quiet_trace}
         ],
-        "oracle": {"renderer_lifecycle": initial_lifecycle, "restoration_generation_advances": 1, "pointer_round_trip_tolerance": 0.002}
+        "oracle": {"renderer_lifecycle": initial_lifecycle, "restoration_generation_advances": 1, "pointer_round_trip_tolerance": 0.002, "orientation_release_actions": 2}
     });
     let evidence_path = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
