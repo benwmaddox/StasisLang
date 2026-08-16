@@ -592,17 +592,20 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         .join("vendor/stasis/stdlib/internal/gfx_cmd.stasis")
         .is_file());
     let knowledge_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/knowledge");
-    for document in [
+    let knowledge_documents = [
         "README.md",
-        "data-driven-apps.md",
-        "deterministic-tests-and-repair.md",
-        "fixed-tick-game-loop.md",
+        "a-little-stasis/01-three-entry-points.md",
+        "a-little-stasis/02-state-has-owners.md",
+        "a-little-stasis/03-a-tick-is-an-ordered-recipe.md",
+        "a-little-stasis/04-input-crosses-a-boundary.md",
+        "a-little-stasis/05-bounded-storage-is-policy.md",
+        "a-little-stasis/06-query-materialize-commit.md",
+        "a-little-stasis/07-test-systems-not-balance-numbers.md",
+        "a-little-stasis/08-projection-is-not-authority.md",
         "geometry-and-collision.md",
         "semantic-edit-and-validation.md",
-        "stasis-language-and-lifecycle.md",
-        "state-machines-cooldowns-waves.md",
-        "worked-patterns.md",
-    ] {
+    ];
+    for document in knowledge_documents.iter().copied() {
         assert_eq!(
             fs::read(project.join("vendor/stasis/docs").join(document))
                 .expect("read generated knowledge document"),
@@ -631,11 +634,8 @@ fn project_commands_emit_stable_json_from_nested_directories() {
             .expect("read knowledge example tests");
     let compiled_examples = format!("{example_source}\n{example_tests}").replace("\r\n", "\n");
     let mut checked_stasis_blocks = 0;
-    for document in fs::read_dir(&knowledge_source).expect("enumerate knowledge documents") {
-        let path = document.expect("knowledge document entry").path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
-            continue;
-        }
+    for document in knowledge_documents.iter().copied() {
+        let path = knowledge_source.join(document);
         let markdown = fs::read_to_string(&path)
             .expect("read knowledge Markdown")
             .replace("\r\n", "\n");
@@ -666,7 +666,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert_eq!(examples_checked.status.code(), Some(0));
     let examples_tested = stasis(&["--json", "test"], &generated_examples);
     assert_eq!(examples_tested.status.code(), Some(0));
-    assert_eq!(json_stdout(&examples_tested)["result"]["tests_passed"], 10);
+    assert_eq!(json_stdout(&examples_tested)["result"]["tests_passed"], 19);
     assert!(!project.join("vendor/stasis/src").exists());
     assert!(!project.join("vendor/stasis/runtime").exists());
     assert!(!project.join("vendor/stasis/stdlib/gfx_cmd.stasis").exists());
