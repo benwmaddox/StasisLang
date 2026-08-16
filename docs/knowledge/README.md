@@ -17,6 +17,15 @@ compiled example project.
 7. [Test systems, not balance numbers](a-little-stasis/07-test-systems-not-balance-numbers.md)
 8. [Projection is not authority](a-little-stasis/08-projection-is-not-authority.md)
 
+## Practical examples
+
+Each page solves one system problem for one style of game.
+
+- [Pong: score after the ball crosses the goal](practical-examples/pong-score-after-the-ball-crosses-the-goal.md)
+- [Breakout: remove one brick on a vertical hit](practical-examples/breakout-remove-one-brick-per-collision.md)
+- [Platformer: land in the crossing tick](practical-examples/platformer-land-in-the-crossing-tick.md)
+- [Snake: reject a reverse turn](practical-examples/snake-reject-a-reverse-turn.md)
+
 ## Focused references
 
 - [Geometry and collision](geometry-and-collision.md)
@@ -24,8 +33,6 @@ compiled example project.
 
 ## Executable backing
 
-The Stasis snippets come from
-[game_patterns.stasis](examples/src/game_patterns.stasis) and
-[game_patterns.test.stasis](examples/tests/game_patterns.test.stasis).
+The Stasis snippets come from the source and test files under `examples/`.
 Run `stasis format --check`, `stasis check`, and `stasis test` from
 `examples/` after changing a snippet or its backing behavior.
