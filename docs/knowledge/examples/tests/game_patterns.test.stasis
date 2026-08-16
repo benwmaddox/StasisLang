@@ -1,0 +1,121 @@
+import "../src/game_patterns.stasis";
+
+test `logical ticks drive exact wave transitions`(): bool {
+    reset_simulation();
+    configure_example_wave();
+    simulation_step();
+    if (state.tick_index != 1 || state.wave_cursor != 2 || state.spawned_count != 2) {
+        return false;
+    }
+    simulation_step();
+    if (state.tick_index != 2 || state.wave_cursor != 2) {
+        return false;
+    }
+    simulation_step();
+    return state.tick_index == 3 && state.wave_cursor == 3;
+}
+
+test `system order lets a due enemy move and receive damage`(): bool {
+    reset_simulation();
+    set_wave_event(0, 0, 3);
+    activate_wave(1);
+    simulation_step();
+    return enemies[0].active && enemies[0].path_position == 1 && enemies[0].health == 1;
+}
+
+test `target ties choose the lower stable slot id`(): bool {
+    reset_simulation();
+    let first_id: i32 = allocate_enemy(5);
+    let second_id: i32 = allocate_enemy(5);
+    enemies[first_id].path_position = 4;
+    enemies[second_id].path_position = 4;
+    return first_id == 0 && second_id == 1 && select_target() == first_id;
+}
+
+test `spawn cursor advances by a bounded amount`(): bool {
+    reset_simulation();
+    set_wave_event(0, 0, 2);
+    set_wave_event(1, 0, 2);
+    set_wave_event(2, 0, 2);
+    activate_wave(3);
+    spawn_due_events();
+    if (state.wave_cursor != MAX_SPAWNS_PER_STEP) {
+        return false;
+    }
+    spawn_due_events();
+    return state.wave_cursor == 3 && state.spawned_count == 3;
+}
+
+test `capacity exhaustion preserves the pending event`(): bool {
+    reset_simulation();
+    for (let index: i32 = 0; index < ENEMY_CAPACITY; index += 1) {
+        allocate_enemy(1);
+    }
+    set_wave_event(0, 0, 3);
+    activate_wave(1);
+    spawn_due_events();
+    return state.capacity_blocked && state.wave_cursor == 0 && state.spawned_count == ENEMY_CAPACITY;
+}
+
+test `cooldown becomes ready on its exact boundary`(): bool {
+    reset_simulation();
+    let target_id: i32 = allocate_enemy(9);
+    materialize_attack();
+    if (!commit_attack() || state.cooldown_ticks != 2 || enemies[target_id].health != 7) {
+        return false;
+    }
+    advance_cooldown();
+    materialize_attack();
+    if (pending_attack.valid || state.cooldown_ticks != 1) {
+        return false;
+    }
+    advance_cooldown();
+    materialize_attack();
+    return pending_attack.valid && pending_attack.target_id == target_id;
+}
+
+test `removal keeps surviving stable ids and permits reuse`(): bool {
+    reset_simulation();
+    let removed_id: i32 = allocate_enemy(1);
+    let survivor_id: i32 = allocate_enemy(4);
+    enemies[removed_id].health = 0;
+    remove_defeated();
+    if (enemies[removed_id].active || !enemies[survivor_id].active || survivor_id != 1) {
+        return false;
+    }
+    let reused_id: i32 = allocate_enemy(6);
+    return reused_id == removed_id && enemies[survivor_id].health == 4 && active_enemy_count() == 2;
+}
+
+test `attack query does not mutate gameplay before commit`(): bool {
+    reset_simulation();
+    let target_id: i32 = allocate_enemy(5);
+    enemies[target_id].path_position = 3;
+    materialize_attack();
+    if (!pending_attack.valid || pending_attack.target_id != target_id) {
+        return false;
+    }
+    if (enemies[target_id].health != 5 || state.cooldown_ticks != 0) {
+        return false;
+    }
+    return commit_attack() && enemies[target_id].health == 3 && state.cooldown_ticks == 2;
+}
+
+test `render projection preserves authoritative gameplay`(): bool {
+    reset_simulation();
+    let first_id: i32 = allocate_enemy(5);
+    let second_id: i32 = allocate_enemy(7);
+    enemies[first_id].path_position = 2;
+    enemies[second_id].path_position = 6;
+    let tick_before: i32 = state.tick_index;
+    let cursor_before: i32 = state.wave_cursor;
+    render();
+    return state.tick_index == tick_before && state.wave_cursor == cursor_before && enemies[first_id].health == 5 && enemies[second_id].health == 7 && render_enemy_count == 2 && render_enemies[0].stable_id == first_id && render_enemies[1].stable_id == second_id;
+}
+
+test `unsorted wave data is rejected without activation`(): bool {
+    reset_simulation();
+    set_wave_event(0, 3, 2);
+    set_wave_event(1, 2, 2);
+    return !activate_wave(2) && state.wave_count == 0 && state.wave_cursor == 0;
+}

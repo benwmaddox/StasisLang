@@ -80,10 +80,13 @@ const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md"
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
-const KNOWLEDGE_DOCUMENTS: &[&str] = &[
+const KNOWLEDGE_FILES: &[&str] = &[
     "README.md",
     "data-driven-apps.md",
     "deterministic-tests-and-repair.md",
+    "examples/src/game_patterns.stasis",
+    "examples/stasis.json",
+    "examples/tests/game_patterns.test.stasis",
     "fixed-tick-game-loop.md",
     "geometry-and-collision.md",
     "semantic-edit-and-validation.md",
@@ -5645,8 +5648,8 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
 }
 
 fn bundled_knowledge_docs_dir() -> Result<PathBuf, String> {
-    let directory = bundled_toolchain_directory("docs/ai_knowledge", "Stasis knowledge library")?;
-    let missing: Vec<_> = KNOWLEDGE_DOCUMENTS
+    let directory = bundled_toolchain_directory("docs/knowledge", "Stasis knowledge library")?;
+    let missing: Vec<_> = KNOWLEDGE_FILES
         .iter()
         .filter(|document| !directory.join(document).is_file())
         .copied()

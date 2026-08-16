@@ -591,7 +591,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert!(project
         .join("vendor/stasis/stdlib/internal/gfx_cmd.stasis")
         .is_file());
-    let knowledge_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/ai_knowledge");
+    let knowledge_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/knowledge");
     for document in [
         "README.md",
         "data-driven-apps.md",
@@ -610,6 +610,63 @@ fn project_commands_emit_stable_json_from_nested_directories() {
             "generated knowledge document differs: {document}"
         );
     }
+    for example in [
+        "examples/src/game_patterns.stasis",
+        "examples/stasis.json",
+        "examples/tests/game_patterns.test.stasis",
+    ] {
+        assert_eq!(
+            fs::read(project.join("vendor/stasis/docs").join(example))
+                .expect("read generated knowledge example"),
+            fs::read(knowledge_source.join(example)).expect("read source knowledge example"),
+            "generated knowledge example differs: {example}"
+        );
+    }
+
+    let example_source =
+        fs::read_to_string(knowledge_source.join("examples/src/game_patterns.stasis"))
+            .expect("read knowledge example source");
+    let example_tests =
+        fs::read_to_string(knowledge_source.join("examples/tests/game_patterns.test.stasis"))
+            .expect("read knowledge example tests");
+    let compiled_examples = format!("{example_source}\n{example_tests}").replace("\r\n", "\n");
+    let mut checked_stasis_blocks = 0;
+    for document in fs::read_dir(&knowledge_source).expect("enumerate knowledge documents") {
+        let path = document.expect("knowledge document entry").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+            continue;
+        }
+        let markdown = fs::read_to_string(&path)
+            .expect("read knowledge Markdown")
+            .replace("\r\n", "\n");
+        let mut remaining = markdown.as_str();
+        while let Some(start) = remaining.find("```stasis\n") {
+            let block_start = start + "```stasis\n".len();
+            let after_start = &remaining[block_start..];
+            let end = after_start
+                .find("\n```")
+                .expect("close Stasis Markdown fence");
+            let block = &after_start[..end];
+            assert!(
+                compiled_examples.contains(block),
+                "Stasis block in {} is not an exact compiler-checked excerpt:\n{block}",
+                path.display()
+            );
+            checked_stasis_blocks += 1;
+            remaining = &after_start[end + "\n```".len()..];
+        }
+    }
+    assert!(
+        checked_stasis_blocks > 0,
+        "no Stasis Markdown blocks checked"
+    );
+
+    let generated_examples = project.join("vendor/stasis/docs/examples");
+    let examples_checked = stasis(&["--json", "check"], &generated_examples);
+    assert_eq!(examples_checked.status.code(), Some(0));
+    let examples_tested = stasis(&["--json", "test"], &generated_examples);
+    assert_eq!(examples_tested.status.code(), Some(0));
+    assert_eq!(json_stdout(&examples_tested)["result"]["tests_passed"], 10);
     assert!(!project.join("vendor/stasis/src").exists());
     assert!(!project.join("vendor/stasis/runtime").exists());
     assert!(!project.join("vendor/stasis/stdlib/gfx_cmd.stasis").exists());
