@@ -82,17 +82,19 @@ const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_arc
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
 const KNOWLEDGE_FILES: &[&str] = &[
     "README.md",
-    "data-driven-apps.md",
-    "deterministic-tests-and-repair.md",
+    "a-little-stasis/01-three-entry-points.md",
+    "a-little-stasis/02-state-has-owners.md",
+    "a-little-stasis/03-a-tick-is-an-ordered-recipe.md",
+    "a-little-stasis/04-input-crosses-a-boundary.md",
+    "a-little-stasis/05-bounded-storage-is-policy.md",
+    "a-little-stasis/06-query-materialize-commit.md",
+    "a-little-stasis/07-test-systems-not-balance-numbers.md",
+    "a-little-stasis/08-projection-is-not-authority.md",
     "examples/src/game_patterns.stasis",
     "examples/stasis.json",
     "examples/tests/game_patterns.test.stasis",
-    "fixed-tick-game-loop.md",
     "geometry-and-collision.md",
     "semantic-edit-and-validation.md",
-    "stasis-language-and-lifecycle.md",
-    "state-machines-cooldowns-waves.md",
-    "worked-patterns.md",
 ];
 const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
@@ -6723,7 +6725,8 @@ mod tests {
         create_project(root.clone(), "vendor_local_edits".to_string()).expect("create project");
         let edited = root.join("vendor/stasis/stdlib/audio.stasis");
         fs::write(&edited, "// local vendor edit\n").expect("edit vendor source");
-        let removed_doc = root.join("vendor/stasis/docs/worked-patterns.md");
+        let removed_doc =
+            root.join("vendor/stasis/docs/a-little-stasis/03-a-tick-is-an-ordered-recipe.md");
         fs::remove_file(&removed_doc).expect("remove vendor knowledge document");
 
         let current = load_workspace(Some(&root)).expect("automatic vendor replacement");

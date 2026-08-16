@@ -1,6 +1,7 @@
 const ENEMY_CAPACITY: i32 = 4;
 const WAVE_CAPACITY: i32 = 6;
 const MAX_SPAWNS_PER_STEP: i32 = 2;
+const INPUT_CAPACITY: i32 = 2;
 
 struct EnemySlot {
     active: bool;
@@ -14,6 +15,12 @@ struct WaveEvent {
 }
 
 struct TowerRules {
+    damage: i32;
+    range_end: i32;
+    cooldown_ticks: i32;
+}
+
+struct TowerRuleInput {
     damage: i32;
     range_end: i32;
     cooldown_ticks: i32;
@@ -46,6 +53,8 @@ global state: SimulationState;
 global enemies: EnemySlot[4];
 global wave_events: WaveEvent[6];
 global tower_rules: TowerRules;
+global pending_inputs: TowerRuleInput[2];
+global pending_input_count: i32;
 global pending_attack: AttackIntent;
 global render_enemies: RenderEnemy[4];
 global render_enemy_count: i32;
@@ -61,6 +70,7 @@ function reset_simulation(): void {
     tower_rules.damage = 2;
     tower_rules.range_end = 8;
     tower_rules.cooldown_ticks = 2;
+    pending_input_count = 0;
     pending_attack.valid = false;
     pending_attack.target_id = -1;
     pending_attack.damage = 0;
@@ -71,6 +81,30 @@ function reset_simulation(): void {
         enemies[slot_id].path_position = 0;
         render_enemies[slot_id].visible = false;
     }
+}
+
+function submit_tower_rules(damage: i32, range_end: i32, cooldown_ticks: i32): bool {
+    if (damage <= 0 || range_end < 0 || cooldown_ticks < 0) {
+        return false;
+    }
+    if (pending_input_count >= INPUT_CAPACITY) {
+        return false;
+    }
+    let input_index: i32 = pending_input_count;
+    pending_inputs[input_index].damage = damage;
+    pending_inputs[input_index].range_end = range_end;
+    pending_inputs[input_index].cooldown_ticks = cooldown_ticks;
+    pending_input_count += 1;
+    return true;
+}
+
+function apply_pending_inputs(): void {
+    for (let input_index: i32 = 0; input_index < pending_input_count; input_index += 1) {
+        tower_rules.damage = pending_inputs[input_index].damage;
+        tower_rules.range_end = pending_inputs[input_index].range_end;
+        tower_rules.cooldown_ticks = pending_inputs[input_index].cooldown_ticks;
+    }
+    pending_input_count = 0;
 }
 
 function set_wave_event(index: i32, spawn_tick: i32, health: i32): void {
@@ -217,16 +251,6 @@ function active_enemy_count(): i32 {
     return count;
 }
 
-function simulation_step(): void {
-    advance_cooldown();
-    spawn_due_events();
-    move_enemies();
-    materialize_attack();
-    commit_attack();
-    remove_defeated();
-    state.tick_index += 1;
-}
-
 function main(): i32 {
     reset_simulation();
     configure_example_wave();
@@ -234,7 +258,14 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    simulation_step();
+    apply_pending_inputs();
+    advance_cooldown();
+    spawn_due_events();
+    move_enemies();
+    materialize_attack();
+    commit_attack();
+    remove_defeated();
+    state.tick_index += 1;
     return 0;
 }
 
