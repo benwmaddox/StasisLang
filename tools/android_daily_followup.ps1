@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = "F:\StasisLang"
+$repoRoot = "D:\code\StasisLang"
 $codex = "C:\Users\Ben\AppData\Local\OpenAI\Codex\bin\codex.exe"
 $prompt = @"
 Continue the StasisLang Android Workshop branch work.
