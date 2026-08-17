@@ -1,11 +1,18 @@
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$CodexPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = "D:\code\StasisLang"
-$codex = "C:\Users\Ben\AppData\Local\OpenAI\Codex\bin\codex.exe"
+$repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+if ($CodexPath) {
+    $codex = Get-Command $CodexPath -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1 -ExpandProperty Source
+} else {
+    $codex = Get-Command codex -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1 -ExpandProperty Source
+}
 $prompt = @"
 Continue the StasisLang Android Workshop branch work.
 
@@ -23,10 +30,6 @@ Leave unrelated local dirty files alone unless explicitly instructed otherwise.
 
 if (!(Test-Path -LiteralPath $repoRoot)) {
     throw "Repo root not found: $repoRoot"
-}
-
-if (!(Test-Path -LiteralPath $codex)) {
-    throw "Codex CLI not found: $codex"
 }
 
 $args = @("--cd", $repoRoot, $prompt)

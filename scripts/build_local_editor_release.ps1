@@ -83,11 +83,21 @@ if (-not $SkipBuild) {
       if ($LASTEXITCODE -ne 0) { throw "Signing failed for $signedFile." }
     }
   } elseif ($env:STASIS_AOT_SIGN_TOOL) {
-    @("stasis.exe", "stasis_graphics.dll") | ForEach-Object {
-      $signedFile = Join-Path $toolchainRoot $_
-      & $env:STASIS_AOT_SIGN_TOOL $signedFile
-      if ($LASTEXITCODE -ne 0) { throw "Configured local signer failed for $signedFile." }
+    $signTool = Get-Command $env:STASIS_AOT_SIGN_TOOL -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $signTool) {
+      if ($env:STASIS_REQUIRE_SIGNED_EXECUTION -eq "1") {
+        throw "Configured signing tool was not found: $env:STASIS_AOT_SIGN_TOOL"
+      }
+      Write-Warning "Ignoring unavailable optional signing tool: $env:STASIS_AOT_SIGN_TOOL"
+    } else {
+      @("stasis.exe", "stasis_graphics.dll") | ForEach-Object {
+        $signedFile = Join-Path $toolchainRoot $_
+        & $signTool.Source $signedFile
+        if ($LASTEXITCODE -ne 0) { throw "Configured local signer failed for $signedFile." }
+      }
     }
+  } elseif ($env:STASIS_REQUIRE_SIGNED_EXECUTION -eq "1") {
+    throw "STASIS_REQUIRE_SIGNED_EXECUTION=1 but STASIS_AOT_SIGN_TOOL is not set."
   }
 
   & (Join-Path $toolchainRoot "stasis.exe") --json editor-info

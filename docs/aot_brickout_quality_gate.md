@@ -6,7 +6,8 @@ compiled, linked into a DLL, and executed headlessly for more than one tick.
 ## Command
 
 ```powershell
-cd F:\StasisLang
+$repoRoot = (git rev-parse --show-toplevel).Trim()
+Set-Location $repoRoot
 $env:STASIS_AOT_QUALITY_GATE = "1"
 cargo test -p stasis aot_brickout_revenge_v1_engine_bundle_executes_two_ticks -- --nocapture
 ```

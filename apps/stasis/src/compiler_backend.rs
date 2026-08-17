@@ -7974,6 +7974,58 @@ echo "signed" > "$1.signed"
     }
 
     #[test]
+    fn missing_optional_signer_does_not_block_unsigned_local_artifacts() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
+        let old_signer = std::env::var_os("STASIS_AOT_SIGN_TOOL");
+        let old_required = std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION");
+        let missing_signer = std::env::temp_dir().join("stasis-missing-sign-tool");
+        std::env::set_var("STASIS_AOT_SIGN_TOOL", &missing_signer);
+        std::env::remove_var("STASIS_REQUIRE_SIGNED_EXECUTION");
+
+        let result = maybe_sign_output_artifact(Path::new("local-artifact.exe"));
+
+        if let Some(value) = old_signer {
+            std::env::set_var("STASIS_AOT_SIGN_TOOL", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_SIGN_TOOL");
+        }
+        if let Some(value) = old_required {
+            std::env::set_var("STASIS_REQUIRE_SIGNED_EXECUTION", value);
+        } else {
+            std::env::remove_var("STASIS_REQUIRE_SIGNED_EXECUTION");
+        }
+        result.expect("an unavailable optional signer should permit unsigned local output");
+    }
+
+    #[test]
+    fn missing_required_signer_fails_before_artifact_execution() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
+        let old_signer = std::env::var_os("STASIS_AOT_SIGN_TOOL");
+        let old_required = std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION");
+        let missing_signer = std::env::temp_dir().join("stasis-missing-required-sign-tool");
+        std::env::set_var("STASIS_AOT_SIGN_TOOL", &missing_signer);
+        std::env::set_var("STASIS_REQUIRE_SIGNED_EXECUTION", "1");
+
+        let result = maybe_sign_output_artifact(Path::new("local-artifact.exe"));
+
+        if let Some(value) = old_signer {
+            std::env::set_var("STASIS_AOT_SIGN_TOOL", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_SIGN_TOOL");
+        }
+        if let Some(value) = old_required {
+            std::env::set_var("STASIS_REQUIRE_SIGNED_EXECUTION", value);
+        } else {
+            std::env::remove_var("STASIS_REQUIRE_SIGNED_EXECUTION");
+        }
+        assert!(result
+            .expect_err("required signing must reject an unavailable signer")
+            .contains("does not exist"));
+    }
+
+    #[test]
     fn self_host_aot_cli_writes_default_summary_sidecar() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -8427,19 +8479,52 @@ pub fn run_self_host_aot_cli(
 }
 
 fn maybe_sign_output_artifact(artifact_path: &Path) -> Result<(), String> {
-    let Some(sign_tool) = std::env::var_os("STASIS_AOT_SIGN_TOOL") else {
-        return Ok(());
+    let sign_tool = std::env::var_os("STASIS_AOT_SIGN_TOOL").filter(|tool| !tool.is_empty());
+    let signing_required =
+        std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").is_some_and(|value| value == "1");
+    let Some(sign_tool) = sign_tool else {
+        return if signing_required {
+            Err("STASIS_REQUIRE_SIGNED_EXECUTION=1 but STASIS_AOT_SIGN_TOOL is not set".to_string())
+        } else {
+            Ok(())
+        };
     };
-    let status = std::process::Command::new(&sign_tool)
+    let sign_tool_path = Path::new(&sign_tool);
+    if (sign_tool_path.is_absolute() || sign_tool_path.components().count() > 1)
+        && !sign_tool_path.is_file()
+    {
+        if signing_required {
+            return Err(format!(
+                "configured signer tool {:?} does not exist",
+                sign_tool
+            ));
+        }
+        eprintln!(
+            "warning: ignoring unavailable optional signer tool {:?}",
+            sign_tool
+        );
+        return Ok(());
+    }
+    let status = match std::process::Command::new(&sign_tool)
         .arg(artifact_path)
         .status()
-        .map_err(|error| {
-            format!(
+    {
+        Ok(status) => status,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !signing_required => {
+            eprintln!(
+                "warning: ignoring unavailable optional signer tool {:?}",
+                sign_tool
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!(
                 "failed to launch signer tool {:?} for {}: {error}",
                 sign_tool,
                 artifact_path.display()
-            )
-        })?;
+            ));
+        }
+    };
     if !status.success() {
         return Err(format!(
             "signer tool {:?} failed for {} with status {:?}",
