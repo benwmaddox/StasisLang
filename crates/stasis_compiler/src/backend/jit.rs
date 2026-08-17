@@ -4814,17 +4814,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_executes_continue_in_for_loop() {
+    fn jit_process_executes_continue_in_for_and_foreach_loops() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function main(): i32 { let count: i32 = 0; for (let i: i32 = 0; i < 5; i += 1) { if (i == 2) { continue; } count += 1; } return count; }\n",
+            include_str!("../../../../tests/stasis/seams/continue_loop_parity.stasis"),
         );
         process.compile().expect("compile");
         let value = process
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
-        assert_eq!(value, 4);
+        assert_eq!(value, 434);
     }
 
     #[cfg(windows)]

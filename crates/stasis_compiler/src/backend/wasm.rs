@@ -1306,6 +1306,7 @@ fn encode_function(
         scratch_f32,
         scratch_f64,
         foreach: BTreeMap::new(),
+        continue_depth: None,
     };
     encode_statements(&hir.statements, &context, &mut body)?;
     // Structured statements use void block types, so only a direct return proves that
@@ -1431,6 +1432,26 @@ struct EncodeContext<'a> {
     scratch_f32: u32,
     scratch_f64: u32,
     foreach: BTreeMap<String, WebForeachBinding>,
+    continue_depth: Option<u32>,
+}
+
+fn nested_control_context<'a>(context: &EncodeContext<'a>) -> Result<EncodeContext<'a>, String> {
+    let mut nested = context.clone();
+    nested.continue_depth = context
+        .continue_depth
+        .map(|depth| {
+            depth
+                .checked_add(1)
+                .ok_or_else(|| "web control-flow nesting exceeds branch depth limits".to_string())
+        })
+        .transpose()?;
+    Ok(nested)
+}
+
+fn loop_body_context<'a>(context: &EncodeContext<'a>) -> EncodeContext<'a> {
+    let mut nested = context.clone();
+    nested.continue_depth = Some(0);
+    nested
 }
 
 #[derive(Debug, Clone)]
@@ -1568,10 +1589,11 @@ fn encode_statements(
             } => {
                 encode_condition(condition, context, out)?;
                 out.extend([0x04, 0x40]);
-                encode_statements(then_statements, context, out)?;
+                let nested = nested_control_context(context)?;
+                encode_statements(then_statements, &nested, out)?;
                 if let Some(values) = else_statements {
                     out.push(0x05);
-                    encode_statements(values, context, out)?;
+                    encode_statements(values, &nested, out)?;
                 }
                 out.push(0x0b);
             }
@@ -1585,12 +1607,19 @@ fn encode_statements(
                 out.extend([0x02, 0x40, 0x03, 0x40]);
                 encode_condition(condition, context, out)?;
                 out.extend([0x45, 0x0d, 0x01]);
-                encode_statements(body_statements, context, out)?;
+                out.extend([0x02, 0x40]);
+                let nested = loop_body_context(context);
+                encode_statements(body_statements, &nested, out)?;
+                out.push(0x0b);
                 encode_statements(std::slice::from_ref(step), context, out)?;
                 out.extend([0x0c, 0x00, 0x0b, 0x0b]);
             }
             SimpleStmt::Continue => {
-                return Err("web scalar lane does not yet support continue".to_string())
+                let depth = context
+                    .continue_depth
+                    .ok_or_else(|| "continue statement is only valid inside loops".to_string())?;
+                out.push(0x0c);
+                uleb(depth, out);
             }
             SimpleStmt::Convert { target, source, .. } => {
                 let target_type = target_type(target, context)?;
@@ -1622,7 +1651,10 @@ fn encode_statements(
                         index_name: index_name.clone(),
                     },
                 );
+                nested.continue_depth = Some(0);
+                out.extend([0x02, 0x40]);
                 encode_statements(body_statements, &nested, out)?;
+                out.push(0x0b);
                 out.extend([0x20]);
                 uleb(index.index, out);
                 out.extend([0x41, 1, 0x6a, 0x21]);
@@ -3336,6 +3368,21 @@ mod tests {
                 .windows(name.len())
                 .any(|window| window == name.as_bytes()));
         }
+    }
+
+    #[test]
+    fn rejects_continue_outside_a_loop() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "invalid_continue.stasis",
+            "function main(): i32 { continue; return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        let error = process.compile().expect_err("reject continue outside loop");
+        assert!(
+            format!("{error:?}").contains("continue statement is only valid inside loops"),
+            "unexpected web continue diagnostic: {error:?}"
+        );
     }
 
     #[test]
