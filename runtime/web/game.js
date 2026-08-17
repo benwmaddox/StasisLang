@@ -23,9 +23,13 @@
   let audioNextStart = 0;
   let audioUnderruns = 0;
   let audioSuspendedByLifecycle = false;
+  let pendingAudioFrames = 0;
   const audioAssets = new Map();
   const audioVoices = new Map();
   const pendingAudio = [];
+  // Keep pre-gesture PCM short enough to unlock without replaying stale gameplay.
+  const PENDING_AUDIO_SECONDS = 0.1;
+  const PENDING_AUDIO_ENTRY_LIMIT = 32;
   // @stasis-feature audio end
   const assetTasks = new Map();
   let nextAssetTask = 1;
@@ -204,6 +208,23 @@
     audioContext ||= new AudioContext();
     return audioContext;
   };
+  const scheduledAudioFrames = () => audioContext
+    ? Math.max(0, Math.round((audioNextStart - audioContext.currentTime) * audioSampleRate))
+    : 0;
+  const queuedAudioFrames = () => scheduledAudioFrames() + pendingAudioFrames;
+  const pendingAudioFrameLimit = () => Math.max(1, Math.round(audioSampleRate * PENDING_AUDIO_SECONDS));
+  const queuePendingAudio = (start, frames = 0) => {
+    if (pendingAudio.length >= PENDING_AUDIO_ENTRY_LIMIT) return false;
+    pendingAudio.push({ start, frames });
+    pendingAudioFrames += frames;
+    return true;
+  };
+  const flushPendingAudio = () => {
+    if (!audioContext || audioContext.state !== "running") return;
+    const ready = pendingAudio.splice(0);
+    pendingAudioFrames = 0;
+    for (const entry of ready) void entry.start();
+  };
   const loadAudio = pathId => {
     const handle = nextHandle++;
     const uri = assetValue(pathId);
@@ -250,8 +271,7 @@
       return true;
     };
     if (!audioContext || audioContext.state !== "running") {
-      pendingAudio.push(start);
-      return true;
+      return queuePendingAudio(start);
     }
     void start();
     return true;
@@ -267,14 +287,14 @@
   const enableWebAudio = () => {
     const audio = ensureAudio();
     if (audio.state === "running") {
-      for (const start of pendingAudio.splice(0)) void start();
+      flushPendingAudio();
       updateAudioState();
       return Promise.resolve(true);
     }
     if (audioEnablePromise) return audioEnablePromise;
     const attempt = audio.resume().then(() => {
       if (audio === audioContext && audio.state === "running") {
-        for (const start of pendingAudio.splice(0)) void start();
+        flushPendingAudio();
         updateAudioState();
         return true;
       }
@@ -304,6 +324,7 @@
       if (audioSuspendedByLifecycle && resumingContext === audioContext) {
         void resumingContext.suspend().then(updateAudioState).catch(() => {});
       } else {
+        flushPendingAudio();
         updateAudioState();
       }
     }).catch(() => {
@@ -313,6 +334,7 @@
   const shutdownWebAudio = () => {
     audioSuspendedByLifecycle = false;
     pendingAudio.length = 0;
+    pendingAudioFrames = 0;
     for (const handle of Array.from(audioVoices.keys())) stopAudio(handle);
     const closingContext = audioContext;
     audioContext = undefined;
@@ -323,15 +345,20 @@
   };
   const pushAudio = (byteOffset, frameCount) => {
     if (!instance?.exports.memory || frameCount <= 0) return 0;
-    const sampleCount = frameCount * audioChannels;
+    const suspended = !audioContext || audioContext.state !== "running";
+    const acceptedFrames = suspended
+      ? Math.min(frameCount, Math.max(0, pendingAudioFrameLimit() - queuedAudioFrames()))
+      : frameCount;
+    if (acceptedFrames <= 0 || (suspended && pendingAudio.length >= PENDING_AUDIO_ENTRY_LIMIT)) return 0;
+    const sampleCount = acceptedFrames * audioChannels;
     if (byteOffset < 0 || byteOffset + sampleCount * 4 > instance.exports.memory.buffer.byteLength) return 0;
     const samples = new Float32Array(instance.exports.memory.buffer, byteOffset, sampleCount).slice();
     const start = async () => {
       const audio = ensureAudio();
-      const buffer = audio.createBuffer(audioChannels, frameCount, audioSampleRate);
+      const buffer = audio.createBuffer(audioChannels, acceptedFrames, audioSampleRate);
       for (let channel = 0; channel < audioChannels; channel += 1) {
         const output = buffer.getChannelData(channel);
-        for (let frame = 0; frame < frameCount; frame += 1) output[frame] = samples[frame * audioChannels + channel];
+        for (let frame = 0; frame < acceptedFrames; frame += 1) output[frame] = samples[frame * audioChannels + channel];
       }
       const source = audio.createBufferSource();
       source.buffer = buffer;
@@ -340,14 +367,14 @@
       if (audioNextStart > 0 && audioNextStart < audio.currentTime) audioUnderruns += 1;
       const startAt = Math.max(earliest, audioNextStart);
       source.start(startAt);
-      audioNextStart = startAt + frameCount / audioSampleRate;
+      audioNextStart = startAt + acceptedFrames / audioSampleRate;
       audioEvents += 1;
       document.body.dataset.audioEvents = String(audioEvents);
       document.body.dataset.audioMode = "stream";
     };
-    if (!audioContext || audioContext.state !== "running") pendingAudio.push(start);
+    if (suspended) queuePendingAudio(start, acceptedFrames);
     else void start();
-    return frameCount;
+    return acceptedFrames;
   };
   // @stasis-feature audio end
   const cancelAssetTask = task => {
@@ -465,7 +492,7 @@
     audio_is_available: () => 1,
     audio_get_sample_rate: () => audioSampleRate,
     audio_get_channels: () => audioChannels,
-    audio_get_queued_frames: () => audioContext ? Math.max(0, Math.round((audioNextStart - audioContext.currentTime) * audioSampleRate)) : 0,
+    audio_get_queued_frames: () => queuedAudioFrames(),
     audio_get_underruns: () => audioUnderruns,
     audio_push_f32_interleaved: (byteOffset, frameCount) => pushAudio(byteOffset, frameCount),
     audio_load_wav: pathId => loadAudio(pathId),

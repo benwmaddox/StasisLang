@@ -26,6 +26,7 @@ python3 tools/ci/verify_render_parity.py
 node --test runtime/web/tests/orientation_host_frame.test.mjs
 node --test runtime/web/tests/sys_memcpy_u8.test.mjs
 node --test runtime/web/tests/asset_paths.test.mjs
+node --test runtime/web/tests/audio_suspended_queue.test.mjs
 
 set +e
 ignored_tests="$(rg -n -U --pcre2 '#\s*\[\s*(?:ignore\b|cfg_attr\s*\([^\]]*\bignore\b)' apps crates mobile tests -g '*.rs' 2>&1)"
