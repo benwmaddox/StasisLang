@@ -32,8 +32,9 @@ $env:STASIS_AOT_SIGN_TOOL = "C:\tools\sign-stasis.cmd"
 3. If your environment allows Defender exclusions, add:
 
 ```powershell
-Add-MpPreference -ExclusionPath "F:\StasisLang\.stasis_cache\tmp"
-Add-MpPreference -ExclusionPath "F:\StasisLang\target\release"
+$repoRoot = (Resolve-Path .).Path
+Add-MpPreference -ExclusionPath (Join-Path $repoRoot ".stasis_cache\tmp")
+Add-MpPreference -ExclusionPath (Join-Path $repoRoot "target\release")
 ```
 
 Note: this requires elevated/admin PowerShell and does not override WDAC/AppLocker policy.
@@ -43,7 +44,7 @@ Note: this requires elevated/admin PowerShell and does not override WDAC/AppLock
 - `STASIS_AOT_SIGN_TOOL` signs AOT-produced executables.
 - `STASIS_COMPILER_ANALYSIS_SIGN_TOOL` signs blocked compiler-analysis artifacts (for example `.stasis_cache\run\*.dll`) and retries once automatically.
 - Cargo execution in this repo now runs through `.cargo\stasis-sign-and-run.cmd` on Windows and will sign each launched executable first when `STASIS_AOT_SIGN_TOOL` is set.
-- Set `STASIS_REQUIRE_SIGNED_EXECUTION=1` to fail fast if the signer tool is missing.
+- An unavailable optional signer is reported and local execution continues unsigned. Set `STASIS_REQUIRE_SIGNED_EXECUTION=1` to fail fast when signing is required or the configured tool is unavailable.
 
 Example (PowerShell):
 
@@ -62,8 +63,8 @@ If Defender exclusions are insufficient, ask IT/security to allow one of:
 - Publisher rule for your local signing certificate.
 - Hash rule for built binaries.
 - Path rule for:
-- `F:\StasisLang\.stasis_cache\tmp`
-- `F:\StasisLang\target\release`
+- `<repo>\.stasis_cache\tmp`
+- `<repo>\target\release`
 
 Publisher rules are preferred to reduce churn when binaries change.
 
