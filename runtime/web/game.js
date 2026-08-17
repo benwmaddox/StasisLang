@@ -46,7 +46,10 @@
   const assetKey = value => value.replace(/^(?:\.\.\/|\.\/)+/, "");
   const assetValue = id => {
     const value = stringValue(id);
-    return game.assets[assetKey(value)] || value;
+    const key = assetKey(value);
+    return Object.prototype.hasOwnProperty.call(game.assets || {}, key)
+      ? game.assets[key]
+      : key;
   };
   const storageKey = (scopeId, keyId) => `stasis:${stringValue(scopeId)}:${stringValue(keyId)}`;
   const storageGet = key => {
@@ -69,6 +72,51 @@
     target.fill(0);
     target.set(bytes);
     return bytes.length;
+  };
+  const u8MemoryLayouts = new Map(
+    Object.values(game.memory || {})
+      .filter(layout => layout?.type_id === 5 && Number.isSafeInteger(layout.hash))
+      .map(layout => [layout.hash | 0, layout])
+  );
+  const resolveU8Memory = hash => {
+    const layout = u8MemoryLayouts.get(hash | 0);
+    const memory = instance?.exports?.memory;
+    if (!layout || !(memory instanceof WebAssembly.Memory)) return null;
+    const { offset, stride, length } = layout;
+    if (![offset, stride, length].every(Number.isSafeInteger)
+      || offset < 0 || stride <= 0 || length < 0) return null;
+    const span = length === 0 ? 0 : (length - 1) * stride + 1;
+    const end = offset + span;
+    if (!Number.isSafeInteger(span) || !Number.isSafeInteger(end)
+      || end > memory.buffer.byteLength) return null;
+    return { bytes: new Uint8Array(memory.buffer), offset, stride, length };
+  };
+  const readU8 = (memory, index) => {
+    if (!memory || !Number.isInteger(index) || index < 0 || index >= memory.length) return 0;
+    return memory.bytes[memory.offset + index * memory.stride];
+  };
+  const writeU8 = (memory, index, value) => {
+    if (!memory || !Number.isInteger(index) || index < 0 || index >= memory.length) return;
+    memory.bytes[memory.offset + index * memory.stride] = value;
+  };
+  const sysMemcpyU8 = (dst, dstIndex, src, srcIndex, count) => {
+    if (!Number.isInteger(count) || count <= 0) return;
+    const sourceRegistered = u8MemoryLayouts.has(src | 0);
+    const source = resolveU8Memory(src);
+    const literal = sourceRegistered
+      ? null
+      : new TextEncoder().encode(stringValue(src));
+    const values = new Uint8Array(count);
+    for (let offset = 0; offset < count; offset += 1) {
+      const index = srcIndex + offset;
+      values[offset] = sourceRegistered
+        ? readU8(source, index)
+        : literal?.[index] ?? 0;
+    }
+    const destination = resolveU8Memory(dst);
+    for (let offset = 0; offset < count; offset += 1) {
+      writeU8(destination, dstIndex + offset, values[offset]);
+    }
   };
   const setViewField = (base, index, field, value) => {
     const path = game.views?.[String(base)]?.[field];
@@ -292,6 +340,7 @@
     print_int: value => console.log(value),
     print_char: value => console.log(String.fromCodePoint(value)),
     print_string: value => console.log(stringValue(value)),
+    sys_memcpy_u8: sysMemcpyU8,
     web_input_axis: () => (keys.has("ArrowRight") || keys.has("KeyD") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("KeyA") ? 1 : 0),
     web_input_fire: () => keys.has("Space") || pointer.down ? 1 : 0,
     web_pointer_x: () => pointer.x | 0,

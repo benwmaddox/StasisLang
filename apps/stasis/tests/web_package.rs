@@ -116,6 +116,135 @@ fn web_continue_matches_native_for_and_foreach_loop_steps() {
 }
 
 #[test]
+fn web_nested_text_views_update_memory_backed_metadata() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-nested-text-metadata-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create nested text fixture");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"web_nested_text_metadata","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("write nested text manifest");
+    fs::write(
+        workspace.join("src/main.stasis"),
+        r#"
+struct GameState {
+    status_text: ascii[160];
+    note_text: utf8[160];
+}
+
+global game: GameState;
+
+function update_ascii(value: ascii[]): i32 {
+    value.length = 3;
+    return value.length;
+}
+
+function update_utf8(value: utf8[]): i32 {
+    value.length = 4;
+    value.char_length = 2;
+    return value.length * 10 + value.char_length;
+}
+
+function literal_ascii_metadata(value: ascii[]): i32 {
+    return value.length * 10 + value.max_length;
+}
+
+function literal_utf8_metadata(value: utf8[]): i32 {
+    return value.length * 100 + value.max_length * 10 + value.char_length;
+}
+
+function literal_ascii_byte(value: ascii[], index: i32): u8 {
+    return value[index];
+}
+
+function literal_utf8_byte(value: utf8[], index: i32): u8 {
+    return value[index];
+}
+
+function literal_bytes_ok(): i32 {
+    if (literal_ascii_byte("go", 0) != 103) {
+        return 0;
+    }
+    if (literal_ascii_byte("go", 1) != 111) {
+        return 0;
+    }
+    if (literal_utf8_byte("é", 0) != 195) {
+        return 0;
+    }
+    if (literal_utf8_byte("é", 1) != 169) {
+        return 0;
+    }
+    if (literal_utf8_byte("é", 2) != 0) {
+        return 0;
+    }
+    if (literal_utf8_byte("é", -1) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+function write_ascii_byte(value: ascii[], index: i32, byte: u8): u8 {
+    value[index] = byte;
+    return value[index];
+}
+
+function write_utf8_byte(value: utf8[], index: i32, byte: u8): u8 {
+    value[index] = byte;
+    return value[index];
+}
+
+function fixed_text_views_ok(): i32 {
+    if (write_ascii_byte(game.status_text, 0, 65) != 65) {
+        return 0;
+    }
+    if (write_utf8_byte(game.note_text, 0, 195) != 195) {
+        return 0;
+    }
+    if (write_utf8_byte(game.note_text, 1, 169) != 169) {
+        return 0;
+    }
+    return 1;
+}
+
+function main(): i32 {
+    let metadata: i32 = update_ascii(game.status_text) * 100000
+        + update_utf8(game.note_text) * 1000
+        + literal_ascii_metadata("go") * 10
+        + literal_utf8_metadata("é");
+    return (metadata * 10 + literal_bytes_ok()) * 10 + fixed_text_views_ok();
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}
+"#,
+    )
+    .expect("write nested text source");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    let execution = execute_web_main(&output.join("game.wasm"));
+    assert!(
+        execution.status.success(),
+        "nested text Wasm execution failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(execution.stdout).expect("UTF-8 result"),
+        "34244111"
+    );
+
+    fs::remove_dir_all(&workspace).expect("clean nested text fixture");
+}
+
+#[test]
 fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let workspace = repo_root().join("samples/web_export_smoke");
     let stamp = stamp();

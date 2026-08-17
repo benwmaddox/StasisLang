@@ -6,8 +6,9 @@
 
 use crate::backend::emit::{
     are_call_argument_and_param_compatible, build_compile_analysis_cache,
-    compute_files_fingerprint, hash_global_path, resolve_extern_call_signatures_with, AssignOp,
-    AssignTarget, ComparisonOp, ConstantValue, SimpleCondition, SimpleExpr, SimpleStmt,
+    compute_files_fingerprint, hash_global_path, is_i32_numeric_type,
+    resolve_extern_call_signatures_with, AssignOp, AssignTarget, ComparisonOp, ConstantValue,
+    SimpleCondition, SimpleExpr, SimpleStmt,
 };
 use crate::backend::program_snapshot::ProgramSnapshot;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
@@ -186,9 +187,14 @@ impl WasmProcess {
                 );
             }
         }
-        (self.module, self.imported_symbols) =
-            encode_module(&lowered, &analysis, &types, self.debug_symbols)
-                .map_err(CompileError::Backend)?;
+        (self.module, self.imported_symbols) = encode_module(
+            &lowered,
+            &analysis,
+            &types,
+            &self.string_literals,
+            self.debug_symbols,
+        )
+        .map_err(CompileError::Backend)?;
         self.program_snapshot = Some(
             ProgramSnapshot::build(
                 source_revision,
@@ -320,6 +326,13 @@ struct MemoryBinding {
     width: u32,
     stride: u32,
     scalar: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StringLiteralMemoryBinding {
+    offset: u32,
+    byte_len: i32,
+    char_len: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -554,6 +567,32 @@ fn build_memory_bindings(
     Ok((bindings, offset))
 }
 
+fn build_string_literal_memory(
+    string_literals: &BTreeMap<i32, String>,
+    start_offset: u32,
+) -> Result<(BTreeMap<i32, StringLiteralMemoryBinding>, u32), String> {
+    let mut offset = start_offset;
+    let mut bindings = BTreeMap::new();
+    for (handle, literal) in string_literals {
+        let byte_len = i32::try_from(literal.len())
+            .map_err(|_| "web string literal byte length exceeds i32 range".to_string())?;
+        let char_len = i32::try_from(literal.chars().count())
+            .map_err(|_| "web string literal character length exceeds i32 range".to_string())?;
+        bindings.insert(
+            *handle,
+            StringLiteralMemoryBinding {
+                offset,
+                byte_len,
+                char_len,
+            },
+        );
+        offset = offset
+            .checked_add(byte_len as u32)
+            .ok_or_else(|| "web string literal memory layout overflow".to_string())?;
+    }
+    Ok((bindings, offset))
+}
+
 fn initial_i32_for_path(
     path: &str,
     analysis: &crate::backend::emit::CompileAnalysisCache,
@@ -664,6 +703,7 @@ fn encode_module(
     functions: &[(FunctionMeta, FunctionHIR)],
     analysis: &crate::backend::emit::CompileAnalysisCache,
     types: &TypeTable,
+    string_literals: &BTreeMap<i32, String>,
     debug_symbols: bool,
 ) -> Result<(Vec<u8>, BTreeSet<String>), String> {
     let mut internal_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -707,6 +747,9 @@ fn encode_module(
     }
 
     let (memory_bindings, memory_bytes) = build_memory_bindings(analysis, types)?;
+    let (string_literal_memory, total_memory_bytes) =
+        build_string_literal_memory(string_literals, memory_bytes)?;
+    let has_memory = memory_bytes > 0 || !string_literal_memory.is_empty();
     let struct_collections = build_struct_collections(analysis, types, &memory_bindings)?;
     let mut globals = Vec::new();
     for (name, type_id) in &analysis.global_path_types {
@@ -853,9 +896,12 @@ fn encode_module(
     }
     section(3, function_section, &mut module);
 
-    if memory_bytes > 0 {
+    if has_memory {
         let mut memory_section = vec![1, 0];
-        uleb(memory_bytes.div_ceil(65_536).max(1), &mut memory_section);
+        uleb(
+            total_memory_bytes.div_ceil(65_536).max(1),
+            &mut memory_section,
+        );
         section(5, memory_section, &mut module);
     }
 
@@ -891,7 +937,7 @@ fn encode_module(
             } else {
                 0
             }
-            + u32::from(memory_bytes > 0)
+            + u32::from(has_memory)
             + 4,
         &mut export_section,
     );
@@ -913,7 +959,7 @@ fn encode_module(
             uleb(index as u32, &mut export_section);
         }
     }
-    if memory_bytes > 0 {
+    if has_memory {
         string("memory", &mut export_section);
         export_section.push(2);
         uleb(0, &mut export_section);
@@ -944,6 +990,7 @@ fn encode_module(
             &global_indices,
             &analysis.global_path_types,
             &memory_bindings,
+            &string_literal_memory,
             &struct_collections,
             &struct_scalars,
             &analysis.named_struct_field_types,
@@ -973,9 +1020,16 @@ fn encode_module(
         })
         .collect::<Vec<_>>();
     initial_memory.sort_by_key(|(binding, _)| binding.offset);
-    if !initial_memory.is_empty() {
+    let literal_segments = string_literal_memory
+        .iter()
+        .filter(|(_, binding)| binding.byte_len > 0)
+        .collect::<Vec<_>>();
+    if !initial_memory.is_empty() || !literal_segments.is_empty() {
         let mut data_section = Vec::new();
-        uleb(initial_memory.len() as u32, &mut data_section);
+        uleb(
+            (initial_memory.len() + literal_segments.len()) as u32,
+            &mut data_section,
+        );
         for (binding, value) in initial_memory {
             data_section.push(0);
             data_section.push(0x41);
@@ -991,6 +1045,18 @@ fn encode_module(
                     ))
                 }
             };
+            uleb(bytes.len() as u32, &mut data_section);
+            data_section.extend(bytes);
+        }
+        for (handle, binding) in literal_segments {
+            let bytes = string_literals
+                .get(handle)
+                .ok_or_else(|| format!("missing web string literal bytes for handle {handle}"))?
+                .as_bytes();
+            data_section.push(0);
+            data_section.push(0x41);
+            sleb(binding.offset as i32, &mut data_section);
+            data_section.push(0x0b);
             uleb(bytes.len() as u32, &mut data_section);
             data_section.extend(bytes);
         }
@@ -1212,6 +1278,7 @@ fn encode_function(
     globals: &BTreeMap<String, u32>,
     global_types: &BTreeMap<String, TypeId>,
     memory: &BTreeMap<String, MemoryBinding>,
+    string_literal_memory: &BTreeMap<i32, StringLiteralMemoryBinding>,
     struct_collections: &BTreeMap<String, StructCollectionBinding>,
     struct_scalars: &BTreeMap<String, StructScalarBinding>,
     named_structs: &crate::backend::emit::NamedStructFieldTypeMap,
@@ -1289,6 +1356,7 @@ fn encode_function(
         globals,
         global_types,
         memory,
+        string_literal_memory,
         struct_collections,
         struct_scalars,
         named_structs,
@@ -1415,6 +1483,7 @@ struct EncodeContext<'a> {
     globals: &'a BTreeMap<String, u32>,
     global_types: &'a BTreeMap<String, TypeId>,
     memory: &'a BTreeMap<String, MemoryBinding>,
+    string_literal_memory: &'a BTreeMap<i32, StringLiteralMemoryBinding>,
     struct_collections: &'a BTreeMap<String, StructCollectionBinding>,
     struct_scalars: &'a BTreeMap<String, StructScalarBinding>,
     named_structs: &'a crate::backend::emit::NamedStructFieldTypeMap,
@@ -1716,7 +1785,13 @@ fn encode_target_get(
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
                 let candidates = collection_meta_candidates(context, suffix);
-                encode_collection_meta_load(binding.index, suffix, &candidates, out);
+                encode_collection_meta_load(
+                    binding.index,
+                    suffix,
+                    &candidates,
+                    context.string_literal_memory,
+                    out,
+                )?;
                 Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
@@ -1738,7 +1813,13 @@ fn encode_target_get(
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
                 let candidates = collection_meta_candidates(context, suffix);
-                encode_collection_meta_load(binding.index, suffix, &candidates, out);
+                encode_collection_meta_load(
+                    binding.index,
+                    suffix,
+                    &candidates,
+                    context.string_literal_memory,
+                    out,
+                )?;
                 Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
@@ -1758,9 +1839,7 @@ fn encode_target_get(
         } => {
             if suffix.is_empty() {
                 if let Some(local) = context.locals.get(collection_path).copied() {
-                    let element_type = encode_local_collection_address(local, index, context, out)?;
-                    encode_memory_load(element_type, out)?;
-                    return Ok(element_type);
+                    return encode_local_collection_load(local, index, context, out);
                 }
             }
             let binding = memory_binding(context, collection_path, suffix)?;
@@ -1781,18 +1860,13 @@ fn encode_target_set(
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 encode_foreach_store(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
-                if suffix != "length" {
-                    return Err("web collection max_length is read-only".to_string());
+                if !matches!(suffix, "length" | "char_length") {
+                    return Err(format!("web collection {suffix} is read-only"));
                 }
                 out.push(0x21);
                 uleb(context.scratch_i32, out);
                 let candidates = collection_meta_candidates(context, suffix);
-                encode_collection_length_store(
-                    binding.index,
-                    context.scratch_i32,
-                    &candidates,
-                    out,
-                );
+                encode_collection_meta_store(binding.index, context.scratch_i32, &candidates, out)?;
                 Ok(())
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 let field_type = context.named_structs[&binding.type_id][suffix];
@@ -1816,18 +1890,13 @@ fn encode_target_set(
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 encode_foreach_store(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
-                if suffix != "length" {
-                    return Err("web collection max_length is read-only".to_string());
+                if !matches!(suffix, "length" | "char_length") {
+                    return Err(format!("web collection {suffix} is read-only"));
                 }
                 out.push(0x21);
                 uleb(context.scratch_i32, out);
                 let candidates = collection_meta_candidates(context, suffix);
-                encode_collection_length_store(
-                    binding.index,
-                    context.scratch_i32,
-                    &candidates,
-                    out,
-                );
+                encode_collection_meta_store(binding.index, context.scratch_i32, &candidates, out)?;
                 Ok(())
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 let field_type = context.named_structs[&binding.type_id][suffix];
@@ -1859,10 +1928,7 @@ fn encode_target_set(
                     let temp = scratch_local(context, element_type)?;
                     out.push(0x21);
                     uleb(temp, out);
-                    encode_local_collection_address(local, index, context, out)?;
-                    out.push(0x20);
-                    uleb(temp, out);
-                    return encode_memory_store(element_type, out);
+                    return encode_local_collection_store(local, index, temp, context, out);
                 }
             }
             let binding = memory_binding(context, collection_path, suffix)?;
@@ -2050,7 +2116,7 @@ fn local_collection_meta<'a>(
     path: &'a str,
 ) -> Option<(&'a LocalBinding, &'a str)> {
     let (name, suffix) = path.split_once('.')?;
-    if !matches!(suffix, "length" | "max_length") {
+    if !matches!(suffix, "length" | "max_length" | "char_length") {
         return None;
     }
     let binding = context.locals.get(name)?;
@@ -2060,10 +2126,18 @@ fn local_collection_meta<'a>(
         .map(|_| (binding, suffix))
 }
 
+#[derive(Clone, Copy)]
+enum CollectionMetaBacking<'a> {
+    Global(u32),
+    Memory(&'a MemoryBinding),
+}
+
+type CollectionMetaCandidate<'a> = (&'a MemoryBinding, Option<CollectionMetaBacking<'a>>);
+
 fn collection_meta_candidates<'a>(
     context: &'a EncodeContext<'_>,
     suffix: &str,
-) -> Vec<(&'a MemoryBinding, Option<u32>)> {
+) -> Vec<CollectionMetaCandidate<'a>> {
     context
         .memory
         .iter()
@@ -2073,13 +2147,24 @@ fn collection_meta_candidates<'a>(
                 .get(*path)
                 .is_some_and(|type_id| context.types.indexed_element_type_id(*type_id).is_some())
         })
-        .map(|(path, memory)| {
-            (
-                memory,
-                (suffix == "length")
-                    .then(|| context.globals.get(&format!("{path}.length")).copied())
-                    .flatten(),
-            )
+        .map(|(path, collection)| {
+            let metadata_path = format!("{path}.{suffix}");
+            let backing = if matches!(suffix, "length" | "char_length") {
+                context
+                    .globals
+                    .get(&metadata_path)
+                    .copied()
+                    .map(CollectionMetaBacking::Global)
+                    .or_else(|| {
+                        context
+                            .memory
+                            .get(&metadata_path)
+                            .map(CollectionMetaBacking::Memory)
+                    })
+            } else {
+                None
+            };
+            (collection, backing)
         })
         .collect()
 }
@@ -2087,61 +2172,109 @@ fn collection_meta_candidates<'a>(
 fn encode_collection_meta_load(
     base_local: u32,
     suffix: &str,
-    candidates: &[(&MemoryBinding, Option<u32>)],
+    candidates: &[CollectionMetaCandidate<'_>],
+    string_literal_memory: &BTreeMap<i32, StringLiteralMemoryBinding>,
     out: &mut Vec<u8>,
-) {
-    let Some(((memory, global), rest)) = candidates.split_first() else {
-        out.push(0x00);
-        return;
+) -> Result<(), String> {
+    let Some(((memory, backing), rest)) = candidates.split_first() else {
+        let mut literal_candidates = string_literal_memory.iter();
+        return encode_string_literal_meta_load(base_local, suffix, &mut literal_candidates, out);
     };
     out.push(0x20);
     uleb(base_local, out);
     out.push(0x41);
     sleb(memory.offset as i32, out);
     out.extend([0x46, 0x04, I32]);
-    if suffix == "length" {
-        if let Some(global) = global {
-            out.push(0x23);
-            uleb(*global, out);
-        } else {
-            out.push(0x41);
-            sleb(memory.len, out);
+    if matches!(suffix, "length" | "char_length") {
+        match *backing {
+            Some(CollectionMetaBacking::Global(global)) => {
+                out.push(0x23);
+                uleb(global, out);
+            }
+            Some(CollectionMetaBacking::Memory(metadata)) => {
+                out.push(0x41);
+                sleb(metadata.offset as i32, out);
+                encode_memory_load(metadata.type_id, out)?;
+            }
+            None if suffix == "length" => {
+                out.push(0x41);
+                sleb(memory.len, out);
+            }
+            None => out.push(0x00),
         }
     } else {
         out.push(0x41);
         sleb(memory.len, out);
     }
     out.push(0x05);
-    encode_collection_meta_load(base_local, suffix, rest, out);
+    encode_collection_meta_load(base_local, suffix, rest, string_literal_memory, out)?;
     out.push(0x0b);
+    Ok(())
 }
 
-fn encode_collection_length_store(
+fn encode_string_literal_meta_load<'a>(
+    base_local: u32,
+    suffix: &str,
+    candidates: &mut impl Iterator<Item = (&'a i32, &'a StringLiteralMemoryBinding)>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((handle, binding)) = candidates.next() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    let value = match suffix {
+        "length" | "max_length" => binding.byte_len,
+        "char_length" => binding.char_len,
+        _ => return Err(format!("unsupported web collection metadata '{suffix}'")),
+    };
+    out.push(0x20);
+    uleb(base_local, out);
+    out.push(0x41);
+    sleb(*handle, out);
+    out.extend([0x46, 0x04, I32]);
+    out.push(0x41);
+    sleb(value, out);
+    out.push(0x05);
+    encode_string_literal_meta_load(base_local, suffix, candidates, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_collection_meta_store(
     base_local: u32,
     value_local: u32,
-    candidates: &[(&MemoryBinding, Option<u32>)],
+    candidates: &[CollectionMetaCandidate<'_>],
     out: &mut Vec<u8>,
-) {
-    let Some(((memory, global), rest)) = candidates.split_first() else {
+) -> Result<(), String> {
+    let Some(((memory, backing), rest)) = candidates.split_first() else {
         out.push(0x00);
-        return;
+        return Ok(());
     };
     out.push(0x20);
     uleb(base_local, out);
     out.push(0x41);
     sleb(memory.offset as i32, out);
     out.extend([0x46, 0x04, 0x40]);
-    if let Some(global) = global {
-        out.push(0x20);
-        uleb(value_local, out);
-        out.push(0x24);
-        uleb(*global, out);
-    } else {
-        out.push(0x00);
+    match *backing {
+        Some(CollectionMetaBacking::Global(global)) => {
+            out.push(0x20);
+            uleb(value_local, out);
+            out.push(0x24);
+            uleb(global, out);
+        }
+        Some(CollectionMetaBacking::Memory(metadata)) => {
+            out.push(0x41);
+            sleb(metadata.offset as i32, out);
+            out.push(0x20);
+            uleb(value_local, out);
+            encode_memory_store(metadata.type_id, out)?;
+        }
+        None => out.push(0x00),
     }
     out.push(0x05);
-    encode_collection_length_store(base_local, value_local, rest, out);
+    encode_collection_meta_store(base_local, value_local, rest, out)?;
     out.push(0x0b);
+    Ok(())
 }
 
 fn encode_struct_view_expr(
@@ -2546,7 +2679,42 @@ fn encode_memory_address(
     Ok(())
 }
 
-fn encode_local_collection_address(
+fn local_collection_memory_candidates<'a>(
+    context: &'a EncodeContext<'_>,
+    element_type: TypeId,
+) -> Result<Vec<&'a MemoryBinding>, String> {
+    let element_lane = wasm_value_type(element_type)?;
+    let mut candidates = Vec::new();
+    for (path, binding) in context.memory {
+        if binding.scalar
+            || context
+                .global_types
+                .get(path)
+                .and_then(|type_id| context.types.indexed_element_type_id(*type_id))
+                .is_none()
+        {
+            continue;
+        }
+        if wasm_value_type(binding.type_id)? == element_lane {
+            candidates.push(binding);
+        }
+    }
+    Ok(candidates)
+}
+
+fn is_text_collection_type(type_id: TypeId, types: &TypeTable) -> bool {
+    types.type_info(type_id).is_some_and(|info| {
+        matches!(
+            info.category,
+            TypeCategory::AsciiFixed
+                | TypeCategory::AsciiView
+                | TypeCategory::Utf8Fixed
+                | TypeCategory::Utf8View
+        )
+    })
+}
+
+fn encode_local_collection_index(
     binding: LocalBinding,
     index: &SimpleExpr,
     context: &EncodeContext<'_>,
@@ -2556,23 +2724,195 @@ fn encode_local_collection_address(
         .types
         .indexed_element_type_id(binding.type_id)
         .ok_or_else(|| format!("web local type {} is not indexable", binding.type_id))?;
-    let width = storage_width(element_type, context.types, context.named_structs)?;
+    storage_width(element_type, context.types, context.named_structs)?;
     let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
     if !is_web_index_type(index_type, context) {
         return Err("web local collection index must be i32-compatible".to_string());
     }
     out.push(0x21);
     uleb(context.scratch_index, out);
+    Ok(element_type)
+}
+
+fn encode_registered_collection_store(
+    handle_local: u32,
+    index_local: u32,
+    value_local: u32,
+    element_type: TypeId,
+    candidates: &[&MemoryBinding],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((memory, rest)) = candidates.split_first() else {
+        out.push(0x00);
+        return Ok(());
+    };
     out.push(0x20);
-    uleb(context.scratch_index, out);
-    out.extend([0x41, 0, 0x48, 0x04, 0x40, 0x00, 0x0b]);
-    out.push(0x20);
-    uleb(binding.index, out);
-    out.push(0x20);
-    uleb(context.scratch_index, out);
+    uleb(handle_local, out);
     out.push(0x41);
-    sleb(width as i32, out);
+    sleb(memory.offset as i32, out);
+    out.extend([0x46, 0x04, 0x40]);
+    if wasm_value_type(memory.type_id)? != wasm_value_type(element_type)? {
+        return Err(format!(
+            "web collection store lane mismatch: view type {element_type}, storage type {}",
+            memory.type_id
+        ));
+    }
+    emit_index_bounds_check(index_local, memory.len, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x41);
+    sleb(memory.stride as i32, out);
     out.extend([0x6c, 0x6a]);
+    out.push(0x20);
+    uleb(value_local, out);
+    encode_memory_store(memory.type_id, out)?;
+    out.push(0x05);
+    encode_registered_collection_store(
+        handle_local,
+        index_local,
+        value_local,
+        element_type,
+        rest,
+        out,
+    )?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_local_collection_store(
+    binding: LocalBinding,
+    index: &SimpleExpr,
+    value_local: u32,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let element_type = encode_local_collection_index(binding, index, context, out)?;
+    let candidates = local_collection_memory_candidates(context, element_type)?;
+    encode_registered_collection_store(
+        binding.index,
+        context.scratch_index,
+        value_local,
+        element_type,
+        &candidates,
+        out,
+    )
+}
+
+fn encode_string_literal_element_load<'a>(
+    handle_local: u32,
+    index_local: u32,
+    candidates: &mut impl Iterator<Item = (&'a i32, &'a StringLiteralMemoryBinding)>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((handle, binding)) = candidates.next() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    out.push(0x20);
+    uleb(handle_local, out);
+    out.push(0x41);
+    sleb(*handle, out);
+    out.extend([0x46, 0x04, I32]);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x41);
+    sleb(binding.byte_len, out);
+    out.extend([0x49, 0x04, I32]);
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x6a);
+    encode_memory_load(TYPE_ID_U8, out)?;
+    out.extend([0x05, 0x41, 0x00, 0x0b, 0x05]);
+    encode_string_literal_element_load(handle_local, index_local, candidates, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_registered_collection_load(
+    handle_local: u32,
+    index_local: u32,
+    element_type: TypeId,
+    allow_string_literals: bool,
+    candidates: &[&MemoryBinding],
+    string_literal_memory: &BTreeMap<i32, StringLiteralMemoryBinding>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((memory, rest)) = candidates.split_first() else {
+        if allow_string_literals {
+            let mut literal_candidates = string_literal_memory.iter();
+            return encode_string_literal_element_load(
+                handle_local,
+                index_local,
+                &mut literal_candidates,
+                out,
+            );
+        }
+        out.push(0x00);
+        return Ok(());
+    };
+    out.push(0x20);
+    uleb(handle_local, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    let element_lane = wasm_value_type(element_type)?;
+    let memory_lane = wasm_value_type(memory.type_id)?;
+    if memory_lane != element_lane {
+        return Err(format!(
+            "web collection load lane mismatch: view type {element_type}, storage type {}",
+            memory.type_id
+        ));
+    }
+    out.extend([0x46, 0x04, element_lane]);
+    emit_index_bounds_check(index_local, memory.len, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x41);
+    sleb(memory.stride as i32, out);
+    out.extend([0x6c, 0x6a]);
+    encode_memory_load(memory.type_id, out)?;
+    out.push(0x05);
+    encode_registered_collection_load(
+        handle_local,
+        index_local,
+        element_type,
+        allow_string_literals,
+        rest,
+        string_literal_memory,
+        out,
+    )?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_local_collection_load(
+    binding: LocalBinding,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let element_type = encode_local_collection_index(binding, index, context, out)?;
+    let candidates = local_collection_memory_candidates(context, element_type)?;
+    let allow_string_literals = is_text_collection_type(binding.type_id, context.types);
+    if allow_string_literals && wasm_value_type(element_type)? != I32 {
+        return Err(format!(
+            "web text collection element type {element_type} is not i32-compatible"
+        ));
+    }
+    encode_registered_collection_load(
+        binding.index,
+        context.scratch_index,
+        element_type,
+        allow_string_literals,
+        &candidates,
+        context.string_literal_memory,
+        out,
+    )?;
     Ok(element_type)
 }
 
@@ -2616,6 +2956,127 @@ fn require_same_type(expected: TypeId, actual: TypeId, context: &str) -> Result<
             "web {context} type mismatch: expected {expected}, found {actual}"
         ))
     }
+}
+
+fn integer_binary_result_type(
+    expected: Option<TypeId>,
+    lhs: TypeId,
+    rhs: TypeId,
+    types: &TypeTable,
+) -> TypeId {
+    if let Some(expected) = expected.filter(|type_id| types.is_integer(*type_id)) {
+        return expected;
+    }
+    if lhs == rhs && types.is_integer(lhs) {
+        lhs
+    } else {
+        TYPE_ID_I32
+    }
+}
+
+fn numeric_binary_result_type(
+    expected: Option<TypeId>,
+    lhs: TypeId,
+    rhs: TypeId,
+    types: &TypeTable,
+) -> Result<TypeId, String> {
+    let lhs_integer = is_i32_numeric_type(lhs, types);
+    let rhs_integer = is_i32_numeric_type(rhs, types);
+    if lhs_integer && rhs_integer {
+        return Ok(integer_binary_result_type(expected, lhs, rhs, types));
+    }
+    let lhs_float = matches!(lhs, TYPE_ID_F32 | TYPE_ID_F64);
+    let rhs_float = matches!(rhs, TYPE_ID_F32 | TYPE_ID_F64);
+    if (lhs_integer || lhs_float) && (rhs_integer || rhs_float) {
+        return Ok(if lhs == TYPE_ID_F64 || rhs == TYPE_ID_F64 {
+            TYPE_ID_F64
+        } else {
+            TYPE_ID_F32
+        });
+    }
+    Err(format!(
+        "web binary expression requires numeric operands, found {lhs} and {rhs}"
+    ))
+}
+
+fn encode_numeric_promotion(
+    from: TypeId,
+    to: TypeId,
+    types: &TypeTable,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    if wasm_value_type(from)? == wasm_value_type(to)? {
+        return Ok(());
+    }
+    let unsigned = types.unsigned_integer_bits(from).is_some();
+    let opcode = match (wasm_value_type(from)?, wasm_value_type(to)?) {
+        (I32, F32) if is_i32_numeric_type(from, types) => {
+            if unsigned {
+                0xb3
+            } else {
+                0xb2
+            }
+        }
+        (I32, F64) if is_i32_numeric_type(from, types) => {
+            if unsigned {
+                0xb8
+            } else {
+                0xb7
+            }
+        }
+        (F32, F64) => 0xbb,
+        _ => {
+            return Err(format!(
+                "unsupported web numeric promotion from type {from} to {to}"
+            ))
+        }
+    };
+    out.push(opcode);
+    Ok(())
+}
+
+fn encode_binary_operands(
+    lhs: &SimpleExpr,
+    rhs: &SimpleExpr,
+    expected: Option<TypeId>,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let child_expected = match expected {
+        Some(TYPE_ID_F32) => Some(TYPE_ID_F32),
+        Some(TYPE_ID_F64) => Some(TYPE_ID_F64),
+        Some(type_id) if context.types.is_integer(type_id) => Some(type_id),
+        _ => None,
+    };
+    let mut lhs_bytes = Vec::new();
+    let mut rhs_bytes = Vec::new();
+    let (lhs_type, rhs_type) = if child_expected.is_none() && matches!(lhs, SimpleExpr::Int(_)) {
+        let rhs_type = encode_expr_as(rhs, None, context, &mut rhs_bytes)?;
+        let lhs_expected = context
+            .types
+            .unsigned_integer_bits(rhs_type)
+            .is_some()
+            .then_some(rhs_type);
+        let lhs_type = encode_expr_as(lhs, lhs_expected, context, &mut lhs_bytes)?;
+        (lhs_type, rhs_type)
+    } else {
+        let lhs_type = encode_expr_as(lhs, child_expected, context, &mut lhs_bytes)?;
+        let rhs_expected = child_expected.or_else(|| {
+            context
+                .types
+                .unsigned_integer_bits(lhs_type)
+                .is_some()
+                .then_some(lhs_type)
+        });
+        let rhs_type = encode_expr_as(rhs, rhs_expected, context, &mut rhs_bytes)?;
+        (lhs_type, rhs_type)
+    };
+    let result_type = numeric_binary_result_type(expected, lhs_type, rhs_type, context.types)?;
+    out.extend(lhs_bytes);
+    encode_numeric_promotion(lhs_type, result_type, context.types, out)?;
+    out.extend(rhs_bytes);
+    encode_numeric_promotion(rhs_type, result_type, context.types, out)?;
+    Ok(result_type)
 }
 
 fn encode_expr(
@@ -2829,7 +3290,13 @@ fn encode_expr_as(
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
                 let candidates = collection_meta_candidates(context, suffix);
-                encode_collection_meta_load(binding.index, suffix, &candidates, out);
+                encode_collection_meta_load(
+                    binding.index,
+                    suffix,
+                    &candidates,
+                    context.string_literal_memory,
+                    out,
+                )?;
                 Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
@@ -2876,9 +3343,7 @@ fn encode_expr_as(
             Ok(signature.result)
         }
         SimpleExpr::Binary { lhs, op, rhs } => {
-            let lhs_type = encode_expr_as(lhs, expected, context, out)?;
-            let rhs_type = encode_expr_as(rhs, Some(lhs_type), context, out)?;
-            require_same_type(lhs_type, rhs_type, "binary expression")?;
+            let result_type = encode_binary_operands(lhs, rhs, expected, context, out)?;
             let assign_op = match op {
                 '+' => AssignOp::Add,
                 '-' => AssignOp::Sub,
@@ -2887,8 +3352,8 @@ fn encode_expr_as(
                 '%' => AssignOp::Mod,
                 other => return Err(format!("unsupported web binary operator '{other}'")),
             };
-            out.push(arithmetic_opcode(assign_op, lhs_type)?);
-            Ok(lhs_type)
+            out.push(arithmetic_opcode(assign_op, result_type)?);
+            Ok(result_type)
         }
         SimpleExpr::Condition(condition) => {
             encode_condition(condition, context, out)?;
@@ -2909,9 +3374,7 @@ fn encode_expr_as(
             }
             if suffix.is_empty() {
                 if let Some(local) = context.locals.get(collection_path).copied() {
-                    let element_type = encode_local_collection_address(local, index, context, out)?;
-                    encode_memory_load(element_type, out)?;
-                    return Ok(element_type);
+                    return encode_local_collection_load(local, index, context, out);
                 }
             }
             let binding = memory_binding(context, collection_path, suffix)?;
@@ -3459,6 +3922,19 @@ mod tests {
     }
 
     #[test]
+    fn reads_and_updates_utf8_view_char_lengths() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "utf8_views.stasis",
+            "global text: utf8[8]; function update(s: utf8[]): i32 { s.char_length = 2; return s.char_length + s.max_length; } function main(): i32 { return update(text); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile mutable UTF-8 view metadata");
+    }
+
+    #[test]
     fn lowers_foreach_over_struct_collection_storage() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
@@ -3566,6 +4042,37 @@ mod tests {
         );
         process.compile().expect("compile web intrinsic module");
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn promotes_mixed_numeric_binary_operands_like_the_jit() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "mixed_numeric.stasis",
+            "function blend(count: i32, scale: f32): f32 { return count * scale + scale * count; } function main(): i32 { return f32_to_i32(blend(2, 0.5)); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile mixed numeric binary expressions");
+        assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn uses_signed_and_unsigned_wasm_numeric_promotions() {
+        let types = TypeTable::new();
+        let mut bytes = Vec::new();
+        encode_numeric_promotion(TYPE_ID_I32, TYPE_ID_F32, &types, &mut bytes)
+            .expect("promote signed i32 to f32");
+        encode_numeric_promotion(TYPE_ID_U32, TYPE_ID_F32, &types, &mut bytes)
+            .expect("promote unsigned i32 lane to f32");
+        encode_numeric_promotion(TYPE_ID_I32, TYPE_ID_F64, &types, &mut bytes)
+            .expect("promote signed i32 to f64");
+        encode_numeric_promotion(TYPE_ID_U32, TYPE_ID_F64, &types, &mut bytes)
+            .expect("promote unsigned i32 lane to f64");
+        encode_numeric_promotion(TYPE_ID_F32, TYPE_ID_F64, &types, &mut bytes)
+            .expect("promote f32 to f64");
+        assert_eq!(bytes, [0xb2, 0xb3, 0xb7, 0xb8, 0xbb]);
     }
 
     #[test]
