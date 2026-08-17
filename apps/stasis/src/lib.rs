@@ -1599,6 +1599,60 @@ fn prepare_play_asset_working_dir(watch_dir: &Path) -> Result<PathBuf, String> {
     Ok(prepared_watch_dir)
 }
 
+fn prepared_play_asset_root(project_root: &Path, asset_working_dir: &Path) -> Option<PathBuf> {
+    let prepared_root = project_root.join(".stasis_cache/play-assets");
+    asset_working_dir
+        .starts_with(&prepared_root)
+        .then_some(prepared_root)
+}
+
+fn refresh_play_asset_file(
+    project_root: &Path,
+    prepared_asset_root: Option<&Path>,
+    source_path: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let source_path = normalize_watch_path_for_compare(source_path);
+    let project_root_abs = normalize_watch_path_for_compare(project_root);
+    let relative = source_path.strip_prefix(&project_root_abs).map_err(|_| {
+        format!(
+            "asset change is outside project root: {}",
+            source_path.display()
+        )
+    })?;
+    let relative_text = relative.to_string_lossy().replace('\\', "/");
+    if relative_text != "assets" && !relative_text.starts_with("assets/") {
+        return Ok(None);
+    }
+    let runtime_path = prepared_asset_root
+        .map(|root| root.join(relative))
+        .unwrap_or_else(|| source_path.clone());
+    if source_path.is_file() {
+        if let Some(parent) = runtime_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create staged asset directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::copy(&source_path, &runtime_path).map_err(|error| {
+            format!(
+                "failed to stage changed asset {} -> {}: {error}",
+                source_path.display(),
+                runtime_path.display()
+            )
+        })?;
+    } else if runtime_path.exists() {
+        fs::remove_file(&runtime_path).map_err(|error| {
+            format!(
+                "failed to remove deleted staged asset {}: {error}",
+                runtime_path.display()
+            )
+        })?;
+    }
+    Ok(Some(runtime_path))
+}
+
 fn resolve_play_asset_source_dir(watch_file: &Path, watch_dir: &Path) -> PathBuf {
     watch_file
         .parent()
@@ -2134,6 +2188,7 @@ fn run_play_in_process_inner(
 
     let asset_source_dir = resolve_play_asset_source_dir(&root_path, &watch_dir_abs);
     let asset_working_dir = prepare_play_asset_working_dir(&asset_source_dir)?;
+    let prepared_asset_root = prepared_play_asset_root(&project_root, &asset_working_dir);
     std::env::set_current_dir(&asset_working_dir).map_err(|error| {
         format!(
             "failed to set current directory to {}: {error}",
@@ -2223,6 +2278,7 @@ fn run_play_in_process_inner(
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
+    let mut watch_asset_paths = collect_watch_asset_paths(&project_root, jit.program_snapshot());
     let mut tick_budget_generation = 0u64;
     let mut tick_budget = jit
         .tick_budget_us()?
@@ -2355,6 +2411,7 @@ fn run_play_in_process_inner(
                                     }
                                 }
                                 watch_dependency_paths = Some(prepared.dependency_paths);
+                                watch_asset_paths = prepared.asset_paths;
                                 if let Some(live) = live.as_mut() {
                                     live.refresh_after_external_edit(&jit);
                                 }
@@ -2392,6 +2449,7 @@ fn run_play_in_process_inner(
         let mut needs_recompile = false;
         let mut ignored_changes: u32 = 0;
         let mut triggered_paths: Vec<String> = Vec::new();
+        let mut changed_asset_paths: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut watch_events = watcher.drain_stasis_changes();
         for data_watcher in &mut data_watchers {
             watch_events.extend(data_watcher.drain_stasis_changes());
@@ -2414,6 +2472,10 @@ fn run_play_in_process_inner(
                 needs_data_reload = true;
                 continue;
             }
+            if watch_asset_paths.contains(&event_path) {
+                changed_asset_paths.entry(event_path).or_insert(event.path);
+                continue;
+            }
             let submit = should_submit_watch_event(
                 &event,
                 Some(&root_path),
@@ -2424,6 +2486,26 @@ fn run_play_in_process_inner(
                 triggered_paths.push(normalize_watch_path_for_log(&event.path));
             } else {
                 ignored_changes = ignored_changes.saturating_add(1);
+            }
+        }
+        for (_, asset_path) in changed_asset_paths {
+            match refresh_play_asset_file(
+                &project_root,
+                prepared_asset_root.as_deref(),
+                &asset_path,
+            ) {
+                Ok(Some(runtime_path)) => {
+                    gfx.notify_file_changed(&runtime_path)?;
+                    println!(
+                        "[asset] refreshed {}",
+                        normalize_watch_path_for_log(&asset_path)
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => println!(
+                    "[asset] refresh rejected {}: {error}",
+                    normalize_watch_path_for_log(&asset_path)
+                ),
             }
         }
         if needs_data_reload {
@@ -2609,6 +2691,7 @@ struct PreparedWatchPatch {
     compile_ms: u128,
     package_ms: u128,
     dependency_paths: BTreeSet<String>,
+    asset_paths: BTreeSet<String>,
 }
 
 struct WatchPatchJob {
@@ -2644,6 +2727,8 @@ fn start_watch_patch_job(
                     .map_err(|error| format!("build_engine_package failed: {error}"))?;
                 let package_ms = package_started.elapsed().as_millis();
                 let dependency_paths = collect_watch_dependency_paths(&project_root, &root_path)?;
+                let asset_paths =
+                    collect_watch_asset_paths(&project_root, candidate.program_snapshot());
                 Ok(PreparedWatchPatch {
                     revision,
                     candidate,
@@ -2651,6 +2736,7 @@ fn start_watch_patch_job(
                     compile_ms,
                     package_ms,
                     dependency_paths,
+                    asset_paths,
                 })
             })();
             let _ = sender.send(result);
@@ -2851,6 +2937,47 @@ fn collect_watch_dependency_paths(
         .keys()
         .map(|path| normalize_watch_path_for_log(&project_root.join(path)))
         .collect())
+}
+
+fn collect_watch_asset_paths(
+    project_root: &Path,
+    snapshot: Option<&stasis_compiler::backend::program_snapshot::ProgramSnapshot>,
+) -> BTreeSet<String> {
+    let Some(snapshot) = snapshot else {
+        return BTreeSet::new();
+    };
+    let source_base_dirs = snapshot
+        .module_graph()
+        .roots()
+        .iter()
+        .filter_map(|root| Path::new(root).parent().map(Path::to_path_buf))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let validation = stasis_compiler::backend::assets::validate_asset_references(
+        project_root,
+        &source_base_dirs,
+        snapshot.asset_references(),
+        None,
+        &BTreeSet::new(),
+    );
+    let mut paths = validation
+        .references
+        .into_iter()
+        .map(|reference| normalize_watch_path_for_log(&reference.absolute_path))
+        .collect::<BTreeSet<_>>();
+    // Static references resolve to concrete paths above. Dynamic @asset_path calls are
+    // intentionally bounded by manifest.dynamic_assets, so include that conservative set too.
+    // The manifest is read opportunistically: a malformed manifest must not make source watching
+    // fail, and the normal compiler/package validation will report that error separately.
+    if let Ok(manifest) = load_project_asset_manifest(project_root, AssetLimits::default()) {
+        for project_path in manifest.dynamic_assets {
+            paths.insert(normalize_watch_path_for_log(
+                &project_root.join(project_path),
+            ));
+        }
+    }
+    paths
 }
 
 fn should_submit_watch_event(
@@ -8150,6 +8277,110 @@ mod tests {
         ));
 
         fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn watch_asset_paths_follow_reachable_asset_loader_references() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project_root = std::env::temp_dir().join(format!("stasis_watch_assets_{stamp}"));
+        let source_dir = project_root.join("src");
+        let asset_dir = project_root.join("assets");
+        fs::create_dir_all(&source_dir).expect("source directory");
+        fs::create_dir_all(&asset_dir).expect("asset directory");
+        let entry = source_dir.join("main.stasis");
+        let used = asset_dir.join("piece.svg");
+        let dynamic = asset_dir.join("dynamic.svg");
+        let unused = asset_dir.join("unused.svg");
+        fs::write(&used, "<svg/>").expect("used asset");
+        fs::write(&dynamic, "<svg><circle/></svg>").expect("dynamic asset");
+        fs::write(&unused, "<svg/>").expect("unused asset");
+        let manifest = serde_json::json!({
+            "schema": "stasis-assets",
+            "version": 2,
+            "dynamic_assets": ["assets/dynamic.svg"],
+            "assets": [
+                {
+                    "id": "piece",
+                    "path": "assets/piece.svg",
+                    "content_sha256": stasis_assets::sha256_bytes(b"<svg/>"),
+                    "format": { "kind": "sprite", "encoding": "svg", "width": 1, "height": 1 },
+                    "dependencies": []
+                },
+                {
+                    "id": "dynamic",
+                    "path": "assets/dynamic.svg",
+                    "content_sha256": stasis_assets::sha256_bytes(b"<svg><circle/></svg>"),
+                    "format": { "kind": "sprite", "encoding": "svg", "width": 1, "height": 1 },
+                    "dependencies": []
+                }
+            ]
+        });
+        fs::write(
+            project_root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec_pretty(&manifest).expect("encode asset manifest"),
+        )
+        .expect("asset manifest");
+        fs::write(
+            &entry,
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nfunction @asset_path(path) request_sprite(self: i32, path: string, width: i32, height: i32): bool { return true; }\nfunction @asset_path(path) request_dynamic(self: i32, path: string, width: i32, height: i32): bool { return true; }\nfunction use_dynamic(path: string): bool { return request_dynamic(0, path, 32, 32); }\nfunction main(): i32 { if (request_sprite(0, \"../assets/piece.svg\", 32, 32) && use_dynamic(\"../assets/dynamic.svg\")) { return gfx_load_sprite(\"../assets/piece.svg\", 32, 32); } return 0; }\n",
+        )
+        .expect("entry source");
+
+        let mut jit = JitProcess::new();
+        jit.set_project_root(project_root.to_string_lossy())
+            .expect("project root");
+        jit.upsert_file(
+            entry.to_string_lossy().to_string(),
+            fs::read_to_string(&entry).expect("read entry"),
+        );
+        jit.compile().expect("compile asset watcher fixture");
+
+        let paths = collect_watch_asset_paths(&project_root, jit.program_snapshot());
+        assert!(paths.contains(&normalize_watch_path_for_log(&used)));
+        assert!(paths.contains(&normalize_watch_path_for_log(&dynamic)));
+        assert!(!paths.contains(&normalize_watch_path_for_log(&unused)));
+
+        fs::create_dir_all(project_root.join(".stasis_cache/play-assets/src"))
+            .expect("staged source directory");
+        fs::create_dir_all(project_root.join(".stasis_cache/play-assets/assets"))
+            .expect("staged asset directory");
+        let staged = project_root.join(".stasis_cache/play-assets/assets/piece.svg");
+        fs::copy(&used, &staged).expect("initial staged asset");
+        let staged_loader_path =
+            project_root.join(".stasis_cache/play-assets/src/../assets/piece.svg");
+        assert_eq!(
+            normalize_watch_path_for_log(&staged_loader_path),
+            normalize_watch_path_for_log(&staged),
+            "staged ../assets loader path must identify the same runtime cache entry"
+        );
+        fs::write(&used, "<svg><path/></svg>").expect("updated asset");
+        let runtime_path = refresh_play_asset_file(
+            &project_root,
+            Some(&project_root.join(".stasis_cache/play-assets")),
+            &used,
+        )
+        .expect("refresh asset")
+        .expect("asset under project root");
+        assert_eq!(runtime_path, staged);
+        assert_eq!(
+            fs::read_to_string(staged).expect("read staged asset"),
+            "<svg><path/></svg>"
+        );
+
+        fs::remove_dir_all(&project_root).ok();
+    }
+
+    #[test]
+    fn runtime_asset_notification_forces_native_sprite_cache_invalidation() {
+        assert!(STASIS_GRAPHICS_SOURCE.contains("stasis_gfx_notify_file_changed"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains("g_asset_watch_force_reload"));
+        assert!(STASIS_GRAPHICS_SOURCE
+            .contains("if (!force_reload && !path_matches && (!mt || mt <= e->mtime)) continue;"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains("_fullpath(canonical, out, sizeof(canonical))"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains("conservatively invalidate all entries"));
     }
 
     #[test]

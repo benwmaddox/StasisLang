@@ -1914,11 +1914,29 @@ static int resolve_asset_path(const char* path, char* out, size_t out_size) {
     for (char* p = out; *p; ++p) {
         if (*p == '\\') *p = '/';
     }
+#if defined(_WIN32)
+    /* Sprite callers commonly use ../assets/... from a staged src directory. Keep the
+     * cache key identical to the absolute path passed by the host watcher. */
+    char canonical[1024];
+    if (_fullpath(canonical, out, sizeof(canonical))) {
+        strncpy(out, canonical, out_size - 1);
+        out[out_size - 1] = 0;
+        for (char* p = out; *p; ++p) {
+            if (*p == '\\') *p = '/';
+        }
+    }
+#endif
     return 1;
 }
 
 #if defined(_WIN32)
 static volatile LONG g_asset_watch_dirty = 0;
+static volatile LONG g_asset_watch_force_reload = 0;
+#define GFX_ASSET_WATCH_MAX_PENDING_PATHS 64
+#define GFX_ASSET_WATCH_PATH_SIZE 1024
+static SRWLOCK g_asset_watch_path_lock = SRWLOCK_INIT;
+static int g_asset_watch_pending_path_count = 0;
+static char g_asset_watch_pending_paths[GFX_ASSET_WATCH_MAX_PENDING_PATHS][GFX_ASSET_WATCH_PATH_SIZE];
 static HANDLE g_asset_watch_stop_event = NULL;
 static HANDLE g_asset_watch_change_handle = NULL;
 static HANDLE g_asset_watch_thread = NULL;
@@ -1964,6 +1982,15 @@ static DWORD WINAPI gfx_asset_watch_thread_proc(LPVOID userdata) {
 
     return 0;
 }
+#endif
+
+#if !defined(_WIN32)
+static volatile int g_asset_watch_dirty = 0;
+static volatile int g_asset_watch_force_reload = 0;
+#define GFX_ASSET_WATCH_MAX_PENDING_PATHS 64
+#define GFX_ASSET_WATCH_PATH_SIZE 1024
+static int g_asset_watch_pending_path_count = 0;
+static char g_asset_watch_pending_paths[GFX_ASSET_WATCH_MAX_PENDING_PATHS][GFX_ASSET_WATCH_PATH_SIZE];
 #endif
 
 static void gfx_asset_watch_init(void) {
@@ -2023,10 +2050,39 @@ static void gfx_asset_watch_shutdown(void) {
 }
 
 STASIS_EXPORT void stasis_gfx_notify_file_changed(const char* path) {
-    (void)path;
+    int force_reload = !path || !*path;
 #if defined(_WIN32)
-    if (!gfx_asset_watch_enabled()) return;
+    if (!force_reload) {
+        AcquireSRWLockExclusive(&g_asset_watch_path_lock);
+        if (g_asset_watch_pending_path_count < GFX_ASSET_WATCH_MAX_PENDING_PATHS) {
+            char* pending = g_asset_watch_pending_paths[g_asset_watch_pending_path_count++];
+            strncpy(pending, path, GFX_ASSET_WATCH_PATH_SIZE - 1);
+            pending[GFX_ASSET_WATCH_PATH_SIZE - 1] = 0;
+            for (char* p = pending; *p; ++p) {
+                if (*p == '\\') *p = '/';
+            }
+        } else {
+            force_reload = 1;
+        }
+        ReleaseSRWLockExclusive(&g_asset_watch_path_lock);
+    }
     InterlockedExchange(&g_asset_watch_dirty, 1);
+    if (force_reload) InterlockedExchange(&g_asset_watch_force_reload, 1);
+#else
+    if (!force_reload) {
+        if (g_asset_watch_pending_path_count < GFX_ASSET_WATCH_MAX_PENDING_PATHS) {
+            char* pending = g_asset_watch_pending_paths[g_asset_watch_pending_path_count++];
+            strncpy(pending, path, GFX_ASSET_WATCH_PATH_SIZE - 1);
+            pending[GFX_ASSET_WATCH_PATH_SIZE - 1] = 0;
+            for (char* p = pending; *p; ++p) {
+                if (*p == '\\') *p = '/';
+            }
+        } else {
+            force_reload = 1;
+        }
+    }
+    g_asset_watch_dirty = 1;
+    if (force_reload) g_asset_watch_force_reload = 1;
 #endif
 }
 
@@ -5435,19 +5491,81 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
 }
 
 static void gfx_asset_watch_apply_pending_changes(void) {
+    int dirty = 0;
+    int force_reload = 0;
+    int pending_path_count = 0;
+    char pending_paths[GFX_ASSET_WATCH_MAX_PENDING_PATHS][GFX_ASSET_WATCH_PATH_SIZE];
 #if defined(_WIN32)
-    if (!gfx_asset_watch_enabled()) return;
-
-    if (InterlockedExchange(&g_asset_watch_dirty, 0) == 0) {
+    dirty = InterlockedExchange(&g_asset_watch_dirty, 0);
+    force_reload = InterlockedExchange(&g_asset_watch_force_reload, 0);
+    AcquireSRWLockExclusive(&g_asset_watch_path_lock);
+    pending_path_count = g_asset_watch_pending_path_count;
+    if (pending_path_count > 0) {
+        memcpy(pending_paths, g_asset_watch_pending_paths,
+               sizeof(pending_paths[0]) * (size_t)pending_path_count);
+    }
+    g_asset_watch_pending_path_count = 0;
+    ReleaseSRWLockExclusive(&g_asset_watch_path_lock);
+#else
+    dirty = g_asset_watch_dirty;
+    g_asset_watch_dirty = 0;
+    force_reload = g_asset_watch_force_reload;
+    g_asset_watch_force_reload = 0;
+    pending_path_count = g_asset_watch_pending_path_count;
+    if (pending_path_count > 0) {
+        memcpy(pending_paths, g_asset_watch_pending_paths,
+               sizeof(pending_paths[0]) * (size_t)pending_path_count);
+    }
+    g_asset_watch_pending_path_count = 0;
+#endif
+    if (!dirty) {
         return;
+    }
+
+    if (pending_path_count > 0 && !force_reload) {
+        /* If any explicit notification cannot be matched to a retained cache entry,
+         * conservatively invalidate all entries. This covers deleted files and any
+         * path spelling that the platform could not canonicalize. */
+        for (int path_index = 0; path_index < pending_path_count; path_index++) {
+            int matched = 0;
+            for (int i = 0; i < g_sprite_capacity; i++) {
+                SpriteEntry* e = &g_sprites[i];
+                if (!e->used || !e->path) continue;
+#if defined(_WIN32)
+                if (_stricmp(e->path, pending_paths[path_index]) == 0) {
+#else
+                if (strcmp(e->path, pending_paths[path_index]) == 0) {
+#endif
+                    matched = 1;
+                    break;
+                }
+            }
+            if (!matched) {
+                force_reload = 1;
+                break;
+            }
+        }
     }
 
     for (int i = 0; i < g_sprite_capacity; i++) {
         SpriteEntry* e = &g_sprites[i];
         if (!e->used || !e->path) continue;
 
+        int path_matches = 0;
+        for (int path_index = 0; path_index < pending_path_count; path_index++) {
+#if defined(_WIN32)
+            if (_stricmp(e->path, pending_paths[path_index]) == 0) {
+#else
+            if (strcmp(e->path, pending_paths[path_index]) == 0) {
+#endif
+                path_matches = 1;
+                break;
+            }
+        }
+        if (pending_path_count > 0 && !force_reload && !path_matches) continue;
+
         uint64_t mt = get_file_mtime(e->path);
-        if (!mt || mt <= e->mtime) continue;
+        if (!force_reload && !path_matches && (!mt || mt <= e->mtime)) continue;
 
         if (!sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h)) {
             SDL_Log("gfx_watch: reload failed for %s", e->path);
@@ -5455,7 +5573,6 @@ static void gfx_asset_watch_apply_pending_changes(void) {
             e->reload_pending = 1;
         }
     }
-#endif
 }
 
 /*

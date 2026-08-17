@@ -1010,6 +1010,7 @@ pub struct StasisGraphicsApi {
     stasis_host_set_performance_metrics: usize,
     stasis_gfx_submit_u8: usize,
     stasis_test_get_render_submission_state: Option<usize>,
+    stasis_gfx_notify_file_changed: Option<usize>,
     stasis_sleep_ms: usize,
 }
 
@@ -1047,6 +1048,8 @@ impl StasisGraphicsApi {
         let stasis_test_get_render_submission_state = lib
             .symbol_address("stasis_test_get_render_submission_state")
             .ok();
+        let stasis_gfx_notify_file_changed =
+            lib.symbol_address("stasis_gfx_notify_file_changed").ok();
         let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
         Ok(Self {
             _lib: lib,
@@ -1058,6 +1061,7 @@ impl StasisGraphicsApi {
             stasis_host_set_performance_metrics,
             stasis_gfx_submit_u8,
             stasis_test_get_render_submission_state,
+            stasis_gfx_notify_file_changed,
             stasis_sleep_ms,
         })
     }
@@ -1223,6 +1227,27 @@ impl StasisGraphicsApi {
             let callback: extern "C" fn(*mut i32, i32) -> i32 =
                 unsafe { std::mem::transmute(address) };
             Ok((callback(state.as_mut_ptr(), state.len() as i32) != 0).then_some(state))
+        }
+    }
+
+    pub fn notify_file_changed(&self, path: &Path) -> Result<(), String> {
+        let Some(address) = self.stasis_gfx_notify_file_changed else {
+            return Ok(());
+        };
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| "changed asset path contains interior NUL byte".to_string())?;
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*const c_char) =
+                unsafe { std::mem::transmute(address) };
+            callback(path.as_ptr());
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(*const c_char) = unsafe { std::mem::transmute(address) };
+            callback(path.as_ptr());
+            Ok(())
         }
     }
 
