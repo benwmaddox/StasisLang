@@ -7,11 +7,16 @@ const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
 async function loadRuntime(game) {
   const imageSources = [];
+  const measurements = [];
   let env;
   const memory = new WebAssembly.Memory({ initial: 1 });
   const context2d = {
     fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {}, moveTo() {},
-    lineTo() {}, stroke() {}, drawImage() {}, translate() {}, rotate() {}
+    lineTo() {}, stroke() {}, drawImage() {}, translate() {}, rotate() {},
+    measureText(value) {
+      measurements.push({ font: this.font, value });
+      return { width: value.length * 7 };
+    }
   };
   const canvas = {
     width: 640,
@@ -93,7 +98,7 @@ async function loadRuntime(game) {
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(typeof env?.gfx_load_sprite, "function", errorBox.textContent);
-  return { env, imageSources };
+  return { env, imageSources, measurements };
 }
 
 test("web asset paths normalize fallback values and preserve explicit overrides", async () => {
@@ -124,4 +129,17 @@ test("web asset paths normalize fallback values and preserve explicit overrides"
     "assets/packed/override-123.png",
     "",
   ]);
+});
+
+test("web measure_text uses the registered Canvas font and string handle", async () => {
+  const game = {
+    memory: {},
+    strings: { "1": "marble" },
+  };
+  const { env, measurements } = await loadRuntime(game);
+
+  const font = env.load_font(7, 20);
+  assert.equal(typeof env.measure_text, "function");
+  assert.equal(env.measure_text(font, 1), 42);
+  assert.deepEqual(measurements, [{ font: "20px stasis-font-1", value: "marble" }]);
 });

@@ -84,6 +84,17 @@ fn execute_web_main(wasm: &Path) -> Output {
         .expect("execute packaged Wasm in Node")
 }
 
+fn execute_web_main_with_measure_text(wasm: &Path) -> Output {
+    Command::new("node")
+        .arg("-e")
+        .arg(
+            "const fs = require('node:fs'); const bytes = fs.readFileSync(process.argv[1]); const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes)); if (!imports.some(({ module, name }) => module === 'env' && name === 'measure_text')) throw new Error('package did not retain env.measure_text'); WebAssembly.instantiate(bytes, { env: { measure_text: () => 12.5 } }).then(({ instance }) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+        )
+        .arg(wasm)
+        .output()
+        .expect("execute packaged Wasm with measure_text import")
+}
+
 #[test]
 fn web_continue_matches_native_for_and_foreach_loop_steps() {
     let root = repo_root();
@@ -242,6 +253,63 @@ function render(): i32 {
     );
 
     fs::remove_dir_all(&workspace).expect("clean nested text fixture");
+}
+
+#[test]
+fn web_package_instantiates_direct_measure_text_import() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-measure-text-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create measure_text fixture");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"web_measure_text","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("write measure_text manifest");
+    fs::write(
+        workspace.join("src/main.stasis"),
+        r#"
+extern function measure_text(font: i32, text: string): f32;
+
+function main(): i32 {
+    let width: f32 = measure_text(2, "abc");
+    if (width == 12.5) {
+        return 0;
+    }
+    return 1;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}
+"#,
+    )
+    .expect("write measure_text source");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    let runtime = fs::read_to_string(output.join("game.js")).expect("measure_text web runtime");
+    assert!(
+        runtime.contains("measure_text:"),
+        "web host omitted the direct measure_text import"
+    );
+    let execution = execute_web_main_with_measure_text(&output.join("game.wasm"));
+    assert!(
+        execution.status.success(),
+        "measure_text Wasm instantiation failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(execution.stdout).expect("UTF-8 result"),
+        "0"
+    );
+
+    fs::remove_dir_all(&workspace).expect("clean measure_text fixture");
 }
 
 #[test]

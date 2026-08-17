@@ -160,6 +160,15 @@
     font.load().then(loaded => document.fonts.add(loaded)).catch(error => console.error(error));
     return handle;
   };
+  const measureText = (fontHandle, textId) => {
+    const font = fonts.get(fontHandle);
+    if (!font) return 0;
+    context.save();
+    context.font = `${font.size}px ${font.family}`;
+    const width = context.measureText(stringValue(textId)).width;
+    context.restore();
+    return width;
+  };
   const releaseSprite = handle => { sprites.delete(handle); };
   const requestSprite = pathId => {
     const task = nextAssetTask++;
@@ -383,6 +392,9 @@
     stasis_jit_asset_task_cancel: task => cancelAssetTask(task),
     load_font: (pathId, size) => loadFont(pathId, size),
     stasis_load_font: (pathId, size) => loadFont(pathId, size),
+    measure_text: (font, textId) => measureText(font, textId),
+    stasis_measure_text: (font, textId) => measureText(font, textId),
+    stasis_jit_measure_text: (font, textId) => measureText(font, textId),
     stasis_jit_sprite_load_from: (base, index, _len, pathId, width, height) => {
       const handle = loadSprite(pathId);
       return setViewField(base, index, "handle", handle)
