@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const CONTINUE_LOOP_PARITY: &str =
+    include_str!("../../../tests/stasis/seams/continue_loop_parity.stasis");
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,6 +71,48 @@ fn copy_tree(source: &Path, destination: &Path) {
             fs::copy(entry.path(), target).expect("copy fixture file");
         }
     }
+}
+
+fn execute_web_main(wasm: &Path) -> Output {
+    Command::new("node")
+        .arg("-e")
+        .arg(
+            "const fs = require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({ instance }) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+        )
+        .arg(wasm)
+        .output()
+        .expect("execute packaged Wasm in Node")
+}
+
+#[test]
+fn web_continue_matches_native_for_and_foreach_loop_steps() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-continue-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create web continue fixture");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"web_continue_parity","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("write web continue manifest");
+    fs::write(workspace.join("src/main.stasis"), CONTINUE_LOOP_PARITY)
+        .expect("write web continue source");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    let execution = execute_web_main(&output.join("game.wasm"));
+    assert!(
+        execution.status.success(),
+        "packaged Wasm execution failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(execution.stdout).expect("UTF-8 result"),
+        "434"
+    );
+
+    fs::remove_dir_all(&workspace).expect("clean web continue fixture");
 }
 
 #[test]
