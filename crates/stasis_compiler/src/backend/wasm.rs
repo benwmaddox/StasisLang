@@ -151,6 +151,8 @@ impl WasmProcess {
         self.memory_layout = memory_bindings
             .into_iter()
             .map(|(path, binding)| {
+                let byte_backed =
+                    is_byte_backed_memory_path(&path, binding.type_id, &analysis, &types);
                 (
                     path,
                     WasmMemoryLayout {
@@ -158,6 +160,7 @@ impl WasmProcess {
                         type_id: binding.type_id,
                         length: binding.len,
                         stride: binding.stride,
+                        byte_backed,
                     },
                 )
             })
@@ -389,6 +392,35 @@ pub struct WasmMemoryLayout {
     pub type_id: TypeId,
     pub length: i32,
     pub stride: u32,
+    pub byte_backed: bool,
+}
+
+fn is_byte_backed_type(type_id: TypeId, types: &TypeTable) -> bool {
+    if type_id == TYPE_ID_U8 {
+        return true;
+    }
+    matches!(
+        types.type_info(type_id).map(|info| info.category),
+        Some(
+            TypeCategory::AsciiFixed
+                | TypeCategory::AsciiView
+                | TypeCategory::Utf8Fixed
+                | TypeCategory::Utf8View
+        )
+    )
+}
+
+fn is_byte_backed_memory_path(
+    path: &str,
+    type_id: TypeId,
+    analysis: &crate::backend::emit::CompileAnalysisCache,
+    types: &TypeTable,
+) -> bool {
+    is_byte_backed_type(type_id, types)
+        || analysis
+            .collection_infos
+            .get(path)
+            .is_some_and(|collection| matches!(collection.element_shape.as_str(), "ascii" | "utf8"))
 }
 
 fn storage_width(

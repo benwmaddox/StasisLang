@@ -126,3 +126,45 @@ test("web sys_memcpy_u8 matches native registered-buffer and literal semantics",
   copy(202, 0, 505, 0, 0);
   assert.deepEqual(Array.from(bytes.slice(16, 24)), [0, 0, 9, 9, 9, 9, 9, 0xc3]);
 });
+
+test("web sys_memcpy_u8 copies byte-backed ascii and utf8 layouts with their declared stride", async () => {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const game = {
+    memory: {
+      source_utf8: { hash: 101, offset: 0, type_id: 69, length: 4, stride: 4, byte_backed: true },
+      destination_ascii: { hash: 202, offset: 64, type_id: 70, length: 4, stride: 4, byte_backed: true },
+    },
+    strings: {},
+    assets: {},
+  };
+  const bytes = new Uint8Array(memory.buffer);
+  bytes[0] = 0xc3;
+  bytes[4] = 0xa9;
+  const copy = await loadRuntime(game, memory);
+
+  copy(202, 0, 101, 0, 2);
+
+  assert.equal(bytes[64], 0xc3);
+  assert.equal(bytes[68], 0xa9);
+});
+
+test("web sys_memcpy_u8 accepts Wasm linear-memory offsets for registered layouts", async () => {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const game = {
+    memory: {
+      source: { hash: 101, offset: 0, type_id: 69, length: 4, stride: 4, byte_backed: true },
+      destination: { hash: 202, offset: 64, type_id: 70, length: 4, stride: 4, byte_backed: true },
+    },
+    strings: {},
+    assets: {},
+  };
+  const bytes = new Uint8Array(memory.buffer);
+  bytes[0] = 65;
+  bytes[4] = 66;
+  const copy = await loadRuntime(game, memory);
+
+  copy(64, 0, 0, 0, 2);
+
+  assert.equal(bytes[64], 65);
+  assert.equal(bytes[68], 66);
+});

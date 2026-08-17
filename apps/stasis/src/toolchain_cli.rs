@@ -16,7 +16,6 @@ use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::formatter::format_source;
-use stasis_compiler::frontend::types::TYPE_ID_U8;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
@@ -4057,6 +4056,7 @@ fn web_runtime_config(
                     "type_id": layout.type_id,
                     "length": layout.length,
                     "stride": layout.stride,
+                    "byte_backed": layout.byte_backed,
                 }),
             )
         })
@@ -4115,7 +4115,7 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
             retained_paths.contains(path.as_str())
                 || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
                 || (imported_symbols.contains("sys_memcpy_u8")
-                    && layout["type_id"].as_u64() == Some(u64::from(TYPE_ID_U8)))
+                    && layout["byte_backed"].as_bool() == Some(true))
         });
     config["globals"]
         .as_object_mut()
@@ -5875,6 +5875,7 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 mod tests {
     use super::*;
     use stasis_ai::live_tool_specs;
+    use stasis_compiler::frontend::types::TYPE_ID_U8;
     use std::collections::BTreeMap;
 
     #[test]
@@ -6001,7 +6002,7 @@ mod tests {
         ]);
         process.upsert_file(
             "memcpy.stasis",
-            "extern function sys_memcpy_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32): void; global source: u8[4]; global destination: u8[4]; global scratch: u8[2]; global unrelated: i32[4]; function main(): i32 { source[0] = 65; sys_memcpy_u8(destination, 0, source, 0, 4); return destination[0]; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+            "extern function sys_memcpy_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32): void; global source: u8[4]; global destination: u8[4]; global source_utf8: utf8[4]; global destination_ascii: ascii[4]; global scratch: u8[2]; global unrelated: i32[4]; function main(): i32 { source[0] = 65; source_utf8[0] = 66; sys_memcpy_u8(destination, 0, source, 0, 4); sys_memcpy_u8(destination_ascii, 0, source_utf8, 0, 1); return destination[0]; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
         );
         process.compile().expect("compile web memcpy fixture");
         assert!(process.imported_symbols().contains("sys_memcpy_u8"));
@@ -6013,6 +6014,16 @@ mod tests {
                 .get(path)
                 .unwrap_or_else(|| panic!("release omitted u8 layout {path}"));
             assert_eq!(layout["type_id"], json!(TYPE_ID_U8));
+            assert_eq!(
+                layout["hash"],
+                json!(stasis_compiler::backend::wasm::wasm_global_hash(path))
+            );
+        }
+        for path in ["source_utf8", "destination_ascii"] {
+            let layout = memory
+                .get(path)
+                .unwrap_or_else(|| panic!("release omitted byte-backed layout {path}"));
+            assert_eq!(layout["byte_backed"], json!(true));
             assert_eq!(
                 layout["hash"],
                 json!(stasis_compiler::backend::wasm::wasm_global_hash(path))
