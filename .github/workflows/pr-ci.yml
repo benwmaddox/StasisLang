@@ -67,8 +67,8 @@ jobs:
           python -m unittest tools.ci.test_verify_render_parity
           python tools/ci/verify_render_parity.py
 
-      - name: Test web orientation HostFrame seam
-        run: node --test runtime/web/tests/orientation_host_frame.test.mjs
+      - name: Test web runtime seams
+        run: node --test runtime/web/tests/*.test.mjs
 
       - name: Test native render contract and lifecycle matrix
         run: |
