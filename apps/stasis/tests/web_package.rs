@@ -95,6 +95,45 @@ fn execute_web_main_with_measure_text(wasm: &Path) -> Output {
         .expect("execute packaged Wasm with measure_text import")
 }
 
+fn execute_web_main_with_byte_memcpy(package: &Path) -> Output {
+    Command::new("node")
+        .arg("-e")
+        .arg(
+            r#"const fs = require('node:fs');
+const root = process.argv[1];
+const source = fs.readFileSync(`${root}/game.js`, 'utf8');
+const game = JSON.parse(source.slice('window.STASIS_GAME = '.length, source.indexOf(';', 'window.STASIS_GAME = '.length)));
+const layoutsByHash = new Map(Object.values(game.memory || {})
+  .filter(layout => layout?.byte_backed === true && Number.isSafeInteger(layout.hash))
+  .map(layout => [layout.hash | 0, layout]));
+const layoutsByOffset = new Map(Object.values(game.memory || {})
+  .filter(layout => layout?.byte_backed === true && Number.isSafeInteger(layout.offset))
+  .map(layout => [layout.offset | 0, layout]));
+const layoutFor = reference => layoutsByHash.get(reference | 0) || layoutsByOffset.get(reference | 0);
+let instance;
+function copy_u8(destinationHash, destinationIndex, sourceHash, sourceIndex, count) {
+  const destination = layoutFor(destinationHash);
+  const sourceLayout = layoutFor(sourceHash);
+  if (!destination || !sourceLayout || !instance?.exports?.memory || count <= 0) return;
+  const bytes = new Uint8Array(instance.exports.memory.buffer);
+  const values = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    values.push(bytes[sourceLayout.offset + (sourceIndex + offset) * sourceLayout.stride]);
+  }
+  values.forEach((value, offset) => {
+    bytes[destination.offset + (destinationIndex + offset) * destination.stride] = value;
+  });
+}
+const bytes = fs.readFileSync(`${root}/game.wasm`);
+WebAssembly.instantiate(bytes, { env: { sys_memcpy_u8: copy_u8 } })
+  .then(({ instance: value }) => { instance = value; process.stdout.write(String(instance.exports.main())); })
+  .catch(error => { console.error(error); process.exit(1); });"#,
+        )
+        .arg(package)
+        .output()
+        .expect("execute packaged Wasm with byte memcpy import")
+}
+
 #[test]
 fn web_continue_matches_native_for_and_foreach_loop_steps() {
     let root = repo_root();
@@ -310,6 +349,85 @@ function render(): i32 {
     );
 
     fs::remove_dir_all(&workspace).expect("clean measure_text fixture");
+}
+
+#[test]
+fn web_package_retains_byte_backed_text_layouts_for_memcpy_import() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-byte-memcpy-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create byte memcpy fixture");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"web_byte_memcpy","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("write byte memcpy manifest");
+    fs::write(
+        workspace.join("src/main.stasis"),
+        r#"
+extern function sys_memcpy_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32): void;
+
+global source: utf8[4];
+global destination: ascii[4];
+
+function seed_source(value: utf8[]): void {
+    value[0] = 65;
+    value[1] = 66;
+}
+
+function read_destination(value: ascii[]): i32 {
+    return value[0] * 100 + value[1];
+}
+
+function main(): i32 {
+    seed_source(source);
+    sys_memcpy_u8(destination, 0, source, 0, 2);
+    return read_destination(destination);
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}
+"#,
+    )
+    .expect("write byte memcpy source");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    let runtime = fs::read_to_string(output.join("game.js")).expect("byte memcpy runtime");
+    let game = runtime
+        .strip_prefix("window.STASIS_GAME = ")
+        .and_then(|source| source.split_once(';').map(|(json, _)| json))
+        .map(|json| {
+            serde_json::from_str::<serde_json::Value>(json).expect("parse runtime metadata")
+        })
+        .expect("runtime metadata prefix");
+    for path in ["source", "destination"] {
+        assert_eq!(
+            game["memory"][path]["byte_backed"],
+            serde_json::json!(true),
+            "release metadata omitted byte-backed marker for {path}"
+        );
+    }
+    assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+
+    let execution = execute_web_main_with_byte_memcpy(&output);
+    assert!(
+        execution.status.success(),
+        "byte memcpy Wasm execution failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(execution.stdout).expect("UTF-8 result"),
+        "6566"
+    );
+
+    fs::remove_dir_all(&workspace).expect("clean byte memcpy fixture");
 }
 
 #[test]

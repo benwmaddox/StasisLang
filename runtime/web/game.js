@@ -10,6 +10,7 @@
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
   const sprites = new Map();
   const fonts = new Map();
+  const fontLoads = new Map();
   const cachedText = new Map();
   let nextHandle = 1;
   let instance;
@@ -75,11 +76,20 @@
   };
   const u8MemoryLayouts = new Map(
     Object.values(game.memory || {})
-      .filter(layout => layout?.type_id === 5 && Number.isSafeInteger(layout.hash))
+      .filter(layout => (layout?.byte_backed === true || layout?.type_id === 5)
+        && Number.isSafeInteger(layout.hash))
       .map(layout => [layout.hash | 0, layout])
   );
+  const u8MemoryLayoutsByOffset = new Map(
+    Object.values(game.memory || {})
+      .filter(layout => (layout?.byte_backed === true || layout?.type_id === 5)
+        && Number.isSafeInteger(layout.offset))
+      .map(layout => [layout.offset | 0, layout])
+  );
+  const hasU8MemoryReference = reference => u8MemoryLayouts.has(reference | 0)
+    || u8MemoryLayoutsByOffset.has(reference | 0);
   const resolveU8Memory = hash => {
-    const layout = u8MemoryLayouts.get(hash | 0);
+    const layout = u8MemoryLayouts.get(hash | 0) || u8MemoryLayoutsByOffset.get(hash | 0);
     const memory = instance?.exports?.memory;
     if (!layout || !(memory instanceof WebAssembly.Memory)) return null;
     const { offset, stride, length } = layout;
@@ -101,8 +111,8 @@
   };
   const sysMemcpyU8 = (dst, dstIndex, src, srcIndex, count) => {
     if (!Number.isInteger(count) || count <= 0) return;
-    const sourceRegistered = u8MemoryLayouts.has(src | 0);
     const source = resolveU8Memory(src);
+    const sourceRegistered = hasU8MemoryReference(src);
     const literal = sourceRegistered
       ? null
       : new TextEncoder().encode(stringValue(src));
@@ -157,7 +167,13 @@
     const family = `stasis-font-${handle}`;
     const font = new FontFace(family, `url(${assetValue(pathId)})`);
     fonts.set(handle, { family, size });
-    font.load().then(loaded => document.fonts.add(loaded)).catch(error => console.error(error));
+    const load = Promise.resolve()
+      .then(() => font.load())
+      .then(loaded => {
+        document.fonts.add(loaded);
+        return loaded;
+      });
+    fontLoads.set(handle, load);
     return handle;
   };
   const measureText = (fontHandle, textId) => {
@@ -858,7 +874,7 @@
     return response.arrayBuffer();
   }
 
-  (async () => {
+  window.STASIS_RUNTIME_PROMISE = (async () => {
     try {
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
@@ -868,8 +884,9 @@
       applyWindowRequest();
       await Promise.all([
         ...Array.from(sprites.values(), image => image.decode().catch(() => undefined)),
-        document.fonts.ready
+        ...fontLoads.values()
       ]);
+      await document.fonts.ready;
       document.body.dataset.ready = "true";
       document.body.dataset.runtime = "wasm";
       document.body.dataset.mainResult = String(mainResult);
