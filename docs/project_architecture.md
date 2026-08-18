@@ -300,6 +300,40 @@ function render(): i32 {
 }
 ```
 
+For a static screen, the game may own a `RedrawGate` and return before rebuilding
+the frame when no semantic change needs presentation:
+
+```stasis
+global redraw: RedrawGate;
+
+function select_menu_item(next_item: i32): void {
+    game.ui.selected_item = next_item;
+    redraw.mark_dirty();
+}
+
+function on_code_swap(): void {
+    redraw.mark_dirty();
+}
+
+function render(): i32 {
+    if (redraw.skip_clean_frame()) {
+        return 0;
+    }
+
+    begin_frame();
+    clear(0.03, 0.04, 0.07, 1.0);
+    draw_menu();
+    end_frame();
+    return 0;
+}
+```
+
+The first call renders normally. Semantic changes and `on_code_swap()` call
+`mark_dirty()`, which enables exactly the next render. A clean call publishes an
+empty command header and returns without rebuilding or presenting. Tick and
+input handling still run at the normal host cadence. Games with continuous
+animation simply omit the guard.
+
 Rendering may calculate local positions and emit commands. It should not:
 
 - advance time or animation counters;
