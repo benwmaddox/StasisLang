@@ -57,17 +57,7 @@ function render_continuous(): i32 {
 }
 
 function frame_presented(): bool {
-    return gfx_cmd_i32[GFX_I_FLAGS] == GFX_FLAG_CLEAR + GFX_FLAG_PRESENT && gfx_cmd_i32[GFX_I_ORDER_COUNT] == 1;
-}
-
-function frame_is_valid_and_empty(): bool {
-    if (gfx_cmd_i32[GFX_I_MAGIC] != GFX_CMD_MAGIC || gfx_cmd_i32[GFX_I_VERSION] != GFX_CMD_VERSION) {
-        return false;
-    }
-    if (gfx_cmd_i32[GFX_I_FLAGS] != 0 || gfx_cmd_i32[GFX_I_ORDER_COUNT] != 0) {
-        return false;
-    }
-    return gfx_cmd_i32[GFX_I_LINE_COUNT] == 0 && gfx_cmd_i32[GFX_I_RECT_COUNT] == 0 && gfx_cmd_i32[GFX_I_SPRITE_COUNT] == 0 && gfx_cmd_i32[GFX_I_TEXT_COUNT] == 0 && gfx_cmd_i32[GFX_I_TEXT_BYTES_USED] == 0;
+    return gfx_cmd_i32[GFX_I_FLAGS] == GFX_FLAG_CLEAR + GFX_FLAG_PRESENT && gfx_cmd_i32[GFX_I_LINE_COUNT] == 1 && gfx_cmd_i32[GFX_I_ORDER_COUNT] == 1 && gfx_cmd_f32[GFX_F_LINE_BASE] == 0.0 && gfx_cmd_f32[GFX_F_LINE_BASE + 2] == 10.0;
 }
 
 test `first render builds and presents normally`(): bool {
@@ -78,14 +68,14 @@ test `first render builds and presents normally`(): bool {
     return render_rebuilds == 1 && frame_presented();
 }
 
-test `clean render exits without rebuilding or presenting`(): bool {
+test `clean render exits without rebuilding the last frame`(): bool {
     reset_fixture();
     render();
 
     render();
     render();
 
-    return render_rebuilds == 1 && frame_is_valid_and_empty();
+    return render_rebuilds == 1 && frame_presented();
 }
 
 test `semantic dirty request is consumed by exactly one render`(): bool {
@@ -98,7 +88,7 @@ test `semantic dirty request is consumed by exactly one render`(): bool {
     let dirty_render_presented: bool = render_rebuilds == 2 && semantic_value == 7 && frame_presented();
     render();
 
-    return dirty_render_presented && render_rebuilds == 2 && frame_is_valid_and_empty();
+    return dirty_render_presented && render_rebuilds == 2 && frame_presented();
 }
 
 test `tick and input cadence continue while clean renders skip`(): bool {
@@ -111,7 +101,7 @@ test `tick and input cadence continue while clean renders skip`(): bool {
     tick();
     render();
 
-    return tick_count == 3 && input_checks == 3 && render_rebuilds == 1 && frame_is_valid_and_empty();
+    return tick_count == 3 && input_checks == 3 && render_rebuilds == 1 && frame_presented();
 }
 
 test `code swap explicitly requests one new presentation`(): bool {
@@ -124,7 +114,7 @@ test `code swap explicitly requests one new presentation`(): bool {
     let swapped_render_presented: bool = render_rebuilds == 2 && frame_presented();
     render();
 
-    return swapped_render_presented && render_rebuilds == 2 && frame_is_valid_and_empty();
+    return swapped_render_presented && render_rebuilds == 2 && frame_presented();
 }
 
 test `continuous render remains unchanged without the guard`(): bool {

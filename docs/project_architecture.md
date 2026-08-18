@@ -329,9 +329,11 @@ function render(): i32 {
 ```
 
 The first call renders normally. Semantic changes and `on_code_swap()` call
-`mark_dirty()`, which enables exactly the next render. A clean call publishes an
-empty command header and returns without rebuilding or presenting. Tick and
-input handling still run at the normal host cadence. Games with continuous
+`mark_dirty()`, which enables exactly the next guest rebuild. A clean call
+returns before touching the command buffer, leaving the last complete frame
+available for the host to replay or restore. This avoids Stasis-level render
+logic; it does not promise that the host or GPU skips presentation work. Tick
+and input handling still run at the normal host cadence. Games with continuous
 animation simply omit the guard.
 
 Rendering may calculate local positions and emit commands. It should not:

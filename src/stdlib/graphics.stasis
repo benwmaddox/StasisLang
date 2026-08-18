@@ -66,9 +66,6 @@ function @inline skip_clean_frame(self: RedrawGate): bool {
         return false;
     }
 
-    // Hosts submit after every render call. Publish a valid empty command
-    // header so an early return cannot replay the previous present flag.
-    gfx_cmd_begin();
     return true;
 }
 
