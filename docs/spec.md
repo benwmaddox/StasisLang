@@ -571,6 +571,47 @@ contracts. Ordinary internal functions may be added, removed, renamed, or change
 a live edit because the compiler rebuilds every reachable caller in the same candidate generation.
 The host must not retain any compiled entry address after the execution window that resolved it.
 
+### 7.7 Opt-in effect contracts
+
+`@effects(...)` is an optional compile-time assertion on a function boundary. It follows the
+existing function-attribute grammar:
+
+```stasis
+function @effects(state) tick(): i32 { update_game(); return 0; }
+function @effects(graphics) render(): i32 { draw_game(); return 0; }
+```
+
+Unannotated functions remain valid. Helpers called from an annotated boundary do not need their own
+annotations: the contract covers the complete resolved call tree, including imported and receiver-
+form calls, overloads, recursion, and mutually recursive groups. Reads and local mutation are always
+allowed. Successful compilation adds no runtime check.
+
+Named regions are literal global paths. `state` permits writes anywhere below the global named
+`state`; `state.enemies` permits assignment of that collection, its length and element storage, and
+nested element fields, while rejecting writes to `state.player` or another global. Multiple regions
+compose. Indexed and wildcard contracts such as `state.enemies[0]` and `state.enemies[*]` are invalid
+because the named collection region already covers every element.
+
+Host capabilities are `graphics`, `audio`, `storage`, `network`, `nondeterministic`, `platform`,
+`memory`, and `code_swap`. Standard-library extern declarations provide authoritative capability
+metadata. An extern without metadata is `unknown` and is rejected beneath every restricted
+boundary. `graphics` includes writes to the compiler-owned graphics command buffers, and `platform`
+includes writes to the compiler-owned window-request mailbox; neither capability permits an
+application global with the same name. Parameter-relative writes are substituted at each resolved call
+site; if the compiler cannot prove their global root, a restricted boundary rejects them.
+
+Diagnostics identify the annotated boundary, rejected path or host capability, originating host
+operation when applicable, and a causal function chain. Contract-only edits revalidate the existing
+summary without changing runtime function identity or forcing code generation. Resolved-call, alias,
+extern-metadata, and reachable-callee changes invalidate the aggregate before validation. JIT
+candidates are checked before publication, so rejection leaves the prior generation active; JIT
+and AOT use the same check.
+
+`on_code_swap` is unannotated by default because migration policy is application-specific. When it
+is annotated, it must explicitly name every state region and the `code_swap` capability needed to
+restore invariants or call `reject_code_swap`. A future read-only refinement may narrow reads, but
+reads require no annotation in this version.
+
 ## 8. Enums
 
 Enums are named types that lower to integer values.

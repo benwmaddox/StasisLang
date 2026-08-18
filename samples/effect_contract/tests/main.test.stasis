@@ -1,0 +1,7 @@
+import "../src/main.stasis";
+
+test `state boundary updates through alias`(): bool {
+    state.value = 9;
+    tick();
+    return state.value == 10;
+}

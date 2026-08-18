@@ -13,7 +13,7 @@ import "internal/gfx_cmd.stasis";
 import "internal/host_window_request.stasis";
 import "asset_tasks.stasis";
 
-extern function sleep_ms(ms: i32): void;
+extern function @effects(nondeterministic) sleep_ms(ms: i32): void;
 
 // Hot-path reads are HostFrame snapshot-only (no host calls).
 function get_time_ms(): i32 {
@@ -25,11 +25,11 @@ function get_time_us(): i32 {
 }
 
 // Startup / assets (host calls; avoid in hot paths)
-extern function gfx_poll_reload(handle: i32): bool;
-extern function gfx_dump_bmp(path: string): i32;
-extern function gfx_dump_png(path: string): i32;
-extern function @asset_path(path) load_font(path: string, size: i32): i32;
-extern function measure_text(font: i32, text: string): f32;
+extern function @effects(graphics) gfx_poll_reload(handle: i32): bool;
+extern function @effects(graphics, storage) gfx_dump_bmp(path: string): i32;
+extern function @effects(graphics, storage) gfx_dump_png(path: string): i32;
+extern function @effects(graphics)@asset_path(path) load_font(path: string, size: i32): i32;
+extern function @effects(graphics) measure_text(font: i32, text: string): f32;
 
 struct Sprite {
     handle: i32;
@@ -65,8 +65,18 @@ struct SpriteSheet {
     cell_height: i32;
 }
 
-function @asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
-function @extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(self: SpriteSheet, path: string, width: i32, height: i32): bool;
+function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(
+    self: Sprite,
+    path: string,
+    width: i32,
+    height: i32
+): bool;
+function @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
+    self: SpriteSheet,
+    path: string,
+    width: i32,
+    height: i32
+): bool;
 
 function publish(self: ImageAsset, target: Sprite): bool {
     if (!self.ready()) {
@@ -202,7 +212,7 @@ function finished(self: AnimationClip, elapsed_ticks: i32): bool {
     return animation_finished(self.frame_count, self.ticks_per_frame, self.playback_mode, elapsed_ticks);
 }
 
-function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
+function @effects(graphics)@extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
 
 function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     if (self.font <= 0 || self.handle <= 0) {

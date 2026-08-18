@@ -7,8 +7,8 @@ use crate::backend::emit::{
     SimpleStmt,
 };
 use crate::data_flow::{
-    build_function_data_flow_summaries, compiler_local_types, CompilerLocalType,
-    FunctionDataFlowSummary,
+    build_function_data_flow_summaries, compiler_local_types, validate_effect_contracts,
+    CompilerLocalType, FunctionDataFlowSummary,
 };
 use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
 use crate::frontend::module_graph::ModuleGraph;
@@ -46,6 +46,8 @@ pub struct FunctionMeta {
     pub return_type: TypeId,
     /// Requests body substitution at eligible call sites. The real function is still emitted.
     pub inline: bool,
+    /// Optional compile-time assertion over the function's reachable effects.
+    pub effect_contract: Option<Vec<String>>,
     pub dependencies: Vec<FunctionId>,
     pub dependents: Vec<FunctionId>,
     pub call_sites: Vec<FunctionCallSite>,
@@ -672,6 +674,7 @@ impl Compiler {
                     params: indexed_function.params,
                     return_type: indexed_function.return_type,
                     inline: indexed_function.inline,
+                    effect_contract: indexed_function.effect_contract,
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
                     call_sites: Vec::new(),
@@ -880,6 +883,18 @@ impl Compiler {
             self.data_flow_summaries = summaries.into();
         }
         self.data_flow_context_fingerprint = context_fingerprint;
+        if let Err(violation) =
+            validate_effect_contracts(&self.files, &self.functions, &self.data_flow_summaries)
+        {
+            self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                violation.file,
+                violation.source_start as usize,
+                violation.source_end as usize,
+                violation.function,
+                violation.message.clone(),
+            ));
+            return Err(CompileError::Frontend(violation.message));
+        }
         Ok(())
     }
 
@@ -2184,6 +2199,13 @@ function tick(): i32 {
         );
         assert_eq!(tick.direct.host_calls, vec!["host_emit"]);
         assert_eq!(
+            tick.direct.host_effects,
+            vec![crate::data_flow::FunctionHostEffect {
+                function: "host_emit".to_string(),
+                capability: "unknown".to_string(),
+            }]
+        );
+        assert_eq!(
             tick.direct.reads,
             vec!["state.enemies[*].hp", "state.score"]
         );
@@ -2271,7 +2293,7 @@ global state: State;
 function touch(enemy: Enemy): void { enemy.hp += 1; }
 function touch(player: Player): void { player.score += 1; }
 
-function tick(): i32 {
+function @effects(state) tick(): i32 {
     touch(state.enemy);
     touch(state.player);
     return 0;
@@ -2289,6 +2311,305 @@ function tick(): i32 {
             tick.aggregate.writes,
             vec!["state.enemy.hp", "state.player.score"]
         );
+    }
+
+    #[test]
+    fn effect_contracts_follow_imported_calls() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "helper.stasis",
+            "function update(value: State): void { value.score += 1; }",
+        );
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\"; struct State { score: i32; } global state: State; function @effects(state) tick(): i32 { update(state); return state.score; }",
+        );
+        compiler.check().expect("imported alias write is contained");
+    }
+
+    #[test]
+    fn effect_contracts_enforce_transitive_alias_aware_global_regions() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+struct Enemy { hp: i32; }
+struct State { enemies: Enemy[2]; player: Enemy; score: i32; }
+global state: State;
+function damage(enemy: Enemy): void { enemy.hp -= 1; }
+function damage_enemies(): void { state.enemies.length = 2; state.enemies[0].damage(); }
+function @effects(state.enemies) tick(): void { damage_enemies(); }
+"#,
+        );
+        compiler.check().expect("contained alias write is allowed");
+
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+struct Enemy { hp: i32; }
+struct State { enemies: Enemy[2]; player: Enemy; score: i32; }
+global state: State;
+function damage(enemy: Enemy): void { enemy.hp -= 1; }
+function damage_enemies(): void { state.player.damage(); }
+function @effects(state.enemies) tick(): void { damage_enemies(); }
+"#,
+        );
+        let error = compiler.check().expect_err("neighboring region must fail");
+        let message = compile_error_message(&error);
+        assert!(message.contains("state.player.hp"), "{message}");
+        assert!(
+            message.contains("tick -> damage_enemies -> damage"),
+            "{message}"
+        );
+        let diagnostic = compiler.last_source_diagnostic().unwrap();
+        assert_eq!(diagnostic.symbol, "tick");
+        assert!(diagnostic.message.contains("originating operation"));
+    }
+
+    #[test]
+    fn effect_contracts_compose_regions_and_host_capabilities() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+struct State { enemies: i32[2]; projectiles: i32[2]; score: i32; }
+global state: State;
+extern function @effects(graphics) draw(value: i32): void;
+extern function @effects(audio) play(): void;
+function render_helpers(): void { draw(state.score); }
+function @effects(state.enemies, state.projectiles, graphics) simulate(): void {
+    state.enemies[0] += 1;
+    state.projectiles[1] += 1;
+    render_helpers();
+}
+"#,
+        );
+        compiler
+            .check()
+            .expect("declared regions and graphics pass");
+
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+struct State { score: i32; }
+global state: State;
+extern function @effects(graphics) draw(value: i32): void;
+extern function @effects(audio) play(): void;
+function helper(): void { play(); }
+function @effects(graphics) render(): void { draw(state.score); helper(); }
+"#,
+        );
+        let error = compiler.check().expect_err("audio is not graphics");
+        let message = compile_error_message(&error);
+        assert!(message.contains("host effect 'audio'"), "{message}");
+        assert!(message.contains("render -> helper"), "{message}");
+    }
+
+    #[test]
+    fn effect_contract_diagnostic_follows_the_rejected_effect_branch() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+global allowed: i32;
+global first: i32;
+global second: i32;
+function write_second(): void { second += 1; }
+function write_first(): void { first += 1; }
+function @effects(allowed) tick(): void { write_second(); write_first(); }
+"#,
+        );
+        let error = compiler.check().expect_err("first is the sorted violation");
+        let message = compile_error_message(&error);
+        assert!(message.contains("rejects write 'first'"), "{message}");
+        assert!(message.contains("tick -> write_first"), "{message}");
+        assert!(!message.contains("write_second"), "{message}");
+    }
+
+    #[test]
+    fn effect_contracts_propagate_generic_view_helper_writes() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+global allowed: ascii[8];
+global forbidden: ascii[8];
+function clear(value: ascii[]): void { value[0] = 0; }
+function @effects(allowed) tick(): void { clear(forbidden); }
+"#,
+        );
+        let error = compiler
+            .check()
+            .expect_err("generic view helper write must reach the boundary");
+        let message = compile_error_message(&error);
+        assert!(message.contains("forbidden[*]"), "{message}");
+        assert!(message.contains("tick -> clear"), "{message}");
+    }
+
+    #[test]
+    fn effect_contracts_reject_unknown_externs_and_unknown_global_regions() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "extern function mystery(): void; function @effects(graphics) render(): void { mystery(); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("unknown extern is conservative");
+        assert!(compile_error_message(&error).contains("host effect 'unknown'"));
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "extern function @effects(graphics) host(value: i32): void; extern function @effects(audio) host(value: f32): void; function @effects(graphics) render(): void { host(1); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("same-name extern overload effects must not overwrite");
+        assert!(
+            compile_error_message(&error).contains("must declare identical @effects metadata"),
+            "{}",
+            compile_error_message(&error)
+        );
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; extern function @effects(audio) collide(value: f32): void; function collide(value: i32): void { state.value += value; } function @effects(state) tick(): void { collide(missing()); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("ambiguous same-name host effects must remain conservative");
+        let message = compile_error_message(&error);
+        assert!(message.contains("host effect 'audio'"), "{message}");
+        assert!(message.contains("from 'collide'"), "{message}");
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "function @effects() render(): void { missing(); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("unresolved calls cannot pass a restricted boundary");
+        let message = compile_error_message(&error);
+        assert!(message.contains("host effect 'unknown'"), "{message}");
+        assert!(message.contains("from 'missing'"), "{message}");
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "function @effects(state) tick(): void { return; }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("literal state global must exist");
+        assert!(compile_error_message(&error).contains("unknown global region 'state'"));
+
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { score: i32; } global state: State; function @effects(state.missing) tick(): void { return; }",
+        );
+        let error = compiler.check().expect_err("named region field must exist");
+        assert!(compile_error_message(&error).contains("state.missing"));
+
+        compiler.upsert_file(
+            "effects.stasis",
+            "global gfx_cmd_i32: i32[2]; function @effects(graphics) render(): void { gfx_cmd_i32[0] = 1; }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("application globals cannot impersonate command buffers");
+        assert!(compile_error_message(&error).contains("gfx_cmd_i32[*]"));
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "vendor/stasis/stdlib/internal/host_window_request.stasis",
+            "global host_req_flags: i32; function request_window(): void { host_req_flags = 1; }",
+        );
+        compiler.upsert_file(
+            "effects.stasis",
+            "import \"vendor/stasis/stdlib/internal/host_window_request.stasis\"; function @effects(platform) tick(): void { request_window(); }",
+        );
+        compiler
+            .check()
+            .expect("platform owns the stdlib window-request mailbox");
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "global host_req_flags: i32; function @effects(platform) tick(): void { host_req_flags = 1; }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("application globals cannot impersonate platform mailboxes");
+        assert!(compile_error_message(&error).contains("host_req_flags"));
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects(state) mutate(value: State): void { value.value += 1; }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("unbound parameter provenance is conservative");
+        assert!(compile_error_message(&error).contains("not proven"));
+    }
+
+    #[test]
+    fn effect_contract_rechecks_when_only_a_deep_callee_changes() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function leaf(): void { return; } function middle(): void { leaf(); } function @effects() render(): void { middle(); }",
+        );
+        compiler.check().expect("initial pure tree");
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function leaf(): void { state.value += 1; } function middle(): void { leaf(); } function @effects() render(): void { middle(); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("deep effect invalidates aggregate");
+        let message = compile_error_message(&error);
+        assert!(message.contains("state.value"), "{message}");
+        assert!(message.contains("render -> middle -> leaf"), "{message}");
+    }
+
+    #[test]
+    fn effect_contract_only_edit_reuses_statements_and_runtime_identity() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects(state) tick(): void { state.value += 1; }",
+        );
+        compiler.index_pass().expect("initial allowed contract");
+        let signature = function_by_name(&compiler, "tick").signature_hash;
+        let parses = compiler.statement_parse_count;
+
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects() tick(): void { state.value += 1; }",
+        );
+        compiler
+            .index_pass()
+            .expect_err("narrowed contract revalidates cached body");
+        assert_eq!(compiler.statement_parse_count, parses);
+        assert_eq!(
+            function_by_name(&compiler, "tick").signature_hash,
+            signature
+        );
+        assert!(!function_by_name(&compiler, "tick").dirty);
+    }
+
+    #[test]
+    fn on_code_swap_contract_names_state_and_rejection_capability() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { swaps: i32; } global state: State; extern function @effects(code_swap) reject_code_swap(): void; function @effects(state, code_swap) on_code_swap(): void { state.swaps += 1; reject_code_swap(); }",
+        );
+        compiler.check().expect("explicit swap effects are allowed");
     }
 
     #[test]
@@ -2370,7 +2691,7 @@ struct State { left: i32; right: i32; }
 global state: State;
 function left(view: State): void { view.left += 1; right(view); }
 function right(view: State): void { view.right += 1; left(view); }
-function tick(): i32 { left(state); return 0; }
+function @effects(state) tick(): i32 { left(state); return 0; }
 "#,
         );
 

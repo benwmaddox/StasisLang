@@ -7580,6 +7580,70 @@ mod tests {
         assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 2);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn effect_contract_rejects_staged_candidate_and_preserves_active_code() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function leaf(): void { return; } function @effects() render(): i32 { leaf(); return 7; } function main(): i32 { return render(); }",
+        );
+        active.compile().expect("compile compliant generation");
+        let revision = active
+            .generation_metadata()
+            .expect("active metadata")
+            .source_revision;
+        assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 7);
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function leaf(): void { state.value += 1; } function @effects() render(): i32 { leaf(); return 9; } function main(): i32 { return render(); }",
+        );
+        let error = candidate
+            .compile()
+            .expect_err("candidate violates pure render boundary");
+        assert!(format!("{error:?}").contains("render -> leaf"));
+        assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 7);
+        assert_eq!(
+            active.generation_metadata().unwrap().source_revision,
+            revision
+        );
+    }
+
+    #[test]
+    fn effect_contract_only_edit_reuses_emitted_machine_code() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects(state) tick(): i32 { state.value += 1; return 0; }",
+        );
+        active.compile().expect("compile broad contract");
+        let pointer = active
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "tick")
+            .expect("tick artifact")
+            .code_ptr;
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects(state.value) tick(): i32 { state.value += 1; return 0; }",
+        );
+        let report = candidate.compile().expect("validate narrower contract");
+        assert_eq!(report.emit.emitted_functions, 0);
+        assert_eq!(
+            candidate
+                .artifacts()
+                .iter()
+                .find(|artifact| artifact.function_key.name == "tick")
+                .unwrap()
+                .code_ptr,
+            pointer
+        );
+    }
+
     #[test]
     fn staged_candidate_applies_custom_roots_before_indexing_source_edits() {
         let mut active = JitProcess::new();
