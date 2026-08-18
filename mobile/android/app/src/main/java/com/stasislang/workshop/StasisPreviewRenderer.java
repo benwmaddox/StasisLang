@@ -476,7 +476,6 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int orderCount = 0;
         boolean presented = false;
         synchronized (this) {
-            applyPendingSpriteReleases();
             if (restorePlaceholderPending
                     && System.nanoTime() < restorePlaceholderUntilNanos) {
                 drawRestorePlaceholder();
@@ -549,6 +548,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     }
                 }
             }
+            finishPendingSpriteReleases(hasFrame, presented);
             capture = pendingCapture;
             pendingCapture = null;
             capturedFrame = capture == null ? null : captureLogicalFrame();
@@ -561,6 +561,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (report != null) Log.i(LOG_TAG, report);
         }
         timing.onRendered(totalNanos);
+    }
+
+    // Releases must wait until the command buffer has consumed its sprite textures. A
+    // frame blocked by restore/resource failure is retried later, so retain its queue.
+    synchronized void finishPendingSpriteReleases(boolean hasFrame, boolean presented) {
+        if (!hasFrame || presented) applyPendingSpriteReleases();
     }
 
     private void drawRestorePlaceholder() {

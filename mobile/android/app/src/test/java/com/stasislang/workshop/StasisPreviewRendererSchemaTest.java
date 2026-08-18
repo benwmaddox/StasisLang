@@ -125,6 +125,33 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(java.util.Arrays.asList(23, -17), released);
     }
 
+    @Test
+    public void spriteReleasesWaitForPresentationButCanCleanUpWithoutAFrame() {
+        List<Integer> released = new ArrayList<>();
+        StasisPreviewRenderer.TextureProvider provider =
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
+                    @Override public int textureFor(int handle) { return 0; }
+                    @Override public void releaseSprite(int handle) { released.add(handle); }
+                };
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(provider, ignored -> {});
+
+        assertTrue(renderer.enqueuePendingSpriteReleases("{\"handles\":[-31]}"));
+        renderer.finishPendingSpriteReleases(true, false);
+        assertTrue(renderer.hasPendingSpriteReleases());
+        assertTrue(released.isEmpty());
+        renderer.finishPendingSpriteReleases(true, true);
+        assertFalse(renderer.hasPendingSpriteReleases());
+        assertEquals(java.util.Arrays.asList(-31), released);
+
+        assertTrue(renderer.enqueuePendingSpriteReleases("{\"handles\":[47]}"));
+        renderer.finishPendingSpriteReleases(false, false);
+        assertFalse(renderer.hasPendingSpriteReleases());
+        assertEquals(java.util.Arrays.asList(-31, 47), released);
+    }
+
     private static String releaseBatchJson(int count) {
         StringBuilder json = new StringBuilder("{\"handles\":[");
         for (int index = 0; index < count; index += 1) {
