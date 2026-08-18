@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import re
 import unittest
 
 
@@ -42,17 +43,59 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "needs: [detect, build, vscode_extension, integration_seams, android_device_seams]",
             self.nightly_workflow,
         )
-        self.assertIn("uses: ./.github/workflows/pr-ci.yml", self.nightly_workflow)
-        self.assertIn("run_slow_seams: true", self.nightly_workflow)
-        self.assertEqual(
-            4,
-            self.pr_workflow.count(
-                "if: ${{ github.event_name == 'workflow_call' && inputs.run_slow_seams }}"
-            ),
+        self.assertIn(
+            "uses: ./.github/workflows/pr-ci.yml\n"
+            "    with:\n"
+            "      run_slow_seams: true",
+            self.nightly_workflow,
         )
         self.assertNotIn("self-hosted", self.workflow)
         self.assertNotIn("runs-on: [self-hosted, Windows, android-device]", self.workflow)
         self.assertNotIn("ANDROID_SERIAL", self.workflow)
+
+    def test_pr_ci_slow_seams_are_boolean_input_gated(self):
+        input_declaration = (
+            "    inputs:\n"
+            "      run_slow_seams:\n"
+            "        description: Run platform integration and packaging seams.\n"
+            "        required: false\n"
+            "        default: false\n"
+            "        type: boolean\n"
+        )
+        for event in ("workflow_dispatch", "workflow_call"):
+            match = re.search(
+                rf"(?ms)^  {event}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:|\Z)",
+                self.pr_workflow,
+            )
+            self.assertIsNotNone(match, event)
+            self.assertIn(input_declaration, match.group("body"))
+
+        self.assertNotIn(
+            "github.event_name == 'workflow_call' && inputs.run_slow_seams",
+            self.pr_workflow,
+        )
+        slow_jobs = (
+            "bootstrap-smoke-windows",
+            "vscode-extension-e2e",
+            "android-package-link",
+            "ios-package-link",
+        )
+        slow_gate = "if: ${{ inputs.run_slow_seams }}"
+        self.assertEqual(4, self.pr_workflow.count(slow_gate))
+        for job in slow_jobs:
+            match = re.search(
+                rf"(?ms)^  {re.escape(job)}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:|\Z)",
+                self.pr_workflow,
+            )
+            self.assertIsNotNone(match, job)
+            self.assertEqual(1, match.group("body").count(slow_gate))
+            if job == "bootstrap-smoke-windows":
+                self.assertEqual(
+                    1,
+                    match.group("body").count(
+                        "run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture"
+                    ),
+                )
 
     def test_nightly_grants_reusable_ci_read_permissions(self):
         self.assertIn("  contents: write", self.nightly_workflow)
