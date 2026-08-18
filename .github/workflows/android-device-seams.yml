@@ -2,6 +2,7 @@ name: Android Emulator Seams
 
 on:
   workflow_call:
+  workflow_dispatch:
 
 concurrency:
   group: android-emulator-seams-nightly
