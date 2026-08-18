@@ -125,6 +125,10 @@ cloning a generated repository, reactivate the checked-in hook with
   nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
   and display `name`. Explicit entries discover their own ancestor manifest, so project-root
   imports and asset preparation remain anchored to the project even when play starts in `src/`.
+  The desktop loop uses `--tick-sleep-us` as an absolute tick interval: input, simulation,
+  rendering, and a potentially vsynced present consume that interval, and the host sleeps only for
+  the remaining budget. An overrun adds no delay, while a pause of at least one whole interval
+  resets the deadline instead of producing a catch-up burst. Passing zero disables this pacing.
 - `run --watch`: launch the existing graphical runner and hot-swap pipeline for game projects.
   The window title uses the manifest project name. Because it is an unbounded graphical session,
   watch mode rejects `--json` and `--headless`.
