@@ -121,7 +121,7 @@ fn run_guest_frame(
     assert_close(scalar_f32("seam_pointer_x"), x, "guest pointer x");
     assert_close(scalar_f32("seam_pointer_y"), y, "guest pointer y");
 
-    assert_eq!(&gfx_i32[0..4], &[1196967473, 4, 3, 0]);
+    assert_eq!(&gfx_i32[0..4], &[1196967473, 5, 3, 0]);
     assert_eq!(gfx_i32[22], 1, "render order count");
     assert_eq!(gfx_i32[24], 1, "render rectangle count");
     for (index, expected) in clear.iter().enumerate() {
@@ -274,7 +274,7 @@ fn desktop_sdl_input_changes_jit_state_and_submitted_frame_on_the_intended_tick(
     assert_eq!(&host_i32[548..552], &[1, 0, 0, 1]);
     assert_eq!(
         [down_trace, move_trace, up_trace],
-        [-1596497517, 610004423, -1115252597],
+        [1530966022, 413668306, -939500466],
         "guest state markers must produce the locked native frame traces"
     );
 
