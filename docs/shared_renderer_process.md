@@ -80,3 +80,19 @@ shipping renderer. It performs no per-command JNI calls and adds no additional
 full-frame copy. The old desktop GL adapter is available only when CMake is
 explicitly configured with `STASIS_GRAPHICS_SDL_ONLY=OFF`; it is not packaged or
 exercised as the canonical process.
+
+## Frame pacing
+
+Rendering and presentation do not define simulation time. Desktop `stasis play`
+paces the tick boundary against an absolute monotonic deadline. Work performed by
+input collection, `tick`, `render`, and `stasis_gfx_submit_u8`--including a
+blocking vsynced present--counts toward the configured interval. The host waits
+only for the remaining budget, adds no delay after an overrun, and resets its
+deadline after a whole-interval pause so suspended or stalled sessions do not
+run a catch-up burst.
+
+The Android and iOS shell applies the same deadline invariant through the shared
+mobile frame pacer. Display synchronization can contribute to pacing on every
+platform, but it never authorizes an extra simulation step. Physical-display
+verification at 60, 90, and 120 Hz remains part of platform acceptance because
+drivers can differ in whether and how long presentation blocks.

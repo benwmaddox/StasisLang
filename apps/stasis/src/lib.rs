@@ -3,6 +3,7 @@
 
 mod compiler_backend;
 mod events;
+mod frame_pacer;
 mod host_set_registry;
 mod live_workspace;
 mod mobile_aot_bindings;
@@ -29,6 +30,7 @@ pub use stasis_test_runner::{
 pub use window_config::WindowConfig;
 
 use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
+use frame_pacer::FramePacer;
 use live_workspace::LiveWorkspace;
 use runtime_exec::RuntimeLauncher;
 use serde::{Deserialize, Serialize};
@@ -2329,6 +2331,7 @@ fn run_play_in_process_inner(
         .transpose()?;
 
     let mut ticks_executed: u64 = 0;
+    let mut frame_pacer = FramePacer::from_micros(tick_sleep_micros, Instant::now())?;
     loop {
         if let Some(live) = live.as_mut() {
             live.process_boundary(
@@ -2598,13 +2601,9 @@ fn run_play_in_process_inner(
                 .ok_or_else(|| "desktop frame has no published JIT entry table".to_string())?;
             evidence.record(ticks_executed.saturating_add(1), entry_revision, submission)?;
         }
-        if tick_sleep_micros > 0 {
-            let ms = (tick_sleep_micros / 1000) as i32;
-            if ms > 0 {
-                gfx.sleep_ms(ms)?;
-            }
+        if let Some(frame_pacer) = frame_pacer.as_mut() {
+            frame_pacer.wait();
         }
-
         if let Some(live) = live.as_mut() {
             if run_tick {
                 ticks_executed = ticks_executed.saturating_add(1);
