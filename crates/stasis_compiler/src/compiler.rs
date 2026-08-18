@@ -2427,6 +2427,26 @@ function @effects(allowed) tick(): void { write_second(); write_first(); }
     }
 
     #[test]
+    fn effect_contracts_propagate_generic_view_helper_writes() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+global allowed: ascii[8];
+global forbidden: ascii[8];
+function clear(value: ascii[]): void { value[0] = 0; }
+function @effects(allowed) tick(): void { clear(forbidden); }
+"#,
+        );
+        let error = compiler
+            .check()
+            .expect_err("generic view helper write must reach the boundary");
+        let message = compile_error_message(&error);
+        assert!(message.contains("forbidden[*]"), "{message}");
+        assert!(message.contains("tick -> clear"), "{message}");
+    }
+
+    #[test]
     fn effect_contracts_reject_unknown_externs_and_unknown_global_regions() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
@@ -2451,6 +2471,18 @@ function @effects(allowed) tick(): void { write_second(); write_first(); }
             "{}",
             compile_error_message(&error)
         );
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; extern function @effects(audio) collide(value: f32): void; function collide(value: i32): void { state.value += value; } function @effects(state) tick(): void { collide(missing()); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("ambiguous same-name host effects must remain conservative");
+        let message = compile_error_message(&error);
+        assert!(message.contains("host effect 'audio'"), "{message}");
+        assert!(message.contains("from 'collide'"), "{message}");
 
         compiler = Compiler::new();
         compiler.upsert_file(

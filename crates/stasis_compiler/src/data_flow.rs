@@ -259,6 +259,7 @@ struct AnalysisContext<'a> {
     constants: BTreeMap<String, i64>,
     view_parameters_by_function: BTreeMap<u32, BTreeSet<usize>>,
     fixed_parameter_capacities: BTreeMap<u32, BTreeMap<usize, u64>>,
+    internal_function_targets: BTreeMap<String, Vec<u32>>,
     extern_functions: BTreeSet<String>,
     extern_effects: BTreeMap<String, Option<Vec<String>>>,
     collection_capacities: BTreeMap<String, u64>,
@@ -1015,8 +1016,21 @@ fn build_context<'a>(
             }
         }
     }
+    let mut internal_function_targets = BTreeMap::<String, Vec<u32>>::new();
+    for function in functions {
+        internal_function_targets
+            .entry(function.name.clone())
+            .or_default()
+            .push(function.storage_index);
+        if !function.module_alias.is_empty() {
+            internal_function_targets
+                .entry(format!("{}.{}", function.module_alias, function.name))
+                .or_default()
+                .push(function.storage_index);
+        }
+    }
     let mut fingerprint_hasher = DefaultHasher::new();
-    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}|{extern_effects:?}")
+    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}|{extern_effects:?}|{internal_function_targets:?}")
         .hash(&mut fingerprint_hasher);
     let fingerprint = fingerprint_hasher.finish();
     Ok(AnalysisContext {
@@ -1024,6 +1038,7 @@ fn build_context<'a>(
         constants,
         view_parameters_by_function,
         fixed_parameter_capacities,
+        internal_function_targets,
         extern_functions,
         extern_effects,
         collection_capacities,
@@ -1504,37 +1519,59 @@ fn analyze_expression(
                         .map(|argument| expression_effect_path(argument, context, locals, aliases))
                         .collect(),
                 );
-            } else if let Some(capability) = builtin_host_effect(target) {
-                effects.host_calls.insert(target.clone());
-                effects.host_effects.insert(FunctionHostEffect {
-                    function: target.clone(),
-                    capability: capability.to_string(),
-                });
-                effects.record_host_call(target);
-            } else if context.extern_functions.contains(target) {
-                effects.host_calls.insert(target.clone());
-                let capabilities = context.extern_effects.get(target).and_then(Option::as_ref);
-                if capabilities.is_none() {
+            } else {
+                let mut handled = false;
+                let mut host_call = false;
+                if let Some(capability) = builtin_host_effect(target) {
+                    handled = true;
+                    host_call = true;
+                    effects.host_calls.insert(target.clone());
+                    effects.host_effects.insert(FunctionHostEffect {
+                        function: target.clone(),
+                        capability: capability.to_string(),
+                    });
+                }
+                if context.extern_functions.contains(target) {
+                    handled = true;
+                    host_call = true;
+                    effects.host_calls.insert(target.clone());
+                    let capabilities = context.extern_effects.get(target).and_then(Option::as_ref);
+                    if capabilities.is_none() {
+                        effects.host_effects.insert(FunctionHostEffect {
+                            function: target.clone(),
+                            capability: "unknown".to_string(),
+                        });
+                    } else if let Some(capabilities) = capabilities {
+                        effects
+                            .host_effects
+                            .extend(capabilities.iter().map(|capability| FunctionHostEffect {
+                                function: target.clone(),
+                                capability: capability.clone(),
+                            }));
+                    }
+                }
+                if host_call {
+                    effects.record_host_call(target);
+                }
+                if let Some(target_ids) = context.internal_function_targets.get(target) {
+                    handled = true;
+                    effects.calls.insert(target.clone());
+                    let arguments = args
+                        .iter()
+                        .map(|argument| expression_effect_path(argument, context, locals, aliases))
+                        .collect::<Vec<_>>();
+                    for target_id in target_ids {
+                        effects.record_call_site(*target_id, arguments.clone());
+                    }
+                }
+                if !handled && !is_pure_intrinsic(target) {
+                    effects.host_calls.insert(target.clone());
                     effects.host_effects.insert(FunctionHostEffect {
                         function: target.clone(),
                         capability: "unknown".to_string(),
                     });
-                } else if let Some(capabilities) = capabilities {
-                    effects
-                        .host_effects
-                        .extend(capabilities.iter().map(|capability| FunctionHostEffect {
-                            function: target.clone(),
-                            capability: capability.clone(),
-                        }));
+                    effects.record_host_call(target);
                 }
-                effects.record_host_call(target);
-            } else if !is_pure_intrinsic(target) {
-                effects.host_calls.insert(target.clone());
-                effects.host_effects.insert(FunctionHostEffect {
-                    function: target.clone(),
-                    capability: "unknown".to_string(),
-                });
-                effects.record_host_call(target);
             }
             for (index, argument) in args.iter().enumerate() {
                 let is_view = target_id
