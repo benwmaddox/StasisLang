@@ -31,12 +31,6 @@ extern function @effects(graphics, storage) gfx_dump_png(path: string): i32;
 extern function @effects(graphics)@asset_path(path) load_font(path: string, size: i32): i32;
 extern function @effects(graphics) measure_text(font: i32, text: string): f32;
 
-struct Sprite {
-    handle: i32;
-    width: i32;
-    height: i32;
-}
-
 struct TextRun {
     font: i32;
     handle: i32;
@@ -82,7 +76,7 @@ function publish(self: ImageAsset, target: Sprite): bool {
     if (!self.ready()) {
         return false;
     }
-    if (target.handle > 0 && target.handle != self.handle) {
+    if (target.handle != 0) {
         gfx_release_sprite(target.handle);
     }
     target.handle = self.handle;
@@ -96,7 +90,7 @@ function publish(self: ImageAsset, target: Sprite): bool {
 }
 
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
-    if (self.handle <= 0 || self.width <= 0 || self.height <= 0) {
+    if (self.handle == 0 || self.width <= 0 || self.height <= 0) {
         return;
     }
     let width: f32 = 0.0;
@@ -129,7 +123,7 @@ function load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, r
 }
 
 function draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void {
-    if (self.handle <= 0 || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
+    if (self.handle == 0 || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
         return;
     }
     if (self.columns > 2147483647 / self.rows) {

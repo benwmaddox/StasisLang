@@ -4506,7 +4506,7 @@ pub extern "C" fn stasis_jit_sprite_load_from(
     struct_view_i32_store(base, index, len, "handle", loaded_handle);
     struct_view_i32_store(base, index, len, "width", width);
     struct_view_i32_store(base, index, len, "height", height);
-    if old_handle != 0 && old_handle != loaded_handle {
+    if old_handle != 0 {
         stasis_jit_gfx_release_sprite(old_handle);
     }
     1
@@ -5719,11 +5719,87 @@ mod tests {
     use super::*;
     use std::sync::MutexGuard;
 
+    static TEST_SPRITE_RELEASES: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_sprite_load(_: &[u8], _: i32, _: i32) -> i32 {
+        77
+    }
+
+    fn test_sprite_release(handle: i32) {
+        if handle == 77 {
+            TEST_SPRITE_RELEASES.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn test_font_load(_: &[u8], _: i32) -> i32 {
+        1
+    }
+
+    fn test_measure_text(_: i32, _: &[u8]) -> f32 {
+        1.0
+    }
+
+    fn test_cache_text(_: i32, _: &[u8]) -> i32 {
+        1
+    }
+
+    fn test_measure_cached(_: i32) -> f32 {
+        1.0
+    }
+
+    fn test_poll_reload(_: i32) -> i32 {
+        0
+    }
+
     fn test_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("dynload test lock mutex poisoned")
+    }
+
+    struct EmbeddedHostReset;
+
+    impl Drop for EmbeddedHostReset {
+        fn drop(&mut self) {
+            set_embedded_graphics_host(None);
+        }
+    }
+
+    #[test]
+    fn jit_sprite_same_handle_replacement_releases_prior_acquisition() {
+        let _guard = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+        TEST_SPRITE_RELEASES.store(0, Ordering::SeqCst);
+        let _host_reset = EmbeddedHostReset;
+        set_embedded_graphics_host(Some(EmbeddedGraphicsHost {
+            load_sprite: test_sprite_load,
+            release_sprite: test_sprite_release,
+            load_font: test_font_load,
+            measure_text: test_measure_text,
+            cache_text: test_cache_text,
+            measure_text_cached: test_measure_cached,
+            measure_text_cached_height: test_measure_cached,
+            poll_reload: test_poll_reload,
+        }));
+        let mut handles = [0_i32];
+        let mut widths = [0_i32];
+        let mut heights = [0_i32];
+        register_global_i32_array(100, global_path_hash("handle"), handles.as_mut_ptr(), 1);
+        register_global_i32_array(100, global_path_hash("width"), widths.as_mut_ptr(), 1);
+        register_global_i32_array(100, global_path_hash("height"), heights.as_mut_ptr(), 1);
+        upsert_jit_string_literal(55, "assets/sprite.svg");
+        assert_eq!(stasis_jit_sprite_load_from(100, 0, 1, 55, 32, 24), 1);
+        assert_eq!(stasis_jit_sprite_load_from(100, 0, 1, 55, 32, 24), 1);
+        assert_eq!(handles[0], 77);
+        assert_eq!(TEST_SPRITE_RELEASES.load(Ordering::SeqCst), 1);
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
     }
 
     #[test]
