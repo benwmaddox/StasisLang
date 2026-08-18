@@ -24,12 +24,16 @@
   let audioUnderruns = 0;
   let audioSuspendedByLifecycle = false;
   let pendingAudioFrames = 0;
+  let nextAudioVoiceHandle = 1;
+  let nextAudioVoiceGeneration = 1;
   const audioAssets = new Map();
   const audioVoices = new Map();
   const pendingAudio = [];
   // Keep pre-gesture PCM short enough to unlock without replaying stale gameplay.
   const PENDING_AUDIO_SECONDS = 0.1;
   const PENDING_AUDIO_ENTRY_LIMIT = 32;
+  const MAX_AUDIO_VOICES = 32;
+  const MAX_AUDIO_VOICE_HANDLE = 0x7fffffff;
   // @stasis-feature audio end
   const assetTasks = new Map();
   let nextAssetTask = 1;
@@ -250,36 +254,144 @@
       .catch(() => { if (entry.state < 3) entry.state = 4; });
     return task;
   };
-  const startAudio = (handle, loop, volume) => {
+  const clampAudioVolume = volume => Math.max(0, Math.min(1, volume));
+  const clampAudioPan = pan => Math.max(-1, Math.min(1, pan));
+  const allocateAudioVoiceHandle = () => {
+    if (audioVoices.size >= MAX_AUDIO_VOICES) return 0;
+    for (let attempt = 0; attempt <= MAX_AUDIO_VOICES; attempt += 1) {
+      const handle = nextAudioVoiceHandle;
+      nextAudioVoiceHandle = handle >= MAX_AUDIO_VOICE_HANDLE ? 1 : handle + 1;
+      if (!audioVoices.has(handle)) return handle;
+    }
+    return 0;
+  };
+  const allocateAudioVoiceGeneration = () => {
+    const generation = nextAudioVoiceGeneration;
+    nextAudioVoiceGeneration = generation >= Number.MAX_SAFE_INTEGER ? 1 : generation + 1;
+    return generation;
+  };
+  const setPanValue = (voice, pan) => {
+    voice.pan = clampAudioPan(pan);
+    if (voice.panner) {
+      voice.panner.pan.value = voice.pan;
+    } else if (voice.leftGain && voice.rightGain) {
+      const angle = (voice.pan + 1) * Math.PI * 0.25;
+      voice.leftGain.gain.value = Math.cos(angle);
+      voice.rightGain.gain.value = Math.sin(angle);
+    }
+  };
+  const connectVoiceOutput = (audio, voice) => {
+    const gain = audio.createGain();
+    gain.gain.value = voice.volume;
+    voice.gain = gain;
+    if (typeof audio.createStereoPanner === "function") {
+      voice.panner = audio.createStereoPanner();
+      gain.connect(voice.panner).connect(audio.destination);
+    } else if (typeof audio.createChannelMerger === "function") {
+      voice.leftGain = audio.createGain();
+      voice.rightGain = audio.createGain();
+      voice.merger = audio.createChannelMerger(2);
+      gain.connect(voice.leftGain).connect(voice.merger, 0, 0);
+      gain.connect(voice.rightGain).connect(voice.merger, 0, 1);
+      voice.merger.connect(audio.destination);
+    } else {
+      gain.connect(audio.destination);
+    }
+    setPanValue(voice, voice.pan);
+  };
+  const forgetAudioVoice = (handle, voice) => {
+    if (audioVoices.get(handle) !== voice) return;
+    audioVoices.delete(handle);
+  };
+  const startAudio = (assetHandle, loop, volume, pan = 0) => {
+    if (!audioAssets.has(assetHandle)) return 0;
+    const handle = allocateAudioVoiceHandle();
+    if (!handle) return 0;
+    const voice = {
+      assetHandle,
+      generation: allocateAudioVoiceGeneration(),
+      source: undefined,
+      gain: undefined,
+      paused: false,
+      volume: clampAudioVolume(volume),
+      pan: clampAudioPan(pan),
+    };
+    audioVoices.set(handle, voice);
     const start = async () => {
-      const audio = ensureAudio();
-      const buffer = await audioAssets.get(handle);
-      if (!buffer) return false;
-      const source = audio.createBufferSource();
-      const gain = audio.createGain();
-      source.buffer = buffer;
-      source.loop = Boolean(loop);
-      gain.gain.value = Math.max(0, Math.min(1, volume));
-      source.connect(gain).connect(audio.destination);
-      source.start();
-      audioVoices.set(handle, { source, gain, paused: false });
-      source.addEventListener("ended", () => {
-        if (audioVoices.get(handle)?.source === source) audioVoices.delete(handle);
-      });
-      audioEvents += 1;
-      document.body.dataset.audioEvents = String(audioEvents);
-      return true;
+      const generation = voice.generation;
+      try {
+        const audio = ensureAudio();
+        const buffer = await audioAssets.get(assetHandle);
+        if (!buffer || audioVoices.get(handle) !== voice || voice.generation !== generation) return false;
+        const source = audio.createBufferSource();
+        source.buffer = buffer;
+        source.loop = Boolean(loop);
+        voice.source = source;
+        connectVoiceOutput(audio, voice);
+        source.connect(voice.gain);
+        if (voice.paused && source.playbackRate) source.playbackRate.value = 0;
+        source.addEventListener("ended", () => {
+          if (voice.source === source) forgetAudioVoice(handle, voice);
+        });
+        source.start();
+        audioEvents += 1;
+        document.body.dataset.audioEvents = String(audioEvents);
+        return true;
+      } catch (_) {
+        forgetAudioVoice(handle, voice);
+        return false;
+      }
     };
     if (!audioContext || audioContext.state !== "running") {
-      return queuePendingAudio(start);
+      if (!queuePendingAudio(start)) {
+        forgetAudioVoice(handle, voice);
+        return 0;
+      }
+      return handle;
     }
     void start();
-    return true;
+    return handle;
   };
   const stopAudio = handle => {
     const voice = audioVoices.get(handle);
-    if (voice) voice.source.stop();
-    audioVoices.delete(handle);
+    if (!voice) return;
+    forgetAudioVoice(handle, voice);
+    if (voice.source) voice.source.stop();
+  };
+  const setAudioVoicePaused = (handle, paused) => {
+    const voice = audioVoices.get(handle);
+    if (!voice || voice.paused === Boolean(paused)) return;
+    voice.paused = Boolean(paused);
+    if (!voice.source) return;
+    if (voice.source.playbackRate) {
+      voice.source.playbackRate.value = voice.paused ? 0 : 1;
+    } else if (voice.paused) {
+      voice.source.disconnect();
+    } else {
+      voice.source.connect(voice.gain);
+    }
+  };
+  const setAudioVoiceVolumePan = (handle, volume, pan) => {
+    const voice = audioVoices.get(handle);
+    if (!voice) return;
+    voice.volume = clampAudioVolume(volume);
+    if (voice.gain) voice.gain.gain.value = voice.volume;
+    setPanValue(voice, pan);
+  };
+  const stopAudioAsset = assetHandle => {
+    for (const [handle, voice] of Array.from(audioVoices.entries())) {
+      if (voice.assetHandle === assetHandle) stopAudio(handle);
+    }
+  };
+  const setAudioAssetPaused = (assetHandle, paused) => {
+    for (const [handle, voice] of audioVoices.entries()) {
+      if (voice.assetHandle === assetHandle) setAudioVoicePaused(handle, paused);
+    }
+  };
+  const setAudioAssetVolume = (assetHandle, volume) => {
+    for (const [handle, voice] of audioVoices.entries()) {
+      if (voice.assetHandle === assetHandle) setAudioVoiceVolumePan(handle, volume, voice.pan);
+    }
   };
   const updateAudioState = () => {
     document.body.dataset.audioState = audioContext?.state || "closed";
@@ -496,37 +608,23 @@
     audio_get_underruns: () => audioUnderruns,
     audio_push_f32_interleaved: (byteOffset, frameCount) => pushAudio(byteOffset, frameCount),
     audio_load_wav: pathId => loadAudio(pathId),
-    audio_release: handle => { audioAssets.delete(handle); stopAudio(handle); },
-    audio_play: (handle, loop, volume) => startAudio(handle, loop, volume) ? handle : 0,
+    audio_release: handle => { audioAssets.delete(handle); stopAudioAsset(handle); },
+    audio_play: (handle, loop, volume, pan) => startAudio(handle, loop, volume, pan),
     audio_stop: handle => stopAudio(handle),
     audio_voice_is_playing: handle => audioVoices.has(handle) ? 1 : 0,
-    audio_voice_set_paused: (handle, paused) => {
-      const voice = audioVoices.get(handle);
-      if (!voice || voice.paused === Boolean(paused)) return;
-      if (paused) voice.source.disconnect();
-      else voice.source.connect(voice.gain);
-      voice.paused = Boolean(paused);
-    },
-    audio_voice_set_volume_pan: (handle, volume) => {
-      const voice = audioVoices.get(handle);
-      if (voice) voice.gain.gain.value = Math.max(0, Math.min(1, volume));
-    },
+    audio_voice_set_paused: (handle, paused) => setAudioVoicePaused(handle, paused),
+    audio_voice_set_volume_pan: (handle, volume, pan) => setAudioVoiceVolumePan(handle, volume, pan),
     stasis_jit_audio_load_music: pathId => loadAudio(pathId),
     stasis_jit_audio_load_effect: pathId => loadAudio(pathId),
-    stasis_jit_audio_play_music: (handle, loop, volume) => startAudio(handle, loop, volume) ? 1 : 0,
-    stasis_jit_audio_play_effect: (handle, volume) => startAudio(handle, false, volume) ? 1 : 0,
-    stasis_jit_audio_stop_music: handle => stopAudio(handle),
-    stasis_jit_audio_pause_music: (handle, paused) => {
-      const voice = audioVoices.get(handle);
-      if (!voice || voice.paused === Boolean(paused)) return;
-      if (paused) voice.source.disconnect();
-      else voice.source.connect(voice.gain);
-      voice.paused = Boolean(paused);
+    stasis_jit_audio_play_music: (handle, loop, volume) => {
+      stopAudioAsset(handle);
+      const voice = startAudio(handle, loop, volume, 0);
+      return voice ? 1 : 0;
     },
-    stasis_jit_audio_set_music_volume: (handle, volume) => {
-      const voice = audioVoices.get(handle);
-      if (voice) voice.gain.gain.value = Math.max(0, Math.min(1, volume));
-    },
+    stasis_jit_audio_play_effect: (handle, volume) => startAudio(handle, false, volume, 0) ? 1 : 0,
+    stasis_jit_audio_stop_music: handle => stopAudioAsset(handle),
+    stasis_jit_audio_pause_music: (handle, paused) => setAudioAssetPaused(handle, paused),
+    stasis_jit_audio_set_music_volume: (handle, volume) => setAudioAssetVolume(handle, volume),
     // @stasis-feature audio end
   }};
 
