@@ -8,7 +8,7 @@
   "resource_regions": [
     {"name": "sprite", "rect": [32, 48, 176, 264], "target_rgb": [49, 209, 124], "tolerance": 28, "minimum_target_pixels": 500},
     {"name": "procedural_fallback", "rect": [232, 48, 176, 264], "target_rgb": [255, 0, 255], "tolerance": 28, "minimum_target_pixels": 100},
-    {"name": "cached_text", "rect": [448, 156, 150, 64], "target_rgb": [17, 231, 220], "tolerance": 12, "minimum_target_pixels": 10}
+    {"name": "cached_text", "rect": [448, 156, 150, 64], "target_rgb": [48, 226, 196], "tolerance": 12, "minimum_target_pixels": 10}
   ],
   "lifecycle": {
     "stages": [
