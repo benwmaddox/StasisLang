@@ -78,6 +78,14 @@ jobs:
           path: artifacts/android_release_shell/e
           if-no-files-found: warn
 
+      - name: Upload Android resource-restore evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-resource-restore-seam
+          path: artifacts/android_resource_restore/e
+          if-no-files-found: warn
+
       - name: Upload Android touch round-trip evidence
         if: always()
         uses: actions/upload-artifact@v4

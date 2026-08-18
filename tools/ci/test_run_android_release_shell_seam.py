@@ -100,6 +100,91 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 {"stable_frame": 30, "state_checksum": 1210, "command_trace": 77},
             )
 
+    def test_resource_lifecycle_requires_ready_generations_and_zero_failures(self):
+        marker = {
+            "event": "lifecycle",
+            "resource_state": 1,
+            "surface_generation": 2,
+            "renderer_generation": 3,
+            "restore_attempts": 1,
+            "restore_failures": 0,
+            "restore_reason": 5,
+            "accepted": 1,
+            "presented": 1,
+        }
+        expectations = {
+            "lifecycle": {
+                "stages": [
+                    {"name": "initial", "min_renderer_generation": 1},
+                    {"name": "resume", "min_renderer_generation": 2},
+                ]
+            }
+        }
+        observed = seam.validate_resource_lifecycle_markers(
+            [marker], expectations, {"initial": marker, "resume": marker}
+        )
+        self.assertEqual(3, observed["resume"]["renderer_generation"])
+        failing = dict(marker, restore_failures=1)
+        with self.assertRaisesRegex(seam.SeamError, "restore failures"):
+            seam.validate_resource_lifecycle_markers(
+                [failing], expectations, {"initial": failing, "resume": failing}
+            )
+
+    def test_resource_diagnostic_scan_names_stale_restore_events(self):
+        expectations = {
+            "lifecycle": {
+                "diagnostic_forbidden": [
+                    "rejected stale sprite",
+                    "renderer restore failed",
+                    "rejected frame",
+                ]
+            }
+        }
+        seam.validate_resource_diagnostics("Stasis renderer ready", expectations)
+        for diagnostic in expectations["lifecycle"]["diagnostic_forbidden"]:
+            with self.assertRaisesRegex(seam.SeamError, diagnostic):
+                seam.validate_resource_diagnostics(diagnostic, expectations)
+
+    def test_transition_selection_ignores_history_paused_and_requires_counter_advance(self):
+        baseline = {
+            "resource_state": 1,
+            "accepted": 30,
+            "presented": 30,
+            "rejected": 0,
+            "validation": 0,
+        }
+        paused_history = dict(baseline, event="lifecycle", restore_reason=4)
+        with self.assertRaisesRegex(seam.SeamError, "no new ready marker"):
+            seam.select_post_transition_marker([paused_history], baseline, "background_resume")
+        advanced = dict(
+            baseline,
+            event="lifecycle",
+            accepted=31,
+            presented=31,
+            restore_reason=5,
+        )
+        self.assertIs(advanced, seam.select_post_transition_marker([advanced], baseline, "background_resume"))
+        rejected = dict(advanced, rejected=1)
+        with self.assertRaisesRegex(seam.SeamError, "no new ready marker"):
+            seam.select_post_transition_marker([rejected], baseline, "background_resume")
+
+    def test_recreation_selection_requires_new_epoch_initialized_marker(self):
+        ready = {
+            "event": "lifecycle",
+            "resource_state": 1,
+            "accepted": 1,
+            "presented": 1,
+            "rejected": 0,
+            "validation": 0,
+        }
+        with self.assertRaisesRegex(seam.SeamError, "initialized"):
+            seam.select_post_transition_marker([ready], {}, "force_activity_restart")
+        initialized = {"event": "initialized"}
+        self.assertIs(
+            ready,
+            seam.select_post_transition_marker([initialized, ready], {}, "force_activity_restart"),
+        )
+
     def test_validates_named_capture_regions(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "capture.png"
@@ -126,6 +211,42 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 },
             )
             self.assertEqual([item["name"] for item in observed], ["red", "teal"])
+
+    def test_resource_pixel_oracle_rejects_lane_background_only_pass(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "capture.png"
+            rows = [[(24, 33, 48)] * 5 + [(242, 199, 51)] * 5 for _ in range(6)]
+            rows[2][2] = (49, 209, 124)
+            rows[2][7] = (13, 20, 31)
+            write_rgb_png(path, 10, 6, rows)
+            expectations = {
+                "logical_size": [10, 6],
+                "resource_regions": [
+                    {
+                        "name": "sprite",
+                        "rect": [0, 0, 5, 6],
+                        "target_rgb": [49, 209, 124],
+                        "tolerance": 0,
+                        "minimum_target_pixels": 1,
+                    },
+                    {
+                        "name": "text",
+                        "rect": [5, 0, 5, 6],
+                        "target_rgb": [13, 20, 31],
+                        "tolerance": 0,
+                        "minimum_target_pixels": 1,
+                    },
+                ],
+            }
+            observed = seam.validate_resource_regions(path, expectations)
+            self.assertEqual([1, 1], [item["target_pixels"] for item in observed])
+            expectations["resource_regions"][0]["minimum_target_pixels"] = 2
+            with self.assertRaisesRegex(seam.SeamError, "target pixels"):
+                seam.validate_resource_regions(path, expectations)
+            expectations["resource_regions"][0]["minimum_target_pixels"] = 1
+            expectations["resource_regions"][0]["target_rgb"] = [250, 250, 250]
+            with self.assertRaisesRegex(seam.SeamError, "target pixels"):
+                seam.validate_resource_regions(path, expectations)
 
     def test_foreground_check_leaves_test_activity_untouched(self):
         calls = []

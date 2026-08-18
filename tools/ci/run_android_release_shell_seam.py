@@ -87,6 +87,105 @@ def validate_markers(markers: list[dict], expectations: dict) -> dict:
     return stable
 
 
+def forbidden_resource_diagnostics(expectations: dict) -> tuple[str, ...]:
+    """Return diagnostics that invalidate a resource restoration seam."""
+    lifecycle = expectations.get("lifecycle", {})
+    values = lifecycle.get("diagnostic_forbidden", ())
+    return tuple(str(value).lower() for value in values)
+
+
+def validate_resource_lifecycle_markers(
+    markers: list[dict], expectations: dict, stage_markers: dict[str, dict] | None = None
+) -> dict[str, dict]:
+    """Validate generation/counter invariants for every requested lifecycle stage."""
+    lifecycle = expectations.get("lifecycle")
+    if not lifecycle:
+        return {}
+    observed = stage_markers if stage_markers is not None else {}
+    candidates = [item for item in markers if item.get("event") in ("lifecycle", "stable", "initialized")]
+    for stage in lifecycle.get("stages", ()):
+        name = stage["name"]
+        marker = observed.get(name)
+        if marker is None:
+            marker = next((item for item in reversed(candidates) if item.get("stage") == name), None)
+        if marker is None:
+            raise SeamError(f"Android resource lifecycle is missing stage {name}")
+        generation = marker.get("renderer_generation", 0)
+        surface_generation = marker.get("surface_generation", 0)
+        if not isinstance(generation, int) or generation < stage.get("min_renderer_generation", 1):
+            raise SeamError(f"Android resource lifecycle stage {name} has invalid renderer generation {generation}")
+        if not isinstance(surface_generation, int) or surface_generation <= 0:
+            raise SeamError(f"Android resource lifecycle stage {name} has invalid surface generation {surface_generation}")
+        if marker.get("resource_state") not in (1,):
+            raise SeamError(f"Android resource lifecycle stage {name} is not ready: state={marker.get('resource_state')}")
+        if marker.get("restore_failures", 0) != 0:
+            raise SeamError(f"Android resource lifecycle stage {name} reported restore failures: {marker.get('restore_failures')}")
+        # These counters prove render progress; the compositor capture below is
+        # the presentation oracle because end_frame may suppress presentation.
+        if marker.get("accepted", 0) <= 0 or marker.get("presented", 0) <= 0:
+            raise SeamError(f"Android resource lifecycle stage {name} has no accepted presented frame")
+        if marker.get("rejected", 0) != 0 or marker.get("validation", 0) != 0:
+            raise SeamError(
+                f"Android resource lifecycle stage {name} rejected or validation counters are nonzero: "
+                f"rejected={marker.get('rejected')} validation={marker.get('validation')}"
+            )
+        observed[name] = marker
+    return observed
+
+
+def select_post_transition_marker(
+    markers: list[dict], baseline: dict, action: str
+) -> dict:
+    """Select a ready marker emitted after an action, never from log history."""
+    ready = [
+        item
+        for item in markers
+        if item.get("event") in ("lifecycle", "stable")
+        and item.get("resource_state") == 1
+        and item.get("accepted", 0) > 0
+        and item.get("presented", 0) > 0
+        and item.get("rejected", 0) == 0
+        and item.get("validation", 0) == 0
+    ]
+    if action == "background_resume":
+        ready = [
+            item
+            for item in ready
+            if item.get("accepted", 0) > baseline.get("accepted", 0)
+            and item.get("presented", 0) > baseline.get("presented", 0)
+        ]
+    elif action == "force_activity_restart":
+        initialized = next(
+            (index for index, item in enumerate(markers) if item.get("event") == "initialized"),
+            None,
+        )
+        if initialized is None:
+            raise SeamError("Android resource recreation emitted no new initialized marker")
+        ready = [
+            item
+            for index, item in enumerate(markers)
+            if index > initialized
+            and item.get("event") in ("lifecycle", "stable")
+            and item.get("resource_state") == 1
+            and item.get("accepted", 0) > 0
+            and item.get("presented", 0) > 0
+            and item.get("rejected", 0) == 0
+            and item.get("validation", 0) == 0
+        ]
+    if not ready:
+        raise SeamError(
+            f"Android resource transition {action} emitted no new ready marker with advancing counters"
+        )
+    return ready[-1]
+
+
+def validate_resource_diagnostics(log: str, expectations: dict) -> None:
+    lowered = log.lower()
+    for diagnostic in forbidden_resource_diagnostics(expectations):
+        if diagnostic in lowered:
+            raise SeamError(f"Android resource lifecycle diagnostic contains forbidden {diagnostic!r}")
+
+
 def validate_touch_markers(markers: list[dict], expectations: dict) -> list[dict]:
     touch = expectations["touch"]
     probes = {
@@ -508,6 +607,99 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
             )
         observed.append({"name": region["name"], "pixel": [x, y], "rgb": average})
     return observed
+
+
+def validate_resource_regions(capture: Path, expectations: dict) -> list[dict]:
+    """Prove resource pixels, rather than merely sampling their lane backgrounds."""
+    regions = expectations.get("resource_regions", ())
+    if not regions:
+        return []
+    width, height, pixels = read_png_rgb(capture)
+    logical_width, logical_height = expectations["logical_size"]
+    scale = min(width / logical_width, height / logical_height)
+    offset_x = (width - logical_width * scale) / 2.0
+    offset_y = (height - logical_height * scale) / 2.0
+    observed = []
+    for region in regions:
+        logical_x, logical_y, logical_w, logical_h = region["rect"]
+        left = max(0, round(offset_x + logical_x * scale))
+        top = max(0, round(offset_y + logical_y * scale))
+        right = min(width, round(offset_x + (logical_x + logical_w) * scale))
+        bottom = min(height, round(offset_y + (logical_y + logical_h) * scale))
+        samples = [
+            pixels[row * width + column]
+            for row in range(top, bottom)
+            for column in range(left, right)
+        ]
+        if not samples:
+            raise SeamError(f"resource region {region['name']} has no captured pixels")
+        target_count = 0
+        target = region.get("target_rgb")
+        if target is None:
+            raise SeamError(f"resource region {region['name']} is missing target_rgb")
+        tolerance = region.get("tolerance", 0)
+        for pixel in samples:
+            if all(
+                abs(pixel[index] - target[index]) <= tolerance for index in range(3)
+            ):
+                target_count += 1
+        minimum_target = region.get("minimum_target_pixels", 0)
+        if minimum_target <= 0:
+            raise SeamError(f"resource region {region['name']} is missing minimum_target_pixels")
+        if target_count < minimum_target:
+            raise SeamError(
+                f"resource region {region['name']} did not contain enough target pixels: "
+                f"expected>={minimum_target} actual={target_count}"
+            )
+        observed.append(
+            {
+                "name": region["name"],
+                "target_pixels": target_count,
+                "bounds": [left, top, right, bottom],
+            }
+        )
+    return observed
+
+
+def capture_until_resource_regions_match(
+    adb: Path,
+    serial: str | None,
+    capture: Path,
+    expectations: dict,
+    deadline: float,
+    package_id: str,
+    component: str,
+) -> tuple[list[dict], list[dict]]:
+    """Use the Android compositor capture as the actual presentation oracle."""
+    last_error: SeamError | None = None
+    while time.monotonic() < deadline:
+        if ensure_test_activity_foreground(adb, serial, package_id, component):
+            time.sleep(0.25)
+        capture.write_bytes(
+            _run(adb, serial, "exec-out", "screencap", "-p", text=False)
+        )
+        try:
+            return validate_regions(capture, expectations), validate_resource_regions(
+                capture, expectations
+            )
+        except SeamError as error:
+            last_error = error
+            if dismiss_system_dialog_action(adb, serial):
+                _run(
+                    adb,
+                    serial,
+                    "shell",
+                    "am",
+                    "start",
+                    "-W",
+                    "-n",
+                    component,
+                    required=False,
+                )
+            time.sleep(0.25)
+    if last_error is not None:
+        raise last_error
+    raise SeamError("resource capture deadline expired before both pixel oracles passed")
 
 
 def dismiss_system_dialog_action(adb: Path, serial: str | None) -> bool:
@@ -941,11 +1133,142 @@ def main() -> int:
                 break
             time.sleep(1)
         stable = validate_markers(markers, expectations)
+        log_history = [log]
+        initial_log_path = args.output / "initial-logcat.txt"
+        initial_log_path.write_text(log, encoding="utf-8")
         first_pid = _run(
             args.adb, args.serial, "shell", "pidof", package_id, required=False
         ).strip()
         if not first_pid:
             raise SeamError("generated Android shell exited before capture")
+        lifecycle_evidence = []
+        lifecycle_markers = {"initial": stable}
+        lifecycle = expectations.get("lifecycle")
+        if lifecycle:
+            initial_stage = next(
+                stage for stage in lifecycle["stages"] if stage["name"] == "initial"
+            )
+            initial_stage_capture = args.output / "initial-resource-frame.png"
+            initial_regions, initial_resource_regions = capture_until_resource_regions_match(
+                args.adb,
+                args.serial,
+                initial_stage_capture,
+                expectations,
+                min(deadline, time.monotonic() + 10),
+                package_id,
+                component,
+            )
+            lifecycle_evidence.append(
+                {
+                    "name": initial_stage["name"],
+                    "action": initial_stage["action"],
+                    "pid": first_pid,
+                    "process_epoch": first_pid,
+                    "same_pid": None,
+                    "capture": str(initial_stage_capture),
+                    "log": str(initial_log_path),
+                    "regions": initial_regions,
+                    "resource_regions": initial_resource_regions,
+                    "presentation_oracle": "android_compositor_capture_target_pixels",
+                    "marker": stable,
+                }
+            )
+            for stage in lifecycle["stages"]:
+                if stage["name"] == "initial":
+                    continue
+                before_pid = first_pid
+                baseline_marker = next(reversed(lifecycle_markers.values()), stable)
+                _run(args.adb, args.serial, "logcat", "-c")
+                if stage["action"] == "background_resume":
+                    _run(args.adb, args.serial, "shell", "input", "keyevent", "KEYCODE_HOME")
+                    resume_deadline = min(deadline, time.monotonic() + 10)
+                    while time.monotonic() < resume_deadline:
+                        current_focus = _run(
+                            args.adb, args.serial, "shell", "dumpsys", "window", "windows", required=False
+                        )
+                        if package_id not in current_focus:
+                            break
+                        time.sleep(0.25)
+                    _run(
+                        args.adb, args.serial, "shell", "am", "start", "-W", "-n", component,
+                        "--es", "stasis.seam_test_id", test_id,
+                    )
+                elif stage["action"] == "force_activity_restart":
+                    _run(
+                        args.adb, args.serial, "shell", "am", "start", "-S", "-W", "-n", component,
+                        "--es", "stasis.seam_test_id", test_id,
+                    )
+                else:
+                    raise SeamError(f"unknown Android resource lifecycle action {stage['action']}")
+                stage_deadline = min(deadline, time.monotonic() + 15)
+                stage_log = ""
+                stage_markers_list: list[dict] = []
+                stage_pid = ""
+                marker = None
+                while time.monotonic() < stage_deadline:
+                    stage_log = _run(
+                        args.adb, args.serial, "logcat", "-d", "-v", "brief", "Stasis:I", "*:S"
+                    )
+                    stage_markers_list = parse_markers(stage_log, test_id)
+                    stage_pid = _run(
+                        args.adb, args.serial, "shell", "pidof", package_id, required=False
+                    ).strip()
+                    if stage["action"] != "force_activity_restart" or (
+                        stage_pid and stage_pid != before_pid
+                    ):
+                        try:
+                            marker = select_post_transition_marker(
+                                stage_markers_list, baseline_marker, stage["action"]
+                            )
+                        except SeamError:
+                            marker = None
+                        if marker is not None:
+                            break
+                    time.sleep(0.25)
+                if marker is None:
+                    raise SeamError(
+                        f"Android resource lifecycle stage {stage['name']} did not reach a new ready marker"
+                    )
+                validate_resource_diagnostics(stage_log, expectations)
+                stage_log_path = args.output / f"{stage['name']}-logcat.txt"
+                stage_log_path.write_text(stage_log, encoding="utf-8")
+                log_history.append(stage_log)
+                markers = parse_markers("\n".join(log_history), test_id)
+                if not stage_pid:
+                    raise SeamError(f"Android resource lifecycle stage {stage['name']} exited")
+                if stage.get("same_pid") is True and stage_pid != before_pid:
+                    raise SeamError(f"Android resource lifecycle stage {stage['name']} changed PID: {before_pid} -> {stage_pid}")
+                if stage.get("same_pid") is False and stage_pid == before_pid:
+                    raise SeamError(f"Android resource lifecycle stage {stage['name']} reused PID {stage_pid}")
+                stage_capture = args.output / f"{stage['name']}-resource-frame.png"
+                stage_regions, stage_resource_regions = capture_until_resource_regions_match(
+                    args.adb, args.serial, stage_capture, expectations,
+                    min(deadline, time.monotonic() + 10), package_id, component,
+                )
+                if stage.get("same_pid") is True and marker.get("renderer_generation", 0) < baseline_marker.get("renderer_generation", 0):
+                    raise SeamError(f"Android resource lifecycle stage {stage['name']} regressed renderer generation")
+                if stage.get("same_pid") is True and marker.get("restore_reason") in (1, 2, 3) and marker.get("renderer_generation", 0) <= baseline_marker.get("renderer_generation", 0):
+                    raise SeamError(f"Android resource lifecycle stage {stage['name']} reset without advancing renderer generation")
+                lifecycle_markers[stage["name"]] = marker
+                lifecycle_evidence.append(
+                    {
+                        "name": stage["name"],
+                        "action": stage["action"],
+                        "pid": stage_pid,
+                        "previous_pid": before_pid,
+                        "process_epoch": stage_pid,
+                        "same_pid": stage_pid == before_pid,
+                        "capture": str(stage_capture),
+                        "log": str(stage_log_path),
+                        "regions": stage_regions,
+                        "resource_regions": stage_resource_regions,
+                        "presentation_oracle": "android_compositor_capture_target_pixels",
+                        "marker": marker,
+                    }
+                )
+                first_pid = stage_pid
+            validate_resource_lifecycle_markers(markers, expectations, lifecycle_markers)
+            evidence["resource_lifecycle"] = lifecycle_evidence
         touch_probes = []
         orientation_probes = []
         orientation_evidence = []
@@ -1122,16 +1445,42 @@ def main() -> int:
             orientation_probes = validate_orientation_markers(
                 markers, expectations, surfaces
             )
+        if lifecycle:
+            log = "\n".join(log_history)
         log_path.write_text(log, encoding="utf-8")
-        regions = capture_until_regions_match(
-            args.adb,
-            args.serial,
-            capture_path,
-            expectations,
-            min(deadline, time.monotonic() + 10),
-            package_id,
-            component,
-        )
+        validate_resource_diagnostics(log, expectations)
+        if lifecycle:
+            regions, resource_regions = capture_until_resource_regions_match(
+                args.adb,
+                args.serial,
+                capture_path,
+                expectations,
+                min(deadline, time.monotonic() + 10),
+                package_id,
+                component,
+            )
+        else:
+            regions = capture_until_regions_match(
+                args.adb,
+                args.serial,
+                capture_path,
+                expectations,
+                min(deadline, time.monotonic() + 10),
+                package_id,
+                component,
+            )
+            resource_regions = []
+        if lifecycle:
+            final_stage_log = _run(
+                args.adb, args.serial, "logcat", "-d", "-v", "brief", "Stasis:I", "*:S"
+            )
+            log_history[-1] = final_stage_log
+            if lifecycle_evidence:
+                final_stage_log_path = Path(lifecycle_evidence[-1]["log"])
+                final_stage_log_path.write_text(final_stage_log, encoding="utf-8")
+            log = "\n".join(log_history)
+            log_path.write_text(log, encoding="utf-8")
+            validate_resource_diagnostics(log, expectations)
         time.sleep(1)
         second_pid = _run(
             args.adb, args.serial, "shell", "pidof", package_id, required=False
@@ -1145,6 +1494,8 @@ def main() -> int:
                 "lifecycle_events": [item["event"] for item in markers],
                 "process_id": first_pid,
                 "regions": regions,
+                "resource_regions": resource_regions,
+                "presentation_oracle": "android_compositor_capture_target_pixels",
             }
         )
         if touch_probes:

@@ -16,6 +16,7 @@
 void stasis_host_report_runtime_error(const char *message);
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 int stasis_test_get_render_submission_state(int32_t *out_i32, int32_t capacity);
+int stasis_gfx_get_resource_lifecycle(int32_t *out_i32, int count);
 
 static int32_t hash_global_path(const char *path) {
     uint32_t hash = 2166136261U;
@@ -36,7 +37,9 @@ static float seam_f32(const char *path) {
 
 static void log_seam_marker(const char *test_id, const char *event, int32_t frame) {
     int32_t render[7] = {0};
+    int32_t lifecycle[6] = {0};
     int has_render = stasis_test_get_render_submission_state(render, 7);
+    int has_lifecycle = stasis_gfx_get_resource_lifecycle(lifecycle, 6);
     int32_t checksum = seam_i32("seam_state_checksum");
     SDL_Log(
         "Stasis seam: {\"schema\":\"stasis.seam_test.v1\",\"test_id\":\"%s\","
@@ -55,7 +58,10 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         "\"drawable_w\":%d,\"drawable_h\":%d,"
         "\"display_generation\":%d,\"density_generation\":%d,"
         "\"frame_display_generation\":%d,\"frame_density_generation\":%d,"
-        "\"content_scale\":%.4f,\"raster_scale\":%.4f}",
+        "\"content_scale\":%.4f,\"raster_scale\":%.4f,"
+        "\"resource_state\":%d,\"surface_generation\":%d,"
+        "\"renderer_generation\":%d,\"restore_attempts\":%d,"
+        "\"restore_failures\":%d,\"restore_reason\":%d}",
         test_id,
         event,
         frame,
@@ -99,7 +105,13 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         has_render ? render[5] : 0,
         has_render ? render[6] : 0,
         seam_f32("seam_content_scale"),
-        seam_f32("seam_raster_scale")
+        seam_f32("seam_raster_scale"),
+        has_lifecycle ? lifecycle[0] : 0,
+        has_lifecycle ? lifecycle[1] : 0,
+        has_lifecycle ? lifecycle[2] : 0,
+        has_lifecycle ? lifecycle[3] : 0,
+        has_lifecycle ? lifecycle[4] : 0,
+        has_lifecycle ? lifecycle[5] : 0
     );
 }
 #endif
@@ -170,6 +182,7 @@ int SDL_main(int argc, char **argv) {
 #if defined(STASIS_ENABLE_SEAM_TESTS)
     int32_t frame = 0;
     int32_t last_probe_sequence = 0;
+    int32_t last_lifecycle[6] = {-1, -1, -1, -1, -1, -1};
 #endif
     stasis_mobile_frame_pacer_reset(&frame_pacer, SDL_GetTicksNS());
     while (status == STASIS_MOBILE_RUNTIME_OK) {
@@ -181,6 +194,19 @@ int SDL_main(int argc, char **argv) {
                 log_seam_marker(seam_test_id, frame == 30 ? "stable" : "frame", frame);
             }
             if (seam_test_id != NULL) {
+                int32_t lifecycle[6] = {0};
+                if (stasis_gfx_get_resource_lifecycle(lifecycle, 6)) {
+                    int changed = 0;
+                    for (int index = 0; index < 6; index++) {
+                        if (lifecycle[index] != last_lifecycle[index]) {
+                            changed = 1;
+                            last_lifecycle[index] = lifecycle[index];
+                        }
+                    }
+                    if (changed) {
+                        log_seam_marker(seam_test_id, "lifecycle", frame);
+                    }
+                }
                 int32_t probe_sequence = seam_i32("seam_probe_sequence");
                 if (probe_sequence != last_probe_sequence) {
                     log_seam_marker(seam_test_id, "probe", frame);
