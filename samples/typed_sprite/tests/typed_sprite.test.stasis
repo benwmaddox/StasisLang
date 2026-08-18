@@ -13,8 +13,28 @@ test `invalid sprite replacement preserves receiver atomically`(): bool {
     return tested_sprite.handle == 23 && tested_sprite.width == 16 && tested_sprite.height == 16;
 }
 
+test `sprite release clears live receiver and is idempotent`(): bool {
+    tested_sprite.handle = 0 - 23;
+    tested_sprite.width = 16;
+    tested_sprite.height = 16;
+    tested_sprite.release();
+    if (tested_sprite.handle != 0 || tested_sprite.width != 0 || tested_sprite.height != 0) {
+        return false;
+    }
+    tested_sprite.release();
+    return tested_sprite.handle == 0 && tested_sprite.width == 0 && tested_sprite.height == 0;
+}
+
+test `zero sprite release remains zero`(): bool {
+    tested_sprite.handle = 0;
+    tested_sprite.width = 0;
+    tested_sprite.height = 0;
+    tested_sprite.release();
+    return tested_sprite.handle == 0 && tested_sprite.width == 0 && tested_sprite.height == 0;
+}
+
 test `draw uses sprite logical dimensions`(): bool {
-    tested_sprite.handle = 7;
+    tested_sprite.handle = 0 - 7;
     tested_sprite.width = 80;
     tested_sprite.height = 48;
 
@@ -24,7 +44,7 @@ test `draw uses sprite logical dimensions`(): bool {
     if (gfx_cmd_sprite_count() != 1) {
         return false;
     }
-    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 0] != 7) {
+    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 0] != 0 - 7) {
         return false;
     }
     if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 1] != 9) {

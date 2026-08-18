@@ -24,6 +24,8 @@ typedef char *(*stasis_android_bridge_inspect_runtime_state_fn)(const char *proj
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *project_root, int handle);
+typedef char *(*stasis_android_bridge_drain_sprite_releases_fn)(void);
+typedef char *(*stasis_android_bridge_poll_sprite_release_cancellations_fn)(void);
 typedef char *(*stasis_android_bridge_resolve_cached_text_fn)(const char *project_root, int handle);
 typedef char *(*stasis_android_bridge_resolve_font_fn)(const char *project_root, int handle);
 typedef char *(*stasis_android_bridge_source_items_fn)(const char *project_root, const char *entry_file);
@@ -49,6 +51,8 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_set_i32_global_fn set_i32_global;
     stasis_android_bridge_get_i32_global_fn get_i32_global;
     stasis_android_bridge_resolve_sprite_asset_fn resolve_sprite_asset;
+    stasis_android_bridge_drain_sprite_releases_fn drain_sprite_releases;
+    stasis_android_bridge_poll_sprite_release_cancellations_fn poll_sprite_release_cancellations;
     stasis_android_bridge_resolve_cached_text_fn resolve_cached_text;
     stasis_android_bridge_resolve_font_fn resolve_font;
     stasis_android_bridge_source_items_fn source_items;
@@ -184,6 +188,11 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_get_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_get_i32_global");
     rust_bridge_api.resolve_sprite_asset =
             (stasis_android_bridge_resolve_sprite_asset_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_sprite_asset");
+    rust_bridge_api.drain_sprite_releases =
+            (stasis_android_bridge_drain_sprite_releases_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_drain_sprite_releases");
+    rust_bridge_api.poll_sprite_release_cancellations =
+            (stasis_android_bridge_poll_sprite_release_cancellations_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_poll_sprite_release_cancellations");
     rust_bridge_api.resolve_cached_text =
             (stasis_android_bridge_resolve_cached_text_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_cached_text");
     rust_bridge_api.resolve_font =
@@ -522,6 +531,41 @@ Java_com_stasislang_workshop_MainActivity_nativeResolveSpriteAsset(
     if (message == NULL) {
         return (*env)->NewStringUTF(env,
                 "{\"status\":\"error\",\"error\":\"shared sprite resolver returned no result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeDrainSpriteReleases(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->drain_sprite_releases == NULL || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    char *message = bridge->drain_sprite_releases();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePollSpriteReleaseCancellations(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->poll_sprite_release_cancellations == NULL
+            || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    char *message = bridge->poll_sprite_release_cancellations();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
     }
     jstring result = (*env)->NewStringUTF(env, message);
     bridge->free_string(message);

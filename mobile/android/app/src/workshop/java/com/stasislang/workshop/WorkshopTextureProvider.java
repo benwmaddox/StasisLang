@@ -203,6 +203,14 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
     }
 
+    @Override
+    public void releaseSprite(int handle) {
+        SpriteTexture cached = textures.get(handle);
+        if (cached == null) return;
+        textures.remove(handle);
+        releaseSpriteIfUnreferenced(cached);
+    }
+
     static boolean usesFallbackSprite(int handle) {
         return handle == 0;
     }

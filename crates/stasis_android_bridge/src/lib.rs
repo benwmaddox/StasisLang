@@ -783,6 +783,8 @@ pub fn run_android_workshop_tick(
 
 const MAX_EMBEDDED_FONTS: usize = 64;
 const MAX_EMBEDDED_TEXT_RUNS: usize = 4096;
+const MAX_EMBEDDED_SPRITES: usize = 4096;
+const MAX_PENDING_SPRITE_RELEASES: usize = 256;
 
 #[derive(Clone)]
 struct EmbeddedFont {
@@ -800,11 +802,20 @@ struct EmbeddedTextRun {
     measured_height: f32,
 }
 
+#[derive(Clone)]
+struct EmbeddedSpriteRef {
+    handle: i32,
+    refs: usize,
+}
+
 struct EmbeddedResourceCatalog {
     project_root: PathBuf,
     assets: ResolvedAssetManifest,
     fonts: Vec<EmbeddedFont>,
     text_runs: Vec<EmbeddedTextRun>,
+    sprite_refs: Vec<EmbeddedSpriteRef>,
+    pending_sprite_releases: Vec<i32>,
+    pending_sprite_release_cancellations: Vec<i32>,
     error: Option<String>,
 }
 
@@ -820,7 +831,7 @@ fn install_embedded_resource_host(project_root: &Path) -> Result<(), String> {
         .map_err(|_| "embedded resource catalog mutex poisoned")? = Some(catalog);
     stasis_dynload::set_embedded_graphics_host(Some(stasis_dynload::EmbeddedGraphicsHost {
         load_sprite: embedded_load_sprite,
-        release_sprite: |_| {},
+        release_sprite: embedded_release_sprite,
         load_font: embedded_load_font,
         measure_text: embedded_measure_text,
         cache_text: embedded_cache_text,
@@ -848,23 +859,43 @@ fn prepare_embedded_resource_catalog(
             assets: Vec::new(),
         }
     };
-    let (fonts, text_runs) = if preserve_loaded_resources {
+    let (
+        fonts,
+        text_runs,
+        sprite_refs,
+        pending_sprite_releases,
+        pending_sprite_release_cancellations,
+    ) = if preserve_loaded_resources {
         let slot = embedded_resource_catalog()
             .lock()
             .map_err(|_| "embedded resource catalog mutex poisoned")?;
         slot.as_ref()
             .filter(|catalog| catalog.project_root == project_root)
-            .map(|catalog| (catalog.fonts.clone(), catalog.text_runs.clone()))
+            .map(|catalog| {
+                (
+                    catalog.fonts.clone(),
+                    catalog.text_runs.clone(),
+                    catalog.sprite_refs.clone(),
+                    catalog.pending_sprite_releases.clone(),
+                    catalog.pending_sprite_release_cancellations.clone(),
+                )
+            })
             .unwrap_or_else(|| {
                 (
                     Vec::with_capacity(MAX_EMBEDDED_FONTS),
                     Vec::with_capacity(MAX_EMBEDDED_TEXT_RUNS),
+                    Vec::with_capacity(MAX_EMBEDDED_SPRITES),
+                    Vec::with_capacity(MAX_PENDING_SPRITE_RELEASES),
+                    Vec::with_capacity(MAX_EMBEDDED_SPRITES),
                 )
             })
     } else {
         (
             Vec::with_capacity(MAX_EMBEDDED_FONTS),
             Vec::with_capacity(MAX_EMBEDDED_TEXT_RUNS),
+            Vec::with_capacity(MAX_EMBEDDED_SPRITES),
+            Vec::with_capacity(MAX_PENDING_SPRITE_RELEASES),
+            Vec::with_capacity(MAX_EMBEDDED_SPRITES),
         )
     };
     Ok(EmbeddedResourceCatalog {
@@ -872,6 +903,9 @@ fn prepare_embedded_resource_catalog(
         assets,
         fonts,
         text_runs,
+        sprite_refs,
+        pending_sprite_releases,
+        pending_sprite_release_cancellations,
         error: None,
     })
 }
@@ -939,8 +973,146 @@ fn embedded_load_sprite(path: &[u8], _max_w: i32, _max_h: i32) -> i32 {
             catalog,
             format!("sprite is not declared in the asset manifest: {display_path}"),
         );
+    } else if !embedded_acquire_sprite(catalog, handle) {
+        return 0;
     }
     handle
+}
+
+fn embedded_acquire_sprite(catalog: &mut EmbeddedResourceCatalog, handle: i32) -> bool {
+    if let Some(index) = catalog
+        .sprite_refs
+        .iter()
+        .position(|entry| entry.handle == handle)
+    {
+        let Some(next_refs) = catalog.sprite_refs[index].refs.checked_add(1) else {
+            set_embedded_resource_error(catalog, "sprite reference count overflow".to_string());
+            return false;
+        };
+        let cancellation_queued = catalog
+            .pending_sprite_release_cancellations
+            .contains(&handle);
+        if !cancellation_queued
+            && catalog.pending_sprite_release_cancellations.len() >= MAX_EMBEDDED_SPRITES
+        {
+            set_embedded_resource_error(
+                catalog,
+                "pending sprite release cancellation queue is full".to_string(),
+            );
+            return false;
+        }
+        catalog.sprite_refs[index].refs = next_refs;
+        catalog
+            .pending_sprite_releases
+            .retain(|queued| *queued != handle);
+        if !cancellation_queued {
+            catalog.pending_sprite_release_cancellations.push(handle);
+        }
+        return true;
+    }
+
+    let cancellation_queued = catalog
+        .pending_sprite_release_cancellations
+        .contains(&handle);
+    if !cancellation_queued
+        && catalog.pending_sprite_release_cancellations.len() >= MAX_EMBEDDED_SPRITES
+    {
+        set_embedded_resource_error(
+            catalog,
+            "pending sprite release cancellation queue is full".to_string(),
+        );
+        return false;
+    }
+    if catalog.sprite_refs.len() >= MAX_EMBEDDED_SPRITES {
+        set_embedded_resource_error(catalog, "sprite registry is full".to_string());
+        return false;
+    }
+    if !cancellation_queued {
+        catalog.pending_sprite_release_cancellations.push(handle);
+    }
+    catalog
+        .sprite_refs
+        .push(EmbeddedSpriteRef { handle, refs: 1 });
+    true
+}
+
+fn embedded_release_sprite(handle: i32) {
+    if handle == 0 {
+        return;
+    }
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return;
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return;
+    };
+    let Some(index) = catalog
+        .sprite_refs
+        .iter()
+        .position(|entry| entry.handle == handle)
+    else {
+        // Handles supplied directly by raw code were never acquired by this
+        // typed ownership table and are deliberately ignored.
+        return;
+    };
+    if catalog.sprite_refs[index].refs == 0 {
+        return;
+    }
+    catalog.sprite_refs[index].refs -= 1;
+    if catalog.sprite_refs[index].refs != 0 {
+        return;
+    }
+    if catalog.pending_sprite_releases.contains(&handle) {
+        return;
+    }
+    if catalog.pending_sprite_releases.len() >= MAX_EMBEDDED_SPRITES {
+        set_embedded_resource_error(catalog, "pending sprite release queue is full".to_string());
+        return;
+    }
+    catalog
+        .pending_sprite_release_cancellations
+        .retain(|queued| *queued != handle);
+    catalog.pending_sprite_releases.push(handle);
+}
+
+fn take_embedded_sprite_releases() -> Vec<i32> {
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return Vec::new();
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return Vec::new();
+    };
+    let count = catalog
+        .pending_sprite_releases
+        .len()
+        .min(MAX_PENDING_SPRITE_RELEASES);
+    let releases = catalog
+        .pending_sprite_releases
+        .drain(..count)
+        .collect::<Vec<_>>();
+    for handle in &releases {
+        catalog
+            .sprite_refs
+            .retain(|entry| entry.handle != *handle || entry.refs != 0);
+    }
+    releases
+}
+
+fn take_embedded_sprite_release_cancellations() -> Vec<i32> {
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return Vec::new();
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return Vec::new();
+    };
+    let count = catalog
+        .pending_sprite_release_cancellations
+        .len()
+        .min(MAX_PENDING_SPRITE_RELEASES);
+    catalog
+        .pending_sprite_release_cancellations
+        .drain(..count)
+        .collect()
 }
 
 fn embedded_load_font(path: &[u8], size: i32) -> i32 {
@@ -2631,6 +2803,27 @@ pub extern "C" fn stasis_android_bridge_resolve_sprite_asset(
         .into_raw()
 }
 
+/// Drain typed sprite releases produced by the Android JIT. The stable
+/// manifest handles are returned as a bounded JSON array and are consumed by
+/// the Workshop GL thread; an empty array is a successful no-op.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_drain_sprite_releases() -> *mut c_char {
+    let releases = take_embedded_sprite_releases();
+    CString::new(serde_json::json!({ "status": "ok", "handles": releases }).to_string())
+        .unwrap_or_else(|_| CString::new("{\"status\":\"ok\",\"handles\":[]}").unwrap())
+        .into_raw()
+}
+
+/// Drain typed sprite release cancellations produced after a stable handle was
+/// reacquired before its previously delivered GL release was applied.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_poll_sprite_release_cancellations() -> *mut c_char {
+    let handles = take_embedded_sprite_release_cancellations();
+    CString::new(serde_json::json!({ "status": "ok", "handles": handles }).to_string())
+        .unwrap_or_else(|_| CString::new("{\"status\":\"ok\",\"handles\":[]}").unwrap())
+        .into_raw()
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_android_bridge_resolve_cached_text(
     project_root: *const c_char,
@@ -2711,6 +2904,142 @@ pub extern "C" fn stasis_android_bridge_free_string(value: *mut c_char) {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn typed_sprite_release_refcounts_and_cancels_pending_event_on_reacquire() {
+        let root = std::env::temp_dir().join("stasis_android_sprite_release_refs");
+        let catalog = EmbeddedResourceCatalog {
+            project_root: root,
+            assets: ResolvedAssetManifest {
+                manifest_path: PathBuf::new(),
+                dynamic_assets: Default::default(),
+                assets: Vec::new(),
+            },
+            fonts: Vec::new(),
+            text_runs: Vec::new(),
+            sprite_refs: vec![EmbeddedSpriteRef {
+                handle: 17,
+                refs: 2,
+            }],
+            pending_sprite_releases: Vec::new(),
+            pending_sprite_release_cancellations: Vec::new(),
+            error: None,
+        };
+        *embedded_resource_catalog().lock().unwrap() = Some(catalog);
+        embedded_release_sprite(17);
+        assert!(take_embedded_sprite_releases().is_empty());
+        embedded_release_sprite(17);
+        // A zero-reference handle queues exactly once, and a reacquisition
+        // removes that event before it can reach the GL thread.
+        let mut slot = embedded_resource_catalog().lock().unwrap();
+        let catalog = slot.as_mut().unwrap();
+        assert!(embedded_acquire_sprite(catalog, 17));
+        drop(slot);
+        assert!(take_embedded_sprite_releases().is_empty());
+        embedded_release_sprite(17);
+        assert_eq!(take_embedded_sprite_releases(), vec![17]);
+        let mut slot = embedded_resource_catalog().lock().unwrap();
+        let catalog = slot.as_mut().unwrap();
+        assert!(embedded_acquire_sprite(catalog, 17));
+        drop(slot);
+        assert_eq!(take_embedded_sprite_release_cancellations(), vec![17]);
+        embedded_release_sprite(17);
+        assert_eq!(take_embedded_sprite_releases(), vec![17]);
+    }
+
+    #[test]
+    fn typed_sprite_release_refcount_overflow_is_a_resource_error() {
+        let mut catalog = EmbeddedResourceCatalog {
+            project_root: PathBuf::new(),
+            assets: ResolvedAssetManifest {
+                manifest_path: PathBuf::new(),
+                dynamic_assets: Default::default(),
+                assets: Vec::new(),
+            },
+            fonts: Vec::new(),
+            text_runs: Vec::new(),
+            sprite_refs: vec![EmbeddedSpriteRef {
+                handle: 31,
+                refs: usize::MAX,
+            }],
+            pending_sprite_releases: Vec::new(),
+            pending_sprite_release_cancellations: Vec::new(),
+            error: None,
+        };
+        assert!(!embedded_acquire_sprite(&mut catalog, 31));
+        assert_eq!(
+            catalog.error.as_deref(),
+            Some("sprite reference count overflow")
+        );
+    }
+
+    #[test]
+    fn typed_sprite_release_delivery_batches_without_loss() {
+        let _guard = bridge_runtime_test_guard();
+        let catalog = EmbeddedResourceCatalog {
+            project_root: PathBuf::new(),
+            assets: ResolvedAssetManifest {
+                manifest_path: PathBuf::new(),
+                dynamic_assets: Default::default(),
+                assets: Vec::new(),
+            },
+            fonts: Vec::new(),
+            text_runs: Vec::new(),
+            sprite_refs: (1..=300)
+                .map(|handle| EmbeddedSpriteRef { handle, refs: 1 })
+                .collect(),
+            pending_sprite_releases: Vec::new(),
+            pending_sprite_release_cancellations: Vec::new(),
+            error: None,
+        };
+        *embedded_resource_catalog().lock().unwrap() = Some(catalog);
+        for handle in 1..=300 {
+            embedded_release_sprite(handle);
+        }
+        let first = take_embedded_sprite_releases();
+        let second = take_embedded_sprite_releases();
+        assert_eq!(first.len(), MAX_PENDING_SPRITE_RELEASES);
+        assert_eq!(first, (1..=256).collect::<Vec<_>>());
+        assert_eq!(second, (257..=300).collect::<Vec<_>>());
+        assert!(take_embedded_sprite_releases().is_empty());
+        *embedded_resource_catalog().lock().unwrap() = None;
+    }
+
+    #[test]
+    fn typed_sprite_release_registry_reuses_slots_after_delivery() {
+        let _guard = bridge_runtime_test_guard();
+        let catalog = EmbeddedResourceCatalog {
+            project_root: PathBuf::new(),
+            assets: ResolvedAssetManifest {
+                manifest_path: PathBuf::new(),
+                dynamic_assets: Default::default(),
+                assets: Vec::new(),
+            },
+            fonts: Vec::new(),
+            text_runs: Vec::new(),
+            sprite_refs: Vec::new(),
+            pending_sprite_releases: Vec::new(),
+            pending_sprite_release_cancellations: Vec::new(),
+            error: None,
+        };
+        *embedded_resource_catalog().lock().unwrap() = Some(catalog);
+        for _ in 0..5000 {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            assert!(embedded_acquire_sprite(slot.as_mut().unwrap(), 17));
+            drop(slot);
+            assert_eq!(take_embedded_sprite_release_cancellations(), vec![17]);
+            embedded_release_sprite(17);
+            assert_eq!(take_embedded_sprite_releases(), vec![17]);
+        }
+        assert!(embedded_resource_catalog()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .sprite_refs
+            .is_empty());
+        *embedded_resource_catalog().lock().unwrap() = None;
+    }
 
     #[test]
     fn android_display_metrics_preserve_logical_canvas_and_round_trip_letterbox() {
@@ -3311,6 +3640,303 @@ mod tests {
         clear_runtime_session_for_test();
     }
 
+    #[test]
+    fn android_jit_typed_sprite_release_reaches_bridge_and_draws_signed_handle() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let source = r#"
+import "/vendor/stasis/stdlib/graphics.stasis";
+
+struct State {
+    sprite: Sprite;
+    loaded: i32;
+    initial_handle: i32;
+    initial_width: i32;
+    initial_height: i32;
+    draw_count: i32;
+    draw_asset: i32;
+    phase: i32;
+}
+
+global state: State;
+
+function main(): void {
+    if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
+        state.loaded = 1;
+        state.initial_handle = state.sprite.handle;
+        state.initial_width = state.sprite.width;
+        state.initial_height = state.sprite.height;
+    }
+}
+
+function tick(): void {
+    gfx_cmd_begin();
+    state.sprite.draw(4.0, 5.0, 200, 7);
+    state.draw_count = gfx_cmd_sprite_count();
+    state.draw_asset = gfx_cmd_i32[GFX_I_SPRITE_BASE];
+    gfx_cmd_mark_present();
+    if (state.phase == 0) {
+        state.sprite.release();
+        state.phase = 1;
+    } else {
+        state.sprite.release();
+        state.phase = 2;
+    }
+}
+"#;
+        let (root, handle) = write_typed_sprite_project("typed_release", source);
+
+        let _first =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("run typed sprite release tick");
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.draw_count"
+            )
+            .expect("read draw count"),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.draw_asset"
+            )
+            .expect("read draw asset"),
+            handle
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "state.loaded")
+                .expect("read loaded flag"),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.initial_handle",
+            )
+            .expect("read initial handle"),
+            handle
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.initial_width",
+            )
+            .expect("read initial width"),
+            32
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.initial_height",
+            )
+            .expect("read initial height"),
+            32
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.sprite.handle"
+            )
+            .expect("read released handle"),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.sprite.width"
+            )
+            .expect("read released width"),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.sprite.height",
+            )
+            .expect("read released height"),
+            0
+        );
+        assert_eq!(
+            ffi_json(stasis_android_bridge_drain_sprite_releases())["handles"],
+            serde_json::json!([handle])
+        );
+
+        let _duplicate =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("run duplicate release tick");
+        assert_eq!(
+            ffi_json(stasis_android_bridge_drain_sprite_releases())["handles"],
+            serde_json::json!([])
+        );
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn android_jit_typed_sprite_release_reacquire_cancels_pending_event() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let source = r#"
+import "/vendor/stasis/stdlib/graphics.stasis";
+
+struct State {
+    sprite: Sprite;
+    loaded: i32;
+    reloaded: i32;
+    reload_handle: i32;
+    reload_width: i32;
+    reload_height: i32;
+    draw_count: i32;
+    draw_asset: i32;
+    phase: i32;
+}
+
+global state: State;
+
+function main(): void {
+    state.phase = 0;
+    if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
+        state.loaded = 1;
+    }
+}
+
+function tick(): void {
+    gfx_cmd_begin();
+    if (state.phase == 0) {
+        state.sprite.release();
+        if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
+            state.reloaded = 1;
+            state.reload_handle = state.sprite.handle;
+            state.reload_width = state.sprite.width;
+            state.reload_height = state.sprite.height;
+        }
+        state.sprite.draw(6.0, 7.0, 255, 0);
+        state.draw_count = gfx_cmd_sprite_count();
+        state.draw_asset = gfx_cmd_i32[GFX_I_SPRITE_BASE];
+        state.phase = 1;
+    } else {
+        state.sprite.release();
+        state.phase = 2;
+    }
+    gfx_cmd_mark_present();
+}
+"#;
+        let (root, handle) = write_typed_sprite_project("typed_reacquire", source);
+
+        let _reacquired =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("run same-tick release and reacquire");
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.draw_count"
+            )
+            .expect("read draw count"),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.draw_asset"
+            )
+            .expect("read draw asset"),
+            handle
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "state.loaded")
+                .expect("read loaded flag"),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "state.reloaded")
+                .expect("read reloaded flag"),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.reload_handle"
+            )
+            .expect("read reload handle"),
+            handle
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.reload_width"
+            )
+            .expect("read reload width"),
+            32
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "state.reload_height",
+            )
+            .expect("read reload height"),
+            32
+        );
+        assert_eq!(
+            ffi_json(stasis_android_bridge_drain_sprite_releases())["handles"],
+            serde_json::json!([])
+        );
+
+        let _final_release =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("run final release");
+        assert_eq!(
+            ffi_json(stasis_android_bridge_drain_sprite_releases())["handles"],
+            serde_json::json!([handle])
+        );
+        assert_eq!(
+            ffi_json(stasis_android_bridge_drain_sprite_releases())["handles"],
+            serde_json::json!([])
+        );
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn android_jit_direct_asset_tasks_release_overloads_compile() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let source = r#"
+import "/vendor/stasis/stdlib/asset_tasks.stasis";
+
+global image: ImageAsset;
+global audio: AudioAsset;
+
+function main(): void {
+    image.release();
+    audio.release();
+}
+
+function tick(): void {}
+"#;
+        let (root, _) = write_typed_sprite_project("direct_asset_tasks_release", source);
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+            .expect("compile and run direct asset_tasks release overloads");
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
     fn temp_project(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3319,6 +3945,48 @@ mod tests {
         let root = std::env::temp_dir().join(format!("stasis_android_bridge_{name}_{stamp}"));
         fs::create_dir_all(root.join("src")).expect("create project");
         root
+    }
+
+    fn write_typed_sprite_project(name: &str, source: &str) -> (PathBuf, i32) {
+        let root = temp_project(name);
+        let stdlib_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/stdlib");
+        for (relative, destination) in [
+            ("stdlib.stasis", "stdlib.stasis"),
+            ("memory.stasis", "memory.stasis"),
+            ("graphics.stasis", "graphics.stasis"),
+            ("asset_tasks.stasis", "asset_tasks.stasis"),
+            ("internal/host_frame.stasis", "internal/host_frame.stasis"),
+            ("internal/gfx_cmd.stasis", "internal/gfx_cmd.stasis"),
+            (
+                "internal/host_window_request.stasis",
+                "internal/host_window_request.stasis",
+            ),
+        ] {
+            let target = root.join("vendor/stasis/stdlib").join(destination);
+            fs::create_dir_all(target.parent().expect("stdlib target parent"))
+                .expect("create vendored stdlib directory");
+            fs::copy(stdlib_root.join(relative), target).expect("vendor stdlib source");
+        }
+        fs::create_dir_all(root.join("assets")).expect("create sprite assets");
+        let sprite = include_bytes!(
+            "../../../mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg"
+        );
+        fs::write(root.join("assets/ball.svg"), sprite).expect("write sprite asset");
+        let hash = stasis_assets::sha256_bytes(sprite);
+        fs::write(
+            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
+            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"ball","path":"assets/ball.svg","content_sha256":"{hash}","format":{{"kind":"sprite","encoding":"svg","width":32,"height":32}},"dependencies":[]}}]}}"#),
+        )
+        .expect("write sprite manifest");
+        fs::write(root.join("src/main.stasis"), source).expect("write typed sprite source");
+        let manifest = load_android_workshop_asset_manifest(&root).expect("load sprite manifest");
+        let handle = manifest
+            .by_id("ball")
+            .expect("manifest sprite")
+            .handle
+            .as_i32();
+        assert!(handle < 0, "fixture must exercise signed stable handle");
+        (root, handle)
     }
 
     #[test]

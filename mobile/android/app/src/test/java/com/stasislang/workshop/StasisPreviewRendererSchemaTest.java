@@ -10,6 +10,8 @@ import static org.junit.Assert.assertTrue;
 import java.nio.IntBuffer;
 import java.nio.FloatBuffer;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.junit.Test;
 
@@ -57,6 +59,79 @@ public final class StasisPreviewRendererSchemaTest {
         assertTrue(diagnostic.contains("logical=24x16 raster=72x48 backend=gles"));
         assertTrue(diagnostic.contains("surface_generation=3 renderer_generation=4"));
         assertTrue(diagnostic.contains("reason=surface_changed failure=upload_failed"));
+    }
+
+    @Test
+    public void spriteReleaseQueueIsOrderedBoundedAndAppliedThroughProvider() {
+        List<Integer> released = new ArrayList<>();
+        StasisPreviewRenderer.TextureProvider provider =
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
+                    @Override public int textureFor(int handle) { return 0; }
+                    @Override public void releaseSprite(int handle) { released.add(handle); }
+                };
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(provider, ignored -> {});
+
+        assertTrue(renderer.enqueuePendingSpriteReleases(
+                "{\"status\":\"ok\",\"handles\":[-7,11,-13]}"));
+        assertTrue(renderer.hasPendingSpriteReleases());
+        renderer.applyPendingSpriteReleases();
+        assertEquals(java.util.Arrays.asList(-7, 11, -13), released);
+        assertFalse(renderer.hasPendingSpriteReleases());
+
+        String tooLarge = releaseBatchJson(StasisPreviewRenderer.MAX_PENDING_SPRITE_RELEASES + 1);
+        assertFalse(renderer.enqueuePendingSpriteReleases(tooLarge));
+        assertFalse(renderer.hasPendingSpriteReleases());
+
+        String full = releaseBatchJson(StasisPreviewRenderer.MAX_PENDING_SPRITE_RELEASES);
+        assertTrue(renderer.enqueuePendingSpriteReleases(full));
+        assertFalse(renderer.enqueuePendingSpriteReleases("{\"handles\":[99]}"));
+        assertTrue(renderer.hasPendingSpriteReleases());
+        renderer.applyPendingSpriteReleases();
+        assertFalse(renderer.hasPendingSpriteReleases());
+        assertEquals(3 + StasisPreviewRenderer.MAX_PENDING_SPRITE_RELEASES, released.size());
+        assertEquals(-1, released.get(3).intValue());
+        assertEquals(-StasisPreviewRenderer.MAX_PENDING_SPRITE_RELEASES,
+                released.get(released.size() - 1).intValue());
+    }
+
+    @Test
+    public void queuedReleaseIsCanceledBeforeGlApplicationWhenHandleReacquires() {
+        List<Integer> released = new ArrayList<>();
+        StasisPreviewRenderer.TextureProvider provider =
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
+                    @Override public int textureFor(int handle) { return 0; }
+                    @Override public void releaseSprite(int handle) { released.add(handle); }
+                };
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(provider, ignored -> {});
+
+        assertTrue(renderer.enqueuePendingSpriteReleases(
+                "{\"handles\":[-17,23]}"));
+        assertTrue(renderer.cancelPendingSpriteReleases(
+                "{\"handles\":[-17]}"));
+        assertTrue(renderer.hasPendingSpriteReleases());
+        renderer.applyPendingSpriteReleases();
+        assertEquals(java.util.Arrays.asList(23), released);
+        assertFalse(renderer.hasPendingSpriteReleases());
+        assertFalse(renderer.cancelPendingSpriteReleases(
+                "{\"handles\":[-17]}"));
+        assertTrue(renderer.enqueuePendingSpriteReleases("{\"handles\":[-17]}"));
+        renderer.applyPendingSpriteReleases();
+        assertEquals(java.util.Arrays.asList(23, -17), released);
+    }
+
+    private static String releaseBatchJson(int count) {
+        StringBuilder json = new StringBuilder("{\"handles\":[");
+        for (int index = 0; index < count; index += 1) {
+            if (index != 0) json.append(',');
+            json.append(-(index + 1));
+        }
+        return json.append("]}").toString();
     }
 
     @Test

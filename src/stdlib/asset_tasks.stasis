@@ -94,8 +94,61 @@ function @effects(graphics)@extern("stasis_jit_gfx_release_sprite") gfx_release_
 
 extern function @effects(audio) audio_release(asset_handle: i32): void;
 
+function reset_image(self: ImageAsset): void {
+    if (self.request > 0) {
+        asset_task_cancel(self.request);
+    }
+    if (self.handle != 0) {
+        gfx_release_sprite(self.handle);
+    }
+    self.request = 0;
+    self.handle = 0;
+    self.state = AssetState.None;
+}
+
+// Sprite ownership lives beside the asset release overloads so callers that
+// import graphics get one unambiguous receiver-method module, while direct
+// asset_tasks imports keep the existing ImageAsset/AudioAsset release API.
+struct Sprite {
+    handle: i32;
+    width: i32;
+    height: i32;
+}
+
+function reset_audio(self: AudioAsset): void {
+    if (self.request > 0) {
+        asset_task_cancel(self.request);
+    }
+    if (self.handle != 0) {
+        audio_release(self.handle);
+    }
+    self.request = 0;
+    self.handle = 0;
+    self.state = AssetState.None;
+}
+
+function release(self: ImageAsset): void {
+    reset_image(self);
+}
+
+function release(self: AudioAsset): void {
+    reset_audio(self);
+}
+
+// Release is safe to call repeatedly. A Sprite is an owning value only when
+// it was populated by load_sprite_from; copied integer handles do not acquire
+// another native reference.
+function release(self: Sprite): void {
+    if (self.handle != 0) {
+        gfx_release_sprite(self.handle);
+    }
+    self.handle = 0;
+    self.width = 0;
+    self.height = 0;
+}
+
 function @asset_path(path) load_image(self: ImageAsset, path: string, width: i32, height: i32): bool {
-    self.release();
+    reset_image(self);
     self.request = asset_request_sprite(path, width, height);
     self.width = width;
     self.height = height;
@@ -108,7 +161,7 @@ function @asset_path(path) load_image(self: ImageAsset, path: string, width: i32
 }
 
 function @asset_path(path) load_audio(self: AudioAsset, path: string): bool {
-    self.release();
+    reset_audio(self);
     self.request = asset_request_audio(path);
     if (self.request <= 0) {
         self.state = AssetState.Failed;
@@ -126,7 +179,7 @@ function status(self: ImageAsset): AssetState {
     if (self.state == AssetState.Loaded) {
         self.handle = asset_task_take_handle(self.request);
         self.request = 0;
-        if (self.handle <= 0) {
+        if (self.handle == 0) {
             self.state = AssetState.Failed;
         }
     }
@@ -141,7 +194,7 @@ function status(self: AudioAsset): AssetState {
     if (self.state == AssetState.Loaded) {
         self.handle = asset_task_take_handle(self.request);
         self.request = 0;
-        if (self.handle <= 0) {
+        if (self.handle == 0) {
             self.state = AssetState.Failed;
         }
     }
@@ -164,28 +217,4 @@ function failed(self: ImageAsset): bool {
 function failed(self: AudioAsset): bool {
     let current: AssetState = self.status();
     return current == AssetState.Failed || current == AssetState.Cancelled;
-}
-
-function release(self: ImageAsset): void {
-    if (self.request > 0) {
-        asset_task_cancel(self.request);
-    }
-    if (self.handle > 0) {
-        gfx_release_sprite(self.handle);
-    }
-    self.request = 0;
-    self.handle = 0;
-    self.state = AssetState.None;
-}
-
-function release(self: AudioAsset): void {
-    if (self.request > 0) {
-        asset_task_cancel(self.request);
-    }
-    if (self.handle > 0) {
-        audio_release(self.handle);
-    }
-    self.request = 0;
-    self.handle = 0;
-    self.state = AssetState.None;
 }

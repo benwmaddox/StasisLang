@@ -287,6 +287,7 @@ STASIS_EXPORT void stasis_gfx_release_sprite(int handle);
 STASIS_EXPORT void stasis_audio_release(int asset_handle);
 STASIS_EXPORT void stasis_gfx_submit_u8(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
 STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int32_t capacity);
+STASIS_EXPORT int stasis_test_get_sprite_state(int32_t handle, int32_t* out_i32, int32_t capacity);
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
 /* Forward decls for internal helpers used before their definitions. */
@@ -5275,6 +5276,19 @@ STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int3
         out_i32[5] = g_render_last_display_generation;
         out_i32[6] = g_render_last_density_generation;
     }
+    return 1;
+}
+
+STASIS_EXPORT int stasis_test_get_sprite_state(int32_t handle, int32_t* out_i32, int32_t capacity) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!out_i32 || capacity < 4 || !enabled || enabled[0] != '1' || enabled[1] != '\0') {
+        return 0;
+    }
+    SpriteEntry* entry = sprite_get(handle);
+    out_i32[0] = entry != NULL ? 1 : 0;
+    out_i32[1] = entry != NULL ? entry->ref_count : 0;
+    out_i32[2] = entry != NULL ? (int32_t)entry->generation : 0;
+    out_i32[3] = g_sprite_count;
     return 1;
 }
 

@@ -351,6 +351,8 @@ public final class MainActivity extends Activity {
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
+    private static native String nativeDrainSpriteReleases();
+    private static native String nativePollSpriteReleaseCancellations();
     private static native String nativeLastFrameError();
     private static native String nativeInspectRuntimeState(String projectRoot);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
@@ -11787,17 +11789,29 @@ public final class MainActivity extends Activity {
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
                 int screenWidth, int screenHeight, int[] header) {
             int status;
+            boolean releaseBatchEnqueued = false;
+            boolean releaseCancellationApplied = false;
             long requested = System.nanoTime();
             synchronized (renderer) {
                 long started = System.nanoTime();
                 lastRendererSyncWaitNanos = started - requested;
+                boolean drainReleases = !renderer.hasPendingSpriteReleases();
                 status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
                         screenWidth, screenHeight, renderer.frameI32Bytes(),
                         renderer.frameF32Bytes(), renderer.frameU8Bytes());
+                releaseCancellationApplied = renderer.cancelPendingSpriteReleases(
+                        nativePollSpriteReleaseCancellations());
+                if (!drainReleases && releaseCancellationApplied) {
+                    drainReleases = !renderer.hasPendingSpriteReleases();
+                }
+                if (drainReleases) {
+                    releaseBatchEnqueued = renderer.enqueuePendingSpriteReleases(
+                            nativeDrainSpriteReleases());
+                }
                 lastNativeFrameDurationNanos = System.nanoTime() - started;
                 renderer.copyFrameHeaderInto(header);
             }
-            if (status == 0) requestRender();
+            if (status == 0 || releaseBatchEnqueued || releaseCancellationApplied) requestRender();
             return status;
         }
 

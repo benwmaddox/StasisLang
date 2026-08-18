@@ -775,7 +775,7 @@ int stasis_jit_sprite_load_from(int32_t base, int32_t index, int32_t len, int32_
     stasis_struct_i32_store(base, index, len, "handle", loaded_handle);
     stasis_struct_i32_store(base, index, len, "width", width);
     stasis_struct_i32_store(base, index, len, "height", height);
-    if (old_handle != 0 && old_handle != loaded_handle) stasis_jit_gfx_release_sprite(old_handle);
+    if (old_handle != 0) stasis_jit_gfx_release_sprite(old_handle);
     return 1;
 }
 

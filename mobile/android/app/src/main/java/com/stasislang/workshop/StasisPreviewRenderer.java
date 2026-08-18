@@ -10,6 +10,10 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.util.Arrays;
+import java.util.ArrayDeque;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final String LOG_TAG = "StasisRenderer";
@@ -125,6 +129,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         default void onDisplayMetricsChanged(float rasterScale, int densityGeneration) {}
 
         int textureFor(int handle);
+
+        default void releaseSprite(int handle) {}
 
         default int fallbackTexture() {
             return 0;
@@ -277,6 +283,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private final TextureProvider textures;
     private final TimingListener timing;
     private final RendererResourceLifecycle resourceLifecycle = new RendererResourceLifecycle();
+    static final int MAX_PENDING_SPRITE_RELEASES = 256;
+    private final ArrayDeque<Integer> pendingSpriteReleases = new ArrayDeque<>();
     private final FramePerformanceSamples performanceSamples = BuildConfig.STASIS_RENDER_ACCEPTANCE
             ? new FramePerformanceSamples(PERFORMANCE_WARMUP_FRAMES, PERFORMANCE_SAMPLE_FRAMES)
             : null;
@@ -319,6 +327,59 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     StasisPreviewRenderer(TextureProvider textures, TimingListener timing) {
         this.textures = textures;
         this.timing = timing;
+    }
+
+    synchronized boolean enqueuePendingSpriteReleases(String message) {
+        if (message == null || message.isEmpty()) return false;
+        try {
+            JSONObject response = new JSONObject(message);
+            JSONArray handles = response.optJSONArray("handles");
+            if (handles == null || handles.length() == 0) return false;
+            if (handles.length() > MAX_PENDING_SPRITE_RELEASES - pendingSpriteReleases.size()) {
+                return false;
+            }
+            boolean enqueued = false;
+            for (int index = 0; index < handles.length(); index += 1) {
+                int handle = handles.optInt(index, 0);
+                if (handle != 0) {
+                    pendingSpriteReleases.addLast(handle);
+                    enqueued = true;
+                }
+            }
+            return enqueued;
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    synchronized boolean hasPendingSpriteReleases() {
+        return !pendingSpriteReleases.isEmpty();
+    }
+
+    synchronized boolean cancelPendingSpriteReleases(String message) {
+        if (message == null || message.isEmpty()) return false;
+        try {
+            JSONArray handles = new JSONObject(message).optJSONArray("handles");
+            if (handles == null) return false;
+            boolean canceled = false;
+            for (int index = 0; index < handles.length(); index += 1) {
+                int handle = handles.optInt(index, 0);
+                if (handle == 0) continue;
+                while (pendingSpriteReleases.removeFirstOccurrence(handle)) {
+                    canceled = true;
+                }
+            }
+            return canceled;
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    // Package-private so queue behavior can be tested without constructing a GLES surface.
+    synchronized void applyPendingSpriteReleases() {
+        while (!pendingSpriteReleases.isEmpty()) {
+            textures.releaseSprite(pendingSpriteReleases.removeFirst());
+        }
     }
 
     // Callers fill these only while synchronized on this renderer. Native code writes
@@ -415,6 +476,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int orderCount = 0;
         boolean presented = false;
         synchronized (this) {
+            applyPendingSpriteReleases();
             if (restorePlaceholderPending
                     && System.nanoTime() < restorePlaceholderUntilNanos) {
                 drawRestorePlaceholder();
