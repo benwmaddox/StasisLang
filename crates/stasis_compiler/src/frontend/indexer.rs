@@ -17,6 +17,7 @@ pub struct IndexedFunction {
     pub param_type_names: Vec<String>,
     pub return_type: TypeId,
     pub inline: bool,
+    pub effect_contract: Option<Vec<String>>,
     pub dependencies: Vec<IndexedCallDependency>,
 }
 
@@ -70,6 +71,7 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
             .annotations
             .iter()
             .any(|annotation| annotation.name == "inline");
+        let effect_contract = parse_effect_contract(&function.annotations)?;
         let signature_hash = hash_signature(name_hash, &params, return_type, inline);
         let body_text = source
             .get(function.body_range.clone())
@@ -89,6 +91,7 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
             param_type_names,
             return_type,
             inline,
+            effect_contract,
             dependencies,
         });
     }
@@ -118,6 +121,51 @@ fn hash_signature(name_hash: u64, params: &[TypeId], return_type: TypeId, inline
         .wrapping_mul(1099511628211)
         .wrapping_add(u64::from(inline));
     hash
+}
+
+fn parse_effect_contract(
+    annotations: &[crate::frontend::parser::ParsedFunctionAnnotation],
+) -> Result<Option<Vec<String>>, String> {
+    let mut matches = annotations
+        .iter()
+        .filter(|annotation| annotation.name == "effects");
+    let Some(annotation) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err("a function may declare @effects only once".to_string());
+    }
+    if !annotation.has_parentheses {
+        return Err("@effects requires parentheses, for example @effects(graphics)".to_string());
+    }
+    let mut regions = Vec::with_capacity(annotation.arguments.len());
+    for argument in &annotation.arguments {
+        let region = argument.text.trim();
+        if region.contains('[') || region.contains(']') || region.contains('*') {
+            return Err(format!(
+                "@effects region '{region}' cannot use an index or wildcard; name the collection region instead"
+            ));
+        }
+        if region.is_empty()
+            || region.split('.').any(|segment| {
+                segment.is_empty()
+                    || !segment.bytes().enumerate().all(|(index, byte)| {
+                        byte == b'_'
+                            || byte.is_ascii_alphabetic()
+                            || (index > 0 && byte.is_ascii_digit())
+                    })
+            })
+        {
+            return Err(format!(
+                "@effects region '{region}' must be a statically named global path or host capability"
+            ));
+        }
+        if regions.iter().any(|existing| existing == region) {
+            return Err(format!("duplicate @effects region '{region}'"));
+        }
+        regions.push(region.to_string());
+    }
+    Ok(Some(regions))
 }
 
 fn collect_dependencies(body_text: &str) -> Result<Vec<IndexedCallDependency>, String> {
@@ -207,6 +255,43 @@ mod tests {
             types.resolve("i32").unwrap_or_default()
         );
         assert!(!indexed[0].inline);
+        assert_eq!(indexed[0].effect_contract, None);
+    }
+
+    #[test]
+    fn indexes_effect_contract_without_changing_runtime_identity() {
+        let mut types = TypeTable::new();
+        let plain = index_file("function render(): void { return; }", &mut types).unwrap();
+        let restricted = index_file(
+            "function @effects(graphics, state.ui) render(): void { return; }",
+            &mut types,
+        )
+        .unwrap();
+        assert_eq!(
+            restricted[0].effect_contract,
+            Some(vec!["graphics".to_string(), "state.ui".to_string()])
+        );
+        assert_eq!(plain[0].signature_hash, restricted[0].signature_hash);
+    }
+
+    #[test]
+    fn rejects_indexed_and_duplicate_effect_regions() {
+        let mut types = TypeTable::new();
+        let indexed = index_file(
+            "function @effects(state.enemies[0]) tick(): void { return; }",
+            &mut types,
+        )
+        .unwrap_err();
+        assert!(indexed.contains("name the collection region"), "{indexed}");
+        let duplicate = index_file(
+            "function @effects(state, state) tick(): void { return; }",
+            &mut types,
+        )
+        .unwrap_err();
+        assert!(
+            duplicate.contains("duplicate @effects region"),
+            "{duplicate}"
+        );
     }
 
     #[test]

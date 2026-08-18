@@ -1114,6 +1114,19 @@ fn parse_function_annotations(
                 }
             }
             let next_cursor = skip_parenthesized_tokens(tokens, cursor)?;
+            if annotation_name == "effects" {
+                arguments = parse_effect_annotation_arguments(
+                    source,
+                    &tokens[cursor + 1..next_cursor - 1],
+                )?;
+                cursor = next_cursor;
+                annotations.push(ParsedFunctionAnnotation {
+                    name: annotation_name.to_string(),
+                    has_parentheses,
+                    arguments,
+                });
+                continue;
+            }
             let mut expects_argument = true;
             for token in &tokens[cursor + 1..next_cursor - 1] {
                 if token.kind == TokenKind::Comma {
@@ -1155,6 +1168,37 @@ fn parse_function_annotations(
         });
     }
     Ok((cursor, extern_symbol, annotations))
+}
+
+fn parse_effect_annotation_arguments(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Vec<ParsedFunctionAnnotationArgument>, String> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut arguments = Vec::new();
+    let mut start = 0usize;
+    for end in 0..=tokens.len() {
+        if end < tokens.len() && tokens[end].kind != TokenKind::Comma {
+            continue;
+        }
+        if start == end {
+            return Err("annotation '@effects' has an empty argument".to_string());
+        }
+        let first = tokens[start];
+        let last = tokens[end - 1];
+        arguments.push(ParsedFunctionAnnotationArgument {
+            kind: if start + 1 == end && first.kind == TokenKind::Identifier {
+                ParsedFunctionAnnotationArgumentKind::Identifier
+            } else {
+                ParsedFunctionAnnotationArgumentKind::Other
+            },
+            text: source[first.start..last.end].to_string(),
+        });
+        start = end + 1;
+    }
+    Ok(arguments)
 }
 
 fn parse_extern_symbol_annotation(

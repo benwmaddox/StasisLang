@@ -121,7 +121,26 @@ import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
 import "/vendor/stasis/stdlib/ui_layout_audit.stasis";
 import "/vendor/stasis/stdlib/ui_button_9slice.stasis";
 
+struct GameState {
+    ticks: i32;
+}
+
+global state: GameState;
+
 function main(): i32 {
+    state.ticks = 0;
+    return 0;
+}
+
+function @effects(state) tick(): i32 {
+    state.ticks += 1;
+    return 0;
+}
+
+function @effects(graphics) render(): i32 {
+    begin_frame();
+    clear(0.05, 0.07, 0.10, 1.0);
+    end_frame();
     return 0;
 }
 "#;
@@ -5874,6 +5893,29 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_graphical_project_has_effect_boundaries_and_checks() {
+        let root = temp_dir("effect_template");
+        create_project(root.clone(), "effect_template".to_string()).expect("create project");
+        let source = fs::read_to_string(root.join("src/main.stasis")).expect("read source");
+        assert_eq!(
+            source
+                .matches("function @effects(state) tick(): i32")
+                .count(),
+            1
+        );
+        assert_eq!(
+            source
+                .matches("function @effects(graphics) render(): i32")
+                .count(),
+            1
+        );
+        assert!(!source.contains("function @effects(state, graphics)"));
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        check_workspace(&workspace).expect("generated project checks");
+        remove_temp(&root);
+    }
     use stasis_ai::live_tool_specs;
     use stasis_compiler::frontend::types::TYPE_ID_U8;
     use std::collections::BTreeMap;

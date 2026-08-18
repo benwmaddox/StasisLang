@@ -85,14 +85,14 @@ function successful(self: LoadingProgress): bool {
     return self.complete() && self.failed_count == 0;
 }
 
-function @extern("stasis_jit_asset_request_sprite") asset_request_sprite(path: string, width: i32, height: i32): i32;
-function @extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
-function @extern("stasis_jit_asset_task_poll") asset_task_state(request: i32): AssetState;
-function @extern("stasis_jit_asset_task_take_handle") asset_task_take_handle(request: i32): i32;
-function @extern("stasis_jit_asset_task_cancel") asset_task_cancel(request: i32): void;
-function @extern("stasis_jit_gfx_release_sprite") gfx_release_sprite(handle: i32): void;
+function @effects(graphics)@extern("stasis_jit_asset_request_sprite") asset_request_sprite(path: string, width: i32, height: i32): i32;
+function @effects(audio)@extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
+function @effects(platform)@extern("stasis_jit_asset_task_poll") asset_task_state(request: i32): AssetState;
+function @effects(platform)@extern("stasis_jit_asset_task_take_handle") asset_task_take_handle(request: i32): i32;
+function @effects(platform)@extern("stasis_jit_asset_task_cancel") asset_task_cancel(request: i32): void;
+function @effects(graphics)@extern("stasis_jit_gfx_release_sprite") gfx_release_sprite(handle: i32): void;
 
-extern function audio_release(asset_handle: i32): void;
+extern function @effects(audio) audio_release(asset_handle: i32): void;
 
 function @asset_path(path) load_image(self: ImageAsset, path: string, width: i32, height: i32): bool {
     self.release();

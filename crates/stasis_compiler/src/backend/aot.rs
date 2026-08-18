@@ -1598,6 +1598,23 @@ fn build_engine_bundle_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aot_enforces_the_same_effect_contracts_as_jit() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function helper(value: State): void { value.value += 1; } function @effects(state) tick(): i32 { helper(state); return state.value; } function main(): i32 { state.value = 4; return tick(); }",
+        );
+        process.compile().expect("compliant AOT contract");
+
+        process.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; global other: i32; function helper(): void { other += 1; } function @effects(state) tick(): i32 { helper(); return state.value; } function main(): i32 { return tick(); }",
+        );
+        let error = process.compile().expect_err("AOT contract violation");
+        assert!(format!("{error:?}").contains("tick -> helper"));
+    }
     use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
     use object::{

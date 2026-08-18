@@ -12,7 +12,16 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
 };
 
-pub const FUNCTION_DATA_FLOW_SCHEMA_VERSION: u32 = 2;
+pub const FUNCTION_DATA_FLOW_SCHEMA_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EffectContractViolation {
+    pub file: String,
+    pub source_start: u32,
+    pub source_end: u32,
+    pub function: String,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FunctionDataFlowEffects {
@@ -23,8 +32,16 @@ pub struct FunctionDataFlowEffects {
     pub calls: Vec<String>,
     pub host_calls: Vec<String>,
     #[serde(default)]
+    pub host_effects: Vec<FunctionHostEffect>,
+    #[serde(default)]
     pub host_call_costs: Vec<FunctionHostCallCost>,
     pub bounded_iterations: Vec<FunctionBoundedIteration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct FunctionHostEffect {
+    pub function: String,
+    pub capability: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -71,6 +88,12 @@ pub struct FunctionDataFlowSummary {
     internal_signature_hash: u64,
     #[serde(skip)]
     pub(crate) parameter_storage_kinds: Vec<ParameterStorageKind>,
+    #[serde(skip)]
+    internal_call_sites: Vec<CallSite>,
+    #[serde(skip)]
+    internal_direct_write_paths: Vec<String>,
+    #[serde(skip)]
+    internal_aggregate_write_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -98,6 +121,7 @@ struct EffectSets {
     parameter_writes: BTreeSet<String>,
     calls: BTreeSet<String>,
     host_calls: BTreeSet<String>,
+    host_effects: BTreeSet<FunctionHostEffect>,
     host_call_costs: BTreeMap<String, Option<u64>>,
     bounded_iterations: BTreeSet<FunctionBoundedIteration>,
     call_sites: Vec<CallSite>,
@@ -143,6 +167,7 @@ impl EffectSets {
             parameter_writes: public_parameter_paths(&self.parameter_writes, parameter_names),
             calls: self.calls.iter().cloned().collect(),
             host_calls: self.host_calls.iter().cloned().collect(),
+            host_effects: self.host_effects.iter().cloned().collect(),
             host_call_costs: self
                 .host_call_costs
                 .iter()
@@ -235,6 +260,7 @@ struct AnalysisContext<'a> {
     view_parameters_by_function: BTreeMap<u32, BTreeSet<usize>>,
     fixed_parameter_capacities: BTreeMap<u32, BTreeMap<usize, u64>>,
     extern_functions: BTreeSet<String>,
+    extern_effects: BTreeMap<String, Option<Vec<String>>>,
     collection_capacities: BTreeMap<String, u64>,
     path_types: BTreeMap<String, TypeId>,
     field_types: BTreeMap<TypeId, BTreeMap<String, TypeId>>,
@@ -439,6 +465,26 @@ pub(crate) fn build_function_data_flow_summaries(
             };
         let internal_syntax_fingerprint =
             effect_syntax_fingerprint(&statements_by_id[function.storage_index as usize]);
+        let internal_aggregate_write_paths = if let Some(aggregate_by_id) = &aggregate_by_id {
+            aggregate_by_id[function.storage_index as usize]
+                .writes
+                .iter()
+                .chain(
+                    aggregate_by_id[function.storage_index as usize]
+                        .parameter_writes
+                        .iter(),
+                )
+                .cloned()
+                .collect()
+        } else {
+            previous_by_key[&(
+                file.path.as_str(),
+                function.name.as_str(),
+                signature_hash.as_str(),
+            )]
+                .internal_aggregate_write_paths
+                .clone()
+        };
         out.push(FunctionDataFlowSummary {
             schema_version: FUNCTION_DATA_FLOW_SCHEMA_VERSION,
             function: function.name.clone(),
@@ -457,6 +503,20 @@ pub(crate) fn build_function_data_flow_summaries(
                 .get(function.storage_index as usize)
                 .cloned()
                 .unwrap_or_default(),
+            internal_call_sites: direct_by_id[function.storage_index as usize]
+                .call_sites
+                .clone(),
+            internal_direct_write_paths: direct_by_id[function.storage_index as usize]
+                .writes
+                .iter()
+                .chain(
+                    direct_by_id[function.storage_index as usize]
+                        .parameter_writes
+                        .iter(),
+                )
+                .cloned()
+                .collect(),
+            internal_aggregate_write_paths,
         });
     }
     out.sort_by(|left, right| {
@@ -794,6 +854,7 @@ fn build_context<'a>(
     let mut globals = BTreeSet::new();
     let mut constants = BTreeMap::new();
     let mut extern_functions = BTreeSet::new();
+    let mut extern_effects = BTreeMap::new();
     let mut resolved_externs = Vec::new();
     let mut structs = BTreeMap::new();
     let mut global_types = Vec::new();
@@ -824,6 +885,49 @@ fn build_context<'a>(
         if file.content.contains("extern") {
             for external in parse_top_level_extern_functions(&file.content)? {
                 extern_functions.insert(external.name.clone());
+                let mut effect_annotations = external
+                    .annotations
+                    .iter()
+                    .filter(|annotation| annotation.name == "effects");
+                let effect_annotation = effect_annotations.next();
+                if effect_annotations.next().is_some() {
+                    return Err(format!(
+                        "extern function '{}' may declare @effects only once",
+                        external.name
+                    ));
+                }
+                let capabilities = if let Some(annotation) = effect_annotation {
+                    Some(
+                        annotation
+                            .arguments
+                            .iter()
+                            .map(|argument| argument.text.trim().to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                };
+                if let Some(capabilities) = &capabilities {
+                    if let Some(invalid) = capabilities
+                        .iter()
+                        .find(|capability| !is_host_capability(capability))
+                    {
+                        return Err(format!(
+                            "extern function '{}' declares unknown host effect capability '{}'",
+                            external.name, invalid
+                        ));
+                    }
+                }
+                if let Some(previous) =
+                    extern_effects.insert(external.name.clone(), capabilities.clone())
+                {
+                    if previous != capabilities {
+                        return Err(format!(
+                            "extern overloads named '{}' must declare identical @effects metadata",
+                            external.name
+                        ));
+                    }
+                }
                 let params: Option<Vec<TypeId>> = external
                     .params
                     .iter()
@@ -912,7 +1016,7 @@ fn build_context<'a>(
         }
     }
     let mut fingerprint_hasher = DefaultHasher::new();
-    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}")
+    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}|{extern_effects:?}")
         .hash(&mut fingerprint_hasher);
     let fingerprint = fingerprint_hasher.finish();
     Ok(AnalysisContext {
@@ -921,6 +1025,7 @@ fn build_context<'a>(
         view_parameters_by_function,
         fixed_parameter_capacities,
         extern_functions,
+        extern_effects,
         collection_capacities,
         path_types,
         field_types,
@@ -1399,8 +1504,36 @@ fn analyze_expression(
                         .map(|argument| expression_effect_path(argument, context, locals, aliases))
                         .collect(),
                 );
+            } else if let Some(capability) = builtin_host_effect(target) {
+                effects.host_calls.insert(target.clone());
+                effects.host_effects.insert(FunctionHostEffect {
+                    function: target.clone(),
+                    capability: capability.to_string(),
+                });
+                effects.record_host_call(target);
             } else if context.extern_functions.contains(target) {
                 effects.host_calls.insert(target.clone());
+                let capabilities = context.extern_effects.get(target).and_then(Option::as_ref);
+                if capabilities.is_none() {
+                    effects.host_effects.insert(FunctionHostEffect {
+                        function: target.clone(),
+                        capability: "unknown".to_string(),
+                    });
+                } else if let Some(capabilities) = capabilities {
+                    effects
+                        .host_effects
+                        .extend(capabilities.iter().map(|capability| FunctionHostEffect {
+                            function: target.clone(),
+                            capability: capability.clone(),
+                        }));
+                }
+                effects.record_host_call(target);
+            } else if !is_pure_intrinsic(target) {
+                effects.host_calls.insert(target.clone());
+                effects.host_effects.insert(FunctionHostEffect {
+                    function: target.clone(),
+                    capability: "unknown".to_string(),
+                });
                 effects.record_host_call(target);
             }
             for (index, argument) in args.iter().enumerate() {
@@ -1419,6 +1552,365 @@ fn analyze_expression(
             analyze_expression(rhs, context, locals, local_types, aliases, effects);
         }
     }
+}
+
+pub(crate) fn is_host_capability(value: &str) -> bool {
+    matches!(
+        value,
+        "graphics"
+            | "audio"
+            | "storage"
+            | "network"
+            | "nondeterministic"
+            | "platform"
+            | "memory"
+            | "code_swap"
+    )
+}
+
+fn builtin_host_effect(target: &str) -> Option<&'static str> {
+    matches!(
+        target,
+        "print_i32" | "print_int" | "print_char" | "print_string"
+    )
+    .then_some("platform")
+}
+
+fn is_pure_intrinsic(target: &str) -> bool {
+    matches!(
+        target,
+        "fixed32_from_i32"
+            | "fixed32_to_i32"
+            | "fixed32_mul"
+            | "fixed32_div"
+            | "fixed32_from_ratio"
+            | "i32_to_f32"
+            | "f32_to_i32"
+            | "sin_fast"
+            | "cos_fast"
+    )
+}
+
+pub(crate) fn validate_effect_contracts(
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    summaries: &[FunctionDataFlowSummary],
+) -> Result<(), EffectContractViolation> {
+    let mut capability_globals = BTreeMap::<&str, BTreeSet<String>>::new();
+    let mut structs = BTreeMap::new();
+    let mut layouts = Vec::new();
+    for file in files {
+        let Ok(layout) = parse_top_level_type_layout(&file.content) else {
+            continue;
+        };
+        structs.extend(
+            layout
+                .structs
+                .iter()
+                .map(|structure| (structure.name.clone(), structure.fields.clone())),
+        );
+        layouts.push((file, layout));
+    }
+    let mut declared_regions = BTreeSet::new();
+    for (file, layout) in layouts {
+        let normalized_path = file.path.replace('\\', "/");
+        let owned_capability = if normalized_path.ends_with("stdlib/internal/gfx_cmd.stasis") {
+            Some("graphics")
+        } else if normalized_path.ends_with("stdlib/internal/host_window_request.stasis") {
+            Some("platform")
+        } else {
+            None
+        };
+        if let Some(capability) = owned_capability {
+            capability_globals
+                .entry(capability)
+                .or_default()
+                .extend(layout.globals.iter().map(|global| global.name.clone()));
+        }
+        for global in layout.globals {
+            collect_declared_regions(
+                &global.name,
+                &global.type_name,
+                &structs,
+                &mut declared_regions,
+                &mut BTreeSet::new(),
+            );
+        }
+        for block in layout.global_blocks {
+            declared_regions.insert(block.name.clone());
+            for field in block.fields {
+                collect_declared_regions(
+                    &format!("{}.{}", block.name, field.name),
+                    &field.type_name,
+                    &structs,
+                    &mut declared_regions,
+                    &mut BTreeSet::new(),
+                );
+            }
+        }
+    }
+    let summary_by_id = summaries
+        .iter()
+        .map(|summary| (summary.internal_function_id, summary))
+        .collect::<BTreeMap<_, _>>();
+    for boundary in functions {
+        let Some(contract) = boundary.effect_contract.as_deref() else {
+            continue;
+        };
+        let Some(summary) = summary_by_id.get(&boundary.storage_index).copied() else {
+            continue;
+        };
+        for region in contract {
+            if !is_host_capability(region) && !declared_regions.contains(region) {
+                return Err(contract_violation(
+                    files,
+                    boundary,
+                    format!(
+                        "effect contract on '{}' names unknown global region '{}'",
+                        boundary.name, region
+                    ),
+                ));
+            }
+        }
+        let allowed_regions = contract
+            .iter()
+            .filter(|region| !is_host_capability(region))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if let Some(path) =
+            summary.aggregate.writes.iter().find(|path| {
+                !write_is_allowed(path, &allowed_regions, contract, &capability_globals)
+            })
+        {
+            let chain = write_call_chain(
+                boundary.storage_index,
+                path,
+                &summary_by_id,
+                &mut BTreeSet::new(),
+            );
+            return Err(contract_violation(
+                files,
+                boundary,
+                format!(
+                    "effect contract on '{}' rejects write '{}'; originating operation is reachable through {}",
+                    boundary.name,
+                    path,
+                    display_call_chain(&chain, &summary_by_id)
+                ),
+            ));
+        }
+        if let Some(path) = summary.aggregate.parameter_writes.first() {
+            let chain = effect_call_chain(
+                boundary.storage_index,
+                &summary_by_id,
+                &mut BTreeSet::new(),
+                &|candidate| candidate.aggregate.parameter_writes.contains(path),
+                &|candidate| !candidate.direct.parameter_writes.is_empty(),
+            );
+            return Err(contract_violation(
+                files,
+                boundary,
+                format!(
+                    "effect contract on '{}' rejects write through parameter '{}': its global region is not proven; originating operation is reachable through {}",
+                    boundary.name,
+                    path,
+                    display_call_chain(&chain, &summary_by_id)
+                ),
+            ));
+        }
+        if let Some(effect) =
+            summary.aggregate.host_effects.iter().find(|effect| {
+                effect.capability == "unknown" || !contract.contains(&effect.capability)
+            })
+        {
+            let chain = effect_call_chain(
+                boundary.storage_index,
+                &summary_by_id,
+                &mut BTreeSet::new(),
+                &|candidate| candidate.aggregate.host_effects.contains(effect),
+                &|candidate| candidate.direct.host_effects.contains(effect),
+            );
+            return Err(contract_violation(
+                files,
+                boundary,
+                format!(
+                    "effect contract on '{}' rejects host effect '{}' from '{}'; originating operation is reachable through {}",
+                    boundary.name,
+                    effect.capability,
+                    effect.function,
+                    display_call_chain(&chain, &summary_by_id)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_declared_regions(
+    path: &str,
+    type_name: &str,
+    structs: &BTreeMap<String, Vec<crate::frontend::parser::ParsedField>>,
+    regions: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+) {
+    regions.insert(path.to_string());
+    let element_type = split_array_type(type_name)
+        .map(|(element, _)| element)
+        .unwrap_or(type_name);
+    if !visiting.insert(element_type.to_string()) {
+        return;
+    }
+    if let Some(fields) = structs.get(element_type) {
+        for field in fields {
+            collect_declared_regions(
+                &format!("{path}.{}", field.name),
+                &field.type_name,
+                structs,
+                regions,
+                visiting,
+            );
+        }
+    }
+    visiting.remove(element_type);
+}
+
+fn region_contains(region: &str, path: &str) -> bool {
+    path == region
+        || path
+            .strip_prefix(region)
+            .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with('['))
+}
+
+fn write_is_allowed(
+    path: &str,
+    regions: &[&str],
+    contract: &[String],
+    capability_globals: &BTreeMap<&str, BTreeSet<String>>,
+) -> bool {
+    regions.iter().any(|region| region_contains(region, path))
+        || contract.iter().any(|capability| {
+            capability_globals
+                .get(capability.as_str())
+                .is_some_and(|globals| globals.contains(root_name(path)))
+        })
+}
+
+fn contract_violation(
+    files: &[SourceFile],
+    boundary: &FunctionMeta,
+    message: String,
+) -> EffectContractViolation {
+    EffectContractViolation {
+        file: files[boundary.file_id as usize].path.clone(),
+        source_start: boundary.signature_range.start,
+        source_end: boundary.signature_range.end,
+        function: boundary.name.clone(),
+        message,
+    }
+}
+
+fn effect_call_chain(
+    current: u32,
+    summaries: &BTreeMap<u32, &FunctionDataFlowSummary>,
+    visiting: &mut BTreeSet<u32>,
+    contains: &impl Fn(&FunctionDataFlowSummary) -> bool,
+    originates: &impl Fn(&FunctionDataFlowSummary) -> bool,
+) -> Vec<u32> {
+    if !visiting.insert(current) {
+        return vec![current];
+    }
+    let Some(summary) = summaries.get(&current).copied() else {
+        return vec![current];
+    };
+    if originates(summary) {
+        return vec![current];
+    }
+    for call_site in &summary.internal_call_sites {
+        let child = call_site.target_id;
+        let Some(child_summary) = summaries.get(&child).copied() else {
+            continue;
+        };
+        if !contains(child_summary) && !originates(child_summary) {
+            continue;
+        }
+        let mut branch = visiting.clone();
+        let chain = effect_call_chain(child, summaries, &mut branch, contains, originates);
+        if chain
+            .last()
+            .and_then(|id| summaries.get(id))
+            .is_some_and(|leaf| originates(leaf))
+        {
+            let mut out = vec![current];
+            out.extend(chain);
+            return out;
+        }
+    }
+    vec![current]
+}
+
+fn write_call_chain(
+    current: u32,
+    path: &str,
+    summaries: &BTreeMap<u32, &FunctionDataFlowSummary>,
+    visiting: &mut BTreeSet<(u32, String)>,
+) -> Vec<u32> {
+    if !visiting.insert((current, path.to_string())) {
+        return vec![current];
+    }
+    let Some(summary) = summaries.get(&current).copied() else {
+        return vec![current];
+    };
+    if summary
+        .internal_direct_write_paths
+        .iter()
+        .any(|candidate| candidate == path)
+    {
+        return vec![current];
+    }
+    for call_site in &summary.internal_call_sites {
+        let Some(child) = summaries.get(&call_site.target_id).copied() else {
+            continue;
+        };
+        let substitutions = call_site
+            .arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| argument.clone().map(|argument| (index, argument)))
+            .collect::<BTreeMap<_, _>>();
+        let child_path = child
+            .internal_aggregate_write_paths
+            .iter()
+            .find(|candidate| {
+                substitute_path(candidate, &substitutions, false).as_deref() == Some(path)
+            });
+        let Some(child_path) = child_path else {
+            continue;
+        };
+        let mut branch = visiting.clone();
+        let chain = write_call_chain(call_site.target_id, child_path, summaries, &mut branch);
+        let reached_origin = chain.len() > 1
+            || child
+                .internal_direct_write_paths
+                .iter()
+                .any(|candidate| candidate == child_path);
+        if reached_origin {
+            let mut out = vec![current];
+            out.extend(chain);
+            return out;
+        }
+    }
+    vec![current]
+}
+
+fn display_call_chain(
+    chain: &[u32],
+    summaries: &BTreeMap<u32, &FunctionDataFlowSummary>,
+) -> String {
+    chain
+        .iter()
+        .filter_map(|id| summaries.get(id).map(|summary| summary.function.as_str()))
+        .collect::<Vec<_>>()
+        .join(" -> ")
 }
 
 fn analyze_view_argument(
@@ -1822,6 +2314,9 @@ fn merge_substituted_effects(
     aggregate
         .host_calls
         .extend(direct.host_calls.iter().cloned());
+    aggregate
+        .host_effects
+        .extend(direct.host_effects.iter().cloned());
     merge_host_call_costs(
         &mut aggregate.host_call_costs,
         &direct.host_call_costs,
