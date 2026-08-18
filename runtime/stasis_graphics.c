@@ -391,7 +391,7 @@ static int g_asset_task_stop;
 static int g_asset_task_next_id = 1;
 
 /* Font rendering with stb_truetype. */
-#define MAX_FONTS 8
+#define MAX_FONTS 32
 #define FONT_FIRST_CHAR 32
 #define FONT_NUM_CHARS 95
 
