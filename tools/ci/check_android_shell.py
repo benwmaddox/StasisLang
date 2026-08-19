@@ -165,8 +165,11 @@ def main() -> int:
     assert "stale for the current Rust/Cargo inputs" in rust_bridge_provenance
     assert "aarch64-linux-android" in rust_bridge_script
     assert "x86_64-linux-android" in rust_bridge_script
+    assert "linux-x86_64" in rust_bridge_script
+    assert "[System.IO.Path]::IsPathRooted" in rust_bridge_script
     assert "libstasis_android_bridge.so" in rust_bridge_script
-    assert '"app\\src\\workshop\\jniLibs\\$abi"' in rust_bridge_script
+    assert 'Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $scriptRoot "app") "src") "workshop") "jniLibs") $abi' in rust_bridge_script
+    assert "cargo_cache.py" in rust_bridge_script
     assert 'build_rust_bridge.ps1") -Release' in debug_script
     assert ":app:assembleWorkshopDebug" in debug_script
     assert "package-mobile" in release_script
@@ -1392,6 +1395,7 @@ def main() -> int:
     assert "required Rust Android compiler bridge is unavailable" in native
     assert "dlopen(\"libstasis_android_bridge.so\"" in native
     assert "stasis_android_bridge_compile_project" in native
+    assert "stasis_android_bridge_version" in native
     assert "stasis_android_bridge_set_i32_global" in native
     assert "stasis_android_bridge_get_i32_global" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeSetRuntimeI32" in native
@@ -1428,6 +1432,11 @@ def main() -> int:
     assert "WorkshopReload::FastReload" in bridge
     assert "WorkshopReload::ResetRequired" in bridge
     assert "CompileReady: backend=cranelift-jit" in bridge
+    assert "Stasis Workshop IT-025" in native
+    assert "STASIS_RENDER_ACCEPTANCE" in native
+    assert "STASIS_RENDER_I_FRAME_TOKEN" in native
+    assert "IT-025 GLES" in preview_renderer
+    assert "I_FRAME_TOKEN" in preview_renderer
     assert "Stasis Android native smoke loaded" in native
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
@@ -1439,6 +1448,7 @@ def main() -> int:
     assert "STASIS_ANDROID_PUBLISHED_AOT" not in cmake
     assert "published_aot_objects.cmake" not in cmake
     assert "find_library(dl_lib dl)" in cmake
+    assert "STASIS_RENDER_ACCEPTANCE" in cmake
     assert "${dl_lib}" in cmake
 
     for sample in STASIS_SAMPLE_FILES:

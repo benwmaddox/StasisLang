@@ -11,6 +11,8 @@ $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
+$runningOnWindows = [System.IO.Path]::DirectorySeparatorChar -eq [char]'\'
+$executableSuffix = if ($runningOnWindows) { ".exe" } else { "" }
 
 if (-not $AndroidHome) {
     if ($env:ANDROID_HOME) {
@@ -18,12 +20,16 @@ if (-not $AndroidHome) {
     } elseif ($env:ANDROID_SDK_ROOT) {
         $AndroidHome = $env:ANDROID_SDK_ROOT
     } else {
-        $AndroidHome = "C:\Android\Sdk"
+        $AndroidHome = if ($runningOnWindows) {
+            "C:\Android\Sdk"
+        } else {
+            Join-Path ([Environment]::GetFolderPath("UserProfile")) "Android/sdk"
+        }
     }
 }
 
 $ndkRoot = if ($NdkVersion) {
-    Join-Path $AndroidHome "ndk\$NdkVersion"
+    Join-Path (Join-Path $AndroidHome "ndk") $NdkVersion
 } else {
     $ndkParent = Join-Path $AndroidHome "ndk"
     $ndks = Get-ChildItem -Directory $ndkParent -ErrorAction SilentlyContinue | Sort-Object Name -Descending
@@ -33,7 +39,9 @@ $ndkRoot = if ($NdkVersion) {
     $ndks[0].FullName
 }
 
-$prebuilt = Join-Path $ndkRoot "toolchains\llvm\prebuilt\windows-x86_64"
+$prebuiltName = if ($runningOnWindows) { "windows-x86_64" } else { "linux-x86_64" }
+$prebuilt = Join-Path (Join-Path (Join-Path $ndkRoot "toolchains") "llvm") (Join-Path "prebuilt" $prebuiltName)
+$linkerSuffix = if ($runningOnWindows) { ".cmd" } else { "" }
 $installedTargets = & rustup target list --installed
 if ($LASTEXITCODE -ne 0) { throw "rustup target discovery failed with exit code $LASTEXITCODE" }
 $env:CARGO_INCREMENTAL = "0"
@@ -66,7 +74,7 @@ foreach ($abi in $Abis) {
     $target = $targets[$abi]
     if (-not $target) { throw "Unsupported Android ABI: $abi" }
     $rustTarget = $target.Rust
-    $linker = Join-Path $prebuilt "bin\$($target.Clang)$MinSdk-clang.cmd"
+    $linker = Join-Path (Join-Path $prebuilt "bin") "$($target.Clang)$MinSdk-clang$linkerSuffix"
     if (-not (Test-Path $linker)) { throw "Android linker not found: $linker" }
     if ($installedTargets -notcontains $rustTarget) {
         throw "Rust target $rustTarget is not installed. Run: rustup target add $rustTarget"
@@ -76,19 +84,33 @@ foreach ($abi in $Abis) {
     $linkerVariable = "CARGO_TARGET_$($rustTarget.ToUpperInvariant().Replace('-', '_'))_LINKER"
     Set-Item -Path "Env:$linkerVariable" -Value $linker
     Set-Item -Path "Env:CC_$targetEnvName" -Value $linker
-    Set-Item -Path "Env:AR_$targetEnvName" -Value (Join-Path $prebuilt "bin\llvm-ar.exe")
+    Set-Item -Path "Env:AR_$targetEnvName" -Value (Join-Path (Join-Path $prebuilt "bin") "llvm-ar$executableSuffix")
 
     Push-Location $repoRoot
     try {
-        cargo build -p stasis_android_bridge --target $rustTarget @profileArgs
+        $cargoCache = Join-Path (Join-Path $repoRoot "tools") "cargo_cache.py"
+        & python $cargoCache run -- cargo build -p stasis_android_bridge --target $rustTarget @profileArgs
         if ($LASTEXITCODE -ne 0) { throw "Rust Android bridge build failed with exit code $LASTEXITCODE" }
     } finally {
         Pop-Location
     }
 
-    $source = Join-Path $repoRoot "target\$rustTarget\$profileDir\libstasis_android_bridge.so"
+    $targetRoot = if ($env:CARGO_TARGET_DIR) {
+        if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+            [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+        } else {
+            [System.IO.Path]::GetFullPath((Join-Path $repoRoot $env:CARGO_TARGET_DIR))
+        }
+    } else {
+        $commonGitDir = (& git -C $repoRoot rev-parse --path-format=absolute --git-common-dir).Trim()
+        Join-Path (Split-Path $commonGitDir -Parent) (Join-Path "build" "codex-cargo-target")
+    }
+    $source = Join-Path (Join-Path (Join-Path $targetRoot $rustTarget) $profileDir) "libstasis_android_bridge.so"
+    if (-not (Test-Path $source)) {
+        $source = Join-Path (Join-Path (Join-Path $repoRoot "target") $rustTarget) (Join-Path $profileDir "libstasis_android_bridge.so")
+    }
     if (-not (Test-Path $source)) { throw "Rust bridge output was not produced: $source" }
-    $destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\$abi"
+    $destDir = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $scriptRoot "app") "src") "workshop") "jniLibs") $abi
     New-Item -ItemType Directory -Force $destDir | Out-Null
     $dest = Join-Path $destDir "libstasis_android_bridge.so"
     Copy-Item -Force $source $dest

@@ -43,6 +43,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Android Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -69,7 +72,17 @@ jobs:
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
             -no-boot-anim -camera-back none
-          script: pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1
+          script: |
+            pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1
+            pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 -Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90
+
+      - name: Upload Android Workshop IT-025 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-workshop-it025-seam
+          path: artifacts/android_workshop_seam/e
+          if-no-files-found: warn
 
       - name: Upload Android release-shell evidence
         if: always()

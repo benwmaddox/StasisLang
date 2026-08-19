@@ -51,6 +51,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int I_DROPPED_ORDER = 23;
     static final int I_RECT_COUNT = 24;
     static final int I_DROPPED_RECTS = 25;
+    static final int I_FRAME_TOKEN = 26;
     static final int I_SPRITE_BASE = 32;
     static final int F_LINE_BASE = 4;
     static final int MAX_GEOMETRY = 10_000;
@@ -544,7 +545,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                     renderAcceptanceFrameCount += 1;
                     if (renderAcceptanceFrameCount == 1 || renderAcceptanceFrameCount % 30 == 0) {
-                        Log.i(LOG_TAG, "RenderAcceptanceFrame: count=" + renderAcceptanceFrameCount);
+                        Log.i(LOG_TAG, "RenderAcceptanceFrame: count=" + renderAcceptanceFrameCount
+                                + " frame_token=" + frameI32.get(I_FRAME_TOKEN));
+                        Log.i(LOG_TAG, "Stasis Workshop IT-025 GLES: {\"schema\":\"stasis.workshop_seam.v1\","
+                                + "\"test_id\":\"IT-025\",\"event\":\"present\",\"count\":"
+                                + renderAcceptanceFrameCount + ","
+                                + "\"frame_token\":" + frameI32.get(I_FRAME_TOKEN) + "}");
                     }
                 }
             }

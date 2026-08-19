@@ -72,6 +72,7 @@ jobs:
         run: |
           python -m unittest tools.ci.test_verify_android_render_performance
           python -m unittest tools.ci.test_verify_render_parity
+          python -m unittest tools.ci.test_verify_android_workshop_seam
           python tools/ci/verify_render_parity.py
 
       - name: Test web runtime seams

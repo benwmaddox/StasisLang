@@ -127,6 +127,7 @@ Run the blocking render end-to-end gate directly with:
 ```
 
 This builds the canonical `samples/render_parity` fixture in Workshop with the real x86_64 development JIT. It captures the OpenGL surface, normalizes the letterboxed 640x360 viewport, and checks Android regions for the background, procedural fallback, opaque/translucent/rotated SVG sprites, a filled rectangle, crossing lines, direct text, and cached text. Three spaced captures, at least 30 rendered frames, and a successful non-empty JIT compile are required. Release packages are checked separately by `build_release.ps1` and can be run on an arm64 device with `validate_device.ps1 -Release`.
+The gate also emits `artifacts/android_workshop_seam/e/workshop-workshop-seam.json` for IT-025. It binds one Java/JNI/dlopen call to the real Rust bridge version, Cranelift `CompileReady`, a guest JIT state checksum, the render command trace, and GLES presentation using the same direct-buffer frame token; missing versions, fallback/stub markers, or fatal diagnostics fail the gate. The API 35 nightly workflow runs this check after the release-shell seams on the already-running emulator and builds both real Rust bridge ABIs when the checkout has no ignored JNI artifacts.
 
 Render-acceptance builds also emit one bounded performance sample after 60
 warm-up and 180 measured frames. Enforce the API 35 emulator thresholds with
