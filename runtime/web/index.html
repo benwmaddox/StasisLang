@@ -11,12 +11,16 @@
     main { position: relative; width: min(960px, 100vw); }
     canvas { display: block; width: 100%; aspect-ratio: 16 / 9; background: #091b2d; touch-action: none; }
     __STASIS_PERFORMANCE_HUD_STYLE__
+    #stasis-loading { position: absolute; inset: 0; display: grid; place-items: center; padding: 1rem; box-sizing: border-box; background: #07111f; color: #dff6ff; text-align: center; }
+    #stasis-loading[data-hidden="true"] { display: none; }
+    #stasis-loading[data-failed="true"] { color: #ff8f8f; }
     #stasis-error { color: #ff8f8f; white-space: pre-wrap; }
   </style>
 </head>
 <body>
   <main>
     <canvas id="stasis-canvas" width="640" height="360" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
+    <div id="stasis-loading" role="status" aria-live="polite">Loading Stasis runtime…</div>
     __STASIS_PERFORMANCE_HUD__
     <pre id="stasis-error"></pre>
   </main>

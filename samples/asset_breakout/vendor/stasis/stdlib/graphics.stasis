@@ -11,8 +11,9 @@
 import "internal/host_frame.stasis";
 import "internal/gfx_cmd.stasis";
 import "internal/host_window_request.stasis";
+import "asset_tasks.stasis";
 
-extern function sleep_ms(ms: i32): void;
+extern function @effects(nondeterministic) sleep_ms(ms: i32): void;
 
 // Hot-path reads are HostFrame snapshot-only (no host calls).
 function get_time_ms(): i32 {
@@ -24,17 +25,11 @@ function get_time_us(): i32 {
 }
 
 // Startup / assets (host calls; avoid in hot paths)
-extern function gfx_poll_reload(handle: i32): bool;
-extern function gfx_dump_bmp(path: string): i32;
-extern function gfx_dump_png(path: string): i32;
-extern function @asset_path(path) load_font(path: string, size: i32): i32;
-extern function measure_text(font: i32, text: string): f32;
-
-struct Sprite {
-    handle: i32;
-    width: i32;
-    height: i32;
-}
+extern function @effects(graphics) gfx_poll_reload(handle: i32): bool;
+extern function @effects(graphics, storage) gfx_dump_bmp(path: string): i32;
+extern function @effects(graphics, storage) gfx_dump_png(path: string): i32;
+extern function @effects(graphics)@asset_path(path) load_font(path: string, size: i32): i32;
+extern function @effects(graphics) measure_text(font: i32, text: string): f32;
 
 struct TextRun {
     font: i32;
@@ -64,11 +59,38 @@ struct SpriteSheet {
     cell_height: i32;
 }
 
-function @asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
-function @extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(self: SpriteSheet, path: string, width: i32, height: i32): bool;
+function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(
+    self: Sprite,
+    path: string,
+    width: i32,
+    height: i32
+): bool;
+function @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
+    self: SpriteSheet,
+    path: string,
+    width: i32,
+    height: i32
+): bool;
+
+function publish(self: ImageAsset, target: Sprite): bool {
+    if (!self.ready()) {
+        return false;
+    }
+    if (target.handle != 0) {
+        gfx_release_sprite(target.handle);
+    }
+    target.handle = self.handle;
+    target.width = self.width;
+    target.height = self.height;
+    self.handle = 0;
+    self.width = 0;
+    self.height = 0;
+    self.state = AssetState.None;
+    return true;
+}
 
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
-    if (self.handle <= 0 || self.width <= 0 || self.height <= 0) {
+    if (self.handle == 0 || self.width <= 0 || self.height <= 0) {
         return;
     }
     let width: f32 = 0.0;
@@ -101,7 +123,7 @@ function load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, r
 }
 
 function draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void {
-    if (self.handle <= 0 || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
+    if (self.handle == 0 || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
         return;
     }
     if (self.columns > 2147483647 / self.rows) {
@@ -184,7 +206,7 @@ function finished(self: AnimationClip, elapsed_ticks: i32): bool {
     return animation_finished(self.frame_count, self.ticks_per_frame, self.playback_mode, elapsed_ticks);
 }
 
-function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
+function @effects(graphics)@extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
 
 function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     if (self.font <= 0 || self.handle <= 0) {
@@ -214,6 +236,11 @@ function set_fullscreen(enabled: i32): i32 {
 
 function set_maximized(enabled: i32): i32 {
     host_request_maximized(enabled);
+    return 0;
+}
+
+function set_maximized_canvas(width: i32, height: i32): i32 {
+    host_request_maximized_canvas(width, height);
     return 0;
 }
 

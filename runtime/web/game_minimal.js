@@ -4,6 +4,13 @@
   const context = canvas.getContext("2d", { alpha: false });
   const hud = document.getElementById("stasis-hud");
   const errorBox = document.getElementById("stasis-error");
+  const loadingBox = document.getElementById("stasis-loading");
+  const setLoading = (message, state = "loading") => {
+    if (!loadingBox) return;
+    loadingBox.textContent = message;
+    loadingBox.dataset.failed = state === "failed" ? "true" : "false";
+    loadingBox.dataset.hidden = state === "ready" ? "true" : "false";
+  };
   const game = window.STASIS_GAME || { strings: {} };
   const commands = [];
   const stringValue = id => game.strings[String(id)] || "";
@@ -89,15 +96,18 @@ __STASIS_IMPORTS__
 
   (async () => {
     try {
+      setLoading("Loading Stasis runtime…", "loading");
       const response = await fetch("game.wasm");
       if (!response.ok) throw new Error(`failed to load game.wasm: ${response.status}`);
       instance = (await WebAssembly.instantiate(await response.arrayBuffer(), imports)).instance;
       document.body.dataset.mainResult = String(instance.exports.main());
       document.body.dataset.ready = "true";
+      setLoading("", "ready");
       document.body.dataset.runtime = "wasm";
       requestAnimationFrame(frame);
     } catch (error) {
       document.body.dataset.ready = "false";
+      setLoading(`Unable to start this game. ${String(error && error.message || error)}`, "failed");
       errorBox.textContent = String(error && error.stack || error);
       throw error;
     }

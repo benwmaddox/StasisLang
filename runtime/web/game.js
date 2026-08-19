@@ -4,6 +4,13 @@
   const context = canvas.getContext("2d", { alpha: false });
   const hud = document.getElementById("stasis-hud");
   const errorBox = document.getElementById("stasis-error");
+  const loadingBox = document.getElementById("stasis-loading");
+  const setLoading = (message, state = "loading") => {
+    if (!loadingBox) return;
+    loadingBox.textContent = message;
+    loadingBox.dataset.failed = state === "failed" ? "true" : "false";
+    loadingBox.dataset.hidden = state === "ready" ? "true" : "false";
+  };
   const keys = new Set();
   const pointer = { id: 0, x: 0, y: 0, dx: 0, dy: 0, down: false, wentDown: false, wentUp: false };
   const commands = [];
@@ -1238,6 +1245,7 @@
 
   window.STASIS_RUNTIME_PROMISE = (async () => {
     try {
+      setLoading("Loading Stasis runtime…", "loading");
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
       writeHostFrame(performance.now());
@@ -1249,12 +1257,14 @@
         ...fontLoads.values()
       ]);
       await document.fonts.ready;
+      setLoading("", "ready");
       document.body.dataset.ready = "true";
       document.body.dataset.runtime = "wasm";
       document.body.dataset.mainResult = String(mainResult);
       requestAnimationFrame(frame);
     } catch (error) {
       document.body.dataset.ready = "false";
+      setLoading(`Unable to start this game. ${String(error && error.message || error)}`, "failed");
       if (instance) {
         for (const [label, name] of [
           ["debugPhaseCount", "state.active_run_definition.phase_count"],

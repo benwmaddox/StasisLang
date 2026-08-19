@@ -8,6 +8,16 @@ test `paddle target centers on pointer`(): bool {
     return true;
 }
 
+test `pointer movement does not require a press`(): bool {
+    if (!pointer_controls_paddle(1)) {
+        return false;
+    }
+    if (pointer_controls_paddle(0)) {
+        return false;
+    }
+    return true;
+}
+
 test `paddle clamp stays inside screen`(): bool {
     if (clamp_paddle(-4.0) != 0.0) {
         return false;

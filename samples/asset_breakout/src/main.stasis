@@ -9,6 +9,7 @@ const PADDLE_W: f32 = 96.0;
 const PADDLE_H: f32 = 14.0;
 const BALL_SIZE: f32 = 12.0;
 const PADDLE_Y: f32 = 326.0;
+const ASSET_TOTAL: i32 = 4;
 
 struct Brick {
     x: f32;
@@ -23,8 +24,16 @@ struct Assets {
     ball: Sprite;
 }
 
+struct AssetLoader {
+    current: ImageAsset;
+    step: i32;
+    assets_ready: bool;
+    failed: bool;
+}
+
 global bricks: Brick[35];
 global assets: Assets;
+global loader: AssetLoader;
 global paddle_x: f32;
 global ball_x: f32;
 global ball_y: f32;
@@ -34,6 +43,24 @@ global bricks_left: i32;
 global ball_active: bool;
 global round_done: bool;
 global presentation_variant: i32;
+
+function loading_completed_count(step: i32): i32 {
+    if (step < 0) {
+        return 0;
+    }
+    if (step > ASSET_TOTAL) {
+        return ASSET_TOTAL;
+    }
+    return step;
+}
+
+function loading_percent(step: i32): i32 {
+    return loading_completed_count(step) * 100 / ASSET_TOTAL;
+}
+
+function loading_is_blocking(): bool {
+    return !loader.assets_ready && !loader.failed;
+}
 
 function clamp_paddle(value: f32): f32 {
     if (value < 0.0) {
@@ -157,30 +184,85 @@ function update_ball(): void {
     }
 }
 
+function request_current_asset(): void {
+    if (loader.step == 0) {
+        loader.current.load_image("assets/arena_background.png", 640, 360);
+    } else if (loader.step == 1) {
+        loader.current.load_image("assets/brick.svg", 78, 22);
+    } else if (loader.step == 2) {
+        loader.current.load_image("assets/paddle.svg", 96, 14);
+    } else if (loader.step == 3) {
+        loader.current.load_image("assets/ball.svg", 12, 12);
+    }
+}
+
+function publish_current_asset(): bool {
+    if (loader.step == 0) {
+        return loader.current.publish(assets.background);
+    }
+    if (loader.step == 1) {
+        return loader.current.publish(assets.brick);
+    }
+    if (loader.step == 2) {
+        return loader.current.publish(assets.paddle);
+    }
+    return loader.current.publish(assets.ball);
+}
+
+function poll_asset_loading(): void {
+    if (loader.assets_ready || loader.failed) {
+        return;
+    }
+    if (loader.step >= ASSET_TOTAL) {
+        loader.assets_ready = assets.background.handle > 0 && assets.brick.handle > 0 && assets.paddle.handle > 0 && assets.ball.handle > 0;
+        if (loader.assets_ready) {
+            reset_round();
+        } else {
+            loader.failed = true;
+        }
+        return;
+    }
+    if (loader.current.state == AssetState.None) {
+        request_current_asset();
+        if (loader.current.state == AssetState.Failed) {
+            loader.failed = true;
+        }
+        return;
+    }
+    if (loader.current.failed()) {
+        loader.failed = true;
+        return;
+    }
+    if (loader.current.ready()) {
+        if (!publish_current_asset()) {
+            loader.failed = true;
+            return;
+        }
+        loader.step += 1;
+    }
+}
+
 function main(): i32 {
     if (!init_window(640, 360, "Neon Breakout")) {
         return 1;
     }
-    if (!assets.background.load_sprite_from("assets/arena_background.png", 640, 360)) {
-        return 1;
-    }
-    if (!assets.brick.load_sprite_from("assets/brick.svg", 78, 22)) {
-        return 1;
-    }
-    if (!assets.paddle.load_sprite_from("assets/paddle.svg", 96, 14)) {
-        return 1;
-    }
-    if (!assets.ball.load_sprite_from("assets/ball.svg", 12, 12)) {
-        return 1;
-    }
+    loader.step = 0;
+    loader.assets_ready = false;
+    loader.failed = false;
     presentation_variant = 0;
-    reset_round();
     return 0;
 }
 
 function tick(): i32 {
     if (should_quit()) {
         return 1;
+    }
+    poll_asset_loading();
+    if (loading_is_blocking()) {
+        return 0;
+    }
+    if (loader.failed) {
+        return 0;
     }
     update_pointer();
     update_ball();
@@ -190,6 +272,22 @@ function tick(): i32 {
 function render(): i32 {
     begin_frame();
     clear(0.02, 0.02, 0.08, 1.0);
+    if (loader.failed) {
+        fill_rect(96.0, 140.0, 448.0, 5.0, 0.45, 0.10, 0.16, 1.0);
+        fill_rect(96.0, 140.0, 448.0, 5.0, 0.95, 0.30, 0.35, 1.0);
+        fill_rect(220.0, 180.0, 200.0, 8.0, 0.95, 0.30, 0.35, 1.0);
+        end_frame();
+        return 0;
+    }
+    if (!loader.assets_ready) {
+        let progress_width: f32 = 448.0 * i32_to_f32(loading_percent(loader.step)) / 100.0;
+        fill_rect(96.0, 140.0, 448.0, 5.0, 0.10, 0.18, 0.30, 1.0);
+        fill_rect(96.0, 140.0, progress_width, 5.0, 0.20, 0.85, 0.98, 1.0);
+        fill_rect(220.0, 180.0, 200.0, 8.0, 0.10, 0.18, 0.30, 1.0);
+        fill_rect(220.0, 180.0, 2.0 * i32_to_f32(loading_percent(loader.step)), 8.0, 0.20, 0.85, 0.98, 1.0);
+        end_frame();
+        return 0;
+    }
     assets.background.draw(0.0, 0.0, 235, 0);
     foreach (let brick, i in bricks) {
         if (brick.alive) {
