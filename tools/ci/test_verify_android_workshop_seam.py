@@ -47,6 +47,7 @@ Stasis Workshop IT-028 GLES: {"schema":"stasis.workshop_hot_edit.v1","test_id":"
 Stasis Workshop IT-028 case: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"case","status":"passed","phase":"baseline","sequence":1,"runtime":{"status":"RuntimeStateReady","generation":1,"source_fingerprint":"1111111111111111"},"guest":{"tick_revision":1,"render_revision":1,"state_counter":1},"render":{"trace":114,"frame_token":81,"rect_count":2,"marker":{"active":true,"x":112.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}},"gles_presented":true,"gles_frame_token":81,"java_only":false,"fallback":0,"stub":0}
 Stasis Workshop IT-028 GLES: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"present","frame_token":82,"trace":115,"rect_count":2,"order_count":11,"marker":{"active":true,"x":176.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}}
 Stasis Workshop IT-028 case: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"case","status":"passed","phase":"published","sequence":2,"runtime":{"status":"RuntimeStateReady","generation":2,"source_fingerprint":"2222222222222222"},"guest":{"tick_revision":2,"render_revision":2,"state_counter":2},"render":{"trace":115,"frame_token":82,"rect_count":2,"marker":{"active":true,"x":176.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}},"gles_presented":true,"gles_frame_token":82,"java_only":false,"fallback":0,"stub":0}
+CompileError: src/main.stasis: unknown call target 'IT028_missing_target'|diagnostic_file=src/main.stasis|diagnostic_line=40|diagnostic_column=31|diagnostic_end_line=42|diagnostic_end_column=2|diagnostic_symbol=on_code_swap|diagnostic_message=unknown%20call%20target%20%27IT028_missing_target%27
 Stasis Workshop IT-028 GLES: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"present","frame_token":83,"trace":115,"rect_count":2,"order_count":11,"marker":{"active":true,"x":176.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}}
 Stasis Workshop IT-028 case: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"case","status":"passed","phase":"post_invalid","sequence":3,"runtime":{"status":"RuntimeStateReady","generation":2,"source_fingerprint":"2222222222222222"},"guest":{"tick_revision":2,"render_revision":2,"state_counter":3},"render":{"trace":115,"frame_token":83,"rect_count":2,"marker":{"active":true,"x":176.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}},"gles_presented":true,"gles_frame_token":83,"java_only":false,"fallback":0,"stub":0}
 Stasis Workshop IT-028: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"hot_edit","status":"passed","ordered":true,"unique":true,"atomic":true,"hook_source_line":40,"invalid_compile":{"ok":false,"kind":"compile_error","diagnostic":{"file":"src/main.stasis","line":40,"column":31,"end_line":42,"end_column":2,"symbol":"on_code_swap","message":"unknown call target 'IT028_missing_target'"}},"restore_receipt":{"status":"NoChange","compile":"CompileReady: backend=cranelift-jit reload=NoChange status=0 functions=10 compile_us=12 manifest=build/native_compile_manifest.txt"},"cleanup_receipt":{"status":"Restored","compile":"CompileReady: backend=cranelift-jit reload=FastReload status=0 functions=10 compile_us=13 manifest=build/native_compile_manifest.txt","frame":{"status":"passed","runtime":{"generation":3,"source_fingerprint":"1111111111111111"},"render":{"marker":{"active":false}},"java_only":false,"fallback":0,"stub":0}}}
@@ -185,6 +186,35 @@ class WorkshopSeamTests(unittest.TestCase):
         with self.assertRaisesRegex(SeamError, "forbidden|structured diagnostic"):
             verify_log(GOOD.replace('"invalid_compile":{"ok":false',
                                     '"invalid_compile":{"raw":"CompileError", "ok":false'), MANIFEST)
+
+    def test_rejects_missing_it028_raw_compile_error(self):
+        raw = next(line for line in GOOD.splitlines() if line.startswith("CompileError: "))
+        with self.assertRaisesRegex(SeamError, "exactly one raw CompileError"):
+            verify_log(GOOD.replace(raw + "\n", ""), MANIFEST)
+
+    def test_rejects_extra_or_unrelated_it028_raw_compile_error(self):
+        raw = next(line for line in GOOD.splitlines() if line.startswith("CompileError: "))
+        with self.assertRaisesRegex(SeamError, "exactly one raw CompileError"):
+            verify_log(GOOD + "\n" + raw, MANIFEST)
+        with self.assertRaisesRegex(SeamError, "truncated|mismatched|out of order"):
+            verify_log(GOOD.replace(raw, "CompileError: unrelated failure", 1), MANIFEST)
+
+    def test_rejects_truncated_it028_raw_compile_error(self):
+        raw = next(line for line in GOOD.splitlines() if line.startswith("CompileError: "))
+        truncated = raw.split("|diagnostic_message=", 1)[0]
+        with self.assertRaisesRegex(SeamError, "truncated|mismatched|out of order"):
+            verify_log(GOOD.replace(raw, truncated, 1), MANIFEST)
+
+    def test_rejects_embedded_or_prefixed_it028_raw_compile_error(self):
+        raw = next(line for line in GOOD.splitlines() if line.startswith("CompileError: "))
+        published = next(line for line in GOOD.splitlines()
+                         if '"phase":"published"' in line)
+        with self.assertRaisesRegex(SeamError, "truncated|mismatched|out of order"):
+            verify_log(GOOD.replace(published + "\n" + raw, published + raw, 1), MANIFEST)
+        for prefix in ("Not", "arbitrary prefix "):
+            with self.subTest(prefix=prefix):
+                with self.assertRaisesRegex(SeamError, "truncated|mismatched|out of order"):
+                    verify_log(GOOD.replace(raw, prefix + raw, 1), MANIFEST)
 
     def test_rejects_it028_missing_gles_marker(self):
         marker = next(line for line in GOOD.splitlines() if "IT-028 GLES" in line)

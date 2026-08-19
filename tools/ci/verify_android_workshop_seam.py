@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from .check_runtime_abi_contract import c_constants
@@ -27,9 +28,14 @@ TOUCH_PRESENT = re.compile(r"Stasis Workshop IT-027 GLES: (\{[^\r\n]+\})")
 HOT_EDIT_MARKER = re.compile(r"Stasis Workshop IT-028: (\{[^\r\n]+\})")
 HOT_EDIT_CASE_MARKER = re.compile(r"Stasis Workshop IT-028 case: (\{[^\r\n]+\})")
 HOT_EDIT_PRESENT = re.compile(r"Stasis Workshop IT-028 GLES: (\{[^\r\n]+\})")
+COMPILE_ERROR_LINE = re.compile(r"^[^\r\n]*CompileError[^\r\n]*\r?$", re.MULTILINE)
+RAW_COMPILE_ERROR_LINE = re.compile(
+    r"^(?:(?:\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+"
+    r"[VDIWEF]\s+StasisWorkshop:\s+)?(?P<payload>CompileError: [^\r\n]+))\r?$"
+)
 FRAME = re.compile(r"RenderAcceptanceFrame: count=(\d+) frame_token=(\d+)")
 FORBIDDEN = re.compile(
-    r"(?:CompileError|native preview frame failed|FATAL EXCEPTION|stub path|fallback path|IT-025 state checksum was unavailable|IT-028 cleanup failed)",
+    r"(?:native preview frame failed|FATAL EXCEPTION|stub path|fallback path|IT-025 state checksum was unavailable|IT-028 cleanup failed)",
     re.IGNORECASE,
 )
 EXPECTED_INVALID = {
@@ -58,6 +64,10 @@ def canonical_frame_descriptor() -> dict[str, dict[str, int]]:
 
 class SeamError(RuntimeError):
     pass
+
+
+def _rust_percent_encode(value: str) -> str:
+    return quote(value, safe="-_.~/")
 
 
 def _json_markers(pattern: re.Pattern[str], log: str, label: str) -> list[tuple[re.Match[str], dict]]:
@@ -229,6 +239,28 @@ def verify_it028(log: str, after_position: int) -> dict:
         + [(case_positions[index], "case") for index in range(3)])
     if [kind for _, kind in interleaved] != ["present", "case"] * 3:
         raise SeamError("IT-028 GLES and case evidence is not strictly interleaved")
+    raw_compile_error_lines = list(COMPILE_ERROR_LINE.finditer(log))
+    if len(raw_compile_error_lines) != 1:
+        raise SeamError(
+            f"expected exactly one raw CompileError line, found {len(raw_compile_error_lines)}"
+        )
+    raw_expected = (
+        f"CompileError: {structured['file']}: {structured['message']}"
+        f"|diagnostic_file={_rust_percent_encode(structured['file'])}"
+        f"|diagnostic_line={structured['line']}"
+        f"|diagnostic_column={structured['column']}"
+        f"|diagnostic_end_line={structured['end_line']}"
+        f"|diagnostic_end_column={structured['end_column']}"
+        f"|diagnostic_symbol={_rust_percent_encode(structured['symbol'])}"
+        f"|diagnostic_message={_rust_percent_encode(structured['message'])}"
+    )
+    raw_line = raw_compile_error_lines[0]
+    raw_match = RAW_COMPILE_ERROR_LINE.fullmatch(raw_line.group(0))
+    raw_start = raw_line.start() + (raw_match.start("payload") if raw_match else 0)
+    if raw_match is None or raw_match.group("payload") != raw_expected \
+            or raw_start <= cases[1][0].start() \
+            or raw_start >= presents[2][0].start():
+        raise SeamError("raw CompileError diagnostic was missing, truncated, or out of order")
     return {
         "summary": summary,
         "cases": [candidate for _, candidate in cases],
