@@ -127,7 +127,7 @@ Run the blocking render end-to-end gate directly with:
 ```
 
 This builds the canonical `samples/render_parity` fixture in Workshop with the real x86_64 development JIT. It captures the OpenGL surface, normalizes the letterboxed 640x360 viewport, and checks Android regions for the background, procedural fallback, opaque/translucent/rotated SVG sprites, a filled rectangle, crossing lines, direct text, and cached text. Three spaced captures, at least 30 rendered frames, and a successful non-empty JIT compile are required. Release packages are checked separately by `build_release.ps1` and can be run on an arm64 device with `validate_device.ps1 -Release`.
-The gate also emits `artifacts/android_workshop_seam/e/workshop-workshop-seam.json` for IT-025 through IT-027. IT-025 binds one Java/JNI/dlopen call to the real Rust bridge version, Cranelift `CompileReady`, a guest JIT state checksum, the render command trace, and GLES presentation using the same direct-buffer frame token. IT-026 runs once after the acceptance compile and proves the canonical i32/f32/u8 direct buffers have exact native-order capacities and alignment; per-lane short, oversized, wrong-order, heap, null, and misaligned variants, plus swapped i32/f32 lanes, must fail before Rust and preserve every passed byte and guard canary. IT-027 dispatches exactly one Java `ACTION_DOWN`, `ACTION_MOVE`, and `ACTION_UP` through the preview, verifies the HostFrame logical/normalized/delta/edge lanes in guest JIT state, and waits for GLES to present the matching direct-buffer marker token. Its compact summary and ordered per-phase markers reject Java-only evidence, duplicate tokens, stale markers, and marker geometry or checksum mismatches. Missing structured ABI/touch evidence, versions, fallback/stub markers, or fatal diagnostics fail the gate. The API 35 nightly workflow runs this check after the release-shell seams on the already-running emulator and builds both real Rust bridge ABIs when the checkout has no ignored JNI artifacts.
+The gate also emits `artifacts/android_workshop_seam/e/workshop-workshop-seam.json` for IT-025 through IT-027. IT-025 binds one Java/JNI/dlopen call to the real Rust bridge version, Cranelift `CompileReady`, a guest JIT state checksum, the render command trace, and GLES presentation using the same direct-buffer frame token. IT-026 runs once after the acceptance compile and proves the canonical i32/f32/u8 direct buffers have exact native-order capacities and alignment; per-lane short, oversized, wrong-order, heap, null, and misaligned variants, plus swapped i32/f32 lanes, must fail before Rust and preserve every passed byte and guard canary. IT-027 dispatches exactly one Java `ACTION_DOWN`, `ACTION_MOVE`, and `ACTION_UP` through the preview, verifies the HostFrame logical/normalized/delta/edge lanes in guest JIT state, and waits for GLES to present the matching direct-buffer marker token. Its compact summary and ordered per-phase markers reject Java-only evidence, duplicate tokens, stale markers, and marker geometry or checksum mismatches. Missing structured ABI/touch evidence, versions, fallback/stub markers, or fatal diagnostics fail the gate. The API 35 nightly workflow runs this check on its own isolated emulator shard, concurrently with the release-shell shard, and builds both real Rust bridge ABIs when the checkout has no ignored JNI artifacts.
 
 Render-acceptance builds also emit one bounded performance sample after 60
 warm-up and 180 measured frames. Enforce the API 35 emulator thresholds with
@@ -138,13 +138,16 @@ of the hardware-normalized limits.
 
 ## Hosted release-shell emulator
 
-The `Android Emulator Seams` GitHub Actions workflow provisions an API 35
-`x86_64` AVD on an `ubuntu-latest` KVM runner. It runs IT-017, IT-018, and
-IT-019 through the test-only `android-x86_64` AOT package, so CI does not
+The `Android Emulator Seams` GitHub Actions workflow provisions two isolated
+API 35 `x86_64` AVDs on separate `ubuntu-latest` KVM runners. The release-shell
+shard runs IT-017 through IT-020 through the test-only `android-x86_64` AOT
+package, while the Workshop shard runs IT-025 through IT-027; the jobs start
+concurrently and report failures and artifacts independently. CI does not
 depend on an attached phone, a self-hosted runner, or a preinstalled local AVD.
 The workflow retains the lifecycle, touch, orientation, screenshot, and cleanup
-oracles and uploads one evidence artifact per seam. The public x86_64 target
-requires `--development-build`; production packages remain `android-arm64`.
+oracles and uploads the established evidence artifacts from each shard. The
+public x86_64 target requires `--development-build`; production packages remain
+`android-arm64`.
 
 Physical-device runs are optional supplemental release evidence for OEM GPU,
 surface, and density behavior. They are not a CI or task-readiness gate.

@@ -27,6 +27,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
         cls.provenance_script = read("mobile/android/rust_bridge_provenance.ps1")
 
+    def workflow_job_body(self, name: str) -> str:
+        match = re.search(
+            rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:\n|\Z)",
+            self.workflow,
+        )
+        self.assertIsNotNone(match, name)
+        return match.group("body")
+
     def test_workflow_uses_hosted_x86_emulator(self):
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
         self.assertNotIn("runs-on: macos-15", self.workflow)
@@ -106,23 +114,59 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("  actions: read", self.nightly_workflow)
 
     def test_workflow_supplies_build_inputs_and_uploads_each_seam(self):
-        self.assertIn("gradle-version: \"8.9\"", self.workflow)
-        self.assertIn("ndk: 27.0.12077973", self.workflow)
-        self.assertIn("cmake: 3.22.1", self.workflow)
-        self.assertIn("8e37db5e797b6167f3a00d697d816a684bd259c7", self.workflow)
-        self.assertIn("bec9134a26c7d0f31b36d6083c25296e04cabff5", self.workflow)
-        self.assertLess(
-            self.workflow.index("- name: Setup Gradle"),
-            self.workflow.index("- name: Checkout SDL3"),
+        job_names = ("release-shell-seams", "workshop-seams")
+        job_bodies = {name: self.workflow_job_body(name) for name in job_names}
+        self.assertNotIn("generated-release-shell", self.workflow)
+        self.assertNotIn("needs:", self.workflow)
+        for body in job_bodies.values():
+            self.assertEqual(1, body.count("runs-on: ubuntu-latest"))
+            self.assertEqual(1, body.count("reactivecircus/android-emulator-runner@v2"))
+            for setup in (
+                "- name: Setup Gradle",
+                "- name: Checkout SDL3",
+                "- name: Checkout SDL3_image",
+                "- name: Install Rust",
+                "- name: Install Android Rust targets",
+                "- name: Setup Python",
+                "- name: Enable KVM",
+            ):
+                self.assertEqual(1, body.count(setup + "\n"), setup)
+            self.assertIn('gradle-version: "8.9"', body)
+            self.assertIn("ndk: 27.0.12077973", body)
+            self.assertIn("cmake: 3.22.1", body)
+            self.assertIn("api-level: 35", body)
+            self.assertIn("arch: x86_64", body)
+            self.assertIn("8e37db5e797b6167f3a00d697d816a684bd259c7", body)
+            self.assertIn("bec9134a26c7d0f31b36d6083c25296e04cabff5", body)
+            self.assertIn(
+                "rustup target add aarch64-linux-android x86_64-linux-android", body
+            )
+        release_body = job_bodies["release-shell-seams"]
+        workshop_body = job_bodies["workshop-seams"]
+        release_script = "pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1"
+        workshop_script = (
+            "pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 "
+            "-Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90"
         )
-        for artifact in (
-            "android-workshop-it025-seam",
-            "android-resource-restore-seam",
-            "android-release-shell-seam",
-            "android-touch-roundtrip-seam",
-            "android-orientation-metrics-seam",
-        ):
-            self.assertIn(artifact, self.workflow)
+        self.assertEqual(1, release_body.count(release_script))
+        self.assertNotIn("test_render_emulator.ps1", release_body)
+        self.assertEqual(1, workshop_body.count(workshop_script))
+        self.assertNotIn("test_release_shell_emulator.ps1", workshop_body)
+        release_artifacts = re.findall(r"(?m)^\s+name: (android-[^\s]+)$", release_body)
+        workshop_artifacts = re.findall(r"(?m)^\s+name: (android-[^\s]+)$", workshop_body)
+        self.assertEqual(
+            sorted(
+                (
+                    "android-release-shell-seam",
+                    "android-resource-restore-seam",
+                    "android-touch-roundtrip-seam",
+                    "android-orientation-metrics-seam",
+                )
+            ),
+            sorted(release_artifacts),
+        )
+        self.assertEqual(["android-workshop-it025-seam"], workshop_artifacts)
+        self.assertEqual(5, self.workflow.count("          name: android-"))
         self.assertEqual(5, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
 
@@ -152,7 +196,9 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
 
     def test_strategy_makes_emulator_the_readiness_gate(self):
         self.assertIn("hosted x86_64 emulator is the CI and readiness", self.strategy)
-        self.assertIn("Production Android packaging remains ARM64", self.strategy)
+        self.assertRegex(
+            self.strategy, r"Production Android\s+packaging remains ARM64"
+        )
         for test_id in ("IT-017", "IT-018", "IT-019"):
             row = next(line for line in self.strategy.splitlines() if f"| {test_id} |" in line)
             self.assertTrue(row.endswith("| Emulator |"), row)
@@ -165,11 +211,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
         self.assertGreaterEqual(inside_drag["duration_ms"], 2000)
 
-    def test_workshop_it025_runs_after_release_shells_on_the_same_emulator(self):
-        self.assertIn(
-            "test_render_emulator.ps1 -Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90",
-            self.workflow,
-        )
+    def test_workshop_it025_isolated_from_release_shells(self):
         self.assertIn("[int]$StepTimeoutSeconds = 300", self.workshop_script)
         self.assertIn("[math]::Min($StepTimeoutSeconds, $remainingSeconds)", self.workshop_script)
         self.assertIn("verify_android_workshop_seam.py", self.workshop_script)
@@ -186,8 +228,6 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("[System.IO.Path]::IsPathRooted", self.rust_bridge_script)
         self.assertNotIn('"app\\src\\workshop\\jniLibs\\$abi"', self.rust_bridge_script)
         self.assertNotIn('"$abi\\libstasis_android_bridge.so"', self.provenance_script)
-        self.assertIn("Install Android Rust targets", self.workflow)
-        self.assertIn("rustup target add aarch64-linux-android x86_64-linux-android", self.workflow)
 
 
 if __name__ == "__main__":
