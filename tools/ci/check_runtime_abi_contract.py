@@ -34,6 +34,12 @@ REQUIRED = (
     JAVA_RENDERER, WORKSHOP, JNI, NATIVE_HOST,
 )
 
+DESCRIPTOR_PATTERNS = {
+    "i32": r'X\(I32,\s*"i32",\s*STASIS_RENDER_I32_COUNT\s*\*\s*sizeof\(int32_t\),\s*_Alignof\(int32_t\)\)',
+    "f32": r'X\(F32,\s*"f32",\s*STASIS_RENDER_F32_COUNT\s*\*\s*sizeof\(float\),\s*_Alignof\(float\)\)',
+    "u8": r'X\(U8,\s*"u8",\s*STASIS_RENDER_U8_COUNT\s*\*\s*sizeof\(uint8_t\),\s*_Alignof\(uint8_t\)\)',
+}
+
 BINOPS = {
     ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
     ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
@@ -256,6 +262,10 @@ def required_write(text: str, lane: str, index: int) -> bool:
     return re.search(rf"\b{lane}\[{index}\]\s*=", text) is not None
 
 
+def without_c_comments(text: str) -> str:
+    return re.sub(r"/\*.*?\*/|//[^\r\n]*", "", text, flags=re.S)
+
+
 def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[list[Mismatch], dict[str, object]]:
     overlays = overlays or {}
     sources = {path: overlays.get(path, (root / path).read_text(encoding="utf-8")) for path in REQUIRED}
@@ -268,6 +278,11 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
     failures += compare(label(RENDER_HEADER), label(DYNLOAD), render, rust, RENDER_TO_RUST)
     failures += compare(label(RENDER_HEADER), label(JAVA_RENDERER), render, java, RENDER_TO_JAVA)
     checks = len(RENDER_TO_GFX) + len(RENDER_TO_RUST) + len(RENDER_TO_JAVA)
+    for lane, pattern in DESCRIPTOR_PATTERNS.items():
+        checks += 1
+        if not re.search(pattern, sources[RENDER_HEADER]):
+            failures.append(Mismatch(label(RENDER_HEADER), label(JNI),
+                                     f"descriptor.{lane}", "canonical count*sizeof/_Alignof", "missing"))
 
     arrays = {
         "host_i32": host["HOST_I32_COUNT"], "host_f32": host["HOST_F32_COUNT"],
@@ -372,6 +387,15 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         checks += 1
         if name not in sources[JNI]:
             failures.append(Mismatch(label(RENDER_HEADER), label(JNI), name, "canonical macro reference", "missing"))
+    checks += 1
+    descriptor_initializer = re.compile(
+        r"static\s+const\s+StasisJniFrameDescriptor\s+stasis_jni_frame_descriptors\s*\[\s*\]\s*="
+        r"\s*\{\s*STASIS_RENDER_BUFFER_DESCRIPTORS\s*\(\s*STASIS_JNI_FRAME_DESCRIPTOR\s*\)\s*\}\s*;"
+    )
+    if not descriptor_initializer.search(without_c_comments(sources[JNI])):
+        failures.append(Mismatch(label(RENDER_HEADER), label(JNI),
+                                 "STASIS_RENDER_BUFFER_DESCRIPTORS.initializer",
+                                 "canonical descriptor invocation", "missing"))
 
     digest = hashlib.sha256((sources[RENDER_HEADER] + sources[HOST_FRAME]).encode()).hexdigest()
     evidence = {

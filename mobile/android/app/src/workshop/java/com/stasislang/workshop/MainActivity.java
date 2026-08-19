@@ -319,6 +319,7 @@ public final class MainActivity extends Activity {
     private final RollingMetric renderMetric = new RollingMetric();
     private boolean compileReady;
     private boolean compileAttempted;
+    private boolean jniFrameAbiAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
@@ -348,12 +349,13 @@ public final class MainActivity extends Activity {
     private static native String nativeSemanticEdit(String projectRoot, String requestJson,
                                                     boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
-    private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
+    static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
+    static native String nativeFrameAbiDescriptor();
     private static native String nativeDrainSpriteReleases();
     private static native String nativePollSpriteReleaseCancellations();
-    private static native String nativeLastFrameError();
+    static native String nativeLastFrameError();
     private static native String nativeInspectRuntimeState(String projectRoot);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
     private static native String nativeGetRuntimeI32(String projectRoot, String path);
@@ -1337,6 +1339,20 @@ public final class MainActivity extends Activity {
                     compileReady = isRunnableCompile(compileResult);
                     compileAttempted = true;
                     setStatusText(compileResult);
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady && !jniFrameAbiAcceptanceRun) {
+                    String abiResult = WorkshopJniFrameAbiAcceptance.run(projectRootPath());
+                    jniFrameAbiAcceptanceRun = true;
+                    boolean abiPassed = false;
+                    try {
+                        abiPassed = "passed".equals(new JSONObject(abiResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!abiPassed) {
+                        compileReady = false;
+                        setStatusText("IT-026 JNI frame ABI acceptance failed: " + abiResult);
+                    }
                 }
                 if (compileReady || gameRuntimeActive) {
                     runNativeTick();

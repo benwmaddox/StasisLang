@@ -2,7 +2,9 @@
 #include <android/log.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +86,133 @@ typedef struct CodexBridgeApi {
 } CodexBridgeApi;
 
 static CodexBridgeApi codex_bridge_api = {0};
+
+typedef struct StasisJniFrameDescriptor {
+    const char *lane;
+    size_t byte_capacity;
+    size_t alignment;
+} StasisJniFrameDescriptor;
+
+#define STASIS_JNI_FRAME_DESCRIPTOR(kind, name, bytes, alignment) \
+    {name, bytes, alignment},
+static const StasisJniFrameDescriptor stasis_jni_frame_descriptors[] = {
+    STASIS_RENDER_BUFFER_DESCRIPTORS(STASIS_JNI_FRAME_DESCRIPTOR)
+};
+#undef STASIS_JNI_FRAME_DESCRIPTOR
+
+static __thread char stasis_jni_last_frame_error[320];
+static jmethodID stasis_jni_buffer_order_method;
+static jobject stasis_jni_native_order;
+static pthread_mutex_t stasis_jni_order_mutex = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int stasis_jni_order_ready = ATOMIC_VAR_INIT(0);
+
+static void clear_stasis_jni_frame_error(void) {
+    stasis_jni_last_frame_error[0] = '\0';
+}
+
+static void set_stasis_jni_frame_error(const char *lane, const char *reason,
+        size_t expected, jlong actual) {
+    snprintf(stasis_jni_last_frame_error, sizeof(stasis_jni_last_frame_error),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"error\","
+            "\"lane\":\"%s\",\"reason\":\"%s\","
+            "\"expected\":%zu,\"actual\":%lld}",
+            lane, reason, expected, (long long)actual);
+}
+
+static void set_stasis_jni_frame_order_error(const char *lane) {
+    snprintf(stasis_jni_last_frame_error, sizeof(stasis_jni_last_frame_error),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"error\","
+            "\"lane\":\"%s\",\"reason\":\"byte_order\","
+            "\"expected\":\"native\",\"actual\":\"non_native\"}", lane);
+}
+
+static int stasis_jni_clear_exception(JNIEnv *env) {
+    if (!(*env)->ExceptionCheck(env)) return 0;
+    (*env)->ExceptionClear(env);
+    return 1;
+}
+
+static int initialize_stasis_jni_order(JNIEnv *env) {
+    if (atomic_load_explicit(&stasis_jni_order_ready, memory_order_acquire)) return 1;
+    if (pthread_mutex_lock(&stasis_jni_order_mutex) != 0) return 0;
+    if (atomic_load_explicit(&stasis_jni_order_ready, memory_order_relaxed)) {
+        pthread_mutex_unlock(&stasis_jni_order_mutex);
+        return 1;
+    }
+    jclass buffer_class = (*env)->FindClass(env, "java/nio/ByteBuffer");
+    if (stasis_jni_clear_exception(env) || buffer_class == NULL) goto failed;
+    jclass order_class = (*env)->FindClass(env, "java/nio/ByteOrder");
+    if (stasis_jni_clear_exception(env) || order_class == NULL) goto failed;
+    jmethodID buffer_order_method = (*env)->GetMethodID(
+            env, buffer_class, "order", "()Ljava/nio/ByteOrder;");
+    if (stasis_jni_clear_exception(env) || buffer_order_method == NULL) goto failed;
+    jmethodID native_order_method = (*env)->GetStaticMethodID(
+            env, order_class, "nativeOrder", "()Ljava/nio/ByteOrder;");
+    if (stasis_jni_clear_exception(env) || native_order_method == NULL) goto failed;
+    jobject native_order = (*env)->CallStaticObjectMethod(env, order_class, native_order_method);
+    if (stasis_jni_clear_exception(env) || native_order == NULL) goto failed;
+    jobject native_order_global = (*env)->NewGlobalRef(env, native_order);
+    if (stasis_jni_clear_exception(env) || native_order_global == NULL) {
+        if (native_order_global != NULL) (*env)->DeleteGlobalRef(env, native_order_global);
+        goto failed;
+    }
+    stasis_jni_buffer_order_method = buffer_order_method;
+    stasis_jni_native_order = native_order_global;
+    atomic_store_explicit(&stasis_jni_order_ready, 1, memory_order_release);
+    pthread_mutex_unlock(&stasis_jni_order_mutex);
+    return 1;
+
+failed:
+    pthread_mutex_unlock(&stasis_jni_order_mutex);
+    return 0;
+}
+
+static int validate_stasis_jni_frame_buffers(JNIEnv *env,
+        jobject frame_i32, jobject frame_f32, jobject frame_u8) {
+    const jobject buffers[] = {frame_i32, frame_f32, frame_u8};
+    clear_stasis_jni_frame_error();
+    if (!initialize_stasis_jni_order(env)) {
+        set_stasis_jni_frame_error("all", "jni_exception", 0, -1);
+        return 0;
+    }
+    for (size_t index = 0; index < sizeof(buffers) / sizeof(buffers[0]); index++) {
+        const StasisJniFrameDescriptor *descriptor = &stasis_jni_frame_descriptors[index];
+        if (buffers[index] == NULL) {
+            set_stasis_jni_frame_error(descriptor->lane, "null_buffer",
+                    descriptor->byte_capacity, -1);
+            return 0;
+        }
+        jobject actual_order = (*env)->CallObjectMethod(
+                env, buffers[index], stasis_jni_buffer_order_method);
+        if (stasis_jni_clear_exception(env)) {
+            set_stasis_jni_frame_error(descriptor->lane, "jni_exception", 0, -1);
+            return 0;
+        }
+        if (actual_order == NULL
+                || (*env)->IsSameObject(env, actual_order, stasis_jni_native_order) == JNI_FALSE) {
+            set_stasis_jni_frame_order_error(descriptor->lane);
+            return 0;
+        }
+        void *address = (*env)->GetDirectBufferAddress(env, buffers[index]);
+        jlong capacity = (*env)->GetDirectBufferCapacity(env, buffers[index]);
+        if (address == NULL) {
+            set_stasis_jni_frame_error(descriptor->lane, "not_direct", descriptor->byte_capacity, capacity);
+            return 0;
+        }
+        if (capacity != (jlong)descriptor->byte_capacity) {
+            set_stasis_jni_frame_error(descriptor->lane, "capacity", descriptor->byte_capacity, capacity);
+            return 0;
+        }
+        if (((uintptr_t)address % descriptor->alignment) != 0) {
+            set_stasis_jni_frame_error(descriptor->lane, "alignment", descriptor->alignment,
+                    (jlong)((uintptr_t)address % descriptor->alignment));
+            return 0;
+        }
+    }
+    return 1;
+}
 
 static char *read_file_text(const char *path, long *size_out);
 
@@ -821,18 +950,12 @@ Java_com_stasislang_workshop_MainActivity_nativeSemanticEdit(
 JNIEXPORT jint JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jobject frame_i32, jobject frame_f32, jobject frame_u8) {
     (void)activity_class;
+    if (!validate_stasis_jni_frame_buffers(env, frame_i32, frame_f32, frame_u8)) {
+        return -1;
+    }
     int32_t *values_i32 = (int32_t *)(*env)->GetDirectBufferAddress(env, frame_i32);
     float *values_f32 = (float *)(*env)->GetDirectBufferAddress(env, frame_f32);
     uint8_t *values_u8 = (uint8_t *)(*env)->GetDirectBufferAddress(env, frame_u8);
-    jlong bytes_i32 = (*env)->GetDirectBufferCapacity(env, frame_i32);
-    jlong bytes_f32 = (*env)->GetDirectBufferCapacity(env, frame_f32);
-    jlong bytes_u8 = (*env)->GetDirectBufferCapacity(env, frame_u8);
-    if (values_i32 == NULL || values_f32 == NULL || values_u8 == NULL
-            || bytes_i32 < (jlong)(STASIS_RENDER_I32_COUNT * sizeof(int32_t))
-            || bytes_f32 < (jlong)(STASIS_RENDER_F32_COUNT * sizeof(float))
-            || bytes_u8 < (jlong)STASIS_RENDER_U8_COUNT) {
-        return -1;
-    }
 
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
@@ -916,10 +1039,38 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
     return (jint)status;
 }
 
+#if STASIS_RENDER_ACCEPTANCE
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeFrameAbiDescriptor(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    char descriptor_json[512];
+    const StasisJniFrameDescriptor *i32 = &stasis_jni_frame_descriptors[0];
+    const StasisJniFrameDescriptor *f32 = &stasis_jni_frame_descriptors[1];
+    const StasisJniFrameDescriptor *u8 = &stasis_jni_frame_descriptors[2];
+    snprintf(descriptor_json, sizeof(descriptor_json),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"descriptor\","
+            "\"lanes\":[{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu},"
+            "{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu},"
+            "{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu}]}",
+            i32->lane, i32->byte_capacity, i32->alignment,
+            f32->lane, f32->byte_capacity, f32->alignment,
+            u8->lane, u8->byte_capacity, u8->alignment);
+    return (*env)->NewStringUTF(env, descriptor_json);
+}
+#endif
+
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeLastFrameError(
         JNIEnv *env, jclass activity_class) {
     (void)activity_class;
+    if (stasis_jni_last_frame_error[0] != '\0') {
+        char message[sizeof(stasis_jni_last_frame_error)];
+        snprintf(message, sizeof(message), "%s", stasis_jni_last_frame_error);
+        clear_stasis_jni_frame_error();
+        return (*env)->NewStringUTF(env, message);
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->last_frame_error == NULL || bridge->free_string == NULL) {
         return (*env)->NewStringUTF(env, "native preview frame failed");
