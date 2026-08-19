@@ -1,0 +1,128 @@
+import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+const SCREEN_W: f32 = 640.0;
+const SCREEN_H: f32 = 360.0;
+const PADDLE_W: f32 = 14.0;
+const PADDLE_H: f32 = 72.0;
+const BALL_SIZE: f32 = 12.0;
+
+struct PongState {
+    left_y: f32;
+    right_y: f32;
+    ball_x: f32;
+    ball_y: f32;
+    ball_dx: f32;
+    ball_dy: f32;
+    left_score: i32;
+    right_score: i32;
+}
+
+global state: PongState;
+
+function clamp_paddle(y: f32): f32 {
+    if (y < 0.0) {
+        return 0.0;
+    }
+    if (y > SCREEN_H - PADDLE_H) {
+        return SCREEN_H - PADDLE_H;
+    }
+    return y;
+}
+
+function paddle_from_pointer(y: f32): f32 {
+    return clamp_paddle(y - PADDLE_H / 2.0);
+}
+
+function reset_ball(direction: f32): void {
+    state.ball_x = SCREEN_W / 2.0 - BALL_SIZE / 2.0;
+    state.ball_y = SCREEN_H / 2.0 - BALL_SIZE / 2.0;
+    state.ball_dx = direction * 4.0;
+    state.ball_dy = 3.0;
+}
+
+function update_player(): void {
+    if (input_pointer_count() > 0 && input_pointer_is_down(0)) {
+        state.left_y = paddle_from_pointer(input_pointer_y_logical(0));
+        return;
+    }
+
+    if (is_key_down(82)) {
+        state.left_y = state.left_y - 5.0;
+    }
+    if (is_key_down(81)) {
+        state.left_y = state.left_y + 5.0;
+    }
+    state.left_y = clamp_paddle(state.left_y);
+}
+
+function update_cpu(): void {
+    let target: f32 = state.ball_y - PADDLE_H / 2.0;
+    if (target > state.right_y) {
+        state.right_y = state.right_y + 3.0;
+    }
+    if (target < state.right_y) {
+        state.right_y = state.right_y - 3.0;
+    }
+    state.right_y = clamp_paddle(state.right_y);
+}
+
+function update_ball(): void {
+    state.ball_x = state.ball_x + state.ball_dx;
+    state.ball_y = state.ball_y + state.ball_dy;
+
+    if (state.ball_y <= 0.0 || state.ball_y >= SCREEN_H - BALL_SIZE) {
+        state.ball_dy = 0.0 - state.ball_dy;
+    }
+
+    if (state.ball_x <= 32.0 && state.ball_x >= 20.0 && state.ball_y + BALL_SIZE >= state.left_y && state.ball_y <= state.left_y + PADDLE_H) {
+        state.ball_dx = 4.0;
+    }
+    if (
+        state.ball_x + BALL_SIZE >= 608.0
+        && state.ball_x <= 620.0
+        && state.ball_y + BALL_SIZE >= state.right_y
+        && state.ball_y <= state.right_y + PADDLE_H
+    ) {
+        state.ball_dx = -4.0;
+    }
+
+    if (state.ball_x < 0.0) {
+        state.right_score = state.right_score + 1;
+        reset_ball(1.0);
+    }
+    if (state.ball_x > SCREEN_W) {
+        state.left_score = state.left_score + 1;
+        reset_ball(-1.0);
+    }
+}
+
+function main(): i32 {
+    init_window(640, 360, "Stasis Pointer Pong");
+    state.left_y = 144.0;
+    state.right_y = 144.0;
+    state.left_score = 0;
+    state.right_score = 0;
+    reset_ball(1.0);
+    return 0;
+}
+
+function tick(): i32 {
+    if (should_quit()) {
+        return 1;
+    }
+    update_player();
+    update_cpu();
+    update_ball();
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.02, 0.05, 0.09, 1.0);
+    fill_rect(20.0, state.left_y, PADDLE_W, PADDLE_H, 0.33, 0.85, 0.98, 1.0);
+    fill_rect(606.0, state.right_y, PADDLE_W, PADDLE_H, 0.98, 0.70, 0.32, 1.0);
+    fill_rect(state.ball_x, state.ball_y, BALL_SIZE, BALL_SIZE, 0.96, 0.98, 1.0, 1.0);
+    fill_rect(318.0, 0.0, 4.0, SCREEN_H, 0.16, 0.30, 0.40, 1.0);
+    end_frame();
+    return 0;
+}

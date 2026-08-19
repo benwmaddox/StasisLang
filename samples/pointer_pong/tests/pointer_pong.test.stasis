@@ -1,0 +1,19 @@
+import "../main.stasis";
+
+test `paddle target centers on pointer`(): bool {
+    let y: f32 = paddle_from_pointer(180.0);
+    if (y != 144.0) {
+        return false;
+    }
+    return true;
+}
+
+test `paddle clamp stays inside screen`(): bool {
+    if (clamp_paddle(-4.0) != 0.0) {
+        return false;
+    }
+    if (clamp_paddle(999.0) != SCREEN_H - PADDLE_H) {
+        return false;
+    }
+    return true;
+}

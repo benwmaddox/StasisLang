@@ -1,0 +1,27 @@
+import "../main.stasis";
+
+test `target contains its center`(): bool {
+    state.x = 40.0;
+    state.y = 80.0;
+    if (!target_contains(76.0, 116.0)) {
+        return false;
+    }
+    if (target_contains(5.0, 5.0)) {
+        return false;
+    }
+    return true;
+}
+
+test `target sequence is fixed`(): bool {
+    state.taps = 0;
+    move_target();
+    if (state.x != 48.0 || state.y != 180.0) {
+        return false;
+    }
+    state.taps = 1;
+    move_target();
+    if (state.x != 240.0 || state.y != 320.0) {
+        return false;
+    }
+    return true;
+}
