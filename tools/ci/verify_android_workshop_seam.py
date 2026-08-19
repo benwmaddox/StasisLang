@@ -166,18 +166,17 @@ def verify_it028(log: str, after_position: int) -> dict:
             or diagnostic.get("kind") != "compile_error" or "raw" in diagnostic \
             or not isinstance(structured, dict):
         raise SeamError("IT-028 invalid edit lacks an isolated structured diagnostic")
-    original_source_lines = summary.get("original_source_lines")
-    expected_line = original_source_lines + 2 if isinstance(original_source_lines, int) else None
+    hook_source_line = summary.get("hook_source_line")
     expected_diagnostic = {
         "file": "src/main.stasis",
-        "line": expected_line,
+        "line": hook_source_line,
         "column": 10,
-        "end_line": expected_line,
-        "end_column": 23,
-        "symbol": "IT028_invalid",
-        "message": "missing closing '}' for function 'IT028_invalid'",
+        "end_line": hook_source_line,
+        "end_column": 22,
+        "symbol": "on_code_swap",
+        "message": "unknown call target 'IT028_missing_target'",
     }
-    if not isinstance(original_source_lines, int) or original_source_lines <= 0 \
+    if not isinstance(hook_source_line, int) or hook_source_line <= 0 \
             or set(structured) != set(expected_diagnostic) \
             or any(structured.get(key) != value for key, value in expected_diagnostic.items()):
         raise SeamError("IT-028 invalid edit diagnostic is incomplete")

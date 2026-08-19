@@ -22,7 +22,6 @@ final class WorkshopHotEditAcceptance {
             if (!original.endsWith("\n")) {
                 throw new IllegalStateException("packaged source must end with a newline");
             }
-            int originalSourceLines = sourceLineCount(original);
             accepted = original.replace(TICK_REVISION,
                     "const IT028_TICK_REVISION: i32 = 2;")
                     .replace(RENDER_REVISION,
@@ -47,7 +46,17 @@ final class WorkshopHotEditAcceptance {
             requirePassed(published, "published");
             logCase(published);
 
-            String invalid = accepted + "\nfunction IT028_invalid(): void { return;\n";
+            String lineEnding = accepted.contains("\r\n") ? "\r\n" : "\n";
+            String originalHook = "function on_code_swap(): void {" + lineEnding
+                    + "    return;" + lineEnding + "}";
+            String invalidHook = "function on_code_swap(): void {" + lineEnding
+                    + "    IT028_missing_target(); return;" + lineEnding + "}";
+            if (accepted.indexOf(originalHook) < 0
+                    || accepted.indexOf(originalHook) != accepted.lastIndexOf(originalHook)) {
+                throw new IllegalStateException("expected exactly one on_code_swap hook");
+            }
+            int hookLine = sourceLineOf(accepted, originalHook);
+            String invalid = accepted.replace(originalHook, invalidHook);
             activity.acceptanceReplaceSource(projectRoot, invalid);
             String invalidCompile = activity.acceptanceCompile(projectRoot);
             if (!invalidCompile.startsWith("CompileError")) {
@@ -56,7 +65,7 @@ final class WorkshopHotEditAcceptance {
             JSONObject invalidDiagnostic = activity.acceptanceCompileDiagnostic(invalidCompile);
             invalidDiagnostic.remove("raw");
             JSONObject diagnostic = invalidDiagnostic.optJSONObject("diagnostic");
-            JSONObject expectedDiagnostic = expectedDiagnostic(originalSourceLines);
+            JSONObject expectedDiagnostic = expectedDiagnostic(hookLine);
             if (diagnostic == null || !diagnosticsEqual(diagnostic, expectedDiagnostic)) {
                 throw new IllegalStateException("invalid edit omitted exact structured diagnostic");
             }
@@ -70,7 +79,7 @@ final class WorkshopHotEditAcceptance {
             String restoreReceipt = activity.acceptanceCompile(projectRoot);
             requireNoChangeReceipt(restoreReceipt);
             JSONObject summary = validateCases(baseline, published, rolledBack);
-            summary.put("original_source_lines", originalSourceLines);
+            summary.put("hook_source_line", hookLine);
             summary.put("invalid_compile", invalidDiagnostic);
             summary.put("restore_receipt", new JSONObject()
                     .put("status", "NoChange")
@@ -86,7 +95,7 @@ final class WorkshopHotEditAcceptance {
                     .put("test_id", "IT-028").put("event", "hot_edit")
                     .put("status", "passed").put("ordered", true).put("unique", true)
                     .put("atomic", true).put("cases", cases)
-                    .put("original_source_lines", originalSourceLines)
+                    .put("hook_source_line", hookLine)
                     .put("invalid_compile", invalidDiagnostic)
                     .put("restore_receipt", summary.getJSONObject("restore_receipt"))
                     .put("cleanup_receipt", cleanup);
@@ -246,17 +255,22 @@ final class WorkshopHotEditAcceptance {
         }
     }
 
-    private static int sourceLineCount(String source) {
-        String[] lines = source.split("\\r?\\n", -1);
-        return lines.length - (source.endsWith("\n") || source.endsWith("\r") ? 1 : 0);
+    private static int sourceLineOf(String source, String text) {
+        int offset = source.indexOf(text);
+        if (offset < 0) throw new IllegalStateException("hook text was not found");
+        int line = 1;
+        for (int index = 0; index < offset; index += 1) {
+            if (source.charAt(index) == '\n') line += 1;
+        }
+        return line;
     }
 
-    private static JSONObject expectedDiagnostic(int originalSourceLines) throws Exception {
+    private static JSONObject expectedDiagnostic(int hookLine) throws Exception {
         return new JSONObject().put("file", "src/main.stasis")
-                .put("line", originalSourceLines + 2).put("column", 10)
-                .put("end_line", originalSourceLines + 2).put("end_column", 23)
-                .put("symbol", "IT028_invalid")
-                .put("message", "missing closing '}' for function 'IT028_invalid'");
+                .put("line", hookLine).put("column", 10)
+                .put("end_line", hookLine).put("end_column", 22)
+                .put("symbol", "on_code_swap")
+                .put("message", "unknown call target 'IT028_missing_target'");
     }
 
     private static boolean diagnosticsEqual(JSONObject actual, JSONObject expected) {
