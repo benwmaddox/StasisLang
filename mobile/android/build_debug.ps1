@@ -14,7 +14,8 @@ $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $scriptRoot
 try {
-    $gradle = Join-Path $scriptRoot "gradlew.bat"
+    $gradleName = if ([System.IO.Path]::DirectorySeparatorChar -eq [char]'\') { "gradlew.bat" } else { "gradlew" }
+    $gradle = Join-Path $scriptRoot $gradleName
     if ($GradlePath) {
         if (-not (Test-Path $GradlePath)) { throw "Gradle was not found: $GradlePath" }
         $gradleCmd = $GradlePath

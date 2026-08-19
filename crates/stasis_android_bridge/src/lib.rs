@@ -37,6 +37,14 @@ pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER
 pub const ANDROID_RENDER_GFX_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_I32_COUNT;
 pub const ANDROID_RENDER_GFX_F32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_F32_COUNT;
 pub const ANDROID_RENDER_GFX_U8_CAPACITY: usize = stasis_dynload::STASIS_RENDER_U8_COUNT;
+pub const ANDROID_RENDER_I_FRAME_TOKEN: usize = 26;
+
+/// Stable identity for the real Rust bridge loaded by the Workshop JNI shim.
+/// The pointer is backed by a static NUL-terminated package-version literal.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_version() -> *const c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AndroidBridgeTickInput {
@@ -1509,20 +1517,22 @@ fn write_production_host_frame(
 }
 
 fn write_android_display_metadata(out: &mut [i32]) -> Result<(), String> {
-    if out.len() < 22 {
+    if out.len() <= ANDROID_RENDER_I_FRAME_TOKEN {
         return Err("render header is too small for display metadata".to_string());
     }
-    let (metrics, display_generation, density_generation) = RUNTIME_SESSION.with(|slot| {
-        let slot = slot.borrow();
-        let session = slot
-            .as_ref()
-            .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
-        Ok::<_, String>((
-            session.display_metrics,
-            session.display_generation,
-            session.density_generation,
-        ))
-    })?;
+    let (metrics, display_generation, density_generation, frame_token) =
+        RUNTIME_SESSION.with(|slot| {
+            let slot = slot.borrow();
+            let session = slot
+                .as_ref()
+                .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
+            Ok::<_, String>((
+                session.display_metrics,
+                session.display_generation,
+                session.density_generation,
+                session.tick_count,
+            ))
+        })?;
     out[10] = metrics.logical_w;
     out[11] = metrics.logical_h;
     out[12] = metrics.native_w;
@@ -1535,6 +1545,7 @@ fn write_android_display_metadata(out: &mut [i32]) -> Result<(), String> {
     out[19] = metrics.logical_h;
     out[20] = display_generation;
     out[21] = density_generation;
+    out[ANDROID_RENDER_I_FRAME_TOKEN] = frame_token;
     Ok(())
 }
 
@@ -2902,6 +2913,16 @@ pub extern "C" fn stasis_android_bridge_free_string(value: *mut c_char) {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CStr;
+
+    #[test]
+    fn exports_the_real_bridge_package_version() {
+        let version = unsafe { CStr::from_ptr(super::stasis_android_bridge_version()) };
+        assert_eq!(
+            version.to_str().expect("bridge version is UTF-8"),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
     use super::*;
     use std::collections::BTreeSet;
 

@@ -15,7 +15,11 @@
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
+#ifndef STASIS_RENDER_ACCEPTANCE
+#define STASIS_RENDER_ACCEPTANCE 0
+#endif
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
+typedef const char *(*stasis_android_bridge_version_fn)(void);
 typedef char *(*stasis_android_bridge_run_tests_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
 typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len);
@@ -42,6 +46,7 @@ typedef int (*stasis_codex_android_initialize_fn)(void *env, void *context);
 typedef void (*stasis_codex_android_free_string_fn)(char *value);
 typedef struct RustBridgeApi {
     void *handle;
+    stasis_android_bridge_version_fn version;
     stasis_android_bridge_compile_project_fn compile_project;
     stasis_android_bridge_run_tests_fn run_tests;
     stasis_android_bridge_run_tick_fn run_tick;
@@ -170,6 +175,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
         return NULL;
     }
 
+    rust_bridge_api.version =
+            (stasis_android_bridge_version_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_version");
     rust_bridge_api.compile_project =
             (stasis_android_bridge_compile_project_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_compile_project");
     rust_bridge_api.run_tests =
@@ -207,7 +214,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_set_storage_root_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_storage_root");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
-    if (rust_bridge_api.compile_project == NULL ||
+    if (rust_bridge_api.version == NULL ||
+        rust_bridge_api.compile_project == NULL ||
         rust_bridge_api.run_tick == NULL ||
         rust_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG, "Rust Android bridge missing required symbols");
@@ -440,6 +448,24 @@ static int try_rust_bridge_get_i32_global(const char *project_root, const char *
     bridge->free_string(bridge_message);
     return 1;
 }
+
+static int parse_state_value(const char *message, int *value) {
+    return strstr(message, "StateGet:") != NULL && parse_manifest_i32(message, "value=", value);
+}
+
+#if STASIS_RENDER_ACCEPTANCE
+static void log_workshop_it025_marker(JNIEnv *env, const char *bridge_version,
+        int state_checksum, uint32_t command_trace, int render_version, int frame_token) {
+    __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG,
+            "Stasis Workshop IT-025: {\"schema\":\"stasis.workshop_seam.v1\","
+            "\"test_id\":\"IT-025\",\"event\":\"frame\","
+            "\"jni_version\":%d,\"rust_bridge_version\":\"%s\","
+            "\"render_version\":%d,\"state_checksum\":%d,"
+            "\"command_trace\":%u,\"frame_token\":%d,\"fallback\":0,\"stub\":0}",
+            (*env)->GetVersion(env), bridge_version, render_version,
+            state_checksum, command_trace, frame_token);
+}
+#endif
 static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len) {
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick_frame == NULL) {
@@ -817,7 +843,6 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
             root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h,
             values_i32, STASIS_RENDER_I32_COUNT, values_f32, STASIS_RENDER_F32_COUNT,
             values_u8, STASIS_RENDER_U8_COUNT);
-    (*env)->ReleaseStringUTFChars(env, project_root, root);
     if (status != 0) {
         values_i32[0] = -1;
     } else {
@@ -849,7 +874,44 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
             last_display_generation = values_i32[STASIS_RENDER_I_DISPLAY_GENERATION];
             last_density_generation = values_i32[STASIS_RENDER_I_DENSITY_GENERATION];
         }
+#if STASIS_RENDER_ACCEPTANCE
+        {
+            static int it025_state_ready = 0;
+            static int it025_state_checksum;
+            static const char *it025_bridge_version;
+            RustBridgeApi *bridge = load_rust_bridge_api();
+            char state_message[256];
+            if (!it025_state_ready) {
+                it025_bridge_version = bridge == NULL || bridge->version == NULL
+                        ? NULL : bridge->version();
+                if (it025_bridge_version == NULL || it025_bridge_version[0] == '\0' ||
+                        !try_rust_bridge_get_i32_global(root, "seam_state_checksum",
+                                state_message, sizeof(state_message)) ||
+                        !parse_state_value(state_message, &it025_state_checksum) ||
+                        it025_state_checksum <= 0) {
+                    __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG,
+                            "IT-025 state checksum was unavailable from the live Rust JIT global bridge");
+                    (*env)->ReleaseStringUTFChars(env, project_root, root);
+                    values_i32[0] = -1;
+                    return -1;
+                }
+                it025_state_ready = 1;
+            }
+            if (it025_bridge_version == NULL) {
+                __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG,
+                        "IT-025 Rust bridge version was unavailable after initialization");
+                (*env)->ReleaseStringUTFChars(env, project_root, root);
+                values_i32[0] = -1;
+                return -1;
+            }
+            log_workshop_it025_marker(env, it025_bridge_version, it025_state_checksum,
+                    stasis_render_trace(values_i32, values_f32, values_u8),
+                    values_i32[STASIS_RENDER_I_VERSION],
+                    values_i32[STASIS_RENDER_I_FRAME_TOKEN]);
+        }
+#endif
     }
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
     return (jint)status;
 }
 

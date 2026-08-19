@@ -47,6 +47,8 @@
 #define STASIS_RENDER_I_DROPPED_ORDER 23
 #define STASIS_RENDER_I_RECT_COUNT 24
 #define STASIS_RENDER_I_DROPPED_RECTS 25
+/* Reserved header slot carrying the monotonically increasing Android frame token. */
+#define STASIS_RENDER_I_FRAME_TOKEN 26
 #define STASIS_RENDER_I_SPRITE_BASE 32
 
 #define STASIS_RENDER_F_CLEAR_BASE 0

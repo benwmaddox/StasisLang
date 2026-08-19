@@ -23,6 +23,9 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.touch_expectations = json.loads(
             read("samples/android_touch_seam/android_seam_expectations.json")
         )
+        cls.workshop_script = read("mobile/android/test_render_emulator.ps1")
+        cls.rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
+        cls.provenance_script = read("mobile/android/rust_bridge_provenance.ps1")
 
     def test_workflow_uses_hosted_x86_emulator(self):
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
@@ -113,13 +116,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.workflow.index("- name: Checkout SDL3"),
         )
         for artifact in (
+            "android-workshop-it025-seam",
             "android-resource-restore-seam",
             "android-release-shell-seam",
             "android-touch-roundtrip-seam",
             "android-orientation-metrics-seam",
         ):
             self.assertIn(artifact, self.workflow)
-        self.assertEqual(4, self.workflow.count("        if: always()"))
+        self.assertEqual(5, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
@@ -160,6 +164,22 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             if gesture["name"] == "inside_drag"
         )
         self.assertGreaterEqual(inside_drag["duration_ms"], 2000)
+
+    def test_workshop_it025_runs_after_release_shells_on_the_same_emulator(self):
+        self.assertIn("test_render_emulator.ps1 -Headless", self.workflow)
+        self.assertIn("verify_android_workshop_seam.py", self.workshop_script)
+        self.assertIn('Join-Path (Join-Path (Join-Path $repoRoot "artifacts") "android_workshop_seam") "e"', self.workshop_script)
+        self.assertIn("Reusing ready Android emulator", self.workshop_script)
+        self.assertNotIn('"-SkipRustBridgeBuild"', self.workshop_script)
+        for path_fragment in ("tools\\ci\\", "samples\\render_parity\\", "app\\build\\outputs\\apk\\", "artifacts\\android_workshop_seam\\"):
+            self.assertNotIn(path_fragment, self.workshop_script)
+        self.assertIn('"linux-x86_64"', self.rust_bridge_script)
+        self.assertIn("cargo_cache.py", self.rust_bridge_script)
+        self.assertIn("[System.IO.Path]::IsPathRooted", self.rust_bridge_script)
+        self.assertNotIn('"app\\src\\workshop\\jniLibs\\$abi"', self.rust_bridge_script)
+        self.assertNotIn('"$abi\\libstasis_android_bridge.so"', self.provenance_script)
+        self.assertIn("Install Android Rust targets", self.workflow)
+        self.assertIn("rustup target add aarch64-linux-android x86_64-linux-android", self.workflow)
 
 
 if __name__ == "__main__":

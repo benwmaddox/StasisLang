@@ -9,6 +9,7 @@ def allowDebugWorkshopRustBridge = (project.findProperty('stasis.allowDebugRustB
         .toString().toBoolean()
 def renderAcceptance = (project.findProperty('stasis.renderAcceptance') ?: 'false')
         .toString().toBoolean()
+def powershellExecutable = System.getProperty('os.name').toLowerCase().contains('windows') ? 'powershell' : 'pwsh'
 android {
     namespace 'com.stasislang.workshop'
     compileSdk = (project.findProperty('stasis.compileSdk') ?: '35').toString().toInteger()
@@ -24,6 +25,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments '-DSTASIS_ANDROID_SMOKE_ONLY=ON'
+                arguments "-DSTASIS_RENDER_ACCEPTANCE=${renderAcceptance ? 'ON' : 'OFF'}"
             }
         }
     }
@@ -88,7 +90,7 @@ tasks.register('verifyWorkshopRustBridge', Exec) {
     inputs.files('src/workshop/jniLibs/arm64-v8a/libstasis_android_bridge.so',
             'src/workshop/jniLibs/x86_64/libstasis_android_bridge.so')
     def expectedProfile = allowDebugWorkshopRustBridge ? 'debug' : 'release'
-    commandLine 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    commandLine powershellExecutable, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
             rootProject.file('rust_bridge_provenance.ps1').absolutePath,
             '-Mode', 'Verify', '-Profile', expectedProfile
 }

@@ -33,6 +33,10 @@ global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global host_req_seq: i32;
 
+// IT-025 reads this guest-owned value through the live JIT global bridge.  It
+// is deliberately independent of host display metadata.
+global seam_state_checksum: i32;
+
 struct ParityState {
     opaque: Sprite;
     translucent: Sprite;
@@ -46,6 +50,7 @@ struct ParityState {
 global state: ParityState;
 
 function main(): i32 {
+    seam_state_checksum = 2500;
     host_req_flags = 1;
     host_req_window_w_px = PARITY_WINDOW_W;
     host_req_window_h_px = PARITY_WINDOW_H;
