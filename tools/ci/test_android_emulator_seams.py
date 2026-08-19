@@ -166,7 +166,12 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertGreaterEqual(inside_drag["duration_ms"], 2000)
 
     def test_workshop_it025_runs_after_release_shells_on_the_same_emulator(self):
-        self.assertIn("test_render_emulator.ps1 -Headless", self.workflow)
+        self.assertIn(
+            "test_render_emulator.ps1 -Headless -StepTimeoutSeconds 600",
+            self.workflow,
+        )
+        self.assertIn("[int]$StepTimeoutSeconds = 300", self.workshop_script)
+        self.assertIn("[math]::Min($StepTimeoutSeconds, $remainingSeconds)", self.workshop_script)
         self.assertIn("verify_android_workshop_seam.py", self.workshop_script)
         self.assertIn('Join-Path (Join-Path (Join-Path $repoRoot "artifacts") "android_workshop_seam") "e"', self.workshop_script)
         self.assertIn("Reusing ready Android emulator", self.workshop_script)

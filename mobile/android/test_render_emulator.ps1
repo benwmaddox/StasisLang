@@ -4,6 +4,7 @@ param(
     [switch]$Headless,
     [switch]$SkipBuild,
     [int]$RenderTimeoutSeconds = 45,
+    [int]$StepTimeoutSeconds = 300,
     [int]$TotalTimeoutSeconds = 900,
     [double]$MaxRenderP50Millis = 0,
     [double]$MaxRenderP95Millis = 0,
@@ -50,7 +51,7 @@ function Assert-In-Time([string]$Step) {
 
 function Invoke-BoundedScript([string]$Path, [string[]]$Arguments, [string]$Phase) {
     $remainingSeconds = [math]::Floor($TotalTimeoutSeconds - $startedAt.Elapsed.TotalSeconds)
-    $stepSeconds = [math]::Min(300, $remainingSeconds)
+    $stepSeconds = [math]::Min($StepTimeoutSeconds, $remainingSeconds)
     if ($stepSeconds -le 0) { throw "Android render E2E exceeded ${TotalTimeoutSeconds}s before $Phase" }
     $stdout = Join-Path $artifactRoot "$Phase-stdout.log"
     $stderr = Join-Path $artifactRoot "$Phase-stderr.log"

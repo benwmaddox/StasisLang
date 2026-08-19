@@ -74,7 +74,7 @@ jobs:
             -no-boot-anim -camera-back none
           script: |
             pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1
-            pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 -Headless
+            pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 -Headless -StepTimeoutSeconds 600
 
       - name: Upload Android Workshop IT-025 evidence
         if: always()
