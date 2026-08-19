@@ -81,7 +81,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int FRAME_I32_CAPACITY = I_ORDER_BASE + MAX_ORDER;
     static final int FRAME_F32_CAPACITY = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
 
-    private static final int HOST_HEADER_I32S = I_FRAME_TOKEN + 1;
+    // The production host header intentionally stops at density generation;
+    // the frame token is read through frameToken() so this ABI stays 22 ints.
+    private static final int HOST_HEADER_I32S = I_DENSITY_GENERATION + 1;
     private static final int CAPTURE_HEADER_I32S = I_RECT_COUNT + 2;
     private static final int LINE_CHUNK_SIZE = 256;
     private static final int SPRITE_CHUNK_SIZE = 128;
@@ -402,6 +404,14 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     synchronized float acceptanceFrameF32(int index) {
         return frameF32.get(index);
+    }
+
+    synchronized int frameToken() {
+        return frameI32.get(I_FRAME_TOKEN);
+    }
+
+    synchronized int rectCount() {
+        return frameI32.get(I_RECT_COUNT);
     }
 
     synchronized void copyFrameHeaderInto(int[] destination) {

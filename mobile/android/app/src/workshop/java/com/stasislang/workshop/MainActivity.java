@@ -4992,7 +4992,7 @@ public final class MainActivity extends Activity {
                 return "{\"status\":\"failed\",\"error\":"
                         + JSONObject.quote(nativeLastFrameError()) + "}";
             }
-            int token = nativeFrameValues[StasisPreviewRenderer.I_FRAME_TOKEN];
+            int token = gamePreview.frameToken();
             long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
             boolean presented = gamePreview.awaitPresentedFrameToken(token, 5_000L);
             if (!presented) {
@@ -5010,7 +5010,8 @@ public final class MainActivity extends Activity {
                 guest.put(names[index], extractIntField(state, "value", Integer.MIN_VALUE));
             }
             JSONObject marker = new JSONObject();
-            boolean markerActive = nativeFrameValues[StasisPreviewRenderer.I_RECT_COUNT] >= 2;
+            int rectCount = gamePreview.rectCount();
+            boolean markerActive = rectCount >= 2;
             marker.put("active", markerActive);
             if (markerActive) {
                 int base = StasisPreviewRenderer.F_RECT_REVERSE_BASE - 8;
@@ -5033,7 +5034,7 @@ public final class MainActivity extends Activity {
                     .put("guest", guest)
                     .put("render", new JSONObject().put("frame_token", token)
                             .put("trace", trace)
-                            .put("rect_count", nativeFrameValues[StasisPreviewRenderer.I_RECT_COUNT])
+                            .put("rect_count", rectCount)
                             .put("marker", marker))
                     .put("gles_presented", true).put("gles_frame_token", token)
                     .put("java_only", false).toString();
@@ -11907,6 +11908,18 @@ public final class MainActivity extends Activity {
             }
         }
 
+        int frameToken() {
+            synchronized (renderer) {
+                return renderer.frameToken();
+            }
+        }
+
+        int rectCount() {
+            synchronized (renderer) {
+                return renderer.rectCount();
+            }
+        }
+
         float acceptanceFrameF32(int index) {
             synchronized (renderer) {
                 return renderer.acceptanceFrameF32(index);
@@ -11966,7 +11979,7 @@ public final class MainActivity extends Activity {
                 lastNativeFrameDurationNanos = System.nanoTime() - started;
                 renderer.copyFrameHeaderInto(header);
                 if (acceptance && status == 0) {
-                    renderer.setAcceptanceTrace(header[StasisPreviewRenderer.I_FRAME_TOKEN],
+                    renderer.setAcceptanceTrace(renderer.frameToken(),
                             MainActivity.nativeFrameTrace(renderer.frameI32Bytes(),
                                     renderer.frameF32Bytes(), renderer.frameU8Bytes()));
                 }
