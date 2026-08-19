@@ -14,6 +14,7 @@ __STASIS_IMPORTS__
   let instance;
   let frames = 0;
   let worstTick = 0;
+  let worstRender = 0;
   let worstWasmRender=0,worstBrowserReplay=0,worstFrameWork=0;
   const colorCache=new Map();
   const cachedColor=(r,g,b)=>{const key=((r&255)<<16)|((g&255)<<8)|(b&255);let value=colorCache.get(key);if(!value){value=color(r,g,b);colorCache.set(key,value);}return value;};
@@ -50,9 +51,9 @@ __STASIS_IMPORTS__
     frames += 1;
     if (frames > 5) {
       worstTick = Math.max(worstTick, tickMs);
-      worstWasmRender=Math.max(worstWasmRender,wasmRenderMs);worstBrowserReplay=Math.max(worstBrowserReplay,browserReplayMs);worstFrameWork=Math.max(worstFrameWork,frameWorkMs);
+      worstRender=Math.max(worstRender,renderMs); worstWasmRender=Math.max(worstWasmRender,wasmRenderMs);worstBrowserReplay=Math.max(worstBrowserReplay,browserReplayMs);worstFrameWork=Math.max(worstFrameWork,frameWorkMs);
     }
-    const worstRender=worstWasmRender+worstBrowserReplay; const underBudget=worstFrameWork<16;
+    const underBudget=worstFrameWork<16;
     if (hud) hud.textContent=`Wasm frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)})\nwasm render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nbrowser replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)})\n${underBudget?"UNDER 16 ms":"OVER BUDGET"}`;
     document.body.dataset.frames = String(frames);
     document.body.dataset.tickMs=tickMs.toFixed(3);document.body.dataset.renderMs=renderMs.toFixed(3);document.body.dataset.wasmRenderMs=wasmRenderMs.toFixed(3);document.body.dataset.browserReplayMs=browserReplayMs.toFixed(3);document.body.dataset.frameWorkMs=frameWorkMs.toFixed(3);document.body.dataset.worstTickMs=worstTick.toFixed(3);document.body.dataset.worstRenderMs=worstRender.toFixed(3);document.body.dataset.worstWasmRenderMs=worstWasmRender.toFixed(3);document.body.dataset.worstBrowserReplayMs=worstBrowserReplay.toFixed(3);document.body.dataset.worstFrameWorkMs=worstFrameWork.toFixed(3);

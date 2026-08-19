@@ -47,15 +47,34 @@
   let lastWindowRequest = -1;
   let pendingFullscreen;
   let worstTick = 0;
+  let worstRender = 0;
   let worstWasmRender = 0;
   let worstBrowserReplay = 0;
   let worstFrameWork = 0;
   let rectBatcher;
+  const RECT_BATCH_MIN = 64;
+  const RECT_CAP = 10000;
+  const rectScratch = new Float32Array(RECT_CAP * 8);
   const startedAt = performance.now();
 
   const colorCache = new Map();
-  const color = (r, g, b) => { const red=r&255, green=g&255, blue=b&255, key=(red<<16)|(green<<8)|blue; let value=colorCache.get(key); if (!value) { value=`rgb(${red} ${green} ${blue})`; colorCache.set(key,value); } return value; };
-  const unitColor = (r,g,b) => color(Math.max(0,Math.min(255,Math.round(r*255))),Math.max(0,Math.min(255,Math.round(g*255))),Math.max(0,Math.min(255,Math.round(b*255))));
+  const color = (r, g, b) => {
+    const red = r & 255;
+    const green = g & 255;
+    const blue = b & 255;
+    const key = (red << 16) | (green << 8) | blue;
+    let value = colorCache.get(key);
+    if (!value) {
+      value = `rgb(${red} ${green} ${blue})`;
+      colorCache.set(key, value);
+    }
+    return value;
+  };
+  const unitColor = (r, g, b) => color(
+    Math.max(0, Math.min(255, Math.round(r * 255))),
+    Math.max(0, Math.min(255, Math.round(g * 255))),
+    Math.max(0, Math.min(255, Math.round(b * 255)))
+  );
   const stringValue = id => game.strings[String(id)] || "";
   const assetKey = value => value.replace(/^(?:\.\.\/|\.\/)+/, "");
   const assetValue = id => {
@@ -650,16 +669,87 @@
   });
   // @stasis-feature audio end
 
-  const RECT_BATCH_MIN = 64;
   function getRectBatcher() {
     if (rectBatcher !== undefined) return rectBatcher;
-    try { if (!document.createElement) return (rectBatcher=null); const target=document.createElement("canvas"), gl=target.getContext("webgl2",{alpha:true,premultipliedAlpha:true}); if (!gl) return (rectBatcher=null);
-      const vs=gl.createShader(gl.VERTEX_SHADER), fs=gl.createShader(gl.FRAGMENT_SHADER), program=gl.createProgram(); if (!vs||!fs||!program) throw new Error();
-      gl.shaderSource(vs,"#version 300 es\nlayout(location=0)in vec2 p;layout(location=1)in vec4 r;layout(location=2)in vec4 c;uniform vec2 s;out vec4 o;void main(){vec2 q=r.xy+p*r.zw;gl_Position=vec4(q.x/s.x*2.-1.,1.-q.y/s.y*2.,0,1);o=c;}"); gl.compileShader(vs); if(!gl.getShaderParameter(vs,gl.COMPILE_STATUS)) throw new Error();
-      gl.shaderSource(fs,"#version 300 es\nprecision mediump float;in vec4 o;out vec4 c;void main(){c=o;}"); gl.compileShader(fs); if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS)) throw new Error(); gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw new Error();
-      const vao=gl.createVertexArray(), unit=gl.createBuffer(), data=gl.createBuffer(); if(!vao||!unit||!data)throw new Error(); gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,unit);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,0,1,1,1]),gl.STATIC_DRAW);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);gl.bindBuffer(gl.ARRAY_BUFFER,data);for(const [a,o]of[[1,0],[2,16]]){gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,4,gl.FLOAT,false,32,o);gl.vertexAttribDivisor(a,1);}gl.bindVertexArray(null);const size=gl.getUniformLocation(program,"s");
-      return (rectBatcher={draw(values,count){const w=Math.max(1,canvas.width|0),h=Math.max(1,canvas.height|0);if(target.width!==w||target.height!==h){target.width=w;target.height=h;}gl.viewport(0,0,w,h);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(program);gl.uniform2f(size,w,h);gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,data);gl.bufferData(gl.ARRAY_BUFFER,values,gl.DYNAMIC_DRAW);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.drawArraysInstanced(gl.TRIANGLE_STRIP,0,4,count);gl.bindVertexArray(null);context.globalAlpha=1;context.globalCompositeOperation="source-over";context.drawImage(target,0,0);}});
-    } catch (_) { return (rectBatcher=null); }
+    try {
+      if (!document.createElement) return (rectBatcher = null);
+      const target = document.createElement("canvas");
+      const gl = target.getContext("webgl2", { alpha: true, premultipliedAlpha: true });
+      if (!gl) return (rectBatcher = null);
+      const vertex = gl.createShader(gl.VERTEX_SHADER);
+      const fragment = gl.createShader(gl.FRAGMENT_SHADER);
+      const program = gl.createProgram();
+      if (!vertex || !fragment || !program) throw new Error("rectangle WebGL allocation failed");
+      gl.shaderSource(vertex, `#version 300 es
+        layout(location = 0) in vec2 p;
+        layout(location = 1) in vec4 r;
+        layout(location = 2) in vec4 c;
+        uniform vec2 size;
+        out vec4 color;
+        void main() {
+          vec2 q = r.xy + p * r.zw;
+          gl_Position = vec4(q.x / size.x * 2.0 - 1.0,
+            1.0 - q.y / size.y * 2.0, 0.0, 1.0);
+          color = c;
+        }`);
+      gl.compileShader(vertex);
+      if (!gl.getShaderParameter(vertex, gl.COMPILE_STATUS)) throw new Error("rectangle vertex shader failed");
+      gl.shaderSource(fragment, `#version 300 es
+        precision mediump float;
+        in vec4 color;
+        out vec4 outputColor;
+        void main() { outputColor = color; }`);
+      gl.compileShader(fragment);
+      if (!gl.getShaderParameter(fragment, gl.COMPILE_STATUS)) throw new Error("rectangle fragment shader failed");
+      gl.attachShader(program, vertex);
+      gl.attachShader(program, fragment);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error("rectangle program failed");
+      const vao = gl.createVertexArray();
+      const unitBuffer = gl.createBuffer();
+      const instanceBuffer = gl.createBuffer();
+      if (!vao || !unitBuffer || !instanceBuffer) throw new Error("rectangle buffers failed");
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+      for (const [attribute, offset] of [[1, 0], [2, 16]]) {
+        gl.enableVertexAttribArray(attribute);
+        gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 32, offset);
+        gl.vertexAttribDivisor(attribute, 1);
+      }
+      gl.bindVertexArray(null);
+      const size = gl.getUniformLocation(program, "size");
+      return (rectBatcher = {
+        draw(values, count) {
+          const width = Math.max(1, canvas.width | 0);
+          const height = Math.max(1, canvas.height | 0);
+          if (target.width !== width || target.height !== height) {
+            target.width = width;
+            target.height = height;
+          }
+          gl.viewport(0, 0, width, height);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.useProgram(program);
+          gl.uniform2f(size, width, height);
+          gl.bindVertexArray(vao);
+          gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+          gl.bufferData(gl.ARRAY_BUFFER, values, gl.DYNAMIC_DRAW);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+          gl.bindVertexArray(null);
+          context.globalAlpha = 1;
+          context.globalCompositeOperation = "source-over";
+          context.drawImage(target, 0, 0);
+        }
+      });
+    } catch (_) {
+      return (rectBatcher = null);
+    }
   }
   function executeCommands() {
     context.globalAlpha = 1;
@@ -717,7 +807,38 @@
       context.fillStyle = unitColor(f32[base + 4], f32[base + 5], f32[base + 6]);
       context.fillRect(f32[base], f32[base + 1], f32[base + 2], f32[base + 3]);
     };
-    const drawRectRun = indices => { if(indices.length<RECT_BATCH_MIN){for(const i of indices)drawRect(i);return;} const batcher=getRectBatcher(); if(!batcher){for(const i of indices)drawRect(i);return;} const values=new Float32Array(indices.length*8); for(let i=0;i<indices.length;i+=1)values.set(f32.subarray(79996-indices[i]*8,80004-indices[i]*8),i*8); try{batcher.draw(values,indices.length);}catch(_){rectBatcher=null;for(const i of indices)drawRect(i);} };
+    const drawRectRun = (start, count, ordered) => {
+      if (count < RECT_BATCH_MIN) {
+        for (let offset = 0; offset < count; offset += 1) {
+          const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+          drawRect(index);
+        }
+        return;
+      }
+      const batcher = getRectBatcher();
+      if (!batcher) {
+        for (let offset = 0; offset < count; offset += 1) {
+          const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+          drawRect(index);
+        }
+        return;
+      }
+      for (let offset = 0; offset < count; offset += 1) {
+        const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+        const source = 79996 - index * 8;
+        const target = offset * 8;
+        for (let field = 0; field < 8; field += 1) rectScratch[target + field] = f32[source + field];
+      }
+      try {
+        batcher.draw(rectScratch, count);
+      } catch (_) {
+        rectBatcher = null;
+        for (let offset = 0; offset < count; offset += 1) {
+          const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+          drawRect(index);
+        }
+      }
+    };
     const drawSprite = index => {
       const baseI = 32 + index * 3;
       const baseF = 80004 + index * spriteStride;
@@ -781,11 +902,20 @@
         if (kind === 1 && index < lineCount) drawLine(index);
         else if (kind === 2 && index < spriteCount) drawSprite(index);
         else if (kind === 3 && index < textCount) drawText(index);
-        else if (kind === 4 && index < rectCount) { const run=[index]; while(order+run.length<orderCount){const next=i32[18464+order+run.length];if(Math.floor(next/16384)!==4||next%16384>=rectCount)break;run.push(next%16384);} drawRectRun(run);order+=run.length-1; }
+        else if (kind === 4 && index < rectCount) {
+          let runCount = 1;
+          while (order + runCount < orderCount) {
+            const next = i32[18464 + order + runCount];
+            if (Math.floor(next / 16384) !== 4 || next % 16384 >= rectCount) break;
+            runCount += 1;
+          }
+          drawRectRun(order, runCount, true);
+          order += runCount - 1;
+        }
       }
     } else {
       for (let index = 0; index < lineCount; index += 1) drawLine(index);
-      drawRectRun(Array.from({ length: rectCount }, (_, index) => index));
+      drawRectRun(0, rectCount, false);
       for (let index = 0; index < spriteCount; index += 1) drawSprite(index);
       for (let index = 0; index < textCount; index += 1) drawText(index);
     }
@@ -955,9 +1085,11 @@
     frames += 1;
     if (frames > 5) {
       worstTick = Math.max(worstTick, tickMs);
-      worstWasmRender = Math.max(worstWasmRender, wasmRenderMs); worstBrowserReplay = Math.max(worstBrowserReplay, browserReplayMs); worstFrameWork = Math.max(worstFrameWork, frameWorkMs);
+      worstRender = Math.max(worstRender, renderMs);
+      worstWasmRender = Math.max(worstWasmRender, wasmRenderMs);
+      worstBrowserReplay = Math.max(worstBrowserReplay, browserReplayMs);
+      worstFrameWork = Math.max(worstFrameWork, frameWorkMs);
     }
-    const worstRender = worstWasmRender + worstBrowserReplay;
     const underBudget = worstFrameWork < 16;
     if (hud) {
       hud.textContent = `Wasm frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)})\nwasm render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nbrowser replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)})\n${underBudget ? "UNDER 16 ms" : "OVER BUDGET"}`;
@@ -965,10 +1097,14 @@
     document.body.dataset.frames = String(frames);
     document.body.dataset.tickMs = tickMs.toFixed(3);
     document.body.dataset.renderMs = renderMs.toFixed(3);
-    document.body.dataset.wasmRenderMs = wasmRenderMs.toFixed(3); document.body.dataset.browserReplayMs = browserReplayMs.toFixed(3); document.body.dataset.frameWorkMs = frameWorkMs.toFixed(3);
+    document.body.dataset.wasmRenderMs = wasmRenderMs.toFixed(3);
+    document.body.dataset.browserReplayMs = browserReplayMs.toFixed(3);
+    document.body.dataset.frameWorkMs = frameWorkMs.toFixed(3);
     document.body.dataset.worstTickMs = worstTick.toFixed(3);
     document.body.dataset.worstRenderMs = worstRender.toFixed(3);
-    document.body.dataset.worstWasmRenderMs = worstWasmRender.toFixed(3); document.body.dataset.worstBrowserReplayMs = worstBrowserReplay.toFixed(3); document.body.dataset.worstFrameWorkMs = worstFrameWork.toFixed(3);
+    document.body.dataset.worstWasmRenderMs = worstWasmRender.toFixed(3);
+    document.body.dataset.worstBrowserReplayMs = worstBrowserReplay.toFixed(3);
+    document.body.dataset.worstFrameWorkMs = worstFrameWork.toFixed(3);
     document.body.dataset.underBudget = String(underBudget);
     if (instance.exports.player_x) document.body.dataset.playerX = String(instance.exports.player_x.value);
     finishHostFrame();
