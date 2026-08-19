@@ -50,6 +50,7 @@ jobs:
       - name: Check Stasis src layout
         run: |
           python tools/ci/check_stasis_src_layout.py
+          python -m unittest tools.ci.test_check_stasis_src_layout
           python tools/ci/check_sdl3_migration.py
           python tools/ci/check_windows_vs_generator.py
           python tools/ci/check_runtime_abi_contract.py
