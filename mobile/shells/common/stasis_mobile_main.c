@@ -190,8 +190,8 @@ int SDL_main(int argc, char **argv) {
         if (status == STASIS_MOBILE_RUNTIME_OK) {
 #if defined(STASIS_ENABLE_SEAM_TESTS)
             frame++;
-            if (seam_test_id != NULL && (frame == 1 || frame == 30)) {
-                log_seam_marker(seam_test_id, frame == 30 ? "stable" : "frame", frame);
+            if (seam_test_id != NULL && (frame == 1 || (frame > 0 && frame % 30 == 0))) {
+                log_seam_marker(seam_test_id, frame == 1 ? "frame" : "stable", frame);
             }
             if (seam_test_id != NULL) {
                 int32_t lifecycle[6] = {0};

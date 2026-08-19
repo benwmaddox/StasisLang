@@ -7206,7 +7206,8 @@ mod tests {
         assert!(mobile_main.contains("resource_state"));
         assert!(mobile_main.contains("renderer_generation"));
         assert!(mobile_main.contains("restore_failures"));
-        assert!(mobile_main.contains("frame == 30"));
+        assert!(mobile_main.contains("frame == 1"));
+        assert!(mobile_main.contains("frame % 30 == 0"));
         let android_activity = fs::read_to_string(
             android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
         )
