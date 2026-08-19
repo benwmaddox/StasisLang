@@ -16,7 +16,11 @@ function fakeGl(stats, available = true, throwing = false) {
     createShader: () => { if (throwing) throw new Error("fake shader failure"); return {}; }, createProgram: () => ({}), createVertexArray: () => ({}), createBuffer: () => ({}),
     shaderSource() {}, compileShader() {}, getShaderParameter: () => true,
     attachShader() {}, linkProgram() {}, getProgramParameter: () => true,
-    bindVertexArray() {}, bindBuffer() {}, bufferData() {}, enableVertexAttribArray() {},
+    bindVertexArray() {}, bindBuffer() {}, bufferData() {},
+    bufferSubData(_target, _offset, _values, _sourceOffset, length) {
+      stats.uploadedFloats.push(length);
+    },
+    enableVertexAttribArray() {},
     vertexAttribPointer() {}, vertexAttribDivisor() {}, getUniformLocation: () => ({}),
     viewport() {}, clearColor() {}, clear() {}, useProgram() {}, uniform2f() {},
     enable() {}, blendFunc() {}, drawArraysInstanced(_mode, _first, _vertices, count) {
@@ -31,7 +35,7 @@ async function loadRuntime({ rects = 0, ordered = null, webgl = true, throwing =
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, 20000);
   const f32 = new Float32Array(memory.buffer, 100000, 100000);
-  const stats = { instanced: 0, instances: [], images: 0, fills: 0, events: [] };
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], images: 0, fills: 0, events: [] };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
@@ -108,6 +112,7 @@ test("large ordered rectangle run uses one instanced composite", async () => {
   runtime.frame();
   assert.equal(runtime.stats.instanced, 1);
   assert.deepEqual(runtime.stats.instances, [64]);
+  assert.deepEqual(runtime.stats.uploadedFloats, [64 * 8]);
   assert.equal(runtime.stats.images, 1);
   assert.equal(runtime.stats.fills, 0);
 });

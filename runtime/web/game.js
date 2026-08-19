@@ -715,6 +715,7 @@
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, rectScratch.byteLength, gl.DYNAMIC_DRAW);
       for (const [attribute, offset] of [[1, 0], [2, 16]]) {
         gl.enableVertexAttribArray(attribute);
         gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 32, offset);
@@ -737,7 +738,7 @@
           gl.uniform2f(size, width, height);
           gl.bindVertexArray(vao);
           gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-          gl.bufferData(gl.ARRAY_BUFFER, values, gl.DYNAMIC_DRAW);
+          gl.bufferSubData(gl.ARRAY_BUFFER, 0, values, 0, count * 8);
           gl.enable(gl.BLEND);
           gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
           gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
