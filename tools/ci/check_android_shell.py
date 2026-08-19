@@ -1396,7 +1396,15 @@ def main() -> int:
     assert "Codex model is unavailable" in codex_native
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
-    assert "call_rust_bridge_compile" in native
+    compile_native_start = native.index(
+        "Java_com_stasislang_workshop_MainActivity_nativeCompileProject")
+    compile_native_end = native.index(
+        "Java_com_stasislang_workshop_MainActivity_nativeSourceItems", compile_native_start)
+    compile_native = native[compile_native_start:compile_native_end]
+    assert "char message[" not in compile_native
+    assert 'bridge->compile_project(root, "src/main.stasis")' in compile_native
+    assert "jstring result = (*env)->NewStringUTF(env, message);" in compile_native
+    assert "bridge->free_string(message);" in compile_native
     assert "required Rust Android compiler bridge is unavailable" in native
     assert "dlopen(\"libstasis_android_bridge.so\"" in native
     assert "stasis_android_bridge_compile_project" in native

@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from .check_runtime_abi_contract import c_constants
@@ -24,9 +25,17 @@ ABI_CASE_MARKER = re.compile(r"Stasis Workshop IT-026 case: (\{[^\r\n]+\})")
 TOUCH_MARKER = re.compile(r"Stasis Workshop IT-027: (\{[^\r\n]+\})")
 TOUCH_CASE_MARKER = re.compile(r"Stasis Workshop IT-027 case: (\{[^\r\n]+\})")
 TOUCH_PRESENT = re.compile(r"Stasis Workshop IT-027 GLES: (\{[^\r\n]+\})")
+HOT_EDIT_MARKER = re.compile(r"Stasis Workshop IT-028: (\{[^\r\n]+\})")
+HOT_EDIT_CASE_MARKER = re.compile(r"Stasis Workshop IT-028 case: (\{[^\r\n]+\})")
+HOT_EDIT_PRESENT = re.compile(r"Stasis Workshop IT-028 GLES: (\{[^\r\n]+\})")
+COMPILE_ERROR_LINE = re.compile(r"^[^\r\n]*CompileError[^\r\n]*\r?$", re.MULTILINE)
+RAW_COMPILE_ERROR_LINE = re.compile(
+    r"^(?:(?:\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+"
+    r"[VDIWEF]\s+StasisWorkshop:\s+)?(?P<payload>CompileError: [^\r\n]+))\r?$"
+)
 FRAME = re.compile(r"RenderAcceptanceFrame: count=(\d+) frame_token=(\d+)")
 FORBIDDEN = re.compile(
-    r"(?:CompileError|native preview frame failed|FATAL EXCEPTION|stub path|fallback path|IT-025 state checksum was unavailable)",
+    r"(?:native preview frame failed|FATAL EXCEPTION|stub path|fallback path|IT-025 state checksum was unavailable|IT-028 cleanup failed)",
     re.IGNORECASE,
 )
 EXPECTED_INVALID = {
@@ -55,6 +64,208 @@ def canonical_frame_descriptor() -> dict[str, dict[str, int]]:
 
 class SeamError(RuntimeError):
     pass
+
+
+def _rust_percent_encode(value: str) -> str:
+    return quote(value, safe="-_.~/")
+
+
+def _json_markers(pattern: re.Pattern[str], log: str, label: str) -> list[tuple[re.Match[str], dict]]:
+    markers = []
+    for match in pattern.finditer(log):
+        try:
+            candidate = json.loads(match.group(1))
+        except json.JSONDecodeError as error:
+            raise SeamError(f"invalid {label} JSON: {error}") from error
+        if candidate.get("test_id") == "IT-028":
+            markers.append((match, candidate))
+    return markers
+
+
+def verify_it028(log: str, after_position: int) -> dict:
+    summaries = _json_markers(HOT_EDIT_MARKER, log, "IT-028 marker")
+    if len(summaries) != 1:
+        raise SeamError(f"expected exactly one IT-028 summary, found {len(summaries)}")
+    summary_match, summary = summaries[0]
+    if summary_match.start() <= after_position:
+        raise SeamError("IT-028 summary must follow IT-027")
+    cases = _json_markers(HOT_EDIT_CASE_MARKER, log, "IT-028 case")
+    presents = _json_markers(HOT_EDIT_PRESENT, log, "IT-028 GLES marker")
+    if len(cases) != 3 or len(presents) != 3:
+        raise SeamError(
+            f"expected exactly 3 IT-028 cases and GLES markers, found {len(cases)} and {len(presents)}"
+        )
+    if any(match.start() <= after_position or match.start() >= summary_match.start()
+           for match, _ in cases + presents):
+        raise SeamError("IT-028 evidence must follow IT-027 and precede its summary")
+    if summary.get("schema") != "stasis.workshop_hot_edit.v1" \
+            or summary.get("event") != "hot_edit" \
+            or summary.get("status") != "passed" \
+            or summary.get("ordered") is not True \
+            or summary.get("unique") is not True \
+            or summary.get("atomic") is not True:
+        raise SeamError("IT-028 marker does not report a passed atomic hot edit")
+    expected_phases = [("baseline", 1, 1), ("published", 2, 2), ("post_invalid", 3, 2)]
+    observed_tokens = []
+    observed_traces = []
+    observed_generations = []
+    observed_sources = []
+    for (case_match, case), (phase, sequence, expected_revision) in zip(cases, expected_phases):
+        if case.get("schema") != "stasis.workshop_hot_edit.v1" \
+                or case.get("event") != "case" \
+                or case.get("status") != "passed" \
+                or (case.get("phase"), case.get("sequence")) != (phase, sequence):
+            raise SeamError("IT-028 cases are not the required ordered phases")
+        runtime = case.get("runtime")
+        guest = case.get("guest")
+        render = case.get("render")
+        if not isinstance(runtime, dict) or not isinstance(guest, dict) or not isinstance(render, dict):
+            raise SeamError(f"IT-028 {phase} lacks runtime, guest, or render evidence")
+        generation = runtime.get("generation")
+        source = runtime.get("source_fingerprint")
+        if not isinstance(generation, int) or generation <= 0 or not isinstance(source, str) or not source:
+            raise SeamError(f"IT-028 {phase} lacks active generation/source identity")
+        observed_generations.append(generation)
+        observed_sources.append(source)
+        if (guest.get("tick_revision"), guest.get("render_revision")) != (
+                expected_revision, expected_revision):
+            raise SeamError(f"IT-028 {phase} tick/render revisions are mixed or stale")
+        if guest.get("state_counter") != sequence:
+            raise SeamError(f"IT-028 {phase} guest state was not migrated: expected {sequence}")
+        token = render.get("frame_token")
+        trace = render.get("trace")
+        marker = render.get("marker")
+        if not isinstance(token, int) or token <= 0 or token in observed_tokens \
+                or not isinstance(trace, int) or trace <= 0 or not isinstance(marker, dict):
+            raise SeamError(f"IT-028 {phase} lacks unique direct-buffer evidence")
+        observed_tokens.append(token)
+        observed_traces.append(trace)
+        expected_marker = {
+            "x": 48.0 + expected_revision * 64.0,
+            "y": 48.0,
+            "w": 24.0,
+            "h": 24.0,
+            "r": 0.2,
+            "g": 0.9,
+            "b": 0.95,
+            "a": 1.0,
+        }
+        if marker.get("active") is not True:
+            raise SeamError(f"IT-028 {phase} lacks active marker evidence")
+        for key, expected in expected_marker.items():
+            if not isinstance(marker.get(key), (int, float)) \
+                    or abs(marker[key] - expected) > 0.01:
+                raise SeamError(f"IT-028 {phase} marker geometry/revision mismatch")
+        if case.get("gles_presented") is not True \
+                or case.get("gles_frame_token") != token \
+                or case.get("java_only") is not False \
+                or case.get("fallback") != 0 or case.get("stub") != 0:
+            raise SeamError(f"IT-028 {phase} lacks native GLES/token proof")
+    if observed_generations != [observed_generations[0], observed_generations[0] + 1,
+                                observed_generations[0] + 1]:
+        raise SeamError("IT-028 generations did not prove one publication boundary")
+    if observed_sources[0] == observed_sources[1] or observed_sources[1] != observed_sources[2]:
+        raise SeamError("IT-028 source identities did not prove rollback to accepted code")
+    if observed_traces[0] == observed_traces[1] or observed_traces[1] != observed_traces[2]:
+        raise SeamError("IT-028 traces did not prove compatible accepted/post-invalid code")
+    if observed_tokens != sorted(observed_tokens):
+        raise SeamError("IT-028 frame tokens are not strictly ordered")
+    diagnostic = summary.get("invalid_compile")
+    structured = diagnostic.get("diagnostic") if isinstance(diagnostic, dict) else None
+    if not isinstance(diagnostic, dict) or diagnostic.get("ok") is not False \
+            or diagnostic.get("kind") != "compile_error" or "raw" in diagnostic \
+            or not isinstance(structured, dict):
+        raise SeamError("IT-028 invalid edit lacks an isolated structured diagnostic")
+    hook_source_line = summary.get("hook_source_line")
+    expected_diagnostic = {
+        "file": "src/main.stasis",
+        "line": hook_source_line,
+        "column": 31,
+        "end_line": hook_source_line + 2,
+        "end_column": 2,
+        "symbol": "on_code_swap",
+        "message": "unknown call target 'IT028_missing_target'",
+    }
+    if not isinstance(hook_source_line, int) or hook_source_line <= 0 \
+            or set(structured) != set(expected_diagnostic) \
+            or any(structured.get(key) != value for key, value in expected_diagnostic.items()):
+        raise SeamError("IT-028 invalid edit diagnostic is incomplete")
+    receipt = summary.get("restore_receipt")
+    if not isinstance(receipt, dict) or receipt.get("status") != "NoChange" \
+            or not isinstance(receipt.get("compile"), str) \
+            or not receipt["compile"].startswith("CompileReady") \
+            or "reload=NoChange" not in receipt["compile"] \
+            or "status=0" not in receipt["compile"]:
+        raise SeamError("IT-028 accepted-source restore receipt is not exact NoChange")
+    cleanup = summary.get("cleanup_receipt")
+    cleanup_frame = cleanup.get("frame") if isinstance(cleanup, dict) else None
+    cleanup_runtime = cleanup_frame.get("runtime") if isinstance(cleanup_frame, dict) else None
+    cleanup_render = cleanup_frame.get("render") if isinstance(cleanup_frame, dict) else None
+    cleanup_marker = cleanup_render.get("marker") if isinstance(cleanup_render, dict) else None
+    if not isinstance(cleanup, dict) or cleanup.get("status") != "Restored" \
+            or not isinstance(cleanup.get("compile"), str) \
+            or not cleanup["compile"].startswith("CompileReady") \
+            or "status=0" not in cleanup["compile"] \
+            or not isinstance(cleanup_frame, dict) or cleanup_frame.get("status") != "passed" \
+            or cleanup_frame.get("java_only") is not False \
+            or cleanup_frame.get("fallback") != 0 or cleanup_frame.get("stub") != 0 \
+            or not isinstance(cleanup_runtime, dict) \
+            or cleanup_runtime.get("generation") != observed_generations[1] + 1 \
+            or cleanup_runtime.get("source_fingerprint") != observed_sources[0] \
+            or not isinstance(cleanup_marker, dict) or cleanup_marker.get("active") is not False:
+        raise SeamError("IT-028 cleanup did not prove restored packaged source/frame")
+    present_positions = [match.start() for match, _ in presents]
+    case_positions = [match.start() for match, _ in cases]
+    for index, ((present_match, present), expected_token, expected_trace, expected_marker) in enumerate(
+            zip(presents, observed_tokens, observed_traces,
+                [case["render"]["marker"] for _, case in cases])):
+        if present_match.start() >= case_positions[index]:
+            raise SeamError("IT-028 GLES marker must precede its matching case")
+        if present.get("schema") != "stasis.workshop_hot_edit.v1" \
+                or present.get("event") != "present" \
+                or present.get("frame_token") != expected_token \
+                or present.get("trace") != expected_trace \
+                or present.get("rect_count") != 2 or present.get("order_count") != 11:
+            raise SeamError("IT-028 GLES marker did not match its exact token/trace")
+        presented_marker = present.get("marker")
+        if not isinstance(presented_marker, dict) or presented_marker.get("active") is not True:
+            raise SeamError("IT-028 GLES marker lacks active evidence")
+        for key in ("x", "y", "w", "h", "r", "g", "b", "a"):
+            if not isinstance(presented_marker.get(key), (int, float)) \
+                    or abs(presented_marker[key] - expected_marker[key]) > 0.01:
+                raise SeamError("IT-028 GLES marker geometry/color mismatch")
+    interleaved = sorted(
+        [(present_positions[index], "present") for index in range(3)]
+        + [(case_positions[index], "case") for index in range(3)])
+    if [kind for _, kind in interleaved] != ["present", "case"] * 3:
+        raise SeamError("IT-028 GLES and case evidence is not strictly interleaved")
+    raw_compile_error_lines = list(COMPILE_ERROR_LINE.finditer(log))
+    if len(raw_compile_error_lines) != 1:
+        raise SeamError(
+            f"expected exactly one raw CompileError line, found {len(raw_compile_error_lines)}"
+        )
+    raw_expected = (
+        f"CompileError: {structured['file']}: {structured['message']}"
+        f"|diagnostic_file={_rust_percent_encode(structured['file'])}"
+        f"|diagnostic_line={structured['line']}"
+        f"|diagnostic_column={structured['column']}"
+        f"|diagnostic_end_line={structured['end_line']}"
+        f"|diagnostic_end_column={structured['end_column']}"
+        f"|diagnostic_symbol={_rust_percent_encode(structured['symbol'])}"
+        f"|diagnostic_message={_rust_percent_encode(structured['message'])}"
+    )
+    raw_line = raw_compile_error_lines[0]
+    raw_match = RAW_COMPILE_ERROR_LINE.fullmatch(raw_line.group(0))
+    raw_start = raw_line.start() + (raw_match.start("payload") if raw_match else 0)
+    if raw_match is None or raw_match.group("payload") != raw_expected \
+            or raw_start <= cases[1][0].start() \
+            or raw_start >= presents[2][0].start():
+        raise SeamError("raw CompileError diagnostic was missing, truncated, or out of order")
+    return {
+        "summary": summary,
+        "cases": [candidate for _, candidate in cases],
+        "gles": [candidate for _, candidate in presents],
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -356,6 +567,7 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         + [(case_positions[index], "case") for index in range(3)])
     if [kind for _, kind in interleaved] != ["present", "case"] * 3:
         raise SeamError("IT-027 GLES and case evidence is not strictly interleaved")
+    hot_edit = verify_it028(log, touch_summary_match.start())
     return {
         "compile_functions": max(map(int, compile_matches)),
         "presented_frames": stable_count,
@@ -368,6 +580,9 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         "it027": touch_summary,
         "it027_cases": cases,
         "it027_gles": [candidate for _, candidate in touch_present],
+        "it028": hot_edit["summary"],
+        "it028_cases": hot_edit["cases"],
+        "it028_gles": hot_edit["gles"],
     }
 
 

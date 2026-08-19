@@ -326,6 +326,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int renderAcceptanceFrameCount;
     private int lastPresentedFrameToken = -1;
     private int lastAcceptanceGlesEvidenceToken = -1;
+    private int lastHotEditGlesEvidenceToken = -1;
     private int acceptanceTrace = -1;
     private int acceptanceTraceToken = -1;
     private int frameDrawCalls;
@@ -564,9 +565,27 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 lastPresentedFrameToken = frameToken;
                 notifyAll();
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
-                    if (rectCount >= 2 && frameToken != lastAcceptanceGlesEvidenceToken) {
+                    int markerBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
+                    if (rectCount >= 2 && isHotEditMarker(markerBase)
+                            && frameToken != lastHotEditGlesEvidenceToken) {
+                        lastHotEditGlesEvidenceToken = frameToken;
+                        Log.i(LOG_TAG, "Stasis Workshop IT-028 GLES: {\"schema\":\"stasis.workshop_hot_edit.v1\","
+                                + "\"test_id\":\"IT-028\",\"event\":\"present\","
+                                + "\"frame_token\":" + frameToken + ","
+                                + "\"trace\":" + (acceptanceTraceToken == frameToken
+                                        ? Integer.toUnsignedLong(acceptanceTrace) : -1L) + ","
+                                + "\"rect_count\":" + rectCount + ",\"order_count\":" + orderCount + ","
+                                + "\"marker\":{\"active\":true,\"x\":" + frameF32.get(markerBase)
+                                + ",\"y\":" + frameF32.get(markerBase + 1)
+                                + ",\"w\":" + frameF32.get(markerBase + 2)
+                                + ",\"h\":" + frameF32.get(markerBase + 3)
+                                + ",\"r\":" + frameF32.get(markerBase + 4)
+                                + ",\"g\":" + frameF32.get(markerBase + 5)
+                                + ",\"b\":" + frameF32.get(markerBase + 6)
+                                + ",\"a\":" + frameF32.get(markerBase + 7) + "}}");
+                    } else if (rectCount >= 2 && !isHotEditMarker(markerBase)
+                            && frameToken != lastAcceptanceGlesEvidenceToken) {
                         lastAcceptanceGlesEvidenceToken = frameToken;
-                        int markerBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
                         Log.i(LOG_TAG, "Stasis Workshop IT-027 GLES: {\"schema\":\"stasis.workshop_touch_roundtrip.v1\","
                                 + "\"test_id\":\"IT-027\",\"event\":\"present\","
                                 + "\"frame_token\":" + frameToken + ","
@@ -634,6 +653,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     synchronized int acceptanceTrace() {
         return acceptanceTrace;
+    }
+
+    private boolean isHotEditMarker(int markerBase) {
+        return Math.abs(frameF32.get(markerBase + 4) - 0.2f) < 0.001f
+                && Math.abs(frameF32.get(markerBase + 5) - 0.9f) < 0.001f
+                && Math.abs(frameF32.get(markerBase + 6) - 0.95f) < 0.001f;
     }
 
     // Releases must wait until the command buffer has consumed its sprite textures. A
