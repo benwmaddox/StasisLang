@@ -167,7 +167,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
 
     def test_workshop_it025_runs_after_release_shells_on_the_same_emulator(self):
         self.assertIn(
-            "test_render_emulator.ps1 -Headless -AvdName test -StepTimeoutSeconds 600",
+            "test_render_emulator.ps1 -Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90",
             self.workflow,
         )
         self.assertIn("[int]$StepTimeoutSeconds = 300", self.workshop_script)
