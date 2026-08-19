@@ -74,10 +74,13 @@ function Invoke-BoundedScript([string]$Path, [string[]]$Arguments, [string]$Phas
     $errorTask = $process.StandardError.ReadToEndAsync()
     $timedOut = -not $process.WaitForExit($stepSeconds * 1000)
     if ($timedOut) {
-        if ($process.PSObject.Methods.Name -contains "Kill") {
+        $killWithTree = $process.GetType().GetMethod("Kill", [Type[]]@([bool]))
+        if ($null -ne $killWithTree) {
             $process.Kill($true)
         } elseif ($runningOnWindows) {
             & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        } else {
+            $process.Kill()
         }
     }
     $process.WaitForExit()

@@ -175,6 +175,9 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("verify_android_workshop_seam.py", self.workshop_script)
         self.assertIn('Join-Path (Join-Path (Join-Path $repoRoot "artifacts") "android_workshop_seam") "e"', self.workshop_script)
         self.assertIn("Reusing ready Android emulator", self.workshop_script)
+        self.assertIn('GetMethod("Kill", [Type[]]@([bool]))', self.workshop_script)
+        self.assertIn('$process.Kill()', self.workshop_script)
+        self.assertIn('taskkill.exe /PID $process.Id /T /F', self.workshop_script)
         self.assertNotIn('"-SkipRustBridgeBuild"', self.workshop_script)
         for path_fragment in ("tools\\ci\\", "samples\\render_parity\\", "app\\build\\outputs\\apk\\", "artifacts\\android_workshop_seam\\"):
             self.assertNotIn(path_fragment, self.workshop_script)
