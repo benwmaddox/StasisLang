@@ -177,15 +177,18 @@ named for the injected failure, and leave the production path unchanged.
 |---|---|---:|---|
 | Fast contract | every PR and `tools/validate_repo.sh` | 2 min | descriptor parity, JIT HostFrame, buffer bounds, diagnostic schemas |
 | Native integration | nightly, platform-sharded | 15 min | desktop real runtime, linked AOT/C runtime, package link and symbol audit |
-| Android emulator | nightly | 15 min/test shard | Workshop JNI/JIT and generated release-shell behavior on a test-only x86_64 AOT build |
+| Android emulator | nightly | 15 min/test shard | Two concurrent isolated API35 x86_64 shards: generated release-shell IT-017-IT-020 and Workshop JNI/JIT IT-025-IT-027 |
 | Physical device | optional release candidate and scheduled farm | 15 min/test shard | Supplemental OEM driver, density, lifecycle, and representative rendering evidence |
 
 Tests should be promoted toward the faster lane when a deterministic lower
 adapter becomes available. The hosted x86_64 emulator is the CI and readiness
-gate. Physical-device tests supplement release confidence for OEM-specific
-surface, driver, and density behavior, but device availability does not block
-ordinary CI or task readiness. Production Android packaging remains ARM64; the
-x86_64 package target exists only for deterministic development/emulator tests.
+gate. Nightly runs provision one emulator per shard so release-shell and
+Workshop failures, timeouts, and evidence remain independently visible rather
+than sharing a sequential device. Physical-device tests supplement release
+confidence for OEM-specific surface, driver, and density behavior, but device
+availability does not block ordinary CI or task readiness. Production Android
+packaging remains ARM64; the x86_64 package target exists only for deterministic
+development/emulator tests.
 
 ## Proposed integration tests
 
