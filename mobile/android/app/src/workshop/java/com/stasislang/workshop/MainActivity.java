@@ -172,7 +172,7 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_IMAGE_REQUEST = 73;
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
-    private static final int RENDER_FRAME_HEADER_SIZE = 22;
+    private static final int RENDER_FRAME_HEADER_SIZE = StasisPreviewRenderer.I_FRAME_TOKEN + 1;
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;
@@ -320,6 +320,7 @@ public final class MainActivity extends Activity {
     private boolean compileReady;
     private boolean compileAttempted;
     private boolean jniFrameAbiAcceptanceRun;
+    private boolean workshopTouchAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
@@ -353,6 +354,7 @@ public final class MainActivity extends Activity {
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
     static native String nativeFrameAbiDescriptor();
+    static native int nativeFrameTrace(ByteBuffer frameI32, ByteBuffer frameF32, ByteBuffer frameU8);
     private static native String nativeDrainSpriteReleases();
     private static native String nativePollSpriteReleaseCancellations();
     static native String nativeLastFrameError();
@@ -1352,6 +1354,22 @@ public final class MainActivity extends Activity {
                     if (!abiPassed) {
                         compileReady = false;
                         setStatusText("IT-026 JNI frame ABI acceptance failed: " + abiResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && !workshopTouchAcceptanceRun) {
+                    String touchResult = WorkshopTouchAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopTouchAcceptanceRun = true;
+                    boolean touchPassed = false;
+                    try {
+                        touchPassed = "passed".equals(new JSONObject(touchResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!touchPassed) {
+                        compileReady = false;
+                        setStatusText("IT-027 Workshop touch acceptance failed: " + touchResult);
                     }
                 }
                 if (compileReady || gameRuntimeActive) {
@@ -4942,6 +4960,88 @@ public final class MainActivity extends Activity {
         gameRuntimeActive = true;
         recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step.PROJECT_RAN);
         updateGameDebugText();
+    }
+
+    // Acceptance-only bridge for the fixed IT-027 gesture. The frame still
+    // enters through GamePreviewView and the normal JNI direct-buffer path;
+    // this method only packages evidence after GLES has consumed its token.
+    String runIt027Frame(String projectRoot, int logicalX, int logicalY, int action,
+            int touchActive, int sequence) {
+        if (gamePreview == null) {
+            return "{\"status\":\"failed\",\"error\":\"preview unavailable\"}";
+        }
+        int screenWidth = Math.max(1, gamePreview.getWidth());
+        int screenHeight = Math.max(1, gamePreview.getHeight());
+        float scale = Math.min(screenWidth / 640.0f, screenHeight / 360.0f);
+        int viewportWidth = Math.max(1, Math.round(640.0f * scale));
+        int viewportHeight = Math.max(1, Math.round(360.0f * scale));
+        float viewportX = (screenWidth - viewportWidth) / 2.0f;
+        float viewportY = (screenHeight - viewportHeight) / 2.0f;
+        float nativeX = viewportX + logicalX * scale;
+        float nativeY = viewportY + logicalY * scale;
+        try {
+            gamePreview.dispatchAcceptanceTouch(action, nativeX, nativeY);
+            int viewTouchActive = gamePreview.touchActive();
+            if (viewTouchActive != touchActive) {
+                return "{\"status\":\"failed\",\"error\":\"view touch state mismatch\"}";
+            }
+            int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+                    gamePreview.touchY(), viewTouchActive, screenWidth, screenHeight,
+                    nativeFrameValues);
+            if (status != 0) {
+                return "{\"status\":\"failed\",\"error\":"
+                        + JSONObject.quote(nativeLastFrameError()) + "}";
+            }
+            int token = nativeFrameValues[StasisPreviewRenderer.I_FRAME_TOKEN];
+            long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
+            boolean presented = gamePreview.awaitPresentedFrameToken(token, 5_000L);
+            if (!presented) {
+                return "{\"status\":\"failed\",\"error\":\"GLES token timeout\"}";
+            }
+            JSONObject guest = new JSONObject();
+            String[] names = {"x", "y", "dx", "dy", "x_norm_x1000", "y_norm_x1000",
+                    "active", "down_edge", "up_edge", "marker_active", "checksum"};
+            String[] paths = {"seam_touch_x", "seam_touch_y", "seam_touch_dx", "seam_touch_dy",
+                    "seam_touch_x_norm_x1000", "seam_touch_y_norm_x1000", "seam_touch_active",
+                    "seam_touch_down_edge", "seam_touch_up_edge", "seam_touch_marker_active",
+                    "seam_touch_checksum"};
+            for (int index = 0; index < names.length; index += 1) {
+                String state = nativeGetRuntimeI32(projectRoot, paths[index]);
+                guest.put(names[index], extractIntField(state, "value", Integer.MIN_VALUE));
+            }
+            JSONObject marker = new JSONObject();
+            boolean markerActive = nativeFrameValues[StasisPreviewRenderer.I_RECT_COUNT] >= 2;
+            marker.put("active", markerActive);
+            if (markerActive) {
+                int base = StasisPreviewRenderer.F_RECT_REVERSE_BASE - 8;
+                marker.put("x", gamePreview.acceptanceFrameF32(base));
+                marker.put("y", gamePreview.acceptanceFrameF32(base + 1));
+                marker.put("w", gamePreview.acceptanceFrameF32(base + 2));
+                marker.put("h", gamePreview.acceptanceFrameF32(base + 3));
+                marker.put("r", gamePreview.acceptanceFrameF32(base + 4));
+                marker.put("g", gamePreview.acceptanceFrameF32(base + 5));
+                marker.put("b", gamePreview.acceptanceFrameF32(base + 6));
+                marker.put("a", gamePreview.acceptanceFrameF32(base + 7));
+            }
+            return new JSONObject().put("schema", "stasis.workshop_touch_roundtrip.v1")
+                    .put("test_id", "IT-027").put("event", "case")
+                    .put("status", "passed").put("sequence", sequence)
+                    .put("phase", action == MotionEvent.ACTION_DOWN ? "down"
+                            : action == MotionEvent.ACTION_MOVE ? "move" : "up")
+                    .put("input", new JSONObject().put("x", logicalX).put("y", logicalY)
+                            .put("active", touchActive).put("action", action))
+                    .put("guest", guest)
+                    .put("render", new JSONObject().put("frame_token", token)
+                            .put("trace", trace)
+                            .put("rect_count", nativeFrameValues[StasisPreviewRenderer.I_RECT_COUNT])
+                            .put("marker", marker))
+                    .put("gles_presented", true).put("gles_frame_token", token)
+                    .put("java_only", false).toString();
+        } catch (Exception error) {
+            return "{\"status\":\"failed\",\"error\":"
+                    + JSONObject.quote(error.getMessage() == null ? error.getClass().getSimpleName()
+                            : error.getMessage()) + "}";
+        }
     }
 
     private static int extractIntField(String text, String key, int fallback) {
@@ -11791,6 +11891,32 @@ public final class MainActivity extends Activity {
             return touchActive ? 1 : 0;
         }
 
+        void dispatchAcceptanceTouch(int action, float x, float y) {
+            long now = SystemClock.uptimeMillis();
+            MotionEvent event = MotionEvent.obtain(now, now, action, x, y, 0);
+            try {
+                onTouchEvent(event);
+            } finally {
+                event.recycle();
+            }
+        }
+
+        int acceptanceTrace() {
+            synchronized (renderer) {
+                return renderer.acceptanceTrace();
+            }
+        }
+
+        float acceptanceFrameF32(int index) {
+            synchronized (renderer) {
+                return renderer.acceptanceFrameF32(index);
+            }
+        }
+
+        boolean awaitPresentedFrameToken(int token, long timeoutMillis) {
+            return renderer.awaitPresentedFrameToken(token, timeoutMillis);
+        }
+
         void onHostPause() {
             renderer.onHostPaused();
             onPause();
@@ -11804,6 +11930,19 @@ public final class MainActivity extends Activity {
 
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
                 int screenWidth, int screenHeight, int[] header) {
+            return runNativeFrameInternal(projectRoot, inputX, inputY, inputActive,
+                    screenWidth, screenHeight, header, false);
+        }
+
+        int runNativeAcceptanceFrame(String projectRoot, int inputX, int inputY, int inputActive,
+                int screenWidth, int screenHeight, int[] header) {
+            return runNativeFrameInternal(projectRoot, inputX, inputY, inputActive,
+                    screenWidth, screenHeight, header, true);
+        }
+
+        private int runNativeFrameInternal(String projectRoot, int inputX, int inputY,
+                int inputActive, int screenWidth, int screenHeight, int[] header,
+                boolean acceptance) {
             int status;
             boolean releaseBatchEnqueued = false;
             boolean releaseCancellationApplied = false;
@@ -11826,6 +11965,11 @@ public final class MainActivity extends Activity {
                 }
                 lastNativeFrameDurationNanos = System.nanoTime() - started;
                 renderer.copyFrameHeaderInto(header);
+                if (acceptance && status == 0) {
+                    renderer.setAcceptanceTrace(header[StasisPreviewRenderer.I_FRAME_TOKEN],
+                            MainActivity.nativeFrameTrace(renderer.frameI32Bytes(),
+                                    renderer.frameF32Bytes(), renderer.frameU8Bytes()));
+                }
             }
             if (status == 0 || releaseBatchEnqueued || releaseCancellationApplied) requestRender();
             return status;

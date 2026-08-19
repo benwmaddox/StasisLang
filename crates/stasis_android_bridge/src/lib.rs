@@ -9,6 +9,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+#[cfg(test)]
+unsafe extern "C" {
+    /// The same native contract implementation used by the JIT extern.
+    /// Keeping this declaration test-only prevents a second trace algorithm
+    /// from entering the Android bridge while allowing the real sample test
+    /// to validate the copied direct buffers.
+    fn stasis_render_v2_trace_native(
+        cmd_i32: *const i32,
+        cmd_f32: *const f32,
+        cmd_u8: *const u8,
+    ) -> u32;
+}
+
 use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
 #[cfg(test)]
@@ -1471,9 +1484,16 @@ fn write_production_host_frame(
     let was_down = previous.is_some_and(|value| value.touch_active != 0);
     let is_down = input.touch_active != 0;
     let (touch_x, touch_y) = metrics.native_to_logical(input.touch_x, input.touch_y);
-    let (previous_x, previous_y) = previous.map_or((touch_x, touch_y), |value| {
-        metrics.native_to_logical(value.touch_x, value.touch_y)
-    });
+    // A new pointer contact starts a fresh gesture, so its delta lane is
+    // deterministic zero even when the runtime previously rendered idle
+    // frames (for example, the preceding ABI acceptance call).
+    let (previous_x, previous_y) = if !was_down {
+        (touch_x, touch_y)
+    } else {
+        previous.map_or((touch_x, touch_y), |value| {
+            metrics.native_to_logical(value.touch_x, value.touch_y)
+        })
+    };
     host_i32[0] = stasis_dynload::stasis_get_time_ms();
     host_i32[7] = 1;
     host_i32[8] = 0;
@@ -4880,6 +4900,237 @@ function tick(): void {}
         assert!(state.contains("render_command_count=1"));
         assert!(state.contains("render0_y=222"));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_it027_touch_roundtrip_real_jit_preserves_host_lanes_and_marker() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("it027_touch_roundtrip");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global host_i32: i32[768];\nglobal host_f32: f32[64];\n\
+             global Input { x: i32; y: i32; dx: i32; dy: i32; xn: i32; yn: i32; active: i32; down: i32; up: i32; checksum: i32; }\n\
+             global Render { command_count: i32; command0_kind: i32; command0_x: i32; command0_y: i32; command0_w: i32; command0_h: i32; }\n\
+             function main(): void { return; }\n\
+             function tick(): void {\n\
+                 Input.x.from_f32(host_f32[0]); Input.y.from_f32(host_f32[1]);\n\
+                 Input.dx.from_f32(host_f32[2]); Input.dy.from_f32(host_f32[3]);\n\
+                 Input.xn.from_f32(host_f32[4] * 1000.0); Input.yn.from_f32(host_f32[5] * 1000.0);\n\
+                 Input.active = host_i32[545]; Input.down = host_i32[546]; Input.up = host_i32[547];\n\
+                 Input.checksum = Input.x + Input.y * 3 + Input.dx * 5 + Input.dy * 7 + Input.xn * 11 + Input.yn * 13 + Input.active * 17 + Input.down * 19 + Input.up * 23;\n\
+             }\n\
+             function render(): void {\n\
+                 Render.command_count = 1; Render.command0_kind = 1; Render.command0_x = Input.x - 8; Render.command0_y = Input.y - 8; Render.command0_w = 16; Render.command0_h = 16;\n\
+             }\n",
+        )
+        .expect("write IT-027 fixture");
+        let entry = Path::new("src/main.stasis");
+        let frame = |x: i32, y: i32, active: i32| {
+            run_android_workshop_tick(
+                &root,
+                entry,
+                AndroidBridgeTickInput {
+                    touch_x: x,
+                    touch_y: y,
+                    touch_active: active,
+                    screen_w: 640,
+                    screen_h: 360,
+                },
+            )
+            .expect("run IT-027 fixture frame")
+        };
+        // An idle frame at a different coordinate must not leak into the next
+        // contact's delta; the gesture edge starts a fresh zero-delta sample.
+        frame(100, 50, 0);
+        frame(160, 90, 1);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.dx").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.down").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.checksum").unwrap(),
+            6466
+        );
+        let first = frame(320, 180, 1);
+        assert_eq!(first.render_commands[0].x, 312);
+        assert_eq!(first.render_commands[0].y, 172);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.dx").unwrap(),
+            160
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.yn").unwrap(),
+            500
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.checksum").unwrap(),
+            14307
+        );
+        let last = frame(400, 240, 0);
+        assert_eq!(last.render_commands[0].x, 392);
+        assert_eq!(last.render_commands[0].y, 232);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.up").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.checksum").unwrap(),
+            17496
+        );
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn android_it027_render_parity_sample_real_jit_exports_marker_and_idle_trace() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples/render_parity")
+            .canonicalize()
+            .expect("render parity sample root");
+        let entry = Path::new("main.stasis");
+        let mut frame_i32 = vec![0_i32; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut frame_f32 = vec![0.0_f32; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut frame_u8 = vec![0_u8; ANDROID_RENDER_GFX_U8_CAPACITY];
+        const RECT_COUNT: usize = 24;
+        const ORDER_COUNT: usize = 22;
+        const RECT_REVERSE_BASE: usize = 79_996;
+        const FRAME_TOKEN: usize = ANDROID_RENDER_I_FRAME_TOKEN;
+
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("main.stasis").expect("entry cstr");
+        let run_frame = |x: i32,
+                         y: i32,
+                         active: i32,
+                         frame_i32: &mut Vec<i32>,
+                         frame_f32: &mut Vec<f32>,
+                         frame_u8: &mut Vec<u8>|
+         -> u32 {
+            let status = stasis_android_bridge_run_tick_frame_v2(
+                root_c.as_ptr(),
+                entry_c.as_ptr(),
+                x,
+                y,
+                active,
+                640,
+                360,
+                frame_i32.as_mut_ptr(),
+                frame_i32.len(),
+                frame_f32.as_mut_ptr(),
+                frame_f32.len(),
+                frame_u8.as_mut_ptr(),
+                frame_u8.len(),
+            );
+            assert_eq!(
+                status,
+                0,
+                "render parity frame failed: {:?}",
+                LAST_FRAME_ERROR.with(|slot| slot.borrow().clone())
+            );
+            let trace = unsafe {
+                stasis_render_v2_trace_native(
+                    frame_i32.as_ptr(),
+                    frame_f32.as_ptr(),
+                    frame_u8.as_ptr(),
+                )
+            };
+            assert_ne!(trace, 0, "render parity frame must have a canonical trace");
+            trace
+        };
+
+        let down_trace = run_frame(160, 90, 1, &mut frame_i32, &mut frame_f32, &mut frame_u8);
+        assert_eq!(frame_i32[RECT_COUNT], 2);
+        assert_eq!(frame_i32[ORDER_COUNT], 11);
+        assert_eq!(frame_i32[FRAME_TOKEN], 1);
+        assert_eq!(
+            &frame_f32[RECT_REVERSE_BASE - 8..RECT_REVERSE_BASE],
+            &[152.0, 82.0, 16.0, 16.0, 1.0, 0.65, 0.08, 1.0]
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_x").unwrap(),
+            160
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_y").unwrap(),
+            90
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_dx").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_down_edge").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_marker_active").unwrap(),
+            1
+        );
+
+        let move_trace = run_frame(320, 180, 1, &mut frame_i32, &mut frame_f32, &mut frame_u8);
+        assert_ne!(move_trace, down_trace);
+        assert_eq!(frame_i32[RECT_COUNT], 2);
+        assert_eq!(frame_i32[ORDER_COUNT], 11);
+        assert_eq!(frame_i32[FRAME_TOKEN], 2);
+        assert_eq!(
+            &frame_f32[RECT_REVERSE_BASE - 8..RECT_REVERSE_BASE],
+            &[312.0, 172.0, 16.0, 16.0, 1.0, 0.65, 0.08, 1.0]
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_dx").unwrap(),
+            160
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_dy").unwrap(),
+            90
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_x_norm_x1000").unwrap(),
+            500
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_y_norm_x1000").unwrap(),
+            500
+        );
+
+        let up_trace = run_frame(400, 240, 0, &mut frame_i32, &mut frame_f32, &mut frame_u8);
+        assert_ne!(up_trace, move_trace);
+        assert_eq!(frame_i32[RECT_COUNT], 2);
+        assert_eq!(frame_i32[ORDER_COUNT], 11);
+        assert_eq!(frame_i32[FRAME_TOKEN], 3);
+        assert_eq!(
+            &frame_f32[RECT_REVERSE_BASE - 8..RECT_REVERSE_BASE],
+            &[392.0, 232.0, 16.0, 16.0, 1.0, 0.65, 0.08, 1.0]
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_active").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_up_edge").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_marker_active").unwrap(),
+            1
+        );
+
+        let idle_trace = run_frame(0, 0, 0, &mut frame_i32, &mut frame_f32, &mut frame_u8);
+        assert_eq!(idle_trace, 3_939_026_311);
+        assert_eq!(frame_i32[RECT_COUNT], 1);
+        assert_eq!(frame_i32[ORDER_COUNT], 10);
+        assert_eq!(frame_i32[FRAME_TOKEN], 4);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_marker_active").unwrap(),
+            0
+        );
+        clear_runtime_session_for_test();
     }
 
     #[test]

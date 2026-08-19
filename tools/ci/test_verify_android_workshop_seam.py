@@ -36,6 +36,13 @@ Stasis Workshop IT-026: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"
 	Stasis Workshop IT-026 case: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"case","name":"null_u8","unchanged":true,"error":{"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"error","lane":"u8","reason":"null_buffer","expected":65536,"actual":-1}}
 	Stasis Workshop IT-026 case: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"case","name":"misaligned_i32","unchanged":true,"error":{"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"error","lane":"i32","reason":"alignment","expected":4,"actual":1}}
 	Stasis Workshop IT-026 case: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"case","name":"misaligned_f32","unchanged":true,"error":{"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"error","lane":"f32","reason":"alignment","expected":4,"actual":1}}
+Stasis Workshop IT-027 GLES: {"schema":"stasis.workshop_touch_roundtrip.v1","test_id":"IT-027","event":"present","frame_token":78,"trace":111,"rect_count":2,"order_count":11,"marker":{"active":true,"x":152,"y":82,"w":16,"h":16,"r":1.0,"g":0.65,"b":0.08,"a":1.0}}
+Stasis Workshop IT-027 case: {"schema":"stasis.workshop_touch_roundtrip.v1","test_id":"IT-027","event":"case","status":"passed","phase":"down","sequence":1,"input":{"x":160,"y":90,"active":1,"action":0},"guest":{"x":160,"y":90,"dx":0,"dy":0,"x_norm_x1000":250,"y_norm_x1000":250,"active":1,"down_edge":1,"up_edge":0,"marker_active":1,"checksum":6466},"render":{"trace":111,"frame_token":78,"marker":{"active":true,"x":152,"y":82,"w":16,"h":16,"r":1.0,"g":0.65,"b":0.08,"a":1.0}},"gles_presented":true,"gles_frame_token":78,"java_only":false}
+Stasis Workshop IT-027 GLES: {"schema":"stasis.workshop_touch_roundtrip.v1","test_id":"IT-027","event":"present","frame_token":79,"trace":112,"rect_count":2,"order_count":11,"marker":{"active":true,"x":312,"y":172,"w":16,"h":16,"r":1.0,"g":0.65,"b":0.08,"a":1.0}}
+Stasis Workshop IT-027 case: {"schema":"stasis.workshop_touch_roundtrip.v1","test_id":"IT-027","event":"case","status":"passed","phase":"move","sequence":2,"input":{"x":320,"y":180,"active":1,"action":2},"guest":{"x":320,"y":180,"dx":160,"dy":90,"x_norm_x1000":500,"y_norm_x1000":500,"active":1,"down_edge":0,"up_edge":0,"marker_active":1,"checksum":14307},"render":{"trace":112,"frame_token":79,"marker":{"active":true,"x":312,"y":172,"w":16,"h":16,"r":1.0,"g":0.65,"b":0.08,"a":1.0}},"gles_presented":true,"gles_frame_token":79,"java_only":false}
+Stasis Workshop IT-027 GLES: {"schema":"stasis.workshop_touch_roundtrip.v1","test_id":"IT-027","event":"present","frame_token":80,"trace":113,"rect_count":2,"order_count":11,"marker":{"active":true,"x":392,"y":232,"w":16,"h":16,"r":1.0,"g":0.65,"b":0.08,"a":1.0}}
+Stasis Workshop IT-027 case: {"schema":"stasis.workshop_touch_roundtrip.v1","test_id":"IT-027","event":"case","status":"passed","phase":"up","sequence":3,"input":{"x":400,"y":240,"active":0,"action":1},"guest":{"x":400,"y":240,"dx":80,"dy":60,"x_norm_x1000":625,"y_norm_x1000":666,"active":0,"down_edge":0,"up_edge":1,"marker_active":1,"checksum":17496},"render":{"trace":113,"frame_token":80,"marker":{"active":true,"x":392,"y":232,"w":16,"h":16,"r":1.0,"g":0.65,"b":0.08,"a":1.0}},"gles_presented":true,"gles_frame_token":80,"java_only":false}
+Stasis Workshop IT-027: {"schema":"stasis.workshop_touch_roundtrip.v1","test_id":"IT-027","event":"touch_roundtrip","status":"passed","phases":3,"ordered":true,"unique":true,"java_motion_events":3,"jni_jit_frames":3,"gles_presented_frames":3,"java_only":false}
 """
 
 
@@ -110,6 +117,44 @@ class WorkshopSeamTests(unittest.TestCase):
         first_line, remainder = GOOD.split("\n", 1)
         with self.assertRaisesRegex(SeamError, "before its summary"):
             verify_log(first_line + "\n" + case + "\n" + remainder, MANIFEST)
+
+    def test_rejects_missing_it027_proof(self):
+        with self.assertRaisesRegex(SeamError, "IT-027"):
+            verify_log(GOOD.split("Stasis Workshop IT-027 case:")[0], MANIFEST)
+
+    def test_rejects_it027_token_mismatch(self):
+        with self.assertRaisesRegex(SeamError, "matching GLES"):
+            verify_log(GOOD.replace('"gles_frame_token":79', '"gles_frame_token":99'), MANIFEST)
+
+    def test_rejects_it027_wrong_delta(self):
+        with self.assertRaisesRegex(SeamError, "edge/delta"):
+            verify_log(GOOD.replace('"dx":160,"dy":90', '"dx":161,"dy":90'), MANIFEST)
+
+    def test_rejects_it027_input_action_mismatch(self):
+        with self.assertRaisesRegex(SeamError, "input action/coordinates"):
+            verify_log(GOOD.replace('"phase":"move","sequence":2,"input":{"x":320,"y":180,"active":1,"action":2}',
+                                    '"phase":"move","sequence":2,"input":{"x":320,"y":180,"active":1,"action":1}'),
+                       MANIFEST)
+
+    def test_rejects_missing_it027_gles_marker(self):
+        marker = next(line for line in GOOD.splitlines() if "IT-027 GLES" in line)
+        with self.assertRaisesRegex(SeamError, "exactly 3 IT-027 GLES"):
+            verify_log(GOOD.replace(marker, ""), MANIFEST)
+
+    def test_rejects_it027_case_after_summary(self):
+        case = next(line for line in GOOD.splitlines() if "IT-027 case" in line)
+        summary = next(line for line in GOOD.splitlines() if "Stasis Workshop IT-027:" in line)
+        reordered = GOOD.replace(case, "").replace(summary, summary + "\n" + case)
+        with self.assertRaisesRegex(SeamError, "precede the IT-027 summary"):
+            verify_log(reordered, MANIFEST)
+
+    def test_rejects_it027_trace_marker_mismatch(self):
+        with self.assertRaisesRegex(SeamError, "traces|GLES marker"):
+            verify_log(GOOD.replace('"trace":111', '"trace":112'), MANIFEST)
+
+    def test_rejects_it027_marker_color_mismatch(self):
+        with self.assertRaisesRegex(SeamError, "geometry/color|geometry mismatch"):
+            verify_log(GOOD.replace('"g":0.65', '"g":0.64', 1), MANIFEST)
 
 
 if __name__ == "__main__":
