@@ -465,6 +465,15 @@ static void log_workshop_it025_marker(JNIEnv *env, const char *bridge_version,
             (*env)->GetVersion(env), bridge_version, render_version,
             state_checksum, command_trace, frame_token);
 }
+
+static uint32_t workshop_it025_command_trace(int32_t *values_i32,
+        const float *values_f32, const uint8_t *values_u8) {
+    int32_t frame_token = values_i32[STASIS_RENDER_I_FRAME_TOKEN];
+    values_i32[STASIS_RENDER_I_FRAME_TOKEN] = 0;
+    uint32_t trace = stasis_render_trace(values_i32, values_f32, values_u8);
+    values_i32[STASIS_RENDER_I_FRAME_TOKEN] = frame_token;
+    return trace;
+}
 #endif
 static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len) {
     RustBridgeApi *bridge = load_rust_bridge_api();
@@ -905,7 +914,7 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
                 return -1;
             }
             log_workshop_it025_marker(env, it025_bridge_version, it025_state_checksum,
-                    stasis_render_trace(values_i32, values_f32, values_u8),
+                    workshop_it025_command_trace(values_i32, values_f32, values_u8),
                     values_i32[STASIS_RENDER_I_VERSION],
                     values_i32[STASIS_RENDER_I_FRAME_TOKEN]);
         }
