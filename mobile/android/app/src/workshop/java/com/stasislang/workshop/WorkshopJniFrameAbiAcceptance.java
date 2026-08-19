@@ -301,9 +301,9 @@ final class WorkshopJniFrameAbiAcceptance {
         }
 
         boolean guardsIntact() {
-            return guardsIntact(parentI32, i32Offset, i32Capacity, GUARD)
-                    && guardsIntact(parentF32, f32Offset, f32Capacity, GUARD)
-                    && guardsIntact(parentU8, u8Offset, u8Capacity, GUARD);
+            return WorkshopJniFrameAbiAcceptance.guardsIntact(parentI32, i32Offset, i32Capacity, GUARD)
+                    && WorkshopJniFrameAbiAcceptance.guardsIntact(parentF32, f32Offset, f32Capacity, GUARD)
+                    && WorkshopJniFrameAbiAcceptance.guardsIntact(parentU8, u8Offset, u8Capacity, GUARD);
         }
         boolean innerChanged() {
             return containsNonInner(i32) || containsNonInner(f32) || containsNonInner(u8);
