@@ -53,8 +53,12 @@ The browser populates the canonical HostFrame arrays and consumes the existing g
 buffers, matching Android/Windows. Browser policy (fullscreen gestures, Clipboard API, local
 storage, and WebAudio unlocking) remains in JavaScript.
 
-Development packages show a HUD with current and worst observed `tick` and `render` time; both must
-remain below 16 ms. Release packages omit the performance HUD. Browser audio is requested
+Development packages show a HUD with current and warmup-excluded worst observed `tick`, `wasm
+render`, `browser replay`, and total `frame work` time. Tick is guest simulation, wasm render is
+guest command-buffer generation, browser replay is host execution/compositing, and frame work is
+their sum. The 16 ms verdict uses worst total frame work. Body datasets expose each phase and
+`worst*Ms`; `renderMs` and `worstRenderMs` remain combined-render compatibility aliases. Release
+packages omit the performance HUD. Browser audio is requested
 immediately and retried on the first pointer or keyboard gesture when autoplay policy initially
 suspends it; subsequent `web_play_tone` calls originate in Stasis game logic.
 
@@ -72,6 +76,11 @@ as desktop/mobile. Release asset validation and preparation retain only reachabl
 PNG, SVG, TTF, WAV, and MP3 files are placed under `assets/` and loaded as external package files.
 WebAudio playback requested during `main()` is queued until the audio context starts or a user
 gesture unlocks it.
+
+Large consecutive rectangle runs use a lazy WebGL2 instanced batcher in the full host, rendered to
+a transparent offscreen canvas and composited once at the run position. Non-rectangle commands
+flush runs to preserve source-over order. Small runs, unavailable WebGL2, and shader/context/resize
+failures use the Canvas 2D fallback; the command ABI is unchanged.
 
 Release Wasm exports lifecycle/host-access functions and memory, but keeps Stasis globals private.
 Development packages additionally export globals and full reachable function names for diagnostics;

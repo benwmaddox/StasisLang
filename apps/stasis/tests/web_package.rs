@@ -466,6 +466,12 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "requestAnimationFrame(frame)",
         "web_play_tone",
         "dataset.underBudget",
+        "dataset.wasmRenderMs",
+        "dataset.browserReplayMs",
+        "dataset.frameWorkMs",
+        "dataset.worstFrameWorkMs",
+        "RECT_BATCH_MIN",
+        "drawArraysInstanced",
         "\"host_i32\"",
         "\"host_f32\"",
         "audio_push_f32_interleaved",
@@ -532,6 +538,14 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
     assert!(!runtime.contains("keydown"));
     assert!(!runtime.contains("pointerdown"));
     assert!(!index.contains("Enable sound"));
+    for expected in [
+        "dataset.wasmRenderMs",
+        "dataset.browserReplayMs",
+        "dataset.frameWorkMs",
+        "dataset.worstFrameWorkMs",
+    ] {
+        assert!(runtime.contains(expected), "minimal runtime missing {expected}");
+    }
     assert!(
         runtime.len() < 10_000,
         "minimal runtime was {} bytes",
