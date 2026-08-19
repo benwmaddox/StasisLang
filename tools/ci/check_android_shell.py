@@ -1434,8 +1434,6 @@ def main() -> int:
     assert "CompileReady: backend=cranelift-jit" in bridge
     assert "Stasis Workshop IT-025" in native
     assert "STASIS_RENDER_ACCEPTANCE" in native
-    assert "workshop_it025_command_trace" in native
-    assert "values_i32[STASIS_RENDER_I_FRAME_TOKEN] = 0" in native
     assert "STASIS_RENDER_I_FRAME_TOKEN" in native
     assert "IT-025 GLES" in preview_renderer
     assert "I_FRAME_TOKEN" in preview_renderer

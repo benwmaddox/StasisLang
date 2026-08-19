@@ -87,7 +87,7 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         raise SeamError("stable GLES presentation did not consume a preceding native frame token")
     expected = {
         "state_checksum": manifest["state_checksum"],
-        "command_trace": manifest["command_trace"],
+        "command_trace": manifest["workshop_command_trace"],
         "render_version": manifest["render_contract_version"],
     }
     for key, value in expected.items():

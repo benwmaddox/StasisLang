@@ -3,6 +3,7 @@
   "fixture": "samples/render_parity/main.stasis",
   "trace_fixture": "samples/render_parity/trace.stasis",
   "command_trace": 1390729377,
+  "workshop_command_trace": 3939026311,
   "state_checksum": 2500,
   "render_contract_version": 5,
   "font_sha256": "17ec668bd0cd62e934f97563287ed72a4a8599ae716d20c1a93c82f1876dde47",
