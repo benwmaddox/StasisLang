@@ -37,6 +37,20 @@ global host_req_seq: i32;
 // is deliberately independent of host display metadata.
 global seam_state_checksum: i32;
 
+// IT-027 keeps the canonical HostFrame pointer lanes in guest-owned state so
+// the acceptance proof can observe the same values that drive its marker.
+global seam_touch_x: i32;
+global seam_touch_y: i32;
+global seam_touch_dx: i32;
+global seam_touch_dy: i32;
+global seam_touch_x_norm_x1000: i32;
+global seam_touch_y_norm_x1000: i32;
+global seam_touch_down_edge: i32;
+global seam_touch_up_edge: i32;
+global seam_touch_active: i32;
+global seam_touch_marker_active: i32;
+global seam_touch_checksum: i32;
+
 struct ParityState {
     opaque: Sprite;
     translucent: Sprite;
@@ -80,6 +94,29 @@ function main(): i32 {
 }
 
 function tick(): i32 {
+    let touch_x: i32;
+    let touch_y: i32;
+    let touch_dx: i32;
+    let touch_dy: i32;
+    let touch_x_norm: i32;
+    let touch_y_norm: i32;
+    touch_x.from_f32(host_f32[0]);
+    touch_y.from_f32(host_f32[1]);
+    touch_dx.from_f32(host_f32[2]);
+    touch_dy.from_f32(host_f32[3]);
+    touch_x_norm.from_f32(host_f32[4] * 1000.0);
+    touch_y_norm.from_f32(host_f32[5] * 1000.0);
+    seam_touch_x = touch_x;
+    seam_touch_y = touch_y;
+    seam_touch_dx = touch_dx;
+    seam_touch_dy = touch_dy;
+    seam_touch_x_norm_x1000 = touch_x_norm;
+    seam_touch_y_norm_x1000 = touch_y_norm;
+    seam_touch_active = host_i32[545];
+    seam_touch_down_edge = host_i32[546];
+    seam_touch_up_edge = host_i32[547];
+    seam_touch_marker_active = seam_touch_active + seam_touch_up_edge;
+    seam_touch_checksum = seam_touch_x + seam_touch_y * 3 + seam_touch_dx * 5 + seam_touch_dy * 7 + seam_touch_x_norm_x1000 * 11 + seam_touch_y_norm_x1000 * 13 + seam_touch_active * 17 + seam_touch_down_edge * 19 + seam_touch_up_edge * 23;
     return 0;
 }
 
@@ -94,6 +131,7 @@ function render(): i32 {
         state.font,
         state.label.handle
     );
+    append_parity_touch_marker(gfx_cmd_i32, gfx_cmd_f32, seam_touch_marker_active, seam_touch_x, seam_touch_y);
     return 0;
 }
 

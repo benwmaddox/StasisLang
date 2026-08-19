@@ -1059,6 +1059,20 @@ Java_com_stasislang_workshop_MainActivity_nativeFrameAbiDescriptor(
             u8->lane, u8->byte_capacity, u8->alignment);
     return (*env)->NewStringUTF(env, descriptor_json);
 }
+
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeFrameTrace(
+        JNIEnv *env, jclass activity_class, jobject frame_i32, jobject frame_f32,
+        jobject frame_u8) {
+    (void)activity_class;
+    if (!validate_stasis_jni_frame_buffers(env, frame_i32, frame_f32, frame_u8)) {
+        return -1;
+    }
+    int32_t *values_i32 = (int32_t *)(*env)->GetDirectBufferAddress(env, frame_i32);
+    float *values_f32 = (float *)(*env)->GetDirectBufferAddress(env, frame_f32);
+    uint8_t *values_u8 = (uint8_t *)(*env)->GetDirectBufferAddress(env, frame_u8);
+    return (jint)stasis_render_trace(values_i32, values_f32, values_u8);
+}
 #endif
 
 JNIEXPORT jstring JNICALL

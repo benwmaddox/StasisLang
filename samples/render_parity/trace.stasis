@@ -27,6 +27,7 @@ function main(): i32 {
     cmd_i32[21] = 5;
 
     build_parity_frame(cmd_i32, cmd_f32, cmd_u8, 3, 1, 2, 1, 1);
+    append_parity_touch_marker(cmd_i32, cmd_f32, 0, 0, 0);
 
     let historical_order: i32 = native_render_trace(cmd_i32, 34608, cmd_f32, 108676, cmd_u8, 65536);
     cmd_i32[18464] = 16384;

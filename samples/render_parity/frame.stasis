@@ -147,3 +147,24 @@ function build_parity_frame(
     cmd_i32[PARITY_GFX_I_ORDER_BASE + 8] = PARITY_GFX_ORDER_SCALE * 3 + 0;
     cmd_i32[PARITY_GFX_I_ORDER_BASE + 9] = PARITY_GFX_ORDER_SCALE * 3 + 1;
 }
+
+function append_parity_touch_marker(cmd_i32: i32[], cmd_f32: f32[], marker_active: i32, marker_x_i32: i32, marker_y_i32: i32): void {
+    if (marker_active != 0) {
+        let marker_f: i32 = PARITY_GFX_F_RECT_REVERSE_BASE - 8;
+        let marker_x: f32;
+        let marker_y: f32;
+        marker_x.from_i32(marker_x_i32);
+        marker_y.from_i32(marker_y_i32);
+        cmd_i32[24] = 2;
+        cmd_f32[marker_f] = marker_x - 8.0;
+        cmd_f32[marker_f + 1] = marker_y - 8.0;
+        cmd_f32[marker_f + 2] = 16.0;
+        cmd_f32[marker_f + 3] = 16.0;
+        cmd_f32[marker_f + 4] = 1.0;
+        cmd_f32[marker_f + 5] = 0.65;
+        cmd_f32[marker_f + 6] = 0.08;
+        cmd_f32[marker_f + 7] = 1.0;
+        cmd_i32[22] = 11;
+        cmd_i32[PARITY_GFX_I_ORDER_BASE + 10] = PARITY_GFX_ORDER_SCALE * 4 + 1;
+    }
+}

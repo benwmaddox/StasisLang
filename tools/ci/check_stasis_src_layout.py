@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import sys
 
 
 RE_IMPORT = re.compile(r'^\s*import\s+"([^"]+)"\s*;\s*(?://.*)?$')
+
+
+def discover_stasis_files(scan_roots: list[pathlib.Path]) -> list[pathlib.Path]:
+    """Return application Stasis sources, excluding vendored source trees."""
+    stasis_files: list[pathlib.Path] = []
+    for root in scan_roots:
+        if not root.is_dir():
+            continue
+        for current_root, directories, filenames in os.walk(root):
+            directories[:] = sorted(name for name in directories if name != "vendor")
+            for filename in sorted(filenames):
+                if filename.endswith(".stasis"):
+                    stasis_files.append(pathlib.Path(current_root) / filename)
+    return sorted(stasis_files, key=lambda path: path.as_posix())
 
 
 def main() -> int:
@@ -70,11 +85,7 @@ def main() -> int:
         return 1
 
     scan_roots = [src_dir, repo_root / "samples", repo_root / "tests"]
-    stasis_files: list[pathlib.Path] = []
-    for root in scan_roots:
-        if not root.is_dir():
-            continue
-        stasis_files.extend(root.rglob("*.stasis"))
+    stasis_files = discover_stasis_files(scan_roots)
 
     errors: list[str] = []
     for file_path in stasis_files:

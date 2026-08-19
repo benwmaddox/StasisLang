@@ -21,6 +21,9 @@ MARKER = re.compile(r"Stasis Workshop IT-025: (\{[^\r\n]+\})")
 PRESENT = re.compile(r"Stasis Workshop IT-025 GLES: (\{[^\r\n]+\})")
 ABI_MARKER = re.compile(r"Stasis Workshop IT-026: (\{[^\r\n]+\})")
 ABI_CASE_MARKER = re.compile(r"Stasis Workshop IT-026 case: (\{[^\r\n]+\})")
+TOUCH_MARKER = re.compile(r"Stasis Workshop IT-027: (\{[^\r\n]+\})")
+TOUCH_CASE_MARKER = re.compile(r"Stasis Workshop IT-027 case: (\{[^\r\n]+\})")
+TOUCH_PRESENT = re.compile(r"Stasis Workshop IT-027 GLES: (\{[^\r\n]+\})")
 FRAME = re.compile(r"RenderAcceptanceFrame: count=(\d+) frame_token=(\d+)")
 FORBIDDEN = re.compile(
     r"(?:CompileError|native preview frame failed|FATAL EXCEPTION|stub path|fallback path|IT-025 state checksum was unavailable)",
@@ -213,6 +216,146 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
             raise SeamError(f"IT-026 {scenario['name']} alignment proof is incorrect")
     if observed_scenarios != set(EXPECTED_INVALID):
         raise SeamError(f"IT-026 scenarios mismatch: expected={sorted(EXPECTED_INVALID)} actual={sorted(observed_scenarios)}")
+    touch_markers = []
+    for match in TOUCH_MARKER.finditer(log):
+        try:
+            candidate = json.loads(match.group(1))
+        except json.JSONDecodeError as error:
+            raise SeamError(f"invalid IT-027 marker JSON: {error}") from error
+        if candidate.get("test_id") == "IT-027":
+            touch_markers.append((match, candidate))
+    if len(touch_markers) != 1:
+        raise SeamError(f"expected exactly one IT-027 summary, found {len(touch_markers)}")
+    touch_summary_match, touch_summary = touch_markers[0]
+    touch_cases = []
+    for match in TOUCH_CASE_MARKER.finditer(log):
+        try:
+            candidate = json.loads(match.group(1))
+        except json.JSONDecodeError as error:
+            raise SeamError(f"invalid IT-027 case JSON: {error}") from error
+        if candidate.get("test_id") == "IT-027":
+            touch_cases.append((match, candidate))
+    if any(match.start() <= abi_match.start() or match.start() >= touch_summary_match.start()
+           for match, _ in touch_cases):
+        raise SeamError("IT-027 cases must follow IT-026 and precede the IT-027 summary")
+    cases = [candidate for _, candidate in touch_cases]
+    if len(cases) != 3:
+        raise SeamError(f"expected exactly 3 IT-027 cases, found {len(cases)}")
+    if touch_summary.get("schema") != "stasis.workshop_touch_roundtrip.v1" \
+            or touch_summary.get("event") != "touch_roundtrip" \
+            or touch_summary.get("status") != "passed" \
+            or touch_summary.get("phases") != 3 \
+            or touch_summary.get("ordered") is not True \
+            or touch_summary.get("unique") is not True \
+            or touch_summary.get("java_motion_events") != 3 \
+            or touch_summary.get("jni_jit_frames") != 3 \
+            or touch_summary.get("gles_presented_frames") != 3 \
+            or touch_summary.get("java_only") is not False:
+        raise SeamError("IT-027 marker does not report a passed ordered JNI/GLES acceptance")
+    expected_phases = [("down", 1, 160, 90, 1, 0, 1, 0, 0, 0),
+                       ("move", 2, 320, 180, 1, 2, 0, 0, 160, 90),
+                       ("up", 3, 400, 225, 0, 1, 0, 1, 80, 45)]
+    observed_phases = []
+    observed_tokens = []
+    for candidate, expected in zip(cases, expected_phases):
+        phase, sequence, x, y, active, action, down_edge, up_edge, dx, dy = expected
+        if candidate.get("schema") != "stasis.workshop_touch_roundtrip.v1" \
+                or candidate.get("event") != "case" \
+                or candidate.get("status") != "passed" \
+                or (candidate.get("phase"), candidate.get("sequence")) != (phase, sequence):
+            raise SeamError("IT-027 cases are not the required ordered phases")
+        guest = candidate.get("guest")
+        input_state = candidate.get("input")
+        if not isinstance(input_state, dict) \
+                or (input_state.get("x"), input_state.get("y"), input_state.get("active"),
+                    input_state.get("action")) != (x, y, active, action):
+            raise SeamError(f"IT-027 {phase} input action/coordinates mismatch")
+        if not isinstance(guest, dict) or (guest.get("x"), guest.get("y"), guest.get("active"),
+                                           guest.get("down_edge"), guest.get("up_edge"),
+                                           guest.get("dx"), guest.get("dy")) != \
+                (x, y, active, down_edge, up_edge, dx, dy):
+            raise SeamError(f"IT-027 {phase} HostFrame/edge/delta mismatch")
+        if guest.get("x_norm_x1000") != x * 1000 // 640 \
+                or guest.get("y_norm_x1000") != y * 1000 // 360:
+            raise SeamError(f"IT-027 {phase} normalized coordinate mismatch")
+        expected_checksum = x + y * 3 + dx * 5 + dy * 7 \
+            + guest["x_norm_x1000"] * 11 + guest["y_norm_x1000"] * 13 \
+            + active * 17 + down_edge * 19 + up_edge * 23
+        if guest.get("checksum") != expected_checksum:
+            raise SeamError(f"IT-027 {phase} guest checksum mismatch")
+        render = candidate.get("render")
+        if not isinstance(render, dict):
+            raise SeamError(f"IT-027 {phase} lacks render evidence")
+        touch_marker = render.get("marker")
+        token = render.get("frame_token")
+        if not isinstance(token, int) or token <= 0 or token in observed_tokens:
+            raise SeamError("IT-027 frame tokens are missing or duplicated")
+        observed_tokens.append(token)
+        if not isinstance(render.get("trace"), int) or render["trace"] == 0 \
+                or not isinstance(touch_marker, dict) or touch_marker.get("active") is not True \
+                or guest.get("marker_active") != 1:
+            raise SeamError(f"IT-027 {phase} lacks direct command-buffer trace/marker")
+        for key, value in (("x", x - 8), ("y", y - 8), ("w", 16), ("h", 16),
+                           ("r", 1.0), ("g", 0.65), ("b", 0.08), ("a", 1.0)):
+            if not isinstance(touch_marker.get(key), (int, float)) or abs(touch_marker[key] - value) > 0.01:
+                raise SeamError(f"IT-027 {phase} marker geometry mismatch")
+        if candidate.get("gles_presented") is not True \
+                or candidate.get("gles_frame_token") != token \
+                or candidate.get("java_only") is not False:
+            raise SeamError(f"IT-027 {phase} lacks matching GLES presentation")
+        observed_phases.append(phase)
+    traces = [candidate["render"]["trace"] for candidate in cases]
+    if len(set(traces)) != 3 or any(trace <= 0 for trace in traces):
+        raise SeamError("IT-027 command traces are missing or duplicated")
+    if observed_phases != [item[0] for item in expected_phases] \
+            or observed_tokens != sorted(observed_tokens):
+        raise SeamError("IT-027 phases or GLES tokens are not strictly ordered")
+    touch_present = []
+    for match in TOUCH_PRESENT.finditer(log):
+        try:
+            candidate = json.loads(match.group(1))
+        except json.JSONDecodeError as error:
+            raise SeamError(f"invalid IT-027 GLES marker JSON: {error}") from error
+        if candidate.get("test_id") == "IT-027":
+            touch_present.append((match, candidate))
+    if len(touch_present) != 3:
+        raise SeamError(f"expected exactly 3 IT-027 GLES markers, found {len(touch_present)}")
+    if any(match.start() <= abi_match.start() or match.start() >= touch_summary_match.start()
+           for match, _ in touch_present):
+        raise SeamError("IT-027 GLES markers must follow IT-026 and precede the summary")
+    presented_tokens = []
+    present_positions = []
+    case_positions = [match.start() for match, _ in touch_cases]
+    for index, ((present_match, present), expected_token, expected_marker) in enumerate(zip(
+            touch_present, observed_tokens, [candidate["render"]["marker"] for candidate in cases])):
+        present_positions.append(present_match.start())
+        if present_match.start() >= case_positions[index]:
+            raise SeamError("IT-027 GLES marker must precede its matching case")
+        if present.get("schema") != "stasis.workshop_touch_roundtrip.v1" \
+                or present.get("event") != "present" \
+                or present.get("frame_token") != expected_token \
+                or present.get("trace") != cases[index]["render"]["trace"] \
+                or present.get("rect_count") != 2 \
+                or present.get("order_count") != 11:
+            raise SeamError("IT-027 GLES marker did not match its ordered case token")
+        presented_marker = present.get("marker")
+        if not isinstance(presented_marker, dict) or presented_marker.get("active") is not True:
+            raise SeamError("IT-027 GLES marker lacks active direct marker evidence")
+        for key in ("x", "y", "w", "h", "r", "g", "b", "a"):
+            observed_value = presented_marker.get(key)
+            expected_value = expected_marker.get(key)
+            if not isinstance(observed_value, (int, float)) \
+                    or not isinstance(expected_value, (int, float)) \
+                    or abs(observed_value - expected_value) > 0.01:
+                raise SeamError("IT-027 GLES marker geometry/color mismatch")
+        presented_tokens.append(present.get("frame_token"))
+    if presented_tokens != observed_tokens:
+        raise SeamError("IT-027 GLES tokens do not independently correlate with cases")
+    interleaved = sorted(
+        [(present_positions[index], "present") for index in range(3)]
+        + [(case_positions[index], "case") for index in range(3)])
+    if [kind for _, kind in interleaved] != ["present", "case"] * 3:
+        raise SeamError("IT-027 GLES and case evidence is not strictly interleaved")
     return {
         "compile_functions": max(map(int, compile_matches)),
         "presented_frames": stable_count,
@@ -222,6 +365,9 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         "marker": marker,
         "it026": abi,
         "it026_cases": invalid,
+        "it027": touch_summary,
+        "it027_cases": cases,
+        "it027_gles": [candidate for _, candidate in touch_present],
     }
 
 

@@ -14,6 +14,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
@@ -1445,16 +1446,41 @@ def main() -> int:
     assert "WorkshopReload::ResetRequired" in bridge
     assert "CompileReady: backend=cranelift-jit" in bridge
     assert "Stasis Workshop IT-025" in native
+    render_main = read("samples/render_parity/main.stasis")
+    render_frame = read("samples/render_parity/frame.stasis")
+    assert "seam_touch_checksum" in render_main
+    assert "host_f32[4] * 1000.0" in render_main
+    assert "append_parity_touch_marker" in render_frame
+    assert "marker_active" in render_frame
+    assert "PARITY_GFX_F_RECT_REVERSE_BASE - 8" in render_frame
     acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java")
     assert "Stasis Workshop IT-026" in acceptance
     assert "all_invalid_unchanged" in acceptance
     assert "isDescriptorEnvelope" in acceptance
     assert "descriptor.optString(\"schema\")" in acceptance
+    touch_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java")
+    assert "Stasis Workshop IT-027" in touch_acceptance
+    assert "ACTION_DOWN" in touch_acceptance and "ACTION_MOVE" in touch_acceptance
+    assert "ACTION_UP" in touch_acceptance
+    assert "java_only" in touch_acceptance
     assert "nativeValidateFrameAbi" not in acceptance
     assert "STASIS_RENDER_ACCEPTANCE" in native
     assert "STASIS_RENDER_I_FRAME_TOKEN" in native
     assert "IT-025 GLES" in preview_renderer
+    assert "IT-027 GLES" in preview_renderer
+    assert "rect_count" in preview_renderer
     assert "I_FRAME_TOKEN" in preview_renderer
+    assert "awaitPresentedFrameToken" in preview_renderer
+    assert "ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS" in activity
+    assert "long deadline = System.nanoTime() + timeoutMillis * 1_000_000L" in activity
+    assert "long remainingNanos = deadline - System.nanoTime();" in activity
+    assert activity.count("remainingNanos = deadline - System.nanoTime();") >= 2
+    assert "long waitMillis = Math.min(remainingMillis" in activity
+    assert "return System.nanoTime() <= deadline;" in activity
+    assert "requestRender();" in activity
+    assert "lastAcceptanceGlesEvidenceToken" in preview_renderer
+    assert "frameToken != lastAcceptanceGlesEvidenceToken" in preview_renderer
+    assert "nativeFrameTrace" in native
     assert "Stasis Android native smoke loaded" in native
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")

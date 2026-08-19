@@ -81,6 +81,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int FRAME_I32_CAPACITY = I_ORDER_BASE + MAX_ORDER;
     static final int FRAME_F32_CAPACITY = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
 
+    // The production host header intentionally stops at density generation;
+    // the frame token is read through frameToken() so this ABI stays 22 ints.
     private static final int HOST_HEADER_I32S = I_DENSITY_GENERATION + 1;
     private static final int CAPTURE_HEADER_I32S = I_RECT_COUNT + 2;
     private static final int LINE_CHUNK_SIZE = 256;
@@ -322,6 +324,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private boolean restorePlaceholderPending;
     private long restorePlaceholderUntilNanos;
     private int renderAcceptanceFrameCount;
+    private int lastPresentedFrameToken = -1;
+    private int lastAcceptanceGlesEvidenceToken = -1;
+    private int acceptanceTrace = -1;
+    private int acceptanceTraceToken = -1;
     private int frameDrawCalls;
     private int activePipeline;
 
@@ -395,6 +401,18 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     ByteBuffer frameU8Bytes() {
         return frameU8Bytes;
+    }
+
+    synchronized float acceptanceFrameF32(int index) {
+        return frameF32.get(index);
+    }
+
+    synchronized int frameToken() {
+        return frameI32.get(I_FRAME_TOKEN);
+    }
+
+    synchronized int rectCount() {
+        return frameI32.get(I_RECT_COUNT);
     }
 
     synchronized void copyFrameHeaderInto(int[] destination) {
@@ -542,15 +560,36 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                         ? 0L : System.nanoTime() - drawStarted;
                 drawCalls = frameDrawCalls;
                 presented = true;
+                int frameToken = frameI32.get(I_FRAME_TOKEN);
+                lastPresentedFrameToken = frameToken;
+                notifyAll();
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+                    if (rectCount >= 2 && frameToken != lastAcceptanceGlesEvidenceToken) {
+                        lastAcceptanceGlesEvidenceToken = frameToken;
+                        int markerBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
+                        Log.i(LOG_TAG, "Stasis Workshop IT-027 GLES: {\"schema\":\"stasis.workshop_touch_roundtrip.v1\","
+                                + "\"test_id\":\"IT-027\",\"event\":\"present\","
+                                + "\"frame_token\":" + frameToken + ","
+                                + "\"trace\":" + (acceptanceTraceToken == frameToken
+                                        ? Integer.toUnsignedLong(acceptanceTrace) : -1L) + ","
+                                + "\"rect_count\":" + rectCount + ",\"order_count\":" + orderCount + ","
+                                + "\"marker\":{\"active\":true,\"x\":" + frameF32.get(markerBase)
+                                + ",\"y\":" + frameF32.get(markerBase + 1)
+                                + ",\"w\":" + frameF32.get(markerBase + 2)
+                                + ",\"h\":" + frameF32.get(markerBase + 3)
+                                + ",\"r\":" + frameF32.get(markerBase + 4)
+                                + ",\"g\":" + frameF32.get(markerBase + 5)
+                                + ",\"b\":" + frameF32.get(markerBase + 6)
+                                + ",\"a\":" + frameF32.get(markerBase + 7) + "}}");
+                    }
                     renderAcceptanceFrameCount += 1;
                     if (renderAcceptanceFrameCount == 1 || renderAcceptanceFrameCount % 30 == 0) {
                         Log.i(LOG_TAG, "RenderAcceptanceFrame: count=" + renderAcceptanceFrameCount
-                                + " frame_token=" + frameI32.get(I_FRAME_TOKEN));
+                                + " frame_token=" + frameToken);
                         Log.i(LOG_TAG, "Stasis Workshop IT-025 GLES: {\"schema\":\"stasis.workshop_seam.v1\","
                                 + "\"test_id\":\"IT-025\",\"event\":\"present\",\"count\":"
                                 + renderAcceptanceFrameCount + ","
-                                + "\"frame_token\":" + frameI32.get(I_FRAME_TOKEN) + "}");
+                                + "\"frame_token\":" + frameToken + "}");
                     }
                 }
             }
@@ -567,6 +606,34 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (report != null) Log.i(LOG_TAG, report);
         }
         timing.onRendered(totalNanos);
+    }
+
+    // Acceptance synchronization waits for the GL thread to consume the exact
+    // token written by the preceding JNI call. It is never used by production.
+    synchronized boolean awaitPresentedFrameToken(int token, long timeoutMillis) {
+        long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+        while (lastPresentedFrameToken != token) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0L) return false;
+            try {
+                long millis = remaining / 1_000_000L;
+                int nanos = (int)(remaining % 1_000_000L);
+                wait(Math.max(1L, millis), nanos);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    synchronized void setAcceptanceTrace(int token, int trace) {
+        acceptanceTraceToken = token;
+        acceptanceTrace = trace;
+    }
+
+    synchronized int acceptanceTrace() {
+        return acceptanceTrace;
     }
 
     // Releases must wait until the command buffer has consumed its sprite textures. A
