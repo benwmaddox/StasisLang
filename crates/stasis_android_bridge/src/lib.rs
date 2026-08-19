@@ -4971,16 +4971,24 @@ function tick(): void {}
             get_android_workshop_i32_global(&root, entry, "Input.checksum").unwrap(),
             14307
         );
-        let last = frame(400, 240, 0);
+        let last = frame(400, 225, 0);
         assert_eq!(last.render_commands[0].x, 392);
-        assert_eq!(last.render_commands[0].y, 232);
+        assert_eq!(last.render_commands[0].y, 217);
         assert_eq!(
             get_android_workshop_i32_global(&root, entry, "Input.up").unwrap(),
             1
         );
         assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.dy").unwrap(),
+            45
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.yn").unwrap(),
+            625
+        );
+        assert_eq!(
             get_android_workshop_i32_global(&root, entry, "Input.checksum").unwrap(),
-            17496
+            16813
         );
         fs::remove_dir_all(&root).ok();
         clear_runtime_session_for_test();
@@ -5099,14 +5107,14 @@ function tick(): void {}
             500
         );
 
-        let up_trace = run_frame(400, 240, 0, &mut frame_i32, &mut frame_f32, &mut frame_u8);
+        let up_trace = run_frame(400, 225, 0, &mut frame_i32, &mut frame_f32, &mut frame_u8);
         assert_ne!(up_trace, move_trace);
         assert_eq!(frame_i32[RECT_COUNT], 2);
         assert_eq!(frame_i32[ORDER_COUNT], 11);
         assert_eq!(frame_i32[FRAME_TOKEN], 3);
         assert_eq!(
             &frame_f32[RECT_REVERSE_BASE - 8..RECT_REVERSE_BASE],
-            &[392.0, 232.0, 16.0, 16.0, 1.0, 0.65, 0.08, 1.0]
+            &[392.0, 217.0, 16.0, 16.0, 1.0, 0.65, 0.08, 1.0]
         );
         assert_eq!(
             get_android_workshop_i32_global(&root, entry, "seam_touch_active").unwrap(),
@@ -5115,6 +5123,18 @@ function tick(): void {}
         assert_eq!(
             get_android_workshop_i32_global(&root, entry, "seam_touch_up_edge").unwrap(),
             1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_dy").unwrap(),
+            45
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_y_norm_x1000").unwrap(),
+            625
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_touch_checksum").unwrap(),
+            16813
         );
         assert_eq!(
             get_android_workshop_i32_global(&root, entry, "seam_touch_marker_active").unwrap(),

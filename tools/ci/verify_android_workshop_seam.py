@@ -254,7 +254,7 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         raise SeamError("IT-027 marker does not report a passed ordered JNI/GLES acceptance")
     expected_phases = [("down", 1, 160, 90, 1, 0, 1, 0, 0, 0),
                        ("move", 2, 320, 180, 1, 2, 0, 0, 160, 90),
-                       ("up", 3, 400, 240, 0, 1, 0, 1, 80, 60)]
+                       ("up", 3, 400, 225, 0, 1, 0, 1, 80, 45)]
     observed_phases = []
     observed_tokens = []
     for candidate, expected in zip(cases, expected_phases):

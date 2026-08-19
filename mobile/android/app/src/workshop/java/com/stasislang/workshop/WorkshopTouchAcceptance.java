@@ -17,7 +17,7 @@ final class WorkshopTouchAcceptance {
         JSONArray cases = new JSONArray();
         int[][] phases = {{160, 90, MotionEvent.ACTION_DOWN, 1},
                 {320, 180, MotionEvent.ACTION_MOVE, 1},
-                {400, 240, MotionEvent.ACTION_UP, 0}};
+                {400, 225, MotionEvent.ACTION_UP, 0}};
         String[] names = {"down", "move", "up"};
         try {
             for (int index = 0; index < phases.length; index += 1) {
@@ -55,7 +55,7 @@ final class WorkshopTouchAcceptance {
                 }
                 if (index == 2 && (guest.optInt("down_edge") != 0
                         || guest.optInt("up_edge") != 1
-                        || guest.optInt("dx") != 80 || guest.optInt("dy") != 60)) {
+                        || guest.optInt("dx") != 80 || guest.optInt("dy") != 45)) {
                     return failed("up edge/delta mismatch");
                 }
                 JSONObject marker = render.optJSONObject("marker");
