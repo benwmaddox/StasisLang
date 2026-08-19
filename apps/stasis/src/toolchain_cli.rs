@@ -63,6 +63,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_asset_path.h",
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
+    "stasis_performance_metrics.h",
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",
@@ -7238,6 +7239,7 @@ mod tests {
         assert!(android
             .join("runtime/stasis_renderer_lifecycle.h")
             .is_file());
+        assert!(android.join("runtime/stasis_performance_metrics.h").is_file());
         assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
             .is_file());
@@ -7261,12 +7263,12 @@ mod tests {
         assert!(java.contains("nativeReadPerformanceMetrics"));
         assert!(java.contains("nativeSetPerformanceMetricsEnabled(show)"));
         assert!(java.contains("nativeReadRuntimeError"));
-        assert!(java.contains("hudText.append(\"tick=\")"));
-        assert!(java.contains("hudText.append(\"  render=\")"));
-        assert!(java.contains("hudText.append(\"  total=\")"));
-        assert!(java.contains("hudText.append(\" ms  budget@60fps=\")"));
+        assert!(java.contains("guest render"));
+        assert!(java.contains("host replay"));
+        assert!(java.contains("frame work"));
+        assert!(java.contains("appendWorkload"));
         assert!(!java.contains("percentile("));
-        assert!(java.contains("performanceHud.setSingleLine(true)"));
+        assert!(java.contains("performanceHud.setSingleLine(false)"));
         assert!(java.contains("verifyAssetManifest(staging)"));
         assert!(java.contains("manifestVersion != 1 && manifestVersion != 2"));
         assert!(java.contains("Asset verification failed before runtime startup"));
@@ -7280,6 +7282,7 @@ mod tests {
             jni.contains("Java_com_example_mobile_MainActivity_nativeSetPerformanceMetricsEnabled")
         );
         assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeReadRuntimeError"));
+        assert!(jni.contains("stasis_host_get_latest_performance_metrics_v1"));
         assert!(!jni.contains("@STASIS_"));
         let runtime_source = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.c"))
             .expect("read shared mobile runtime source");
@@ -7301,6 +7304,7 @@ mod tests {
         assert!(ios.join("runtime/stasis_asset_path.h").is_file());
         assert!(ios.join("runtime/stasis_render_contract.h").is_file());
         assert!(ios.join("runtime/stasis_renderer_lifecycle.h").is_file());
+        assert!(ios.join("runtime/stasis_performance_metrics.h").is_file());
         assert!(ios.join("runtime/stasis_platform_storage.c").is_file());
         assert!(ios.join("runtime/stasis_platform_storage.h").is_file());
         assert!(config.contains("@executable_path/Frameworks"));

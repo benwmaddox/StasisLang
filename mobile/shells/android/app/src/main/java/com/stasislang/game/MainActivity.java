@@ -40,10 +40,13 @@ public final class MainActivity extends SDLActivity {
     private static native String nativeReadRuntimeError();
 
     private final Handler hudHandler = new Handler(Looper.getMainLooper());
-    private final float[] nativePerformance = new float[2];
-    private final RollingMetric tickMetric = new RollingMetric();
-    private final RollingMetric renderMetric = new RollingMetric();
-    private final StringBuilder hudText = new StringBuilder(96);
+    private final float[] nativePerformance = new float[14];
+    private final RollingMetric[] phaseMetrics = new RollingMetric[] {
+            new RollingMetric(), new RollingMetric(), new RollingMetric(), new RollingMetric(),
+            new RollingMetric(), new RollingMetric(), new RollingMetric(), new RollingMetric()
+    };
+    private final RollingMetric frameWorst = new RollingMetric();
+    private final StringBuilder hudText = new StringBuilder(420);
     private FrameLayout diagnosticLayer;
     private TextView performanceHud;
     private TextView runtimeError;
@@ -130,7 +133,7 @@ public final class MainActivity extends SDLActivity {
         performanceHud = new TextView(this);
         performanceHud.setTextColor(Color.WHITE);
         performanceHud.setTextSize(10.0f);
-        performanceHud.setSingleLine(true);
+        performanceHud.setSingleLine(false);
         performanceHud.setPadding(dp(6), dp(4), dp(6), dp(4));
         performanceHud.setBackgroundColor(Color.argb(150, 20, 28, 38));
         performanceHud.setContentDescription("Stasis performance timing overlay");
@@ -164,8 +167,8 @@ public final class MainActivity extends SDLActivity {
         nativeSetPerformanceMetricsEnabled(show);
         performanceHud.setVisibility(show ? View.VISIBLE : View.GONE);
         if (show) {
-            tickMetric.clear();
-            renderMetric.clear();
+            for (RollingMetric metric : phaseMetrics) metric.clear();
+            frameWorst.clear();
             updatePerformanceHud();
         }
     }
@@ -194,23 +197,46 @@ public final class MainActivity extends SDLActivity {
         if (performanceHud == null || performanceHud.getVisibility() != View.VISIBLE
                 || !nativeReadPerformanceMetrics(nativePerformance)) return;
         long now = System.nanoTime();
-        tickMetric.add(now, nativePerformance[0]);
-        renderMetric.add(now, nativePerformance[1]);
-        double tickAverage = tickMetric.average();
-        double renderAverage = renderMetric.average();
-        double totalAverage = tickAverage + renderAverage;
-        int budgetPercent = Math.max(0,
-                (int)((totalAverage * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
+        for (int index = 0; index < phaseMetrics.length; index++) {
+            if (nativePerformance[index] >= 0.0f) phaseMetrics[index].add(now, nativePerformance[index]);
+        }
+        if (nativePerformance[6] >= 0.0f) frameWorst.add(now, nativePerformance[6]);
+        int budgetPercent = nativePerformance[6] < 0.0f ? 0 : Math.max(0,
+                (int)((nativePerformance[6] * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
         hudText.setLength(0);
-        hudText.append("tick=");
-        appendMillis(hudText, tickAverage);
-        hudText.append("  render=");
-        appendMillis(hudText, renderAverage);
-        hudText.append("  total=");
-        appendMillis(hudText, totalAverage);
-        hudText.append(" ms  budget@60fps=").append(budgetPercent).append('%');
+        hudText.append("SDL · Android\n");
+        appendPhase(hudText, "tick", nativePerformance[0], phaseMetrics[0].worst());
+        appendPhase(hudText, "guest render", nativePerformance[1], phaseMetrics[1].worst());
+        appendPhase(hudText, "host replay", nativePerformance[2], phaseMetrics[2].worst());
+        appendPhase(hudText, "render prep", nativePerformance[3], phaseMetrics[3].worst());
+        appendPhase(hudText, "GPU submit", nativePerformance[4], phaseMetrics[4].worst());
+        appendPhase(hudText, "GPU execution", nativePerformance[5], phaseMetrics[5].worst());
+        appendPhase(hudText, "frame work", nativePerformance[6], frameWorst.worst());
+        appendPhase(hudText, "present wait", nativePerformance[7], phaseMetrics[7].worst());
+        if (nativePerformance[6] >= 0.0f) {
+            hudText.append(nativePerformance[6] <= FRAME_BUDGET_MILLIS ? "UNDER" : "OVER")
+                    .append(" 16.67 ms · ");
+        }
+        appendWorkload(hudText, "commands", nativePerformance[9], true);
+        appendWorkload(hudText, "lines", nativePerformance[10], false);
+        appendWorkload(hudText, "rects", nativePerformance[11], false);
+        appendWorkload(hudText, "sprites", nativePerformance[12], false);
+        appendWorkload(hudText, "text", nativePerformance[13], false);
         performanceHud.setTextColor(debugColorForBudget(budgetPercent));
         performanceHud.setText(hudText.toString());
+    }
+
+    private static void appendPhase(StringBuilder builder, String name, float current, double worst) {
+        if (current < 0.0f) return;
+        builder.append(name).append(' ');
+        appendMillis(builder, current); builder.append(" (worst "); appendMillis(builder, worst); builder.append(')');
+        builder.append('\n');
+    }
+
+    private static void appendWorkload(StringBuilder builder, String label, float value, boolean first) {
+        if (value < 0.0f) return;
+        builder.append(first ? "workload " : " · ").append(label).append(' ')
+                .append((int)(value + 0.5f));
     }
 
     private void updateRuntimeError() {
@@ -422,6 +448,15 @@ public final class MainActivity extends SDLActivity {
                 }
             }
             return samples == 0 ? 0.0 : total / samples;
+        }
+
+        double worst() {
+            long cutoff = System.nanoTime() - WINDOW_NANOS;
+            double result = -1.0;
+            for (int i = 0; i < count; i++) {
+                if (times[i] >= cutoff && values[i] > result) result = values[i];
+            }
+            return result < 0.0 ? 0.0 : result;
         }
     }
 }

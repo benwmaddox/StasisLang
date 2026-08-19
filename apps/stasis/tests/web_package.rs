@@ -470,8 +470,18 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "dataset.browserReplayMs",
         "dataset.frameWorkMs",
         "dataset.worstFrameWorkMs",
+        "dataset.backend",
+        "dataset.hostReplayMs",
+        "dataset.renderPrepMs",
+        "dataset.gpuSubmitMs",
+        "dataset.presentWaitMs",
+        "dataset.instances",
+        "dataset.uploadedBytes",
+        "PERF_ROLLING_CAPACITY",
+        "performanceWorstTimes",
         "RECT_BATCH_MIN",
         "drawArraysInstanced",
+        "Canvas2D + WebGL2",
         "\"host_i32\"",
         "\"host_f32\"",
         "audio_push_f32_interleaved",
@@ -491,6 +501,9 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
             "missing web runtime data {expected}"
         );
     }
+    assert!(!runtime.contains("render prep N/A"));
+    assert!(!runtime.contains("GPU submit N/A"));
+    assert!(!runtime.contains("present wait N/A"));
     assert!(!runtime.contains("STASIS_WASM_BASE64"));
     assert!(!runtime.contains("data:application/wasm;base64,"));
     assert!(output.join("index.html").is_file());
@@ -543,9 +556,16 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
         "dataset.browserReplayMs",
         "dataset.frameWorkMs",
         "dataset.worstFrameWorkMs",
+        "dataset.backend",
+        "dataset.hostReplayMs",
+        "dataset.renderPrepMs",
+        "dataset.gpuSubmitMs",
+        "dataset.presentWaitMs",
+        "PERF_ROLLING_CAPACITY",
     ] {
         assert!(runtime.contains(expected), "minimal runtime missing {expected}");
     }
+    assert!(!runtime.contains("N/A"));
     assert!(
         runtime.len() < 10_000,
         "minimal runtime was {} bytes",

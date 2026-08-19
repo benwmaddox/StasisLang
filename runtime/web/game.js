@@ -51,6 +51,38 @@
   let worstWasmRender = 0;
   let worstBrowserReplay = 0;
   let worstFrameWork = 0;
+  const PERF_ROLLING_CAPACITY = 1200;
+  const performanceWorstTimes = new Float64Array(PERF_ROLLING_CAPACITY);
+  const performanceWorstValues = Array.from({ length: 5 }, () => new Float64Array(PERF_ROLLING_CAPACITY));
+  let performanceWorstNext = 0;
+  let performanceWorstCount = 0;
+  const recordPerformanceWorst = (now, tick, render, wasm, replay, frameWork) => {
+    performanceWorstTimes[performanceWorstNext] = now;
+    performanceWorstValues[0][performanceWorstNext] = tick;
+    performanceWorstValues[1][performanceWorstNext] = render;
+    performanceWorstValues[2][performanceWorstNext] = wasm;
+    performanceWorstValues[3][performanceWorstNext] = replay;
+    performanceWorstValues[4][performanceWorstNext] = frameWork;
+    performanceWorstNext = (performanceWorstNext + 1) % PERF_ROLLING_CAPACITY;
+    if (performanceWorstCount < PERF_ROLLING_CAPACITY) performanceWorstCount += 1;
+    const cutoff = now - 5000;
+    for (let metric = 0; metric < 5; metric += 1) {
+      let maximum = 0;
+      for (let sample = 0; sample < performanceWorstCount; sample += 1) {
+        if (performanceWorstTimes[sample] >= cutoff) maximum = Math.max(maximum, performanceWorstValues[metric][sample]);
+      }
+      if (metric === 0) worstTick = maximum;
+      else if (metric === 1) worstRender = maximum;
+      else if (metric === 2) worstWasmRender = maximum;
+      else if (metric === 3) worstBrowserReplay = maximum;
+      else worstFrameWork = maximum;
+    }
+  };
+  const performanceWorkload = {
+    commands: 0, lines: 0, rectangles: 0, sprites: 0, text: 0,
+    instances: 0, batches: 0, drawCalls: 0, uploadedBytes: 0
+  };
+  let performanceBackend = "Canvas2D";
   let rectBatcher;
   const RECT_BATCH_MIN = 64;
   const RECT_CAP = 10000;
@@ -753,6 +785,7 @@
     }
   }
   function executeCommands() {
+    performanceWorkload.commands += commands.length;
     context.globalAlpha = 1;
     context.globalCompositeOperation = "source-over";
     for (const command of commands) {
@@ -792,6 +825,8 @@
       context.restore();
     }
     const drawLine = index => {
+      performanceWorkload.lines += 1;
+      performanceWorkload.drawCalls += 1;
       const base = 4 + index * 8;
       context.save();
       context.globalAlpha = f32[base + 7];
@@ -809,7 +844,9 @@
       context.fillRect(f32[base], f32[base + 1], f32[base + 2], f32[base + 3]);
     };
     const drawRectRun = (start, count, ordered) => {
+      performanceWorkload.rectangles += count;
       if (count < RECT_BATCH_MIN) {
+        performanceWorkload.drawCalls += count;
         for (let offset = 0; offset < count; offset += 1) {
           const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
           drawRect(index);
@@ -818,6 +855,7 @@
       }
       const batcher = getRectBatcher();
       if (!batcher) {
+        performanceWorkload.drawCalls += count;
         for (let offset = 0; offset < count; offset += 1) {
           const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
           drawRect(index);
@@ -832,8 +870,14 @@
       }
       try {
         batcher.draw(rectScratch, count);
+        performanceWorkload.instances += count;
+        performanceWorkload.batches += 1;
+        performanceWorkload.drawCalls += 1;
+        performanceWorkload.uploadedBytes += count * 8 * Float32Array.BYTES_PER_ELEMENT;
+        performanceBackend = "Canvas2D + WebGL2";
       } catch (_) {
         rectBatcher = null;
+        performanceWorkload.drawCalls += count;
         for (let offset = 0; offset < count; offset += 1) {
           const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
           drawRect(index);
@@ -841,6 +885,8 @@
       }
     };
     const drawSprite = index => {
+      performanceWorkload.sprites += 1;
+      performanceWorkload.drawCalls += 1;
       const baseI = 32 + index * 3;
       const baseF = 80004 + index * spriteStride;
       const image = sprites.get(i32[baseI]);
@@ -870,6 +916,8 @@
       context.restore();
     };
     const drawText = index => {
+      performanceWorkload.text += 1;
+      performanceWorkload.drawCalls += 1;
       const baseI = 12320 + index * 3;
       const baseF = textBase + index * 6;
       const offset = i32[baseI + 1];
@@ -895,6 +943,7 @@
     const textCount = Math.max(0, Math.min(i32[7], 2048));
     const rectCount = version >= 4 ? Math.max(0, Math.min(i32[24], 10000 - lineCount)) : 0;
     const orderCount = version >= 3 ? Math.max(0, Math.min(i32[22], 16144)) : 0;
+    performanceWorkload.commands += lineCount + rectCount + spriteCount + textCount;
     if (orderCount > 0) {
       for (let order = 0; order < orderCount; order += 1) {
         const encoded = i32[18464 + order];
@@ -1078,22 +1127,33 @@
     const wasmRenderStart = performance.now();
     instance.exports.render();
     const wasmRenderMs = performance.now() - wasmRenderStart;
+    performanceWorkload.commands = 0;
+    performanceWorkload.lines = 0;
+    performanceWorkload.rectangles = 0;
+    performanceWorkload.sprites = 0;
+    performanceWorkload.text = 0;
+    performanceWorkload.instances = 0;
+    performanceWorkload.batches = 0;
+    performanceWorkload.drawCalls = 0;
+    performanceWorkload.uploadedBytes = 0;
+    performanceBackend = rectBatcher ? "Canvas2D + WebGL2" : "Canvas2D";
     const replayStart = performance.now();
     executeCommands();
     const browserReplayMs = performance.now() - replayStart;
     const renderMs = wasmRenderMs + browserReplayMs;
     const frameWorkMs = tickMs + renderMs;
+    const renderPrepMs = -1;
+    const gpuSubmitMs = -1;
+    const gpuExecutionMs = -1;
+    const presentWaitMs = -1;
     frames += 1;
-    if (frames > 5) {
-      worstTick = Math.max(worstTick, tickMs);
-      worstRender = Math.max(worstRender, renderMs);
-      worstWasmRender = Math.max(worstWasmRender, wasmRenderMs);
-      worstBrowserReplay = Math.max(worstBrowserReplay, browserReplayMs);
-      worstFrameWork = Math.max(worstFrameWork, frameWorkMs);
-    }
-    const underBudget = worstFrameWork < 16;
+    recordPerformanceWorst(timestamp, tickMs, renderMs, wasmRenderMs, browserReplayMs, frameWorkMs);
+    const underBudget = frameWorkMs <= 16.67;
     if (hud) {
-      hud.textContent = `Wasm frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)})\nwasm render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nbrowser replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)})\n${underBudget ? "UNDER 16 ms" : "OVER BUDGET"}`;
+      const uploadText = performanceWorkload.uploadedBytes > 0 ? ` · uploaded ${performanceWorkload.uploadedBytes} B` : "";
+      const instanceText = performanceBackend.includes("WebGL2")
+        ? ` · instances ${performanceWorkload.instances} · batches ${performanceWorkload.batches}` : "";
+      hud.textContent = `${performanceBackend} · frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)}) · guest render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nhost replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)}) · ${underBudget ? "UNDER 16.67 ms" : "OVER 16.67 ms"}\ncommands ${performanceWorkload.commands} · lines ${performanceWorkload.lines} · rects ${performanceWorkload.rectangles} · sprites ${performanceWorkload.sprites} · text ${performanceWorkload.text}\ndraws ${performanceWorkload.drawCalls}${instanceText}${uploadText}`;
     }
     document.body.dataset.frames = String(frames);
     document.body.dataset.tickMs = tickMs.toFixed(3);
@@ -1101,6 +1161,21 @@
     document.body.dataset.wasmRenderMs = wasmRenderMs.toFixed(3);
     document.body.dataset.browserReplayMs = browserReplayMs.toFixed(3);
     document.body.dataset.frameWorkMs = frameWorkMs.toFixed(3);
+    document.body.dataset.backend = performanceBackend;
+    document.body.dataset.hostReplayMs = browserReplayMs.toFixed(3);
+    document.body.dataset.renderPrepMs = String(renderPrepMs);
+    document.body.dataset.gpuSubmitMs = String(gpuSubmitMs);
+    document.body.dataset.gpuExecutionMs = String(gpuExecutionMs);
+    document.body.dataset.presentWaitMs = String(presentWaitMs);
+    document.body.dataset.commands = String(performanceWorkload.commands);
+    document.body.dataset.lines = String(performanceWorkload.lines);
+    document.body.dataset.rectangles = String(performanceWorkload.rectangles);
+    document.body.dataset.sprites = String(performanceWorkload.sprites);
+    document.body.dataset.text = String(performanceWorkload.text);
+    document.body.dataset.instances = performanceBackend.includes("WebGL2") ? String(performanceWorkload.instances) : "-1";
+    document.body.dataset.batches = performanceBackend.includes("WebGL2") ? String(performanceWorkload.batches) : "-1";
+    document.body.dataset.drawCalls = String(performanceWorkload.drawCalls);
+    document.body.dataset.uploadedBytes = String(performanceWorkload.uploadedBytes);
     document.body.dataset.worstTickMs = worstTick.toFixed(3);
     document.body.dataset.worstRenderMs = worstRender.toFixed(3);
     document.body.dataset.worstWasmRenderMs = worstWasmRender.toFixed(3);
