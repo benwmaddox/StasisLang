@@ -1,0 +1,46 @@
+{
+  "schema": "stasis-assets",
+  "version": 2,
+  "display": {
+    "logical_width": 640,
+    "logical_height": 360,
+    "max_physical_width": 640,
+    "max_physical_height": 360,
+    "scale_mode": "fit"
+  },
+  "assets": [
+    {
+      "id": "arena_background",
+      "path": "assets/arena_background.png",
+      "content_sha256": "d59328cc15422282ea6b107870906c217484938b7903b2ad759298283efa6664",
+      "format": {"kind": "sprite", "encoding": "png", "width": 1672, "height": 941},
+      "prepare": {
+        "max_logical_width": 640,
+        "max_logical_height": 360,
+        "max_render_scale": 1.0
+      },
+      "dependencies": []
+    },
+    {
+      "id": "brick",
+      "path": "assets/brick.svg",
+      "content_sha256": "edff11b95c0aa55e114e152e65023dfd8cbf0e0fe2788b7089920f61991b8613",
+      "format": {"kind": "sprite", "encoding": "svg", "width": 78, "height": 22},
+      "dependencies": []
+    },
+    {
+      "id": "paddle",
+      "path": "assets/paddle.svg",
+      "content_sha256": "e7dd763ff0cdeee6bbe940d5f53d8960334f19abe3c53c1258117291a5dc3598",
+      "format": {"kind": "sprite", "encoding": "svg", "width": 96, "height": 14},
+      "dependencies": []
+    },
+    {
+      "id": "ball",
+      "path": "assets/ball.svg",
+      "content_sha256": "690a6d6592f3d68660600b7be4b289a929f1234786734f024edb956721b2869b",
+      "format": {"kind": "sprite", "encoding": "svg", "width": 12, "height": 12},
+      "dependencies": []
+    }
+  ]
+}

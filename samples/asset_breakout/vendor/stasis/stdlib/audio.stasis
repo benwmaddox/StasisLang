@@ -1,0 +1,33 @@
+@link("stasis_graphics");
+
+// Audio/runtime bindings (marker module).
+// From a generated project: import "/vendor/stasis/stdlib/audio.stasis";
+
+extern function audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
+extern function audio_shutdown(): void;
+extern function audio_is_available(): bool;
+extern function audio_get_sample_rate(): i32;
+extern function audio_get_channels(): i32;
+extern function audio_get_queued_frames(): i32;
+extern function audio_get_underruns(): i32;
+extern function audio_push_f32_interleaved(samples: f32[], frame_count: i32): i32;
+
+// Bounded audio assets are decoded outside deterministic Stasis state. audio_load_wav accepts
+// mono or stereo little-endian PCM16 WAV files. The music/effect helpers accept WAV or MP3.
+// Compressed input stays compressed on disk and is decoded into bounded host memory at load.
+extern function @asset_path(path) audio_load_wav(path: string): i32;
+extern function audio_release(asset_handle: i32): void;
+extern function audio_play(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
+extern function audio_stop(voice_handle: i32): void;
+extern function audio_voice_is_playing(voice_handle: i32): bool;
+extern function audio_voice_set_paused(voice_handle: i32, paused: bool): void;
+extern function audio_voice_set_volume_pan(voice_handle: i32, volume: f32, pan: f32): void;
+
+// Brickout-compatible category helpers backed by the same SDL host mixer.
+function @asset_path(path)@extern("stasis_jit_audio_load_music") audio_load_music(path: string): i32;
+function @asset_path(path)@extern("stasis_jit_audio_load_effect") audio_load_effect(path: string): i32;
+function @extern("stasis_jit_audio_play_music") audio_play_music(asset_handle: i32, loop: bool, volume: f32): bool;
+function @extern("stasis_jit_audio_stop_music") audio_stop_music(asset_handle: i32): void;
+function @extern("stasis_jit_audio_pause_music") audio_pause_music(asset_handle: i32, paused: bool): void;
+function @extern("stasis_jit_audio_set_music_volume") audio_set_music_volume(asset_handle: i32, volume: f32): void;
+function @extern("stasis_jit_audio_play_effect") audio_play_effect(asset_handle: i32, volume: f32): bool;

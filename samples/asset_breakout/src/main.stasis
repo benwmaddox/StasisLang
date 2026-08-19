@@ -1,0 +1,215 @@
+import "/vendor/stasis/stdlib/graphics.stasis";
+
+const SCREEN_W: f32 = 640.0;
+const SCREEN_H: f32 = 360.0;
+const BRICK_COUNT: i32 = 35;
+const BRICK_W: f32 = 78.0;
+const BRICK_H: f32 = 22.0;
+const PADDLE_W: f32 = 96.0;
+const PADDLE_H: f32 = 14.0;
+const BALL_SIZE: f32 = 12.0;
+const PADDLE_Y: f32 = 326.0;
+
+struct Brick {
+    x: f32;
+    y: f32;
+    alive: bool;
+}
+
+struct Assets {
+    background: Sprite;
+    brick: Sprite;
+    paddle: Sprite;
+    ball: Sprite;
+}
+
+global bricks: Brick[35];
+global assets: Assets;
+global paddle_x: f32;
+global ball_x: f32;
+global ball_y: f32;
+global ball_vx: f32;
+global ball_vy: f32;
+global bricks_left: i32;
+global ball_active: bool;
+global round_done: bool;
+global presentation_variant: i32;
+
+function clamp_paddle(value: f32): f32 {
+    if (value < 0.0) {
+        return 0.0;
+    }
+    if (value > SCREEN_W - PADDLE_W) {
+        return SCREEN_W - PADDLE_W;
+    }
+    return value;
+}
+
+function set_paddle_x(value: f32): void {
+    paddle_x = clamp_paddle(value);
+}
+
+function initialize_bricks(): void {
+    foreach (let brick, i in bricks) {
+        let column: i32 = i % 7;
+        let row: i32 = i / 7;
+        brick.x = 25.0 + i32_to_f32(column) * 82.0;
+        brick.y = 36.0 + i32_to_f32(row) * 28.0;
+        brick.alive = true;
+    }
+    bricks_left = BRICK_COUNT;
+}
+
+function reset_round(): void {
+    initialize_bricks();
+    paddle_x =(SCREEN_W - PADDLE_W) / 2.0;
+    ball_x = SCREEN_W / 2.0 - BALL_SIZE / 2.0;
+    ball_y = PADDLE_Y - BALL_SIZE - 2.0;
+    ball_vx = 2.2;
+    ball_vy = -2.6;
+    ball_active = false;
+    round_done = false;
+}
+
+function update_pointer(): void {
+    if (input_pointer_count() > 0) {
+        let pointer_x: f32 = input_pointer_x_logical(0);
+        set_paddle_x(pointer_x - PADDLE_W / 2.0);
+        if (input_pointer_went_down(0)) {
+            if (round_done) {
+                reset_round();
+            }
+            ball_active = true;
+        }
+    }
+    if (is_key_down(80)) {
+        set_paddle_x(paddle_x - 4.0);
+    }
+    if (is_key_down(79)) {
+        set_paddle_x(paddle_x + 4.0);
+    }
+    if (is_key_down(44)) {
+        if (round_done) {
+            reset_round();
+        }
+        ball_active = true;
+    }
+}
+
+function update_ball(): void {
+    if (!ball_active) {
+        ball_x = paddle_x + PADDLE_W / 2.0 - BALL_SIZE / 2.0;
+        ball_y = PADDLE_Y - BALL_SIZE - 2.0;
+        return;
+    }
+
+    ball_x += ball_vx;
+    ball_y += ball_vy;
+    if (ball_x < 0.0) {
+        ball_x = 0.0;
+        ball_vx = 0.0 - ball_vx;
+    }
+    if (ball_x + BALL_SIZE > SCREEN_W) {
+        ball_x = SCREEN_W - BALL_SIZE;
+        ball_vx = 0.0 - ball_vx;
+    }
+    if (ball_y < 0.0) {
+        ball_y = 0.0;
+        ball_vy = 0.0 - ball_vy;
+    }
+
+    let hit_brick: bool = false;
+    foreach (let brick, i in bricks) {
+        if (
+            !hit_brick
+            && brick.alive
+            && ball_x + BALL_SIZE >= brick.x
+            && ball_x <= brick.x + BRICK_W
+            && ball_y + BALL_SIZE >= brick.y
+            && ball_y <= brick.y + BRICK_H
+        ) {
+            brick.alive = false;
+            bricks_left -= 1;
+            ball_vy = 0.0 - ball_vy;
+            hit_brick = true;
+        }
+    }
+    if (bricks_left == 0) {
+        ball_active = false;
+        round_done = true;
+        return;
+    }
+
+    if (ball_vy > 0.0 && ball_y + BALL_SIZE >= PADDLE_Y && ball_y <= PADDLE_Y + PADDLE_H && ball_x + BALL_SIZE >= paddle_x && ball_x <= paddle_x + PADDLE_W) {
+        ball_y = PADDLE_Y - BALL_SIZE;
+        ball_vy = 0.0 - ball_vy;
+        ball_vx =(ball_x + BALL_SIZE / 2.0 -(paddle_x + PADDLE_W / 2.0)) * 0.06;
+        if (ball_vx > 3.4) {
+            ball_vx = 3.4;
+        }
+        if (ball_vx < -3.4) {
+            ball_vx = -3.4;
+        }
+    }
+    if (ball_y > SCREEN_H) {
+        ball_active = false;
+        round_done = true;
+    }
+}
+
+function main(): i32 {
+    if (!init_window(640, 360, "Neon Breakout")) {
+        return 1;
+    }
+    if (!assets.background.load_sprite_from("assets/arena_background.png", 640, 360)) {
+        return 1;
+    }
+    if (!assets.brick.load_sprite_from("assets/brick.svg", 78, 22)) {
+        return 1;
+    }
+    if (!assets.paddle.load_sprite_from("assets/paddle.svg", 96, 14)) {
+        return 1;
+    }
+    if (!assets.ball.load_sprite_from("assets/ball.svg", 12, 12)) {
+        return 1;
+    }
+    presentation_variant = 0;
+    reset_round();
+    return 0;
+}
+
+function tick(): i32 {
+    if (should_quit()) {
+        return 1;
+    }
+    update_pointer();
+    update_ball();
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.02, 0.02, 0.08, 1.0);
+    assets.background.draw(0.0, 0.0, 235, 0);
+    foreach (let brick, i in bricks) {
+        if (brick.alive) {
+            assets.brick.draw(brick.x, brick.y, 255, 0);
+        }
+    }
+    assets.paddle.draw(paddle_x, PADDLE_Y, 255, 0);
+    assets.ball.draw(ball_x, ball_y, 255, 0);
+    if (presentation_variant == 1) {
+        fill_rect(0.0, 0.0, SCREEN_W, 2.0, 1.0, 0.30, 0.78, 1.0);
+    }
+    end_frame();
+    return 0;
+}
+
+// Compatible swaps preserve the active round and only change a visible accent.
+function on_code_swap(): void {
+    if (presentation_variant == 0) {
+        presentation_variant = 1;
+    } else {
+        presentation_variant = 0;
+    }
+}
