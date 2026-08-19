@@ -492,24 +492,6 @@ static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring requ
     return result;
 }
 
-static void call_rust_bridge_compile(const char *project_root, char *message, size_t message_size) {
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->compile_project == NULL || bridge->free_string == NULL) {
-        snprintf(message, message_size,
-                "CompileError: required Rust Android compiler bridge is unavailable");
-        return;
-    }
-
-    char *bridge_message = bridge->compile_project(project_root, "src/main.stasis");
-    if (bridge_message == NULL) {
-        snprintf(message, message_size, "CompileError: Rust Android bridge returned null message");
-        return;
-    }
-
-    snprintf(message, message_size, "%s", bridge_message);
-    bridge->free_string(bridge_message);
-}
-
 static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, char *message, size_t message_size) {
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick == NULL || bridge->free_string == NULL) {
@@ -862,12 +844,23 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
         return (*env)->NewStringUTF(env, "CompileError: unable to read project root");
     }
 
-    char message[256];
-    call_rust_bridge_compile(root, message, sizeof(message));
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->compile_project == NULL || bridge->free_string == NULL) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env,
+                "CompileError: required Rust Android compiler bridge is unavailable");
+    }
+
+    char *message = bridge->compile_project(root, "src/main.stasis");
 
     (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "CompileError: Rust Android bridge returned null message");
+    }
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
-    return (*env)->NewStringUTF(env, message);
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
 }
 
 JNIEXPORT jstring JNICALL

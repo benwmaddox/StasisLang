@@ -267,8 +267,8 @@ final class WorkshopHotEditAcceptance {
 
     private static JSONObject expectedDiagnostic(int hookLine) throws Exception {
         return new JSONObject().put("file", "src/main.stasis")
-                .put("line", hookLine).put("column", 10)
-                .put("end_line", hookLine).put("end_column", 22)
+                .put("line", hookLine).put("column", 31)
+                .put("end_line", hookLine + 2).put("end_column", 2)
                 .put("symbol", "on_code_swap")
                 .put("message", "unknown call target 'IT028_missing_target'");
     }

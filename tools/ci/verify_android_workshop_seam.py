@@ -170,9 +170,9 @@ def verify_it028(log: str, after_position: int) -> dict:
     expected_diagnostic = {
         "file": "src/main.stasis",
         "line": hook_source_line,
-        "column": 10,
-        "end_line": hook_source_line,
-        "end_column": 22,
+        "column": 31,
+        "end_line": hook_source_line + 2,
+        "end_column": 2,
         "symbol": "on_code_swap",
         "message": "unknown call target 'IT028_missing_target'",
     }
