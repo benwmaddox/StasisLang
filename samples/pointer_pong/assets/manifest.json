@@ -1,5 +1,13 @@
 {
   "schema": "stasis-assets",
   "version": 1,
-  "assets": []
+  "assets": [
+    {
+      "id": "score_font",
+      "path": "assets/score.ttf",
+      "content_sha256": "18abfa7824d1cf89934346adeb8731102c58f404e5de4c027b0d1121a71d72a1",
+      "format": {"kind": "font", "encoding": "ttf"},
+      "dependencies": []
+    }
+  ]
 }
