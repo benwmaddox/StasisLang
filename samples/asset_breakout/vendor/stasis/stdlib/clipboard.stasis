@@ -1,0 +1,27 @@
+// Bounded printable-ASCII clipboard access for player-entered share codes.
+// Loading returns the byte length, or -1 when unavailable, invalid, or too large.
+function @extern("stasis_jit_clipboard_load_ascii") clipboard_load_ascii_raw(out: ascii[], capacity: i32): i32;
+function @extern("stasis_jit_clipboard_save_ascii") clipboard_save_ascii_raw(value: ascii[], length: i32): i32;
+
+function clipboard_load_ascii(out: ascii[]): i32 {
+    out.length = 0;
+    let capacity: i32 = out.max_length;
+    if (capacity <= 0) {
+        return -1;
+    }
+    let loaded: i32 = clipboard_load_ascii_raw(out, capacity);
+    if (loaded < 0 || loaded > capacity) {
+        out.length = 0;
+        return -1;
+    }
+    out.length = loaded;
+    return loaded;
+}
+
+function clipboard_save_ascii(value: ascii[]): bool {
+    let count: i32 = value.length;
+    if (count < 0 || count > value.max_length) {
+        return false;
+    }
+    return clipboard_save_ascii_raw(value, count) != 0;
+}

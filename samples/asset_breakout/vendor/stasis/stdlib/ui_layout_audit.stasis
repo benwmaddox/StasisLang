@@ -1,0 +1,231 @@
+// Allocation-free geometry checks and machine-readable UI layout reporting.
+// Values are emitted as signed thousandths of one logical layout unit.
+
+function ui_audit_abs(value: f32): f32 {
+    if (value < 0.0) {
+        return 0.0 - value;
+    }
+    return value;
+}
+
+function ui_audit_center_delta_x(parent_x: f32, parent_width: f32, child_x: f32, child_width: f32): f32 {
+    return(child_x + child_width * 0.5) -(parent_x + parent_width * 0.5);
+}
+
+function ui_audit_center_delta_y(parent_y: f32, parent_height: f32, child_y: f32, child_height: f32): f32 {
+    return(child_y + child_height * 0.5) -(parent_y + parent_height * 0.5);
+}
+
+function ui_audit_left_gap(parent_x: f32, child_x: f32): f32 {
+    return child_x - parent_x;
+}
+
+function ui_audit_right_gap(parent_x: f32, parent_width: f32, child_x: f32, child_width: f32): f32 {
+    return parent_x + parent_width -(child_x + child_width);
+}
+
+function ui_audit_top_gap(parent_y: f32, child_y: f32): f32 {
+    return child_y - parent_y;
+}
+
+function ui_audit_bottom_gap(parent_y: f32, parent_height: f32, child_y: f32, child_height: f32): f32 {
+    return parent_y + parent_height -(child_y + child_height);
+}
+
+function ui_audit_equal(a: f32, b: f32, tolerance: f32): bool {
+    return ui_audit_abs(a - b) <= tolerance;
+}
+
+function ui_audit_centered_x(parent_x: f32, parent_width: f32, child_x: f32, child_width: f32, tolerance: f32): bool {
+    return ui_audit_abs(ui_audit_center_delta_x(parent_x, parent_width, child_x, child_width)) <= tolerance;
+}
+
+function ui_audit_centered_y(parent_y: f32, parent_height: f32, child_y: f32, child_height: f32, tolerance: f32): bool {
+    return ui_audit_abs(ui_audit_center_delta_y(parent_y, parent_height, child_y, child_height)) <= tolerance;
+}
+
+function ui_audit_contains_axis(parent_start: f32, parent_length: f32, child_start: f32, child_length: f32, tolerance: f32): bool {
+    return child_start >= parent_start - tolerance && child_start + child_length <= parent_start + parent_length + tolerance;
+}
+
+function ui_audit_overlap_x(first_x: f32, first_width: f32, second_x: f32, second_width: f32): f32 {
+    let start: f32 = first_x;
+    if (second_x > start) {
+        start = second_x;
+    }
+    let end: f32 = first_x + first_width;
+    if (second_x + second_width < end) {
+        end = second_x + second_width;
+    }
+    if (end <= start) {
+        return 0.0;
+    }
+    return end - start;
+}
+
+function ui_audit_overlap_y(first_y: f32, first_height: f32, second_y: f32, second_height: f32): f32 {
+    let start: f32 = first_y;
+    if (second_y > start) {
+        start = second_y;
+    }
+    let end: f32 = first_y + first_height;
+    if (second_y + second_height < end) {
+        end = second_y + second_height;
+    }
+    if (end <= start) {
+        return 0.0;
+    }
+    return end - start;
+}
+
+function ui_audit_rects_overlap(
+    first_x: f32,
+    first_y: f32,
+    first_width: f32,
+    first_height: f32,
+    second_x: f32,
+    second_y: f32,
+    second_width: f32,
+    second_height: f32
+): bool {
+    return ui_audit_overlap_x(first_x, first_width, second_x, second_width) > 0.0 && ui_audit_overlap_y(first_y, first_height, second_y, second_height) > 0.0;
+}
+
+function ui_audit_milli(value: f32): i32 {
+    let result: i32 = 0;
+    if (value < 0.0) {
+        result.from_f32(value * 1000.0 - 0.5);
+    } else {
+        result.from_f32(value * 1000.0 + 0.5);
+    }
+    return result;
+}
+
+function ui_audit_print_bool(value: bool): void {
+    if (value) {
+        print_int(1);
+    } else {
+        print_int(0);
+    }
+}
+
+function ui_audit_rect(id: string, role: string, x: f32, y: f32, width: f32, height: f32): void {
+    print_string("UI_LAYOUT|rect|id=");
+    print_string(id);
+    print_string("|role=");
+    print_string(role);
+    print_string("|x_milli=");
+    print_int(ui_audit_milli(x));
+    print_string("|y_milli=");
+    print_int(ui_audit_milli(y));
+    print_string("|w_milli=");
+    print_int(ui_audit_milli(width));
+    print_string("|h_milli=");
+    print_int(ui_audit_milli(height));
+    print_string("\n");
+}
+
+function ui_audit_text(id: string, x: f32, y: f32, width: f32, height: f32, font_size: i32): void {
+    print_string("UI_LAYOUT|text|id=");
+    print_string(id);
+    print_string("|x_milli=");
+    print_int(ui_audit_milli(x));
+    print_string("|y_milli=");
+    print_int(ui_audit_milli(y));
+    print_string("|w_milli=");
+    print_int(ui_audit_milli(width));
+    print_string("|h_milli=");
+    print_int(ui_audit_milli(height));
+    print_string("|font_size=");
+    print_int(font_size);
+    print_string("\n");
+}
+
+function ui_audit_baseline_check(first_id: string, second_id: string, first_y: f32, second_y: f32, tolerance: f32): void {
+    let delta: f32 = second_y - first_y;
+    let passes: bool = ui_audit_abs(delta) <= tolerance;
+    print_string("UI_LAYOUT|check|kind=baseline|first=");
+    print_string(first_id);
+    print_string("|second=");
+    print_string(second_id);
+    print_string("|delta_milli=");
+    print_int(ui_audit_milli(delta));
+    print_string("|tolerance_milli=");
+    print_int(ui_audit_milli(tolerance));
+    print_string("|pass=");
+    ui_audit_print_bool(passes);
+    print_string("\n");
+}
+
+function ui_audit_center_check(axis: string, child_id: string, parent_id: string, delta: f32, tolerance: f32): void {
+    let passes: bool = ui_audit_abs(delta) <= tolerance;
+    print_string("UI_LAYOUT|check|kind=center_");
+    print_string(axis);
+    print_string("|child=");
+    print_string(child_id);
+    print_string("|parent=");
+    print_string(parent_id);
+    print_string("|delta_milli=");
+    print_int(ui_audit_milli(delta));
+    print_string("|tolerance_milli=");
+    print_int(ui_audit_milli(tolerance));
+    print_string("|pass=");
+    ui_audit_print_bool(passes);
+    print_string("\n");
+}
+
+function ui_audit_padding_axis(
+    axis: string,
+    id: string,
+    parent_id: string,
+    parent_start: f32,
+    parent_length: f32,
+    child_start: f32,
+    child_length: f32,
+    tolerance: f32
+): void {
+    let contained: bool = ui_audit_contains_axis(parent_start, parent_length, child_start, child_length, tolerance);
+    print_string("UI_LAYOUT|padding|axis=");
+    print_string(axis);
+    print_string("|id=");
+    print_string(id);
+    print_string("|parent=");
+    print_string(parent_id);
+    print_string("|start_milli=");
+    print_int(ui_audit_milli(child_start - parent_start));
+    print_string("|end_milli=");
+    print_int(ui_audit_milli(parent_start + parent_length -(child_start + child_length)));
+    print_string("|contained=");
+    ui_audit_print_bool(contained);
+    print_string("\n");
+}
+
+function ui_audit_overlap_axis(
+    axis: string,
+    first_id: string,
+    second_id: string,
+    first_start: f32,
+    first_length: f32,
+    second_start: f32,
+    second_length: f32,
+    overlap_expected: bool
+): void {
+    let overlap: f32 = ui_audit_overlap_x(first_start, first_length, second_start, second_length);
+    let passes: bool = overlap <= 0.0;
+    if (overlap_expected) {
+        passes = overlap > 0.0;
+    }
+    print_string("UI_LAYOUT|check|kind=overlap|axis=");
+    print_string(axis);
+    print_string("|first=");
+    print_string(first_id);
+    print_string("|second=");
+    print_string(second_id);
+    print_string("|overlap_milli=");
+    print_int(ui_audit_milli(overlap));
+    print_string("|expected=");
+    ui_audit_print_bool(overlap_expected);
+    print_string("|pass=");
+    ui_audit_print_bool(passes);
+    print_string("\n");
+}
