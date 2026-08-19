@@ -101,6 +101,11 @@
      STASIS_RENDER_MAX_TEXT * STASIS_RENDER_TEXT_F32_STRIDE)
 #define STASIS_RENDER_U8_COUNT STASIS_RENDER_TEXT_MAX_BYTES
 
+#define STASIS_RENDER_BUFFER_DESCRIPTORS(X) \
+    X(I32, "i32", STASIS_RENDER_I32_COUNT * sizeof(int32_t), _Alignof(int32_t)) \
+    X(F32, "f32", STASIS_RENDER_F32_COUNT * sizeof(float), _Alignof(float)) \
+    X(U8, "u8", STASIS_RENDER_U8_COUNT * sizeof(uint8_t), _Alignof(uint8_t))
+
 static inline int32_t stasis_render_sprite_f32_stride(int32_t version) {
     return version >= STASIS_RENDER_V5_VERSION
         ? STASIS_RENDER_SPRITE_F32_STRIDE

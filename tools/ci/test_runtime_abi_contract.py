@@ -76,6 +76,27 @@ class RuntimeAbiContractTests(unittest.TestCase):
         failures, _ = contract.check(overlays=overlays)
         self.assertTrue(any(failure.field == "STASIS_RENDER_U8_COUNT" for failure in failures))
 
+    def test_render_descriptor_must_keep_canonical_lane_expressions(self):
+        mutations = {
+            "i32": ("sizeof(int32_t), _Alignof(int32_t)", "sizeof(float), _Alignof(int32_t)"),
+            "f32": ("sizeof(float), _Alignof(float)", "sizeof(int32_t), _Alignof(float)"),
+            "u8": ("sizeof(uint8_t), _Alignof(uint8_t)", "sizeof(uint16_t), _Alignof(uint8_t)"),
+        }
+        for lane, (canonical, mutated) in mutations.items():
+            overlays = copy.deepcopy(self.sources)
+            overlays[contract.RENDER_HEADER] = overlays[contract.RENDER_HEADER].replace(canonical, mutated, 1)
+            failures, _ = contract.check(overlays=overlays)
+            self.assertTrue(any(failure.field == f"descriptor.{lane}" for failure in failures))
+
+    def test_jni_descriptor_initializer_must_execute_canonical_macro(self):
+        overlays = copy.deepcopy(self.sources)
+        invocation = "STASIS_RENDER_BUFFER_DESCRIPTORS(STASIS_JNI_FRAME_DESCRIPTOR)"
+        overlays[contract.JNI] = overlays[contract.JNI].replace(
+            invocation, f"/* {invocation} */", 1)
+        failures, _ = contract.check(overlays=overlays)
+        self.assertTrue(any(failure.field == "STASIS_RENDER_BUFFER_DESCRIPTORS.initializer"
+                            for failure in failures))
+
 
 if __name__ == "__main__":
     unittest.main()

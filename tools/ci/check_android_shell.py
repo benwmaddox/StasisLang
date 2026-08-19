@@ -13,6 +13,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
@@ -373,7 +374,8 @@ def main() -> int:
     assert "MAX_TOOL_CALLS_PER_BATCH = 50" in host_agent
     assert 'DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")' in host_comparison
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
-    assert "private static native int nativeRunFrameInto(String projectRoot" in activity
+    assert "static native int nativeRunFrameInto(String projectRoot" in activity
+    assert "static native String nativeFrameAbiDescriptor()" in activity
     assert "ByteBuffer frameI32" in activity
     assert "ByteBuffer frameF32" in activity
     assert "ByteBuffer frameU8" in activity
@@ -1402,7 +1404,17 @@ def main() -> int:
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
-    assert "bytes_i32 < (jlong)(STASIS_RENDER_I32_COUNT * sizeof(int32_t))" in native
+    assert "STASIS_RENDER_BUFFER_DESCRIPTORS" in native
+    assert "validate_stasis_jni_frame_buffers" in native
+    assert "Java_com_stasislang_workshop_MainActivity_nativeFrameAbiDescriptor" in native
+    assert "stasis_jni_order_mutex" in native
+    assert "stasis_jni_order_ready" in native
+    assert "memory_order_acquire" in native
+    assert "memory_order_release" in native
+    assert "pthread_mutex_lock" in native
+    assert "ExceptionCheck" in native
+    assert "NewGlobalRef" in native
+    assert "clear_stasis_jni_frame_error" in native
     assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2")' in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
     assert "scan_stasis_files" not in native
@@ -1433,6 +1445,12 @@ def main() -> int:
     assert "WorkshopReload::ResetRequired" in bridge
     assert "CompileReady: backend=cranelift-jit" in bridge
     assert "Stasis Workshop IT-025" in native
+    acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java")
+    assert "Stasis Workshop IT-026" in acceptance
+    assert "all_invalid_unchanged" in acceptance
+    assert "isDescriptorEnvelope" in acceptance
+    assert "descriptor.optString(\"schema\")" in acceptance
+    assert "nativeValidateFrameAbi" not in acceptance
     assert "STASIS_RENDER_ACCEPTANCE" in native
     assert "STASIS_RENDER_I_FRAME_TOKEN" in native
     assert "IT-025 GLES" in preview_renderer
