@@ -60,14 +60,14 @@ function wrap_y(value: f32): f32 {
 
 function initialize_agents(): void {
     // 128 columns x 64 rows gives a stable, dense starting lattice.
-    for (let i: i32 = 0; i < AGENT_COUNT; i += 1) {
+    foreach (let agent, i in agents) {
         let column: i32 = i % 128;
         let row: i32 = i / 128;
-        agents[i].x = i32_to_f32(column) * 5.0 + 2.0;
-        agents[i].y = i32_to_f32(row) * 5.0 + 2.0;
-        agents[i].vx = i32_to_f32((i % 5) - 2) * 0.22;
-        agents[i].vy = i32_to_f32(((i / 5) % 5) - 2) * 0.18;
-        agents[i].band = i % 6;
+        agent.x = i32_to_f32(column) * 5.0 + 2.0;
+        agent.y = i32_to_f32(row) * 5.0 + 2.0;
+        agent.vx = i32_to_f32((i % 5) - 2) * 0.22;
+        agent.vy = i32_to_f32(((i / 5) % 5) - 2) * 0.18;
+        agent.band = i % 6;
     }
 }
 
@@ -127,7 +127,7 @@ function update_agent(index: i32): void {
 }
 
 function update_agents(): void {
-    for (let i: i32 = 0; i < AGENT_COUNT; i += 1) {
+    foreach (let agent, i in agents) {
         update_agent(i);
     }
 }
@@ -158,27 +158,27 @@ function render(): i32 {
     fill_rect(0.0, SCREEN_H - 1.0, SCREEN_W, 1.0, 0.16, 0.28, 0.42, 1.0);
 
     // One rectangle per agent: 8,192 commands, below the 10,000 command cap.
-    for (let i: i32 = 0; i < AGENT_COUNT; i += 1) {
+    foreach (let agent, i in agents) {
         let red: f32 = 0.22;
         let green: f32 = 0.78;
         let blue: f32 = 0.98;
-        if (agents[i].band == 1) {
+        if (agent.band == 1) {
             red = 0.98;
             green = 0.72;
             blue = 0.28;
-        } else if (agents[i].band == 2) {
+        } else if (agent.band == 2) {
             red = 0.42;
             green = 0.96;
             blue = 0.54;
-        } else if (agents[i].band == 3) {
+        } else if (agent.band == 3) {
             red = 0.92;
             green = 0.38;
             blue = 0.76;
-        } else if (agents[i].band == 4) {
+        } else if (agent.band == 4) {
             red = 0.98;
             green = 0.42;
             blue = 0.30;
-        } else if (agents[i].band == 5) {
+        } else if (agent.band == 5) {
             red = 0.64;
             green = 0.50;
             blue = 0.98;
@@ -188,7 +188,7 @@ function render(): i32 {
             red = blue;
             blue = swap;
         }
-        fill_rect(agents[i].x, agents[i].y, AGENT_SIZE, AGENT_SIZE, red, green, blue, 0.94);
+        fill_rect(agent.x, agent.y, AGENT_SIZE, AGENT_SIZE, red, green, blue, 0.94);
     }
 
     let field_red: f32 = 0.30;
