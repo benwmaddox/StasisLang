@@ -100,6 +100,10 @@ function paddle_from_pointer(y: f32): f32 {
     return clamp_paddle(y - PADDLE_H / 2.0);
 }
 
+function pointer_controls_paddle(pointer_count: i32): bool {
+    return pointer_count > 0;
+}
+
 function reset_ball(direction: f32): void {
     state.ball_x = SCREEN_W / 2.0 - BALL_SIZE / 2.0;
     state.ball_y = SCREEN_H / 2.0 - BALL_SIZE / 2.0;
@@ -108,7 +112,10 @@ function reset_ball(direction: f32): void {
 }
 
 function update_player(): void {
-    if (input_pointer_count() > 0 && input_pointer_is_down(0)) {
+    // Pointer position is continuously available for mouse hover and touch.
+    // A press is not required; keyboard movement remains the fallback when no
+    // pointer has entered the game canvas yet.
+    if (pointer_controls_paddle(input_pointer_count())) {
         state.left_y = paddle_from_pointer(input_pointer_y_logical(0));
         return;
     }

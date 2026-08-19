@@ -61,3 +61,28 @@ test `hot swap preserves active round`(): bool {
     on_code_swap();
     return presentation_variant == 1 && ball_active && ball_x == 123.0 && ball_y == 87.0 && bricks_left == 12;
 }
+
+test `asset loading progress is bounded`(): bool {
+    if (loading_percent(-1) != 0 || loading_percent(0) != 0) {
+        return false;
+    }
+    if (loading_percent(2) != 50 || loading_percent(ASSET_TOTAL) != 100) {
+        return false;
+    }
+    return loading_percent(ASSET_TOTAL + 1) == 100;
+}
+
+test `simulation stays gated until assets are ready`(): bool {
+    loader.assets_ready = false;
+    loader.failed = false;
+    if (!loading_is_blocking()) {
+        return false;
+    }
+    loader.assets_ready = true;
+    if (loading_is_blocking()) {
+        return false;
+    }
+    loader.assets_ready = false;
+    loader.failed = true;
+    return !loading_is_blocking();
+}
