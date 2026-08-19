@@ -1,0 +1,219 @@
+// Flex-style layout helpers for simple UI composition.
+// From a generated project: import "/vendor/stasis/stdlib/flex_layout.stasis";
+//
+// Uses plain f32 arrays for portability across backends.
+// Rect layout: [x, y, w, h]
+
+import "stdlib.stasis";
+import "graphics.stasis";
+
+const FLEX_RECT_STRIDE: i32 = 4;
+const FLEX_RECT_X: i32 = 0;
+const FLEX_RECT_Y: i32 = 1;
+const FLEX_RECT_W: i32 = 2;
+const FLEX_RECT_H: i32 = 3;
+const FLEX_JUSTIFY_START: i32 = 0;
+const FLEX_JUSTIFY_CENTER: i32 = 1;
+const FLEX_JUSTIFY_END: i32 = 2;
+const FLEX_JUSTIFY_SPACE_BETWEEN: i32 = 3;
+const FLEX_ALIGN_START: i32 = 0;
+const FLEX_ALIGN_CENTER: i32 = 1;
+const FLEX_ALIGN_END: i32 = 2;
+const FLEX_ALIGN_STRETCH: i32 = 3;
+
+function flex_max_f32(a: f32, b: f32): f32 {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+function flex_min_i32(a: i32, b: i32): i32 {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+function flex_rect_set(rect: f32[], x: f32, y: f32, w: f32, h: f32): void {
+    rect[FLEX_RECT_X] = x;
+    rect[FLEX_RECT_Y] = y;
+    rect[FLEX_RECT_W] = w;
+    rect[FLEX_RECT_H] = h;
+}
+
+function flex_rect_set_at(rects: f32[], index: i32, x: f32, y: f32, w: f32, h: f32): void {
+    let base: i32 = index * FLEX_RECT_STRIDE;
+    rects[base + FLEX_RECT_X] = x;
+    rects[base + FLEX_RECT_Y] = y;
+    rects[base + FLEX_RECT_W] = w;
+    rects[base + FLEX_RECT_H] = h;
+}
+
+function flex_rect_x(rects: f32[], index: i32): f32 {
+    return rects[index * FLEX_RECT_STRIDE + FLEX_RECT_X];
+}
+
+function flex_rect_y(rects: f32[], index: i32): f32 {
+    return rects[index * FLEX_RECT_STRIDE + FLEX_RECT_Y];
+}
+
+function flex_rect_w(rects: f32[], index: i32): f32 {
+    return rects[index * FLEX_RECT_STRIDE + FLEX_RECT_W];
+}
+
+function flex_rect_h(rects: f32[], index: i32): f32 {
+    return rects[index * FLEX_RECT_STRIDE + FLEX_RECT_H];
+}
+
+function flex_measure_box(out_size: f32[], inner_w: f32, inner_h: f32, pad_x: f32, pad_y: f32): void {
+    out_size[0] = inner_w + pad_x * 2.0;
+    out_size[1] = inner_h + pad_y * 2.0;
+}
+
+function flex_measure_text_box(out_size: f32[], font: i32, text: string, line_h: f32, pad_x: f32, pad_y: f32): void {
+    let text_w: f32 = measure_text(font, text);
+    flex_measure_box(out_size, text_w, line_h, pad_x, pad_y);
+}
+
+function flex_measure_text_run_box(out_size: f32[], run: TextRun, line_h: f32, pad_x: f32, pad_y: f32): void {
+    flex_measure_box(out_size, run.width, line_h, pad_x, pad_y);
+}
+
+function flex_main_total(item_main: f32[], count: i32, gap: f32): f32 {
+    let total: f32 = 0.0;
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        total = total + item_main[i];
+    }
+    if (count > 1) {
+        total = total + i32_to_f32(count - 1) * gap;
+    }
+    return total;
+}
+
+function flex_row(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32[], count: i32, gap: f32, justify: i32, align: i32): void {
+    let sum_w: f32 = 0.0;
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        sum_w = sum_w + item_w[i];
+    }
+
+    let actual_gap: f32 = gap;
+    if (justify == FLEX_JUSTIFY_SPACE_BETWEEN && count > 1) {
+        actual_gap =(parent[FLEX_RECT_W] - sum_w) / i32_to_f32(count - 1);
+        if (actual_gap < 0.0) {
+            actual_gap = 0.0;
+        }
+    }
+
+    let total_w: f32 = sum_w;
+    if (count > 1) {
+        total_w = total_w + i32_to_f32(count - 1) * actual_gap;
+    }
+
+    let cursor_x: f32 = parent[FLEX_RECT_X];
+    if (justify == FLEX_JUSTIFY_CENTER) {
+        cursor_x = parent[FLEX_RECT_X] +(parent[FLEX_RECT_W] - total_w) * 0.5;
+    }
+    if (justify == FLEX_JUSTIFY_END) {
+        cursor_x = parent[FLEX_RECT_X] + parent[FLEX_RECT_W] - total_w;
+    }
+
+    for (i = 0; i < count; i = i + 1) {
+        let y: f32 = parent[FLEX_RECT_Y];
+        let h: f32 = item_h[i];
+        if (align == FLEX_ALIGN_CENTER) {
+            y = parent[FLEX_RECT_Y] +(parent[FLEX_RECT_H] - h) * 0.5;
+        }
+        if (align == FLEX_ALIGN_END) {
+            y = parent[FLEX_RECT_Y] + parent[FLEX_RECT_H] - h;
+        }
+        if (align == FLEX_ALIGN_STRETCH) {
+            y = parent[FLEX_RECT_Y];
+            h = parent[FLEX_RECT_H];
+        }
+        flex_rect_set_at(out_rects, i, cursor_x, y, item_w[i], h);
+        cursor_x = cursor_x + item_w[i] + actual_gap;
+    }
+}
+
+function flex_column(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32[], count: i32, gap: f32, justify: i32, align: i32): void {
+    let sum_h: f32 = 0.0;
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        sum_h = sum_h + item_h[i];
+    }
+
+    let actual_gap: f32 = gap;
+    if (justify == FLEX_JUSTIFY_SPACE_BETWEEN && count > 1) {
+        actual_gap =(parent[FLEX_RECT_H] - sum_h) / i32_to_f32(count - 1);
+        if (actual_gap < 0.0) {
+            actual_gap = 0.0;
+        }
+    }
+
+    let total_h: f32 = sum_h;
+    if (count > 1) {
+        total_h = total_h + i32_to_f32(count - 1) * actual_gap;
+    }
+
+    let cursor_y: f32 = parent[FLEX_RECT_Y];
+    if (justify == FLEX_JUSTIFY_CENTER) {
+        cursor_y = parent[FLEX_RECT_Y] +(parent[FLEX_RECT_H] - total_h) * 0.5;
+    }
+    if (justify == FLEX_JUSTIFY_END) {
+        cursor_y = parent[FLEX_RECT_Y] + parent[FLEX_RECT_H] - total_h;
+    }
+
+    for (i = 0; i < count; i = i + 1) {
+        let x: f32 = parent[FLEX_RECT_X];
+        let w: f32 = item_w[i];
+        if (align == FLEX_ALIGN_CENTER) {
+            x = parent[FLEX_RECT_X] +(parent[FLEX_RECT_W] - w) * 0.5;
+        }
+        if (align == FLEX_ALIGN_END) {
+            x = parent[FLEX_RECT_X] + parent[FLEX_RECT_W] - w;
+        }
+        if (align == FLEX_ALIGN_STRETCH) {
+            x = parent[FLEX_RECT_X];
+            w = parent[FLEX_RECT_W];
+        }
+        flex_rect_set_at(out_rects, i, x, cursor_y, w, item_h[i]);
+        cursor_y = cursor_y + item_h[i] + actual_gap;
+    }
+}
+
+function flex_grid(out_rects: f32[], parent: f32[], item_w: f32[], item_h: f32[], count: i32, columns: i32, col_gap: f32, row_gap: f32): void {
+    if (count <= 0 || columns <= 0) {
+        return;
+    }
+
+    let row_start: i32 = 0;
+    let row_y: f32 = parent[FLEX_RECT_Y];
+
+    for (row_start = 0; row_start < count; row_start = row_start + columns) {
+        let row_count: i32 = flex_min_i32(columns, count - row_start);
+        let row_width: f32 = 0.0;
+        let row_height: f32 = 0.0;
+        let col: i32 = 0;
+
+        for (col = 0; col < row_count; col = col + 1) {
+            let idx: i32 = row_start + col;
+            row_width = row_width + item_w[idx];
+            row_height = flex_max_f32(row_height, item_h[idx]);
+        }
+
+        let cursor_x: f32 = parent[FLEX_RECT_X];
+
+        for (col = 0; col < row_count; col = col + 1) {
+            let idx: i32 = row_start + col;
+            let y: f32 = row_y;
+            let h: f32 = item_h[idx];
+            flex_rect_set_at(out_rects, idx, cursor_x, y, item_w[idx], h);
+            cursor_x = cursor_x + item_w[idx] + col_gap;
+        }
+
+        row_y = row_y + row_height + row_gap;
+    }
+}

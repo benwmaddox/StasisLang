@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "name": "swarm_field",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "vendor": {
+    "stasis": {
+      "release_id": "development",
+      "sha256": "ae83fa61f536b13463ecded28234ba60ba49084ab2805f997074b6e61803cf72"
+    }
+  },
+  "android": {
+    "application_id": "com.stasislang.sample.swarmfield",
+    "label": "Stasis Swarm Field",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  }
+}
