@@ -321,6 +321,7 @@ public final class MainActivity extends Activity {
     private boolean compileAttempted;
     private boolean jniFrameAbiAcceptanceRun;
     private boolean workshopTouchAcceptanceRun;
+    private boolean workshopHotEditAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
@@ -1370,6 +1371,23 @@ public final class MainActivity extends Activity {
                     if (!touchPassed) {
                         compileReady = false;
                         setStatusText("IT-027 Workshop touch acceptance failed: " + touchResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopTouchAcceptanceRun && !workshopHotEditAcceptanceRun) {
+                    String hotEditResult = WorkshopHotEditAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopHotEditAcceptanceRun = true;
+                    boolean hotEditPassed = false;
+                    try {
+                        hotEditPassed = "passed".equals(new JSONObject(hotEditResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!hotEditPassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-028 Workshop hot-edit acceptance failed: " + hotEditResult);
                     }
                 }
                 if (compileReady || gameRuntimeActive) {
@@ -5043,6 +5061,84 @@ public final class MainActivity extends Activity {
                     + JSONObject.quote(error.getMessage() == null ? error.getClass().getSimpleName()
                             : error.getMessage()) + "}";
         }
+    }
+
+    String runIt028Frame(String projectRoot, String phase, int sequence) {
+        if (gamePreview == null) {
+            return "{\"status\":\"failed\",\"error\":\"preview unavailable\"}";
+        }
+        int screenWidth = Math.max(1, gamePreview.getWidth());
+        int screenHeight = Math.max(1, gamePreview.getHeight());
+        try {
+            int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+                    screenWidth, screenHeight, nativeFrameValues);
+            if (status != 0) {
+                return "{\"status\":\"failed\",\"error\":"
+                        + JSONObject.quote(nativeLastFrameError()) + "}";
+            }
+            int token = gamePreview.frameToken();
+            long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
+            if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+                return "{\"status\":\"failed\",\"error\":\"GLES token timeout\"}";
+            }
+            JSONObject runtime = new JSONObject(nativeInspectRuntimeState(projectRoot));
+            JSONObject guest = new JSONObject();
+            String[] names = {"tick_revision", "render_revision", "state_counter"};
+            String[] paths = {"seam_it028_tick_marker", "seam_it028_render_marker",
+                    "seam_it028_state_counter"};
+            for (int index = 0; index < names.length; index += 1) {
+                String state = nativeGetRuntimeI32(projectRoot, paths[index]);
+                guest.put(names[index], extractIntField(state, "value", Integer.MIN_VALUE));
+            }
+            JSONObject marker = new JSONObject();
+            int rectCount = gamePreview.rectCount();
+            boolean markerActive = rectCount >= 2;
+            marker.put("active", markerActive);
+            if (markerActive) {
+                int base = StasisPreviewRenderer.F_RECT_REVERSE_BASE - 8;
+                marker.put("x", gamePreview.acceptanceFrameF32(base));
+                marker.put("y", gamePreview.acceptanceFrameF32(base + 1));
+                marker.put("w", gamePreview.acceptanceFrameF32(base + 2));
+                marker.put("h", gamePreview.acceptanceFrameF32(base + 3));
+                marker.put("r", gamePreview.acceptanceFrameF32(base + 4));
+                marker.put("g", gamePreview.acceptanceFrameF32(base + 5));
+                marker.put("b", gamePreview.acceptanceFrameF32(base + 6));
+                marker.put("a", gamePreview.acceptanceFrameF32(base + 7));
+            }
+            return new JSONObject().put("schema", "stasis.workshop_hot_edit.v1")
+                    .put("test_id", "IT-028").put("event", "case")
+                    .put("status", "passed").put("phase", phase).put("sequence", sequence)
+                    .put("runtime", runtime).put("guest", guest)
+                    .put("render", new JSONObject().put("frame_token", token)
+                            .put("trace", trace).put("rect_count", rectCount)
+                            .put("marker", marker))
+                    .put("gles_presented", true).put("gles_frame_token", token)
+                    .put("java_only", false).put("fallback", 0).put("stub", 0).toString();
+        } catch (Exception error) {
+            return "{\"status\":\"failed\",\"error\":"
+                    + JSONObject.quote(error.getMessage() == null ? error.getClass().getSimpleName()
+                            : error.getMessage()) + "}";
+        }
+    }
+
+    String acceptanceReadSource(String projectRoot) throws IOException {
+        return readTextFile(new File(projectRoot, "src/main.stasis"));
+    }
+
+    void acceptanceReplaceSource(String projectRoot, String source) throws IOException {
+        replaceTextFileAtomically(new File(projectRoot, "src/main.stasis"), source);
+    }
+
+    String acceptanceCompile(String projectRoot) {
+        return nativeCompileProject(projectRoot);
+    }
+
+    String acceptanceSetRuntimeI32(String projectRoot, String path, int value) {
+        return nativeSetRuntimeI32(projectRoot, path, value);
+    }
+
+    JSONObject acceptanceCompileDiagnostic(String compileResult) throws Exception {
+        return compileResultToJson(compileResult);
     }
 
     private static int extractIntField(String text, String key, int fallback) {

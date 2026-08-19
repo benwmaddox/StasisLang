@@ -51,6 +51,17 @@ global seam_touch_active: i32;
 global seam_touch_marker_active: i32;
 global seam_touch_checksum: i32;
 
+// IT-028 is enabled only by the acceptance runner after IT-027. The tagged
+// revisions make a valid source publication observable in both tick and
+// render without changing ordinary parity or touch frames.
+const IT028_TICK_REVISION: i32 = 1;
+const IT028_RENDER_REVISION: i32 = 1;
+
+global seam_it028_enabled: i32;
+global seam_it028_tick_marker: i32;
+global seam_it028_render_marker: i32;
+global seam_it028_state_counter: i32;
+
 struct ParityState {
     opaque: Sprite;
     translucent: Sprite;
@@ -117,6 +128,10 @@ function tick(): i32 {
     seam_touch_up_edge = host_i32[547];
     seam_touch_marker_active = seam_touch_active + seam_touch_up_edge;
     seam_touch_checksum = seam_touch_x + seam_touch_y * 3 + seam_touch_dx * 5 + seam_touch_dy * 7 + seam_touch_x_norm_x1000 * 11 + seam_touch_y_norm_x1000 * 13 + seam_touch_active * 17 + seam_touch_down_edge * 19 + seam_touch_up_edge * 23;
+    if (seam_it028_enabled != 0) {
+        seam_it028_state_counter += 1;
+        seam_it028_tick_marker = IT028_TICK_REVISION;
+    }
     return 0;
 }
 
@@ -132,7 +147,28 @@ function render(): i32 {
         state.label.handle
     );
     append_parity_touch_marker(gfx_cmd_i32, gfx_cmd_f32, seam_touch_marker_active, seam_touch_x, seam_touch_y);
+    if (seam_it028_enabled != 0) {
+        seam_it028_render_marker = IT028_RENDER_REVISION;
+        append_it028_marker(gfx_cmd_i32, gfx_cmd_f32, IT028_RENDER_REVISION);
+    }
     return 0;
+}
+
+function append_it028_marker(cmd_i32: i32[], cmd_f32: f32[], revision: i32): void {
+    let marker_f: i32 = PARITY_GFX_F_RECT_REVERSE_BASE - 8;
+    let revision_f: f32;
+    revision_f.from_i32(revision);
+    cmd_i32[24] = 2;
+    cmd_f32[marker_f] = 48.0 + revision_f * 64.0;
+    cmd_f32[marker_f + 1] = 48.0;
+    cmd_f32[marker_f + 2] = 24.0;
+    cmd_f32[marker_f + 3] = 24.0;
+    cmd_f32[marker_f + 4] = 0.2;
+    cmd_f32[marker_f + 5] = 0.9;
+    cmd_f32[marker_f + 6] = 0.95;
+    cmd_f32[marker_f + 7] = 1.0;
+    cmd_i32[22] = 11;
+    cmd_i32[PARITY_GFX_I_ORDER_BASE + 10] = PARITY_GFX_ORDER_SCALE * 4 + 1;
 }
 
 function on_code_swap(): void {

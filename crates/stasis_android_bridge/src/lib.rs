@@ -163,6 +163,7 @@ pub struct AndroidBridgeRunTickResult {
 struct AndroidRuntimeSession {
     project_root: PathBuf,
     source_fingerprint: u64,
+    generation: u64,
     jit: JitProcess,
     initialized: bool,
     pending_candidate: Option<JitProcess>,
@@ -1641,6 +1642,7 @@ fn build_runtime_session(
     Ok(AndroidRuntimeSession {
         project_root: project_root.to_path_buf(),
         source_fingerprint,
+        generation: 1,
         jit,
         initialized: false,
         pending_candidate: None,
@@ -1771,6 +1773,7 @@ fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Re
     }
     session.jit = candidate;
     session.source_fingerprint = pending_source_fingerprint;
+    session.generation = session.generation.saturating_add(1);
     Ok(true)
 }
 
@@ -2751,6 +2754,8 @@ fn inspect_android_runtime_state(project_root: &Path) -> Result<serde_json::Valu
             "source": "live_session",
             "tick_count": session.tick_count,
             "game_tick_count": session.jit.read_i32_global_path("GameState.tick_count"),
+            "generation": session.generation,
+            "source_fingerprint": format!("{:016x}", session.source_fingerprint),
             "initialized": session.initialized,
             "pending_candidate": session.pending_candidate.is_some(),
         }))
@@ -4420,6 +4425,9 @@ function tick(): void {}
         .expect("write active source");
         run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
             .expect("initialize active generation");
+        let baseline = inspect_android_runtime_state(&root).expect("inspect baseline generation");
+        assert_eq!(baseline["generation"], 1);
+        let baseline_source = baseline["source_fingerprint"].clone();
 
         fs::write(
             &source,
@@ -4447,6 +4455,10 @@ function tick(): void {}
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
                 .expect("activate complete generation");
         assert!(activated.recompiled);
+        let activated_state =
+            inspect_android_runtime_state(&root).expect("inspect activated generation");
+        assert_eq!(activated_state["generation"], 2);
+        assert_ne!(activated_state["source_fingerprint"], baseline_source);
         assert_eq!(
             get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.score")
                 .expect("read migrated state"),
@@ -4454,6 +4466,43 @@ function tick(): void {}
         );
 
         fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn android_invalid_edit_preserves_active_generation_and_code() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("invalid_edit_preserves_generation");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 1; }\n",
+        )
+        .expect("write active source");
+        let first =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("run active source");
+        assert_eq!(first.observed_game_tick_count, 11);
+        let active = inspect_android_runtime_state(&root).expect("inspect active source");
+
+        fs::write(&source, "function main(): void {\n").expect("write invalid source");
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("invalid edit must fail compilation");
+        assert!(error.contains("diagnostic_file=src/main.stasis"));
+        let preserved = inspect_android_runtime_state(&root).expect("inspect preserved source");
+        assert_eq!(preserved["generation"], active["generation"]);
+        assert_eq!(preserved["source_fingerprint"], active["source_fingerprint"]);
+
+        let resumed =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("active code remains runnable after invalid edit");
+        assert_eq!(resumed.observed_game_tick_count, 12);
+        let after_frame = inspect_android_runtime_state(&root).expect("inspect after frame");
+        assert_eq!(after_frame["generation"], active["generation"]);
+        assert_eq!(after_frame["source_fingerprint"], active["source_fingerprint"]);
+
+        fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
     }
 
@@ -4736,6 +4785,7 @@ function tick(): void {}
         let mut session = AndroidRuntimeSession {
             project_root: PathBuf::from("android-large-state"),
             source_fingerprint: 1,
+            generation: 1,
             jit: active,
             initialized: true,
             pending_candidate: Some(candidate),
