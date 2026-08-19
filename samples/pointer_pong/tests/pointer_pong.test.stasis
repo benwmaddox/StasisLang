@@ -17,3 +17,19 @@ test `paddle clamp stays inside screen`(): bool {
     }
     return true;
 }
+
+test `score display wraps after two digits`(): bool {
+    if (score_for_display(0) != 0 || score_for_display(7) != 7) {
+        return false;
+    }
+    if (score_for_display(100) != 0 || score_for_display(234) != 34) {
+        return false;
+    }
+    if (score_for_display(-1) != 0) {
+        return false;
+    }
+    if (score_digit(47, 10) != 4 || score_digit(47, 1) != 7) {
+        return false;
+    }
+    return true;
+}
