@@ -903,6 +903,16 @@ static void stasis_release_finger_slot(SDL_FingerID fingerId) {
     }
 }
 
+#if defined(__IPHONEOS__)
+static int stasis_ios_active_finger_count(void) {
+    int active_fingers = 0;
+    for (int finger = 0; finger < STASIS_MAX_POINTERS - 1; finger++) {
+        if (g_finger_active[finger]) active_fingers++;
+    }
+    return active_fingers;
+}
+#endif
+
 static void stasis_pump_events(void) {
     if (!g_window) return;
     stasis_sync_display_metrics();
@@ -1032,11 +1042,7 @@ static void stasis_pump_events(void) {
                         &logical_x, &logical_y);
                     stasis_set_pointer_pos_px(idx, logical_x, logical_y);
 #if defined(__IPHONEOS__)
-                    int active_fingers = 0;
-                    for (int finger = 0; finger < STASIS_MAX_POINTERS - 1; finger++) {
-                        if (g_finger_active[finger]) active_fingers++;
-                    }
-                    if (active_fingers >= 3 && !g_ios_three_finger_latched) {
+                    if (stasis_ios_active_finger_count() >= 3 && !g_ios_three_finger_latched) {
                         g_ios_three_finger_latched = true;
                         g_force_debug_overlay = !g_force_debug_overlay;
                         g_perf_sample_count = 0;
@@ -1060,13 +1066,6 @@ static void stasis_pump_events(void) {
                         event.tfinger.y * (float)g_native_window_height,
                         &logical_x, &logical_y);
                     stasis_set_pointer_pos_px(idx, logical_x, logical_y);
-#if defined(__IPHONEOS__)
-                    int active_fingers = 0;
-                    for (int finger = 0; finger < STASIS_MAX_POINTERS - 1; finger++) {
-                        if (g_finger_active[finger]) active_fingers++;
-                    }
-                    if (active_fingers < 3) g_ios_three_finger_latched = false;
-#endif
                 }
                 break;
             case SDL_EVENT_FINGER_UP:
@@ -1077,6 +1076,9 @@ static void stasis_pump_events(void) {
                     g_input_frame.pointers[idx].is_down = 0;
                     g_input_frame.pointers[idx].went_up = 1;
                     stasis_release_finger_slot(event.tfinger.fingerID);
+#if defined(__IPHONEOS__)
+                    if (stasis_ios_active_finger_count() < 3) g_ios_three_finger_latched = false;
+#endif
                     float logical_x = 0.0f;
                     float logical_y = 0.0f;
                     stasis_window_to_logical(

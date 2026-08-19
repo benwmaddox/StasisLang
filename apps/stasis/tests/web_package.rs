@@ -479,6 +479,7 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "dataset.uploadedBytes",
         "PERF_ROLLING_CAPACITY",
         "performanceWorstTimes",
+        "if (hud) {\n      recordPerformanceWorst(",
         "RECT_BATCH_MIN",
         "drawArraysInstanced",
         "Canvas2D + WebGL2",
@@ -562,8 +563,12 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
         "dataset.gpuSubmitMs",
         "dataset.presentWaitMs",
         "PERF_ROLLING_CAPACITY",
+        "if (hud) {\n      recordWorst(",
     ] {
-        assert!(runtime.contains(expected), "minimal runtime missing {expected}");
+        assert!(
+            runtime.contains(expected),
+            "minimal runtime missing {expected}"
+        );
     }
     assert!(!runtime.contains("N/A"));
     assert!(

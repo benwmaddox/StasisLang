@@ -1154,7 +1154,9 @@
     const gpuExecutionMs = -1;
     const presentWaitMs = -1;
     frames += 1;
-    recordPerformanceWorst(timestamp, tickMs, renderMs, wasmRenderMs, browserReplayMs, frameWorkMs);
+    if (hud) {
+      recordPerformanceWorst(timestamp, tickMs, renderMs, wasmRenderMs, browserReplayMs, frameWorkMs);
+    }
     const underBudget = frameWorkMs <= 16.67;
     if (hud) {
       const uploadText = performanceWorkload.uploadedBytes > 0 ? ` · uploaded ${performanceWorkload.uploadedBytes} B` : "";

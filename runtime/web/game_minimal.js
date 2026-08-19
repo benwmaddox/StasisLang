@@ -68,7 +68,9 @@ __STASIS_IMPORTS__
     const frameWorkMs=tickMs+renderMs;
     const renderPrepMs=-1,gpuSubmitMs=-1,gpuExecutionMs=-1,presentWaitMs=-1;
     frames += 1;
-    recordWorst(performance.now(),tickMs,renderMs,wasmRenderMs,browserReplayMs,frameWorkMs);
+    if (hud) {
+      recordWorst(performance.now(),tickMs,renderMs,wasmRenderMs,browserReplayMs,frameWorkMs);
+    }
     const underBudget=frameWorkMs<=16.67;
     let lines=0,rectangles=0,text=0;
     for(const command of commands){if(command[0]===1)rectangles+=1;else if(command[0]===2)text+=1;}

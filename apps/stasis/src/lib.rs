@@ -4372,6 +4372,32 @@ mod tests {
         }
         assert!(STASIS_GRAPHICS_SOURCE.contains("host_started_counter"));
         assert!(STASIS_GRAPHICS_SOURCE.contains("g_perf_render_started_counter, host_finished"));
+        let finger_up = STASIS_GRAPHICS_SOURCE
+            .split_once("case SDL_EVENT_FINGER_UP:")
+            .and_then(|(_, source)| source.split_once("default:").map(|(section, _)| section))
+            .expect("finger-up event source section");
+        let release_offset = finger_up
+            .find("stasis_release_finger_slot(event.tfinger.fingerID)")
+            .expect("finger-up should release its slot");
+        let reset_offset = finger_up
+            .find("stasis_ios_active_finger_count() < 3")
+            .expect("finger-up should reset the iOS three-finger latch below three active fingers");
+        assert!(
+            release_offset < reset_offset,
+            "finger-up must release its slot before checking the active-finger latch reset"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains(
+                "if (stasis_ios_active_finger_count() >= 3 && !g_ios_three_finger_latched)"
+            ),
+            "iOS three-finger latch should use the shared active-finger count helper"
+        );
+        assert!(
+            !STASIS_GRAPHICS_SOURCE.contains(
+                "case SDL_EVENT_FINGER_MOTION:\n                {\n                    int active_fingers"
+            ),
+            "iOS three-finger latch should not reset from motion events"
+        );
         assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("STASIS_PERF_UNAVAILABLE"));
         assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("STASIS_PERF_METRICS_VERSION"));
         assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("size"));
