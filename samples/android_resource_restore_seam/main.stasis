@@ -1,0 +1,53 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global ticks: i32;
+global seam_state_checksum: i32;
+global sprite: Sprite;
+global fallback: Sprite;
+global font: i32;
+global label: TextRun;
+
+function main(): i32 {
+    init_window(640, 360, "Stasis Android Resource Restore");
+    ticks = 0;
+    seam_state_checksum = 2000;
+    if (!sprite.load_sprite_from("assets/resource_sprite.svg", 112, 112)) {
+        return 11;
+    }
+    // A non-existent handle deliberately exercises the runtime's procedural
+    // fallback texture. It must be rebuilt with the other active resources.
+    fallback.handle = 2147483647;
+    fallback.width = 112;
+    fallback.height = 112;
+    font = load_font("assets/resource.ttf", 24);
+    if (font == 0) {
+        return 12;
+    }
+    if (!label.load_text_from(font, "cached restore text")) {
+        return 13;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    ticks = ticks + 1;
+    seam_state_checksum = 2000 + ticks * 7;
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.03, 0.06, 0.11, 1.0);
+    fill_rect(32.0, 48.0, 176.0, 264.0, 0.09, 0.13, 0.19, 1.0);
+    fill_rect(232.0, 48.0, 176.0, 264.0, 0.19, 0.19, 0.19, 1.0);
+    fill_rect(432.0, 48.0, 176.0, 264.0, 0.95, 0.78, 0.20, 1.0);
+    sprite.draw(64.0, 124.0, 255, 0);
+    fallback.draw(264.0, 124.0, 255, 0);
+    label.draw(448.0, 156.0, 0.0666667, 0.9058824, 0.8627451, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

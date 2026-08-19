@@ -7203,7 +7203,11 @@ mod tests {
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
         assert!(mobile_main.contains("Stasis seam:"));
         assert!(mobile_main.contains("seam_state_checksum"));
-        assert!(mobile_main.contains("frame == 30"));
+        assert!(mobile_main.contains("resource_state"));
+        assert!(mobile_main.contains("renderer_generation"));
+        assert!(mobile_main.contains("restore_failures"));
+        assert!(mobile_main.contains("frame == 1"));
+        assert!(mobile_main.contains("frame % 30 == 0"));
         let android_activity = fs::read_to_string(
             android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
         )

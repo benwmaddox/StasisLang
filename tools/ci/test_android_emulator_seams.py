@@ -32,8 +32,8 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("arch: x86_64", self.workflow)
         self.assertIn("Enable KVM", self.workflow)
         self.assertIn("workflow_call:", self.workflow)
+        self.assertIn("workflow_dispatch:", self.workflow)
         self.assertNotIn("pull_request:", self.workflow)
-        self.assertNotIn("workflow_dispatch:", self.workflow)
         self.assertIn('uses: actions/setup-python@v5', self.workflow)
         self.assertIn('python-version: "3.12"', self.workflow)
         self.assertIn("group: android-emulator-seams-nightly", self.workflow)
@@ -113,12 +113,13 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.workflow.index("- name: Checkout SDL3"),
         )
         for artifact in (
+            "android-resource-restore-seam",
             "android-release-shell-seam",
             "android-touch-roundtrip-seam",
             "android-orientation-metrics-seam",
         ):
             self.assertIn(artifact, self.workflow)
-        self.assertEqual(3, self.workflow.count("        if: always()"))
+        self.assertEqual(4, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
@@ -138,6 +139,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn('"x86_64" -notin $abiList', self.emulator_script)
         self.assertIn("-Target android-x86_64", self.emulator_script)
         for project in (
+            "samples/android_resource_restore_seam",
             "samples/android_aot_seam",
             "samples/android_touch_seam",
             "samples/android_orientation_seam",

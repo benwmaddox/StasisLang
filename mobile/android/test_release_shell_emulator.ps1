@@ -46,6 +46,10 @@ $artifactRootPath = if ([System.IO.Path]::IsPathRooted($ArtifactRoot)) {
 }
 $seams = @(
     @{
+        Project = "samples/android_resource_restore_seam"
+        Output = "android_resource_restore"
+    },
+    @{
         Project = "samples/android_aot_seam"
         Output = "android_release_shell"
     },

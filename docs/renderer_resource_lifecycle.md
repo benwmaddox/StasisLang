@@ -79,3 +79,18 @@ Android foreground resume preserves resources unless SDL reports an actual reset
 - `mobile/android/test_emulator.ps1` installs Workshop, launches it, rotates it,
   backgrounds/resumes it, forces Activity/process recreation, requires multiple
   successful restoration markers with no restore failure, and force-stops the app.
+- The IT-020 generated release-shell fixture performs the same sequence with a
+  packaged SVG sprite, the procedural fallback, a font atlas, and cached text.
+  Its `stasis.seam_test.v1` lifecycle markers include state, surface and
+  renderer generations, restore attempts/failures, and the transition reason;
+  each stage also retains a named-region capture and process identity.
+  Resume is validated within the original process: presented/accepted counters
+  must advance while a preserved renderer generation may remain unchanged. A
+  forced Activity restart starts a new process epoch, so its positive
+  generations are checked independently rather than treated as monotonic with
+  the prior process. Same-process surface/device reset reasons must advance
+  the renderer generation. The fixture's compositor oracle counts target-color
+  pixels in inset resource bounds, including glyph-colored pixels for cached
+  text; lane backgrounds and fill-rectangle edges cannot satisfy it. Accepted
+  and presented counters only gate render progress; the captured Android
+  framebuffer is the actual presentation oracle.
