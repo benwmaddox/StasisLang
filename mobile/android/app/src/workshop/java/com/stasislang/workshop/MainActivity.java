@@ -11861,6 +11861,7 @@ public final class MainActivity extends Activity {
 
         private final MainActivity activity;
         private final StasisPreviewRenderer renderer;
+        private static final long ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS = 100L;
         private int touchX;
         private int touchY;
         private boolean touchActive;
@@ -11927,7 +11928,23 @@ public final class MainActivity extends Activity {
         }
 
         boolean awaitPresentedFrameToken(int token, long timeoutMillis) {
-            return renderer.awaitPresentedFrameToken(token, timeoutMillis);
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || timeoutMillis <= 0L) {
+                return renderer.awaitPresentedFrameToken(token, timeoutMillis);
+            }
+            long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+            while (true) {
+                long remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0L) return false;
+                requestRender();
+                remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0L) return false;
+                long remainingMillis = (remainingNanos + 999_999L) / 1_000_000L;
+                long waitMillis = Math.min(remainingMillis,
+                        ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS);
+                if (renderer.awaitPresentedFrameToken(token, waitMillis)) {
+                    return System.nanoTime() <= deadline;
+                }
+            }
         }
 
         void onHostPause() {

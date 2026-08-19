@@ -325,6 +325,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private long restorePlaceholderUntilNanos;
     private int renderAcceptanceFrameCount;
     private int lastPresentedFrameToken = -1;
+    private int lastAcceptanceGlesEvidenceToken = -1;
     private int acceptanceTrace = -1;
     private int acceptanceTraceToken = -1;
     private int frameDrawCalls;
@@ -559,15 +560,17 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                         ? 0L : System.nanoTime() - drawStarted;
                 drawCalls = frameDrawCalls;
                 presented = true;
-                lastPresentedFrameToken = frameI32.get(I_FRAME_TOKEN);
+                int frameToken = frameI32.get(I_FRAME_TOKEN);
+                lastPresentedFrameToken = frameToken;
                 notifyAll();
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
-                    if (rectCount >= 2) {
+                    if (rectCount >= 2 && frameToken != lastAcceptanceGlesEvidenceToken) {
+                        lastAcceptanceGlesEvidenceToken = frameToken;
                         int markerBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
                         Log.i(LOG_TAG, "Stasis Workshop IT-027 GLES: {\"schema\":\"stasis.workshop_touch_roundtrip.v1\","
                                 + "\"test_id\":\"IT-027\",\"event\":\"present\","
-                                + "\"frame_token\":" + frameI32.get(I_FRAME_TOKEN) + ","
-                                + "\"trace\":" + (acceptanceTraceToken == frameI32.get(I_FRAME_TOKEN)
+                                + "\"frame_token\":" + frameToken + ","
+                                + "\"trace\":" + (acceptanceTraceToken == frameToken
                                         ? Integer.toUnsignedLong(acceptanceTrace) : -1L) + ","
                                 + "\"rect_count\":" + rectCount + ",\"order_count\":" + orderCount + ","
                                 + "\"marker\":{\"active\":true,\"x\":" + frameF32.get(markerBase)
@@ -582,11 +585,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     renderAcceptanceFrameCount += 1;
                     if (renderAcceptanceFrameCount == 1 || renderAcceptanceFrameCount % 30 == 0) {
                         Log.i(LOG_TAG, "RenderAcceptanceFrame: count=" + renderAcceptanceFrameCount
-                                + " frame_token=" + frameI32.get(I_FRAME_TOKEN));
+                                + " frame_token=" + frameToken);
                         Log.i(LOG_TAG, "Stasis Workshop IT-025 GLES: {\"schema\":\"stasis.workshop_seam.v1\","
                                 + "\"test_id\":\"IT-025\",\"event\":\"present\",\"count\":"
                                 + renderAcceptanceFrameCount + ","
-                                + "\"frame_token\":" + frameI32.get(I_FRAME_TOKEN) + "}");
+                                + "\"frame_token\":" + frameToken + "}");
                     }
                 }
             }

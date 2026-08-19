@@ -1471,6 +1471,15 @@ def main() -> int:
     assert "rect_count" in preview_renderer
     assert "I_FRAME_TOKEN" in preview_renderer
     assert "awaitPresentedFrameToken" in preview_renderer
+    assert "ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS" in activity
+    assert "long deadline = System.nanoTime() + timeoutMillis * 1_000_000L" in activity
+    assert "long remainingNanos = deadline - System.nanoTime();" in activity
+    assert activity.count("remainingNanos = deadline - System.nanoTime();") >= 2
+    assert "long waitMillis = Math.min(remainingMillis" in activity
+    assert "return System.nanoTime() <= deadline;" in activity
+    assert "requestRender();" in activity
+    assert "lastAcceptanceGlesEvidenceToken" in preview_renderer
+    assert "frameToken != lastAcceptanceGlesEvidenceToken" in preview_renderer
     assert "nativeFrameTrace" in native
     assert "Stasis Android native smoke loaded" in native
 
