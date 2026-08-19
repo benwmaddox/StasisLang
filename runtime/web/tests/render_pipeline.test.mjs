@@ -144,7 +144,7 @@ test("runtime publishes split timing phases and HUD labels", async () => {
   assert.equal(runtime.body.dataset.frameWorkMs, "9.000");
   assert.equal(runtime.body.dataset.renderMs, "7.000");
   assert.equal(runtime.body.dataset.worstRenderMs, "7.000");
-  assert.match(runtime.hud.textContent, /wasm render/);
-  assert.match(runtime.hud.textContent, /browser replay/);
+  assert.match(runtime.hud.textContent, /guest render/);
+  assert.match(runtime.hud.textContent, /host replay/);
   assert.match(runtime.hud.textContent, /frame work/);
 });

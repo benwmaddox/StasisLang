@@ -9,6 +9,8 @@ EXPORTS
     stasis_host_copy_runtime_error
     stasis_host_performance_metrics_enabled
     stasis_host_set_performance_metrics_enabled
+    stasis_host_get_latest_performance_metrics
+    stasis_host_get_latest_performance_metrics_v1
     stasis_init_window
     stasis_get_window_size
     stasis_get_display_metrics

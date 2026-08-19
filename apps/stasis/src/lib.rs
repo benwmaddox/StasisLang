@@ -4315,6 +4315,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_render_contract.h"
     ));
+    const STASIS_PERFORMANCE_METRICS_HEADER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_performance_metrics.h"
+    ));
     const BETWEEN_TICK_LAYOUT_V1: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../samples/between_tick_layout_migration/v1.stasis"
@@ -4348,21 +4352,30 @@ mod tests {
     }
 
     #[test]
-    fn windows_performance_hud_uses_frame_work_and_60_fps_budget() {
+    fn performance_hud_uses_additive_snapshot_and_excludes_present_wait() {
         for required in [
             "event.key.key == SDLK_F3",
             "stasis_host_performance_metrics_enabled",
             "stasis_host_set_performance_metrics",
             "g_perf_pending_guest_render_us",
-            "stasis_perf_elapsed_us(g_perf_render_started_counter, now)",
-            "budget@60fps=%d%%",
-            "const double total_ms = tick_ms + render_ms",
+            "stasis_host_get_latest_performance_metrics_v1",
+            "frame_work_us",
+            "present_wait_us",
+            "stasis_perf_finish_render_sample(stasis_perf_elapsed_us(",
+            "SDL_RenderDebugText",
+            "g_ios_three_finger_latched",
         ] {
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
                 "Windows performance HUD contract should contain {required}"
             );
         }
+        assert!(STASIS_GRAPHICS_SOURCE.contains("host_started_counter"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains("g_perf_render_started_counter, host_finished"));
+        assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("STASIS_PERF_UNAVAILABLE"));
+        assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("STASIS_PERF_METRICS_VERSION"));
+        assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("size"));
+        assert!(!STASIS_GRAPHICS_SOURCE.contains("N/A"));
         assert!(
             STASIS_RUNNER_SOURCE.contains("const int measure_hud = host_performance_metrics_enabled")
                 && STASIS_RUNNER_SOURCE.contains("if (measure_hud) QueryPerformanceCounter")

@@ -55,9 +55,11 @@ captures use the drawable resolution.
    cargo run -p stasis --release -- play samples\asteroids.stasis
    ```
 
-Press `F3` in a Windows play window to toggle the performance HUD. It reports
-five-second average tick, render, and total times plus total use of the 60 fps
-frame budget.
+Press `F3` in a Windows play window to toggle the performance HUD. It follows
+the shared ordered performance contract, showing the phases and workload
+details that the active backend can measure, plus a five-second rolling worst
+frame-work value. Unsupported fields are omitted from the rendered HUD. See
+`docs/performance_hud.md` for the contract.
 
 ## Android (NDK)
 

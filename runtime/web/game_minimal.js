@@ -16,6 +16,17 @@ __STASIS_IMPORTS__
   let worstTick = 0;
   let worstRender = 0;
   let worstWasmRender=0,worstBrowserReplay=0,worstFrameWork=0;
+  const PERF_ROLLING_CAPACITY=1200;
+  const worstTimes=new Float64Array(PERF_ROLLING_CAPACITY);
+  const worstValues=Array.from({length:5},()=>new Float64Array(PERF_ROLLING_CAPACITY));
+  let worstNext=0,worstCount=0;
+  const recordWorst=(now,tick,render,wasm,replay,frameWork)=>{
+    worstTimes[worstNext]=now;worstValues[0][worstNext]=tick;worstValues[1][worstNext]=render;worstValues[2][worstNext]=wasm;worstValues[3][worstNext]=replay;worstValues[4][worstNext]=frameWork;
+    worstNext=(worstNext+1)%PERF_ROLLING_CAPACITY;if(worstCount<PERF_ROLLING_CAPACITY)worstCount+=1;
+    const cutoff=now-5000;let maxTick=0,maxRender=0,maxWasm=0,maxReplay=0,maxFrame=0;
+    for(let sample=0;sample<worstCount;sample+=1)if(worstTimes[sample]>=cutoff){maxTick=Math.max(maxTick,worstValues[0][sample]);maxRender=Math.max(maxRender,worstValues[1][sample]);maxWasm=Math.max(maxWasm,worstValues[2][sample]);maxReplay=Math.max(maxReplay,worstValues[3][sample]);maxFrame=Math.max(maxFrame,worstValues[4][sample]);}
+    worstTick=maxTick;worstRender=maxRender;worstWasmRender=maxWasm;worstBrowserReplay=maxReplay;worstFrameWork=maxFrame;
+  };
   const colorCache=new Map();
   const cachedColor=(r,g,b)=>{const key=((r&255)<<16)|((g&255)<<8)|(b&255);let value=colorCache.get(key);if(!value){value=color(r,g,b);colorCache.set(key,value);}return value;};
 
@@ -48,16 +59,31 @@ __STASIS_IMPORTS__
     const browserReplayMs=performance.now()-replayStart;
     const renderMs=wasmRenderMs+browserReplayMs;
     const frameWorkMs=tickMs+renderMs;
+    const renderPrepMs=-1,gpuSubmitMs=-1,gpuExecutionMs=-1,presentWaitMs=-1;
     frames += 1;
-    if (frames > 5) {
-      worstTick = Math.max(worstTick, tickMs);
-      worstRender=Math.max(worstRender,renderMs); worstWasmRender=Math.max(worstWasmRender,wasmRenderMs);worstBrowserReplay=Math.max(worstBrowserReplay,browserReplayMs);worstFrameWork=Math.max(worstFrameWork,frameWorkMs);
-    }
-    const underBudget=worstFrameWork<16;
-    if (hud) hud.textContent=`Wasm frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)})\nwasm render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nbrowser replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)})\n${underBudget?"UNDER 16 ms":"OVER BUDGET"}`;
+    recordWorst(performance.now(),tickMs,renderMs,wasmRenderMs,browserReplayMs,frameWorkMs);
+    const underBudget=frameWorkMs<=16.67;
+    let lines=0,rectangles=0,text=0;
+    for(const command of commands){if(command[0]===1)rectangles+=1;else if(command[0]===2)text+=1;}
+    if (hud) hud.textContent=`Canvas2D · frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)}) · guest render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nhost replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)}) · ${underBudget?"UNDER 16.67 ms":"OVER 16.67 ms"}\ncommands ${commands.length} · lines ${lines} · rects ${rectangles} · text ${text}\ndraws ${commands.length}`;
     document.body.dataset.frames = String(frames);
     document.body.dataset.tickMs=tickMs.toFixed(3);document.body.dataset.renderMs=renderMs.toFixed(3);document.body.dataset.wasmRenderMs=wasmRenderMs.toFixed(3);document.body.dataset.browserReplayMs=browserReplayMs.toFixed(3);document.body.dataset.frameWorkMs=frameWorkMs.toFixed(3);document.body.dataset.worstTickMs=worstTick.toFixed(3);document.body.dataset.worstRenderMs=worstRender.toFixed(3);document.body.dataset.worstWasmRenderMs=worstWasmRender.toFixed(3);document.body.dataset.worstBrowserReplayMs=worstBrowserReplay.toFixed(3);document.body.dataset.worstFrameWorkMs=worstFrameWork.toFixed(3);
     document.body.dataset.underBudget = String(underBudget);
+    document.body.dataset.backend="Canvas2D";
+    document.body.dataset.hostReplayMs=browserReplayMs.toFixed(3);
+    document.body.dataset.renderPrepMs=String(renderPrepMs);
+    document.body.dataset.gpuSubmitMs=String(gpuSubmitMs);
+    document.body.dataset.gpuExecutionMs=String(gpuExecutionMs);
+    document.body.dataset.presentWaitMs=String(presentWaitMs);
+    document.body.dataset.commands=String(commands.length);
+    document.body.dataset.lines=String(lines);
+    document.body.dataset.rectangles=String(rectangles);
+    document.body.dataset.sprites="-1";
+    document.body.dataset.text=String(text);
+    document.body.dataset.instances="-1";
+    document.body.dataset.batches="-1";
+    document.body.dataset.drawCalls=String(commands.length);
+    document.body.dataset.uploadedBytes="-1";
     requestAnimationFrame(frame);
   }
 

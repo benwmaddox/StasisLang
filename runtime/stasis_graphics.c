@@ -32,6 +32,7 @@
 #include "stasis_render_contract.h"
 #include "stasis_display_scale.h"
 #include "stasis_renderer_lifecycle.h"
+#include "stasis_performance_metrics.h"
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -205,11 +206,10 @@ static float g_postfx_speed = 0.0f;
 static float g_postfx_color[3] = {0.05f, 0.85f, 0.78f};
 static bool g_postfx_force_disable = false;
 
-#define STASIS_PERF_SAMPLE_CAPACITY 360
+#define STASIS_PERF_SAMPLE_CAPACITY 1200
 typedef struct {
     uint64_t captured_counter;
-    uint64_t tick_us;
-    uint64_t render_us;
+    StasisPerformanceMetrics metrics;
 } StasisPerfSample;
 static StasisPerfSample g_perf_samples[STASIS_PERF_SAMPLE_CAPACITY];
 static int g_perf_sample_count = 0;
@@ -217,9 +217,13 @@ static int g_perf_sample_next = 0;
 static uint64_t g_perf_pending_tick_us = 0;
 static uint64_t g_perf_pending_guest_render_us = 0;
 static uint64_t g_perf_render_started_counter = 0;
-static SDL_AtomicInt g_perf_latest_tick_us;
-static SDL_AtomicInt g_perf_latest_render_us;
-static int g_perf_font_handle = -1;
+static SDL_SpinLock g_perf_metrics_lock;
+static StasisPerformanceMetrics g_perf_latest_metrics;
+static uint32_t g_perf_pending_lines = STASIS_PERF_UNAVAILABLE;
+static uint32_t g_perf_pending_rectangles = STASIS_PERF_UNAVAILABLE;
+static uint32_t g_perf_pending_sprites = STASIS_PERF_UNAVAILABLE;
+static uint32_t g_perf_pending_text = STASIS_PERF_UNAVAILABLE;
+static uint32_t g_perf_pending_commands = STASIS_PERF_UNAVAILABLE;
 static const char* g_restore_label[] = {
     "   01110 11111 01110 01110 11111 01110   ",
     "   10001 00100 10001 10001 00100 10001   ",
@@ -274,6 +278,9 @@ static float g_prev_x_px[STASIS_MAX_POINTERS];
 static float g_prev_y_px[STASIS_MAX_POINTERS];
 static SDL_FingerID g_finger_ids[STASIS_MAX_POINTERS - 1];
 static int g_finger_active[STASIS_MAX_POINTERS - 1];
+#if defined(__IPHONEOS__)
+static bool g_ios_three_finger_latched = false;
+#endif
 
 /* Forward decls for exported functions used before their definitions (MSVC C mode does not allow implicit declarations). */
 STASIS_EXPORT int stasis_get_time_ms(void);
@@ -310,7 +317,6 @@ static void setup_ortho(void);
 static void reset_line_program(void);
 static void reset_sprite_program(void);
 #endif
-static int stasis_perf_font(void);
 static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter);
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
@@ -942,7 +948,6 @@ static void stasis_pump_events(void) {
                     g_perf_render_started_counter = 0;
                     stasis_host_set_performance_metrics_enabled(
                         g_force_debug_overlay ? 1 : 0);
-                    if (g_force_debug_overlay) (void)stasis_perf_font();
                     SDL_Log("performance HUD %s (F3 toggles)", g_force_debug_overlay ? "on" : "off");
                 }
                 break;
@@ -1026,6 +1031,21 @@ static void stasis_pump_events(void) {
                         event.tfinger.y * (float)g_native_window_height,
                         &logical_x, &logical_y);
                     stasis_set_pointer_pos_px(idx, logical_x, logical_y);
+#if defined(__IPHONEOS__)
+                    int active_fingers = 0;
+                    for (int finger = 0; finger < STASIS_MAX_POINTERS - 1; finger++) {
+                        if (g_finger_active[finger]) active_fingers++;
+                    }
+                    if (active_fingers >= 3 && !g_ios_three_finger_latched) {
+                        g_ios_three_finger_latched = true;
+                        g_force_debug_overlay = !g_force_debug_overlay;
+                        g_perf_sample_count = 0;
+                        g_perf_sample_next = 0;
+                        g_perf_render_started_counter = 0;
+                        stasis_host_set_performance_metrics_enabled(
+                            g_force_debug_overlay ? 1 : 0);
+                    }
+#endif
                 }
                 break;
             case SDL_EVENT_FINGER_MOTION:
@@ -1040,6 +1060,13 @@ static void stasis_pump_events(void) {
                         event.tfinger.y * (float)g_native_window_height,
                         &logical_x, &logical_y);
                     stasis_set_pointer_pos_px(idx, logical_x, logical_y);
+#if defined(__IPHONEOS__)
+                    int active_fingers = 0;
+                    for (int finger = 0; finger < STASIS_MAX_POINTERS - 1; finger++) {
+                        if (g_finger_active[finger]) active_fingers++;
+                    }
+                    if (active_fingers < 3) g_ios_three_finger_latched = false;
+#endif
                 }
                 break;
             case SDL_EVENT_FINGER_UP:
@@ -1242,8 +1269,31 @@ STASIS_EXPORT int stasis_host_performance_metrics_enabled(void)
 STASIS_EXPORT void stasis_host_set_performance_metrics_enabled(int enabled)
 {
     SDL_SetAtomicInt(&g_performance_metrics_requested, enabled != 0);
-    SDL_SetAtomicInt(&g_perf_latest_tick_us, 0);
-    SDL_SetAtomicInt(&g_perf_latest_render_us, 0);
+    SDL_LockSpinlock(&g_perf_metrics_lock);
+    memset(&g_perf_latest_metrics, 0, sizeof(g_perf_latest_metrics));
+    g_perf_latest_metrics.version = STASIS_PERF_METRICS_VERSION;
+    g_perf_latest_metrics.size = (uint32_t)sizeof(g_perf_latest_metrics);
+    g_perf_latest_metrics.tick_us = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.guest_render_us = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.host_replay_us = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.render_prep_us = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.gpu_submit_us = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.gpu_execution_us = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.frame_work_us = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.present_wait_us = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.commands = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.lines = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.rectangles = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.sprites = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.text = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.instances = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.batches = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.draw_calls = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.texture_switches = STASIS_PERF_UNAVAILABLE;
+    g_perf_latest_metrics.uploaded_bytes = STASIS_PERF_UNAVAILABLE;
+    snprintf(g_perf_latest_metrics.backend, sizeof(g_perf_latest_metrics.backend), "%s",
+        g_use_sdl_renderer ? "SDL" : "OpenGL");
+    SDL_UnlockSpinlock(&g_perf_metrics_lock);
 }
 
 STASIS_EXPORT void stasis_host_report_runtime_error(const char* message)
@@ -1278,12 +1328,30 @@ STASIS_EXPORT void stasis_host_get_latest_performance_metrics(
     uint32_t* tick_us,
     uint32_t* render_us)
 {
+    StasisPerformanceMetrics metrics;
+    SDL_LockSpinlock(&g_perf_metrics_lock);
+    metrics = g_perf_latest_metrics;
+    SDL_UnlockSpinlock(&g_perf_metrics_lock);
     if (tick_us) {
-        *tick_us = (uint32_t)SDL_GetAtomicInt(&g_perf_latest_tick_us);
+        *tick_us = metrics.tick_us;
     }
     if (render_us) {
-        *render_us = (uint32_t)SDL_GetAtomicInt(&g_perf_latest_render_us);
+        *render_us = metrics.host_replay_us == STASIS_PERF_UNAVAILABLE
+            ? metrics.guest_render_us
+            : metrics.guest_render_us + metrics.host_replay_us;
     }
+}
+
+/* Additive, capacity-checked snapshot API. The original two-value function above
+ * remains ABI-compatible for older shells and tools. */
+STASIS_EXPORT int stasis_host_get_latest_performance_metrics_v1(
+    StasisPerformanceMetrics* output, size_t capacity)
+{
+    if (!output || capacity < sizeof(StasisPerformanceMetrics)) return 0;
+    SDL_LockSpinlock(&g_perf_metrics_lock);
+    *output = g_perf_latest_metrics;
+    SDL_UnlockSpinlock(&g_perf_metrics_lock);
+    return 1;
 }
 
 typedef int (*stasis_tick_fn)(void);
@@ -4659,7 +4727,8 @@ STASIS_EXPORT uint64_t stasis_host_performance_elapsed_us(
     return stasis_perf_elapsed_us(started_counter, finished_counter);
 }
 
-static void stasis_perf_finish_render_sample(void) {
+static void stasis_perf_finish_render_sample(uint64_t host_replay_us,
+                                             uint64_t present_wait_us) {
     if (!stasis_host_performance_metrics_enabled()) {
         g_perf_render_started_counter = 0;
         return;
@@ -4667,11 +4736,33 @@ static void stasis_perf_finish_render_sample(void) {
     const uint64_t now = SDL_GetPerformanceCounter();
     StasisPerfSample* sample = &g_perf_samples[g_perf_sample_next];
     sample->captured_counter = now;
-    sample->tick_us = g_perf_pending_tick_us;
-    sample->render_us = g_perf_pending_guest_render_us
-        + stasis_perf_elapsed_us(g_perf_render_started_counter, now);
-    SDL_SetAtomicInt(&g_perf_latest_tick_us, (int)sample->tick_us);
-    SDL_SetAtomicInt(&g_perf_latest_render_us, (int)sample->render_us);
+    memset(&sample->metrics, 0, sizeof(sample->metrics));
+    sample->metrics.version = STASIS_PERF_METRICS_VERSION;
+    sample->metrics.size = (uint32_t)sizeof(sample->metrics);
+    sample->metrics.tick_us = (uint32_t)g_perf_pending_tick_us;
+    sample->metrics.guest_render_us = (uint32_t)g_perf_pending_guest_render_us;
+    sample->metrics.host_replay_us = (uint32_t)host_replay_us;
+    sample->metrics.render_prep_us = STASIS_PERF_UNAVAILABLE;
+    sample->metrics.gpu_submit_us = STASIS_PERF_UNAVAILABLE;
+    sample->metrics.gpu_execution_us = STASIS_PERF_UNAVAILABLE;
+    sample->metrics.present_wait_us = (uint32_t)present_wait_us;
+    sample->metrics.frame_work_us = sample->metrics.tick_us
+        + sample->metrics.guest_render_us + sample->metrics.host_replay_us;
+    sample->metrics.commands = g_perf_pending_commands;
+    sample->metrics.lines = g_perf_pending_lines;
+    sample->metrics.rectangles = g_perf_pending_rectangles;
+    sample->metrics.sprites = g_perf_pending_sprites;
+    sample->metrics.text = g_perf_pending_text;
+    sample->metrics.instances = STASIS_PERF_UNAVAILABLE;
+    sample->metrics.batches = STASIS_PERF_UNAVAILABLE;
+    sample->metrics.draw_calls = STASIS_PERF_UNAVAILABLE;
+    sample->metrics.texture_switches = STASIS_PERF_UNAVAILABLE;
+    sample->metrics.uploaded_bytes = STASIS_PERF_UNAVAILABLE;
+    snprintf(sample->metrics.backend, sizeof(sample->metrics.backend), "%s",
+        g_use_sdl_renderer ? "SDL" : "OpenGL");
+    SDL_LockSpinlock(&g_perf_metrics_lock);
+    g_perf_latest_metrics = sample->metrics;
+    SDL_UnlockSpinlock(&g_perf_metrics_lock);
     g_perf_sample_next = (g_perf_sample_next + 1) % STASIS_PERF_SAMPLE_CAPACITY;
     if (g_perf_sample_count < STASIS_PERF_SAMPLE_CAPACITY) {
         g_perf_sample_count++;
@@ -4679,72 +4770,166 @@ static void stasis_perf_finish_render_sample(void) {
     g_perf_render_started_counter = 0;
 }
 
-static void stasis_perf_averages(double* tick_ms, double* render_ms) {
+static void stasis_perf_latest_snapshot(StasisPerformanceMetrics* output,
+                                         uint32_t* worst_frame_work_us) {
+    if (!output) return;
+    SDL_LockSpinlock(&g_perf_metrics_lock);
+    *output = g_perf_latest_metrics;
+    SDL_UnlockSpinlock(&g_perf_metrics_lock);
+    uint32_t worst = output->frame_work_us;
     const uint64_t now = SDL_GetPerformanceCounter();
     const uint64_t frequency = SDL_GetPerformanceFrequency();
     const uint64_t window = frequency * 5u;
-    uint64_t tick_total = 0;
-    uint64_t render_total = 0;
-    int samples = 0;
-
     for (int i = 0; i < g_perf_sample_count; i++) {
         const StasisPerfSample* sample = &g_perf_samples[i];
-        if (sample->captured_counter == 0 || now < sample->captured_counter) continue;
-        if (now - sample->captured_counter > window) continue;
-        tick_total += sample->tick_us;
-        render_total += sample->render_us;
-        samples++;
+        if (sample->captured_counter == 0 || now < sample->captured_counter
+            || now - sample->captured_counter > window) continue;
+        if (sample->metrics.frame_work_us != STASIS_PERF_UNAVAILABLE
+            && sample->metrics.frame_work_us > worst) {
+            worst = sample->metrics.frame_work_us;
+        }
     }
-
-    if (samples == 0) {
-        *tick_ms = 0.0;
-        *render_ms = 0.0;
-        return;
-    }
-    *tick_ms = (double)tick_total / (double)samples / 1000.0;
-    *render_ms = (double)render_total / (double)samples / 1000.0;
+    if (worst_frame_work_us) *worst_frame_work_us = worst;
 }
 
-static int stasis_perf_font(void) {
-    if (g_perf_font_handle >= 0) return g_perf_font_handle;
-#if defined(_WIN32)
-    const char* windows_dir = getenv("WINDIR");
-    char path[1024];
-    if (windows_dir && *windows_dir) {
-        snprintf(path, sizeof(path), "%s/Fonts/segoeui.ttf", windows_dir);
+static void stasis_perf_append_value(char* output, size_t capacity, uint32_t us) {
+    if (us == STASIS_PERF_UNAVAILABLE) {
+        output[0] = '\0';
     } else {
-        snprintf(path, sizeof(path), "C:/Windows/Fonts/segoeui.ttf");
+        snprintf(output, capacity, "%.2f ms", (double)us / 1000.0);
     }
-    g_perf_font_handle = stasis_load_font(path, 15);
-#else
-    g_perf_font_handle = 0;
-#endif
-    return g_perf_font_handle;
 }
+
+static void stasis_perf_append_count(char* output, size_t capacity, uint32_t count) {
+    if (count == STASIS_PERF_UNAVAILABLE) output[0] = '\0';
+    else snprintf(output, capacity, "%u", (unsigned int)count);
+}
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+/* Tiny runtime-owned fallback for OpenGL builds. It deliberately uses no font
+ * asset, allocation, or system API, so the diagnostic HUD remains visible on
+ * macOS/iOS/Linux even when a game has not loaded a font. */
+static uint8_t stasis_perf_glyph_row(char character, int row) {
+    static const uint8_t glyphs[36][7] = {
+        {0x0e,0x11,0x13,0x15,0x19,0x11,0x0e}, {0x04,0x0c,0x04,0x04,0x04,0x04,0x0e},
+        {0x0e,0x11,0x01,0x02,0x04,0x08,0x1f}, {0x1e,0x01,0x01,0x0e,0x01,0x01,0x1e},
+        {0x02,0x06,0x0a,0x12,0x1f,0x02,0x02}, {0x1f,0x10,0x10,0x1e,0x01,0x01,0x1e},
+        {0x06,0x08,0x10,0x1e,0x11,0x11,0x0e}, {0x1f,0x01,0x02,0x04,0x08,0x08,0x08},
+        {0x0e,0x11,0x11,0x0e,0x11,0x11,0x0e}, {0x0e,0x11,0x11,0x0f,0x01,0x02,0x1c},
+        {0x0e,0x11,0x11,0x1f,0x11,0x11,0x11}, {0x1e,0x11,0x11,0x1e,0x11,0x11,0x1e},
+        {0x0e,0x11,0x10,0x10,0x10,0x11,0x0e}, {0x1e,0x11,0x11,0x11,0x11,0x11,0x1e},
+        {0x1f,0x10,0x10,0x1e,0x10,0x10,0x1f}, {0x1f,0x10,0x10,0x1e,0x10,0x10,0x10},
+        {0x0e,0x11,0x10,0x17,0x11,0x11,0x0f}, {0x11,0x11,0x11,0x1f,0x11,0x11,0x11},
+        {0x0e,0x04,0x04,0x04,0x04,0x04,0x0e}, {0x01,0x01,0x01,0x01,0x11,0x11,0x0e},
+        {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, {0x10,0x10,0x10,0x10,0x10,0x10,0x1f},
+        {0x11,0x1b,0x15,0x15,0x11,0x11,0x11}, {0x11,0x19,0x19,0x15,0x13,0x13,0x11},
+        {0x0e,0x11,0x11,0x11,0x11,0x11,0x0e}, {0x1e,0x11,0x11,0x1e,0x10,0x10,0x10},
+        {0x0e,0x11,0x11,0x11,0x15,0x12,0x0d}, {0x1e,0x11,0x11,0x1e,0x14,0x12,0x11},
+        {0x0f,0x10,0x10,0x0e,0x01,0x01,0x1e}, {0x1f,0x04,0x04,0x04,0x04,0x04,0x04},
+        {0x11,0x11,0x11,0x11,0x11,0x11,0x0e}, {0x11,0x11,0x11,0x11,0x11,0x0a,0x04},
+        {0x11,0x11,0x11,0x15,0x15,0x1b,0x11}, {0x11,0x11,0x0a,0x04,0x0a,0x11,0x11},
+        {0x11,0x11,0x0a,0x04,0x04,0x04,0x04}, {0x1f,0x01,0x02,0x04,0x08,0x10,0x1f}
+    };
+    const int upper = toupper((unsigned char)character);
+    if (upper >= '0' && upper <= '9') return glyphs[upper - '0'][row];
+    if (upper >= 'A' && upper <= 'Z') return glyphs[10 + upper - 'A'][row];
+    if (character == ':') return (row == 1 || row == 5) ? 0x04 : 0;
+    if (character == '.') return row == 6 ? 0x04 : 0;
+    if (character == '-') return row == 3 ? 0x1f : 0;
+    if (character == '%') return row == 1 ? 0x19 : (row == 5 ? 0x13 : 0);
+    if (character == '[' || character == ']') return (row == 0 || row == 6) ? 0x1e : 0x10;
+    return 0;
+}
+
+static void stasis_perf_draw_builtin_gl(const char* text, float x, float y,
+                                        float r, float g, float b) {
+    if (!text || !*text) return;
+    glDisable(GL_TEXTURE_2D);
+    glColor4f(r, g, b, 1.0f);
+    glBegin(GL_QUADS);
+    for (const char* cursor = text; *cursor; cursor++, x += 12.0f) {
+        for (int row = 0; row < 7; row++) {
+            const uint8_t bits = stasis_perf_glyph_row(*cursor, row);
+            for (int column = 0; column < 5; column++) {
+                if ((bits & (1u << (4 - column))) == 0) continue;
+                const float left = x + (float)column * 2.0f;
+                const float top = y + (float)row * 2.0f;
+                glVertex2f(left, top); glVertex2f(left + 2.0f, top);
+                glVertex2f(left + 2.0f, top + 2.0f); glVertex2f(left, top + 2.0f);
+            }
+        }
+    }
+    glEnd();
+}
+#endif
 
 static void stasis_perf_draw_overlay(void) {
     if (!g_force_debug_overlay) return;
-    const int font = stasis_perf_font();
-    if (font <= 0) return;
 
-    double tick_ms = 0.0;
-    double render_ms = 0.0;
-    stasis_perf_averages(&tick_ms, &render_ms);
-    const double total_ms = tick_ms + render_ms;
-    const int budget_percent = (int)(total_ms * 6.0 + 0.5);
-    char text[160];
-    snprintf(
-        text,
-        sizeof(text),
-        "tick=%.2f ms  render=%.2f ms  total=%.2f ms  budget@60fps=%d%%  [F3]",
-        tick_ms,
-        render_ms,
-        total_ms,
-        budget_percent);
+    StasisPerformanceMetrics metrics;
+    uint32_t worst_frame_work_us = STASIS_PERF_UNAVAILABLE;
+    stasis_perf_latest_snapshot(&metrics, &worst_frame_work_us);
+    const int under_budget = metrics.frame_work_us != STASIS_PERF_UNAVAILABLE
+        && metrics.frame_work_us <= 16667;
+    char tick[32], guest[32], host[32], frame[32], present[32];
+    char commands[16], lines[16], rectangles[16], sprites[16], text_count[16];
+    stasis_perf_append_value(tick, sizeof(tick), metrics.tick_us);
+    stasis_perf_append_value(guest, sizeof(guest), metrics.guest_render_us);
+    stasis_perf_append_value(host, sizeof(host), metrics.host_replay_us);
+    stasis_perf_append_value(frame, sizeof(frame), metrics.frame_work_us);
+    stasis_perf_append_value(present, sizeof(present), metrics.present_wait_us);
+    stasis_perf_append_count(commands, sizeof(commands), metrics.commands);
+    stasis_perf_append_count(lines, sizeof(lines), metrics.lines);
+    stasis_perf_append_count(rectangles, sizeof(rectangles), metrics.rectangles);
+    stasis_perf_append_count(sprites, sizeof(sprites), metrics.sprites);
+    stasis_perf_append_count(text_count, sizeof(text_count), metrics.text);
+    char text[5][220];
+    snprintf(text[0], sizeof(text[0]), "%s  [F3]", metrics.backend[0] ? metrics.backend : "native");
+    if (metrics.tick_us == STASIS_PERF_UNAVAILABLE && metrics.guest_render_us == STASIS_PERF_UNAVAILABLE) {
+        text[1][0] = '\0';
+    } else {
+        snprintf(text[1], sizeof(text[1]), "tick %s  guest render %s", tick, guest);
+    }
+    if (metrics.host_replay_us == STASIS_PERF_UNAVAILABLE) text[2][0] = '\0';
+    else snprintf(text[2], sizeof(text[2]), "host replay %s", host);
+    if (metrics.frame_work_us == STASIS_PERF_UNAVAILABLE) {
+        text[3][0] = '\0';
+    } else {
+        snprintf(text[3], sizeof(text[3]), "frame work %s (worst %.2f ms)  %s%s%s",
+            frame, worst_frame_work_us == STASIS_PERF_UNAVAILABLE ? 0.0 : (double)worst_frame_work_us / 1000.0,
+            under_budget ? "UNDER 16.67 ms" : "OVER 16.67 ms",
+            metrics.present_wait_us == STASIS_PERF_UNAVAILABLE ? "" : "  present wait ",
+            metrics.present_wait_us == STASIS_PERF_UNAVAILABLE ? "" : present);
+    }
+    if (metrics.commands == STASIS_PERF_UNAVAILABLE && metrics.lines == STASIS_PERF_UNAVAILABLE
+        && metrics.rectangles == STASIS_PERF_UNAVAILABLE && metrics.sprites == STASIS_PERF_UNAVAILABLE
+        && metrics.text == STASIS_PERF_UNAVAILABLE) {
+        text[4][0] = '\0';
+    } else {
+        size_t offset = 0;
+        text[4][0] = '\0';
+        if (metrics.commands != STASIS_PERF_UNAVAILABLE) {
+            offset += (size_t)snprintf(text[4] + offset, sizeof(text[4]) - offset, "commands %s", commands);
+        }
+        if (metrics.lines != STASIS_PERF_UNAVAILABLE && offset < sizeof(text[4])) {
+            offset += (size_t)snprintf(text[4] + offset, sizeof(text[4]) - offset, "%slines %s", offset ? "  " : "", lines);
+        }
+        if (metrics.rectangles != STASIS_PERF_UNAVAILABLE && offset < sizeof(text[4])) {
+            offset += (size_t)snprintf(text[4] + offset, sizeof(text[4]) - offset, "%srects %s", offset ? "  " : "", rectangles);
+        }
+        if (metrics.sprites != STASIS_PERF_UNAVAILABLE && offset < sizeof(text[4])) {
+            offset += (size_t)snprintf(text[4] + offset, sizeof(text[4]) - offset, "%ssprites %s", offset ? "  " : "", sprites);
+        }
+        if (metrics.text != STASIS_PERF_UNAVAILABLE && offset < sizeof(text[4])) {
+            (void)snprintf(text[4] + offset, sizeof(text[4]) - offset, "%stext %s", offset ? "  " : "", text_count);
+        }
+    }
 
     float r = 1.0f;
     float g = 1.0f;
     float b = 1.0f;
+    const int budget_percent = metrics.frame_work_us == STASIS_PERF_UNAVAILABLE
+        ? 0 : (int)(metrics.frame_work_us * 100u / 16667u);
     if (budget_percent >= 100) {
         r = 0.73f; g = 0.41f; b = 1.0f;
     } else if (budget_percent >= 80) {
@@ -4753,12 +4938,17 @@ static void stasis_perf_draw_overlay(void) {
         r = 1.0f; g = 0.84f; b = 0.40f;
     }
 
-    const int background_width = g_window_width > 690 ? 680 : g_window_width - 16;
+    const int background_width = g_window_width > 760 ? 750 : g_window_width - 16;
+    const float background_height = 18.0f + 18.0f * 5.0f;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(g_renderer, 20, 28, 38, 170);
-        SDL_FRect background = { 8.0f, 8.0f, (float)background_width, 28.0f };
+        SDL_FRect background = { 8.0f, 8.0f, (float)background_width, background_height };
         if (background.w > 0) SDL_RenderFillRect(g_renderer, &background);
+        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), 255);
+        for (int line = 0; line < 5; line++) {
+            if (text[line][0]) SDL_RenderDebugText(g_renderer, 12.0f, 11.0f + (float)line * 18.0f, text[line]);
+        }
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
         flush_lines();
@@ -4769,15 +4959,15 @@ static void stasis_perf_draw_overlay(void) {
             glBegin(GL_QUADS);
             glVertex2f(8.0f, 8.0f);
             glVertex2f(8.0f + (float)background_width, 8.0f);
-            glVertex2f(8.0f + (float)background_width, 36.0f);
-            glVertex2f(8.0f, 36.0f);
+            glVertex2f(8.0f + (float)background_width, 8.0f + background_height);
+            glVertex2f(8.0f, 8.0f + background_height);
             glEnd();
+        }
+        for (int line = 0; line < 5; line++) {
+            stasis_perf_draw_builtin_gl(text[line], 12.0f, 11.0f + (float)line * 18.0f, r, g, b);
         }
 #endif
     }
-
-    stasis_draw_text(font, text, 13.0f, 12.0f, 0.0f, 0.0f, 0.0f, 0.9f);
-    stasis_draw_text(font, text, 12.0f, 11.0f, r, g, b, 1.0f);
 }
 
 /*
@@ -4805,8 +4995,18 @@ STASIS_EXPORT void stasis_end_frame(void) {
 
         /* Capture before present so we read the current render target. */
         capture_scheduled_screenshot();
-        stasis_perf_finish_render_sample();
-        SDL_RenderPresent(g_renderer);
+        const int measure_frame = stasis_host_performance_metrics_enabled();
+        if (measure_frame) {
+            const uint64_t host_finished = SDL_GetPerformanceCounter();
+            const uint64_t present_started = SDL_GetPerformanceCounter();
+            SDL_RenderPresent(g_renderer);
+            const uint64_t present_finished = SDL_GetPerformanceCounter();
+            stasis_perf_finish_render_sample(stasis_perf_elapsed_us(
+                g_perf_render_started_counter, host_finished),
+                stasis_perf_elapsed_us(present_started, present_finished));
+        } else {
+            SDL_RenderPresent(g_renderer);
+        }
         g_line_count = 0;
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -4818,8 +5018,18 @@ STASIS_EXPORT void stasis_end_frame(void) {
         }
         /* Capture after all draws (including postfx) but before swap. */
         capture_scheduled_screenshot();
-        stasis_perf_finish_render_sample();
-        SDL_GL_SwapWindow(g_window);
+        const int measure_frame = stasis_host_performance_metrics_enabled();
+        if (measure_frame) {
+            const uint64_t host_finished = SDL_GetPerformanceCounter();
+            const uint64_t present_started = SDL_GetPerformanceCounter();
+            SDL_GL_SwapWindow(g_window);
+            const uint64_t present_finished = SDL_GetPerformanceCounter();
+            stasis_perf_finish_render_sample(stasis_perf_elapsed_us(
+                g_perf_render_started_counter, host_finished),
+                stasis_perf_elapsed_us(present_started, present_finished));
+        } else {
+            SDL_GL_SwapWindow(g_window);
+        }
 #else
         /* STASIS_GRAPHICS_SDL_ONLY should never create a GL context. */
         g_line_count = 0;
@@ -5123,6 +5333,11 @@ static bool stasis_render_trace_is_enabled(void) {
 }
 
 static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+    /* Start before validation so a valid frame's host replay includes command
+     * validation and decoding. Rejected frames return before publishing a
+     * performance sample. */
+    const uint64_t host_started_counter = stasis_host_performance_metrics_enabled()
+        ? SDL_GetPerformanceCounter() : 0;
     StasisRenderValidation validation = stasis_render_validate(cmd_i32, cmd_f32);
     if (validation != STASIS_RENDER_VALID) {
         g_render_rejected_frames++;
@@ -5152,9 +5367,7 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
         cmd_i32[STASIS_RENDER_I_DISPLAY_GENERATION];
     g_render_last_density_generation =
         cmd_i32[STASIS_RENDER_I_DENSITY_GENERATION];
-    g_perf_render_started_counter = stasis_host_performance_metrics_enabled()
-        ? SDL_GetPerformanceCounter()
-        : 0;
+    g_perf_render_started_counter = host_started_counter;
 
     const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
     const int32_t gfx_cmd_max_lines = STASIS_RENDER_MAX_LINES;
@@ -5177,6 +5390,12 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
     if (sprite_count > gfx_cmd_max_sprites) sprite_count = gfx_cmd_max_sprites;
     if (text_count > gfx_cmd_max_text) text_count = gfx_cmd_max_text;
     if (text_bytes_used > gfx_cmd_max_text_bytes) text_bytes_used = gfx_cmd_max_text_bytes;
+
+    g_perf_pending_lines = (uint32_t)line_count;
+    g_perf_pending_rectangles = (uint32_t)rect_count;
+    g_perf_pending_sprites = (uint32_t)sprite_count;
+    g_perf_pending_text = (uint32_t)text_count;
+    g_perf_pending_commands = (uint32_t)(line_count + rect_count + sprite_count + text_count);
 
     if (!g_render_contract_logged) {
         SDL_Log(

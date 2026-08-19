@@ -1362,12 +1362,12 @@ def main() -> int:
     assert "event.getPointerCount() >= 3" in release_activity
     assert "nativeReadPerformanceMetrics" in release_activity
     assert "nativeReadRuntimeError" in release_activity
-    assert 'hudText.append("tick=")' in release_activity
-    assert 'hudText.append("  render=")' in release_activity
-    assert 'hudText.append("  total=")' in release_activity
-    assert 'hudText.append(" ms  budget@60fps=")' in release_activity
+    assert 'appendPhase(hudText, "guest render"' in release_activity
+    assert 'appendPhase(hudText, "host replay"' in release_activity
+    assert 'appendPhase(hudText, "frame work"' in release_activity
+    assert 'appendWorkload(hudText, "commands"' in release_activity
     assert "percentile(" not in release_activity
-    assert "performanceHud.setSingleLine(true)" in release_activity
+    assert "performanceHud.setSingleLine(false)" in release_activity
     assert "setOnApplyWindowInsetsListener" in release_activity
     assert "getDisplayCutout" in release_activity
     assert "verifyAssetManifest(staging)" in release_activity
@@ -1375,6 +1375,8 @@ def main() -> int:
     assert "MAX_MANIFEST_ASSETS = 4096" in release_activity
     assert "MAX_TOTAL_ASSET_BYTES" in release_activity
     assert "stasis_host_get_latest_performance_metrics" in release_bridge
+    assert "stasis_host_get_latest_performance_metrics_v1" in release_bridge
+    assert "stasis_performance_metrics.h" in release_bridge
     assert "stasis_host_copy_runtime_error" in release_bridge
     assert "drawSprites" in preview_renderer
     assert '"com.stasislang.pong"' in device_script

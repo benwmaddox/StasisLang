@@ -28,6 +28,7 @@ RUNTIME_FILES = (
     "stasis_asset_path.h",
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
+    "stasis_performance_metrics.h",
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",

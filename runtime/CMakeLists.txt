@@ -195,6 +195,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
     install(
         FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
+              stasis_performance_metrics.h
         DESTINATION include
     )
 endif()
@@ -236,6 +237,12 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     )
     target_include_directories(stasis_renderer_lifecycle_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME stasis_renderer_lifecycle_contract COMMAND stasis_renderer_lifecycle_test)
+    add_executable(
+        stasis_performance_metrics_test
+        tests/stasis_performance_metrics_test.c
+    )
+    target_include_directories(stasis_performance_metrics_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_performance_metrics_contract COMMAND stasis_performance_metrics_test)
     if(TARGET stasis_graphics_static)
         add_executable(
             stasis_asset_tasks_test
