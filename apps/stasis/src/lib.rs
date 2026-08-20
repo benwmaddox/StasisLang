@@ -56,6 +56,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -70,6 +71,98 @@ pub struct PlayProfileConfig {
     pub functions: Vec<String>,
     pub warmup_ticks: u64,
     pub output_path: Option<PathBuf>,
+}
+
+/// Fixed-rate capture inserted into the existing JIT play loop.
+///
+/// The runtime owns presentation and PNG encoding; the host only schedules one
+/// pre-present capture for each committed rendered frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayFrameCaptureConfig {
+    pub output_dir: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub frame_count: u64,
+}
+
+struct PlayCaptureEnvironment {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+static PLAY_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct PlayCurrentDirectoryGuard {
+    path: PathBuf,
+}
+
+impl Drop for PlayCurrentDirectoryGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.path);
+    }
+}
+
+impl PlayCaptureEnvironment {
+    fn install(config: &PlayFrameCaptureConfig) -> Result<Self, String> {
+        if config.width == 0 || config.height == 0 || config.fps == 0 || config.frame_count == 0 {
+            return Err(
+                "recording capture requires positive dimensions and frame count".to_string(),
+            );
+        }
+        let lock = PLAY_CAPTURE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "recording capture process lock is poisoned".to_string())?;
+        fs::create_dir_all(&config.output_dir).map_err(|error| {
+            format!(
+                "failed to create recording staging directory {}: {error}",
+                config.output_dir.display()
+            )
+        })?;
+        let names = [
+            "STASIS_RECORDING_WIDTH",
+            "STASIS_RECORDING_HEIGHT",
+            "STASIS_RECORDING_FPS",
+            "STASIS_RECORDING_PRESENTATION",
+            "STASIS_WINDOW_HIDDEN",
+            "STASIS_USE_SDL",
+            "STASIS_GFX_VSYNC",
+            "SDL_VIDEODRIVER",
+            "SDL_RENDER_DRIVER",
+        ];
+        let previous = names
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect();
+        std::env::set_var("STASIS_RECORDING_WIDTH", config.width.to_string());
+        std::env::set_var("STASIS_RECORDING_HEIGHT", config.height.to_string());
+        std::env::set_var("STASIS_RECORDING_FPS", config.fps.to_string());
+        std::env::set_var("STASIS_RECORDING_PRESENTATION", "1");
+        std::env::set_var("STASIS_WINDOW_HIDDEN", "1");
+        std::env::set_var("STASIS_USE_SDL", "1");
+        std::env::set_var("STASIS_GFX_VSYNC", "0");
+        std::env::set_var("SDL_VIDEODRIVER", "dummy");
+        std::env::set_var("SDL_RENDER_DRIVER", "software");
+        stasis_dynload::set_recording_clock(config.fps, 0);
+        Ok(Self {
+            previous,
+            _lock: lock,
+        })
+    }
+}
+
+impl Drop for PlayCaptureEnvironment {
+    fn drop(&mut self) {
+        stasis_dynload::clear_recording_clock();
+        for (name, value) in self.previous.drain(..).rev() {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1947,6 +2040,7 @@ pub fn run_play_in_process(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -1981,6 +2075,7 @@ pub fn run_play_in_process_with_window_title(
         tick_sleep_micros,
         max_ticks,
         Some(window_title),
+        None,
         None,
         None,
     )
@@ -2032,6 +2127,34 @@ pub fn run_play_in_process_with_input_script_and_window_title(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_input_script_window_title_profile_and_capture(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+    capture: PlayFrameCaptureConfig,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        profile,
+        None,
+        Some(capture),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run_play_in_process_with_input_script_window_title_and_profile(
     watch_file: &Path,
     watch_dir: Option<&Path>,
@@ -2053,6 +2176,7 @@ pub fn run_play_in_process_with_input_script_window_title_and_profile(
         max_ticks,
         window_title,
         profile,
+        None,
         None,
     )
 }
@@ -2099,6 +2223,7 @@ pub fn run_live_in_process_with_data(
         None,
         None,
         Some((server, config)),
+        None,
     )
 }
 
@@ -2114,10 +2239,14 @@ fn run_play_in_process_inner(
     window_title: Option<&str>,
     mut profile: Option<PlayProfileConfig>,
     live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
+    capture: Option<PlayFrameCaptureConfig>,
 ) -> Result<(), String> {
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
     let launch_dir = std::env::current_dir()
         .map_err(|error| format!("failed to read current directory before play launch: {error}"))?;
+    let _current_directory_guard = PlayCurrentDirectoryGuard {
+        path: launch_dir.clone(),
+    };
     if let Some(output_path) = profile
         .as_mut()
         .and_then(|profile| profile.output_path.as_mut())
@@ -2258,7 +2387,14 @@ fn run_play_in_process_inner(
         &mut host_req_window_h_px,
     );
 
+    let _capture_environment = capture
+        .as_ref()
+        .map(PlayCaptureEnvironment::install)
+        .transpose()?;
     let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
+    if let Some(capture) = capture.as_ref() {
+        gfx.set_recording_config(capture.width, capture.height, capture.fps)?;
+    }
     gfx.set_asset_root(prepared_asset_root.as_deref().unwrap_or(&project_root))?;
     let mut frame_evidence = DesktopFrameEvidence::from_env()?;
     let configured_title = window_title.or_else(|| {
@@ -2539,6 +2675,9 @@ fn run_play_in_process_inner(
             );
         }
 
+        if capture.is_some() {
+            stasis_dynload::set_recording_clock_frame(ticks_executed);
+        }
         gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
         if host_i32.get(9).copied().unwrap_or(0) != 0 {
             break;
@@ -2589,6 +2728,20 @@ fn run_play_in_process_inner(
 
         if measure_hud {
             gfx.host_set_performance_metrics(tick_micros, render_micros)?;
+        }
+        if let Some(capture) = capture.as_ref() {
+            let frame = ticks_executed.saturating_add(1);
+            if frame <= capture.frame_count {
+                let path = capture.output_dir.join(format!("frame-{frame:06}.png"));
+                stasis_dynload::schedule_runtime_screenshot(&path).map_err(|error| {
+                    format!(
+                        "recording capture stage failed for frame {frame} at {} ({}x{}): {error}",
+                        path.display(),
+                        capture.width,
+                        capture.height
+                    )
+                })?;
+            }
         }
         gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
         if let Some(evidence) = frame_evidence.as_mut() {
@@ -5244,6 +5397,37 @@ mod tests {
                 && STASIS_GRAPHICS_SOURCE.contains("capture_scheduled_screenshot();")
                 && STASIS_GRAPHICS_EXPORTS.contains("stasis_host_schedule_screenshot"),
             "Gauntlet captures must arm the existing pre-present screenshot path"
+        );
+    }
+
+    #[test]
+    fn recording_runtime_keeps_fixed_hidden_surface_and_logical_letterbox() {
+        for required in [
+            "STASIS_RECORDING_PRESENTATION",
+            "STASIS_RECORDING_FPS",
+            "stasis_set_recording_config",
+            "SDL_WINDOW_HIDDEN",
+            "SDL_SetRenderVSync(g_renderer, g_recording_presentation ? 0 : 1)",
+            "SDL_LOGICAL_PRESENTATION_LETTERBOX",
+            "if (g_recording_presentation)",
+            "stasis_recording_clock_us",
+            "micros > (uint64_t)INT_MAX ? INT_MAX",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "recording runtime contract should contain {required}"
+            );
+        }
+        let fullscreen = STASIS_GRAPHICS_SOURCE
+            .find("STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {")
+            .expect("fullscreen export");
+        let fullscreen_body = &STASIS_GRAPHICS_SOURCE[fullscreen..];
+        assert!(
+            fullscreen_body[..fullscreen_body
+                .find("bool result = SDL_SetWindowFullscreen")
+                .expect("fullscreen platform call")]
+                .contains("if (g_recording_presentation)"),
+            "recording fullscreen requests must not touch the hidden surface"
         );
     }
 

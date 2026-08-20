@@ -46,6 +46,7 @@ mod dap;
 mod gauntlet;
 mod headless;
 mod live_tui;
+mod record;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
@@ -213,6 +214,7 @@ const COMMANDS: &[&str] = &[
     "gauntlet",
     "validate",
     "run",
+    "record",
     "lsp",
     "dap",
     "tui",
@@ -343,6 +345,11 @@ enum ToolchainCommand {
         /// Run bounded ticks without wall-clock pacing (headless only).
         #[arg(long)]
         fast_forward: bool,
+    },
+    /// Render a deterministic fixed-rate headless PNG sequence or MP4 recording.
+    Record {
+        #[command(flatten)]
+        args: record::RecordArgs,
     },
     /// Run the persistent Stasis language server.
     Lsp {
@@ -961,6 +968,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Validate { .. } => "validate",
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
+        ToolchainCommand::Record { .. } => "record",
         ToolchainCommand::Lsp { .. } => "lsp",
         ToolchainCommand::Dap { .. } => "dap",
         ToolchainCommand::Tui { .. } => "tui",
@@ -1107,6 +1115,7 @@ fn execute(
                         run_workspace(&workspace, headless, ticks, fast_forward)
                     }
                 }
+                ToolchainCommand::Record { args } => record::execute(&workspace, args),
                 ToolchainCommand::Lsp { stdio } => {
                     if json_output {
                         Err("--json cannot be combined with lsp; LSP owns stdout".to_string())
@@ -6888,6 +6897,64 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn record_accepts_exact_sixty_fps_and_frame_count() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "record",
+            "src/main.stasis",
+            "--output",
+            "artifacts/frames",
+            "--width",
+            "640",
+            "--height",
+            "360",
+            "--fps",
+            "60",
+            "--frames",
+            "12",
+        ])
+        .expect("parse recording command");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::Record { args }
+                if args.entry == Some(PathBuf::from("src/main.stasis"))
+                    && args.width == 640
+                    && args.height == 360
+                    && args.fps == 60
+                    && args.frames == Some(12)
+                    && args.duration.is_none()
+        ));
+    }
+
+    #[test]
+    fn record_requires_one_duration_or_frame_count() {
+        assert!(ToolchainCli::try_parse_from([
+            "stasis", "record", "--output", "frames", "--width", "1", "--height", "1", "--fps",
+            "60"
+        ])
+        .is_err());
+        assert!(ToolchainCli::try_parse_from([
+            "stasis",
+            "record",
+            "--output",
+            "frames",
+            "--width",
+            "1",
+            "--height",
+            "1",
+            "--fps",
+            "60",
+            "--frames",
+            "1",
+            "--duration",
+            "1"
+        ])
+        .is_err());
     }
 
     #[test]
