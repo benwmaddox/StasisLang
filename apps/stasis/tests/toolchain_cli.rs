@@ -2711,10 +2711,10 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     fs::create_dir_all(project.join("assets")).expect("create asset directory");
 
     let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/render_parity");
-    let main_source = fs::read_to_string(sample.join("main.stasis"))
-        .expect("read render parity entry")
-        .replace("\"assets/", "\"../assets/");
-    fs::write(project.join("src/main.stasis"), main_source).expect("write nested entry");
+    let main_source =
+        fs::read_to_string(sample.join("main.stasis")).expect("read render parity entry");
+    let rooted_source = main_source.replace("\"assets/", "\"/assets/");
+    fs::write(project.join("src/main.stasis"), rooted_source).expect("write rooted entry");
     fs::copy(
         sample.join("frame.stasis"),
         project.join("src/frame.stasis"),
@@ -2739,6 +2739,28 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     .expect("write manifest");
     fs::write(project.join("live.commands"), ":quit\n").expect("write live script");
 
+    let rooted_output = stasis(
+        &[
+            "tui",
+            "demo/src/main.stasis",
+            "--live-script",
+            "live.commands",
+            "--live-json",
+        ],
+        &parent,
+    );
+    assert_eq!(
+        rooted_output.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&rooted_output.stdout),
+        String::from_utf8_lossy(&rooted_output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&rooted_output.stdout).contains("\"kind\":\"quitting\""));
+    assert!(!String::from_utf8_lossy(&rooted_output.stderr).contains("failed to open"));
+
+    let legacy_source = main_source.replace("\"assets/", "\"../assets/");
+    fs::write(project.join("src/main.stasis"), legacy_source).expect("write legacy entry");
     let output = stasis(
         &[
             "tui",

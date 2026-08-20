@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONTINUE_LOOP_PARITY: &str =
     include_str!("../../../tests/stasis/seams/continue_loop_parity.stasis");
+const ROOTED_WEB_ASSET: &str = "/assets/smoke.svg";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -645,6 +646,48 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     assert!(output.join("assets/smoke.ttf").is_file());
 
     fs::remove_dir_all(&output).expect("clean existing game web package");
+}
+
+#[test]
+fn rooted_web_asset_paths_emit_package_relative_assets() {
+    let root = repo_root();
+    let source_workspace = root.join("samples/windows_launch_smoke");
+    let workspace = root
+        .join("build")
+        .join(format!("web-rooted-assets-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("assets")).expect("create rooted web fixture");
+    for file in ["stasis.json", "main.stasis"] {
+        fs::copy(source_workspace.join(file), workspace.join(file)).expect("copy web fixture");
+    }
+    for file in ["manifest.json", "smoke.png", "smoke.svg", "smoke.ttf"] {
+        fs::copy(
+            source_workspace.join("assets").join(file),
+            workspace.join("assets").join(file),
+        )
+        .expect("copy web fixture asset");
+    }
+    let source = fs::read_to_string(workspace.join("main.stasis"))
+        .expect("read rooted web fixture source")
+        .replace("\"assets/smoke.svg\"", &format!("\"{ROOTED_WEB_ASSET}\""));
+    fs::write(workspace.join("main.stasis"), source).expect("write rooted web fixture source");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    assert!(
+        output.join("assets/smoke.svg").is_file(),
+        "rooted asset was not emitted at its package-relative key"
+    );
+    let runtime = fs::read_to_string(output.join("game.js")).expect("rooted web runtime");
+    assert!(
+        runtime.contains(&format!("\"{ROOTED_WEB_ASSET}\"")),
+        "rooted asset literal was not retained in runtime metadata"
+    );
+    assert!(
+        runtime.contains("value.startsWith(\"/assets/\")")
+            && runtime.contains("return value.slice(1)"),
+        "web runtime is missing the rooted-to-package-relative asset mapping"
+    );
+
+    fs::remove_dir_all(&workspace).expect("clean rooted web fixture");
 }
 
 #[test]
