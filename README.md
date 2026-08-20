@@ -362,9 +362,12 @@ stasis --workspace samples/windows_launch_smoke record main.stasis `
 ```
 
 An extensionless output is an atomically published, staged PNG sequence; `.mp4` uses
-FFmpeg H.264/yuv420p and requires `ffmpeg` on `PATH`. Recording uses the normal
-JIT/render path, zero tick sleep, fixed physical output dimensions, logical
-canvas letterboxing, and no visible or focused window. See
+FFmpeg H.264/yuv420p plus AAC and requires `ffmpeg` on `PATH`. MP4 audio is the
+existing game mixer rendered offline as deterministic 48 kHz stereo PCM16; no
+physical device or microphone is used. Recording uses the normal JIT/render path,
+zero tick sleep, fixed physical output dimensions, logical canvas letterboxing,
+and no visible or focused window. PNG mode does not stage offline audio, although
+guest code may still request its normal audio API. See
 [docs/headless_recording.md](docs/headless_recording.md).
 
 ## Installation and Setup

@@ -1513,6 +1513,7 @@ static int g_audio_underruns = 0;
 static int g_audio_channels = 2;
 static int g_audio_sample_rate = 48000;
 static int g_audio_target_latency_frames = 2048;
+#define STASIS_AUDIO_MAX_TARGET_LATENCY_FRAMES (1 << 20)
 static float* g_audio_ring = NULL;
 static int g_audio_ring_capacity_frames = 0;
 static int g_audio_ring_capacity_samples = 0;
@@ -1520,6 +1521,7 @@ static int g_audio_read_sample = 0;
 static int g_audio_write_sample = 0;
 static int g_audio_queued_samples = 0;
 static int64_t g_audio_running_frame_index = 0;
+static int g_recording_audio_enabled = 0;
 
 static StasisAudioAssetStore g_audio_assets;
 
@@ -1532,6 +1534,53 @@ static int stasis_audio_has_active_voice(void) {
 static int stasis_audio_maxi(int a, int b) { return a > b ? a : b; }
 static int stasis_audio_mini(int a, int b) { return a < b ? a : b; }
 
+static int stasis_audio_ensure_ring_init(void) {
+    if (g_audio_assets.next_asset_handle <= 0 || g_audio_assets.next_voice_handle <= 0) {
+        stasis_audio_assets_reset(&g_audio_assets);
+    }
+    if (g_audio_ring) return 1;
+
+    g_audio_channels = 2;
+    g_audio_target_latency_frames = stasis_audio_maxi(512, g_audio_target_latency_frames);
+    g_audio_ring_capacity_frames = stasis_audio_maxi(8192, g_audio_target_latency_frames * 4);
+    g_audio_ring_capacity_samples = g_audio_ring_capacity_frames * g_audio_channels;
+    g_audio_ring = (float*)malloc((size_t)g_audio_ring_capacity_samples * sizeof(float));
+    if (!g_audio_ring) {
+        g_audio_ring_capacity_frames = 0;
+        g_audio_ring_capacity_samples = 0;
+        return 0;
+    }
+    SDL_memset(g_audio_ring, 0, (size_t)g_audio_ring_capacity_samples * sizeof(float));
+    g_audio_read_sample = 0;
+    g_audio_write_sample = 0;
+    g_audio_queued_samples = 0;
+    g_audio_underruns = 0;
+    g_audio_running_frame_index = 0;
+    return 1;
+}
+
+static int stasis_audio_mix_output(float* output, int frame_count) {
+    if (!output || frame_count <= 0 || g_audio_channels <= 0 ||
+        !stasis_audio_ensure_ring_init()) return 0;
+    const int sample_count = frame_count * g_audio_channels;
+    SDL_memset(output, 0, (size_t)sample_count * sizeof(float));
+    const int available = stasis_audio_mini(sample_count, g_audio_queued_samples);
+    int copied = 0;
+    while (copied < available) {
+        int contiguous = g_audio_ring_capacity_samples - g_audio_read_sample;
+        int part = stasis_audio_mini(available - copied, contiguous);
+        SDL_memcpy(
+            &output[copied], &g_audio_ring[g_audio_read_sample],
+            (size_t)part * sizeof(float));
+        copied += part;
+        g_audio_read_sample = (g_audio_read_sample + part) % g_audio_ring_capacity_samples;
+        g_audio_queued_samples -= part;
+    }
+    stasis_audio_assets_mix(&g_audio_assets, output, frame_count, g_audio_sample_rate);
+    g_audio_running_frame_index += frame_count;
+    return frame_count;
+}
+
 static void SDLCALL stasis_audio_callback(
     void* userdata,
     SDL_AudioStream* stream,
@@ -1542,38 +1591,21 @@ static void SDLCALL stasis_audio_callback(
     (void)total_amount;
     if (!stream || additional_amount <= 0 || g_audio_channels <= 0) return;
 
-    int remaining_samples = additional_amount / (int)sizeof(float);
-    if (g_audio_queued_samples < remaining_samples && !stasis_audio_has_active_voice()) {
+    int remaining_frames = additional_amount / (int)sizeof(float) / g_audio_channels;
+    if (g_audio_queued_samples < remaining_frames * g_audio_channels &&
+        !stasis_audio_has_active_voice()) {
         g_audio_underruns++;
     }
 
     float output[1024];
-    while (remaining_samples > 0) {
-        int chunk = stasis_audio_mini(remaining_samples, (int)(sizeof(output) / sizeof(output[0])));
-        int available = stasis_audio_mini(chunk, g_audio_queued_samples);
-        int copied = 0;
-        while (copied < available) {
-            int contiguous = g_audio_ring_capacity_samples - g_audio_read_sample;
-            int part = stasis_audio_mini(available - copied, contiguous);
-            SDL_memcpy(
-                &output[copied], &g_audio_ring[g_audio_read_sample],
-                (size_t)part * sizeof(float));
-            copied += part;
-            g_audio_read_sample =
-                (g_audio_read_sample + part) % g_audio_ring_capacity_samples;
-            g_audio_queued_samples -= part;
-        }
-        if (copied < chunk) {
-            SDL_memset(&output[copied], 0, (size_t)(chunk - copied) * sizeof(float));
-        }
-        stasis_audio_assets_mix(
-            &g_audio_assets, output, chunk / g_audio_channels, g_audio_sample_rate);
-        if (!SDL_PutAudioStreamData(stream, output, chunk * (int)sizeof(float))) return;
-        remaining_samples -= chunk;
+    const int max_frames = (int)(sizeof(output) / sizeof(output[0])) / g_audio_channels;
+    while (remaining_frames > 0) {
+        int chunk = stasis_audio_mini(remaining_frames, max_frames);
+        if (stasis_audio_mix_output(output, chunk) != chunk) return;
+        if (!SDL_PutAudioStreamData(
+                stream, output, chunk * g_audio_channels * (int)sizeof(float))) return;
+        remaining_frames -= chunk;
     }
-
-    g_audio_running_frame_index +=
-        (additional_amount / (int)sizeof(float)) / g_audio_channels;
 }
 
 static void stasis_audio_shutdown_internal(void) {
@@ -1608,9 +1640,7 @@ static int stasis_audio_ensure_init(void) {
     if (stasis_audio_disabled()) {
         return 0;
     }
-    if (g_audio_assets.next_asset_handle <= 0 || g_audio_assets.next_voice_handle <= 0) {
-        stasis_audio_assets_reset(&g_audio_assets);
-    }
+    if (g_recording_audio_enabled) return stasis_audio_ensure_ring_init();
     if (g_audio_initialized && g_audio_stream) {
         return 1;
     }
@@ -1648,23 +1678,11 @@ static int stasis_audio_ensure_init(void) {
     g_audio_stream = stream;
     g_audio_channels = 2;
 
-    g_audio_target_latency_frames = stasis_audio_maxi(512, g_audio_target_latency_frames);
-    g_audio_ring_capacity_frames = stasis_audio_maxi(8192, g_audio_target_latency_frames * 4);
-    g_audio_ring_capacity_samples = g_audio_ring_capacity_frames * g_audio_channels;
-
-    g_audio_ring = (float*)malloc((size_t)g_audio_ring_capacity_samples * sizeof(float));
-    if (!g_audio_ring) {
+    if (!stasis_audio_ensure_ring_init()) {
         SDL_DestroyAudioStream(g_audio_stream);
         g_audio_stream = NULL;
         return 0;
     }
-    SDL_memset(g_audio_ring, 0, (size_t)g_audio_ring_capacity_samples * sizeof(float));
-
-    g_audio_read_sample = 0;
-    g_audio_write_sample = 0;
-    g_audio_queued_samples = 0;
-    g_audio_underruns = 0;
-    g_audio_running_frame_index = 0;
     g_audio_initialized = 1;
 
     if (!SDL_ResumeAudioStreamDevice(g_audio_stream)) {
@@ -3357,11 +3375,24 @@ static int stasis_asset_task_worker(void* unused) {
     }
 }
 
-static int stasis_asset_tasks_ensure_started(void) {
-    if (g_asset_task_thread) return 1;
+static int stasis_asset_tasks_ensure_storage(void) {
+    if (g_asset_task_mutex && g_asset_task_condition) return 1;
     g_asset_task_mutex = SDL_CreateMutex();
     g_asset_task_condition = SDL_CreateCondition();
     if (!g_asset_task_mutex || !g_asset_task_condition) goto fail;
+    return 1;
+
+fail:
+    if (g_asset_task_condition) SDL_DestroyCondition(g_asset_task_condition);
+    if (g_asset_task_mutex) SDL_DestroyMutex(g_asset_task_mutex);
+    g_asset_task_condition = NULL;
+    g_asset_task_mutex = NULL;
+    return 0;
+}
+
+static int stasis_asset_tasks_ensure_started(void) {
+    if (g_asset_task_thread) return 1;
+    if (!stasis_asset_tasks_ensure_storage()) return 0;
     g_asset_task_stop = 0;
     g_asset_task_thread = SDL_CreateThread(stasis_asset_task_worker, "stasis-assets", NULL);
     if (!g_asset_task_thread) goto fail;
@@ -3374,6 +3405,8 @@ fail:
     g_asset_task_mutex = NULL;
     return 0;
 }
+
+static StasisAssetTask* stasis_asset_task_find_locked(int task_id);
 
 static int stasis_asset_task_request(
     int kind,
@@ -3388,7 +3421,13 @@ static int stasis_asset_task_request(
     } else if (kind == STASIS_ASSET_KIND_AUDIO && !stasis_audio_ensure_init()) {
         return 0;
     }
-    if (!stasis_asset_tasks_ensure_started()) return 0;
+    const int synchronous_audio =
+        kind == STASIS_ASSET_KIND_AUDIO && g_recording_audio_enabled;
+    if (synchronous_audio) {
+        if (!stasis_asset_tasks_ensure_storage()) return 0;
+    } else if (!stasis_asset_tasks_ensure_started()) {
+        return 0;
+    }
 
     SDL_LockMutex(g_asset_task_mutex);
     int slot = -1;
@@ -3407,7 +3446,7 @@ static int stasis_asset_task_request(
     task->id = g_asset_task_next_id++;
     if (g_asset_task_next_id <= 0) g_asset_task_next_id = 1;
     task->kind = kind;
-    task->state = STASIS_ASSET_TASK_PENDING;
+    task->state = synchronous_audio ? STASIS_ASSET_TASK_LOADING : STASIS_ASSET_TASK_PENDING;
     task->max_w = max_w;
     task->max_h = max_h;
     task->raster_w = kind == STASIS_ASSET_KIND_SPRITE
@@ -3416,8 +3455,30 @@ static int stasis_asset_task_request(
         ? stasis_display_scaled_extent(max_h, g_pixel_scale) : 0;
     memcpy(task->path, resolved, strlen(resolved) + 1);
     int id = task->id;
-    SDL_SignalCondition(g_asset_task_condition);
     SDL_UnlockMutex(g_asset_task_mutex);
+    if (synchronous_audio) {
+        StasisDecodedAudio audio;
+        memset(&audio, 0, sizeof(audio));
+        const int ok = stasis_audio_decode(resolved, &audio);
+        SDL_LockMutex(g_asset_task_mutex);
+        task = stasis_asset_task_find_locked(id);
+        if (!task || task->release_requested || task->state == STASIS_ASSET_TASK_CANCELLED) {
+            stasis_audio_decoded_free(&audio);
+            if (task) stasis_asset_task_clear(task);
+        } else if (!ok) {
+            task->state = STASIS_ASSET_TASK_FAILED;
+            stasis_audio_decoded_free(&audio);
+        } else {
+            task->audio = audio;
+            task->state = STASIS_ASSET_TASK_DECODED;
+        }
+        SDL_UnlockMutex(g_asset_task_mutex);
+    } else {
+        SDL_LockMutex(g_asset_task_mutex);
+        task = stasis_asset_task_find_locked(id);
+        if (task) SDL_SignalCondition(g_asset_task_condition);
+        SDL_UnlockMutex(g_asset_task_mutex);
+    }
     return id;
 }
 
@@ -6132,10 +6193,10 @@ STASIS_EXPORT int stasis_asset_task_poll(int task_id) {
     int handle = 0;
     if (kind == STASIS_ASSET_KIND_SPRITE) {
         handle = stasis_gfx_publish_sprite_task(task);
-    } else if (kind == STASIS_ASSET_KIND_AUDIO && g_audio_stream) {
-        SDL_LockAudioStream(g_audio_stream);
+    } else if (kind == STASIS_ASSET_KIND_AUDIO && (g_audio_stream || g_recording_audio_enabled)) {
+        if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
         handle = stasis_audio_assets_store_decoded(&g_audio_assets, &task->audio);
-        SDL_UnlockAudioStream(g_audio_stream);
+        if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
     }
 
     SDL_LockMutex(g_asset_task_mutex);
@@ -6696,9 +6757,9 @@ STASIS_EXPORT int stasis_audio_load_wav(const char* path) {
         return 0;
     }
     if (!stasis_audio_ensure_init()) goto fail;
-    SDL_LockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     int handle = stasis_audio_assets_load_wav(&g_audio_assets, resolved);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
     if (handle == 0) {
         stasis_report_runtime_errorf("Audio failed to load: %s", path);
     }
@@ -6715,9 +6776,9 @@ static int stasis_audio_load_asset(const char* path) {
         return 0;
     }
     if (!stasis_audio_ensure_init()) return 0;
-    SDL_LockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     int handle = stasis_audio_assets_load(&g_audio_assets, resolved);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
     if (handle == 0) {
         stasis_report_runtime_errorf("Audio failed to load: %s", path);
     }
@@ -6725,10 +6786,10 @@ static int stasis_audio_load_asset(const char* path) {
 }
 
 STASIS_EXPORT void stasis_audio_release(int asset_handle) {
-    if (!g_audio_stream) return;
-    SDL_LockAudioStream(g_audio_stream);
+    if (!g_audio_stream && !g_recording_audio_enabled) return;
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     stasis_audio_assets_release(&g_audio_assets, asset_handle);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 }
 
 STASIS_EXPORT int stasis_audio_play(int asset_handle, int loop, float volume, float pan) {
@@ -6737,43 +6798,43 @@ STASIS_EXPORT int stasis_audio_play(int asset_handle, int loop, float volume, fl
     if (volume > 1.0f) volume = 1.0f;
     if (pan < -1.0f) pan = -1.0f;
     if (pan > 1.0f) pan = 1.0f;
-    SDL_LockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     int voice_handle = stasis_audio_assets_play(&g_audio_assets, asset_handle, loop, volume, pan);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
     return voice_handle;
 }
 
 STASIS_EXPORT void stasis_audio_stop(int voice_handle) {
-    if (!g_audio_stream) return;
-    SDL_LockAudioStream(g_audio_stream);
+    if (!g_audio_stream && !g_recording_audio_enabled) return;
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     stasis_audio_assets_stop_voice(&g_audio_assets, voice_handle);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 }
 
 STASIS_EXPORT int stasis_audio_voice_is_playing(int voice_handle) {
-    if (!g_audio_stream) return 0;
-    SDL_LockAudioStream(g_audio_stream);
+    if (!g_audio_stream && !g_recording_audio_enabled) return 0;
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     int playing = stasis_audio_assets_voice_is_playing(&g_audio_assets, voice_handle);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
     return playing;
 }
 
 STASIS_EXPORT void stasis_audio_voice_set_paused(int voice_handle, int paused) {
-    if (!g_audio_stream) return;
-    SDL_LockAudioStream(g_audio_stream);
+    if (!g_audio_stream && !g_recording_audio_enabled) return;
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     stasis_audio_assets_voice_set_paused(&g_audio_assets, voice_handle, paused);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 }
 
 STASIS_EXPORT void stasis_audio_voice_set_volume_pan(int voice_handle, float volume, float pan) {
-    if (!g_audio_stream) return;
+    if (!g_audio_stream && !g_recording_audio_enabled) return;
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
     if (pan < -1.0f) pan = -1.0f;
     if (pan > 1.0f) pan = 1.0f;
-    SDL_LockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     stasis_audio_assets_voice_set_volume_pan(&g_audio_assets, voice_handle, volume, pan);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 }
 
 /* Brickout-compatible convenience API. Both categories use the same bounded WAV/MP3 asset
@@ -6787,34 +6848,34 @@ STASIS_EXPORT int stasis_audio_load_effect(const char* path) {
 }
 
 STASIS_EXPORT int stasis_audio_play_music(int asset_handle, int loop, float volume) {
-    if (!g_audio_stream) {
+    if (!g_audio_stream && !g_recording_audio_enabled) {
         return stasis_audio_play(asset_handle, loop, volume, 0.0f) > 0;
     }
-    SDL_LockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     stasis_audio_assets_stop_asset(&g_audio_assets, asset_handle);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
     return stasis_audio_play(asset_handle, loop, volume, 0.0f) > 0;
 }
 
 STASIS_EXPORT void stasis_audio_stop_music(int asset_handle) {
-    if (!g_audio_stream) return;
-    SDL_LockAudioStream(g_audio_stream);
+    if (!g_audio_stream && !g_recording_audio_enabled) return;
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     stasis_audio_assets_stop_asset(&g_audio_assets, asset_handle);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 }
 
 STASIS_EXPORT void stasis_audio_pause_music(int asset_handle, int paused) {
-    if (!g_audio_stream) return;
-    SDL_LockAudioStream(g_audio_stream);
+    if (!g_audio_stream && !g_recording_audio_enabled) return;
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     stasis_audio_assets_set_asset_paused(&g_audio_assets, asset_handle, paused);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 }
 
 STASIS_EXPORT void stasis_audio_set_music_volume(int asset_handle, float volume) {
-    if (!g_audio_stream) return;
-    SDL_LockAudioStream(g_audio_stream);
+    if (!g_audio_stream && !g_recording_audio_enabled) return;
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     stasis_audio_assets_set_asset_volume(&g_audio_assets, asset_handle, volume);
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 }
 
 STASIS_EXPORT int stasis_audio_play_effect(int asset_handle, float volume) {
@@ -6822,11 +6883,16 @@ STASIS_EXPORT int stasis_audio_play_effect(int asset_handle, float volume) {
 }
 
 STASIS_EXPORT int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) {
-    if (sample_rate > 0) g_audio_sample_rate = sample_rate;
     if (channels != 0 && channels != 2) return 0;
+    if (target_latency_frames > STASIS_AUDIO_MAX_TARGET_LATENCY_FRAMES) return 0;
+    if (g_recording_audio_enabled && sample_rate > 0 && sample_rate != 48000) return 0;
+    if (sample_rate > 0) g_audio_sample_rate = sample_rate;
     g_audio_channels = 2;
     if (target_latency_frames > 0) g_audio_target_latency_frames = target_latency_frames;
 
+    if (g_recording_audio_enabled) {
+        return stasis_audio_ensure_ring_init();
+    }
     if (g_audio_stream) {
         stasis_audio_shutdown_internal();
     }
@@ -6839,20 +6905,27 @@ STASIS_EXPORT void stasis_audio_shutdown(void) {
 }
 
 STASIS_EXPORT int stasis_audio_is_available(void) {
+    if (g_recording_audio_enabled) return stasis_audio_ensure_ring_init();
     return stasis_audio_ensure_init();
 }
 
 STASIS_EXPORT int stasis_audio_get_sample_rate(void) {
+    if (g_recording_audio_enabled) return g_audio_sample_rate;
     if (!stasis_audio_ensure_init()) return 0;
     return g_audio_sample_rate;
 }
 
 STASIS_EXPORT int stasis_audio_get_channels(void) {
+    if (g_recording_audio_enabled) return g_audio_channels;
     if (!stasis_audio_ensure_init()) return 0;
     return g_audio_channels;
 }
 
 STASIS_EXPORT int stasis_audio_get_queued_frames(void) {
+    if (g_recording_audio_enabled) {
+        if (!stasis_audio_ensure_ring_init() || g_audio_channels <= 0) return 0;
+        return g_audio_queued_samples / g_audio_channels;
+    }
     if (!stasis_audio_ensure_init()) return 0;
 
     int queued = 0;
@@ -6865,6 +6938,7 @@ STASIS_EXPORT int stasis_audio_get_queued_frames(void) {
 }
 
 STASIS_EXPORT int stasis_audio_get_underruns(void) {
+    if (g_recording_audio_enabled) return 0;
     if (!stasis_audio_ensure_init()) return 0;
 
     int underruns = 0;
@@ -6876,12 +6950,16 @@ STASIS_EXPORT int stasis_audio_get_underruns(void) {
 
 STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr, int frame_count) {
     if (!interleaved_lr || frame_count <= 0) return 0;
-    if (!stasis_audio_ensure_init()) return 0;
+    if (g_recording_audio_enabled) {
+        if (!stasis_audio_ensure_ring_init()) return 0;
+    } else if (!stasis_audio_ensure_init()) {
+        return 0;
+    }
 
     int accepted_samples = 0;
     const int requested_samples = frame_count * g_audio_channels;
 
-    SDL_LockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_LockAudioStream(g_audio_stream);
     int free_samples = g_audio_ring_capacity_samples - g_audio_queued_samples;
     int to_write = stasis_audio_mini(requested_samples, free_samples);
 
@@ -6894,10 +6972,32 @@ STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr,
         accepted_samples += chunk;
         to_write -= chunk;
     }
-    SDL_UnlockAudioStream(g_audio_stream);
+    if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 
     if (g_audio_channels <= 0) return 0;
     return accepted_samples / g_audio_channels;
+}
+
+STASIS_EXPORT int stasis_set_recording_audio_config(int enabled) {
+    if (g_audio_stream || g_audio_initialized) return 0;
+    if (!enabled && g_recording_audio_enabled) {
+        stasis_asset_tasks_shutdown();
+        stasis_audio_shutdown_internal();
+    }
+    g_recording_audio_enabled = enabled != 0;
+    if (g_recording_audio_enabled) {
+        g_audio_sample_rate = 48000;
+        g_audio_channels = 2;
+    }
+    return 1;
+}
+
+STASIS_EXPORT int stasis_recording_audio_pull_f32_interleaved(
+    float* output_stereo,
+    int frame_count
+) {
+    if (!g_recording_audio_enabled || !output_stereo || frame_count <= 0) return 0;
+    return stasis_audio_mix_output(output_stereo, frame_count);
 }
 
 /*

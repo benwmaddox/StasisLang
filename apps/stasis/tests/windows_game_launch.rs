@@ -120,6 +120,42 @@ fn configure_capture(command: &mut Command, screenshot: &Path, exit_after: bool)
     }
 }
 
+fn ffmpeg_directory(root: &Path) -> Option<PathBuf> {
+    let code_root = root.parent().and_then(Path::parent).unwrap_or(root);
+    for bundled in [
+        code_root.join("ffmpeg-9.0.1-essentials_build/bin"),
+        code_root.join("ffmpeg-9.0.1-essentials_build/ffmpeg-9.0.1-essentials_build/bin"),
+    ] {
+        if bundled.join("ffmpeg.exe").is_file() && bundled.join("ffprobe.exe").is_file() {
+            return Some(bundled);
+        }
+    }
+    let ffmpeg = Command::new("ffmpeg").arg("-version").output().ok();
+    let ffprobe = Command::new("ffprobe").arg("-version").output().ok();
+    if ffmpeg
+        .as_ref()
+        .is_some_and(|output| output.status.success())
+        && ffprobe
+            .as_ref()
+            .is_some_and(|output| output.status.success())
+    {
+        Some(PathBuf::from(""))
+    } else {
+        None
+    }
+}
+
+fn add_ffmpeg_path(command: &mut Command, directory: &Path) {
+    if !directory.as_os_str().is_empty() {
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = std::env::split_paths(&current).collect::<Vec<_>>();
+        paths.insert(0, directory.to_path_buf());
+        if let Ok(path) = std::env::join_paths(paths) {
+            command.env("PATH", path);
+        }
+    }
+}
+
 fn assert_launch(description: &str, completed: CompletedProcess, screenshot: &Path) {
     let stdout = String::from_utf8_lossy(&completed.stdout);
     let stderr = String::from_utf8_lossy(&completed.stderr);
@@ -637,11 +673,12 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
         fs::read(&recording_frames(&scripted_again)[0]).expect("repeated frame bytes")
     );
 
-    if Command::new("ffmpeg").arg("-version").output().is_ok() {
+    if let Some(ffmpeg_dir) = ffmpeg_directory(&root) {
         let mp4 = test_tree.0.join("recording.mp4");
         let mp4_run = launch(
             {
                 let mut command = stasis_command(&project);
+                add_ffmpeg_path(&mut command, &ffmpeg_dir);
                 command.args([
                     "record",
                     "main.stasis",
@@ -662,8 +699,13 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
         );
         assert!(mp4_run.status.success(), "MP4 recording failed");
         assert!(fs::metadata(&mp4).expect("MP4 artifact").len() > 0);
-        if Command::new("ffprobe").arg("-version").output().is_ok() {
-            let probe = Command::new("ffprobe")
+        let ffprobe = if ffmpeg_dir.as_os_str().is_empty() {
+            PathBuf::from("ffprobe")
+        } else {
+            ffmpeg_dir.join("ffprobe.exe")
+        };
+        if Command::new(&ffprobe).arg("-version").output().is_ok() {
+            let probe = Command::new(&ffprobe)
                 .args([
                     "-v",
                     "error",
@@ -688,10 +730,199 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
                 probe_text.lines().any(|line| line.trim() == "3"),
                 "unexpected MP4 frame count: {probe_text}"
             );
+            let audio_probe = Command::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=codec_name,sample_rate,channels",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                ])
+                .arg(&mp4)
+                .output()
+                .expect("run audio ffprobe");
+            assert!(audio_probe.status.success(), "audio ffprobe failed");
+            let audio_text = String::from_utf8_lossy(&audio_probe.stdout);
+            assert!(
+                audio_text.contains("aac"),
+                "unexpected audio codec: {audio_text}"
+            );
+            assert!(
+                audio_text.contains("48000"),
+                "unexpected audio rate: {audio_text}"
+            );
+            assert!(
+                audio_text.lines().any(|line| line.trim() == "2"),
+                "unexpected audio channels: {audio_text}"
+            );
         }
     } else {
         eprintln!("ffmpeg unavailable; MP4 artifact validation skipped");
     }
+}
+
+#[test]
+fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
+    let root = repository_root();
+    let Some(ffmpeg_dir) = ffmpeg_directory(&root) else {
+        eprintln!("audio recording integration skipped: FFmpeg is unavailable");
+        return;
+    };
+    let runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            let path = root.join("runtime/build/bin/Release/stasis_graphics.dll");
+            path.is_file().then_some(path)
+        });
+    let Some(runtime) = runtime else {
+        eprintln!("audio recording integration skipped: graphics runtime is unavailable");
+        return;
+    };
+    let fixture = root.join("samples/audio_asset_playback");
+    let test_tree = TestTree(temp_dir("audio_recording"));
+    let project = test_tree.0.join("audio_asset_playback");
+    copy_tree(&fixture, &project);
+    copy_tree(&root.join("src"), &project.join("vendor/stasis/src"));
+
+    let record = |output: &Path, label: &str| {
+        let mut command = stasis_command(&project);
+        command.env("STASIS_RUNTIME_DLL_PATH", &runtime);
+        add_ffmpeg_path(&mut command, &ffmpeg_dir);
+        command.args([
+            "record",
+            "audio_asset_playback.stasis",
+            "--output",
+            output.to_str().unwrap(),
+            "--width",
+            "480",
+            "--height",
+            "270",
+            "--fps",
+            "60",
+            "--frames",
+            "60",
+        ]);
+        let completed = launch(command, label);
+        assert!(
+            completed.status.success(),
+            "{label} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&completed.stdout),
+            String::from_utf8_lossy(&completed.stderr)
+        );
+    };
+    let first = test_tree.0.join("audio-first.mp4");
+    let second = test_tree.0.join("audio-second.mp4");
+    record(&first, "audio recording first");
+    record(&second, "audio recording repeat");
+
+    let ffprobe = if ffmpeg_dir.as_os_str().is_empty() {
+        PathBuf::from("ffprobe")
+    } else {
+        ffmpeg_dir.join("ffprobe.exe")
+    };
+    let probe = |path: &Path, selector: &str, entries: &str| -> String {
+        let output = Command::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                selector,
+                "-show_entries",
+                entries,
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(path)
+            .output()
+            .expect("run ffprobe");
+        assert!(
+            output.status.success(),
+            "ffprobe failed: {:?}",
+            output.status
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let video = probe(
+        &first,
+        "v:0",
+        "stream=codec_name,r_frame_rate,nb_read_frames,start_time,duration",
+    );
+    assert!(video.contains("h264"), "unexpected video stream: {video}");
+    assert!(video.contains("60/1"), "unexpected video rate: {video}");
+    assert!(
+        video.lines().any(|line| line.trim() == "60"),
+        "unexpected video count: {video}"
+    );
+    assert!(
+        video.lines().any(|line| line.trim() == "0.000000"),
+        "unexpected video start: {video}"
+    );
+    let audio = probe(
+        &first,
+        "a:0",
+        "stream=codec_name,sample_rate,channels,start_time,duration",
+    );
+    assert!(audio.contains("aac"), "unexpected audio stream: {audio}");
+    assert!(audio.contains("48000"), "unexpected audio rate: {audio}");
+    assert!(
+        audio.lines().any(|line| line.trim() == "2"),
+        "unexpected audio channels: {audio}"
+    );
+    assert!(
+        audio.lines().any(|line| line.trim() == "0.000000"),
+        "unexpected audio start: {audio}"
+    );
+    let video_duration = video
+        .lines()
+        .last()
+        .expect("video duration")
+        .trim()
+        .parse::<f64>()
+        .expect("numeric video duration");
+    let audio_duration = audio
+        .lines()
+        .last()
+        .expect("audio duration")
+        .trim()
+        .parse::<f64>()
+        .expect("numeric audio duration");
+    assert!(
+        (video_duration - 1.0).abs() < 0.02,
+        "video duration {video_duration}"
+    );
+    assert!(
+        (audio_duration - video_duration).abs() <= 1024.0 / 48_000.0,
+        "A/V duration mismatch: {audio_duration} vs {video_duration}"
+    );
+
+    let decode = |path: &Path| {
+        let output = Command::new(if ffmpeg_dir.as_os_str().is_empty() {
+            PathBuf::from("ffmpeg")
+        } else {
+            ffmpeg_dir.join("ffmpeg.exe")
+        })
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:a:0", "-f", "s16le", "-acodec", "pcm_s16le", "-"])
+        .output()
+        .expect("decode audio");
+        assert!(output.status.success(), "audio decode failed");
+        output.stdout
+    };
+    let first_pcm = decode(&first);
+    let second_pcm = decode(&second);
+    assert!(
+        !first_pcm.is_empty()
+            && first_pcm
+                .chunks_exact(2)
+                .any(|sample| i16::from_le_bytes([sample[0], sample[1]]) != 0)
+    );
+    assert_eq!(first_pcm, second_pcm, "recorded PCM must be repeatable");
 }
 
 fn recording_frames(directory: &Path) -> Vec<PathBuf> {

@@ -261,6 +261,16 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
             PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy"
         )
         add_executable(
+            stasis_recording_audio_test
+            tests/stasis_recording_audio_test.c
+        )
+        target_link_libraries(stasis_recording_audio_test PRIVATE stasis_graphics_static)
+        target_compile_definitions(
+            stasis_recording_audio_test
+            PRIVATE STASIS_TEST_AUDIO_PATH="${CMAKE_SOURCE_DIR}/../samples/audio_asset_playback/assets/tone.wav"
+        )
+        add_test(NAME stasis_recording_audio_contract COMMAND stasis_recording_audio_test)
+        add_executable(
             stasis_font_cache_test
             tests/stasis_font_cache_test.c
         )

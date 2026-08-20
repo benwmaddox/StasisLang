@@ -1141,6 +1141,8 @@ pub struct StasisGraphicsApi {
     stasis_host_set_performance_metrics: usize,
     stasis_gfx_submit_u8: usize,
     stasis_set_recording_config: Option<usize>,
+    stasis_set_recording_audio_config: Option<usize>,
+    stasis_recording_audio_pull_f32_interleaved: Option<usize>,
     stasis_test_get_render_submission_state: Option<usize>,
     stasis_gfx_notify_file_changed: Option<usize>,
     stasis_sleep_ms: usize,
@@ -1179,6 +1181,11 @@ impl StasisGraphicsApi {
             lib.symbol_address("stasis_host_performance_metrics_enabled")?;
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
         let stasis_set_recording_config = lib.symbol_address("stasis_set_recording_config").ok();
+        let stasis_set_recording_audio_config =
+            lib.symbol_address("stasis_set_recording_audio_config").ok();
+        let stasis_recording_audio_pull_f32_interleaved = lib
+            .symbol_address("stasis_recording_audio_pull_f32_interleaved")
+            .ok();
         let stasis_test_get_render_submission_state = lib
             .symbol_address("stasis_test_get_render_submission_state")
             .ok();
@@ -1196,6 +1203,8 @@ impl StasisGraphicsApi {
             stasis_host_set_performance_metrics,
             stasis_gfx_submit_u8,
             stasis_set_recording_config,
+            stasis_set_recording_audio_config,
+            stasis_recording_audio_pull_f32_interleaved,
             stasis_test_get_render_submission_state,
             stasis_gfx_notify_file_changed,
             stasis_sleep_ms,
@@ -1244,6 +1253,62 @@ impl StasisGraphicsApi {
             }
             Ok(())
         }
+    }
+
+    pub fn set_recording_audio_config(&self, enabled: bool) -> Result<(), String> {
+        let symbol = self.stasis_set_recording_audio_config.ok_or_else(|| {
+            "graphics runtime lacks offline recording audio configuration support".to_string()
+        })?;
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+            if callback(if enabled { 1 } else { 0 }) == 0 {
+                return Err(
+                    "graphics runtime rejected offline recording audio configuration".to_string(),
+                );
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+            if callback(if enabled { 1 } else { 0 }) == 0 {
+                return Err(
+                    "graphics runtime rejected offline recording audio configuration".to_string(),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    pub fn pull_recording_audio_f32_interleaved(
+        &self,
+        output: &mut [f32],
+    ) -> Result<usize, String> {
+        if output.len() % 2 != 0 {
+            return Err("recording audio output must contain stereo samples".to_string());
+        }
+        let symbol = self
+            .stasis_recording_audio_pull_f32_interleaved
+            .ok_or_else(|| {
+                "graphics runtime lacks offline recording audio pull support".to_string()
+            })?;
+        let frame_count = output.len() / 2;
+        if frame_count > i32::MAX as usize {
+            return Err("recording audio pull exceeds runtime frame-count bound".to_string());
+        }
+        #[cfg(windows)]
+        let callback: extern "system" fn(*mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(symbol) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*mut f32, i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+        let accepted = callback(output.as_mut_ptr(), frame_count as i32);
+        if accepted < 0 || accepted as usize != frame_count {
+            return Err(format!(
+                "graphics runtime returned {accepted} recording audio frames, expected {frame_count}"
+            ));
+        }
+        Ok(accepted as usize)
     }
 
     pub fn set_asset_root(&self, path: &Path) -> Result<(), String> {

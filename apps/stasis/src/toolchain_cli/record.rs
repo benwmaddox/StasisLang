@@ -6,6 +6,7 @@ use stasis::{
     run_play_in_process_with_input_script_window_title_profile_and_capture, PlayFrameCaptureConfig,
 };
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,7 +20,7 @@ pub(super) struct RecordArgs {
     /// Override the manifest entry with a project-relative .stasis file.
     #[arg(value_name = "ENTRY")]
     pub(super) entry: Option<PathBuf>,
-    /// Output directory for PNG frames, or an .mp4 file for H.264 encoding.
+    /// Output directory for PNG frames, or an .mp4 file for H.264/AAC encoding.
     #[arg(long, value_name = "PATH")]
     pub(super) output: PathBuf,
     #[arg(long, value_name = "PIXELS")]
@@ -75,6 +76,18 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             args.width, args.height
         ));
     }
+    if kind == OutputKind::Mp4 {
+        let audio_frames = frame_count
+            .checked_mul(48_000)
+            .ok_or_else(|| "MP4 recording audio sample schedule overflow".to_string())?
+            / u64::from(args.fps);
+        let audio_bytes = audio_frames
+            .checked_mul(4)
+            .ok_or_else(|| "MP4 recording WAV size overflow".to_string())?;
+        if audio_bytes > u64::from(u32::MAX) - 36 {
+            return Err("MP4 recording exceeds the bounded 4 GiB WAV staging limit".to_string());
+        }
+    }
     let entry = resolve_entry(workspace, args.entry.as_deref())?;
     let input_script = args
         .input_script
@@ -113,6 +126,7 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             height: args.height,
             fps: args.fps,
             frame_count,
+            audio_output: (kind == OutputKind::Mp4).then(|| stage_root.join("audio.wav")),
         },
     );
     if let Err(error) = result {
@@ -136,6 +150,16 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             args.fps,
             output.display()
         ));
+    }
+    if kind == OutputKind::Mp4 {
+        let audio_path = stage_root.join("audio.wav");
+        if let Err(error) = validate_wav(&audio_path, args.fps, frame_count) {
+            cleanup_stage(&stage_root);
+            return Err(format!(
+                "recording audio validation failed (48 kHz stereo PCM16, output {}): {error}",
+                output.display()
+            ));
+        }
     }
 
     // The stage is complete before this atomic same-volume no-replace rename.
@@ -339,6 +363,47 @@ fn validate_frames(
     Ok(())
 }
 
+fn validate_wav(path: &Path, fps: u32, frame_count: u64) -> Result<(), String> {
+    let mut file =
+        fs::File::open(path).map_err(|error| format!("failed to open staged WAV: {error}"))?;
+    let mut header = [0u8; 44];
+    file.read_exact(&mut header)
+        .map_err(|error| format!("failed to read staged WAV header: {error}"))?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return Err("WAV header is missing RIFF/WAVE signatures".to_string());
+    }
+    if &header[12..16] != b"fmt " || u16::from_le_bytes([header[20], header[21]]) != 1 {
+        return Err("WAV is not uncompressed PCM".to_string());
+    }
+    let channels = u16::from_le_bytes([header[22], header[23]]);
+    let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
+    let bits = u16::from_le_bytes([header[34], header[35]]);
+    let data_size = u32::from_le_bytes([header[40], header[41], header[42], header[43]]) as u64;
+    let file_size = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect staged WAV: {error}"))?
+        .len();
+    let expected_frames = frame_count
+        .checked_mul(48_000)
+        .ok_or_else(|| "WAV sample schedule overflow".to_string())?
+        / u64::from(fps);
+    let expected_bytes = expected_frames
+        .checked_mul(4)
+        .ok_or_else(|| "WAV size overflow".to_string())?;
+    if channels != 2 || sample_rate != 48_000 || bits != 16 {
+        return Err(format!(
+            "expected PCM16 48 kHz stereo, got channels={channels} rate={sample_rate} bits={bits}"
+        ));
+    }
+    if data_size != expected_bytes || file_size != 44 + data_size {
+        return Err(format!(
+            "expected {expected_frames} audio frames ({expected_bytes} bytes), got {} bytes",
+            data_size
+        ));
+    }
+    Ok(())
+}
+
 fn encode_mp4(
     frames_dir: &Path,
     stage_root: &Path,
@@ -348,8 +413,15 @@ fn encode_mp4(
 ) -> Result<(), String> {
     let staged_output = stage_root.join("recording.mp4");
     let pattern = frames_dir.join("frame-%06d.png");
+    let audio = stage_root.join("audio.wav");
     let command = Command::new("ffmpeg")
-        .args(ffmpeg_args(&pattern, &staged_output, fps, frame_count))
+        .args(ffmpeg_args(
+            &pattern,
+            &audio,
+            &staged_output,
+            fps,
+            frame_count,
+        ))
         .output()
         .map_err(|error| format!("MP4 encoder failure: could not start ffmpeg: {error}"))?;
     if !command.status.success() {
@@ -391,7 +463,13 @@ fn encode_mp4(
     Ok(())
 }
 
-fn ffmpeg_args(pattern: &Path, output: &Path, fps: u32, frame_count: u64) -> Vec<String> {
+fn ffmpeg_args(
+    pattern: &Path,
+    audio: &Path,
+    output: &Path,
+    fps: u32,
+    frame_count: u64,
+) -> Vec<String> {
     vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
@@ -401,15 +479,27 @@ fn ffmpeg_args(pattern: &Path, output: &Path, fps: u32, frame_count: u64) -> Vec
         fps.to_string(),
         "-i".to_string(),
         pattern.display().to_string(),
+        "-i".to_string(),
+        audio.display().to_string(),
+        "-map".to_string(),
+        "0:v:0".to_string(),
+        "-map".to_string(),
+        "1:a:0".to_string(),
         "-frames:v".to_string(),
         frame_count.to_string(),
         "-c:v".to_string(),
         "libx264".to_string(),
         "-pix_fmt".to_string(),
         "yuv420p".to_string(),
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-ar".to_string(),
+        "48000".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
         "-r".to_string(),
         fps.to_string(),
-        "-an".to_string(),
+        "-shortest".to_string(),
         "-f".to_string(),
         "mp4".to_string(),
         output.display().to_string(),
@@ -468,6 +558,7 @@ mod tests {
     fn ffmpeg_contract_preserves_exact_rate_and_count() {
         let args = ffmpeg_args(
             Path::new("frames/frame-%06d.png"),
+            Path::new("audio.wav"),
             Path::new("out.mp4"),
             59,
             177,
@@ -484,5 +575,20 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "-pix_fmt" && pair[1] == "yuv420p"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-map" && pair[1] == "0:v:0"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-map" && pair[1] == "1:a:0"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c:a" && pair[1] == "aac"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-ar" && pair[1] == "48000"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-ac" && pair[1] == "2"));
     }
 }
