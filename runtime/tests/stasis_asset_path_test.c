@@ -19,6 +19,8 @@ int main(void) {
     CHECK_PATH("../../assets/sprites/unit.svg", "assets/sprites/unit.svg");
     CHECK_PATH("src/../assets/ball.svg", "assets/ball.svg");
     CHECK_PATH("./assets\\ball.svg", "assets/ball.svg");
+    CHECK_PATH("/assets/ball.svg", "assets/ball.svg");
+    CHECK_PATH("/assets/fonts/../ball.svg", "assets/ball.svg");
 
     char too_small[4] = {0};
     if (stasis_asset_normalize_relative_path("assets/ball.svg", too_small, sizeof(too_small))) {
@@ -28,6 +30,8 @@ int main(void) {
     char absolute[128] = {0};
     if (stasis_asset_normalize_relative_path("/tmp/ball.svg", absolute, sizeof(absolute)) ||
         stasis_asset_normalize_relative_path("C:\\tmp\\ball.svg", absolute, sizeof(absolute)) ||
+        stasis_asset_normalize_relative_path("C:tmp\\ball.svg", absolute, sizeof(absolute)) ||
+        stasis_asset_normalize_relative_path("/assets/../../tmp/ball.svg", absolute, sizeof(absolute)) ||
         stasis_asset_normalize_relative_path("\\\\server\\share\\ball.svg", absolute, sizeof(absolute))) {
         fprintf(stderr, "absolute asset path unexpectedly accepted\n");
         return 1;

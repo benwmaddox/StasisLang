@@ -67,7 +67,7 @@ Preparation writes only beneath the build output; project masters and the source
 
 `stasis play` prepares the same bundle beneath `.stasis_cache/play-assets` before guest startup and mirrors the source directory's position relative to the project root. Existing source-relative paths such as `../assets/images/hero.png` therefore resolve to prepared output without source rewriting. Resized cache hits do not decode the master again. Development builds stage the complete declared manifest so iterative and optional paths remain available.
 
-Static `@asset_path` validation uses the active program entry's source directory as that same runtime boundary, including when the annotated loader call lives in a nested imported module. The declaring module and project root remain compatibility fallbacks, but they do not replace the entry boundary used by play and packaging.
+Static `@asset_path` validation uses the active program entry's source directory as that same runtime boundary, including when the annotated loader call lives in a nested imported module. The declaring module and project root remain compatibility fallbacks, but they do not replace the entry boundary used by play and packaging. A leading `/assets/...` is a portable virtual project-root spelling: it is treated exactly like the canonical `assets/...` path and never as a host filesystem root. It is resolved only against the project's canonical `assets/` directory, including when the annotated call lives in a nested module.
 
 `stasis check`, tests, development builds, release builds, and mobile/desktop packages
 consume one compiler-owned asset-reference result. Asset loader declarations mark their path
@@ -76,8 +76,9 @@ metadata, and supported legacy loader names remain compatible. Arbitrary string 
 treated as assets.
 
 Static references in the entry module's reachable graph are validated before output publication.
-Each path resolves first relative to its declaring source module and then from the project root,
-must remain beneath `assets/`, must name a regular file with exact disk casing on every host, and,
+Each relative path resolves first relative to its declaring source module and then from the project root;
+each `/assets/...` path resolves from the project root only. Every path must remain beneath `assets/`,
+must name a regular file with exact disk casing on every host, and,
 when a manifest exists, must name a declared entry. Release outputs retain only those validated
 paths plus transitive manifest dependencies. Test roots use the same rules; test-only and
 unreachable production modules do not enlarge a release package.
@@ -95,7 +96,7 @@ The package contains only the selected display envelope's output, not multiple r
 
 - IDs are 1-128 ASCII letters, digits, `.`, `_`, or `-` and are unique within a project.
 - Runtime handles are the nonzero FNV-1a 32-bit hash of `<kind>:<id>`. Load fails if two entries collide; platforms must not repair or renumber collisions independently.
-- Paths use forward slashes, start with `assets/`, contain only normal path components, and must resolve to a regular file under the canonical project `assets/` directory.
+- Manifest paths use forward slashes, start with `assets/`, contain only normal path components, and must resolve to a regular file under the canonical project `assets/` directory. Source `@asset_path` literals may additionally use the rooted `/assets/...` spelling. URI paths, drive paths, UNC paths, any embedded backslash separator, and leading slash paths other than `/assets/...` are compile errors; dynamic manifest paths remain canonical `assets/...` paths.
 - SHA-256 is checked against the complete bounded file before the asset is accepted.
 - Declared encodings must match file extensions. Sprite dimensions, audio metadata, font encoding, display dimensions, manifest size, entry count, and individual file size are bounded by the shared resolver.
 - Sprite preparation requires a version 2 manifest and top-level `display` metadata.

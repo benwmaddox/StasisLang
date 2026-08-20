@@ -1956,7 +1956,14 @@ static int is_absolute_path(const char* path) {
 static int resolve_asset_path(const char* path, char* out, size_t out_size) {
     if (!out || out_size < 2 || !path || !*path) return 0;
     ensure_asset_base();
-    if (is_absolute_path(path)) {
+    if (stasis_asset_path_is_virtual_root(path)) {
+        char normalized[1024];
+        if (!stasis_asset_normalize_relative_path(path, normalized, sizeof(normalized))) {
+            return 0;
+        }
+        snprintf(out, out_size, "%s/%s", g_asset_base, normalized);
+        out[out_size - 1] = 0;
+    } else if (is_absolute_path(path)) {
         if (g_asset_env[0] != 0) return 0;
         strncpy(out, path, out_size - 1);
         out[out_size - 1] = 0;
@@ -2220,7 +2227,7 @@ static GLuint link_program(GLuint vs, GLuint fs) {
 static uint64_t get_file_mtime(const char* path) {
     char resolved[1024];
     const char* probe = path;
-    if (!is_absolute_path(path)) {
+    if (!is_absolute_path(path) || stasis_asset_path_is_virtual_root(path)) {
         if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
             return 0;
         }

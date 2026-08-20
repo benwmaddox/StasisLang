@@ -48,8 +48,11 @@ Each output contains the same pieces:
 Mobile packaging follows the selected entry module's import graph and the same
 compiler-owned `@asset_path` validation used by `stasis check` and desktop builds. It includes
 only validated manifest assets from reachable production calls plus transitive dependencies.
-Relative literals use the declaring module directory, project-root `assets/...` paths are also
-accepted, and casing is checked identically on Windows and Unix. Bounded dynamic loaders must use
+Relative literals use the declaring module directory. Both canonical `assets/...` and rooted
+`/assets/...` project paths are accepted; the latter is a virtual root spelling and is staged as
+`assets/...` beneath `stasis_game` on every target. Casing is checked identically on Windows and Unix.
+URI, drive, UNC, embedded-backslash, and other host-rooted spellings fail compilation before
+publishing a package. Bounded dynamic loaders must use
 the manifest's `dynamic_assets` declaration; otherwise packaging fails before publishing output.
 Android and iOS use the identical result.
 
@@ -61,7 +64,8 @@ Potential Android release-shell additions are tracked in
 `android_release_shell_backlog.md`; they must remain generic or opt-in adapters.
 
 The runtime asset root is always the packaged `stasis_game` project root.
-Canonical game paths therefore start with `assets/`. For compatibility with
+Canonical game paths therefore start with `assets/`; source-rooted `/assets/...` paths are
+normalized to that same canonical form before runtime lookup. For compatibility with
 older source-relative literals such as `../assets/foo.svg`, an explicit
 packaged asset root normalizes `.` and leading parent segments without allowing
 the resolved path to escape `stasis_game`.
