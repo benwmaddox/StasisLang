@@ -145,7 +145,7 @@ impl WasmProcess {
             }
         }
 
-        self.string_literals = collect_string_literals(&lowered);
+        self.string_literals = collect_string_literals(&lowered, &analysis.constant_values);
         let (memory_bindings, _) =
             build_memory_bindings(&analysis, &types).map_err(CompileError::Backend)?;
         self.memory_layout = memory_bindings
@@ -2420,8 +2420,12 @@ fn encode_struct_collection_copy(
         out.push(0x41);
         sleb(target_field.stride as i32, out);
         out.extend([0x6c, 0x6a]);
-        let source_field = encode_struct_field_address(&source_binding, suffix, context, out)?;
-        encode_memory_load(source_field.type_id, out)?;
+        let source_field_type = encode_struct_field_load(&source_binding, suffix, context, out)?;
+        require_same_type(
+            target_field.type_id,
+            source_field_type,
+            "struct collection field assignment",
+        )?;
         encode_memory_store(target_field.type_id, out)?;
     }
     Ok(())
@@ -3627,8 +3631,15 @@ fn encode_zero(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_string_literals(functions: &[(FunctionMeta, FunctionHIR)]) -> BTreeMap<i32, String> {
-    fn expression(value: &SimpleExpr, out: &mut BTreeMap<i32, String>) {
+fn collect_string_literals(
+    functions: &[(FunctionMeta, FunctionHIR)],
+    constants: &BTreeMap<String, ConstantValue>,
+) -> BTreeMap<i32, String> {
+    fn expression(
+        value: &SimpleExpr,
+        constants: &BTreeMap<String, ConstantValue>,
+        out: &mut BTreeMap<i32, String>,
+    ) {
         match value {
             SimpleExpr::StringLiteral(value) => {
                 out.insert(
@@ -3636,35 +3647,51 @@ fn collect_string_literals(functions: &[(FunctionMeta, FunctionHIR)]) -> BTreeMa
                     value.clone(),
                 );
             }
-            SimpleExpr::Condition(value) => condition(value, out),
-            SimpleExpr::IndexedPath { index, .. } => expression(index, out),
+            SimpleExpr::Identifier(name) => {
+                if let Some(ConstantValue::String { value, .. }) = constants.get(name) {
+                    out.insert(
+                        crate::backend::emit::hash_string_literal(value),
+                        value.clone(),
+                    );
+                }
+            }
+            SimpleExpr::Condition(value) => condition(value, constants, out),
+            SimpleExpr::IndexedPath { index, .. } => expression(index, constants, out),
             SimpleExpr::Call { args, .. } => {
                 for arg in args {
-                    expression(arg, out);
+                    expression(arg, constants, out);
                 }
             }
             SimpleExpr::Binary { lhs, rhs, .. } => {
-                expression(lhs, out);
-                expression(rhs, out);
+                expression(lhs, constants, out);
+                expression(rhs, constants, out);
             }
             _ => {}
         }
     }
-    fn condition(value: &SimpleCondition, out: &mut BTreeMap<i32, String>) {
+    fn condition(
+        value: &SimpleCondition,
+        constants: &BTreeMap<String, ConstantValue>,
+        out: &mut BTreeMap<i32, String>,
+    ) {
         match value {
             SimpleCondition::Comparison { lhs, rhs, .. } => {
-                expression(lhs, out);
-                expression(rhs, out);
+                expression(lhs, constants, out);
+                expression(rhs, constants, out);
             }
-            SimpleCondition::Expr(value) => expression(value, out),
+            SimpleCondition::Expr(value) => expression(value, constants, out),
             SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-                condition(lhs, out);
-                condition(rhs, out);
+                condition(lhs, constants, out);
+                condition(rhs, constants, out);
             }
-            SimpleCondition::Not(value) => condition(value, out),
+            SimpleCondition::Not(value) => condition(value, constants, out),
         }
     }
-    fn statements(values: &[SimpleStmt], out: &mut BTreeMap<i32, String>) {
+    fn statements(
+        values: &[SimpleStmt],
+        constants: &BTreeMap<String, ConstantValue>,
+        out: &mut BTreeMap<i32, String>,
+    ) {
         for value in values {
             match value {
                 SimpleStmt::Let {
@@ -3674,17 +3701,17 @@ fn collect_string_literals(functions: &[(FunctionMeta, FunctionHIR)]) -> BTreeMa
                     expression: value, ..
                 }
                 | SimpleStmt::Expr(value)
-                | SimpleStmt::Return(value) => expression(value, out),
-                SimpleStmt::Convert { source, .. } => expression(source, out),
+                | SimpleStmt::Return(value) => expression(value, constants, out),
+                SimpleStmt::Convert { source, .. } => expression(source, constants, out),
                 SimpleStmt::If {
                     condition: value,
                     then_statements,
                     else_statements,
                 } => {
-                    condition(value, out);
-                    statements(then_statements, out);
+                    condition(value, constants, out);
+                    statements(then_statements, constants, out);
                     if let Some(values) = else_statements {
-                        statements(values, out);
+                        statements(values, constants, out);
                     }
                 }
                 SimpleStmt::For {
@@ -3693,21 +3720,21 @@ fn collect_string_literals(functions: &[(FunctionMeta, FunctionHIR)]) -> BTreeMa
                     step,
                     body_statements,
                 } => {
-                    statements(std::slice::from_ref(init), out);
-                    condition(value, out);
-                    statements(std::slice::from_ref(step), out);
-                    statements(body_statements, out);
+                    statements(std::slice::from_ref(init), constants, out);
+                    condition(value, constants, out);
+                    statements(std::slice::from_ref(step), constants, out);
+                    statements(body_statements, constants, out);
                 }
                 SimpleStmt::Foreach {
                     body_statements, ..
-                } => statements(body_statements, out),
+                } => statements(body_statements, constants, out),
                 SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
             }
         }
     }
     let mut out = BTreeMap::new();
     for (_, hir) in functions {
-        statements(&hir.statements, &mut out);
+        statements(&hir.statements, constants, &mut out);
     }
     out
 }
@@ -3863,6 +3890,37 @@ mod tests {
                 .windows(name.len())
                 .any(|window| window == name.as_bytes()));
         }
+    }
+
+    #[test]
+    fn collects_reachable_string_constants_and_inline_literals() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "string_constants.stasis",
+            r#"
+const USED_PATH: string = "/assets/used.svg";
+const UNUSED_PATH: string = "/assets/unused.svg";
+extern function consume(path: string): i32;
+function main(): i32 { return consume(USED_PATH); }
+function tick(): i32 { return consume("direct literal"); }
+function render(): i32 { return 0; }
+"#,
+        );
+        process.compile().expect("compile string constants");
+
+        let strings = process.string_literals();
+        assert_eq!(
+            strings.get(&crate::backend::emit::hash_string_literal(
+                "/assets/used.svg"
+            )),
+            Some(&"/assets/used.svg".to_string())
+        );
+        assert_eq!(
+            strings.get(&crate::backend::emit::hash_string_literal("direct literal")),
+            Some(&"direct literal".to_string())
+        );
+        assert!(!strings.values().any(|value| value == "/assets/unused.svg"));
     }
 
     #[test]
