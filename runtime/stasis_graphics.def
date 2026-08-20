@@ -42,6 +42,8 @@ EXPORTS
     stasis_audio_get_queued_frames
     stasis_audio_get_underruns
     stasis_audio_push_f32_interleaved
+    stasis_set_recording_audio_config
+    stasis_recording_audio_pull_f32_interleaved
     stasis_audio_load_wav
     stasis_audio_release
     stasis_audio_play

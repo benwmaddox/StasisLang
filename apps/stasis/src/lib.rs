@@ -54,7 +54,7 @@ use stasis_runner::swap::contracts::{
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
@@ -84,6 +84,110 @@ pub struct PlayFrameCaptureConfig {
     pub height: u32,
     pub fps: u32,
     pub frame_count: u64,
+    pub audio_output: Option<PathBuf>,
+}
+
+const RECORDING_AUDIO_SAMPLE_RATE: u64 = 48_000;
+const RECORDING_AUDIO_CHANNELS: u16 = 2;
+
+fn recording_audio_target_samples(frame: u64, fps: u32) -> Result<u64, String> {
+    if fps == 0 {
+        return Err("recording audio stage requires a positive frame rate".to_string());
+    }
+    frame
+        .checked_mul(RECORDING_AUDIO_SAMPLE_RATE)
+        .ok_or_else(|| "recording audio stage sample schedule overflow".to_string())
+        .map(|samples| samples / u64::from(fps))
+}
+
+struct RecordingAudioSink {
+    file: fs::File,
+    frame_count: u64,
+}
+
+struct RecordingAudioTeardown<'a> {
+    gfx: &'a stasis_dynload::StasisGraphicsApi,
+}
+
+impl Drop for RecordingAudioTeardown<'_> {
+    fn drop(&mut self) {
+        let _ = self.gfx.set_recording_audio_config(false);
+    }
+}
+
+impl RecordingAudioSink {
+    fn create(path: &Path) -> Result<Self, String> {
+        let mut file = fs::File::create(path).map_err(|error| {
+            format!(
+                "recording audio stage failed to create {}: {error}",
+                path.display()
+            )
+        })?;
+        file.write_all(&[0u8; 44]).map_err(|error| {
+            format!(
+                "recording audio stage failed to reserve WAV header {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            file,
+            frame_count: 0,
+        })
+    }
+
+    fn append(&mut self, samples: &[f32]) -> Result<(), String> {
+        if samples.len() % usize::from(RECORDING_AUDIO_CHANNELS) != 0 {
+            return Err("recording audio mix returned non-stereo sample count".to_string());
+        }
+        let mut pcm = Vec::with_capacity(samples.len() * 2);
+        for sample in samples {
+            let clamped = sample.clamp(-1.0, 1.0);
+            let value = if clamped <= -1.0 {
+                i16::MIN
+            } else {
+                (clamped * f32::from(i16::MAX)).round() as i16
+            };
+            pcm.extend_from_slice(&value.to_le_bytes());
+        }
+        self.file.write_all(&pcm).map_err(|error| {
+            format!("recording audio stage failed to write WAV samples: {error}")
+        })?;
+        self.frame_count = self
+            .frame_count
+            .saturating_add((samples.len() / usize::from(RECORDING_AUDIO_CHANNELS)) as u64);
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        let data_bytes = self
+            .frame_count
+            .checked_mul(u64::from(RECORDING_AUDIO_CHANNELS) * 2)
+            .ok_or_else(|| "recording audio WAV size overflow".to_string())?;
+        let riff_size = 36u64
+            .checked_add(data_bytes)
+            .ok_or_else(|| "recording audio WAV RIFF size overflow".to_string())?;
+        if data_bytes > u64::from(u32::MAX) || riff_size > u64::from(u32::MAX) {
+            return Err("recording audio WAV exceeds RIFF size limit".to_string());
+        }
+        let mut header = Vec::with_capacity(44);
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(riff_size as u32).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes());
+        header.extend_from_slice(&RECORDING_AUDIO_CHANNELS.to_le_bytes());
+        header.extend_from_slice(&(RECORDING_AUDIO_SAMPLE_RATE as u32).to_le_bytes());
+        header.extend_from_slice(&(RECORDING_AUDIO_SAMPLE_RATE as u32 * 4).to_le_bytes());
+        header.extend_from_slice(&4u16.to_le_bytes());
+        header.extend_from_slice(&16u16.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+        self.file
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| self.file.write_all(&header))
+            .and_then(|_| self.file.flush())
+            .map_err(|error| format!("recording audio stage failed to finalize WAV: {error}"))
+    }
 }
 
 struct PlayCaptureEnvironment {
@@ -2395,6 +2499,19 @@ fn run_play_in_process_inner(
     if let Some(capture) = capture.as_ref() {
         gfx.set_recording_config(capture.width, capture.height, capture.fps)?;
     }
+    let _recording_audio_teardown = capture
+        .as_ref()
+        .filter(|capture| capture.audio_output.is_some())
+        .map(|_| {
+            gfx.set_recording_audio_config(true)?;
+            Ok::<_, String>(RecordingAudioTeardown { gfx: &gfx })
+        })
+        .transpose()?;
+    let mut recording_audio = capture
+        .as_ref()
+        .and_then(|capture| capture.audio_output.as_deref())
+        .map(RecordingAudioSink::create)
+        .transpose()?;
     gfx.set_asset_root(prepared_asset_root.as_deref().unwrap_or(&project_root))?;
     let mut frame_evidence = DesktopFrameEvidence::from_env()?;
     let configured_title = window_title.or_else(|| {
@@ -2744,6 +2861,24 @@ fn run_play_in_process_inner(
             }
         }
         gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
+        if let (Some(capture), Some(audio)) = (capture.as_ref(), recording_audio.as_mut()) {
+            let frame = ticks_executed.saturating_add(1);
+            let target_samples = recording_audio_target_samples(frame, capture.fps)?;
+            let delta = target_samples.saturating_sub(audio.frame_count);
+            let sample_count = delta
+                .checked_mul(u64::from(RECORDING_AUDIO_CHANNELS))
+                .ok_or_else(|| "recording audio stage buffer size overflow".to_string())?;
+            let sample_count = usize::try_from(sample_count)
+                .map_err(|_| "recording audio stage buffer is too large".to_string())?;
+            let mut samples = vec![0.0f32; sample_count];
+            gfx.pull_recording_audio_f32_interleaved(&mut samples)
+                .map_err(|error| {
+                    format!("recording audio mix stage failed at frame {frame}: {error}")
+                })?;
+            audio.append(&samples).map_err(|error| {
+                format!("recording audio WAV stage failed at frame {frame}: {error}")
+            })?;
+        }
         if let Some(evidence) = frame_evidence.as_mut() {
             let submission = gfx.test_render_submission_state()?.ok_or_else(|| {
                 format!(
@@ -2789,6 +2924,11 @@ fn run_play_in_process_inner(
     if let Some(profile) = profile.as_ref() {
         finish_play_profile(&jit, profile)?;
     }
+    let audio_finish = recording_audio
+        .take()
+        .map(RecordingAudioSink::finish)
+        .transpose();
+    audio_finish?;
 
     Ok(())
 }
@@ -4297,6 +4437,72 @@ mod tests {
     const WINDOW_REQUEST_MAILBOX_FIXTURE: &str =
         include_str!("../../../tests/stasis/seams/window_request_mailbox_probe.stasis");
 
+    #[test]
+    fn recording_audio_sample_schedule_has_no_fractional_drift() {
+        let targets = (0..60)
+            .map(|frame| recording_audio_target_samples(frame, 59).expect("sample target"))
+            .collect::<Vec<_>>();
+        assert_eq!(targets[0], 0);
+        assert_eq!(targets[1], 48_000 / 59);
+        assert_eq!(targets[59], 59 * 48_000 / 59);
+        assert_eq!(
+            recording_audio_target_samples(60, 59).unwrap(),
+            60 * 48_000 / 59
+        );
+        assert!(targets.windows(2).all(|pair| pair[1] >= pair[0]));
+    }
+
+    #[test]
+    fn recording_audio_sink_writes_pcm16_stereo_wav() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-recording-audio-{}-{}.wav",
+            std::process::id(),
+            UNIX_EPOCH.elapsed().unwrap_or_default().as_nanos()
+        ));
+        let mut sink = RecordingAudioSink::create(&path).expect("create WAV sink");
+        sink.append(&[0.5, -0.5, 0.0, 1.0])
+            .expect("write WAV samples");
+        sink.finish().expect("finish WAV sink");
+        let bytes = fs::read(&path).expect("read WAV sink");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes([bytes[22], bytes[23]]), 2);
+        assert_eq!(
+            u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+            48_000
+        );
+        assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 16);
+        assert_eq!(
+            u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]),
+            8
+        );
+        assert_eq!(bytes.len(), 52);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn recording_audio_sink_uses_exact_cumulative_59fps_length() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-recording-audio-59fps-{}-{}.wav",
+            std::process::id(),
+            UNIX_EPOCH.elapsed().unwrap_or_default().as_nanos()
+        ));
+        let mut sink = RecordingAudioSink::create(&path).expect("create 59 fps WAV sink");
+        let mut written = 0u64;
+        for frame in 1..=60 {
+            let target = recording_audio_target_samples(frame, 59).unwrap();
+            let delta = target - written;
+            sink.append(&vec![0.0; delta as usize * 2])
+                .expect("write 59 fps samples");
+            written = target;
+        }
+        sink.finish().expect("finish 59 fps WAV sink");
+        let bytes = fs::metadata(&path).expect("stat 59 fps WAV").len();
+        assert_eq!(written, 60 * 48_000 / 59);
+        assert_eq!(bytes, 44 + written * 4);
+        fs::remove_file(path).ok();
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct AppliedWindowRequest {
         sequence: i32,
@@ -5406,6 +5612,8 @@ mod tests {
             "STASIS_RECORDING_PRESENTATION",
             "STASIS_RECORDING_FPS",
             "stasis_set_recording_config",
+            "stasis_set_recording_audio_config",
+            "stasis_recording_audio_pull_f32_interleaved",
             "SDL_WINDOW_HIDDEN",
             "SDL_SetRenderVSync(g_renderer, g_recording_presentation ? 0 : 1)",
             "SDL_LOGICAL_PRESENTATION_LETTERBOX",

@@ -30,11 +30,29 @@ stasis --workspace samples/windows_launch_smoke record main.stasis `
   --width 640 --height 360 --fps 60 --frames 3
 ```
 
-FFmpeg must be on `PATH`; the command uses H.264 (`libx264`), `yuv420p`, and the
-requested input/output rate. PNGs are validated for exact names, count, and
-dimensions before publication. MP4 encoding and publication are staged, so an
-encoder or renderer failure removes partial artifacts and reports the stage,
-resolution, frame rate, output, and underlying cause.
+FFmpeg must be on `PATH`; the command uses H.264 (`libx264`), `yuv420p`, AAC,
+and the requested input/output rate. MP4 recording also runs the existing game
+mixer offline at 48 kHz, stereo, PCM16 before muxing it as AAC. Audio samples
+for frame `n` are exactly `floor(n * 48000 / fps)`, so fractional rates do not
+accumulate rounding drift and no physical audio device is opened. This captures
+game-generated asset voices and `audio_push_f32_interleaved` samples only; it
+does not capture a microphone or system audio. PNG mode does not stage offline
+audio; guest code may still initialize and use the normal interactive audio API
+when that path is requested.
+
+For a checked-in audio example:
+
+```powershell
+stasis --workspace samples/audio_asset_playback record `
+  audio_asset_playback.stasis `
+  --output artifacts/audio-review.mp4 `
+  --width 480 --height 270 --fps 60 --frames 60
+```
+
+PNG frames and the staged WAV are validated for exact count, dimensions,
+format, and sample count before publication. MP4 encoding and publication are
+staged, so an encoder, mixer, or renderer failure removes partial artifacts and
+reports the stage, resolution, frame rate, output, and underlying cause.
 
 Publication renames the fully validated sibling stage into the destination in
 one same-volume operation; the final path is never populated incrementally.

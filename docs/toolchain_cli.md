@@ -124,10 +124,13 @@ cloning a generated repository, reactivate the checked-in hook with
 - `record [ENTRY] --output PATH --width PX --height PX --fps FPS (--frames N|--duration S)`:
   execute the normal desktop JIT/render path on a hidden fixed-size SDL software presentation.
   An extensionless output path publishes an exact, numbered PNG sequence; an `.mp4` path stages
-  those PNGs and invokes FFmpeg H.264/yuv420p at the requested rate. Recording starts after
-  `main()`, uses zero tick sleep, applies the existing `--input-script` timeline, and preserves
-  logical-canvas fit/letterboxing. Dimensions, rates, counts, output format, staged frame
-  validation, encoder failures, and partial-output cleanup are bounded and diagnosed. See
+  those PNGs and the existing mixed game audio, then invokes FFmpeg H.264/yuv420p plus AAC at
+  the requested rate. Audio is rendered offline as deterministic 48 kHz stereo PCM16 using
+  cumulative `floor(frame * 48000 / fps)` sample boundaries; no physical device, microphone, or
+  system audio is used. Recording starts after `main()`, uses zero tick sleep, applies the existing
+  `--input-script` timeline, and preserves logical-canvas fit/letterboxing. Dimensions, rates,
+  counts, output format, staged frame/WAV validation, encoder failures, and partial-output cleanup
+  are bounded and diagnosed. See
   [Deterministic headless recording](headless_recording.md).
 - `play [ENTRY]`: launch the graphical hot-swap runtime. Without an entry override, discover the
   nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
