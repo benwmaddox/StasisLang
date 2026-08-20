@@ -2259,6 +2259,7 @@ fn run_play_in_process_inner(
     );
 
     let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
+    gfx.set_asset_root(prepared_asset_root.as_deref().unwrap_or(&project_root))?;
     let mut frame_evidence = DesktopFrameEvidence::from_env()?;
     let configured_title = window_title.or_else(|| {
         live.as_ref()

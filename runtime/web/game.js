@@ -115,7 +115,11 @@
     Math.max(0, Math.min(255, Math.round(b * 255)))
   );
   const stringValue = id => game.strings[String(id)] || "";
-  const assetKey = value => value.replace(/^(?:\.\.\/|\.\/)+/, "");
+  const assetKey = value => {
+    if (value === "/assets") return "assets";
+    if (value.startsWith("/assets/")) return value.slice(1);
+    return value.replace(/^(?:\.\.\/|\.\/)+/, "");
+  };
   const assetValue = id => {
     const value = stringValue(id);
     const key = assetKey(value);

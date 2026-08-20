@@ -1003,6 +1003,7 @@ pub fn graphics_runtime_release_id(path: &Path) -> Result<String, String> {
 pub struct StasisGraphicsApi {
     _lib: Library,
     stasis_init_window: usize,
+    stasis_set_asset_root: usize,
     stasis_host_get_frame: usize,
     stasis_host_bulk_init: usize,
     stasis_host_bulk_apply_requests: usize,
@@ -1036,6 +1037,7 @@ impl StasisGraphicsApi {
         let lib = Library::load(path)?;
         verify_graphics_runtime_abi(&lib, path)?;
         let stasis_init_window = lib.symbol_address("stasis_init_window")?;
+        let stasis_set_asset_root = lib.symbol_address("stasis_set_asset_root")?;
         let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
         let stasis_host_bulk_init = lib.symbol_address("stasis_host_bulk_init")?;
         let stasis_host_bulk_apply_requests =
@@ -1054,6 +1056,7 @@ impl StasisGraphicsApi {
         Ok(Self {
             _lib: lib,
             stasis_init_window,
+            stasis_set_asset_root,
             stasis_host_get_frame,
             stasis_host_bulk_init,
             stasis_host_bulk_apply_requests,
@@ -1083,6 +1086,35 @@ impl StasisGraphicsApi {
             let callback: extern "C" fn(i32, i32, *const c_char) -> i32 =
                 unsafe { std::mem::transmute(self.stasis_init_window) };
             Ok(callback(width, height, title.as_ptr()) != 0)
+        }
+    }
+
+    pub fn set_asset_root(&self, path: &Path) -> Result<(), String> {
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| "asset root contains an interior NUL byte".to_string())?;
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*const c_char) -> i32 =
+                unsafe { std::mem::transmute(self.stasis_set_asset_root) };
+            if callback(path.as_ptr()) == 0 {
+                return Err(format!(
+                    "graphics runtime rejected asset root {}",
+                    path.to_string_lossy()
+                ));
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(*const c_char) -> i32 =
+                unsafe { std::mem::transmute(self.stasis_set_asset_root) };
+            if callback(path.as_ptr()) == 0 {
+                return Err(format!(
+                    "graphics runtime rejected asset root {}",
+                    path.to_string_lossy()
+                ));
+            }
+            Ok(())
         }
     }
 

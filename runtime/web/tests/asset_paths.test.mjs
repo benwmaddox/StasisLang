@@ -10,6 +10,7 @@ async function loadRuntime(game, options = {}) {
   const measurements = [];
   const animationFrames = [];
   const addedFonts = [];
+  const fontSources = [];
   let env;
   const memory = new WebAssembly.Memory({ initial: 1 });
   const context2d = {
@@ -92,6 +93,11 @@ async function loadRuntime(game, options = {}) {
       get src() { return this.value; }
     },
     FontFace: class {
+      constructor(family, source) {
+        this.family = family;
+        this.source = source;
+        fontSources.push(source);
+      }
       load() { return options.fontLoad ? options.fontLoad(this) : Promise.resolve(this); }
     },
     AudioContext: class {
@@ -111,7 +117,10 @@ async function loadRuntime(game, options = {}) {
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(typeof env?.gfx_load_sprite, "function", errorBox.textContent);
-  return { env, imageSources, measurements, animationFrames, addedFonts, document, errorBox, runtimePromise };
+  return {
+    env, imageSources, measurements, animationFrames, addedFonts, fontSources,
+    document, errorBox, runtimePromise,
+  };
 }
 
 test("web asset paths normalize fallback values and preserve explicit overrides", async () => {
@@ -142,6 +151,35 @@ test("web asset paths normalize fallback values and preserve explicit overrides"
     "assets/packed/override-123.png",
     "",
   ]);
+});
+
+test("web rooted sprite and font paths use package-relative asset keys", async () => {
+  const game = {
+    memory: {},
+    strings: {
+      "1": "/assets/rooted-fallback.png",
+      "2": "/assets/rooted.png",
+      "3": "/assets/rooted.ttf",
+      "4": "/textures/absolute.png",
+    },
+    assets: {
+      "assets/rooted.png": "assets/packed/rooted-123.png",
+      "assets/rooted.ttf": "assets/packed/rooted-456.ttf",
+    },
+  };
+  const { env, imageSources, fontSources } = await loadRuntime(game);
+
+  env.gfx_load_sprite(1);
+  env.gfx_load_sprite(2);
+  env.load_font(3, 20);
+  env.gfx_load_sprite(4);
+
+  assert.deepEqual(imageSources, [
+    "assets/rooted-fallback.png",
+    "assets/packed/rooted-123.png",
+    "/textures/absolute.png",
+  ]);
+  assert.deepEqual(fontSources, ["url(assets/packed/rooted-456.ttf)"]);
 });
 
 test("web measure_text uses the registered Canvas font and string handle", async () => {
