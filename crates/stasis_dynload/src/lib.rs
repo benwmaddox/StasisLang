@@ -1625,7 +1625,6 @@ fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, Stri
 }
 
 pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
-    let mut out = Vec::new();
     let configured = [
         std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH"),
         // Preserve the original variable as a compatibility alias for existing Windows workflows.
@@ -1638,13 +1637,21 @@ pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
     let executable_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
+    runtime_library_candidate_paths_for(executable_dir.as_deref(), &configured)
+}
+
+fn runtime_library_candidate_paths_for(
+    executable_dir: Option<&Path>,
+    configured: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
     if let Some(exe_dir) = executable_dir {
-        // An explicit runtime path is authoritative. This is required for isolated tests and
-        // developer builds where cargo may stage a different sibling DLL beside the executable.
-        out.extend(configured.iter().cloned());
+        // A release bundle is one unit. Never let an environment override replace its sibling
+        // runtime with a different build.
         for file_name in runtime_library_file_names() {
             out.push(exe_dir.join(file_name));
         }
+        out.extend(configured.iter().cloned());
 
         // Dev-friendly default: locate the runtime built under the repo tree by
         // walking a few parents from the executable location.
@@ -1661,7 +1668,8 @@ pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
             }
         }
     } else {
-        out.extend(configured);
+        // If there is no executable directory, the configured path is the only explicit fallback.
+        out.extend(configured.iter().cloned());
     }
 
     // Allow loading from the current working directory too (handy for ad-hoc runs).
@@ -6055,17 +6063,19 @@ mod tests {
     fn bundled_graphics_runtime_is_default_candidate() {
         let executable = std::env::current_exe().expect("current test executable");
         let candidates = runtime_library_candidate_paths();
-        if let Some(configured) = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH")
-            .or_else(|| std::env::var_os("STASIS_RUNTIME_DLL_PATH"))
-        {
-            assert_eq!(candidates.first(), Some(&PathBuf::from(configured)));
-        } else {
-            let expected = executable
-                .parent()
-                .expect("test executable directory")
-                .join(runtime_library_file_names()[0]);
-            assert_eq!(candidates.first(), Some(&expected));
-        }
+        let expected = executable
+            .parent()
+            .expect("test executable directory")
+            .join(runtime_library_file_names()[0]);
+        assert_eq!(candidates.first(), Some(&expected));
+    }
+
+    #[test]
+    fn configured_runtime_is_fallback_without_executable_directory() {
+        let configured = PathBuf::from("configured/stasis_graphics.dll");
+        let candidates =
+            runtime_library_candidate_paths_for(None, std::slice::from_ref(&configured));
+        assert_eq!(candidates.first(), Some(&configured));
     }
 
     #[cfg(not(windows))]
