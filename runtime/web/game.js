@@ -149,6 +149,18 @@
     target.set(bytes);
     return bytes.length;
   };
+  const memoryLayouts = typeId => Object.values(game.memory || {})
+    .filter(layout => layout?.type_id === typeId
+      && Number.isSafeInteger(layout.hash));
+  const memoryLayoutsByHash = typeId => new Map(
+    memoryLayouts(typeId).map(layout => [layout.hash | 0, layout])
+  );
+  const memoryLayoutsByOffset = typeId => new Map(
+    Object.values(game.memory || {})
+      .filter(layout => layout?.type_id === typeId
+        && Number.isSafeInteger(layout.offset))
+      .map(layout => [layout.offset | 0, layout])
+  );
   const u8MemoryLayouts = new Map(
     Object.values(game.memory || {})
       .filter(layout => (layout?.byte_backed === true || layout?.type_id === 5)
@@ -202,6 +214,56 @@
     for (let offset = 0; offset < count; offset += 1) {
       writeU8(destination, dstIndex + offset, values[offset]);
     }
+  };
+  const typedMemoryLayouts = new Map([
+    [1, { byHash: memoryLayoutsByHash(1), byOffset: memoryLayoutsByOffset(1), width: 4 }],
+    [2, { byHash: memoryLayoutsByHash(2), byOffset: memoryLayoutsByOffset(2), width: 4 }],
+  ]);
+  const resolveTypedMemory = (reference, typeId) => {
+    const metadata = typedMemoryLayouts.get(typeId);
+    const layout = metadata?.byHash.get(reference | 0)
+      || metadata?.byOffset.get(reference | 0);
+    const memory = instance?.exports?.memory;
+    if (!layout || !(memory instanceof WebAssembly.Memory)) return null;
+    const { offset, stride, length } = layout;
+    if (![offset, stride, length].every(Number.isSafeInteger)
+      || offset < 0 || stride <= 0 || length < 0) return null;
+    const span = length === 0 ? 0 : (length - 1) * stride + metadata.width;
+    const end = offset + span;
+    if (!Number.isSafeInteger(span) || !Number.isSafeInteger(end)
+      || end > memory.buffer.byteLength) return null;
+    return { view: new DataView(memory.buffer), offset, stride, length };
+  };
+  const readTyped = (memory, index, typeId) => {
+    if (!memory || !Number.isInteger(index) || index < 0 || index >= memory.length) return 0;
+    const offset = memory.offset + index * memory.stride;
+    return typeId === 1
+      ? memory.view.getInt32(offset, true)
+      : memory.view.getFloat32(offset, true);
+  };
+  const writeTyped = (memory, index, value, typeId) => {
+    if (!memory || !Number.isInteger(index) || index < 0 || index >= memory.length) return;
+    const offset = memory.offset + index * memory.stride;
+    if (typeId === 1) memory.view.setInt32(offset, value, true);
+    else memory.view.setFloat32(offset, value, true);
+  };
+  const sysMemcpyTyped = (dst, dstIndex, src, srcIndex, count, typeId) => {
+    if (!Number.isInteger(count) || count <= 0) return;
+    const source = resolveTypedMemory(src, typeId);
+    const values = typeId === 1 ? new Int32Array(count) : new Float32Array(count);
+    for (let offset = 0; offset < count; offset += 1) {
+      values[offset] = readTyped(source, srcIndex + offset, typeId);
+    }
+    const destination = resolveTypedMemory(dst, typeId);
+    for (let offset = 0; offset < count; offset += 1) {
+      writeTyped(destination, dstIndex + offset, values[offset], typeId);
+    }
+  };
+  const sysMemcpyI32 = (dst, dstIndex, src, srcIndex, count) => {
+    sysMemcpyTyped(dst, dstIndex, src, srcIndex, count, 1);
+  };
+  const sysMemcpyF32 = (dst, dstIndex, src, srcIndex, count) => {
+    sysMemcpyTyped(dst, dstIndex, src, srcIndex, count, 2);
   };
   const setViewField = (base, index, field, value) => {
     const path = game.views?.[String(base)]?.[field];
@@ -572,6 +634,8 @@
     print_char: value => console.log(String.fromCodePoint(value)),
     print_string: value => console.log(stringValue(value)),
     sys_memcpy_u8: sysMemcpyU8,
+    sys_memcpy_i32: sysMemcpyI32,
+    sys_memcpy_f32: sysMemcpyF32,
     web_input_axis: () => (keys.has("ArrowRight") || keys.has("KeyD") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("KeyA") ? 1 : 0),
     web_input_fire: () => keys.has("Space") || pointer.down ? 1 : 0,
     web_pointer_x: () => pointer.x | 0,

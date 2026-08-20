@@ -296,6 +296,67 @@ function render(): i32 {
 }
 
 #[test]
+fn web_package_executes_scalar_struct_to_collection_copy() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-struct-copy-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create struct copy fixture");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"web_struct_copy","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("write struct copy manifest");
+    fs::write(
+        workspace.join("src/main.stasis"),
+        r#"
+struct CopyState {
+    count: i32;
+    enabled: bool;
+}
+
+global source: CopyState;
+global destination: CopyState[2];
+
+function main(): i32 {
+    source.count = 40;
+    source.enabled = true;
+    destination[0] = source;
+    destination[1] = destination[0];
+    if (destination[1].enabled) {
+        return destination[1].count + 2;
+    }
+    return -1;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}
+"#,
+    )
+    .expect("write struct copy source");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    let execution = execute_web_main(&output.join("game.wasm"));
+    assert!(
+        execution.status.success(),
+        "scalar struct copy Wasm execution failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(execution.stdout).expect("UTF-8 result"),
+        "42"
+    );
+
+    fs::remove_dir_all(&workspace).expect("clean struct copy fixture");
+}
+
+#[test]
 fn web_package_instantiates_direct_measure_text_import() {
     let root = repo_root();
     let workspace = root
@@ -619,7 +680,13 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     assert!(wasm.starts_with(b"\0asm\x01\0\0\0"));
     assert!(wasm.windows(6).any(|window| window == b"memory"));
     let runtime = fs::read_to_string(output.join("game.js")).expect("existing game runtime");
-    for expected in ["gfx_cmd_i32", "gfx_cmd_f32", "stasis_jit_gfx_cache_text"] {
+    for expected in [
+        "gfx_cmd_i32",
+        "gfx_cmd_f32",
+        "stasis_jit_gfx_cache_text",
+        "sys_memcpy_i32: sysMemcpyI32",
+        "sys_memcpy_f32: sysMemcpyF32",
+    ] {
         assert!(
             runtime.contains(expected),
             "missing web runtime data {expected}"
@@ -668,7 +735,13 @@ fn rooted_web_asset_paths_emit_package_relative_assets() {
     }
     let source = fs::read_to_string(workspace.join("main.stasis"))
         .expect("read rooted web fixture source")
-        .replace("\"assets/smoke.svg\"", &format!("\"{ROOTED_WEB_ASSET}\""));
+        .replace(
+            "extern function gfx_load_sprite",
+            &format!(
+                "const ROOTED_SMOKE_PATH: string = \"{ROOTED_WEB_ASSET}\";\n\nextern function gfx_load_sprite"
+            ),
+        )
+        .replace("\"assets/smoke.svg\"", "ROOTED_SMOKE_PATH");
     fs::write(workspace.join("main.stasis"), source).expect("write rooted web fixture source");
 
     let output = package(&workspace, Path::new("build/web-package"));
