@@ -824,7 +824,7 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
     } else {
         ffmpeg_dir.join("ffprobe.exe")
     };
-    let probe = |path: &Path, selector: &str, entries: &str| -> String {
+    let probe = |path: &Path, selector: &str, entries: &str| -> serde_json::Value {
         let output = Command::new(&ffprobe)
             .args([
                 "-v",
@@ -835,7 +835,7 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
                 "-show_entries",
                 entries,
                 "-of",
-                "default=noprint_wrappers=1:nokey=1",
+                "json",
             ])
             .arg(path)
             .output()
@@ -845,50 +845,40 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
             "ffprobe failed: {:?}",
             output.status
         );
-        String::from_utf8_lossy(&output.stdout).to_string()
+        let payload: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse ffprobe JSON");
+        payload["streams"]
+            .as_array()
+            .and_then(|streams| streams.first())
+            .cloned()
+            .expect("ffprobe stream")
     };
     let video = probe(
         &first,
         "v:0",
         "stream=codec_name,r_frame_rate,nb_read_frames,start_time,duration",
     );
-    assert!(video.contains("h264"), "unexpected video stream: {video}");
-    assert!(video.contains("60/1"), "unexpected video rate: {video}");
-    assert!(
-        video.lines().any(|line| line.trim() == "60"),
-        "unexpected video count: {video}"
-    );
-    assert!(
-        video.lines().any(|line| line.trim() == "0.000000"),
-        "unexpected video start: {video}"
-    );
+    assert_eq!(video["codec_name"], "h264", "unexpected video stream");
+    assert_eq!(video["r_frame_rate"], "60/1", "unexpected video rate");
+    assert_eq!(video["nb_read_frames"], "60", "unexpected video count");
+    assert_eq!(video["start_time"], "0.000000", "unexpected video start");
     let audio = probe(
         &first,
         "a:0",
         "stream=codec_name,sample_rate,channels,start_time,duration",
     );
-    assert!(audio.contains("aac"), "unexpected audio stream: {audio}");
-    assert!(audio.contains("48000"), "unexpected audio rate: {audio}");
-    assert!(
-        audio.lines().any(|line| line.trim() == "2"),
-        "unexpected audio channels: {audio}"
-    );
-    assert!(
-        audio.lines().any(|line| line.trim() == "0.000000"),
-        "unexpected audio start: {audio}"
-    );
-    let video_duration = video
-        .lines()
-        .last()
+    assert_eq!(audio["codec_name"], "aac", "unexpected audio stream");
+    assert_eq!(audio["sample_rate"], "48000", "unexpected audio rate");
+    assert_eq!(audio["channels"], 2, "unexpected audio channels");
+    assert_eq!(audio["start_time"], "0.000000", "unexpected audio start");
+    let video_duration = video["duration"]
+        .as_str()
         .expect("video duration")
-        .trim()
         .parse::<f64>()
         .expect("numeric video duration");
-    let audio_duration = audio
-        .lines()
-        .last()
+    let audio_duration = audio["duration"]
+        .as_str()
         .expect("audio duration")
-        .trim()
         .parse::<f64>()
         .expect("numeric audio duration");
     assert!(
