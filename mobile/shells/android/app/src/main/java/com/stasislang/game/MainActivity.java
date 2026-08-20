@@ -1,6 +1,7 @@
 package @STASIS_PACKAGE_ID@;
 
 import android.content.res.AssetManager;
+import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -26,6 +27,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HashSet;
 
 public final class MainActivity extends SDLActivity {
+    private static final String STASIS_ANDROID_ORIENTATION = "@STASIS_ANDROID_ORIENTATION@";
     private static final long HUD_UPDATE_INTERVAL_MS = 200L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_MANIFEST_BYTES = 1024 * 1024;
@@ -52,6 +54,26 @@ public final class MainActivity extends SDLActivity {
     private TextView runtimeError;
     private Runnable hudUpdater;
     private String displayedRuntimeError;
+
+    @Override
+    public void setOrientationBis(int width, int height, boolean resizable, String hint) {
+        int requestedOrientation;
+        switch (STASIS_ANDROID_ORIENTATION) {
+            case "sensorLandscape":
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+                break;
+            case "sensorPortrait":
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+                break;
+            case "fullSensor":
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR;
+                break;
+            default:
+                super.setOrientationBis(width, height, resizable, hint);
+                return;
+        }
+        setRequestedOrientation(requestedOrientation);
+    }
 
     @Override
     protected void onCreate(Bundle state) {

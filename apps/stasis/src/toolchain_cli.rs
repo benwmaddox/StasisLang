@@ -7224,6 +7224,49 @@ mod tests {
         assert!(android_activity.contains("stasis.seam_test_id"));
         assert!(android_activity.contains("BuildConfig.STASIS_SEAM_TESTS"));
         assert!(android_activity.contains("nativeSetSeamTestId"));
+        assert!(android_activity
+            .contains("private static final String STASIS_ANDROID_ORIENTATION = \"fullSensor\";"));
+        assert!(!android_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
+        assert!(android_activity.contains("public void setOrientationBis"));
+        assert!(android_activity.contains("ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE"));
+        assert!(android_activity.contains("ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT"));
+        assert!(android_activity.contains("ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR"));
+        assert!(
+            android_activity.contains("super.setOrientationBis(width, height, resizable, hint);")
+        );
+
+        let mut landscape_workspace = workspace.clone();
+        landscape_workspace
+            .manifest
+            .android
+            .as_mut()
+            .expect("Android manifest")
+            .orientation = "sensorLandscape".to_string();
+        let android_landscape = root.join("android-landscape-package");
+        fs::create_dir_all(&android_landscape).expect("create landscape Android staging");
+        assemble_mobile_shell(
+            &landscape_workspace,
+            PackageTarget::AndroidArm64,
+            &aot,
+            &android_landscape,
+            &provenance,
+        )
+        .expect("assemble landscape Android shell");
+        let landscape_activity = fs::read_to_string(
+            android_landscape
+                .join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
+        )
+        .expect("read landscape Android activity");
+        assert!(landscape_activity.contains(
+            "private static final String STASIS_ANDROID_ORIENTATION = \"sensorLandscape\";"
+        ));
+        assert!(!landscape_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
+        let landscape_manifest = fs::read_to_string(
+            android_landscape.join("android/app/src/main/AndroidManifest.xml"),
+        )
+        .expect("read landscape Android manifest");
+        assert!(landscape_manifest.contains("android:screenOrientation=\"sensorLandscape\""));
+
         let android_jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
                 .expect("read Android JNI bridge");
