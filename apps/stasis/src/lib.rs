@@ -4891,6 +4891,26 @@ mod tests {
     }
 
     #[test]
+    fn opengl_frame_start_clears_the_entire_drawable_before_viewport_content() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let clear_start = graphics_source
+            .find("static void stasis_gl_clear_drawable(void) {")
+            .expect("OpenGL frame-start clear helper");
+        let clear_body = graphics_source[clear_start..]
+            .split_once("\n}\n")
+            .map(|(body, _)| body)
+            .expect("complete OpenGL frame-start clear helper");
+        assert!(clear_body.contains("glDisable(GL_SCISSOR_TEST)"));
+        assert!(clear_body.contains("glClearColor(0.0f, 0.0f, 0.0f, 1.0f)"));
+        assert!(clear_body.contains("glClear(GL_COLOR_BUFFER_BIT)"));
+        assert!(
+            !clear_body.contains("glScissor"),
+            "frame-start clear must not depend on stale letterbox geometry"
+        );
+        assert!(graphics_source.contains("stasis_gl_clear_drawable();"));
+    }
+
+    #[test]
     fn windows_runtime_uses_physical_drawable_pixels_at_monitor_density() {
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("SDL_WINDOW_HIGH_PIXEL_DENSITY")
