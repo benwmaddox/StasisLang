@@ -16,6 +16,7 @@ use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::formatter::format_source;
+use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
@@ -4136,6 +4137,10 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
                 || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
                 || (imported_symbols.contains("sys_memcpy_u8")
                     && layout["byte_backed"].as_bool() == Some(true))
+                || (imported_symbols.contains("sys_memcpy_i32")
+                    && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_I32)))
+                || (imported_symbols.contains("sys_memcpy_f32")
+                    && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_F32)))
         });
     config["globals"]
         .as_object_mut()
@@ -6077,6 +6082,60 @@ mod tests {
         let runtime = link_web_runtime(&process, false);
         assert!(runtime.contains("const sysMemcpyU8 ="));
         assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+    }
+
+    #[test]
+    fn release_web_runtime_retains_typed_layouts_for_memcpy() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_memcpy.stasis",
+            "extern function sys_memcpy_i32(dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32): void; extern function sys_memcpy_f32(dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32): void; global i32_source: i32[4]; global i32_destination: i32[4]; global i32_scratch: i32[2]; global f32_source: f32[4]; global f32_destination: f32[4]; global f32_scratch: f32[2]; global unrelated: u8[4]; function main(): i32 { i32_source[0] = 41; f32_source[0] = 1.0; sys_memcpy_i32(i32_destination, 0, i32_source, 0, 4); sys_memcpy_f32(f32_destination, 0, f32_source, 0, 4); return i32_destination[0]; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile typed web memcpy fixture");
+        assert!(process.imported_symbols().contains("sys_memcpy_i32"));
+        assert!(process.imported_symbols().contains("sys_memcpy_f32"));
+
+        let release = web_runtime_config(&workspace, &process, false);
+        let memory = release["memory"].as_object().expect("release memory");
+        for (paths, type_id) in [
+            (
+                ["i32_source", "i32_destination", "i32_scratch"],
+                TYPE_ID_I32,
+            ),
+            (
+                ["f32_source", "f32_destination", "f32_scratch"],
+                TYPE_ID_F32,
+            ),
+        ] {
+            for path in paths {
+                let layout = memory
+                    .get(path)
+                    .unwrap_or_else(|| panic!("release omitted typed layout {path}"));
+                assert_eq!(layout["type_id"], json!(type_id));
+                assert_eq!(
+                    layout["hash"],
+                    json!(stasis_compiler::backend::wasm::wasm_global_hash(path))
+                );
+                assert_eq!(
+                    layout["offset"],
+                    json!(
+                        process
+                            .memory_layout()
+                            .get(path)
+                            .expect("typed layout")
+                            .offset
+                    )
+                );
+            }
+        }
+        assert!(!memory.contains_key("unrelated"));
     }
 
     #[test]
