@@ -666,26 +666,16 @@ static void stasis_sync_display_metrics(void) {
 }
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static void stasis_gl_clear_rect(int x, int y, int width, int height) {
-    if (width <= 0 || height <= 0) return;
-    glScissor(x, y, width, height);
-    glClear(GL_COLOR_BUFFER_BIT);
-}
-
-static void stasis_gl_clear_letterbox_bars(void) {
-    const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
-    const int left = (int)viewport.x;
-    const int bottom = stasis_display_bottom_origin_y(
-        g_drawable_height, viewport);
-    const int right = left + (int)viewport.w;
-    const int top = bottom + (int)viewport.h;
-    glEnable(GL_SCISSOR_TEST);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    stasis_gl_clear_rect(0, 0, left, g_drawable_height);
-    stasis_gl_clear_rect(right, 0, g_drawable_width - right, g_drawable_height);
-    stasis_gl_clear_rect(0, 0, g_drawable_width, bottom);
-    stasis_gl_clear_rect(0, top, g_drawable_width, g_drawable_height - top);
+static void stasis_gl_clear_drawable(void) {
+    /*
+     * Clear the complete drawable before the logical viewport is rendered.
+     * The viewport can be transiently stale while Android rotates or
+     * recreates its surface; clearing four bars from the previous metrics can
+     * leave newly exposed pixels uninitialized (or show old surface contents).
+     */
     glDisable(GL_SCISSOR_TEST);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
 }
 #endif
 
@@ -4702,7 +4692,7 @@ STASIS_EXPORT void stasis_begin_frame(void) {
         SDL_SetRenderClipRect(g_renderer, NULL);
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        stasis_gl_clear_letterbox_bars();
+        stasis_gl_clear_drawable();
 #else
         (void)g_force_debug_overlay;
 #endif

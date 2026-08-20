@@ -7197,6 +7197,14 @@ mod tests {
         let android_manifest =
             fs::read_to_string(android.join("android/app/src/main/AndroidManifest.xml"))
                 .expect("read Android manifest");
+        assert!(android_manifest.contains("android:appCategory=\"game\""));
+        assert!(android_manifest.contains(
+            "android:name=\"android.window.PROPERTY_COMPAT_ALLOW_ORIENTATION_OVERRIDE\""
+        ));
+        assert!(android_manifest.contains(
+            "android:name=\"android.window.PROPERTY_COMPAT_ALLOW_USER_ASPECT_RATIO_OVERRIDE\""
+        ));
+        assert!(android_manifest.matches("android:value=\"false\"").count() >= 2);
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
         assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
