@@ -437,6 +437,276 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
 }
 
 #[test]
+fn recording_matches_visible_play_letterbox_and_input_timeline() {
+    let root = repository_root();
+    let configured_runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+        .as_deref()
+        .is_some_and(|path| Path::new(path).is_file());
+    if !configured_runtime
+        && !root
+            .join("runtime/build/bin/Release/stasis_graphics.dll")
+            .is_file()
+    {
+        eprintln!(
+            "native recording integration skipped: runtime/build/bin/Release/stasis_graphics.dll is unavailable"
+        );
+        return;
+    }
+    let fixture = root.join("samples/windows_launch_smoke");
+    let test_tree = TestTree(temp_dir("headless_recording"));
+    let project = test_tree.0.join("windows_launch_smoke");
+    copy_tree(&fixture, &project);
+
+    let visible = test_tree.0.join("visible.png");
+    let visible_run = launch(
+        {
+            let mut command = stasis_command(&project);
+            command.args([
+                "play",
+                "main.stasis",
+                "--ticks",
+                "2",
+                "--screenshot-frame",
+                "2",
+                "--screenshot",
+                visible.to_str().unwrap(),
+                "--exit-after-screenshot",
+            ]);
+            command
+        },
+        "visible parity play",
+    );
+    assert_launch("visible parity play", visible_run, &visible);
+    let visible_image = image::open(&visible)
+        .expect("visible parity screenshot")
+        .to_rgba8();
+    let parity_points = [
+        (10, 10),   // background
+        (310, 170), // background
+        (84, 66),   // PNG sprite interior
+        (236, 66),  // SVG sprite interior
+    ];
+
+    let baseline = test_tree.0.join("baseline");
+    let baseline_run = launch(
+        {
+            let mut command = stasis_command(&project);
+            command.args([
+                "record",
+                "main.stasis",
+                "--output",
+                baseline.to_str().unwrap(),
+                "--width",
+                "640",
+                "--height",
+                "400",
+                "--fps",
+                "60",
+                "--frames",
+                "3",
+            ]);
+            command
+        },
+        "headless recording baseline",
+    );
+    assert!(
+        baseline_run.status.success(),
+        "headless recording baseline failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&baseline_run.stdout),
+        String::from_utf8_lossy(&baseline_run.stderr)
+    );
+    let baseline_log = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&baseline_run.stdout),
+        String::from_utf8_lossy(&baseline_run.stderr)
+    );
+    assert!(
+        baseline_log.contains("Stasis recording presentation: hidden=1"),
+        "recording did not report hidden presentation: {baseline_log}"
+    );
+    let baseline_files = recording_frames(&baseline);
+    assert_eq!(baseline_files.len(), 3);
+    let baseline_first = image::open(&baseline_files[0])
+        .expect("baseline first frame")
+        .to_rgba8();
+    assert_eq!(baseline_first.dimensions(), (640, 400));
+    assert_eq!(baseline_first.get_pixel(0, 0).0, [0, 0, 0, 255]);
+    assert_eq!(baseline_first.get_pixel(639, 399).0, [0, 0, 0, 255]);
+    for (x, y) in parity_points {
+        assert_eq!(
+            baseline_first.get_pixel(x * 2, y * 2 + 20).0,
+            visible_image.get_pixel(x, y).0,
+            "letterbox parity mismatch at visible pixel ({x},{y})"
+        );
+    }
+    let visible_background = visible_image.get_pixel(10, 10).0;
+    let mut visible_text_pixels = 0;
+    for x in 50..150 {
+        for y in 120..155 {
+            if visible_image.get_pixel(x, y).0 != visible_background {
+                visible_text_pixels += 1;
+            }
+        }
+    }
+    let mut recorded_text_pixels = 0;
+    for x in 100..300 {
+        for y in 260..330 {
+            if baseline_first.get_pixel(x, y).0 != [0, 0, 0, 255] {
+                recorded_text_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        visible_text_pixels > 0,
+        "visible cached text oracle has no glyph pixels"
+    );
+    assert!(
+        recorded_text_pixels > 0,
+        "recorded cached text oracle has no glyph pixels"
+    );
+
+    let scripted = test_tree.0.join("scripted");
+    let scripted_run = launch(
+        {
+            let mut command = stasis_command(&project);
+            command.args([
+                "record",
+                "main.stasis",
+                "--output",
+                scripted.to_str().unwrap(),
+                "--width",
+                "640",
+                "--height",
+                "400",
+                "--fps",
+                "60",
+                "--frames",
+                "3",
+                "--input-script",
+                "record_input.json",
+            ]);
+            command
+        },
+        "headless recording input script",
+    );
+    assert!(
+        scripted_run.status.success(),
+        "headless recording input script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&scripted_run.stdout),
+        String::from_utf8_lossy(&scripted_run.stderr)
+    );
+    let scripted_files = recording_frames(&scripted);
+    assert_eq!(scripted_files.len(), 3);
+    let scripted_first = image::open(&scripted_files[0])
+        .expect("scripted first frame")
+        .to_rgba8();
+    let scripted_pixel = scripted_first.get_pixel(20, 40).0;
+    assert_ne!(scripted_pixel, baseline_first.get_pixel(20, 40).0);
+    assert!(
+        scripted_pixel[0] > scripted_pixel[2],
+        "input script should switch the known fixture pixel to red: {scripted_pixel:?}"
+    );
+
+    let scripted_again = test_tree.0.join("scripted-again");
+    let rerun = launch(
+        {
+            let mut command = stasis_command(&project);
+            command.args([
+                "record",
+                "main.stasis",
+                "--output",
+                scripted_again.to_str().unwrap(),
+                "--width",
+                "640",
+                "--height",
+                "400",
+                "--fps",
+                "60",
+                "--frames",
+                "3",
+                "--input-script",
+                "record_input.json",
+            ]);
+            command
+        },
+        "headless recording input repeat",
+    );
+    assert!(rerun.status.success(), "input repeat failed");
+    assert_eq!(
+        fs::read(&scripted_files[0]).expect("scripted frame bytes"),
+        fs::read(&recording_frames(&scripted_again)[0]).expect("repeated frame bytes")
+    );
+
+    if Command::new("ffmpeg").arg("-version").output().is_ok() {
+        let mp4 = test_tree.0.join("recording.mp4");
+        let mp4_run = launch(
+            {
+                let mut command = stasis_command(&project);
+                command.args([
+                    "record",
+                    "main.stasis",
+                    "--output",
+                    mp4.to_str().unwrap(),
+                    "--width",
+                    "640",
+                    "--height",
+                    "400",
+                    "--fps",
+                    "60",
+                    "--frames",
+                    "3",
+                ]);
+                command
+            },
+            "headless recording MP4",
+        );
+        assert!(mp4_run.status.success(), "MP4 recording failed");
+        assert!(fs::metadata(&mp4).expect("MP4 artifact").len() > 0);
+        if Command::new("ffprobe").arg("-version").output().is_ok() {
+            let probe = Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-count_frames",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=r_frame_rate,nb_read_frames",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                ])
+                .arg(&mp4)
+                .output()
+                .expect("run ffprobe");
+            assert!(probe.status.success(), "ffprobe failed");
+            let probe_text = String::from_utf8_lossy(&probe.stdout);
+            assert!(
+                probe_text.contains("60/1"),
+                "unexpected MP4 rate: {probe_text}"
+            );
+            assert!(
+                probe_text.lines().any(|line| line.trim() == "3"),
+                "unexpected MP4 frame count: {probe_text}"
+            );
+        }
+    } else {
+        eprintln!("ffmpeg unavailable; MP4 artifact validation skipped");
+    }
+}
+
+fn recording_frames(directory: &Path) -> Vec<PathBuf> {
+    let mut frames = fs::read_dir(directory)
+        .expect("recording output directory")
+        .map(|entry| entry.expect("recording output entry").path())
+        .collect::<Vec<_>>();
+    frames.sort();
+    assert!(frames
+        .iter()
+        .all(|path| path.extension().and_then(|value| value.to_str()) == Some("png")));
+    frames
+}
+
+#[test]
 fn maximized_portrait_preserves_canvas_in_jit_and_release() {
     let root = repository_root();
     let fixture = root.join("samples/maximized_portrait");

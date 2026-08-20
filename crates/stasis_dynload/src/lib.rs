@@ -10,6 +10,120 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+/// Atomically rename `source` to `destination`, refusing an existing destination.
+///
+/// Recording publication uses this instead of a check-then-rename sequence so a
+/// concurrent creator cannot be overwritten.
+pub fn atomic_rename_no_replace(source: &Path, destination: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let source_display = source.display().to_string();
+        let destination_display = destination.display().to_string();
+        let source = source
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let destination = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        unsafe extern "system" {
+            fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+        }
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result != 0 {
+            return Ok(());
+        }
+        return Err(format!(
+            "atomic no-replace rename {} -> {} failed: {}",
+            source_display,
+            destination_display,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source_display = source.display().to_string();
+        let destination_display = destination.display().to_string();
+        let source = CString::new(source.as_os_str().as_bytes())
+            .map_err(|_| "recording source path contains NUL".to_string())?;
+        let destination = CString::new(destination.as_os_str().as_bytes())
+            .map_err(|_| "recording destination path contains NUL".to_string())?;
+        unsafe extern "C" {
+            fn renameat2(
+                olddirfd: i32,
+                oldpath: *const c_char,
+                newdirfd: i32,
+                newpath: *const c_char,
+                flags: u32,
+            ) -> i32;
+        }
+        const AT_FDCWD: i32 = -100;
+        const RENAME_NOREPLACE: u32 = 1;
+        let result = unsafe {
+            renameat2(
+                AT_FDCWD,
+                source.as_ptr(),
+                AT_FDCWD,
+                destination.as_ptr(),
+                RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        return Err(format!(
+            "atomic no-replace rename {} -> {} failed: {}",
+            source_display,
+            destination_display,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source_display = source.display().to_string();
+        let destination_display = destination.display().to_string();
+        let source = CString::new(source.as_os_str().as_bytes())
+            .map_err(|_| "recording source path contains NUL".to_string())?;
+        let destination = CString::new(destination.as_os_str().as_bytes())
+            .map_err(|_| "recording destination path contains NUL".to_string())?;
+        unsafe extern "C" {
+            fn renamex_np(from: *const c_char, to: *const c_char, flags: u32) -> i32;
+        }
+        const RENAME_EXCL: u32 = 0x4;
+        let result = unsafe { renamex_np(source.as_ptr(), destination.as_ptr(), RENAME_EXCL) };
+        if result == 0 {
+            return Ok(());
+        }
+        return Err(format!(
+            "atomic no-replace rename {} -> {} failed: {}",
+            source_display,
+            destination_display,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (source, destination);
+        Err("atomic no-replace rename is unsupported on this desktop platform".to_string())
+    }
+}
+
 #[cfg(unix)]
 use std::ffi::CStr;
 #[cfg(windows)]
@@ -40,6 +154,22 @@ static JIT_HOST_ENTRY_TARGETS: AtomicUsize = AtomicUsize::new(0);
 static JIT_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 static JIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
 static JIT_PROFILE_GENERATION: AtomicU64 = AtomicU64::new(1);
+static RECORDING_CLOCK_FPS: AtomicU64 = AtomicU64::new(0);
+static RECORDING_CLOCK_FRAME: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_recording_clock(fps: u32, frame: u64) {
+    RECORDING_CLOCK_FPS.store(u64::from(fps), Ordering::Release);
+    RECORDING_CLOCK_FRAME.store(frame, Ordering::Release);
+}
+
+pub fn set_recording_clock_frame(frame: u64) {
+    RECORDING_CLOCK_FRAME.store(frame, Ordering::Release);
+}
+
+pub fn clear_recording_clock() {
+    RECORDING_CLOCK_FPS.store(0, Ordering::Release);
+    RECORDING_CLOCK_FRAME.store(0, Ordering::Release);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitProfileSample {
@@ -1010,6 +1140,7 @@ pub struct StasisGraphicsApi {
     stasis_host_performance_metrics_enabled: usize,
     stasis_host_set_performance_metrics: usize,
     stasis_gfx_submit_u8: usize,
+    stasis_set_recording_config: Option<usize>,
     stasis_test_get_render_submission_state: Option<usize>,
     stasis_gfx_notify_file_changed: Option<usize>,
     stasis_sleep_ms: usize,
@@ -1047,6 +1178,7 @@ impl StasisGraphicsApi {
         let stasis_host_performance_metrics_enabled =
             lib.symbol_address("stasis_host_performance_metrics_enabled")?;
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
+        let stasis_set_recording_config = lib.symbol_address("stasis_set_recording_config").ok();
         let stasis_test_get_render_submission_state = lib
             .symbol_address("stasis_test_get_render_submission_state")
             .ok();
@@ -1063,6 +1195,7 @@ impl StasisGraphicsApi {
             stasis_host_performance_metrics_enabled,
             stasis_host_set_performance_metrics,
             stasis_gfx_submit_u8,
+            stasis_set_recording_config,
             stasis_test_get_render_submission_state,
             stasis_gfx_notify_file_changed,
             stasis_sleep_ms,
@@ -1086,6 +1219,30 @@ impl StasisGraphicsApi {
             let callback: extern "C" fn(i32, i32, *const c_char) -> i32 =
                 unsafe { std::mem::transmute(self.stasis_init_window) };
             Ok(callback(width, height, title.as_ptr()) != 0)
+        }
+    }
+
+    pub fn set_recording_config(&self, width: u32, height: u32, fps: u32) -> Result<(), String> {
+        let symbol = self.stasis_set_recording_config.ok_or_else(|| {
+            "graphics runtime lacks typed headless recording configuration support".to_string()
+        })?;
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(i32, i32, u32) -> i32 =
+                unsafe { std::mem::transmute(symbol) };
+            if callback(width as i32, height as i32, fps) == 0 {
+                return Err("graphics runtime rejected typed recording configuration".to_string());
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(i32, i32, u32) -> i32 =
+                unsafe { std::mem::transmute(symbol) };
+            if callback(width as i32, height as i32, fps) == 0 {
+                return Err("graphics runtime rejected typed recording configuration".to_string());
+            }
+            Ok(())
         }
     }
 
@@ -1482,12 +1639,12 @@ pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
     if let Some(exe_dir) = executable_dir {
-        // A release bundle is one unit. Never let an environment override replace its sibling
-        // runtime with a different build.
+        // An explicit runtime path is authoritative. This is required for isolated tests and
+        // developer builds where cargo may stage a different sibling DLL beside the executable.
+        out.extend(configured.iter().cloned());
         for file_name in runtime_library_file_names() {
             out.push(exe_dir.join(file_name));
         }
-        out.extend(configured.iter().cloned());
 
         // Dev-friendly default: locate the runtime built under the repo tree by
         // walking a few parents from the executable location.
@@ -4586,8 +4743,22 @@ pub extern "C" fn stasis_jit_sleep_ms(ms: i32) {
 }
 
 // Runtime-compatible time APIs used by `extern function time()`/`time_us()` expansion.
+fn recording_clock_us() -> Option<u64> {
+    let fps = RECORDING_CLOCK_FPS.load(Ordering::Acquire);
+    (fps != 0).then(|| {
+        RECORDING_CLOCK_FRAME
+            .load(Ordering::Acquire)
+            .saturating_mul(1_000_000)
+            / fps
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_get_time_ms() -> i32 {
+    if let Some(micros) = recording_clock_us() {
+        return (micros / 1_000).min(i32::MAX as u64) as i32;
+    }
+
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_millis() as i32,
         Err(_) => 0,
@@ -4596,6 +4767,9 @@ pub extern "C" fn stasis_get_time_ms() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_get_time_us() -> i32 {
+    if let Some(micros) = recording_clock_us() {
+        return micros.min(i32::MAX as u64) as i32;
+    }
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_micros() as i32,
         Err(_) => 0,
@@ -5751,6 +5925,49 @@ mod tests {
     use super::*;
     use std::sync::MutexGuard;
 
+    #[test]
+    fn recording_clock_uses_frame_index_without_accumulated_rounding() {
+        let _guard = test_lock();
+        set_recording_clock(60, 0);
+        assert_eq!(stasis_get_time_ms(), 0);
+        assert_eq!(stasis_get_time_us(), 0);
+        set_recording_clock_frame(1);
+        assert_eq!(stasis_get_time_us(), 16_666);
+        set_recording_clock_frame(3);
+        assert_eq!(stasis_get_time_us(), 50_000);
+        set_recording_clock(59, 59);
+        assert_eq!(stasis_get_time_us(), (59_u64 * 1_000_000 / 59) as i32);
+        set_recording_clock(1, u64::MAX);
+        assert_eq!(stasis_get_time_ms(), i32::MAX);
+        assert_eq!(stasis_get_time_us(), i32::MAX);
+        clear_recording_clock();
+    }
+
+    #[test]
+    fn atomic_rename_no_replace_refuses_existing_destination() {
+        let _guard = test_lock();
+        let root = std::env::temp_dir().join(format!(
+            "stasis-atomic-rename-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create atomic rename test directory");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::write(&source, b"source").expect("write source");
+        std::fs::write(&destination, b"destination").expect("write destination");
+        assert!(atomic_rename_no_replace(&source, &destination).is_err());
+        assert_eq!(std::fs::read(&source).expect("read source"), b"source");
+        assert_eq!(
+            std::fs::read(&destination).expect("read destination"),
+            b"destination"
+        );
+        std::fs::remove_dir_all(root).expect("remove atomic rename test directory");
+    }
+
     static TEST_SPRITE_RELEASES: AtomicUsize = AtomicUsize::new(0);
 
     fn test_sprite_load(_: &[u8], _: i32, _: i32) -> i32 {
@@ -5835,13 +6052,20 @@ mod tests {
     }
 
     #[test]
-    fn bundled_graphics_runtime_outranks_environment_overrides() {
+    fn bundled_graphics_runtime_is_default_candidate() {
         let executable = std::env::current_exe().expect("current test executable");
-        let expected = executable
-            .parent()
-            .expect("test executable directory")
-            .join(runtime_library_file_names()[0]);
-        assert_eq!(runtime_library_candidate_paths().first(), Some(&expected));
+        let candidates = runtime_library_candidate_paths();
+        if let Some(configured) = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH")
+            .or_else(|| std::env::var_os("STASIS_RUNTIME_DLL_PATH"))
+        {
+            assert_eq!(candidates.first(), Some(&PathBuf::from(configured)));
+        } else {
+            let expected = executable
+                .parent()
+                .expect("test executable directory")
+                .join(runtime_library_file_names()[0]);
+            assert_eq!(candidates.first(), Some(&expected));
+        }
     }
 
     #[cfg(not(windows))]

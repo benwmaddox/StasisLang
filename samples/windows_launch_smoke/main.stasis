@@ -12,6 +12,7 @@ global host_req_flags: i32;
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global host_req_seq: i32;
+global host_i32: i32[768];
 global png_sprite: i32;
 global svg_sprite: i32;
 global smoke_font: i32;
@@ -64,6 +65,11 @@ function render(): i32 {
     gfx_cmd_f32[1] = 0.07;
     gfx_cmd_f32[2] = 0.12;
     gfx_cmd_f32[3] = 1.0;
+    if (host_i32[545] != 0) {
+        gfx_cmd_f32[0] = 0.80;
+        gfx_cmd_f32[1] = 0.12;
+        gfx_cmd_f32[2] = 0.08;
+    }
 
     gfx_cmd_i32[32] = png_sprite;
     gfx_cmd_i32[33] = 0;

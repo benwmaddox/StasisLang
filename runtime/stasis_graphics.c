@@ -156,6 +156,11 @@ static int g_native_window_height = 600;
 static int g_drawable_width = 800;
 static int g_drawable_height = 600;
 static float g_pixel_scale = 1.0f;
+static bool g_recording_presentation = false;
+static int g_recording_width = 0;
+static int g_recording_height = 0;
+static uint32_t g_recording_fps = 0;
+static bool g_recording_config_pending = false;
 static StasisDisplayMetrics g_display_metrics;
 static int g_display_generation = 0;
 static int g_density_generation = 0;
@@ -3638,8 +3643,8 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
         out_path = resolved;
     }
 
-    const int w = g_drawable_width;
-    const int h = g_drawable_height;
+    const int w = g_recording_presentation ? g_recording_width : g_drawable_width;
+    const int h = g_recording_presentation ? g_recording_height : g_drawable_height;
     const size_t bytes = (size_t)w * (size_t)h * 4u;
 
     uint8_t* pixels = (uint8_t*)malloc(bytes);
@@ -3664,6 +3669,11 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
                 g_line_count = 0;
             }
 
+            /* Read the fixed physical recording target, not the logical viewport. */
+            if (g_recording_presentation) {
+                SDL_SetRenderLogicalPresentation(
+                    g_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+            }
             /* SDL3 returns an owned surface for renderer readback. */
             SDL_Surface* readback = SDL_RenderReadPixels(g_renderer, NULL);
             SDL_Surface* bgra = readback
@@ -3678,9 +3688,17 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
                 }
                 ok = png ? write_png_bgra32(out_path, w, h, pixels, 0)
                          : write_bmp_bgra32(out_path, w, h, pixels, 0);
+            } else {
+                SDL_Log("recording readback dimensions mismatch: got=%dx%d expected=%dx%d",
+                    bgra ? bgra->w : 0, bgra ? bgra->h : 0, w, h);
             }
             SDL_DestroySurface(bgra);
             SDL_DestroySurface(readback);
+            if (g_recording_presentation) {
+                SDL_SetRenderLogicalPresentation(
+                    g_renderer, g_window_width, g_window_height,
+                    SDL_LOGICAL_PRESENTATION_LETTERBOX);
+            }
         }
         free(pixels);
         return ok;
@@ -4174,6 +4192,16 @@ STASIS_EXPORT int stasis_get_startup_test_success(void) {
     return g_last_test_result.success;
 }
 
+/* Typed recording setup used by the JIT host before window initialization. */
+STASIS_EXPORT int stasis_set_recording_config(int width, int height, uint32_t fps) {
+    if (g_window || width < 1 || height < 1 || fps == 0) return 0;
+    g_recording_width = width;
+    g_recording_height = height;
+    g_recording_fps = fps;
+    g_recording_config_pending = true;
+    return 1;
+}
+
 /*
  * Initialize graphics window
  * Returns 1 on success, 0 on failure
@@ -4202,6 +4230,52 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_screenshot_frame = 1;
     g_debug_frame_counter = 0;
     g_screenshot_path[0] = 0;
+    const bool typed_recording = g_recording_config_pending;
+    const int typed_width = g_recording_width;
+    const int typed_height = g_recording_height;
+    const uint32_t typed_fps = g_recording_fps;
+    g_recording_config_pending = false;
+    g_recording_presentation = false;
+    g_recording_width = 0;
+    g_recording_height = 0;
+    g_recording_fps = 0;
+    if (typed_recording) {
+        g_recording_presentation = true;
+        g_recording_width = typed_width;
+        g_recording_height = typed_height;
+        g_recording_fps = typed_fps;
+        width = typed_width;
+        height = typed_height;
+        SDL_Log("Stasis recording presentation: hidden=1 logical=%dx%d physical=%dx%d fps=%u",
+            width, height, g_recording_width, g_recording_height, g_recording_fps);
+    }
+    const char* recording = SDL_getenv("STASIS_RECORDING_PRESENTATION");
+    const char* recording_width = SDL_getenv("STASIS_RECORDING_WIDTH");
+    const char* recording_height = SDL_getenv("STASIS_RECORDING_HEIGHT");
+    const char* recording_fps = SDL_getenv("STASIS_RECORDING_FPS");
+    if (!typed_recording && recording && strcmp(recording, "0") != 0 && recording_width && recording_height && recording_fps) {
+        char* width_end = NULL;
+        char* height_end = NULL;
+        char* fps_end = NULL;
+        long parsed_width = strtol(recording_width, &width_end, 10);
+        long parsed_height = strtol(recording_height, &height_end, 10);
+        long parsed_fps = strtol(recording_fps, &fps_end, 10);
+        if (width_end != recording_width && *width_end == 0 &&
+            height_end != recording_height && *height_end == 0 &&
+            fps_end != recording_fps && *fps_end == 0 &&
+            parsed_width > 0 && parsed_width <= INT_MAX &&
+            parsed_height > 0 && parsed_height <= INT_MAX &&
+            parsed_fps > 0 && parsed_fps <= UINT32_MAX) {
+            g_recording_presentation = true;
+            g_recording_width = (int)parsed_width;
+            g_recording_height = (int)parsed_height;
+            g_recording_fps = (uint32_t)parsed_fps;
+            width = g_recording_width;
+            height = g_recording_height;
+            SDL_Log("Stasis recording presentation: hidden=1 logical=%dx%d physical=%dx%d fps=%u",
+                width, height, g_recording_width, g_recording_height, g_recording_fps);
+        }
+    }
     const char* screenshot = SDL_getenv("STASIS_SCREENSHOT_ONCE");
     if (screenshot && *screenshot) {
         strncpy(g_screenshot_path, screenshot, sizeof(g_screenshot_path) - 1);
@@ -4250,6 +4324,14 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     int native_request_height = height;
     SDL_WindowFlags window_flags = (want_sdl ? 0 : SDL_WINDOW_OPENGL) |
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (g_recording_presentation) {
+        window_flags &= ~SDL_WINDOW_RESIZABLE;
+        window_flags |= SDL_WINDOW_HIDDEN;
+    }
+    const char* force_hidden = SDL_getenv("STASIS_WINDOW_HIDDEN");
+    if (force_hidden && strcmp(force_hidden, "0") != 0) {
+        window_flags |= SDL_WINDOW_HIDDEN;
+    }
 #if defined(__ANDROID__) || defined(__IPHONEOS__)
     const SDL_DisplayMode* display_mode =
         SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
@@ -4261,7 +4343,9 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 #else
     /* Let the desktop window manager fill its usable work area without
        covering taskbars, docks, or panels. */
-    window_flags |= SDL_WINDOW_MAXIMIZED;
+    if (!g_recording_presentation) {
+        window_flags |= SDL_WINDOW_MAXIMIZED;
+    }
 #endif
 
     g_window = SDL_CreateWindow(
@@ -4277,7 +4361,9 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_Quit();
         return 0;
     }
-    SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    if (!g_recording_presentation) {
+        SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
 
     /* Optional: start window minimized to keep automated/local test runs unobtrusive. */
     {
@@ -4347,8 +4433,9 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             SDL_Quit();
             return 0;
         }
-        if (!SDL_SetRenderVSync(g_renderer, 1)) {
-            SDL_Log("SDL_SetRenderVSync failed: %s", SDL_GetError());
+        if (!SDL_SetRenderVSync(g_renderer, g_recording_presentation ? 0 : 1)) {
+            SDL_Log("SDL_SetRenderVSync failed (recording=%d): %s",
+                g_recording_presentation ? 1 : 0, SDL_GetError());
         }
         SDL_SetDefaultTextureScaleMode(g_renderer, SDL_SCALEMODE_LINEAR);
         SDL_SetRenderLogicalPresentation(
@@ -4572,6 +4659,14 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
 
     stasis_set_logical_size(width, height);
 #if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+    if (g_recording_presentation) {
+        if (g_renderer) {
+            SDL_SetRenderLogicalPresentation(
+                g_renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+        }
+        stasis_sync_display_metrics();
+        return;
+    }
     const SDL_WindowFlags window_flags = SDL_GetWindowFlags(g_window);
     if ((window_flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) {
         SDL_RestoreWindow(g_window);
@@ -4602,6 +4697,17 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
 STASIS_EXPORT int stasis_set_maximized(int maximized) {
     if (!g_window) {
         return 0;
+    }
+
+    if (g_recording_presentation) {
+        (void)maximized;
+        if (g_renderer) {
+            SDL_SetRenderLogicalPresentation(
+                g_renderer, g_window_width, g_window_height,
+                SDL_LOGICAL_PRESENTATION_LETTERBOX);
+        }
+        stasis_sync_display_metrics();
+        return 1;
     }
 
 #if defined(__ANDROID__) || defined(__IPHONEOS__)
@@ -4660,6 +4766,12 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
 STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
     if (!g_window) {
         return 0;
+    }
+
+    if (g_recording_presentation) {
+        (void)fullscreen;
+        stasis_sync_display_metrics();
+        return 1;
     }
 
     bool result = SDL_SetWindowFullscreen(g_window, fullscreen != 0);
@@ -6320,7 +6432,17 @@ STASIS_EXPORT int stasis_is_key_down(int scancode) {
 /*
  * Get current time in milliseconds
  */
+static uint64_t stasis_recording_clock_us(void) {
+    if (!g_recording_presentation || g_recording_fps == 0) return 0;
+    return ((uint64_t)(uint32_t)g_debug_frame_counter * 1000000ull) /
+        (uint64_t)g_recording_fps;
+}
+
 STASIS_EXPORT int stasis_get_time_ms(void) {
+    if (g_recording_presentation) {
+        uint64_t millis = stasis_recording_clock_us() / 1000ull;
+        return millis > (uint64_t)INT_MAX ? INT_MAX : (int)millis;
+    }
     return (int)SDL_GetTicks();
 }
 
@@ -6328,6 +6450,10 @@ STASIS_EXPORT int stasis_get_time_ms(void) {
  * Get current time in microseconds (truncated to i32).
  */
 STASIS_EXPORT int stasis_get_time_us(void) {
+    if (g_recording_presentation) {
+        uint64_t micros = stasis_recording_clock_us();
+        return micros > (uint64_t)INT_MAX ? INT_MAX : (int)micros;
+    }
     Uint64 freq = SDL_GetPerformanceFrequency();
     if (freq == 0) return 0;
     Uint64 counter = SDL_GetPerformanceCounter();

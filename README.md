@@ -351,6 +351,22 @@ stasis play game.stasis `
 
 This turns a graphical interaction into a repeatable test artifact. PNG bytes are deterministic for identical pixels, though rasterization may still differ across graphics backends, drivers, and platforms.
 
+For deterministic desktop-first video review, use the hidden fixed-rate recorder:
+
+```powershell
+stasis --workspace samples/windows_launch_smoke record main.stasis `
+  --output artifacts/frames --width 640 --height 360 --fps 60 --frames 3 `
+  --input-script record_input.json
+stasis --workspace samples/windows_launch_smoke record main.stasis `
+  --output artifacts/review.mp4 --width 640 --height 360 --fps 60 --frames 3
+```
+
+An extensionless output is an atomically published, staged PNG sequence; `.mp4` uses
+FFmpeg H.264/yuv420p and requires `ffmpeg` on `PATH`. Recording uses the normal
+JIT/render path, zero tick sleep, fixed physical output dimensions, logical
+canvas letterboxing, and no visible or focused window. See
+[docs/headless_recording.md](docs/headless_recording.md).
+
 ## Installation and Setup
 
 Stasis is fast-moving and breaking changes are expected. Nightly release archives are published from `main` on the [GitHub Releases page](https://github.com/benwmaddox/StasisLang/releases).

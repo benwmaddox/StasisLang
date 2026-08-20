@@ -121,6 +121,14 @@ cloning a generated repository, reactivate the checked-in hook with
   the default. `--ticks` invokes `tick()` exactly `COUNT` times without calling `render()` or
   loading the graphics runtime. `--fast-forward` makes the no-pacing contract explicit and
   requires a positive tick count.
+- `record [ENTRY] --output PATH --width PX --height PX --fps FPS (--frames N|--duration S)`:
+  execute the normal desktop JIT/render path on a hidden fixed-size SDL software presentation.
+  An extensionless output path publishes an exact, numbered PNG sequence; an `.mp4` path stages
+  those PNGs and invokes FFmpeg H.264/yuv420p at the requested rate. Recording starts after
+  `main()`, uses zero tick sleep, applies the existing `--input-script` timeline, and preserves
+  logical-canvas fit/letterboxing. Dimensions, rates, counts, output format, staged frame
+  validation, encoder failures, and partial-output cleanup are bounded and diagnosed. See
+  [Deterministic headless recording](headless_recording.md).
 - `play [ENTRY]`: launch the graphical hot-swap runtime. Without an entry override, discover the
   nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
   and display `name`. Explicit entries discover their own ancestor manifest, so project-root
