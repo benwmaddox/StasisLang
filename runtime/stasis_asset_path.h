@@ -4,6 +4,11 @@
 #include <stddef.h>
 #include <string.h>
 
+static int stasis_asset_path_is_virtual_root(const char *path) {
+    return path != NULL &&
+        (strcmp(path, "/assets") == 0 || strncmp(path, "/assets/", 8) == 0);
+}
+
 static int stasis_asset_normalize_relative_path(
     const char *path,
     char *out,
@@ -12,12 +17,16 @@ static int stasis_asset_normalize_relative_path(
     const char *cursor = path;
     size_t used = 0;
     if (path == NULL || out == NULL || out_size < 2) return 0;
-    if (path[0] == '/' || path[0] == '\\') return 0;
+    int rooted = stasis_asset_path_is_virtual_root(path);
+    if (path[0] == '/' && !rooted) return 0;
+    if (path[0] == '\\') return 0;
     if (((path[0] >= 'A' && path[0] <= 'Z') ||
          (path[0] >= 'a' && path[0] <= 'z')) &&
-        path[1] == ':' && (path[2] == '/' || path[2] == '\\')) {
+        path[1] == ':') {
         return 0;
     }
+    if (strstr(path, "://") != NULL) return 0;
+    if (rooted) cursor = path + 1;
 
     while (*cursor != '\0') {
         while (*cursor == '/' || *cursor == '\\') cursor += 1;
@@ -42,6 +51,9 @@ static int stasis_asset_normalize_relative_path(
 
     if (used == 0) return 0;
     out[used] = '\0';
+    if (rooted && strcmp(out, "assets") != 0 && strncmp(out, "assets/", 7) != 0) {
+        return 0;
+    }
     return 1;
 }
 

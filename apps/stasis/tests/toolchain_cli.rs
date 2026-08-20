@@ -1743,13 +1743,14 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     assert_eq!(created.status.code(), Some(0));
     fs::write(
         project.join("src/main.stasis"),
-        "import \"/vendor/stasis/stdlib/graphics.stasis\";\nfunction main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        "import \"/vendor/stasis/stdlib/graphics.stasis\";\nfunction main(): i32 { return load_font(\"/assets/fonts/ui.ttf\", 16); }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
     )
     .expect("write mobile entry");
-    fs::create_dir_all(project.join("assets")).expect("create assets");
+    fs::create_dir_all(project.join("assets/fonts")).expect("create assets");
+    fs::write(project.join("assets/fonts/ui.ttf"), b"font").expect("write font asset");
     fs::write(
         project.join("assets/manifest.json"),
-        "{\n  \"schema\": \"stasis-assets\",\n  \"version\": 1,\n  \"assets\": []\n}\n",
+        "{\n  \"schema\": \"stasis-assets\",\n  \"version\": 1,\n  \"assets\": [\n    {\"id\":\"ui_font\",\"path\":\"assets/fonts/ui.ttf\",\"content_sha256\":\"795ea3efa43d0872b63bf0067be97553b46983e4f075097669391e9d15388ecc\",\"format\":{\"kind\":\"font\",\"encoding\":\"ttf\"},\"dependencies\":[]}\n  ]\n}\n",
     )
     .expect("write asset manifest");
 
@@ -1887,6 +1888,9 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     assert!(android_cmake.contains("set(SDLIMAGE_PNG_LIBPNG OFF CACHE BOOL \"\" FORCE)"));
     assert!(project
         .join("android/android/app/src/main/assets/stasis_game/assets/manifest.json")
+        .is_file());
+    assert!(project
+        .join("android/android/app/src/main/assets/stasis_game/assets/fonts/ui.ttf")
         .is_file());
     let arm64_gradle = fs::read_to_string(project.join("android/android/app/build.gradle"))
         .expect("read arm64 Gradle");

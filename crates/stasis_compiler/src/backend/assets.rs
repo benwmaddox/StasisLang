@@ -626,15 +626,27 @@ fn resolve_one(
     manifest_paths: Option<&BTreeSet<String>>,
     result: &mut AssetValidationResult,
 ) {
-    if looks_absolute_or_uri(logical_path) {
+    if logical_path.contains('\\') {
+        result.diagnostics.push(diagnostic(
+            reference,
+            "asset_path_nonportable_separator",
+            vec![logical_path.to_string()],
+            "asset paths must use forward slashes; backslash separators are not portable"
+                .to_string(),
+        ));
+        return;
+    }
+    if looks_absolute_or_uri(logical_path) && !is_virtual_asset_path(logical_path) {
         result.diagnostics.push(diagnostic(
             reference,
             "asset_path_absolute_or_uri",
             vec![logical_path.to_string()],
-            "asset paths must be relative filesystem paths".to_string(),
+            "asset paths must be relative filesystem paths or use the /assets/... project-root spelling".to_string(),
         ));
         return;
     }
+    let rooted_project_path = is_virtual_asset_path(logical_path)
+        .then(|| logical_path.strip_prefix('/').unwrap_or(logical_path));
     let source = PathBuf::from(&reference.source_path);
     let declaring_dir = if source.is_absolute() {
         source
@@ -650,23 +662,29 @@ fn resolve_one(
             .to_path_buf()
     };
     let mut candidates = Vec::new();
-    for source_base_dir in source_base_dirs {
-        let source_base_dir = if source_base_dir.is_absolute() {
-            source_base_dir.clone()
-        } else {
-            project_root.join(source_base_dir)
-        };
-        let candidate = source_base_dir.join(logical_path);
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
+    if let Some(rooted_project_path) = rooted_project_path {
+        // `/assets/...` is a virtual project-root spelling. It must not depend on
+        // the declaring source module or any caller-provided source base.
+        candidates.push(project_root.join(rooted_project_path));
+    } else {
+        for source_base_dir in source_base_dirs {
+            let source_base_dir = if source_base_dir.is_absolute() {
+                source_base_dir.clone()
+            } else {
+                project_root.join(source_base_dir)
+            };
+            let candidate = source_base_dir.join(logical_path);
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
         }
-    }
-    for candidate in [
-        declaring_dir.join(logical_path),
-        project_root.join(logical_path),
-    ] {
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
+        for candidate in [
+            declaring_dir.join(logical_path),
+            project_root.join(logical_path),
+        ] {
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
         }
     }
     let attempted = candidates
@@ -753,6 +771,10 @@ fn looks_absolute_or_uri(path: &str) -> bool {
         || path.starts_with('/')
         || path.starts_with('\\')
         || path.as_bytes().get(1).is_some_and(|byte| *byte == b':')
+}
+
+fn is_virtual_asset_path(path: &str) -> bool {
+    path == "/assets" || path.starts_with("/assets/")
 }
 
 fn normalize_path(path: &Path) -> Option<PathBuf> {
@@ -1099,10 +1121,11 @@ function main(): i32 {
         let references = vec![
             reference(0, "../../assets/svg/hero.svg"),
             reference(10, "assets/svg/hero.svg"),
-            reference(20, "../../outside.svg"),
-            reference(30, "assets/svg/missing.svg"),
-            reference(40, "https://example.com/hero.svg"),
-            reference(50, "C:/assets/hero.svg"),
+            reference(20, "/assets/svg/hero.svg"),
+            reference(30, "../../outside.svg"),
+            reference(40, "assets/svg/missing.svg"),
+            reference(50, "https://example.com/hero.svg"),
+            reference(60, "C:/assets/hero.svg"),
         ];
         let result = validate_asset_references(
             &root,
@@ -1111,7 +1134,7 @@ function main(): i32 {
             Some(&BTreeSet::from(["assets/svg/hero.svg".to_string()])),
             &BTreeSet::new(),
         );
-        assert_eq!(result.references.len(), 2);
+        assert_eq!(result.references.len(), 3);
         assert_eq!(
             result.resolved_paths,
             BTreeSet::from(["assets/svg/hero.svg".to_string()])
@@ -1133,11 +1156,61 @@ function main(): i32 {
         let undeclared = validate_asset_references(
             &root,
             &[],
-            &[reference(60, "assets/svg/hero.svg")],
+            &[reference(70, "assets/svg/hero.svg")],
             Some(&BTreeSet::new()),
             &BTreeSet::new(),
         );
         assert_eq!(undeclared.diagnostics[0].code, "asset_not_declared");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn validation_rejects_nonportable_asset_path_spellings() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_asset_portability_{stamp}"));
+        fs::create_dir_all(root.join("assets/fonts")).expect("asset dir");
+        fs::write(root.join("assets/fonts/ui.ttf"), "font").expect("asset fixture");
+        let source_path = root.join("main.stasis").to_string_lossy().into_owned();
+        let reference = |start, logical_path: &str| AssetReference {
+            api: "load_font".into(),
+            source_path: source_path.clone(),
+            start,
+            end: start + logical_path.len(),
+            logical_path: Some(logical_path.into()),
+        };
+        let result = validate_asset_references(
+            &root,
+            &[],
+            &[
+                reference(0, "/assets/fonts/ui.ttf"),
+                reference(1, "/tmp/ui.ttf"),
+                reference(2, "C:/assets/fonts/ui.ttf"),
+                reference(3, "assets\\fonts\\ui.ttf"),
+                reference(4, "\\\\server\\share\\ui.ttf"),
+                reference(5, "https://example.com/ui.ttf"),
+            ],
+            None,
+            &BTreeSet::new(),
+        );
+        assert_eq!(result.references.len(), 1);
+        assert_eq!(result.references[0].project_path, "assets/fonts/ui.ttf");
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "asset_path_absolute_or_uri",
+                "asset_path_absolute_or_uri",
+                "asset_path_nonportable_separator",
+                "asset_path_nonportable_separator",
+                "asset_path_absolute_or_uri",
+            ]
+        );
         fs::remove_dir_all(root).ok();
     }
 }
