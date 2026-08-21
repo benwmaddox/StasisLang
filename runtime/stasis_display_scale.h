@@ -175,10 +175,29 @@ static int stasis_display_scaled_extent(int logical_extent, float pixel_scale) {
     return (int)scaled;
 }
 
+#define STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT 512
+#define STASIS_DISPLAY_FONT_ATLAS_MAX_EXTENT 4096
+
 static int stasis_display_font_atlas_extent(float pixel_scale) {
-    if (pixel_scale <= 1.0f) return 512;
+    if (pixel_scale <= 1.0f) return STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT;
     if (pixel_scale <= 4.0f) return 1024;
     return 2048;
+}
+
+/* Return the next bounded power-of-two atlas size, or zero at the cap. */
+static int stasis_display_font_atlas_next_extent(int atlas_extent) {
+    if (atlas_extent < STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT) {
+        return STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT;
+    }
+    if (atlas_extent >= STASIS_DISPLAY_FONT_ATLAS_MAX_EXTENT) return 0;
+    int next_extent = STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT;
+    while (next_extent <= atlas_extent) {
+        if (next_extent > STASIS_DISPLAY_FONT_ATLAS_MAX_EXTENT / 2) {
+            return STASIS_DISPLAY_FONT_ATLAS_MAX_EXTENT;
+        }
+        next_extent *= 2;
+    }
+    return next_extent;
 }
 
 #endif

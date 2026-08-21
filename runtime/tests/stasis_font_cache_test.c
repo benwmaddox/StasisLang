@@ -99,6 +99,10 @@ int main(void) {
     CHECK(second_size > 0);
     CHECK(second_size != first);
 
+    int large = stasis_load_font(STASIS_TEST_FONT_PATH, 100);
+    CHECK(large > 0);
+    CHECK(stasis_load_font(STASIS_TEST_FONT_PATH, 100) == large);
+
     size_t identity_size = 0;
     unsigned char* identity_bytes = read_file(STASIS_TEST_FONT_PATH, &identity_size);
     char identity_names[10][64];
