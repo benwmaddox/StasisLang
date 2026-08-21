@@ -5,9 +5,11 @@
   const hud = document.getElementById("stasis-hud");
   const errorBox = document.getElementById("stasis-error");
   const loadingBox = document.getElementById("stasis-loading");
+  const loadingStatus = document.getElementById("stasis-loading-status");
   const setLoading = (message, state = "loading") => {
     if (!loadingBox) return;
-    loadingBox.textContent = message;
+    if (loadingStatus) loadingStatus.textContent = message;
+    else loadingBox.textContent = message;
     loadingBox.dataset.failed = state === "failed" ? "true" : "false";
     loadingBox.dataset.hidden = state === "ready" ? "true" : "false";
   };
@@ -1315,7 +1317,7 @@
 
   window.STASIS_RUNTIME_PROMISE = (async () => {
     try {
-      setLoading("Loading Stasis runtime…", "loading");
+      setLoading("Preparing…", "loading");
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
       writeHostFrame(performance.now());

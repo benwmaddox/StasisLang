@@ -53,6 +53,15 @@ The browser populates the canonical HostFrame arrays and consumes the existing g
 buffers, matching Android/Windows. Browser policy (fullscreen gestures, Clipboard API, local
 storage, and WebAudio unlocking) remains in JavaScript.
 
+Before the Wasm module and game assets are ready, `index.html` displays a static, title-aware
+loading shell. The package generator substitutes the manifest game name into
+`#stasis-loading-title`; the separate `#stasis-loading-status` line is the live status target
+updated by both browser runtimes. The shell uses only inline HTML/CSS so it remains available on
+slow or offline starts. `setLoading` keeps the title and decorative structure intact while it
+updates that status, hides the shell after readiness, and leaves it visible with a readable error
+status when startup fails. The `stasis-loading` element retains `role="status"` and
+`aria-live="polite"` for assistive technology.
+
 Development packages show a HUD with current and warmup-excluded worst observed `tick`, `wasm
 render`, `browser replay`, and total `frame work` time. Tick is guest simulation, wasm render is
 guest command-buffer generation, browser replay is host execution/compositing, and frame work is

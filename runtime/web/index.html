@@ -6,14 +6,23 @@
   <link rel="icon" href="data:,">
   <title>__STASIS_GAME_TITLE__</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-monospace, Consolas, monospace; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #07111f; color: #dff6ff; }
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; overflow: hidden; background: #081613; color: #f3eee1; }
     main { position: relative; width: min(960px, 100vw); }
     canvas { display: block; width: 100%; aspect-ratio: 16 / 9; background: #091b2d; touch-action: none; }
     __STASIS_PERFORMANCE_HUD_STYLE__
-    #stasis-loading { position: absolute; inset: 0; display: grid; place-items: center; padding: 1rem; box-sizing: border-box; background: #07111f; color: #dff6ff; text-align: center; }
+    #stasis-loading { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: clamp(1.5rem, 7vw, 5rem); box-sizing: border-box; overflow: hidden; isolation: isolate; background: linear-gradient(145deg, #102a24 0%, #0b1d1a 48%, #07131d 100%); color: #f3eee1; text-align: center; }
+    #stasis-loading::before, #stasis-loading::after { position: absolute; z-index: -1; display: block; content: ""; pointer-events: none; }
+    #stasis-loading::before { width: min(86vw, 56rem); height: min(86vw, 56rem); border: 1px solid #bca66b22; border-radius: 50%; background: radial-gradient(circle, #c6a96b0d 0%, transparent 67%); transform: translate(22%, -25%); }
+    #stasis-loading::after { inset: 0; background: linear-gradient(90deg, transparent 0 49.95%, #bca66b10 50%, transparent 50.05%); opacity: .65; }
+    .stasis-loading-card { width: min(100%, 58rem); display: grid; justify-items: center; gap: clamp(.85rem, 2.5vw, 1.45rem); }
+    .stasis-loading-rule { position: relative; width: min(100%, 32rem); height: 7px; }
+    .stasis-loading-rule::before { position: absolute; top: 3px; right: 0; left: 0; height: 1px; content: ""; background: linear-gradient(90deg, transparent, #c7b47b99 18%, #c7b47b99 82%, transparent); }
+    .stasis-loading-rule-marked::after { position: absolute; top: 0; left: 50%; width: 7px; height: 7px; box-sizing: border-box; content: ""; border: 1px solid #c7b47bcc; background: #0c211d; transform: translateX(-50%) rotate(45deg); }
+    #stasis-loading-title { max-width: 100%; margin: 0; color: #d8ba70; font-family: Georgia, "Times New Roman", serif; font-size: clamp(2.15rem, 6.2vw, 5.4rem); font-weight: 400; letter-spacing: .055em; line-height: .95; text-shadow: 0 2px 18px #0008; text-transform: uppercase; text-wrap: balance; }
+    #stasis-loading-status { min-height: 1.2em; color: #b9c2b5; font-size: clamp(.72rem, 1.6vw, .86rem); letter-spacing: .1em; line-height: 1.4; text-transform: uppercase; }
     #stasis-loading[data-hidden="true"] { display: none; }
-    #stasis-loading[data-failed="true"] { color: #ff8f8f; }
+    #stasis-loading[data-failed="true"] #stasis-loading-status { color: #f1a09a; }
     #stasis-error { position: absolute; inset: 0; margin: 0; padding: 1rem; box-sizing: border-box; overflow: auto; color: #ff8f8f; white-space: pre-wrap; pointer-events: none; }
     #stasis-error:empty { display: none; }
   </style>
@@ -21,7 +30,14 @@
 <body>
   <main>
     <canvas id="stasis-canvas" width="640" height="360" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
-    <div id="stasis-loading" role="status" aria-live="polite">Loading Stasis runtime…</div>
+    <div id="stasis-loading" role="status" aria-live="polite">
+      <div class="stasis-loading-card">
+        <div class="stasis-loading-rule" aria-hidden="true"></div>
+        <h1 id="stasis-loading-title">__STASIS_GAME_TITLE__</h1>
+        <div class="stasis-loading-rule stasis-loading-rule-marked" aria-hidden="true"></div>
+        <div id="stasis-loading-status">Preparing…</div>
+      </div>
+    </div>
     __STASIS_PERFORMANCE_HUD__
     <pre id="stasis-error"></pre>
   </main>
