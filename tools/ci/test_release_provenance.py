@@ -1,6 +1,7 @@
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,39 @@ class ReleaseProvenanceTests(unittest.TestCase):
 
     def test_macos_retina_plist_is_part_of_release_provenance(self):
         self.assertIn("stasis_runner_macos.plist.in", RUNTIME_FILES)
+
+    def test_release_workflows_assemble_every_provenance_runtime_file(self):
+        for workflow_name in (
+            ".github/workflows/nightly-release.yml",
+            ".github/workflows/bootstrap-artifacts.yml",
+        ):
+            workflow = (ROOT / workflow_name).read_text(encoding="utf-8")
+            unix_matches = re.findall(
+                r'^\s+cp (?P<files>runtime/[^\n]+) "\$\{out\}/runtime/"\s*$',
+                workflow,
+                re.MULTILINE,
+            )
+            windows_matches = re.findall(
+                r"^\s+@\((?P<files>[^\n]+)\) \| ForEach-Object \{ Copy-Item \"runtime/\$_\" \"\$out/runtime/\" -Force \}\s*$",
+                workflow,
+                re.MULTILINE,
+            )
+            self.assertEqual(1, len(unix_matches), workflow_name)
+            self.assertEqual(1, len(windows_matches), workflow_name)
+
+            unix_files = {pathlib.Path(path).name for path in unix_matches[0].split()}
+            windows_files = set(re.findall(r"'([^']+)'", windows_matches[0]))
+            for filename in RUNTIME_FILES:
+                self.assertIn(
+                    filename,
+                    unix_files,
+                    f"{filename} missing from Unix assembly in {workflow_name}",
+                )
+                self.assertIn(
+                    filename,
+                    windows_files,
+                    f"{filename} missing from Windows assembly in {workflow_name}",
+                )
 
     def test_package_verifier_detects_runtime_substitution(self):
         with tempfile.TemporaryDirectory() as temporary:
