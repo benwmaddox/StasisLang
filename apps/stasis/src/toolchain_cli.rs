@@ -5943,7 +5943,13 @@ mod tests {
 
         let development = web_index_html("development-game", true);
         assert!(development.contains(r#"id="stasis-hud""#));
-        assert!(!development.contains("__STASIS_"));
+        for html in [&release, &development] {
+            assert!(!html.contains("__STASIS_"));
+            assert!(html.contains("#stasis-error { position: absolute;"));
+            assert!(html.contains("inset: 0; margin: 0;"));
+            assert!(html.contains("white-space: pre-wrap;"));
+            assert!(html.contains("#stasis-error:empty { display: none; }"));
+        }
     }
 
     #[test]
