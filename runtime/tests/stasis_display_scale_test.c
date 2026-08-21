@@ -148,6 +148,16 @@ static void test_extreme_density_and_extent_are_bounded(void) {
     CHECK(stasis_display_font_atlas_extent(metrics.raster_scale) == 2048);
 }
 
+static void test_font_atlas_growth_is_bounded_and_deterministic(void) {
+    CHECK(stasis_display_font_atlas_next_extent(512) == 1024);
+    CHECK(stasis_display_font_atlas_next_extent(1024) == 2048);
+    CHECK(stasis_display_font_atlas_next_extent(2048) == 4096);
+    CHECK(stasis_display_font_atlas_next_extent(4096) == 0);
+    CHECK(stasis_display_font_atlas_next_extent(8192) == 0);
+    CHECK(stasis_display_font_atlas_next_extent(0) == 512);
+    CHECK(stasis_display_font_atlas_next_extent(513) == 1024);
+}
+
 int main(void) {
     test_phone_scale_preserves_logical_canvas();
     test_pointer_mapping_round_trips_through_letterbox();
@@ -157,5 +167,6 @@ int main(void) {
     test_safe_native_area_maps_to_logical_viewport();
     test_maximized_portrait_pointer_mapping();
     test_extreme_density_and_extent_are_bounded();
+    test_font_atlas_growth_is_bounded_and_deterministic();
     return 0;
 }
