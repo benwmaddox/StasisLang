@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -989,9 +990,66 @@ static int32_t collection_meta_hash(int32_t hash, int32_t kind) {
     return (int32_t)value;
 }
 
+static int utf8_continuation(unsigned char value) {
+    return value >= 0x80 && value <= 0xbf;
+}
+
+static size_t utf8_sequence_length(const unsigned char *cursor, size_t remaining) {
+    const unsigned char first = cursor[0];
+    if (first <= 0x7f) return 1;
+    if (remaining >= 2 && first >= 0xc2 && first <= 0xdf &&
+        utf8_continuation(cursor[1])) return 2;
+    if (remaining >= 3 && first == 0xe0 && cursor[1] >= 0xa0 && cursor[1] <= 0xbf &&
+        utf8_continuation(cursor[2])) return 3;
+    if (remaining >= 3 && first >= 0xe1 && first <= 0xec && utf8_continuation(cursor[1]) &&
+        utf8_continuation(cursor[2])) return 3;
+    if (remaining >= 3 && first == 0xed && cursor[1] >= 0x80 && cursor[1] <= 0x9f &&
+        utf8_continuation(cursor[2])) return 3;
+    if (remaining >= 3 && first >= 0xee && first <= 0xef && utf8_continuation(cursor[1]) &&
+        utf8_continuation(cursor[2])) return 3;
+    if (remaining >= 4 && first == 0xf0 && cursor[1] >= 0x90 && cursor[1] <= 0xbf &&
+        utf8_continuation(cursor[2]) && utf8_continuation(cursor[3])) return 4;
+    if (remaining >= 4 && first >= 0xf1 && first <= 0xf3 && utf8_continuation(cursor[1]) &&
+        utf8_continuation(cursor[2]) && utf8_continuation(cursor[3])) return 4;
+    if (remaining >= 4 && first == 0xf4 && cursor[1] >= 0x80 && cursor[1] <= 0x8f &&
+        utf8_continuation(cursor[2]) && utf8_continuation(cursor[3])) return 4;
+    return 1;
+}
+
+static int32_t utf8_char_length(const char *text) {
+    const unsigned char *cursor = (const unsigned char *)text;
+    const size_t byte_length = strlen(text);
+    size_t offset = 0;
+    size_t count = 0;
+    while (offset < byte_length) {
+        const size_t remaining = byte_length - offset;
+        const size_t sequence_length = utf8_sequence_length(cursor, remaining);
+        if (count >= (size_t)INT32_MAX) return INT32_MAX;
+        count += 1;
+        cursor += sequence_length;
+        offset += sequence_length;
+    }
+    return (int32_t)count;
+}
+
+static int32_t saturated_i32_length(size_t length) {
+    return length > (size_t)INT32_MAX ? INT32_MAX : (int32_t)length;
+}
+
 int32_t stasis_jit_collection_i32_load(int32_t hash, int32_t kind) {
     int32_t derived = collection_meta_hash(hash, kind);
-    return derived == 0 ? 0 : stasis_jit_global_i32_load(derived);
+    StasisScalar *metadata;
+    const char *literal;
+
+    if (derived == 0) return 0;
+    metadata = find_scalar(derived, STASIS_VALUE_I32, 0);
+    if (metadata != NULL) return stasis_jit_global_i32_load(derived);
+
+    literal = find_string(hash);
+    if (literal == NULL) return 0;
+    if (kind == 1 || kind == 2) return saturated_i32_length(strlen(literal));
+    if (kind == 3) return utf8_char_length(literal);
+    return 0;
 }
 void stasis_jit_collection_i32_store(int32_t hash, int32_t kind, int32_t value) {
     int32_t derived = collection_meta_hash(hash, kind);
@@ -1023,6 +1081,53 @@ static void copy_i32_values(int32_t dst, int32_t di, int32_t src, int32_t si, in
     }
 }
 
+static int mobile_text_array_is_registered(int32_t collection_hash) {
+    return find_array(collection_hash, 0, STASIS_VALUE_U8, 0) != NULL ||
+        find_array(collection_hash, 0, STASIS_VALUE_I32, 0) != NULL;
+}
+
+static int32_t saturating_index_add(int32_t base, int32_t offset) {
+    int64_t value = (int64_t)base + (int64_t)offset;
+    if (value > INT32_MAX) return INT32_MAX;
+    if (value < INT32_MIN) return INT32_MIN;
+    return (int32_t)value;
+}
+
+static void copy_u8_values(int32_t dst, int32_t di, int32_t src, int32_t si, int32_t count) {
+    int32_t *values;
+    int32_t offset;
+    const char *literal = NULL;
+
+    if (count <= 0) return;
+    if (!mobile_text_array_is_registered(src)) literal = find_string(src);
+    if (literal != NULL) {
+        const size_t byte_length = strlen(literal);
+        for (offset = 0; offset < count; offset += 1) {
+            const int32_t source_index = saturating_index_add(si, offset);
+            const int32_t destination_index = saturating_index_add(di, offset);
+            int32_t value = 0;
+            if (source_index >= 0 && (size_t)source_index < byte_length) {
+                value = (unsigned char)literal[source_index];
+            }
+            stasis_jit_global_i32_array_store(dst, 0, destination_index, value);
+        }
+        return;
+    }
+
+    if ((size_t)count > SIZE_MAX / sizeof(*values)) return;
+    values = (int32_t *)malloc((size_t)count * sizeof(*values));
+    if (values == NULL) return;
+    for (offset = 0; offset < count; offset += 1) {
+        values[offset] = stasis_jit_global_i32_array_load(
+            src, 0, saturating_index_add(si, offset));
+    }
+    for (offset = 0; offset < count; offset += 1) {
+        stasis_jit_global_i32_array_store(
+            dst, 0, saturating_index_add(di, offset), values[offset]);
+    }
+    free(values);
+}
+
 static void copy_f32_values(int32_t dst, int32_t di, int32_t src, int32_t si, int32_t count) {
     int32_t index;
     if (count <= 0 || di < 0 || si < 0) return;
@@ -1039,12 +1144,12 @@ static void copy_f32_values(int32_t dst, int32_t di, int32_t src, int32_t si, in
     }
 }
 
-void stasis_jit_sys_memcpy_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
+void stasis_jit_sys_memcpy_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_u8_values(d, di, s, si, n); }
 void stasis_jit_sys_memcpy_i32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
 void stasis_jit_sys_memcpy_f32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_f32_values(d, di, s, si, n); }
 
 /* Mobile AOT has no live swap coordinator; retain the shared import contract as a no-op. */
 void stasis_jit_reject_code_swap(void) {}
-void stasis_jit_sys_memmove_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
+void stasis_jit_sys_memmove_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_u8_values(d, di, s, si, n); }
 void stasis_jit_sys_memmove_i32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
 void stasis_jit_sys_memmove_f32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_f32_values(d, di, s, si, n); }
