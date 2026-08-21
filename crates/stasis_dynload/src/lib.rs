@@ -5115,11 +5115,38 @@ pub extern "C" fn stasis_jit_global_i32_array_load(
             return 0;
         }
     }
-    let table = jit_i32_array_global_table();
-    let guard = table.lock().expect("jit global table mutex poisoned");
+    let (runtime_value, runtime_array_exists) = {
+        let table = jit_i32_array_global_table();
+        let guard = table.lock().expect("jit global table mutex poisoned");
+        (
+            guard.get(&(collection_hash, field_hash, index)).copied(),
+            guard.keys().any(|(collection, field, _)| {
+                *collection == collection_hash && *field == field_hash
+            }),
+        )
+    };
+    if let Some(value) = runtime_value {
+        return value;
+    }
+    if runtime_array_exists {
+        return 0;
+    }
+
+    // A string literal is represented by its hash while lowering text-view
+    // indexing. Registered/dynamic runtime arrays above must win when they
+    // use the same hash; only an unbound byte view can fall back to the
+    // literal table.
+    if field_hash != 0 {
+        return 0;
+    }
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
     guard
-        .get(&(collection_hash, field_hash, index))
-        .copied()
+        .get(&collection_hash)
+        .and_then(|text| text.as_bytes().get(idx))
+        .map(|byte| i32::from(*byte))
         .unwrap_or_default()
 }
 
@@ -6672,6 +6699,61 @@ mod tests {
         assert_eq!(stasis_jit_collection_i32_load(1234, 1), 5);
         assert_eq!(stasis_jit_collection_i32_load(1234, 2), 5);
         assert_eq!(stasis_jit_collection_i32_load(1234, 3), 5);
+    }
+
+    #[test]
+    fn jit_global_i32_array_load_reads_string_literal_bytes_with_safe_bounds() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+
+        let literal_id = 0x1357_2468i32;
+        upsert_jit_string_literal(literal_id, "52%");
+
+        assert_eq!(
+            stasis_jit_global_i32_array_load(literal_id, 0, 0),
+            i32::from(b'5')
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(literal_id, 0, 1),
+            i32::from(b'2')
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(literal_id, 0, 2),
+            i32::from(b'%')
+        );
+        assert_eq!(stasis_jit_global_i32_array_load(literal_id, 0, 3), 0);
+        assert_eq!(stasis_jit_global_i32_array_load(literal_id, 0, -1), 0);
+
+        clear_jit_string_literal_table();
+    }
+
+    #[test]
+    fn jit_global_i32_array_load_prefers_runtime_arrays_over_literal_hash_collisions() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+
+        let shared_id = 0x2468_1357i32;
+        upsert_jit_string_literal(shared_id, "literal");
+
+        stasis_jit_global_i32_array_store(shared_id, 0, 0, 81);
+        let mut registered = [91i32, 92];
+        register_global_i32_array(shared_id, 0, registered.as_mut_ptr(), registered.len());
+
+        assert_eq!(stasis_jit_global_i32_array_load(shared_id, 0, 0), 91);
+        assert_eq!(stasis_jit_global_i32_array_load(shared_id, 0, 1), 92);
+
+        clear_registered_global_memory();
+        assert_eq!(stasis_jit_global_i32_array_load(shared_id, 0, 0), 81);
+        assert_eq!(stasis_jit_global_i32_array_load(shared_id, 0, 1), 0);
+
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
     }
 
     #[test]
