@@ -96,6 +96,50 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 workflow_name,
             )
 
+    def test_release_workflows_bound_graphical_smoke_processes(self):
+        for workflow_name in (
+            ".github/workflows/nightly-release.yml",
+            ".github/workflows/bootstrap-artifacts.yml",
+        ):
+            workflow = (ROOT / workflow_name).read_text(encoding="utf-8")
+            windows_start = workflow.index(
+                "      - name: Smoke test bundled graphics runtime (windows)"
+            )
+            unix_start = workflow.index(
+                "      - name: Smoke test bundled CLI (unix)"
+            )
+            windows_block = workflow[windows_start:unix_start]
+            unix_end = workflow.find("\n      - name:", unix_start + 1)
+            unix_block = workflow[unix_start:unix_end if unix_end != -1 else None]
+
+            self.assertIn(
+                'Start-Process -FilePath ".\\cli-smoke\\build\\ci_smoke.exe" -PassThru',
+                windows_block,
+                workflow_name,
+            )
+            self.assertIn("WaitForExit(5000)", windows_block, workflow_name)
+            self.assertIn("$smokeProcess.ExitCode -ne 0", windows_block, workflow_name)
+            self.assertIn("Stop-Process -Id $smokeProcess.Id -Force", windows_block, workflow_name)
+            self.assertIn("$smokeProcess.WaitForExit()", windows_block, workflow_name)
+            self.assertNotRegex(
+                windows_block,
+                r"(?m)^\s+\.\\cli-smoke\\build\\ci_smoke\.exe\s*$",
+                workflow_name,
+            )
+
+            self.assertIn('python3 - "${smoke_executable}" <<\'PY\'', unix_block, workflow_name)
+            self.assertIn("process = subprocess.Popen([sys.argv[1]])", unix_block, workflow_name)
+            self.assertIn("process.wait(timeout=5)", unix_block, workflow_name)
+            self.assertIn("if return_code != 0:", unix_block, workflow_name)
+            self.assertIn("process.terminate()", unix_block, workflow_name)
+            self.assertIn("process.kill()", unix_block, workflow_name)
+            self.assertIn("process.wait()", unix_block, workflow_name)
+            self.assertNotRegex(
+                unix_block,
+                r"(?m)^\s+\./cli-smoke/build/ci_smoke\s*$",
+                workflow_name,
+            )
+
     def test_package_verifier_detects_runtime_substitution(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
