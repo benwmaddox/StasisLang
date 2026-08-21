@@ -167,6 +167,9 @@ int main(void) {
     uint8_t dynamic_path[] = "sprite.bmp";
     uint8_t ascii_value[] = "GG1-test";
     uint8_t ascii_out[32] = {0};
+    uint8_t literal_out[8] = {0};
+    uint8_t utf8_out[16] = {0};
+    uint8_t raw_out[4] = {0};
     int32_t sprite_handle[1] = {0};
     int32_t sprite_width[1] = {0};
     int32_t sprite_height[1] = {0};
@@ -205,8 +208,16 @@ int main(void) {
     CHECK(stasis_jit_global_i32_array_load(22, 0, 1) == 2);
     stasis_jit_sys_memcpy_u8(22, 2, 22, 0, 2);
     CHECK(external_u8[2] == 1 && external_u8[3] == 2);
+    stasis_jit_upsert_string_literal(22, "literal-must-not-win");
+    stasis_jit_register_global_u8_array(54, 0, raw_out, sizeof(raw_out));
+    stasis_jit_sys_memcpy_u8(54, 0, 22, 0, 4);
+    CHECK(memcmp(raw_out, external_u8, sizeof(raw_out)) == 0);
 
     stasis_jit_register_global_i32_array(24, 0, overlapping_i32, 5);
+    stasis_jit_upsert_string_literal(24, "i32-array-must-win");
+    memset(raw_out, 0, sizeof(raw_out));
+    stasis_jit_sys_memcpy_u8(54, 0, 24, 0, 4);
+    CHECK(memcmp(raw_out, "\1\2\3\4", sizeof(raw_out)) == 0);
     stasis_jit_sys_memmove_i32(24, 1, 24, 0, 4);
     CHECK(overlapping_i32[0] == 1 && overlapping_i32[1] == 1 &&
             overlapping_i32[2] == 2 && overlapping_i32[3] == 3 && overlapping_i32[4] == 4);
@@ -245,6 +256,41 @@ int main(void) {
 
     stasis_jit_upsert_string_literal(40, "sample_game");
     stasis_jit_upsert_string_literal(41, "unlocked_tier");
+    CHECK(stasis_jit_collection_i32_load(40, 1) == 11);
+    CHECK(stasis_jit_collection_i32_load(40, 2) == 11);
+    CHECK(stasis_jit_collection_i32_load(40, 3) == 11);
+    {
+        const char utf8_literal[] = {
+            'h', (char)0xc3, (char)0xa9, 'l', 'l', 'o', ' ',
+            (char)0xf0, (char)0x9f, (char)0x8c, (char)0x8d, 0};
+        stasis_jit_upsert_string_literal(45, utf8_literal);
+        CHECK(stasis_jit_collection_i32_load(45, 1) == 11);
+        CHECK(stasis_jit_collection_i32_load(45, 2) == 11);
+        CHECK(stasis_jit_collection_i32_load(45, 3) == 7);
+        stasis_jit_register_global_u8_array(53, 0, utf8_out, sizeof(utf8_out));
+        stasis_jit_sys_memcpy_u8(53, 0, 45, 0, 11);
+        CHECK(memcmp(utf8_out, utf8_literal, 11) == 0);
+    }
+    stasis_jit_upsert_string_literal(50, "field");
+    stasis_jit_register_global_u8_array(52, 0, literal_out, sizeof(literal_out));
+    stasis_jit_sys_memcpy_u8(52, 1, 50, 1, 3);
+    CHECK(memcmp(literal_out, "\0iel\0\0\0\0", sizeof(literal_out)) == 0);
+    stasis_jit_sys_memmove_u8(52, 0, 50, 0, 5);
+    CHECK(memcmp(literal_out, "field", 5) == 0);
+    memset(literal_out, 0x7f, sizeof(literal_out));
+    stasis_jit_sys_memcpy_u8(52, 0, 50, 99, 2);
+    CHECK(literal_out[0] == 0 && literal_out[1] == 0);
+    {
+        const char truncated_literal[] = {'x', (char)0xc3, 0};
+        stasis_jit_upsert_string_literal(46, truncated_literal);
+        CHECK(stasis_jit_collection_i32_load(46, 1) == 2);
+        CHECK(stasis_jit_collection_i32_load(46, 3) == 2);
+    }
+    CHECK(stasis_jit_collection_i32_load(404, 1) == 0);
+    CHECK(stasis_jit_collection_i32_load(40, 0) == 0);
+    CHECK(stasis_jit_collection_i32_load(40, 4) == 0);
+    stasis_jit_collection_i32_store(45, 1, 23);
+    CHECK(stasis_jit_collection_i32_load(45, 1) == 23);
     CHECK(stasis_jit_storage_load_i32(40, 41, 1) == 1);
     CHECK(stasis_jit_storage_save_i32(40, 41, 4) == 1);
     CHECK(stasis_jit_storage_load_i32(40, 41, 1) == 4);
