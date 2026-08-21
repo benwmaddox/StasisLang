@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const FIXTURE: &str = include_str!("../../../tests/stasis/seams/generated_mobile_aot_probe.stasis");
+const FIXTURE: &str =
+    include_str!("../../../tests/stasis/seams/generated_mobile_aot_probe.stasis.fixture");
 const STDLIB: &str = include_str!("../../../src/stdlib/stdlib.stasis");
 const MEMORY: &str = include_str!("../../../src/stdlib/memory.stasis");
 const GFX_CMD: &str = include_str!("../../../src/stdlib/internal/gfx_cmd.stasis");
