@@ -45,6 +45,22 @@ Web packages do not render an audio-enable control. The runtime requests audio i
 automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts
 the audio context suspended.
 
+## Loading shell font
+
+The optional `web.loading_font` manifest field selects a project font for the static loading title:
+
+```json
+{
+  "web": { "loading_font": "/assets/fonts/display.ttf" }
+}
+```
+
+The value may be rooted (`/assets/...`) or project-relative (`assets/...`), but must name an
+existing `.ttf`, `.otf`, `.woff`, or `.woff2` file under `assets/`. `stasis check` and packaging
+validate the path before producing output. Web packages retain the configured font even when the
+game does not load it through Stasis code, preload it in the HTML shell, and use it for the loading
+title. Projects without this field keep the Georgia fallback and the same loading DOM contract.
+
 ## Runtime contract
 
 The browser owns `requestAnimationFrame`, input collection, Canvas 2D command execution, WebAudio,
