@@ -283,7 +283,21 @@ jobs:
           .\stasis.exe --workspace cli-smoke check
           .\stasis.exe --workspace cli-smoke test
           .\stasis.exe --workspace cli-smoke build --mode release
-          .\cli-smoke\build\ci_smoke.exe
+          $smokeProcess = Start-Process -FilePath ".\cli-smoke\build\ci_smoke.exe" -PassThru
+          try {
+            if ($smokeProcess.WaitForExit(5000)) {
+              if ($smokeProcess.ExitCode -ne 0) { throw "ci_smoke exited early with code $($smokeProcess.ExitCode)" }
+            } else {
+              Stop-Process -Id $smokeProcess.Id -Force -ErrorAction SilentlyContinue
+              $smokeProcess.WaitForExit()
+            }
+          } finally {
+            if (-not $smokeProcess.HasExited) {
+              Stop-Process -Id $smokeProcess.Id -Force -ErrorAction SilentlyContinue
+              $smokeProcess.WaitForExit()
+            }
+            $smokeProcess.Dispose()
+          }
           Set-Content -Path "cli-smoke/src/main.stasis" -Encoding ASCII -Value @(
             "function main(): i32 { return 0; }",
             "function tick(): i32 { return 0; }",
@@ -318,7 +332,24 @@ jobs:
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"
           fi
-          "${smoke_executable}"
+          python3 - "${smoke_executable}" <<'PY'
+          import subprocess
+          import sys
+
+          process = subprocess.Popen([sys.argv[1]])
+          try:
+              return_code = process.wait(timeout=5)
+          except subprocess.TimeoutExpired:
+              process.terminate()
+              try:
+                  process.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  process.kill()
+                  process.wait()
+          else:
+              if return_code != 0:
+                  raise SystemExit(f"ci_smoke exited early with code {return_code}")
+          PY
           printf '%s\n' \
             'function main(): i32 { return 0; }' \
             'function tick(): i32 { return 0; }' \
