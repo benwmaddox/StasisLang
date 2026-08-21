@@ -686,6 +686,13 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
         "stasis_jit_gfx_cache_text",
         "sys_memcpy_i32: sysMemcpyI32",
         "sys_memcpy_f32: sysMemcpyF32",
+        "const pointerCount = pointer.hover || pointer.down || pointer.wentDown || pointer.wentUp ? 1 : 0;",
+        "const inside = event.clientX >= bounds.left && event.clientX <= bounds.right",
+        "&& event.clientY >= bounds.top && event.clientY <= bounds.bottom;",
+        "pointer.hover = event.pointerType !== \"touch\" && inside;",
+        "canvas.addEventListener(\"pointerleave\", () => { pointer.hover = false; });",
+        "canvas.addEventListener(\"pointerup\", event => {\n    updatePointer(event);\n    pointer.down = false;\n    pointer.wentUp = true;\n  });",
+        "canvas.addEventListener(\"pointercancel\", () => { pointer.hover = false; pointer.down = false; pointer.wentUp = true; });",
     ] {
         assert!(
             runtime.contains(expected),

@@ -12,7 +12,7 @@
     loadingBox.dataset.hidden = state === "ready" ? "true" : "false";
   };
   const keys = new Set();
-  const pointer = { id: 0, x: 0, y: 0, dx: 0, dy: 0, down: false, wentDown: false, wentUp: false };
+  const pointer = { id: 0, x: 0, y: 0, dx: 0, dy: 0, hover: false, down: false, wentDown: false, wentUp: false };
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
   const sprites = new Map();
@@ -1079,7 +1079,7 @@
     const bounds = canvas.getBoundingClientRect();
     const ratio = devicePixelRatio || 1;
     const focused = document.hasFocus() ? 1 : 0;
-    const pointerCount = pointer.down || pointer.wentDown || pointer.wentUp ? 1 : 0;
+    const pointerCount = pointer.hover || pointer.down || pointer.wentDown || pointer.wentUp ? 1 : 0;
     i32[0] = Math.floor(elapsedMs) | 0;
     i32[7] = pointerCount;
     i32[8] = 0;
@@ -1268,11 +1268,14 @@
     const bounds = canvas.getBoundingClientRect();
     const x = Math.round((event.clientX - bounds.left) * canvas.width / bounds.width);
     const y = Math.round((event.clientY - bounds.top) * canvas.height / bounds.height);
+    const inside = event.clientX >= bounds.left && event.clientX <= bounds.right
+      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
     pointer.dx += x - pointer.x;
     pointer.dy += y - pointer.y;
     pointer.x = x;
     pointer.y = y;
     pointer.id = event.pointerId | 0;
+    pointer.hover = event.pointerType !== "touch" && inside;
   }
   addEventListener("keydown", event => {
     keys.add(event.code);
@@ -1295,12 +1298,13 @@
     canvas.focus();
     void applyFullscreenGesture();
   });
+  canvas.addEventListener("pointerleave", () => { pointer.hover = false; });
   canvas.addEventListener("pointerup", event => {
     updatePointer(event);
     pointer.down = false;
     pointer.wentUp = true;
   });
-  canvas.addEventListener("pointercancel", () => { pointer.down = false; pointer.wentUp = true; });
+  canvas.addEventListener("pointercancel", () => { pointer.hover = false; pointer.down = false; pointer.wentUp = true; });
   addEventListener("resize", () => { resized = true; displayGeneration += 1; });
   document.addEventListener("fullscreenchange", () => { resized = true; displayGeneration += 1; });
   // @stasis-feature audio begin
