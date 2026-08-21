@@ -12,8 +12,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const FIXTURE: &str = include_str!("../../../tests/stasis/seams/generated_mobile_aot_probe.stasis");
-const EXPECTED_TRACE: u32 = 3_312_025_514;
+const FIXTURE: &str =
+    include_str!("../../../tests/stasis/seams/generated_mobile_aot_probe.stasis.fixture");
+const STDLIB: &str = include_str!("../../../src/stdlib/stdlib.stasis");
+const MEMORY: &str = include_str!("../../../src/stdlib/memory.stasis");
+const GFX_CMD: &str = include_str!("../../../src/stdlib/internal/gfx_cmd.stasis");
+const EXPECTED_TRACE: u32 = 2_880_741_754;
 
 struct TestTree(PathBuf);
 
@@ -76,6 +80,8 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     let bundle_dir = tree.0.join("bundle");
     fs::create_dir_all(project.join("src")).expect("create fixture source directory");
     fs::create_dir_all(project.join("assets")).expect("create fixture asset directory");
+    fs::create_dir_all(project.join("vendor/stasis/stdlib/internal"))
+        .expect("create fixture stdlib directory");
     fs::write(
         project.join("stasis.json"),
         "{\"manifest_version\":1,\"name\":\"it012\",\"entry\":\"src/main.stasis\",\"tests\":\"tests\",\"output\":\"build\"}\n",
@@ -86,6 +92,15 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         "{\"schema\":\"stasis-assets\",\"version\":1,\"assets\":[]}\n",
     )
     .expect("write empty asset manifest");
+    fs::write(project.join("vendor/stasis/stdlib/stdlib.stasis"), STDLIB)
+        .expect("write fixture stdlib");
+    fs::write(project.join("vendor/stasis/stdlib/memory.stasis"), MEMORY)
+        .expect("write fixture memory stdlib");
+    fs::write(
+        project.join("vendor/stasis/stdlib/internal/gfx_cmd.stasis"),
+        GFX_CMD,
+    )
+    .expect("write fixture graphics command stdlib");
     fs::write(project.join("src/main.stasis"), FIXTURE).expect("write fixture source");
 
     let mut process = AotProcess::new();
@@ -138,7 +153,13 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     let root = repository_root();
     let runtime = root.join("runtime");
     let executable = tree.0.join("it012_generated_mobile.exe");
-    let mut command = Command::new(locate_cl());
+    let compiler = locate_cl();
+    let compiler_is_clang = compiler
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.eq_ignore_ascii_case("clang-cl"))
+        .unwrap_or(false);
+    let mut command = Command::new(compiler);
     command
         .current_dir(&tree.0)
         .args([
@@ -147,7 +168,6 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
             "/WX",
             "/wd4204",
             "/std:c11",
-            "/experimental:c11atomics",
             "/D_CRT_SECURE_NO_WARNINGS",
         ])
         .arg(format!("/I{}", runtime.display()))
@@ -156,6 +176,9 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         .arg(runtime.join("stasis_mobile_aot_runtime.c"))
         .arg(runtime.join("stasis_render_trace.c"))
         .arg(&bindings_path);
+    if !compiler_is_clang {
+        command.arg("/experimental:c11atomics");
+    }
     for path in bundle.object_paths_by_function_id.values() {
         command.arg(path);
     }
@@ -187,7 +210,7 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         .and_then(|value| value.parse::<u32>().ok())
         .expect("harness trace");
     assert_eq!(trace, EXPECTED_TRACE, "first generated render trace");
-    assert!(stdout.contains("state=15 frames=1 rects=1"));
+    assert!(stdout.contains("state=15 frames=1 rects=1 texts=1 bytes=5 chars=4"));
     assert!(stdout.contains(
         "IT-013 order=123 paused_poll=1 reinit=1 main_stop=11 tick_stop=22 render_stop=33 frames_after_failures=0"
     ));
@@ -204,7 +227,19 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         "bindings": bindings_path,
         "main_state": 10,
         "first_tick_state": 15,
-        "first_render": {"frames": 1, "rects": 1, "trace": trace},
+        "first_render": {
+            "frames": 1,
+            "rects": 1,
+            "texts": 1,
+            "text_bytes_used": 6,
+            "text_font": 7,
+            "text_offset": 0,
+            "text_byte_length": 5,
+            "text_bytes": [67, 97, 102, 195, 169, 0],
+            "forwarded_byte_length": 5,
+            "forwarded_char_length": 4,
+            "trace": trace
+        },
         "oracle": {"symbol_audit_failure": audit_error}
     });
     let path = evidence_root().join("it-012-generated-mobile-aot-runtime.json");
