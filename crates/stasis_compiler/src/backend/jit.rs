@@ -4342,6 +4342,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_indexes_ascii_string_literal_view_bytes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let view: ascii[] = \"%\"; return view[0]; }\n",
+        );
+        process
+            .compile()
+            .expect("compile string literal view fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute string literal view fixture"),
+            37
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_rejects_collection_handle_compound_assignment_for_local() {
         let mut process = JitProcess::new();
         process.upsert_file(
