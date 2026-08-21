@@ -1332,6 +1332,30 @@ impl JitProcess {
         Ok((raw as u32) as i32)
     }
 
+    /// Validate the narrow host ABI used by deterministic recording hooks.
+    ///
+    /// Name lookup goes through the accepted program snapshot so duplicate
+    /// aliases are rejected instead of selecting an arbitrary declaration.
+    pub fn validate_i32_onearg_by_name(&self, name: &str) -> Result<(), String> {
+        let function = self.unique_function_by_name(name)?;
+        if function.return_type != TYPE_ID_I32 || function.params.as_slice() != [TYPE_ID_I32] {
+            return Err(format!(
+                "before-tick hook '{name}' signature mismatch; expected `function {name}(frame: i32): i32`, actual return type id {}, parameter types {:?}",
+                function.return_type, function.params
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn execute_i32_onearg_by_name(&self, name: &str, frame: i32) -> Result<i32, String> {
+        self.validate_i32_onearg_by_name(name)?;
+        let function = self.unique_function_by_name(name)?;
+        let artifact = self
+            .artifact_for_function_id(function.id)
+            .ok_or_else(|| format!("compiled artifact missing for before-tick hook '{name}'"))?;
+        stasis_dynload::invoke_i32_to_i32(artifact.code_ptr as usize, frame)
+    }
+
     pub fn execute_void_noarg_by_name(&self, name: &str) -> Result<(), String> {
         let function = self.unique_function_by_name(name)?;
         if function.return_type != TYPE_ID_VOID {
@@ -3229,6 +3253,74 @@ mod tests {
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_cancel").is_some());
     }
     use crate::backend::EngineEntrypoints;
+
+    #[test]
+    fn before_tick_hook_requires_unique_i32_to_i32_signature() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["before".to_string()]);
+        process.upsert_file(
+            "hook.stasis",
+            "function before(frame: i32): i32 { return frame + 1; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+        );
+        process.compile().expect("compile valid hook");
+        process
+            .validate_i32_onearg_by_name("before")
+            .expect("valid hook signature");
+        drop(process);
+
+        let mut missing = JitProcess::new();
+        missing.upsert_file(
+            "missing.stasis",
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+        );
+        missing.compile().expect("compile missing-hook program");
+        assert!(missing
+            .validate_i32_onearg_by_name("before")
+            .expect_err("missing hook")
+            .contains("function 'before' not found"));
+        drop(missing);
+
+        for source in [
+            "function before(frame: f32): i32 { return 1; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+            "function before(frame: i32): void { }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+        ] {
+            let mut invalid = JitProcess::new();
+            invalid.set_required_emit_roots(&["before".to_string()]);
+            invalid.upsert_file("invalid_hook.stasis", source);
+            invalid.compile().expect("compile invalid-hook program");
+            assert!(invalid
+                .validate_i32_onearg_by_name("before")
+                .is_err());
+        }
+
+        let mut ambiguous = JitProcess::new();
+        ambiguous.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\";\nfunction before(frame: i32): i32 { return frame; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+        );
+        ambiguous.upsert_file(
+            "helper.stasis",
+            "function before(frame: i32): i32 { return frame + 1; }\n",
+        );
+        ambiguous.compile().expect("compile ambiguous-hook program");
+        assert!(ambiguous
+            .validate_i32_onearg_by_name("before")
+            .expect_err("ambiguous hook")
+            .contains("ambiguous"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn before_tick_hook_executes_i32_frame_argument() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["before".to_string()]);
+        process.upsert_file(
+            "hook.stasis",
+            "function before(frame: i32): i32 { return frame + 1; }\n",
+        );
+        process.compile().expect("compile valid hook");
+        assert_eq!(process.execute_i32_onearg_by_name("before", 41), Ok(42));
+    }
 
     #[test]
     fn collection_layout_edit_rejits_every_reachable_function() {

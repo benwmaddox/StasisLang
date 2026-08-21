@@ -347,7 +347,7 @@ enum ToolchainCommand {
         #[arg(long)]
         fast_forward: bool,
     },
-    /// Render a deterministic fixed-rate headless PNG sequence or MP4 recording.
+    /// Render a deterministic PNG sequence, MP4, or audio-only MP3 recording.
     Record {
         #[command(flatten)]
         args: record::RecordArgs,

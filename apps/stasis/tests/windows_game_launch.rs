@@ -788,24 +788,28 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
     copy_tree(&fixture, &project);
     copy_tree(&root.join("src"), &project.join("vendor/stasis/src"));
 
-    let record = |output: &Path, label: &str| {
+    let record = |output: &Path, label: &str, fps: u32, frames: u64, before_tick: Option<&str>| {
         let mut command = stasis_command(&project);
         command.env("STASIS_RUNTIME_DLL_PATH", &runtime);
         add_ffmpeg_path(&mut command, &ffmpeg_dir);
-        command.args([
-            "record",
-            "audio_asset_playback.stasis",
-            "--output",
-            output.to_str().unwrap(),
-            "--width",
-            "480",
-            "--height",
-            "270",
-            "--fps",
-            "60",
-            "--frames",
-            "60",
-        ]);
+        command
+            .args([
+                "record",
+                "audio_asset_playback.stasis",
+                "--output",
+                output.to_str().unwrap(),
+                "--width",
+                "480",
+                "--height",
+                "270",
+                "--fps",
+            ])
+            .arg(fps.to_string())
+            .arg("--frames")
+            .arg(frames.to_string());
+        if let Some(before_tick) = before_tick {
+            command.arg("--before-tick").arg(before_tick);
+        }
         let completed = launch(command, label);
         assert!(
             completed.status.success(),
@@ -816,8 +820,8 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
     };
     let first = test_tree.0.join("audio-first.mp4");
     let second = test_tree.0.join("audio-second.mp4");
-    record(&first, "audio recording first");
-    record(&second, "audio recording repeat");
+    record(&first, "audio recording first", 60, 60, None);
+    record(&second, "audio recording repeat", 60, 60, None);
 
     let ffprobe = if ffmpeg_dir.as_os_str().is_empty() {
         PathBuf::from("ffprobe")
@@ -913,6 +917,194 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
                 .any(|sample| i16::from_le_bytes([sample[0], sample[1]]) != 0)
     );
     assert_eq!(first_pcm, second_pcm, "recorded PCM must be repeatable");
+
+    let mp3_first = test_tree.0.join("audio-first.mp3");
+    let mp3_second = test_tree.0.join("audio-second.mp3");
+    let source_path = project.join("audio_asset_playback.stasis");
+    let source = fs::read_to_string(&source_path).expect("read audio hook fixture");
+    fs::write(
+        &source_path,
+        format!(
+            "{source}\nfunction recording_demo(frame: i32): i32 {{\n    if (frame == 0) {{\n        effect.play_effect(0.25);\n    }}\n    if (frame == 20) {{\n        music.set_music_volume(0.05);\n    }}\n    if (frame == 40) {{\n        music.set_music_volume(0.18);\n    }}\n    return 0;\n}}\n"
+        ),
+    )
+    .expect("write audio hook fixture");
+    record(
+        &mp3_first,
+        "hooked audio-only recording first",
+        59,
+        60,
+        Some("recording_demo"),
+    );
+    record(
+        &mp3_second,
+        "hooked audio-only recording repeat",
+        59,
+        60,
+        Some("recording_demo"),
+    );
+    let mp3_audio = probe(
+        &mp3_first,
+        "a:0",
+        "stream=codec_name,sample_rate,channels,start_time,duration",
+    );
+    assert_eq!(mp3_audio["codec_name"], "mp3", "unexpected MP3 codec");
+    assert_eq!(mp3_audio["sample_rate"], "48000", "unexpected MP3 rate");
+    assert_eq!(mp3_audio["channels"], 2, "unexpected MP3 channels");
+    let mp3_start = mp3_audio["start_time"]
+        .as_str()
+        .expect("MP3 start time")
+        .parse::<f64>()
+        .expect("numeric MP3 start time");
+    let mp3_duration = mp3_audio["duration"]
+        .as_str()
+        .expect("MP3 duration")
+        .parse::<f64>()
+        .expect("numeric MP3 duration");
+    let mp3_pcm = decode(&mp3_first);
+    let mp3_pcm_repeat = decode(&mp3_second);
+    let expected_mp3_samples = 60_u64 * 48_000 / 59;
+    let expected_mp3_duration = expected_mp3_samples as f64 / 48_000.0;
+    let mp3_frame_duration = 1152.0 / 48_000.0;
+    assert!(
+        (0.0..=mp3_frame_duration).contains(&mp3_start),
+        "MP3 encoder delay start {mp3_start} exceeds one MPEG audio frame"
+    );
+    assert!(
+        mp3_duration >= expected_mp3_duration
+            && mp3_duration - expected_mp3_duration <= 2.0 * mp3_frame_duration,
+        "MP3 container duration {mp3_duration} does not account for bounded encoder delay/padding around {expected_mp3_duration}"
+    );
+    assert_eq!(
+        mp3_pcm.len(),
+        usize::try_from(expected_mp3_samples * 4).expect("MP3 PCM byte count"),
+        "gapless MP3 decode must trim encoder delay/padding to the cumulative sample schedule"
+    );
+    assert!(
+        mp3_pcm
+            .chunks_exact(2)
+            .any(|sample| i16::from_le_bytes([sample[0], sample[1]]) != 0),
+        "audio-only MP3 is silent"
+    );
+    assert_eq!(mp3_pcm, mp3_pcm_repeat, "audio-only MP3 must be repeatable");
+}
+
+#[test]
+fn recording_before_tick_hook_observes_input_and_failure_publishes_nothing() {
+    let root = repository_root();
+    let runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            let path = root.join("runtime/build/bin/Release/stasis_graphics.dll");
+            path.is_file().then_some(path)
+        });
+    let Some(runtime) = runtime else {
+        eprintln!("before-tick integration skipped: graphics runtime is unavailable");
+        return;
+    };
+    let fixture = root.join("samples/windows_launch_smoke");
+    let test_tree = TestTree(temp_dir("before_tick_hook"));
+    let project = test_tree.0.join("windows_launch_smoke");
+    copy_tree(&fixture, &project);
+    let source_path = project.join("main.stasis");
+    let source = fs::read_to_string(&source_path).expect("read hook fixture");
+    let source = source
+        .replace(
+            "global ticks: i32;",
+            "global ticks: i32;\nglobal hook_frame: i32;\nglobal hook_input: i32;",
+        )
+        .replace(
+            "function tick(): i32 {\n    ticks += 1;\n    return 0;\n}",
+            "function before_record(frame: i32): i32 {\n    hook_frame = frame;\n    hook_input = host_i32[545];\n    return 0;\n}\n\nfunction tick(): i32 {\n    if (hook_frame != ticks) {\n        return 51;\n    }\n    if (ticks == 0 && hook_input == 0) {\n        return 52;\n    }\n    ticks += 1;\n    return 0;\n}",
+        );
+    fs::write(&source_path, source).expect("write hook fixture");
+
+    let output = test_tree.0.join("hooked");
+    let mut hooked = stasis_command(&project);
+    hooked.env("STASIS_RUNTIME_DLL_PATH", &runtime);
+    hooked.args([
+        "record",
+        "main.stasis",
+        "--output",
+        output.to_str().unwrap(),
+        "--width",
+        "640",
+        "--height",
+        "400",
+        "--fps",
+        "60",
+        "--frames",
+        "3",
+        "--input-script",
+        "record_input.json",
+        "--before-tick",
+        "before_record",
+    ]);
+    let hooked = launch(hooked, "before-tick hook recording");
+    assert!(
+        hooked.status.success(),
+        "hook recording failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&hooked.stdout),
+        String::from_utf8_lossy(&hooked.stderr)
+    );
+    assert_eq!(recording_frames(&output).len(), 3);
+
+    let failed_source = fs::read_to_string(&source_path)
+        .expect("read successful hook fixture")
+        .replace(
+            "    return 0;\n}\n\nfunction tick(): i32 {",
+            "    return 9;\n}\n\nfunction tick(): i32 {",
+        );
+    fs::write(&source_path, failed_source).expect("write failing hook fixture");
+    let failed_output = test_tree.0.join("hook-failure");
+    let mut failed = stasis_command(&project);
+    failed.env("STASIS_RUNTIME_DLL_PATH", &runtime);
+    failed.args([
+        "record",
+        "main.stasis",
+        "--output",
+        failed_output.to_str().unwrap(),
+        "--width",
+        "640",
+        "--height",
+        "400",
+        "--fps",
+        "60",
+        "--frames",
+        "3",
+        "--before-tick",
+        "before_record",
+    ]);
+    let failed = launch(failed, "failing before-tick hook recording");
+    assert!(
+        !failed.status.success(),
+        "failing hook unexpectedly succeeded"
+    );
+    let failure_log = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        failure_log.contains("before_record"),
+        "missing hook in failure: {failure_log}"
+    );
+    assert!(
+        failure_log.contains("frame 0"),
+        "missing frame in failure: {failure_log}"
+    );
+    assert!(!failed_output.exists(), "hook failure published an output");
+    assert!(
+        fs::read_dir(&test_tree.0)
+            .expect("inspect hook staging parent")
+            .all(|entry| !entry
+                .expect("read hook staging entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stasis-recording-")),
+        "hook failure left a recording staging directory"
+    );
 }
 
 fn recording_frames(directory: &Path) -> Vec<PathBuf> {

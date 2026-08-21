@@ -121,14 +121,18 @@ cloning a generated repository, reactivate the checked-in hook with
   the default. `--ticks` invokes `tick()` exactly `COUNT` times without calling `render()` or
   loading the graphics runtime. `--fast-forward` makes the no-pacing contract explicit and
   requires a positive tick count.
-- `record [ENTRY] --output PATH --width PX --height PX --fps FPS (--frames N|--duration S)`:
+- `record [ENTRY] --output PATH --width PX --height PX --fps FPS (--frames N|--duration S) [--before-tick FUNCTION]`:
   execute the normal desktop JIT/render path on a hidden fixed-size SDL software presentation.
   An extensionless output path publishes an exact, numbered PNG sequence; an `.mp4` path stages
   those PNGs and the existing mixed game audio, then invokes FFmpeg H.264/yuv420p plus AAC at
-  the requested rate. Audio is rendered offline as deterministic 48 kHz stereo PCM16 using
+  the requested rate. An `.mp3` path stages only the existing mixed game audio and invokes
+  FFmpeg `libmp3lame` for a 48 kHz stereo audio-only artifact. Audio is rendered offline as deterministic 48 kHz stereo PCM16 using
   cumulative `floor(frame * 48000 / fps)` sample boundaries; no physical device, microphone, or
   system audio is used. Recording starts after `main()`, uses zero tick sleep, applies the existing
-  `--input-script` timeline, and preserves logical-canvas fit/letterboxing. Dimensions, rates,
+  `--input-script` timeline, and preserves logical-canvas fit/letterboxing. With `--before-tick`,
+  the required guest function must be `function name(frame: i32): i32`; it receives zero-based
+  frames once after input/live overrides and before tick, render, and capture/mix. Hook state changes
+  are visible to the normal tick and render. Dimensions, rates,
   counts, output format, staged frame/WAV validation, encoder failures, and partial-output cleanup
   are bounded and diagnosed. See
   [Deterministic headless recording](headless_recording.md).

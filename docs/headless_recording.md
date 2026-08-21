@@ -40,6 +40,64 @@ does not capture a microphone or system audio. PNG mode does not stage offline
 audio; guest code may still initialize and use the normal interactive audio API
 when that path is requested.
 
+Use an `.mp3` output for audio-only recording. It advances the same hidden desktop
+simulation, input, tick, render, and offline mixer loop but does not stage PNG frames:
+
+```powershell
+stasis --workspace samples/audio_asset_playback record `
+  audio_asset_playback.stasis `
+  --output artifacts/audio-review.mp3 `
+  --width 480 --height 270 --fps 60 --frames 60
+```
+
+The MP3 contains only game-generated audio (asset voices and
+`audio_push_f32_interleaved` samples), encoded by FFmpeg's `libmp3lame` at 48 kHz
+stereo. MP3 container start/duration may include up to the codec's frame-bounded
+encoder delay and padding; decoding through FFmpeg trims that metadata back to the
+exact pre-encode sample schedule. No microphone, system audio, physical device, or
+visible window is used.
+
+For deterministic setup at each frame, pass `--before-tick FUNCTION`. The function
+must have exactly this signature:
+
+```text
+function before_record(frame: i32): i32 { ... }
+```
+
+The hook is a required guest function, receives a zero-based frame index, and is
+called exactly once in this order: deterministic input and live overrides, hook,
+normal `tick()`, `render()`, then capture/mix. It may mutate normal guest state and
+call other guest functions. A missing or ambiguous function, any signature mismatch,
+an invocation failure, or a nonzero return identifies the function and frame and
+publishes no artifact.
+
+For a minimal copy/paste demo, add this function to each entry file used below first:
+
+```text
+function before_record(frame: i32): i32 {
+    if (frame < 0) {
+        return 1;
+    }
+    return 0;
+}
+```
+
+The same hook can then be used with each output mode:
+
+```powershell
+stasis --workspace samples/windows_launch_smoke record main.stasis `
+  --output artifacts/hooked-frames --width 640 --height 360 --fps 60 --frames 3 `
+  --before-tick before_record
+
+stasis --workspace samples/windows_launch_smoke record main.stasis `
+  --output artifacts/hooked.mp4 --width 640 --height 360 --fps 60 --frames 3 `
+  --before-tick before_record
+
+stasis --workspace samples/audio_asset_playback record audio_asset_playback.stasis `
+  --output artifacts/hooked.mp3 --width 480 --height 270 --fps 60 --duration 1 `
+  --before-tick before_record
+```
+
 For a checked-in audio example:
 
 ```powershell
@@ -49,8 +107,8 @@ stasis --workspace samples/audio_asset_playback record `
   --width 480 --height 270 --fps 60 --frames 60
 ```
 
-PNG frames and the staged WAV are validated for exact count, dimensions,
-format, and sample count before publication. MP4 encoding and publication are
+PNG frames (when requested) and the staged WAV (for MP4/MP3) are validated for exact count, dimensions,
+format, and sample count before publication. MP4/MP3 encoding and publication are
 staged, so an encoder, mixer, or renderer failure removes partial artifacts and
 reports the stage, resolution, frame rate, output, and underlying cause.
 

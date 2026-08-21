@@ -951,6 +951,31 @@ pub fn invoke_i32_to_void(address: usize, arg0: i32) -> Result<(), String> {
     }
 }
 
+/// Invoke a guest ABI function with one i32 argument and an i32 result.
+///
+/// The address is produced by the JIT, so keeping the platform calling
+/// convention and the dispatch/execution guards in one helper prevents hosts
+/// from accidentally introducing a second callback ABI.
+pub fn invoke_i32_to_i32(address: usize, arg0: i32) -> Result<i32, String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+        return Ok(callback(arg0));
+    }
+    #[cfg(not(windows))]
+    {
+        let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+        Ok(callback(arg0))
+    }
+}
+
 pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i32, String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
@@ -6860,6 +6885,19 @@ mod tests {
 
     extern "C" fn host_entry_two() -> i32 {
         2
+    }
+
+    extern "C" fn add_frame(frame: i32) -> i32 {
+        frame.saturating_add(7)
+    }
+
+    #[test]
+    fn invokes_single_i32_to_i32_guest_abi() {
+        let address = add_frame as *const () as usize;
+        assert_eq!(invoke_i32_to_i32(address, 35), Ok(42));
+        assert!(invoke_i32_to_i32(0, 0)
+            .expect_err("null invocation must fail")
+            .contains("null function pointer"));
     }
 
     #[test]

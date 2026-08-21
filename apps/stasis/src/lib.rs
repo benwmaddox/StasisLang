@@ -79,12 +79,13 @@ pub struct PlayProfileConfig {
 /// pre-present capture for each committed rendered frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayFrameCaptureConfig {
-    pub output_dir: PathBuf,
+    pub output_dir: Option<PathBuf>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub frame_count: u64,
     pub audio_output: Option<PathBuf>,
+    pub before_tick_function: Option<String>,
 }
 
 const RECORDING_AUDIO_SAMPLE_RATE: u64 = 48_000;
@@ -218,12 +219,14 @@ impl PlayCaptureEnvironment {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .map_err(|_| "recording capture process lock is poisoned".to_string())?;
-        fs::create_dir_all(&config.output_dir).map_err(|error| {
-            format!(
-                "failed to create recording staging directory {}: {error}",
-                config.output_dir.display()
-            )
-        })?;
+        if let Some(output_dir) = config.output_dir.as_ref() {
+            fs::create_dir_all(output_dir).map_err(|error| {
+                format!(
+                    "failed to create recording staging directory {}: {error}",
+                    output_dir.display()
+                )
+            })?;
+        }
         let names = [
             "STASIS_RECORDING_WIDTH",
             "STASIS_RECORDING_HEIGHT",
@@ -2528,12 +2531,25 @@ fn run_play_in_process_inner(
         jit.set_profile_functions(profile.functions.clone())?;
     }
     jit.set_project_root(project_root.to_string_lossy())?;
+    if let Some(function) = capture
+        .as_ref()
+        .and_then(|capture| capture.before_tick_function.as_deref())
+    {
+        jit.set_required_emit_roots(&[function.to_string()]);
+    }
     let root_source = fs::read_to_string(&root_path)
         .map_err(|error| format!("failed to read {}: {error}", root_path.display()))?;
     jit.upsert_file(root_path_str.clone(), root_source);
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
+    if let Some(function) = capture
+        .as_ref()
+        .and_then(|capture| capture.before_tick_function.as_deref())
+    {
+        jit.validate_i32_onearg_by_name(function)
+            .map_err(|error| format!("before-tick hook '{function}' validation failed: {error}"))?;
+    }
     let mut watch_asset_paths = collect_watch_asset_paths(&project_root, jit.program_snapshot());
     let mut tick_budget_generation = 0u64;
     let mut tick_budget = jit
@@ -2817,6 +2833,26 @@ fn run_play_in_process_inner(
             &host_req_window_h_px,
         )?;
 
+        if let Some(function) = capture
+            .as_ref()
+            .and_then(|capture| capture.before_tick_function.as_deref())
+        {
+            let frame = i32::try_from(ticks_executed)
+                .map_err(|_| format!("before-tick hook '{function}' frame index overflow"))?;
+            let result = jit
+                .execute_i32_onearg_by_name(function, frame)
+                .map_err(|error| {
+                    format!(
+                        "before-tick hook '{function}' failed at frame {ticks_executed}: {error}"
+                    )
+                })?;
+            if result != 0 {
+                return Err(format!(
+                    "before-tick hook '{function}' returned non-zero status {result} at frame {ticks_executed}"
+                ));
+            }
+        }
+
         let run_tick = live.as_ref().is_none_or(LiveWorkspace::should_run_tick);
         let measure_hud = gfx.host_performance_metrics_enabled()?;
         let mut tick_micros = 0;
@@ -2849,15 +2885,17 @@ fn run_play_in_process_inner(
         if let Some(capture) = capture.as_ref() {
             let frame = ticks_executed.saturating_add(1);
             if frame <= capture.frame_count {
-                let path = capture.output_dir.join(format!("frame-{frame:06}.png"));
-                stasis_dynload::schedule_runtime_screenshot(&path).map_err(|error| {
-                    format!(
-                        "recording capture stage failed for frame {frame} at {} ({}x{}): {error}",
-                        path.display(),
-                        capture.width,
-                        capture.height
-                    )
-                })?;
+                if let Some(output_dir) = capture.output_dir.as_ref() {
+                    let path = output_dir.join(format!("frame-{frame:06}.png"));
+                    stasis_dynload::schedule_runtime_screenshot(&path).map_err(|error| {
+                        format!(
+                            "recording capture stage failed for frame {frame} at {} ({}x{}): {error}",
+                            path.display(),
+                            capture.width,
+                            capture.height
+                        )
+                    })?;
+                }
             }
         }
         gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;

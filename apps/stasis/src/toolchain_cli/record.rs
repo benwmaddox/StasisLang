@@ -20,7 +20,7 @@ pub(super) struct RecordArgs {
     /// Override the manifest entry with a project-relative .stasis file.
     #[arg(value_name = "ENTRY")]
     pub(super) entry: Option<PathBuf>,
-    /// Output directory for PNG frames, or an .mp4 file for H.264/AAC encoding.
+    /// Output directory for PNG frames, or an .mp4/.mp3 file for encoding.
     #[arg(long, value_name = "PATH")]
     pub(super) output: PathBuf,
     #[arg(long, value_name = "PIXELS")]
@@ -43,12 +43,16 @@ pub(super) struct RecordArgs {
     /// Apply the existing deterministic pointer input timeline.
     #[arg(long, value_name = "PATH")]
     pub(super) input_script: Option<PathBuf>,
+    /// Invoke this guest function once before each tick: function name(frame: i32): i32.
+    #[arg(long, value_name = "FUNCTION")]
+    pub(super) before_tick: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputKind {
     PngSequence,
     Mp4,
+    Mp3,
 }
 
 pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<CommandResult, String> {
@@ -76,16 +80,16 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             args.width, args.height
         ));
     }
-    if kind == OutputKind::Mp4 {
+    if matches!(kind, OutputKind::Mp4 | OutputKind::Mp3) {
         let audio_frames = frame_count
             .checked_mul(48_000)
-            .ok_or_else(|| "MP4 recording audio sample schedule overflow".to_string())?
+            .ok_or_else(|| "recording audio sample schedule overflow".to_string())?
             / u64::from(args.fps);
         let audio_bytes = audio_frames
             .checked_mul(4)
-            .ok_or_else(|| "MP4 recording WAV size overflow".to_string())?;
+            .ok_or_else(|| "recording WAV size overflow".to_string())?;
         if audio_bytes > u64::from(u32::MAX) - 36 {
-            return Err("MP4 recording exceeds the bounded 4 GiB WAV staging limit".to_string());
+            return Err("recording exceeds the bounded 4 GiB WAV staging limit".to_string());
         }
     }
     let entry = resolve_entry(workspace, args.entry.as_deref())?;
@@ -101,13 +105,21 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             .duration_since(UNIX_EPOCH)
             .map_or(0, |value| value.as_nanos())
     ));
-    let frames_dir = stage_root.join("frames");
-    if let Err(error) = fs::create_dir_all(&frames_dir) {
-        cleanup_stage(&stage_root);
+    if let Err(error) = fs::create_dir(&stage_root) {
         return Err(format!(
             "recording stage failed: could not create {}: {error}",
-            frames_dir.display()
+            stage_root.display()
         ));
+    }
+    let frames_dir = (kind != OutputKind::Mp3).then(|| stage_root.join("frames"));
+    if let Some(frames_dir) = frames_dir.as_ref() {
+        if let Err(error) = fs::create_dir_all(frames_dir) {
+            cleanup_stage(&stage_root);
+            return Err(format!(
+                "recording stage failed: could not create {}: {error}",
+                frames_dir.display()
+            ));
+        }
     }
 
     let result = run_play_in_process_with_input_script_window_title_profile_and_capture(
@@ -126,7 +138,9 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             height: args.height,
             fps: args.fps,
             frame_count,
-            audio_output: (kind == OutputKind::Mp4).then(|| stage_root.join("audio.wav")),
+            audio_output: matches!(kind, OutputKind::Mp4 | OutputKind::Mp3)
+                .then(|| stage_root.join("audio.wav")),
+            before_tick_function: args.before_tick.clone(),
         },
     );
     if let Err(error) = result {
@@ -141,17 +155,19 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         ));
     }
 
-    if let Err(error) = validate_frames(&frames_dir, args.width, args.height, frame_count) {
-        cleanup_stage(&stage_root);
-        return Err(format!(
-            "recording validation failed (recording presentation=hidden-sdl-software, {}x{} at {} fps, output {}): {error}",
-            args.width,
-            args.height,
-            args.fps,
-            output.display()
-        ));
+    if let Some(frames_dir) = frames_dir.as_ref() {
+        if let Err(error) = validate_frames(frames_dir, args.width, args.height, frame_count) {
+            cleanup_stage(&stage_root);
+            return Err(format!(
+                "recording validation failed (recording presentation=hidden-sdl-software, {}x{} at {} fps, output {}): {error}",
+                args.width,
+                args.height,
+                args.fps,
+                output.display()
+            ));
+        }
     }
-    if kind == OutputKind::Mp4 {
+    if matches!(kind, OutputKind::Mp4 | OutputKind::Mp3) {
         let audio_path = stage_root.join("audio.wav");
         if let Err(error) = validate_wav(&audio_path, args.fps, frame_count) {
             cleanup_stage(&stage_root);
@@ -170,15 +186,24 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         ))
     } else {
         match kind {
-            OutputKind::PngSequence => {
-                stasis_dynload::atomic_rename_no_replace(&frames_dir, &output).map_err(|error| {
-                    format!(
-                        "recording publish failed for PNG sequence {}: {error}",
-                        output.display()
-                    )
-                })
-            }
-            OutputKind::Mp4 => encode_mp4(&frames_dir, &stage_root, &output, args.fps, frame_count),
+            OutputKind::PngSequence => stasis_dynload::atomic_rename_no_replace(
+                frames_dir.as_ref().expect("PNG frame staging"),
+                &output,
+            )
+            .map_err(|error| {
+                format!(
+                    "recording publish failed for PNG sequence {}: {error}",
+                    output.display()
+                )
+            }),
+            OutputKind::Mp4 => encode_mp4(
+                frames_dir.as_ref().expect("MP4 frame staging"),
+                &stage_root,
+                &output,
+                args.fps,
+                frame_count,
+            ),
+            OutputKind::Mp3 => encode_mp3(&stage_root, &output),
         }
     };
     if let Err(error) = publish_result {
@@ -190,6 +215,7 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
     let format = match kind {
         OutputKind::PngSequence => "png-sequence",
         OutputKind::Mp4 => "mp4",
+        OutputKind::Mp3 => "mp3",
     };
     Ok(CommandResult::success(
         format!(
@@ -252,8 +278,9 @@ fn output_kind(path: &Path) -> Result<OutputKind, String> {
     match path.extension().and_then(|value| value.to_str()) {
         None => Ok(OutputKind::PngSequence),
         Some(extension) if extension.eq_ignore_ascii_case("mp4") => Ok(OutputKind::Mp4),
+        Some(extension) if extension.eq_ignore_ascii_case("mp3") => Ok(OutputKind::Mp3),
         Some(extension) => Err(format!(
-            "unsupported recording output extension .{extension} for {}; use an extensionless PNG directory or .mp4",
+            "unsupported recording output extension .{extension} for {}; use an extensionless PNG directory, .mp4, or .mp3",
             path.display()
         )),
     }
@@ -463,6 +490,45 @@ fn encode_mp4(
     Ok(())
 }
 
+fn encode_mp3(stage_root: &Path, output: &Path) -> Result<(), String> {
+    let staged_output = stage_root.join("recording.mp3");
+    let audio = stage_root.join("audio.wav");
+    let command = Command::new("ffmpeg")
+        .args(ffmpeg_mp3_args(&audio, &staged_output))
+        .output()
+        .map_err(|error| format!("MP3 encoder failure: could not start ffmpeg: {error}"))?;
+    if !command.status.success() {
+        let detail = String::from_utf8_lossy(&command.stderr).trim().to_string();
+        return Err(format!(
+            "MP3 encoder failure: ffmpeg exited with {}{}",
+            command.status,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ));
+    }
+    let metadata = fs::metadata(&staged_output).map_err(|error| {
+        format!(
+            "MP3 encoder failure: ffmpeg produced no artifact {}: {error}",
+            staged_output.display()
+        )
+    })?;
+    if metadata.len() == 0 {
+        return Err(format!(
+            "MP3 encoder failure: ffmpeg produced an empty artifact {}",
+            staged_output.display()
+        ));
+    }
+    stasis_dynload::atomic_rename_no_replace(&staged_output, output).map_err(|error| {
+        format!(
+            "recording publish failed for MP3 {}: {error}",
+            output.display()
+        )
+    })
+}
+
 fn ffmpeg_args(
     pattern: &Path,
     audio: &Path,
@@ -506,6 +572,29 @@ fn ffmpeg_args(
     ]
 }
 
+fn ffmpeg_mp3_args(audio: &Path, output: &Path) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-y".to_string(),
+        "-i".to_string(),
+        audio.display().to_string(),
+        "-vn".to_string(),
+        "-map".to_string(),
+        "0:a:0".to_string(),
+        "-c:a".to_string(),
+        "libmp3lame".to_string(),
+        "-ar".to_string(),
+        "48000".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
+        "-f".to_string(),
+        "mp3".to_string(),
+        output.display().to_string(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +609,7 @@ mod tests {
             frames: Some(3),
             duration: None,
             input_script: None,
+            before_tick: None,
         }
     }
 
@@ -551,6 +641,7 @@ mod tests {
             Ok(OutputKind::PngSequence)
         );
         assert_eq!(output_kind(Path::new("capture.MP4")), Ok(OutputKind::Mp4));
+        assert_eq!(output_kind(Path::new("capture.mp3")), Ok(OutputKind::Mp3));
         assert!(output_kind(Path::new("capture.mov")).is_err());
     }
 
@@ -590,5 +681,23 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "-ac" && pair[1] == "2"));
+    }
+
+    #[test]
+    fn ffmpeg_mp3_contract_is_audio_only_and_fixed_rate() {
+        let args = ffmpeg_mp3_args(Path::new("audio.wav"), Path::new("out.mp3"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-map" && pair[1] == "0:a:0"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c:a" && pair[1] == "libmp3lame"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-ar" && pair[1] == "48000"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-ac" && pair[1] == "2"));
+        assert!(!args.iter().any(|value| value == "-frames:v"));
     }
 }
