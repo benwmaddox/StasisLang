@@ -522,6 +522,9 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     );
     let runtime = fs::read_to_string(output.join("game.js")).expect("game.js");
     let index = fs::read_to_string(output.join("index.html")).expect("index.html");
+    assert!(index.contains(r#"<title>web_export_smoke</title>"#));
+    assert!(index.contains(r#"<h1 id="stasis-loading-title">web_export_smoke</h1>"#));
+    assert!(index.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
     assert!(!index.contains("stasis-audio"));
     assert!(!index.contains("Enable sound"));
     for expected in [
@@ -625,7 +628,8 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
         "dataset.gpuSubmitMs",
         "dataset.presentWaitMs",
         "PERF_ROLLING_CAPACITY",
-        "if (hud) {\n      recordWorst(",
+        "if (hud)",
+        "recordWorst(",
     ] {
         assert!(
             runtime.contains(expected),

@@ -5940,9 +5940,13 @@ mod tests {
         let release = web_index_html("release-game", false);
         assert!(!release.contains("stasis-hud"));
         assert!(!release.contains("__STASIS_"));
+        assert!(release.contains(r#"<h1 id="stasis-loading-title">release-game</h1>"#));
+        assert!(release.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
+        assert!(release.contains(r#"id="stasis-loading" role="status" aria-live="polite""#));
 
         let development = web_index_html("development-game", true);
         assert!(development.contains(r#"id="stasis-hud""#));
+        assert!(development.contains(r#"<h1 id="stasis-loading-title">development-game</h1>"#));
         for html in [&release, &development] {
             assert!(!html.contains("__STASIS_"));
             assert!(html.contains("#stasis-error { position: absolute;"));
