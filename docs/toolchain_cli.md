@@ -59,6 +59,9 @@ project root and nested directories. `--workspace PATH` selects a project explic
   "entry": "src/main.stasis",
   "tests": "tests",
   "output": "build",
+  "web": {
+    "loading_font": "/assets/fonts/display.ttf"
+  },
   "vendor": {
     "stasis": {
       "release_id": "nightly-20260805-123",
@@ -67,6 +70,10 @@ project root and nested directories. `--workspace PATH` selects a project explic
   }
 }
 ```
+
+The optional `web.loading_font` value must identify an existing `.ttf`, `.otf`, `.woff`, or
+`.woff2` file under the project `assets/` directory. Both `/assets/...` and `assets/...` forms are
+accepted; web packaging normalizes them to a package-relative URL for the static loading shell.
 
 The vendor release and hash describe the exact checked-in `vendor/stasis` snapshot.
 `manifest_version` versions the JSON schema and is independent of the selected toolchain release.

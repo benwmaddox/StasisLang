@@ -727,6 +727,78 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
 }
 
 #[test]
+fn configured_web_loading_font_is_staged_and_missing_font_fails_check() {
+    let source = repo_root().join("samples/windows_launch_smoke");
+    let workspace = repo_root()
+        .join("build")
+        .join(format!("web-loading-font-test-{}", stamp()));
+    copy_tree(&source, &workspace);
+    let manifest_path = workspace.join("stasis.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read fixture manifest"))
+            .expect("parse fixture manifest");
+    manifest["web"] = serde_json::json!({"loading_font": "/assets/smoke.ttf"});
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize fixture manifest"),
+    )
+    .expect("write fixture manifest");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    let index = fs::read_to_string(output.join("index.html")).expect("read configured index");
+    assert!(index.contains(
+        r#"<link rel="preload" href="assets/smoke.ttf" as="font" type="font/ttf" crossorigin>"#
+    ));
+    assert!(index.contains(
+        r#"@font-face { font-family: "StasisLoadingFont"; src: url("assets/smoke.ttf") format("truetype");"#
+    ));
+    assert!(output.join("assets/smoke.ttf").is_file());
+    fs::remove_dir_all(&output).expect("clean configured package");
+
+    manifest["web"]["loading_font"] = serde_json::json!("assets/smoke.ttf");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize relative manifest"),
+    )
+    .expect("write relative manifest");
+    let relative_output = package(&workspace, Path::new("build/web-package-relative"));
+    let relative_index =
+        fs::read_to_string(relative_output.join("index.html")).expect("read relative index");
+    assert!(relative_index.contains(
+        r#"<link rel="preload" href="assets/smoke.ttf" as="font" type="font/ttf" crossorigin>"#
+    ));
+    assert!(relative_output.join("assets/smoke.ttf").is_file());
+    fs::remove_dir_all(&relative_output).expect("clean relative package");
+
+    manifest["web"]["loading_font"] = serde_json::json!("/assets/missing.ttf");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize missing manifest"),
+    )
+    .expect("write missing manifest");
+    let check = Command::new(env!("CARGO_BIN_EXE_stasis"))
+        .arg("check")
+        .arg("--workspace")
+        .arg(&workspace)
+        .output()
+        .expect("run missing loading font check");
+    assert!(
+        !check.status.success(),
+        "missing loading font unexpectedly passed"
+    );
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert!(
+        diagnostics.contains("web.loading_font must name an existing file"),
+        "missing font diagnostic was not clear: {diagnostics}"
+    );
+    fs::remove_dir_all(&workspace).expect("clean loading font fixture");
+}
+
+#[test]
 fn rooted_web_asset_paths_emit_package_relative_assets() {
     let root = repo_root();
     let source_workspace = root.join("samples/windows_launch_smoke");

@@ -680,6 +680,14 @@ struct ProjectManifest {
     vendor: Option<VendorManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     android: Option<AndroidProjectManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web: Option<WebProjectManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebProjectManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loading_font: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -713,6 +721,7 @@ impl ProjectManifest {
             stdlib: None,
             vendor: None,
             android: None,
+            web: None,
         }
     }
 
@@ -785,6 +794,11 @@ impl ProjectManifest {
                 })
             {
                 return Err("android version_name is invalid".to_string());
+            }
+        }
+        if let Some(web) = &self.web {
+            if let Some(path) = web.loading_font.as_deref() {
+                normalize_web_loading_font_path(path)?;
             }
         }
         Ok(())
@@ -1442,6 +1456,26 @@ fn load_workspace_with_vendor_gate(
     let mut manifest: ProjectManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
     manifest.validate()?;
+    if let Some(web) = manifest.web.as_ref() {
+        if let Some(path) = web.loading_font.as_deref() {
+            let normalized = normalize_web_loading_font_path(path)?;
+            let font = root.join(&normalized);
+            let assets_root = root.join("assets").canonicalize().ok();
+            let resolved_font = font.canonicalize().ok();
+            if !font.is_file()
+                || !assets_root.as_deref().is_some_and(|assets| {
+                    resolved_font
+                        .as_deref()
+                        .is_some_and(|resolved| resolved.starts_with(assets))
+                })
+            {
+                return Err(format!(
+                    "web.loading_font must name an existing file under assets: {}",
+                    font.display()
+                ));
+            }
+        }
+    }
     if manifest.stdlib.as_deref() == Some("toolchain") {
         sync_toolchain_stdlib(&root)?;
     }
@@ -3867,6 +3901,14 @@ fn package_web_workspace(
             })
             .transpose()?;
         stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
+        stage_web_loading_font(workspace, &staging_root)?;
+        let loading_font = workspace
+            .manifest
+            .web
+            .as_ref()
+            .and_then(|web| web.loading_font.as_deref())
+            .map(normalize_web_loading_font_path)
+            .transpose()?;
         let runtime_config = web_runtime_config(workspace, &process, development_build);
         let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
@@ -3883,7 +3925,11 @@ fn package_web_workspace(
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
         fs::write(
             staging_root.join("index.html"),
-            web_index_html(&workspace.manifest.name, development_build),
+            web_index_html(
+                &workspace.manifest.name,
+                development_build,
+                loading_font.as_deref(),
+            ),
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
 
@@ -3974,7 +4020,7 @@ fn publish_package_output(staging_root: &Path, package_root: &Path) -> Result<()
     Ok(())
 }
 
-fn web_index_html(title: &str, development_build: bool) -> String {
+fn web_index_html(title: &str, development_build: bool, loading_font: Option<&str>) -> String {
     let (hud_style, hud) = if development_build {
         (
             "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
@@ -3983,10 +4029,34 @@ fn web_index_html(title: &str, development_build: bool) -> String {
     } else {
         ("", "")
     };
+    let (loading_font_face, loading_font_family) = loading_font
+        .map(|path| {
+            let (mime, format) = match Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("ttf") => ("ttf", "truetype"),
+                Some("otf") => ("otf", "opentype"),
+                Some("woff") => ("woff", "woff"),
+                Some("woff2") => ("woff2", "woff2"),
+                _ => ("font", "font"),
+            };
+            (
+                format!(
+                    "<link rel=\"preload\" href=\"{path}\" as=\"font\" type=\"font/{mime}\" crossorigin>\n  <style>@font-face {{ font-family: \"StasisLoadingFont\"; src: url(\"{path}\") format(\"{format}\"); font-display: block; }}</style>"
+                ),
+                "\"StasisLoadingFont\", ".to_string(),
+            )
+        })
+        .unwrap_or_else(|| (String::new(), String::new()));
     WEB_INDEX_HTML
         .replace("__STASIS_GAME_TITLE__", title)
         .replace("__STASIS_PERFORMANCE_HUD_STYLE__", hud_style)
         .replace("__STASIS_PERFORMANCE_HUD__", hud)
+        .replace("__STASIS_LOADING_FONT_FACE__", &loading_font_face)
+        .replace("__STASIS_LOADING_FONT_FAMILY__", &loading_font_family)
 }
 
 fn lean_web_runtime(process: &WasmProcess) -> Option<String> {
@@ -5837,6 +5907,52 @@ fn validate_relative_path(field: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn stage_web_loading_font(workspace: &Workspace, destination_root: &Path) -> Result<(), String> {
+    let Some(path) = workspace
+        .manifest
+        .web
+        .as_ref()
+        .and_then(|web| web.loading_font.as_deref())
+    else {
+        return Ok(());
+    };
+    let path = normalize_web_loading_font_path(path)?;
+    let source = workspace.root.join(&path);
+    let destination = destination_root.join(&path);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    copy_file(&source, &destination)
+}
+
+fn normalize_web_loading_font_path(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let value = value.strip_prefix('/').unwrap_or(value);
+    if value.is_empty() || value.contains('\\') {
+        return Err(
+            "web.loading_font must be an assets-relative path such as /assets/ui.ttf".to_string(),
+        );
+    }
+    let path = Path::new(value);
+    validate_relative_path("web.loading_font", path)?;
+    let normalized = value.replace('\\', "/");
+    if !normalized.starts_with("assets/") || normalized.len() == "assets/".len() {
+        return Err("web.loading_font must point to a file under assets/".to_string());
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "web.loading_font must have a web font extension".to_string())?;
+    if !matches!(extension.as_str(), "ttf" | "otf" | "woff" | "woff2") {
+        return Err(
+            "web.loading_font must use a .ttf, .otf, .woff, or .woff2 extension".to_string(),
+        );
+    }
+    Ok(normalized)
+}
+
 fn validate_optional_workspace_path(
     workspace: &Workspace,
     field: &str,
@@ -5937,14 +6053,14 @@ mod tests {
 
     #[test]
     fn release_web_index_omits_performance_hud() {
-        let release = web_index_html("release-game", false);
+        let release = web_index_html("release-game", false, None);
         assert!(!release.contains("stasis-hud"));
         assert!(!release.contains("__STASIS_"));
         assert!(release.contains(r#"<h1 id="stasis-loading-title">release-game</h1>"#));
         assert!(release.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
         assert!(release.contains(r#"id="stasis-loading" role="status" aria-live="polite""#));
 
-        let development = web_index_html("development-game", true);
+        let development = web_index_html("development-game", true, None);
         assert!(development.contains(r#"id="stasis-hud""#));
         assert!(development.contains(r#"<h1 id="stasis-loading-title">development-game</h1>"#));
         for html in [&release, &development] {
@@ -5953,6 +6069,45 @@ mod tests {
             assert!(html.contains("inset: 0; margin: 0;"));
             assert!(html.contains("white-space: pre-wrap;"));
             assert!(html.contains("#stasis-error:empty { display: none; }"));
+        }
+    }
+
+    #[test]
+    fn configured_web_loading_font_is_preloaded_and_used_by_shell() {
+        let html = web_index_html("font-game", false, Some("assets/fonts/ui.ttf"));
+        assert!(html.contains(
+            r#"<link rel="preload" href="assets/fonts/ui.ttf" as="font" type="font/ttf" crossorigin>"#
+        ));
+        assert!(html.contains(
+            r#"@font-face { font-family: "StasisLoadingFont"; src: url("assets/fonts/ui.ttf") format("truetype");"#
+        ));
+        assert!(
+            html.contains(r#"font-family: "StasisLoadingFont", Georgia, "Times New Roman", serif"#)
+        );
+        assert!(!html.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn web_loading_font_paths_accept_rooted_assets_and_reject_escape() {
+        assert_eq!(
+            normalize_web_loading_font_path("/assets/fonts/ui.ttf").unwrap(),
+            "assets/fonts/ui.ttf"
+        );
+        assert_eq!(
+            normalize_web_loading_font_path("assets/fonts/ui.woff2").unwrap(),
+            "assets/fonts/ui.woff2"
+        );
+        for path in [
+            "../assets/fonts/ui.ttf",
+            "assets/../outside.ttf",
+            "assets/fonts/ui.txt",
+            "fonts/ui.ttf",
+            "assets/fonts\\ui.ttf",
+        ] {
+            assert!(
+                normalize_web_loading_font_path(path).is_err(),
+                "accepted invalid web loading font path {path}"
+            );
         }
     }
 
