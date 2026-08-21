@@ -65,6 +65,37 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     f"{filename} missing from Windows assembly in {workflow_name}",
                 )
 
+    def test_release_workflows_select_platform_smoke_executable(self):
+        for workflow_name in (
+            ".github/workflows/nightly-release.yml",
+            ".github/workflows/bootstrap-artifacts.yml",
+        ):
+            workflow = (ROOT / workflow_name).read_text(encoding="utf-8")
+            smoke_start = workflow.index("      - name: Smoke test bundled CLI (unix)")
+            next_step = workflow.find("\n      - name:", smoke_start + 1)
+            smoke_block = workflow[smoke_start:next_step if next_step != -1 else None]
+            self.assertIn(
+                'smoke_executable="./cli-smoke/build/ci_smoke"',
+                smoke_block,
+                workflow_name,
+            )
+            self.assertIn(
+                'if [[ "${{ runner.os }}" == "macOS" ]]; then',
+                smoke_block,
+                workflow_name,
+            )
+            self.assertIn(
+                'smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"',
+                smoke_block,
+                workflow_name,
+            )
+            self.assertIn('"${smoke_executable}"', smoke_block, workflow_name)
+            self.assertNotRegex(
+                smoke_block,
+                r"(?m)^\s+\./cli-smoke/build/ci_smoke\s*$",
+                workflow_name,
+            )
+
     def test_package_verifier_detects_runtime_substitution(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

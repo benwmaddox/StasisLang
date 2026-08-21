@@ -314,7 +314,11 @@ jobs:
           ./bin/stasis --workspace cli-smoke check
           ./bin/stasis --workspace cli-smoke test
           ./bin/stasis --workspace cli-smoke build --mode release
-          ./cli-smoke/build/ci_smoke
+          smoke_executable="./cli-smoke/build/ci_smoke"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"
+          fi
+          "${smoke_executable}"
           printf '%s\n' \
             'function main(): i32 { return 0; }' \
             'function tick(): i32 { return 0; }' \
