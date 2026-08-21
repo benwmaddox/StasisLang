@@ -1008,7 +1008,9 @@ fn recording_before_tick_hook_observes_input_and_failure_publishes_nothing() {
     let project = test_tree.0.join("windows_launch_smoke");
     copy_tree(&fixture, &project);
     let source_path = project.join("main.stasis");
-    let source = fs::read_to_string(&source_path).expect("read hook fixture");
+    let source = fs::read_to_string(&source_path)
+        .expect("read hook fixture")
+        .replace("\r\n", "\n");
     let source = source
         .replace(
             "global ticks: i32;",
@@ -1018,6 +1020,10 @@ fn recording_before_tick_hook_observes_input_and_failure_publishes_nothing() {
             "function tick(): i32 {\n    ticks += 1;\n    return 0;\n}",
             "function before_record(frame: i32): i32 {\n    hook_frame = frame;\n    hook_input = host_i32[545];\n    return 0;\n}\n\nfunction tick(): i32 {\n    if (hook_frame != ticks) {\n        return 51;\n    }\n    if (ticks == 0 && hook_input == 0) {\n        return 52;\n    }\n    ticks += 1;\n    return 0;\n}",
         );
+    assert!(
+        source.contains("function before_record(frame: i32): i32"),
+        "before-tick hook injection did not match the fixture"
+    );
     fs::write(&source_path, source).expect("write hook fixture");
 
     let output = test_tree.0.join("hooked");
