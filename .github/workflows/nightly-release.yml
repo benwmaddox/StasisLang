@@ -516,7 +516,12 @@ jobs:
             notes="$(printf 'Automated nightly build.\n\nFirst nightly tag in this repository.')"
           fi
 
-          gh release create "${NIGHTLY_TAG}" dist/* \
+          mapfile -d '' -t release_assets < <(find dist -maxdepth 1 -type f -print0 | sort -z)
+          if ((${#release_assets[@]} == 0)); then
+            echo "No regular release assets found directly under dist" >&2
+            exit 1
+          fi
+          gh release create "${NIGHTLY_TAG}" "${release_assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Nightly ${NIGHTLY_TAG}" \
             --notes "${notes}" \

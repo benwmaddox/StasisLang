@@ -140,6 +140,30 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 workflow_name,
             )
 
+    def test_nightly_release_filters_top_level_regular_assets(self):
+        workflow = (ROOT / ".github/workflows/nightly-release.yml").read_text(
+            encoding="utf-8"
+        )
+        release_start = workflow.index("      - name: Create GitHub prerelease")
+        release_block = workflow[release_start:]
+        self.assertIn(
+            "mapfile -d '' -t release_assets < <(find dist -maxdepth 1 -type f -print0 | sort -z)",
+            release_block,
+        )
+        self.assertIn("if ((${#release_assets[@]} == 0)); then", release_block)
+        self.assertIn(
+            'echo "No regular release assets found directly under dist" >&2',
+            release_block,
+        )
+        self.assertIn(
+            'gh release create "${NIGHTLY_TAG}" "${release_assets[@]}"',
+            release_block,
+        )
+        self.assertNotRegex(
+            release_block,
+            r'gh release create .*dist/\*',
+        )
+
     def test_package_verifier_detects_runtime_substitution(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
