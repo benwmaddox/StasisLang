@@ -7261,10 +7261,9 @@ mod tests {
             "private static final String STASIS_ANDROID_ORIENTATION = \"sensorLandscape\";"
         ));
         assert!(!landscape_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
-        let landscape_manifest = fs::read_to_string(
-            android_landscape.join("android/app/src/main/AndroidManifest.xml"),
-        )
-        .expect("read landscape Android manifest");
+        let landscape_manifest =
+            fs::read_to_string(android_landscape.join("android/app/src/main/AndroidManifest.xml"))
+                .expect("read landscape Android manifest");
         assert!(landscape_manifest.contains("android:screenOrientation=\"sensorLandscape\""));
 
         let android_jni =
@@ -7290,7 +7289,9 @@ mod tests {
         assert!(android
             .join("runtime/stasis_renderer_lifecycle.h")
             .is_file());
-        assert!(android.join("runtime/stasis_performance_metrics.h").is_file());
+        assert!(android
+            .join("runtime/stasis_performance_metrics.h")
+            .is_file());
         assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
             .is_file());

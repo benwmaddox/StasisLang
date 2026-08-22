@@ -31,7 +31,7 @@ if not "%SIGN_TOOL%"=="" (
     echo [stasis-sign-runner] target does not exist: %TARGET%>&2
     exit /b 3
   )
-  "%SIGN_TOOL%" "%TARGET%"
+  call "%SIGN_TOOL%" "%TARGET%"
   if errorlevel 1 (
     echo [stasis-sign-runner] signer failed for: %TARGET%>&2
     exit /b 4

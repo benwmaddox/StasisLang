@@ -4492,7 +4492,10 @@ function tick(): void {}
         assert!(error.contains("diagnostic_file=src/main.stasis"));
         let preserved = inspect_android_runtime_state(&root).expect("inspect preserved source");
         assert_eq!(preserved["generation"], active["generation"]);
-        assert_eq!(preserved["source_fingerprint"], active["source_fingerprint"]);
+        assert_eq!(
+            preserved["source_fingerprint"],
+            active["source_fingerprint"]
+        );
 
         let resumed =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
@@ -4500,7 +4503,10 @@ function tick(): void {}
         assert_eq!(resumed.observed_game_tick_count, 12);
         let after_frame = inspect_android_runtime_state(&root).expect("inspect after frame");
         assert_eq!(after_frame["generation"], active["generation"]);
-        assert_eq!(after_frame["source_fingerprint"], active["source_fingerprint"]);
+        assert_eq!(
+            after_frame["source_fingerprint"],
+            active["source_fingerprint"]
+        );
 
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();

@@ -1,6 +1,6 @@
 use crate::backend::emit::{
-    debug_variable_slot, AssignTarget, CompileAnalysisCache, DirectStorageBinding,
-    DirectStorageBindings, RuntimeHelperLinkage, SimpleCondition, SimpleExpr, SimpleStmt,
+    debug_variable_slot, CompileAnalysisCache, DirectStorageBinding, DirectStorageBindings,
+    RuntimeHelperLinkage,
 };
 use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReason,
@@ -18,6 +18,7 @@ use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
     TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
+use crate::ir::hir::{AssignTarget, SimpleCondition, SimpleExpr, SimpleStmt};
 use crate::ir::hir::{DebugStatement, FunctionHIR};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -475,7 +476,6 @@ pub struct JitGenerationMetadata {
     pub retained_dependencies: Vec<FunctionKey>,
     pub host_export_signatures: BTreeMap<String, String>,
     pub host_export_code_ptrs: BTreeMap<String, u64>,
-    pub diagnostics: Vec<String>,
     pub code_owner_revision: u64,
     pub data_owner_layout_hash: u64,
     pub codegen_micros: u64,
@@ -777,7 +777,9 @@ impl JitProcess {
     }
 
     fn compile_internal(&mut self) -> CompileResult<CompileReport> {
-        let index = self.compiler.index_pass()?;
+        // Program validity is a whole-program contract. Reachability may gate backend work, but
+        // it must never hide invalid source that can become live after a later edit.
+        let index = self.compiler.check()?;
         self.validate_host_aliases()
             .map_err(crate::compiler::CompileError::Backend)?;
         self.compiler
@@ -1188,7 +1190,6 @@ impl JitProcess {
             retained_dependencies: patch_plan.retained_dependencies.clone(),
             host_export_signatures,
             host_export_code_ptrs,
-            diagnostics: Vec::new(),
             code_owner_revision: files_fingerprint,
             data_owner_layout_hash: layout_hash,
             codegen_micros,
@@ -3221,6 +3222,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn jit_rejects_invalid_unreachable_function_body() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "dead.stasis",
+            "function main(): i32 { return 0; }\nfunction unfinished(): i32 { while (true) { return 1; } }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject invalid dead code");
+        assert!(
+            format!("{error:?}").contains("while"),
+            "unexpected diagnostic: {error:?}"
+        );
+        assert!(process.program_snapshot().is_none());
+        assert!(process.artifacts().is_empty());
+    }
+
+    #[test]
     fn async_asset_task_externs_resolve_to_builtin_bridges() {
         assert!(builtin_host_symbol_address("stasis_jit_asset_request_sprite").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_request_audio").is_some());
@@ -3667,7 +3687,7 @@ mod tests {
         process.set_local_runtime_helper_trampolines(true);
         process.upsert_file(
             "sample.stasis",
-            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let width: f32 = gfx_measure_text_cached(0); if (gfx_poll_reload(0) || audio_is_available() || width != 0.0) { return 2; } if (ms == 0 && us == 0) { return 0; } return 1; }\n",
+            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let reloaded: bool = gfx_poll_reload(0); let width: f32 = gfx_measure_text_cached(0); let audio: bool = audio_is_available(); return 1; }\n",
         );
         process
             .compile()
