@@ -47,12 +47,9 @@ final class WorkshopDiagnosticSeamAcceptance {
             activity.acceptanceReplaceSource(projectRoot, original);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema baseline");
             requireEquals("passed", activity.runIt031Frame(projectRoot), "render-schema baseline frame");
-            String renderSchemaSource = original.replace(
-                    "    pong_host_render();\n    return 0;\n}\n\nfunction on_code_swap()",
-                    "    pong_host_render();\n    gfx_cmd_i32[1] = 99;\n    return 0;\n}\n\nfunction on_code_swap()");
-            if (renderSchemaSource.equals(original)) {
-                throw new IllegalStateException("render-schema mutation anchor was not found");
-            }
+            String renderSchemaSource = insertAfterInFunction(original,
+                    "function render(): i32 {", "pong_host_render();",
+                    "\n    gfx_cmd_i32[1] = 99;");
             activity.acceptanceReplaceSource(projectRoot, renderSchemaSource);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema setup");
             String renderMessage = activity.runIt031Frame(projectRoot);
@@ -61,14 +58,10 @@ final class WorkshopDiagnosticSeamAcceptance {
             requireContext(render, null, "render", null);
             cases.put(caseEvidence(activity, "render_schema", render, renderMessage, null));
 
-            String missingResource = original.replace(
-                    "function on_code_swap(): void {\n    pong_game_on_code_swap();",
-                    "function on_code_swap(): void {\n    load_sprite_from(PongHost.ball_sprite, "
-                            + "\"assets/IT031_missing.svg\", 32, 32);\n"
-                            + "    pong_game_on_code_swap();");
-            if (missingResource.equals(original)) {
-                throw new IllegalStateException("resource mutation anchor was not found");
-            }
+            String missingResource = insertAfterInFunction(original,
+                    "function on_code_swap(): void {", "function on_code_swap(): void {",
+                    "\n    load_sprite_from(PongHost.ball_sprite, "
+                            + "\"assets/IT031_missing.svg\", 32, 32);");
             activity.acceptanceReplaceSource(projectRoot, missingResource);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "resource setup");
             String nativeResource = activity.runIt031Frame(projectRoot);
@@ -126,6 +119,20 @@ final class WorkshopDiagnosticSeamAcceptance {
                 ? expectedParseLocation(source) : null;
         cases.put(caseEvidence(activity, expectedStage, nativeDiagnostic, nativeMessage,
                 expectedLocation));
+    }
+
+    static String insertAfterInFunction(String source, String declaration, String anchor,
+            String insertion) {
+        int functionStart = source.lastIndexOf(declaration);
+        int nextFunction = functionStart < 0 ? -1
+                : source.indexOf("\nfunction ", functionStart + declaration.length());
+        int anchorStart = functionStart < 0 ? -1 : source.indexOf(anchor, functionStart);
+        if (functionStart < 0 || anchorStart < 0
+                || (nextFunction >= 0 && anchorStart >= nextFunction)) {
+            throw new IllegalStateException("mutation anchor was not found in " + declaration);
+        }
+        int insertionPoint = anchorStart + anchor.length();
+        return source.substring(0, insertionPoint) + insertion + source.substring(insertionPoint);
     }
 
     private static JSONObject caseEvidence(MainActivity activity, String name,
