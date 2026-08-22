@@ -1418,7 +1418,8 @@ fn qualify_module_calls(
                     qualify_bare_calls,
                 )
             }
-            SimpleExpr::Int(_)
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
@@ -1713,7 +1714,8 @@ fn inline_expression_calls(
 
     fn is_safe_argument(expression: &SimpleExpr) -> bool {
         match expression {
-            SimpleExpr::Int(_)
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
@@ -1833,7 +1835,8 @@ fn inline_expression_calls(
             SimpleExpr::Condition(value) => {
                 condition(value, candidates, caller_id, arguments, stack)
             }
-            SimpleExpr::Int(_)
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_) => {}
@@ -2914,6 +2917,33 @@ function unfinished(): void { continue; }
             .last_source_diagnostic()
             .expect("structured unreachable-function diagnostic");
         assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
+    fn check_distinguishes_typed_defaults_from_explicit_initializers() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "defaults.stasis",
+            r#"
+struct Enemy { hp: i32; }
+function main(): i32 { return 0; }
+function create_enemy(): Enemy { let enemy: Enemy; return enemy; }
+"#,
+        );
+        compiler.check().expect("typed default should be valid");
+
+        compiler.upsert_file(
+            "defaults.stasis",
+            r#"
+struct Enemy { hp: i32; }
+function main(): i32 { return 0; }
+function create_enemy(): Enemy { let enemy: Enemy = 0.0; return enemy; }
+"#,
+        );
+        let error = compiler
+            .check()
+            .expect_err("explicit float initializer should remain invalid");
+        assert!(format!("{error:?}").contains("expected Enemy expression but found f32"));
     }
 
     #[test]

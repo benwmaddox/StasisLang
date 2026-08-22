@@ -124,7 +124,8 @@ fn collect_expression_references(
         SimpleExpr::Condition(condition) => {
             collect_condition_references(condition, references, scopes)
         }
-        SimpleExpr::Int(_)
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_) => {}

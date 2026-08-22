@@ -5096,7 +5096,8 @@ fn collect_call_targets_from_hir(hir: &FunctionHIR) -> BTreeSet<String> {
                 expression(lhs, out);
                 expression(rhs, out);
             }
-            SimpleExpr::Int(_)
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
@@ -5414,6 +5415,17 @@ pub(crate) fn emit_simple_expression(
     foreach_bindings: &ForeachBindingMap,
 ) -> Result<ValueBinding, String> {
     match expression {
+        SimpleExpr::DefaultValue(type_id) => {
+            let value = match *type_id {
+                TYPE_ID_F32 => builder.ins().f32const(Ieee32::with_float(0.0)),
+                TYPE_ID_F64 => builder.ins().f64const(Ieee64::with_float(0.0)),
+                _ => builder.ins().iconst(types::I32, 0),
+            };
+            Ok(ValueBinding {
+                value,
+                type_id: *type_id,
+            })
+        }
         SimpleExpr::Int(value) => {
             let literal_type = expected_type
                 .filter(|type_id| type_table.is_integer(*type_id))

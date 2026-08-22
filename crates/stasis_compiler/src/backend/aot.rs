@@ -1400,7 +1400,8 @@ fn record_string_literals_in_expr(
     out: &mut BTreeMap<i32, String>,
 ) -> Result<(), String> {
     match expression {
-        SimpleExpr::Int(_)
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::Identifier(_) => Ok(()),

@@ -3294,6 +3294,20 @@ fn encode_expr_as(
     out: &mut Vec<u8>,
 ) -> Result<TypeId, String> {
     match value {
+        SimpleExpr::DefaultValue(type_id) => {
+            match *type_id {
+                TYPE_ID_F32 => {
+                    out.push(0x43);
+                    out.extend(0.0_f32.to_le_bytes());
+                }
+                TYPE_ID_F64 => {
+                    out.push(0x44);
+                    out.extend(0.0_f64.to_le_bytes());
+                }
+                _ => out.extend([0x41, 0x00]),
+            }
+            Ok(*type_id)
+        }
         SimpleExpr::Int(value) => {
             out.push(0x41);
             sleb(*value as i32, out);

@@ -683,7 +683,8 @@ fn validate_expression_calls(
             validate_expression_calls(lhs, context)?;
             validate_expression_calls(rhs, context)
         }
-        SimpleExpr::Int(_)
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_)
@@ -1260,6 +1261,7 @@ fn hash_condition_shape(condition: &SimpleCondition, hasher: &mut DefaultHasher)
 fn hash_expression_shape(expression: &SimpleExpr, hasher: &mut DefaultHasher) {
     std::mem::discriminant(expression).hash(hasher);
     match expression {
+        SimpleExpr::DefaultValue(type_id) => type_id.hash(hasher),
         SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
@@ -1930,7 +1932,8 @@ fn analyze_expression(
     effects: &mut EffectSets,
 ) {
     match expression {
-        SimpleExpr::Int(_)
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_) => {}
@@ -2475,6 +2478,7 @@ fn expression_type(
     aliases: &BTreeMap<String, String>,
 ) -> Option<TypeId> {
     match expression {
+        SimpleExpr::DefaultValue(type_id) => Some(*type_id),
         SimpleExpr::Int(_) => Some(TYPE_ID_I32),
         SimpleExpr::Float(_) => Some(TYPE_ID_F32),
         SimpleExpr::Bool(_) | SimpleExpr::Condition(_) => Some(TYPE_ID_BOOL),
@@ -3053,6 +3057,7 @@ fn display_condition(condition: &SimpleCondition) -> String {
 
 fn display_expression(expression: &SimpleExpr) -> String {
     match expression {
+        SimpleExpr::DefaultValue(type_id) => format!("default({})", type_id),
         SimpleExpr::Int(value) => value.to_string(),
         SimpleExpr::Float(value) => value.to_string(),
         SimpleExpr::Bool(value) => value.to_string(),

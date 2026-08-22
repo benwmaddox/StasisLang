@@ -101,6 +101,7 @@ pub(crate) enum ComparisonOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SimpleExpr {
+    DefaultValue(TypeId),
     Int(i64),
     Float(f64),
     Bool(bool),

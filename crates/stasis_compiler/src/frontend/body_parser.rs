@@ -1,4 +1,4 @@
-use crate::frontend::types::{TypeTable, TYPE_ID_BOOL};
+use crate::frontend::types::TypeTable;
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, DebugStatement,
     ParsedSimpleStatements, SimpleCondition, SimpleExpr, SimpleStmt,
@@ -171,12 +171,8 @@ pub(crate) fn parse_let_statement(
             })?;
             let expression = if let Some(expression_text) = initializer {
                 parse_value_expression(expression_text)?
-            } else if resolved_type_id == TYPE_ID_BOOL {
-                SimpleExpr::Bool(false)
-            } else if type_table.is_integer(resolved_type_id) {
-                SimpleExpr::Int(0)
             } else {
-                SimpleExpr::Float(0.0)
+                SimpleExpr::DefaultValue(resolved_type_id)
             };
             (Some(resolved_type_id), expression)
         }
