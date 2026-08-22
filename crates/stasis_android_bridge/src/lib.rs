@@ -2604,14 +2604,18 @@ fn format_runtime_diagnostic(
     symbol: Option<&str>,
     resource: Option<&str>,
 ) -> String {
-    format_native_diagnostic(
-        stage,
-        code,
-        detail,
-        None,
-        symbol,
-        resource,
-        &[format!("{stage} phase"), detail.to_string()],
+    format!(
+        "{}{}",
+        sanitize_legacy_prefix(detail),
+        format_native_diagnostic(
+            stage,
+            code,
+            detail,
+            None,
+            symbol,
+            resource,
+            &[format!("{stage} phase"), detail.to_string()],
+        )
     )
 }
 
