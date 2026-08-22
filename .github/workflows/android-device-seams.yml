@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 75
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
       STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
@@ -64,7 +65,7 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7
-          cores: 4
+          cores: 2
           ram-size: 4096M
           ndk: 27.0.12077973
           cmake: 3.22.1
@@ -112,6 +113,7 @@ jobs:
     timeout-minutes: 75
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
       STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
@@ -162,7 +164,7 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7
-          cores: 4
+          cores: 2
           ram-size: 4096M
           ndk: 27.0.12077973
           cmake: 3.22.1

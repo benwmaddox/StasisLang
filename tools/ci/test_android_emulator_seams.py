@@ -135,12 +135,17 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.assertIn("ndk: 27.0.12077973", body)
             self.assertIn("cmake: 3.22.1", body)
             self.assertIn("api-level: 35", body)
+            self.assertIn("target: google_apis", body)
             self.assertIn("arch: x86_64", body)
+            self.assertIn('CARGO_BUILD_JOBS: "2"', body)
+            self.assertIn("cores: 2", body)
             self.assertIn("8e37db5e797b6167f3a00d697d816a684bd259c7", body)
             self.assertIn("bec9134a26c7d0f31b36d6083c25296e04cabff5", body)
             self.assertIn(
                 "rustup target add aarch64-linux-android x86_64-linux-android", body
             )
+        self.assertEqual(2, self.workflow.count('CARGO_BUILD_JOBS: "2"'))
+        self.assertEqual(2, self.workflow.count("cores: 2"))
         release_body = job_bodies["release-shell-seams"]
         workshop_body = job_bodies["workshop-seams"]
         release_script = "pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1"
