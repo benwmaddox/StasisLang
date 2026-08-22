@@ -397,6 +397,15 @@ final class WorkshopDiagnosticSeamAcceptance {
         requireEquals("passed", activity.runIt031Frame(projectRoot), "final cleanup frame");
         JSONObject restoredRuntime = activity.acceptanceRuntimeState(projectRoot);
         requireRuntimeIdentity(restoredRuntime, "cleanup runtime");
+        JSONObject ui = activity.acceptanceRecoverAfterHealthyFrame(compile);
+        if (ui.optBoolean("blocking_error_visible", true)
+                || !ui.optBoolean("status_healthy", false)
+                || !ui.optBoolean("compile_ready", false)
+                || !ui.optBoolean("compile_attempted", false)
+                || !ui.optBoolean("game_runtime_active", false)
+                || ui.optString("displayed_status", "").isEmpty()) {
+            throw new IllegalStateException("cleanup UI recovery did not clear blocking status: " + ui);
+        }
         if (baselineRuntime != null
                 && (!baselineRuntime.optString("source_fingerprint").equals(
                         restoredRuntime.optString("source_fingerprint"))
@@ -406,6 +415,7 @@ final class WorkshopDiagnosticSeamAcceptance {
         }
         return new JSONObject().put("status", "Restored").put("compile", compile)
                 .put("frame", "passed")
+                .put("ui", ui)
                 .put("source_fingerprint", restoredRuntime.optString("source_fingerprint"))
                 .put("generation", restoredRuntime.optInt("generation", -1))
                 .put("baseline_source_fingerprint", baselineRuntime == null ? JSONObject.NULL

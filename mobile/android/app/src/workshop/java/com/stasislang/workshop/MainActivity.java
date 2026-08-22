@@ -5189,6 +5189,32 @@ public final class MainActivity extends Activity {
         return "passed";
     }
 
+    JSONObject acceptanceRecoverAfterHealthyFrame(String compileResult) throws Exception {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || !isRunnableCompile(compileResult)
+                || gamePreview == null
+                || nativeFrameValues[0] != StasisPreviewRenderer.RENDER_MAGIC
+                || nativeFrameValues[1] != StasisPreviewRenderer.RENDER_VERSION) {
+            throw new IllegalStateException("IT-031 UI recovery requires a healthy compile and frame");
+        }
+        compileReady = true;
+        compileAttempted = true;
+        gameRuntimeActive = true;
+        lastCompileResult = compileResult;
+        setStatusText(compileResult);
+        String displayedStatus = reloadStatus == null
+                ? compactStatusText(compileResult) : reloadStatus.getText().toString();
+        boolean blockingVisible = blockingErrorPanel != null
+                && blockingErrorPanel.getVisibility() == View.VISIBLE;
+        boolean statusHealthy = !blockingVisible && !displayedStatus.startsWith("CompileError")
+                && !displayedStatus.startsWith("RunError");
+        return new JSONObject().put("blocking_error_visible", blockingVisible)
+                .put("status_healthy", statusHealthy)
+                .put("displayed_status", displayedStatus)
+                .put("compile_ready", compileReady)
+                .put("compile_attempted", compileAttempted)
+                .put("game_runtime_active", gameRuntimeActive);
+    }
+
     private static int extractIntField(String text, String key, int fallback) {
         String marker = key + "=";
         int start = text.indexOf(marker);

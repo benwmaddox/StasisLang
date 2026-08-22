@@ -348,6 +348,7 @@ def verify_it031(log: str, after_position: int) -> dict | None:
         if name == "render_schema" and context.get("symbol") != "render":
             raise SeamError("IT-031 render diagnostic lost the render symbol")
     cleanup = marker.get("cleanup_receipt")
+    cleanup_ui = cleanup.get("ui") if isinstance(cleanup, dict) else None
     if not isinstance(cleanup, dict) or cleanup.get("status") != "Restored" \
             or cleanup.get("frame") != "passed" \
             or not isinstance(cleanup.get("compile"), str) \
@@ -359,8 +360,17 @@ def verify_it031(log: str, after_position: int) -> dict | None:
             or not isinstance(cleanup.get("generation"), int) \
             or cleanup.get("generation") <= 0 \
             or not isinstance(cleanup.get("baseline_generation"), int) \
-            or cleanup.get("generation") <= cleanup.get("baseline_generation"):
-        raise SeamError("IT-031 cleanup did not prove original source and healthy frame")
+            or cleanup.get("generation") <= cleanup.get("baseline_generation") \
+            or not isinstance(cleanup_ui, dict) \
+            or cleanup_ui.get("blocking_error_visible") is not False \
+            or cleanup_ui.get("status_healthy") is not True \
+            or cleanup_ui.get("compile_ready") is not True \
+            or cleanup_ui.get("compile_attempted") is not True \
+            or cleanup_ui.get("game_runtime_active") is not True \
+            or not isinstance(cleanup_ui.get("displayed_status"), str) \
+            or not cleanup_ui.get("displayed_status") \
+            or cleanup_ui.get("displayed_status").startswith(("CompileError", "RunError")):
+        raise SeamError("IT-031 cleanup did not prove original source, healthy frame, and UI recovery")
     return marker
 
 
