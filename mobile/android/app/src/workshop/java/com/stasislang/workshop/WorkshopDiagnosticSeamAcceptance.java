@@ -158,7 +158,7 @@ final class WorkshopDiagnosticSeamAcceptance {
         return evidence;
     }
 
-    private static JSONObject expectedParseLocation(String source) {
+    private static JSONObject expectedParseLocation(String source) throws Exception {
         int start = source.lastIndexOf("function on_code_swap");
         if (start < 0) throw new IllegalStateException("parse source lost on_code_swap");
         return locationForOffset(source, start, source.length());
