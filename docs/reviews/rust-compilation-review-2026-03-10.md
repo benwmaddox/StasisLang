@@ -86,7 +86,11 @@ Recommendation:
 - `crates/stasis_compiler/src/ir/hir.rs:1`
 - `crates/stasis_compiler/src/compiler.rs:382`
 
-So the pipeline today is effectively:
+Resolution (2026-08-22): function bodies now parse once into backend-independent HIR in
+`frontend/body_parser.rs`; `FunctionHIR` no longer stores source text, and JIT/AOT/Web consume the
+same structured body. The current flow is documented in `docs/compiler_architecture.md`.
+
+At the time of this review, the pipeline was effectively:
 1. index file and hash metadata
 2. slice function source text
 3. reparse statements during backend emit

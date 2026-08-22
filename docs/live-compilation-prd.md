@@ -95,6 +95,8 @@ Pruning is symbol-level and happens before Cranelift emission.
 
 ### 4.2 File-Level Pipeline
 
+The implementation map for this pipeline is [compiler_architecture.md](compiler_architecture.md).
+
 ```text
 Raw Text
  -> Lex

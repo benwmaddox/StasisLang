@@ -93,7 +93,6 @@ pub struct ProgramSnapshot {
     files: Vec<SourceFile>,
     module_graph: ModuleGraph,
     functions: Vec<ProgramFunction>,
-    accepted_diagnostics: Vec<crate::SourceDiagnostic>,
     reachable_function_ids: BTreeSet<FunctionId>,
     asset_references: Vec<AssetReference>,
     state_layout: StateLayout,
@@ -200,7 +199,6 @@ impl ProgramSnapshot {
             files: files.to_vec(),
             module_graph: module_graph.clone(),
             functions: functions.iter().map(ProgramFunction::from).collect(),
-            accepted_diagnostics: Vec::new(),
             reachable_function_ids,
             asset_references,
             state_layout,
@@ -236,9 +234,6 @@ impl ProgramSnapshot {
         self.functions
             .iter()
             .find(|function| &function.symbol_id == symbol_id)
-    }
-    pub fn accepted_diagnostics(&self) -> &[crate::SourceDiagnostic] {
-        &self.accepted_diagnostics
     }
     pub fn reachable_function_ids(&self) -> &BTreeSet<FunctionId> {
         &self.reachable_function_ids
@@ -539,11 +534,6 @@ mod tests {
         let aot_snapshot = aot.program_snapshot().expect("AOT snapshot");
         assert_eq!(jit_snapshot.functions(), aot_snapshot.functions());
         assert_eq!(jit_snapshot.layout_digest(), aot_snapshot.layout_digest());
-        assert_eq!(
-            jit_snapshot.accepted_diagnostics(),
-            aot_snapshot.accepted_diagnostics()
-        );
-        assert!(jit_snapshot.accepted_diagnostics().is_empty());
     }
 
     #[test]

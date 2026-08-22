@@ -36,6 +36,14 @@ class UnsafeBoundaryTests(unittest.TestCase):
             source.write_text("unsafe extern \"C\" fn boundary() {}", encoding="utf-8")
             self.assertEqual(unexpected_unsafe_files(root), [])
 
+    def test_allows_exact_audited_platform_seam_file(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "crates" / "stasis_ai" / "src" / "lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("fn boundary() { unsafe { raw(); } }", encoding="utf-8")
+            self.assertEqual(unexpected_unsafe_files(root), [])
+
 
 if __name__ == "__main__":
     unittest.main()

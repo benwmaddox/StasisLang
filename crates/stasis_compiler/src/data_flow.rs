@@ -2,14 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::backend::emit::{
-    collect_supported_call_signatures, eval_const_i64, resolve_call_signature, AssignOp,
-    AssignTarget, CallSignatureMap, ComparisonOp, ResolvedExternCallSignature, SimpleCondition,
-    SimpleExpr, SimpleStmt,
+    collect_supported_call_signatures, resolve_call_signature, CallSignatureMap,
+    ResolvedExternCallSignature,
 };
 use crate::compiler::{FunctionMeta, SourceFile};
 use crate::frontend::parser::{parse_top_level_extern_functions, parse_top_level_type_layout};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+};
+use crate::ir::hir::{
+    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 
 pub const FUNCTION_DATA_FLOW_SCHEMA_VERSION: u32 = 3;
@@ -94,6 +96,14 @@ pub struct FunctionDataFlowSummary {
     internal_direct_write_paths: Vec<String>,
     #[serde(skip)]
     internal_aggregate_write_paths: Vec<String>,
+}
+
+impl FunctionDataFlowSummary {
+    pub(crate) fn resolved_callee_storage_indices(&self) -> impl Iterator<Item = u32> + '_ {
+        self.internal_call_sites
+            .iter()
+            .map(|call_site| call_site.target_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -259,9 +269,9 @@ struct AnalysisContext<'a> {
     constants: BTreeMap<String, i64>,
     view_parameters_by_function: BTreeMap<u32, BTreeSet<usize>>,
     fixed_parameter_capacities: BTreeMap<u32, BTreeMap<usize, u64>>,
-    internal_function_targets: BTreeMap<String, Vec<u32>>,
     extern_functions: BTreeSet<String>,
     extern_effects: BTreeMap<String, Option<Vec<String>>>,
+    internal_function_targets: BTreeMap<String, Vec<u32>>,
     collection_capacities: BTreeMap<String, u64>,
     path_types: BTreeMap<String, TypeId>,
     field_types: BTreeMap<TypeId, BTreeMap<String, TypeId>>,
@@ -1038,9 +1048,9 @@ fn build_context<'a>(
         constants,
         view_parameters_by_function,
         fixed_parameter_capacities,
-        internal_function_targets,
         extern_functions,
         extern_effects,
+        internal_function_targets,
         collection_capacities,
         path_types,
         field_types,
@@ -1510,9 +1520,13 @@ fn analyze_expression(
             }
         }
         SimpleExpr::Call { target, args } => {
-            let target_id = resolve_internal_call(target, args, context, local_types, aliases);
+            let mut target_id = resolve_internal_call(target, args, context, local_types, aliases);
             if let Some(target_id) = target_id {
-                effects.calls.insert(target.clone());
+                effects.calls.insert(
+                    target
+                        .rsplit_once('.')
+                        .map_or_else(|| target.clone(), |(_, name)| name.to_string()),
+                );
                 effects.record_call_site(
                     target_id,
                     args.iter()
@@ -1553,16 +1567,22 @@ fn analyze_expression(
                 if host_call {
                     effects.record_host_call(target);
                 }
-                if let Some(target_ids) = context.internal_function_targets.get(target) {
+                if let Some([sole_target_id]) = context
+                    .internal_function_targets
+                    .get(target)
+                    .map(Vec::as_slice)
+                {
                     handled = true;
+                    target_id = Some(*sole_target_id);
                     effects.calls.insert(target.clone());
-                    let arguments = args
-                        .iter()
-                        .map(|argument| expression_effect_path(argument, context, locals, aliases))
-                        .collect::<Vec<_>>();
-                    for target_id in target_ids {
-                        effects.record_call_site(*target_id, arguments.clone());
-                    }
+                    effects.record_call_site(
+                        *sole_target_id,
+                        args.iter()
+                            .map(|argument| {
+                                expression_effect_path(argument, context, locals, aliases)
+                            })
+                            .collect(),
+                    );
                 }
                 if !handled && !is_pure_intrinsic(target) {
                     effects.host_calls.insert(target.clone());
