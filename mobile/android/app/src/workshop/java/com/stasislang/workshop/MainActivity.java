@@ -322,6 +322,7 @@ public final class MainActivity extends Activity {
     private boolean jniFrameAbiAcceptanceRun;
     private boolean workshopTouchAcceptanceRun;
     private boolean workshopHotEditAcceptanceRun;
+    private boolean workshopDiagnosticSeamAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
@@ -1388,6 +1389,25 @@ public final class MainActivity extends Activity {
                         compileReady = false;
                         gameRuntimeActive = false;
                         setStatusText("IT-028 Workshop hot-edit acceptance failed: " + hotEditResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopHotEditAcceptanceRun && !workshopDiagnosticSeamAcceptanceRun) {
+                    String diagnosticResult = WorkshopDiagnosticSeamAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopDiagnosticSeamAcceptanceRun = true;
+                    boolean diagnosticPassed = false;
+                    try {
+                        diagnosticPassed = "passed".equals(
+                                new JSONObject(diagnosticResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!diagnosticPassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-031 diagnostic seam acceptance failed: "
+                                + diagnosticResult);
                     }
                 }
                 if (compileReady || gameRuntimeActive) {
@@ -5133,12 +5153,40 @@ public final class MainActivity extends Activity {
         return nativeCompileProject(projectRoot);
     }
 
+    JSONObject acceptanceRuntimeState(String projectRoot) throws Exception {
+        return new JSONObject(nativeInspectRuntimeState(projectRoot));
+    }
+
     String acceptanceSetRuntimeI32(String projectRoot, String path, int value) {
         return nativeSetRuntimeI32(projectRoot, path, value);
     }
 
     JSONObject acceptanceCompileDiagnostic(String compileResult) throws Exception {
         return compileResultToJson(compileResult);
+    }
+
+    WorkshopNativeDiagnostic acceptanceNativeDiagnostic(String nativeMessage) {
+        return WorkshopNativeDiagnostic.fromNative(nativeMessage);
+    }
+
+    JSONObject acceptanceDisplayDiagnostic(String nativeMessage) throws Exception {
+        setStatusText(nativeMessage);
+        String displayedText = reloadStatus == null
+                ? compactStatusText(nativeMessage)
+                : reloadStatus.getText().toString();
+        WorkshopNativeDiagnostic displayed = WorkshopNativeDiagnostic.fromNative(displayedText);
+        return new JSONObject().put("diagnostic", displayed == null ? JSONObject.NULL
+                : displayed.toJson()).put("displayed_text", displayedText);
+    }
+
+    String runIt031Frame(String projectRoot) {
+        if (gamePreview == null) return "";
+        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+                gamePreview.touchY(), gamePreview.touchActive(),
+                Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
+                nativeFrameValues);
+        if (status != 0) return "RunError: " + nativeLastFrameError();
+        return "passed";
     }
 
     private static int extractIntField(String text, String key, int fallback) {

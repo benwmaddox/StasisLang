@@ -28,6 +28,7 @@ TOUCH_PRESENT = re.compile(r"Stasis Workshop IT-027 GLES: (\{[^\r\n]+\})")
 HOT_EDIT_MARKER = re.compile(r"Stasis Workshop IT-028: (\{[^\r\n]+\})")
 HOT_EDIT_CASE_MARKER = re.compile(r"Stasis Workshop IT-028 case: (\{[^\r\n]+\})")
 HOT_EDIT_PRESENT = re.compile(r"Stasis Workshop IT-028 GLES: (\{[^\r\n]+\})")
+DIAGNOSTIC_MARKER = re.compile(r"Stasis Workshop IT-031: (\{[^\r\n]+\})")
 COMPILE_ERROR_LINE = re.compile(r"^[^\r\n]*CompileError[^\r\n]*\r?$", re.MULTILINE)
 RAW_COMPILE_ERROR_LINE = re.compile(
     r"^(?:(?:\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+"
@@ -70,14 +71,15 @@ def _rust_percent_encode(value: str) -> str:
     return quote(value, safe="-_.~/")
 
 
-def _json_markers(pattern: re.Pattern[str], log: str, label: str) -> list[tuple[re.Match[str], dict]]:
+def _json_markers(pattern: re.Pattern[str], log: str, label: str,
+                  test_id: str = "IT-028") -> list[tuple[re.Match[str], dict]]:
     markers = []
     for match in pattern.finditer(log):
         try:
             candidate = json.loads(match.group(1))
         except json.JSONDecodeError as error:
             raise SeamError(f"invalid {label} JSON: {error}") from error
-        if candidate.get("test_id") == "IT-028":
+        if candidate.get("test_id") == test_id:
             markers.append((match, candidate))
     return markers
 
@@ -265,7 +267,101 @@ def verify_it028(log: str, after_position: int) -> dict:
         "summary": summary,
         "cases": [candidate for _, candidate in cases],
         "gles": [candidate for _, candidate in presents],
+        "_position": summary_match.start(),
     }
+
+
+def verify_it031(log: str, after_position: int) -> dict | None:
+    markers = _json_markers(DIAGNOSTIC_MARKER, log, "IT-031 diagnostic marker", "IT-031")
+    if not markers:
+        return None
+    if len(markers) != 1:
+        raise SeamError(f"expected exactly one IT-031 summary, found {len(markers)}")
+    marker_match, marker = markers[0]
+    if marker_match.start() <= after_position:
+        raise SeamError("IT-031 summary must follow IT-028")
+    if (marker.get("schema"), marker.get("test_id"), marker.get("event"),
+            marker.get("status"), marker.get("ordered")) != (
+                "stasis.workshop_diagnostic_seam.v1", "IT-031", "diagnostic_seam",
+                "passed", True):
+        raise SeamError("IT-031 marker does not report an ordered native diagnostic seam")
+    cases = marker.get("cases")
+    expected = [
+        ("parse", "parse", "stasis.parse"),
+        ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
+        ("runtime_entry", "runtime_entry", "stasis.runtimeEntry"),
+        ("render_schema", "render_schema", "stasis.renderSchema"),
+        ("missing_resource", "resource", "stasis.missingResource"),
+    ]
+    if not isinstance(cases, list) or len(cases) != len(expected):
+        raise SeamError("IT-031 must contain exactly five ordered native cases")
+    for case, (name, stage, code) in zip(cases, expected):
+        if not isinstance(case, dict) or case.get("name") != name or case.get("equal") is not True:
+            raise SeamError(f"IT-031 case {name} is missing native/UI equality evidence")
+        native = case.get("native")
+        ui = case.get("ui")
+        if not isinstance(native, dict) or native != ui:
+            raise SeamError(f"IT-031 case {name} changed between native and UI")
+        if not isinstance(case.get("displayed_text"), str) \
+                or native.get("detail", "") not in case["displayed_text"]:
+            raise SeamError(f"IT-031 case {name} lost detail in the displayed UI status")
+        if native.get("schema") != "stasis.native_diagnostic.v1" \
+                or native.get("version") != 1 \
+                or native.get("stage") != stage \
+                or native.get("code") != code \
+                or not isinstance(native.get("detail"), str) \
+                or not native["detail"] \
+                or not isinstance(native.get("causes"), list) \
+                or not native["causes"]:
+            raise SeamError(f"IT-031 case {name} lost stage, code, detail, or causes")
+        if native["detail"] == "native preview frame failed":
+            raise SeamError(f"IT-031 case {name} replaced detail with a generic fallback")
+        if native["causes"][0] != f"{stage} phase" \
+                or native["causes"][-1] != native["detail"]:
+            raise SeamError(f"IT-031 case {name} has reversed or incomplete cause ordering")
+        context = native.get("context")
+        if not isinstance(context, dict):
+            raise SeamError(f"IT-031 case {name} lost diagnostic context")
+        if name == "parse":
+            location = case.get("location")
+            expected_location = location.get("expected") if isinstance(location, dict) else None
+            actual_location = location.get("actual") if isinstance(location, dict) else None
+            if context.get("file") != "src/main.stasis" \
+                    or context.get("symbol") != "on_code_swap" \
+                    or not isinstance(expected_location, dict) \
+                    or expected_location != actual_location \
+                    or not all(isinstance(expected_location.get(key), int)
+                               and expected_location[key] > 0
+                               for key in ("line", "column", "end_line", "end_column")) \
+                    or (expected_location["end_line"], expected_location["end_column"]) < \
+                    (expected_location["line"], expected_location["column"]):
+                raise SeamError("IT-031 parse diagnostic lost final-function span or symbol")
+        if name == "extern_resolution" and (
+                context.get("file") != "src/main.stasis"
+                or context.get("symbol") != "IT031_missing_extern"):
+            raise SeamError("IT-031 extern diagnostic lost its source file or symbol")
+        if name == "missing_resource" \
+                and context.get("resource") != "assets/IT031_missing.svg":
+            raise SeamError("IT-031 resource diagnostic lost its resource path")
+        if name == "runtime_entry" and context.get("symbol") != "tick":
+            raise SeamError("IT-031 runtime diagnostic lost the tick symbol")
+        if name == "render_schema" and context.get("symbol") != "render":
+            raise SeamError("IT-031 render diagnostic lost the render symbol")
+    cleanup = marker.get("cleanup_receipt")
+    if not isinstance(cleanup, dict) or cleanup.get("status") != "Restored" \
+            or cleanup.get("frame") != "passed" \
+            or not isinstance(cleanup.get("compile"), str) \
+            or not cleanup["compile"].startswith("CompileReady") \
+            or "status=0" not in cleanup["compile"] \
+            or not isinstance(cleanup.get("source_fingerprint"), str) \
+            or not cleanup["source_fingerprint"] \
+            or cleanup.get("source_fingerprint") != cleanup.get("baseline_source_fingerprint") \
+            or not isinstance(cleanup.get("generation"), int) \
+            or cleanup.get("generation") <= 0 \
+            or not isinstance(cleanup.get("baseline_generation"), int) \
+            or cleanup.get("generation") <= cleanup.get("baseline_generation"):
+        raise SeamError("IT-031 cleanup did not prove original source and healthy frame")
+    return marker
 
 
 def _sha256(path: Path) -> str:
@@ -568,6 +664,9 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
     if [kind for _, kind in interleaved] != ["present", "case"] * 3:
         raise SeamError("IT-027 GLES and case evidence is not strictly interleaved")
     hot_edit = verify_it028(log, touch_summary_match.start())
+    diagnostic_seam = verify_it031(log, hot_edit["_position"])
+    if diagnostic_seam is None:
+        raise SeamError("missing mandatory IT-031 diagnostic seam evidence")
     return {
         "compile_functions": max(map(int, compile_matches)),
         "presented_frames": stable_count,
@@ -583,6 +682,7 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         "it028": hot_edit["summary"],
         "it028_cases": hot_edit["cases"],
         "it028_gles": hot_edit["gles"],
+        "it031": diagnostic_seam,
     }
 
 

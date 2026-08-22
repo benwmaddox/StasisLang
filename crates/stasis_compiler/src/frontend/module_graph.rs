@@ -247,7 +247,9 @@ fn display_path(path: &Path) -> String {
 }
 
 pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, SourceDiagnostic> {
-    let tokens = lex(source).map_err(|message| diagnostic(path, 0..source.len(), "", message))?;
+    let tokens = lex(source).map_err(|message| {
+        diagnostic(path, 0..source.len(), "", message).with_code(SourceDiagnosticCode::Parse)
+    })?;
     let mut imports = Vec::new();
     let mut cursor = 0usize;
     while cursor < tokens.len() {
@@ -262,7 +264,8 @@ pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, Sour
                 token.start..token.end,
                 "import",
                 "import must be followed by a string literal path",
-            ));
+            )
+            .with_code(SourceDiagnosticCode::Parse));
         };
         if literal.kind != TokenKind::StringLiteral {
             return Err(diagnostic(
@@ -270,12 +273,17 @@ pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, Sour
                 token.start..literal.end,
                 "import",
                 "import must be followed by a string literal path",
-            ));
+            )
+            .with_code(SourceDiagnosticCode::Parse));
         }
-        let import_path = parse_string_literal_text(token_text(source, literal))
-            .map_err(|message| diagnostic(path, literal.start..literal.end, "import", message))?;
+        let import_path =
+            parse_string_literal_text(token_text(source, literal)).map_err(|message| {
+                diagnostic(path, literal.start..literal.end, "import", message)
+                    .with_code(SourceDiagnosticCode::Parse)
+            })?;
         let target = resolve_import_path(path, &import_path).map_err(|message| {
             diagnostic(path, literal.start..literal.end, &import_path, message)
+                .with_code(SourceDiagnosticCode::Parse)
         })?;
         let alias = module_alias(&target);
         let declaration_end = tokens
@@ -638,6 +646,7 @@ mod tests {
         ] {
             let error = graph(&["main.stasis"], &[("main.stasis", source)]).unwrap_err();
             assert!(error.message.contains(expected), "{}", error.message);
+            assert_eq!(error.code, SourceDiagnosticCode::Parse);
         }
         let error = graph(
             &["main.stasis"],

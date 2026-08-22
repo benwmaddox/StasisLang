@@ -10,7 +10,7 @@ use crate::data_flow::{
     build_function_data_flow_summaries, compiler_local_types, validate_effect_contracts,
     CompilerLocalType, FunctionDataFlowSummary,
 };
-use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
+use crate::frontend::indexer::{hash_text, index_file_with_diagnostic, IndexedCallDependency};
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
@@ -603,20 +603,24 @@ impl Compiler {
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
-            let indexed = match index_file(&self.files[file_id].content, &mut self.types) {
-                Ok(indexed) => indexed,
-                Err(message) => {
-                    let file = &self.files[file_id];
-                    self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                        file.path.clone(),
-                        0,
-                        file.content.len(),
-                        "",
-                        message.clone(),
-                    ));
-                    return Err(CompileError::Frontend(message));
-                }
-            };
+            let indexed =
+                match index_file_with_diagnostic(&self.files[file_id].content, &mut self.types) {
+                    Ok(indexed) => indexed,
+                    Err(diagnostic) => {
+                        let file = &self.files[file_id];
+                        self.last_source_diagnostic = Some(
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                diagnostic.start,
+                                diagnostic.end,
+                                diagnostic.symbol,
+                                diagnostic.message.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                        );
+                        return Err(CompileError::Frontend(diagnostic.message));
+                    }
+                };
             self.files[file_id].functions.clear();
             for indexed_function in indexed {
                 let storage_index = self.functions.len() as FunctionStorageIndex;
@@ -1003,6 +1007,10 @@ impl Compiler {
 
     pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
         self.last_source_diagnostic.as_ref()
+    }
+
+    pub(crate) fn set_external_source_diagnostic(&mut self, diagnostic: crate::SourceDiagnostic) {
+        self.last_source_diagnostic = Some(diagnostic);
     }
 
     fn record_function_diagnostic(&mut self, function: &FunctionMeta, message: &str) {

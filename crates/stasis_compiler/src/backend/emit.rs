@@ -48,6 +48,9 @@ pub(crate) struct ExternCallSignature {
     pub(crate) symbol_candidates: Vec<String>,
     pub(crate) params: Vec<TypeId>,
     pub(crate) return_type: TypeId,
+    pub(crate) source_path: String,
+    pub(crate) source_start: usize,
+    pub(crate) source_end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,7 +216,10 @@ pub(crate) fn collect_supported_extern_call_signatures(
             )
         })?;
         for declaration in declarations {
-            let signature = build_extern_call_signature(type_table, declaration)?;
+            let mut signature = build_extern_call_signature(type_table, declaration.clone())?;
+            signature.source_path = file.path.clone();
+            signature.source_start = declaration.name_range.start;
+            signature.source_end = declaration.name_range.end;
             out.push(signature);
         }
     }
@@ -222,11 +228,19 @@ pub(crate) fn collect_supported_extern_call_signatures(
 
 pub(crate) fn resolve_extern_call_signatures_with(
     extern_signatures: &[ExternCallSignature],
-    mut resolve_candidate: impl FnMut(&ExternCallSignature, &str) -> Option<usize>,
+    resolve_candidate: impl FnMut(&ExternCallSignature, &str) -> Option<usize>,
 ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
+    resolve_extern_call_signatures_with_index(extern_signatures, resolve_candidate)
+        .map_err(|(_, error)| error)
+}
+
+pub(crate) fn resolve_extern_call_signatures_with_index(
+    extern_signatures: &[ExternCallSignature],
+    mut resolve_candidate: impl FnMut(&ExternCallSignature, &str) -> Option<usize>,
+) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), (usize, String)> {
     let mut resolved = Vec::with_capacity(extern_signatures.len());
     let mut symbol_addresses: ExternSymbolAddressMap = BTreeMap::new();
-    for signature in extern_signatures {
+    for (index, signature) in extern_signatures.iter().enumerate() {
         let mut selected: Option<(String, usize)> = None;
         for candidate in &signature.symbol_candidates {
             if let Some(address) = resolve_candidate(signature, candidate) {
@@ -235,9 +249,12 @@ pub(crate) fn resolve_extern_call_signatures_with(
             }
         }
         let Some((symbol, address)) = selected else {
-            return Err(format!(
-                "unresolved extern call target '{}' with candidates {:?}",
-                signature.name, signature.symbol_candidates
+            return Err((
+                index,
+                format!(
+                    "unresolved extern call target '{}' with candidates {:?}",
+                    signature.name, signature.symbol_candidates
+                ),
             ));
         };
         symbol_addresses.insert(symbol.clone(), address);
@@ -335,6 +352,9 @@ pub(crate) fn build_extern_call_signature(
         symbol_candidates: build_extern_symbol_candidates(symbol_name, declaration.explicit_symbol),
         params,
         return_type,
+        source_path: String::new(),
+        source_start: 0,
+        source_end: 0,
     })
 }
 

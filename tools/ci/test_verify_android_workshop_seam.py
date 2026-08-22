@@ -51,10 +51,161 @@ CompileError: src/main.stasis: unknown call target 'IT028_missing_target'|diagno
 Stasis Workshop IT-028 GLES: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"present","frame_token":83,"trace":115,"rect_count":2,"order_count":11,"marker":{"active":true,"x":176.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}}
 Stasis Workshop IT-028 case: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"case","status":"passed","phase":"post_invalid","sequence":3,"runtime":{"status":"RuntimeStateReady","generation":2,"source_fingerprint":"2222222222222222"},"guest":{"tick_revision":2,"render_revision":2,"state_counter":3},"render":{"trace":115,"frame_token":83,"rect_count":2,"marker":{"active":true,"x":176.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}},"gles_presented":true,"gles_frame_token":83,"java_only":false,"fallback":0,"stub":0}
 Stasis Workshop IT-028: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"hot_edit","status":"passed","ordered":true,"unique":true,"atomic":true,"hook_source_line":40,"invalid_compile":{"ok":false,"kind":"compile_error","diagnostic":{"file":"src/main.stasis","line":40,"column":31,"end_line":42,"end_column":2,"symbol":"on_code_swap","message":"unknown call target 'IT028_missing_target'"}},"restore_receipt":{"status":"NoChange","compile":"CompileReady: backend=cranelift-jit reload=NoChange status=0 functions=10 compile_us=12 manifest=build/native_compile_manifest.txt"},"cleanup_receipt":{"status":"Restored","compile":"CompileReady: backend=cranelift-jit reload=FastReload status=0 functions=10 compile_us=13 manifest=build/native_compile_manifest.txt","frame":{"status":"passed","runtime":{"generation":3,"source_fingerprint":"1111111111111111"},"render":{"marker":{"active":false}},"java_only":false,"fallback":0,"stub":0}}}
+Stasis Workshop IT-031: {"schema":"stasis.workshop_diagnostic_seam.v1","test_id":"IT-031","event":"diagnostic_seam","status":"passed","ordered":true,"cases":[{"name":"parse","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"parse","code":"stasis.parse","context":{"file":"src/main.stasis"},"detail":"parse detail","causes":["parse phase","parse detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"parse","code":"stasis.parse","context":{"file":"src/main.stasis"},"detail":"parse detail","causes":["parse phase","parse detail"]}},{"name":"extern_resolution","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"extern_resolution","code":"stasis.unresolvedExtern","context":{"file":"src/main.stasis","symbol":"IT031_missing_extern"},"detail":"extern detail","causes":["extern_resolution phase","extern detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"extern_resolution","code":"stasis.unresolvedExtern","context":{"file":"src/main.stasis","symbol":"IT031_missing_extern"},"detail":"extern detail","causes":["extern_resolution phase","extern detail"]}},{"name":"runtime_entry","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"runtime_entry","code":"stasis.runtimeEntry","context":{"symbol":"tick"},"detail":"runtime detail","causes":["runtime_entry phase","runtime detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"runtime_entry","code":"stasis.runtimeEntry","context":{"symbol":"tick"},"detail":"runtime detail","causes":["runtime_entry phase","runtime detail"]}},{"name":"render_schema","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"render_schema","code":"stasis.renderSchema","context":{"symbol":"render"},"detail":"render detail","causes":["render_schema phase","render detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"render_schema","code":"stasis.renderSchema","context":{"symbol":"render"},"detail":"render detail","causes":["render_schema phase","render detail"]}},{"name":"missing_resource","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"resource","code":"stasis.missingResource","context":{"resource":"assets/IT031_missing.svg"},"detail":"resource detail","causes":["resource phase","resource detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"resource","code":"stasis.missingResource","context":{"resource":"assets/IT031_missing.svg"},"detail":"resource detail","causes":["resource phase","resource detail"]}}],"cleanup_receipt":{"status":"Restored","compile":"CompileReady: status=0","frame":"passed","source_fingerprint":"1111111111111111","baseline_source_fingerprint":"1111111111111111","generation":3,"baseline_generation":3}}
 """
+
+# A successful cleanup publication advances the live runtime generation while
+# restoring the original source fingerprint.
+GOOD = GOOD.replace('"generation":3,"baseline_generation":3',
+                    '"generation":4,"baseline_generation":3')
+GOOD = GOOD.replace('"context":{"file":"src/main.stasis"},"detail":"parse detail"',
+                    '"context":{"file":"src/main.stasis","symbol":"on_code_swap"},'
+                    '"detail":"parse detail"')
+GOOD = GOOD.replace('"causes":["parse phase","parse detail"]}},',
+                    '"causes":["parse phase","parse detail"]},'
+                    '"location":{"expected":{"line":3,"column":1,"end_line":4,"end_column":1},'
+                    '"actual":{"line":3,"column":1,"end_line":4,"end_column":1}}},', 1)
+
+for _name, _detail in (("parse", "parse detail"), ("extern_resolution", "extern detail"),
+                       ("runtime_entry", "runtime detail"), ("render_schema", "render detail"),
+                       ("missing_resource", "resource detail")):
+    GOOD = GOOD.replace(
+        '{"name":"' + _name + '","equal":true,',
+        '{"name":"' + _name + '","equal":true,"displayed_text":"' + _detail + '",',
+        1)
 
 
 class WorkshopSeamTests(unittest.TestCase):
+    def test_accepts_ordered_it031_native_ui_diagnostics(self):
+        cases = []
+        for name, stage, code in [
+                ("parse", "parse", "stasis.parse"),
+                ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
+                ("runtime_entry", "runtime_entry", "stasis.runtimeEntry"),
+                ("render_schema", "render_schema", "stasis.renderSchema"),
+                ("missing_resource", "resource", "stasis.missingResource")]:
+            diagnostic = {"schema": "stasis.native_diagnostic.v1", "version": 1,
+                          "stage": stage, "code": code, "context": {},
+                          "detail": name + " detail",
+                          "causes": [stage + " phase", name + " detail"]}
+            if name in {"parse", "extern_resolution"}:
+                diagnostic["context"]["file"] = "src/main.stasis"
+            if name == "parse":
+                diagnostic["context"]["symbol"] = "on_code_swap"
+            if name == "extern_resolution":
+                diagnostic["context"]["symbol"] = "IT031_missing_extern"
+            if name == "missing_resource":
+                diagnostic["context"]["resource"] = "assets/IT031_missing.svg"
+            if name == "runtime_entry":
+                diagnostic["context"]["symbol"] = "tick"
+            if name == "render_schema":
+                diagnostic["context"]["symbol"] = "render"
+            case = {"name": name, "native": diagnostic, "ui": diagnostic,
+                    "displayed_text": diagnostic["detail"], "equal": True}
+            if name == "parse":
+                case["location"] = {
+                    "expected": {"line": 3, "column": 1, "end_line": 4, "end_column": 1},
+                    "actual": {"line": 3, "column": 1, "end_line": 4, "end_column": 1}}
+            cases.append(case)
+        marker = {"schema": "stasis.workshop_diagnostic_seam.v1", "test_id": "IT-031",
+                  "event": "diagnostic_seam", "status": "passed", "ordered": True,
+                  "cases": cases, "cleanup_receipt": {"status": "Restored", "compile": "CompileReady: status=0", "frame": "passed", "source_fingerprint": "1111111111111111", "baseline_source_fingerprint": "1111111111111111", "generation": 4, "baseline_generation": 3}}
+        result = verify_log(GOOD.split("Stasis Workshop IT-031:", 1)[0]
+                            + "Stasis Workshop IT-031: " + json.dumps(marker), MANIFEST)
+        self.assertEqual(result["it031"]["test_id"], "IT-031")
+
+    def test_rejects_it031_changed_java_detail(self):
+        cases = []
+        for name, stage, code in [
+                ("parse", "parse", "stasis.parse"),
+                ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
+                ("runtime_entry", "runtime_entry", "stasis.runtimeEntry"),
+                ("render_schema", "render_schema", "stasis.renderSchema"),
+                ("missing_resource", "resource", "stasis.missingResource")]:
+            diagnostic = {"schema": "stasis.native_diagnostic.v1", "version": 1,
+                          "stage": stage, "code": code, "context": {},
+                          "detail": name, "causes": [stage + " phase", name]}
+            if name in {"parse", "extern_resolution"}:
+                diagnostic["context"]["file"] = "src/main.stasis"
+            if name == "parse":
+                diagnostic["context"]["symbol"] = "on_code_swap"
+            if name == "extern_resolution":
+                diagnostic["context"]["symbol"] = "IT031_missing_extern"
+            if name == "missing_resource":
+                diagnostic["context"]["resource"] = "assets/IT031_missing.svg"
+            if name == "runtime_entry":
+                diagnostic["context"]["symbol"] = "tick"
+            if name == "render_schema":
+                diagnostic["context"]["symbol"] = "render"
+            ui = dict(diagnostic)
+            ui["detail"] = "changed"
+            cases.append({"name": name, "native": diagnostic, "ui": ui,
+                          "displayed_text": diagnostic["detail"], "equal": True})
+        marker = {"schema": "stasis.workshop_diagnostic_seam.v1", "test_id": "IT-031",
+                  "event": "diagnostic_seam", "status": "passed", "ordered": True,
+                  "cases": cases, "cleanup_receipt": {"status": "Restored", "compile": "CompileReady: status=0", "frame": "passed", "source_fingerprint": "1111111111111111", "baseline_source_fingerprint": "1111111111111111", "generation": 4, "baseline_generation": 3}}
+        with self.assertRaisesRegex(SeamError, "changed between native and UI"):
+            verify_log(GOOD.split("Stasis Workshop IT-031:", 1)[0]
+                       + "Stasis Workshop IT-031: " + json.dumps(marker), MANIFEST)
+
+    def test_rejects_missing_it031_marker(self):
+        with self.assertRaisesRegex(SeamError, "IT-031"):
+            verify_log(GOOD.split("Stasis Workshop IT-031:", 1)[0], MANIFEST)
+
+    def test_rejects_reversed_causes_and_generic_fallback(self):
+        reversed_causes = GOOD.replace(
+            '"causes":["parse phase","parse detail"]',
+            '"causes":["parse detail","parse phase"]')
+        with self.assertRaisesRegex(SeamError, "cause"):
+            verify_log(reversed_causes, MANIFEST)
+        generic_detail = GOOD.replace('"detail":"render detail"',
+                                      '"detail":"native preview frame failed"', 1)
+        with self.assertRaisesRegex(SeamError, "forbidden"):
+            verify_log(generic_detail, MANIFEST)
+
+    def test_rejects_wrong_it031_case_order_context_and_cleanup(self):
+        wrong_code = GOOD.replace('"code":"stasis.renderSchema"',
+                                  '"code":"stasis.parse"')
+        with self.assertRaisesRegex(SeamError, "stage, code"):
+            verify_log(wrong_code, MANIFEST)
+        wrong_context = GOOD.replace('"symbol":"tick"', '"symbol":"main"')
+        with self.assertRaisesRegex(SeamError, "tick symbol"):
+            verify_log(wrong_context, MANIFEST)
+        cleanup_failure = GOOD.replace(
+            '"cleanup_receipt":{"status":"Restored","compile":"CompileReady: status=0","frame":"passed","source_fingerprint":"1111111111111111","baseline_source_fingerprint":"1111111111111111","generation":4,"baseline_generation":3}',
+            '"cleanup_receipt":{"status":"Restored","compile":"CompileReady: status=1","frame":"failed","source_fingerprint":"1111111111111111","baseline_source_fingerprint":"1111111111111111","generation":4,"baseline_generation":3}', 1)
+        with self.assertRaisesRegex(SeamError, "cleanup"):
+            verify_log(cleanup_failure, MANIFEST)
+
+    def test_rejects_it031_cleanup_identity_mismatch(self):
+        mismatch = GOOD.replace(
+            '"baseline_source_fingerprint":"1111111111111111"',
+            '"baseline_source_fingerprint":"2222222222222222"', 1)
+        with self.assertRaisesRegex(SeamError, "cleanup"):
+            verify_log(mismatch, MANIFEST)
+
+    def test_rejects_it031_nonadvancing_cleanup_generation(self):
+        unchanged = GOOD.replace(
+            '"generation":4,"baseline_generation":3',
+            '"generation":3,"baseline_generation":3', 1)
+        with self.assertRaisesRegex(SeamError, "cleanup"):
+            verify_log(unchanged, MANIFEST)
+
+    def test_rejects_it031_parse_provenance_loss(self):
+        wrong_symbol = GOOD.replace(
+            '"context":{"file":"src/main.stasis","symbol":"on_code_swap"},'
+            '"detail":"parse detail"',
+            '"context":{"file":"src/main.stasis","symbol":"first"},'
+            '"detail":"parse detail"')
+        with self.assertRaisesRegex(SeamError, "final-function span or symbol"):
+            verify_log(wrong_symbol, MANIFEST)
+        missing_span = GOOD.replace(
+            '"location":{"expected":{"line":3,"column":1,"end_line":4,"end_column":1},'
+            '"actual":{"line":3,"column":1,"end_line":4,"end_column":1}}',
+            '"location":{}', 1)
+        with self.assertRaisesRegex(SeamError, "final-function span or symbol"):
+            verify_log(missing_span, MANIFEST)
+
     def test_native_compile_transport_preserves_full_diagnostic(self):
         native = (Path(__file__).resolve().parents[2]
                   / "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c").read_text()
@@ -66,6 +217,17 @@ class WorkshopSeamTests(unittest.TestCase):
         self.assertIn('bridge->compile_project(root, "src/main.stasis")', compile_native)
         self.assertIn("jstring result = (*env)->NewStringUTF(env, message);", compile_native)
         self.assertIn("bridge->free_string(message);", compile_native)
+    def test_native_diagnostic_envelope_has_a_full_string_transport_contract(self):
+        bridge = (Path(__file__).resolve().parents[2]
+                  / "crates/stasis_android_bridge/src/lib.rs").read_text()
+        native = (Path(__file__).resolve().parents[2]
+                  / "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c").read_text()
+        self.assertIn('"schema": "stasis.native_diagnostic.v1"', bridge)
+        self.assertIn("diagnostic_envelope=", bridge)
+        self.assertIn("NewStringUTF(env, message)", native)
+        start = bridge.index("fn format_native_diagnostic")
+        end = bridge.index("fn format_runtime_diagnostic", start)
+        self.assertNotIn("native preview frame failed", bridge[start:end])
 
     def test_accepts_complete_single_frame_proof(self):
         result = verify_log(GOOD, MANIFEST)
