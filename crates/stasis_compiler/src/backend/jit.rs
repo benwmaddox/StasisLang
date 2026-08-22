@@ -3736,14 +3736,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target 'helper'")
-                        || message.contains("unsupported call arity 3"),
+                    message.contains("cannot resolve call 'helper'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -3764,8 +3763,8 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::compiler::CompileError::Backend(ref message)
-                    if message.contains("unknown call target 'leaf'")
+                crate::compiler::CompileError::Frontend(ref message)
+                    if message.contains("cannot resolve call 'leaf'")
             ),
             "unexpected error: {error:?}"
         );
@@ -6396,7 +6395,7 @@ mod tests {
                     "return mid() + 12;",
                     "return shared() + 22;",
                     3,
-                    "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return missing(); }",
+                    "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return 6; }",
                 ),
                 47,
                 0,
@@ -6456,18 +6455,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_skips_unreachable_invalid_function_body() {
+    fn jit_process_rejects_unreachable_unresolved_call() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
             "function bad(): i32 { return missing(); }\nfunction tick(): i32 { return 1; }\n",
         );
-        let report = process.compile().expect("compile");
-        assert_eq!(report.emit.emitted_functions, 1);
-        let value = process
-            .execute_i32_noarg_by_name("tick")
-            .expect("execute tick");
-        assert_eq!(value, 1);
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject unreachable unresolved calls");
+        assert!(format!("{error:?}").contains("cannot resolve call 'missing'"));
+        assert!(process.artifacts().is_empty());
     }
 
     #[test]
@@ -6826,13 +6824,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6845,13 +6843,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected return type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("return expression expected bool but found i32"),
+                    message.contains("return expression expected bool expression but found i32"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6866,13 +6864,13 @@ mod tests {
             .compile()
             .expect_err("expected assignment type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'ready' expected bool expression but found i32"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6887,13 +6885,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6908,13 +6906,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6927,13 +6925,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'value' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6946,13 +6944,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'i' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6966,13 +6964,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("foreach item binding 'value' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6986,13 +6984,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("foreach index binding 'v' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -7785,13 +7783,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile failure");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target 'missing'"),
+                    message.contains("cannot resolve call 'missing'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
 
         let second_main_ptr = process

@@ -76,9 +76,10 @@ adds observations to the same pipeline rather than selecting another compiler pa
 
 Repository validation compiles all Rust targets, runs Rust tests, executes the checked-in
 `tests/stasis/*.test.stasis` behavior suite through the normal JIT compiler, and always compiles
-Brickout Revenge v1 through the production AOT engine-bundle path. Source/ABI validators prune
-generated, cached, vendored, and build directories so they inspect checked-in source rather than
-stale copies.
+Brickout Revenge v1 through the production AOT engine-bundle path. The Windows gate also links,
+loads, initializes, and executes that bundle for two deterministic ticks. Source/ABI validators
+prune generated, cached, vendored, and build directories so they inspect checked-in source rather
+than stale copies.
 
 When a test requires an external platform tool or credential, it belongs in an explicit smoke
 workflow. Default correctness tests must remain hermetic and must not silently return early behind

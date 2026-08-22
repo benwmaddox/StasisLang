@@ -369,25 +369,7 @@ pub(crate) fn build_extern_symbol_candidates(
 }
 
 pub(crate) fn is_i32_abi_compatible_type(type_id: TypeId, type_table: &TypeTable) -> bool {
-    if type_id == TYPE_ID_I32
-        || type_id == TYPE_ID_BOOL
-        || type_table.unsigned_integer_bits(type_id).is_some()
-    {
-        return true;
-    }
-    let Some(type_info) = type_table.type_info(type_id) else {
-        return false;
-    };
-    matches!(
-        type_info.category,
-        TypeCategory::Named
-            | TypeCategory::ArrayFixed
-            | TypeCategory::ArrayView
-            | TypeCategory::AsciiFixed
-            | TypeCategory::AsciiView
-            | TypeCategory::Utf8Fixed
-            | TypeCategory::Utf8View
-    )
+    type_table.is_i32_abi_compatible(type_id)
 }
 
 pub(crate) fn is_collection_handle_type(type_id: TypeId, type_table: &TypeTable) -> bool {
@@ -504,14 +486,7 @@ pub(crate) fn are_assignment_types_compatible(
     expression_type: TypeId,
     type_table: &TypeTable,
 ) -> bool {
-    if target_type == expression_type {
-        return true;
-    }
-    if target_type == TYPE_ID_BOOL || expression_type == TYPE_ID_BOOL {
-        return false;
-    }
-    is_i32_abi_compatible_type(target_type, type_table)
-        && is_i32_abi_compatible_type(expression_type, type_table)
+    type_table.assignment_types_are_compatible(target_type, expression_type)
 }
 
 pub(crate) fn compile_analysis_requires_reemit(

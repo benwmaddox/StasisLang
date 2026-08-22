@@ -4677,6 +4677,182 @@ mod tests {
         fs::remove_dir_all(&temp_root).ok();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn aot_brickout_revenge_v1_engine_bundle_executes_two_ticks() {
+        fn hash_global_path(path: &str) -> i32 {
+            let mut hash: u32 = 2_166_136_261;
+            for byte in path.bytes() {
+                hash ^= u32::from(byte);
+                hash = hash.wrapping_mul(16_777_619);
+            }
+            hash as i32
+        }
+
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("samples")
+            .join("brickout_revenge")
+            .join("brickout_revenge_v1.stasis");
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_brickout_exec_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+
+        let mut backend = IncrementalCompilerBackend::with_aot_config(
+            AotCompileConfig::default(),
+            temp_root.join("aot_artifacts"),
+        );
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_202),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(
+            result.status,
+            CompileStatus::Success,
+            "Brickout AOT diagnostics: {:?}",
+            result.diagnostics
+        );
+
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("compiled Brickout engine bundle");
+        let manifest = backend
+            .read_engine_bundle_manifest(&bundle.manifest_path)
+            .expect("read Brickout bundle manifest");
+        let symbol = |name: &str| {
+            manifest
+                .functions
+                .iter()
+                .find(|row| row.name == name)
+                .map(|row| row.symbol.clone())
+                .unwrap_or_else(|| panic!("manifest should include {name}"))
+        };
+        let main_symbol = symbol("main");
+        let tick_symbol = symbol("tick");
+        let state_layout = backend
+            .last_program_snapshot
+            .as_ref()
+            .map(ProgramSnapshot::state_layout)
+            .expect("Brickout AOT snapshot");
+        let runtime_fields =
+            merge_runtime_fields(state_layout, &[]).expect("Brickout runtime fields");
+        let function_symbols = manifest
+            .functions
+            .iter()
+            .map(|row| row.symbol.clone())
+            .collect::<Vec<_>>();
+        let function_aliases = vec![
+            PackagedFunctionAlias {
+                alias: "main",
+                target_symbol: main_symbol.clone(),
+                returns_i32: true,
+            },
+            PackagedFunctionAlias {
+                alias: "tick",
+                target_symbol: tick_symbol.clone(),
+                returns_i32: true,
+            },
+        ];
+        let bridge_object = emit_engine_bundle_runtime_bridge_object(
+            &backend,
+            &runtime_fields,
+            &function_symbols,
+            &function_aliases,
+            manifest.string_literals.as_deref().unwrap_or_default(),
+        )
+        .expect("compile Brickout runtime bridge");
+
+        let mut link_config = AotLinkConfig::default();
+        link_config
+            .runtime_lib_paths
+            .push(ensure_stasis_dynload_link_library().expect("stasis_dynload link library"));
+        if let Some(wrapper) = ensure_rust_lld_link_wrapper(&temp_root) {
+            link_config.linker_path = Some(wrapper);
+        }
+        let linked = temp_root.join("brickout_aot_bundle.dll");
+        let export_symbols = vec![
+            main_symbol.clone(),
+            tick_symbol.clone(),
+            "stasis_jit_global_i32_array_store".to_string(),
+            "stasis_jit_global_f32_array_store".to_string(),
+        ];
+        let mut object_paths = bundle.object_paths().cloned().collect::<Vec<_>>();
+        object_paths.push(bridge_object);
+        link_objects_to_dynamic_library(&object_paths, &linked, &export_symbols, &link_config)
+            .expect("link Brickout engine bundle");
+        sign_output_artifact_if_configured(&linked).expect("sign Brickout engine bundle");
+
+        let library = stasis_dynload::Library::load(&linked).expect("load Brickout engine bundle");
+        let main_ptr = library
+            .symbol_address(&main_symbol)
+            .expect("resolve Brickout main");
+        let tick_ptr = library
+            .symbol_address(&tick_symbol)
+            .expect("resolve Brickout tick");
+        let store_i32 = library
+            .symbol_address("stasis_jit_global_i32_array_store")
+            .expect("resolve host i32 store");
+        let store_f32 = library
+            .symbol_address("stasis_jit_global_f32_array_store")
+            .expect("resolve host f32 store");
+        let bind_runtime = library
+            .symbol_address("stasis_aot_bind_runtime_globals")
+            .expect("resolve runtime-global binding entrypoint");
+        stasis_dynload::invoke_noarg_void(bind_runtime).expect("bind Brickout runtime globals");
+        let host_i32 = hash_global_path("host_i32");
+        let host_f32 = hash_global_path("host_f32");
+        let store = |index: i32, value: i32| {
+            stasis_dynload::invoke_i32_i32_i32_i32_to_void(store_i32, host_i32, 0, index, value)
+                .expect("store Brickout host i32");
+        };
+        let store_float = |index: i32, value: f32| {
+            stasis_dynload::invoke_i32_i32_i32_f32_to_void(store_f32, host_f32, 0, index, value)
+                .expect("store Brickout host f32");
+        };
+
+        let start_ms = 12_345;
+        store(0, start_ms);
+        store_float(50, 360.0);
+        store_float(51, 720.0);
+        store_float(52, 0.0);
+        store_float(53, 0.0);
+        store_float(54, 360.0);
+        store_float(55, 720.0);
+        store(7, 0);
+        store(8, 0);
+        store(9, 0);
+        store(10, 0);
+        store(11, 1);
+        store(12, 360);
+        store(13, 720);
+        store(19, start_ms * 1_000);
+
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(main_ptr).expect("execute Brickout main"),
+            0
+        );
+        store(11, 0);
+        for tick_index in 0..2 {
+            let time_ms = start_ms + (tick_index + 1) * 16;
+            store(0, time_ms);
+            store(10, tick_index);
+            store(19, time_ms * 1_000);
+            assert_eq!(
+                stasis_dynload::invoke_noarg_i32(tick_ptr).expect("execute Brickout tick"),
+                0
+            );
+        }
+
+        drop(library);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
     #[test]
     fn jit_dev_engine_mode_rebuilds_one_complete_generation_between_compiles() {
         let stamp = SystemTime::now()
@@ -5089,9 +5265,10 @@ mod tests {
         assert_eq!(result.status, CompileStatus::Failed);
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
-                diagnostic.message.contains("call target") && diagnostic.message.contains("callee")
+                diagnostic.message.contains("cannot resolve call")
+                    && diagnostic.message.contains("callee")
             }),
-            "expected unresolved direct call target diagnostic, got: {:?}",
+            "expected unresolved call diagnostic, got: {:?}",
             result.diagnostics
         );
         fs::remove_dir_all(&temp_root).ok();

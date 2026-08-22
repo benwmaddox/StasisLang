@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::data_flow::{
     build_function_data_flow_summaries, compiler_local_types, validate_effect_contracts,
-    CompilerLocalType, FunctionDataFlowSummary,
+    validate_program_semantics, CompilerLocalType, FunctionDataFlowSummary,
 };
 use crate::frontend::body_parser::parse_simple_statements_with_debug;
 use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
@@ -903,6 +903,17 @@ impl Compiler {
                 violation.message.clone(),
             ));
             return Err(CompileError::Frontend(violation.message));
+        }
+        if let Err((storage_index, message)) = validate_program_semantics(
+            &self.files,
+            &self.functions,
+            &analysis_statements,
+            &self.types,
+        ) {
+            if let Some(function) = self.functions.get(storage_index as usize).cloned() {
+                self.record_function_diagnostic(&function, &message);
+            }
+            return Err(CompileError::Frontend(message));
         }
         Ok(())
     }
@@ -2864,6 +2875,48 @@ function unreachable(): i32 { while (true) { return 1; } }
     }
 
     #[test]
+    fn check_type_checks_functions_unreachable_from_runtime_roots() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unfinished(): i32 { let value: i32 = true; return value; }
+"#,
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("unreachable body must be type checked");
+        assert!(format!("{error:?}").contains("expected i32 expression but found bool"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured unreachable-function diagnostic");
+        assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
+    fn check_validates_control_flow_in_functions_unreachable_from_runtime_roots() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unfinished(): void { continue; }
+"#,
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("unreachable body must validate loop control");
+        assert!(format!("{error:?}").contains("only valid inside loops"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured unreachable-function diagnostic");
+        assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
     fn data_flow_rebuilds_when_fixed_capacity_metadata_changes() {
         let mut compiler = Compiler::new();
         for capacity in [4, 8] {
@@ -3090,7 +3143,7 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
 
         compiler.upsert_file(
             "api.stasis",
-            "function value(input: i32): f32 { return to_f32(input); }",
+            "function value(input: i32): f32 { return i32_to_f32(input); }",
         );
         compiler.index_pass().expect("return edit index");
         let return_edit = compiler.functions()[0].clone();
@@ -3523,7 +3576,7 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
         compiler.index_pass().expect("initial index");
         assert_eq!(compiler.statement_parse_count, 2);
 
-        compiler.upsert_file("helper.stasis", "function helper(): f32 { return 1.0; }");
+        compiler.upsert_file("helper.stasis", "function helper(): u32 { return 1; }");
         compiler.index_pass().expect("signature edit index");
         assert_eq!(compiler.statement_parse_count, 4);
     }

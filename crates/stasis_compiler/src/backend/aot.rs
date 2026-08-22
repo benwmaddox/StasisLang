@@ -2818,13 +2818,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target"),
+                    message.contains("cannot resolve call 'helper'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -3078,16 +3078,17 @@ function end_frame(): void { return; }
     }
 
     #[test]
-    fn aot_process_skips_unreachable_invalid_function_body() {
+    fn aot_process_rejects_unreachable_unresolved_call() {
         let mut process = AotProcess::new();
         process.upsert_file(
             "sample.stasis",
             "function bad(): i32 { return missing(); }\nfunction tick(): i32 { return 1; }\n",
         );
-        let report = process.compile().expect("compile");
-        assert_eq!(report.index.parsed_functions, 2);
-        assert_eq!(report.emit.emitted_functions, 1);
-        assert_eq!(process.artifacts().len(), 1);
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject unreachable unresolved calls");
+        assert!(format!("{error:?}").contains("cannot resolve call 'missing'"));
+        assert!(process.artifacts().is_empty());
     }
 
     #[test]

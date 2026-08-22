@@ -9,6 +9,7 @@ use crate::compiler::{FunctionMeta, SourceFile};
 use crate::frontend::parser::{parse_top_level_extern_functions, parse_top_level_type_layout};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+    TYPE_ID_VOID,
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
@@ -278,6 +279,438 @@ struct AnalysisContext<'a> {
     call_signatures: CallSignatureMap,
     fingerprint: u64,
     types: &'a TypeTable,
+}
+
+pub(crate) fn validate_program_semantics(
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    statements_by_id: &[Vec<SimpleStmt>],
+    types: &TypeTable,
+) -> Result<(), (u32, String)> {
+    let context = build_context(files, functions, types).map_err(|message| (0, message))?;
+    for function in functions {
+        let statements = statements_by_id
+            .get(function.storage_index as usize)
+            .ok_or_else(|| {
+                (
+                    function.storage_index,
+                    format!("function '{}' has no statement artifact", function.name),
+                )
+            })?;
+        let mut local_types = function
+            .param_names
+            .iter()
+            .cloned()
+            .zip(function.params.iter().copied())
+            .collect();
+        validate_statements(
+            statements,
+            function.return_type,
+            &context,
+            &mut local_types,
+            0,
+        )
+        .map_err(|message| (function.storage_index, message))?;
+    }
+    Ok(())
+}
+
+fn validate_statements(
+    statements: &[SimpleStmt],
+    return_type: TypeId,
+    context: &AnalysisContext<'_>,
+    local_types: &mut BTreeMap<String, TypeId>,
+    loop_depth: usize,
+) -> Result<(), String> {
+    for statement in statements {
+        match statement {
+            SimpleStmt::Noop => {}
+            SimpleStmt::Let {
+                name,
+                type_id,
+                expression,
+            } => {
+                if local_types.contains_key(name) {
+                    return Err(format!("let binding '{name}' shadows existing variable"));
+                }
+                validate_expression_calls(expression, context)?;
+                let expression_type = semantic_expression_type_with_expected(
+                    expression,
+                    *type_id,
+                    context,
+                    local_types,
+                );
+                if let (Some(expected), Some(found)) = (type_id, expression_type) {
+                    if !assignment_types_compatible(*expected, found, context.types) {
+                        return Err(type_mismatch(
+                            &format!("let binding '{name}'"),
+                            *expected,
+                            found,
+                            context.types,
+                        ));
+                    }
+                }
+                if let Some(binding_type) = (*type_id).or(expression_type) {
+                    local_types.insert(name.clone(), binding_type);
+                }
+            }
+            SimpleStmt::Assign {
+                target, expression, ..
+            } => {
+                validate_expression_calls(expression, context)?;
+                validate_assignment_target_calls(target, context)?;
+                if let Some(target_type) =
+                    semantic_assignment_target_type(target, context, local_types)
+                {
+                    if let Some(expression_type) = semantic_expression_type_with_expected(
+                        expression,
+                        Some(target_type),
+                        context,
+                        local_types,
+                    ) {
+                        if !assignment_types_compatible(target_type, expression_type, context.types)
+                        {
+                            return Err(type_mismatch(
+                                "assignment",
+                                target_type,
+                                expression_type,
+                                context.types,
+                            ));
+                        }
+                    }
+                }
+            }
+            SimpleStmt::Convert {
+                target,
+                kind,
+                source,
+            } => {
+                validate_expression_calls(source, context)?;
+                validate_assignment_target_calls(target, context)?;
+                let (required_source, allowed_targets, name) = match kind {
+                    crate::ir::hir::ConversionKind::FromI32 => {
+                        (TYPE_ID_I32, [TYPE_ID_F32, TYPE_ID_F64], "from_i32")
+                    }
+                    crate::ir::hir::ConversionKind::FromF32 => {
+                        (TYPE_ID_F32, [TYPE_ID_I32, TYPE_ID_F64], "from_f32")
+                    }
+                    crate::ir::hir::ConversionKind::FromF64 => {
+                        (TYPE_ID_F64, [TYPE_ID_I32, TYPE_ID_F32], "from_f64")
+                    }
+                };
+                if let (Some(target_type), Some(source_type)) = (
+                    semantic_assignment_target_type(target, context, local_types),
+                    semantic_expression_type_with_expected(
+                        source,
+                        Some(required_source),
+                        context,
+                        local_types,
+                    ),
+                ) {
+                    if source_type != required_source {
+                        return Err(format!(
+                            "{name} source expression must be {}",
+                            type_name(required_source, context.types)
+                        ));
+                    }
+                    if !allowed_targets.contains(&target_type) {
+                        return Err(format!(
+                            "{name} target must be {} or {}",
+                            type_name(allowed_targets[0], context.types),
+                            type_name(allowed_targets[1], context.types)
+                        ));
+                    }
+                }
+            }
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                validate_condition_calls(condition, context)?;
+                validate_condition(condition, context, local_types)?;
+                let mut then_locals = local_types.clone();
+                validate_statements(
+                    then_statements,
+                    return_type,
+                    context,
+                    &mut then_locals,
+                    loop_depth,
+                )?;
+                if let Some(else_statements) = else_statements {
+                    let mut else_locals = local_types.clone();
+                    validate_statements(
+                        else_statements,
+                        return_type,
+                        context,
+                        &mut else_locals,
+                        loop_depth,
+                    )?;
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                let mut loop_locals = local_types.clone();
+                validate_statements(
+                    std::slice::from_ref(init.as_ref()),
+                    return_type,
+                    context,
+                    &mut loop_locals,
+                    loop_depth + 1,
+                )?;
+                validate_condition_calls(condition, context)?;
+                validate_condition(condition, context, &loop_locals)?;
+                let mut body_locals = loop_locals.clone();
+                validate_statements(
+                    body_statements,
+                    return_type,
+                    context,
+                    &mut body_locals,
+                    loop_depth + 1,
+                )?;
+                validate_statements(
+                    std::slice::from_ref(step.as_ref()),
+                    return_type,
+                    context,
+                    &mut loop_locals,
+                    loop_depth + 1,
+                )?;
+            }
+            SimpleStmt::Foreach {
+                item_name,
+                index_name,
+                collection_path,
+                body_statements,
+            } => {
+                let mut loop_locals = local_types.clone();
+                if loop_locals.contains_key(item_name) {
+                    return Err(format!(
+                        "foreach item binding '{item_name}' shadows existing variable"
+                    ));
+                }
+                if let Some(element_type) =
+                    path_type(collection_path, context, local_types, &BTreeMap::new())
+                        .and_then(|collection| context.types.indexed_element_type_id(collection))
+                {
+                    loop_locals.insert(item_name.clone(), element_type);
+                }
+                if let Some(index_name) = index_name {
+                    if loop_locals.contains_key(index_name) || index_name == item_name {
+                        return Err(format!(
+                            "foreach index binding '{index_name}' shadows existing variable"
+                        ));
+                    }
+                    loop_locals.insert(index_name.clone(), TYPE_ID_I32);
+                }
+                validate_statements(
+                    body_statements,
+                    return_type,
+                    context,
+                    &mut loop_locals,
+                    loop_depth + 1,
+                )?;
+            }
+            SimpleStmt::Expr(expression) => validate_expression_calls(expression, context)?,
+            SimpleStmt::Continue if loop_depth == 0 => {
+                return Err("continue statement is only valid inside loops".to_string());
+            }
+            SimpleStmt::Continue => {}
+            SimpleStmt::Return(expression) => {
+                validate_expression_calls(expression, context)?;
+                if let Some(expression_type) = semantic_expression_type_with_expected(
+                    expression,
+                    Some(return_type),
+                    context,
+                    local_types,
+                ) {
+                    if !assignment_types_compatible(return_type, expression_type, context.types) {
+                        return Err(type_mismatch(
+                            "return expression",
+                            return_type,
+                            expression_type,
+                            context.types,
+                        ));
+                    }
+                }
+            }
+            SimpleStmt::ReturnVoid if return_type != TYPE_ID_VOID => {
+                return Err(format!(
+                    "return statement expected {} expression",
+                    type_name(return_type, context.types)
+                ));
+            }
+            SimpleStmt::ReturnVoid => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_condition(
+    condition: &SimpleCondition,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<(), String> {
+    match condition {
+        SimpleCondition::Comparison { .. } => {}
+        SimpleCondition::Expr(expression) => {
+            if let Some(found) = semantic_expression_type(expression, context, local_types) {
+                if found == TYPE_ID_BOOL {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "condition expression must be bool; found {}",
+                    type_name(found, context.types)
+                ));
+            }
+        }
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            validate_condition(lhs, context, local_types)?;
+            validate_condition(rhs, context, local_types)?;
+        }
+        SimpleCondition::Not(inner) => validate_condition(inner, context, local_types)?,
+    }
+    Ok(())
+}
+
+fn semantic_expression_type(
+    expression: &SimpleExpr,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Option<TypeId> {
+    if let SimpleExpr::Identifier(name) = expression {
+        if context.constants.contains_key(name) {
+            return Some(TYPE_ID_I32);
+        }
+    }
+    expression_type(expression, context, local_types, &BTreeMap::new())
+}
+
+fn semantic_expression_type_with_expected(
+    expression: &SimpleExpr,
+    expected: Option<TypeId>,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Option<TypeId> {
+    let inferred = semantic_expression_type(expression, context, local_types);
+    if expected == Some(TYPE_ID_F64) && inferred == Some(TYPE_ID_F32) {
+        return Some(TYPE_ID_F64);
+    }
+    inferred
+}
+
+fn semantic_assignment_target_type(
+    target: &AssignTarget,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Option<TypeId> {
+    match target {
+        AssignTarget::Local(path) | AssignTarget::GlobalPath(path) => {
+            path_type(path, context, local_types, &BTreeMap::new())
+        }
+        AssignTarget::IndexedPath {
+            collection_path,
+            suffix,
+            ..
+        } => {
+            let collection = path_type(collection_path, context, local_types, &BTreeMap::new())?;
+            let element = context.types.indexed_element_type_id(collection)?;
+            field_suffix_type(element, suffix, &context.field_types)
+        }
+    }
+}
+
+fn validate_assignment_target_calls(
+    target: &AssignTarget,
+    context: &AnalysisContext<'_>,
+) -> Result<(), String> {
+    if let AssignTarget::IndexedPath { index, .. } = target {
+        validate_expression_calls(index, context)?;
+    }
+    Ok(())
+}
+
+fn validate_condition_calls(
+    condition: &SimpleCondition,
+    context: &AnalysisContext<'_>,
+) -> Result<(), String> {
+    match condition {
+        SimpleCondition::Comparison { lhs, rhs, .. } => {
+            validate_expression_calls(lhs, context)?;
+            validate_expression_calls(rhs, context)
+        }
+        SimpleCondition::Expr(expression) => validate_expression_calls(expression, context),
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            validate_condition_calls(lhs, context)?;
+            validate_condition_calls(rhs, context)
+        }
+        SimpleCondition::Not(inner) => validate_condition_calls(inner, context),
+    }
+}
+
+fn validate_expression_calls(
+    expression: &SimpleExpr,
+    context: &AnalysisContext<'_>,
+) -> Result<(), String> {
+    match expression {
+        SimpleExpr::Condition(condition) => validate_condition_calls(condition, context),
+        SimpleExpr::IndexedPath { index, .. } => validate_expression_calls(index, context),
+        SimpleExpr::Call { target, args } => {
+            for argument in args {
+                validate_expression_calls(argument, context)?;
+            }
+            let bare_target = target
+                .rsplit_once('.')
+                .map_or(target.as_str(), |(_, name)| name);
+            let known = context.call_signatures.contains_key(target)
+                || context.call_signatures.contains_key(bare_target)
+                || context.extern_functions.contains(target)
+                || context.extern_functions.contains(bare_target)
+                || context.internal_function_targets.contains_key(target)
+                || context.internal_function_targets.contains_key(bare_target)
+                || builtin_host_effect(target).is_some()
+                || is_pure_intrinsic(target);
+            if known {
+                Ok(())
+            } else {
+                Err(format!("cannot resolve call '{target}'"))
+            }
+        }
+        SimpleExpr::Binary { lhs, rhs, .. } => {
+            validate_expression_calls(lhs, context)?;
+            validate_expression_calls(rhs, context)
+        }
+        SimpleExpr::Int(_)
+        | SimpleExpr::Float(_)
+        | SimpleExpr::Bool(_)
+        | SimpleExpr::StringLiteral(_)
+        | SimpleExpr::Identifier(_) => Ok(()),
+    }
+}
+
+fn assignment_types_compatible(
+    target_type: TypeId,
+    expression_type: TypeId,
+    types: &TypeTable,
+) -> bool {
+    types.assignment_types_are_compatible(target_type, expression_type)
+}
+
+fn type_mismatch(subject: &str, expected: TypeId, found: TypeId, types: &TypeTable) -> String {
+    format!(
+        "{subject} expected {} expression but found {}",
+        type_name(expected, types),
+        type_name(found, types)
+    )
+}
+
+fn type_name(type_id: TypeId, types: &TypeTable) -> String {
+    types
+        .type_info(type_id)
+        .map_or_else(|| type_id.to_string(), |info| info.name.clone())
 }
 
 pub(crate) fn build_function_data_flow_summaries(
