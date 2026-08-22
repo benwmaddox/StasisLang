@@ -23,8 +23,11 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
         assertTrue(render.indexOf("gfx_cmd_i32[1] = 99;") < render.indexOf("return 0;"));
         String resource = WorkshopDiagnosticSeamAcceptance.insertAfterInFunction(source,
                 "function on_code_swap(): void {", "function on_code_swap(): void {",
-                "\n  load_missing();");
-        assertTrue(resource.contains("function on_code_swap(): void {\n  load_missing();"));
+                "\n  let it031_sprite: Sprite;\n  load_sprite_from(it031_sprite, "
+                        + "\"assets/IT031_missing.svg\", 32, 32);");
+        assertTrue(resource.contains("function on_code_swap(): void {\n"
+                + "  let it031_sprite: Sprite;\n"
+                + "  load_sprite_from(it031_sprite, \"assets/IT031_missing.svg\", 32, 32);"));
     }
 
     @Test public void renderMutationHandlesCrLfAndInlineBodies() {

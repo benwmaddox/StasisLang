@@ -59,7 +59,8 @@ final class WorkshopDiagnosticSeamAcceptance {
 
             String missingResource = insertAfterInFunction(original,
                     "function on_code_swap(): void {", "function on_code_swap(): void {",
-                    "\n    load_sprite_from(PongHost.ball_sprite, "
+                    "\n    let it031_sprite: Sprite;\n"
+                            + "    load_sprite_from(it031_sprite, "
                             + "\"assets/IT031_missing.svg\", 32, 32);");
             activity.acceptanceReplaceSource(projectRoot, missingResource);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "resource setup");
