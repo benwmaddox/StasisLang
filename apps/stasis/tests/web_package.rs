@@ -520,7 +520,9 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
             .any(|window| window == b"player_x"),
         "local release retained development-only Wasm symbols"
     );
-    let runtime = fs::read_to_string(output.join("game.js")).expect("game.js");
+    let runtime = fs::read_to_string(output.join("game.js"))
+        .expect("game.js")
+        .replace("\r\n", "\n");
     let index = fs::read_to_string(output.join("index.html")).expect("index.html");
     assert!(index.contains(r#"<title>web_export_smoke</title>"#));
     assert!(index.contains(r#"<h1 id="stasis-loading-title">web_export_smoke</h1>"#));
@@ -590,7 +592,9 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
     let output = package(&workspace, &relative_output);
 
     let wasm = fs::read(output.join("game.wasm")).expect("minimal Pong Wasm");
-    let runtime = fs::read_to_string(output.join("game.js")).expect("minimal Pong runtime");
+    let runtime = fs::read_to_string(output.join("game.js"))
+        .expect("minimal Pong runtime")
+        .replace("\r\n", "\n");
     let index = fs::read_to_string(output.join("index.html")).expect("minimal Pong index");
     for reachable in ["main", "tick", "render", "web_draw_rect"] {
         assert!(

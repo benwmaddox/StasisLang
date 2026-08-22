@@ -8,6 +8,16 @@ import sys
 
 
 RE_IMPORT = re.compile(r'^\s*import\s+"([^"]+)"\s*;\s*(?://.*)?$')
+IGNORED_SOURCE_DIRS = {
+    ".git",
+    ".gradle",
+    ".stasis_cache",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+}
 
 
 def discover_stasis_files(scan_roots: list[pathlib.Path]) -> list[pathlib.Path]:
@@ -17,7 +27,9 @@ def discover_stasis_files(scan_roots: list[pathlib.Path]) -> list[pathlib.Path]:
         if not root.is_dir():
             continue
         for current_root, directories, filenames in os.walk(root):
-            directories[:] = sorted(name for name in directories if name != "vendor")
+            directories[:] = sorted(
+                name for name in directories if name not in IGNORED_SOURCE_DIRS
+            )
             for filename in sorted(filenames):
                 if filename.endswith(".stasis"):
                     stasis_files.append(pathlib.Path(current_root) / filename)

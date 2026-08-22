@@ -4492,7 +4492,10 @@ function tick(): void {}
         assert!(error.contains("diagnostic_file=src/main.stasis"));
         let preserved = inspect_android_runtime_state(&root).expect("inspect preserved source");
         assert_eq!(preserved["generation"], active["generation"]);
-        assert_eq!(preserved["source_fingerprint"], active["source_fingerprint"]);
+        assert_eq!(
+            preserved["source_fingerprint"],
+            active["source_fingerprint"]
+        );
 
         let resumed =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
@@ -4500,7 +4503,10 @@ function tick(): void {}
         assert_eq!(resumed.observed_game_tick_count, 12);
         let after_frame = inspect_android_runtime_state(&root).expect("inspect after frame");
         assert_eq!(after_frame["generation"], active["generation"]);
-        assert_eq!(after_frame["source_fingerprint"], active["source_fingerprint"]);
+        assert_eq!(
+            after_frame["source_fingerprint"],
+            active["source_fingerprint"]
+        );
 
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
@@ -5497,7 +5503,7 @@ function tick(): void {}
     }
 
     #[test]
-    fn android_backend_failure_reports_imported_function_span() {
+    fn android_semantic_failure_reports_imported_function_span() {
         let root = temp_project("cross_file_backend_diagnostic");
         fs::create_dir_all(root.join("src/systems")).expect("create systems");
         fs::write(
@@ -5509,12 +5515,12 @@ function tick(): void {}
             root.join("src/systems/broken.stasis"),
             "\n\nfunction on_code_swap(): void { missing_target(); }\n",
         )
-        .expect("write imported backend failure");
+        .expect("write imported semantic failure");
 
         let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
             .expect_err("compile should fail");
         assert!(
-            error.contains("unknown%20call%20target%20%27missing_target%27"),
+            error.contains("cannot%20resolve%20call%20%27missing_target%27"),
             "unexpected error: {error}"
         );
         assert!(error.contains("|diagnostic_file=src/systems/broken.stasis"));

@@ -1,7 +1,9 @@
 #![cfg(windows)]
 
 use serde_json::json;
-use stasis::{audit_mobile_aot_bindings, write_mobile_aot_bindings_source};
+use stasis::{
+    audit_mobile_aot_bindings, sign_output_artifact_if_configured, write_mobile_aot_bindings_source,
+};
 use stasis_assets::{load_project_asset_manifest, prepare_asset_bundle, sha256_bytes, AssetLimits};
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::EngineEntrypoints;
@@ -62,6 +64,24 @@ fn locate_cl() -> PathBuf {
         .expect("cl.exe path")
 }
 
+fn locate_runtime_import_library(runtime_dll: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("STASIS_RUNTIME_IMPORT_LIBRARY_PATH").map(PathBuf::from) {
+        assert!(
+            path.is_file(),
+            "STASIS_RUNTIME_IMPORT_LIBRARY_PATH must name an import library file"
+        );
+        return path;
+    }
+    let candidates = [
+        runtime_dll.with_file_name("stasis_graphics.lib"),
+        repository_root().join("runtime/build/bin/stasis_graphics.lib"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .expect("graphics runtime import library is missing")
+}
+
 fn wav_fixture() -> Vec<u8> {
     let samples = [0_i16, 16_384, -16_384, 8_192];
     let mut bytes = Vec::new();
@@ -89,12 +109,8 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
         std::env::var_os("STASIS_RUNTIME_DLL_PATH")
             .expect("STASIS_RUNTIME_DLL_PATH must name the CI-built SDL runtime"),
     );
-    let runtime_import = runtime_dll.with_file_name("stasis_graphics.lib");
+    let runtime_import = locate_runtime_import_library(&runtime_dll);
     assert!(runtime_dll.is_file(), "graphics runtime DLL is missing");
-    assert!(
-        runtime_import.is_file(),
-        "graphics runtime import library is missing"
-    );
 
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -249,6 +265,7 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
         String::from_utf8_lossy(&link.stdout),
         String::from_utf8_lossy(&link.stderr)
     );
+    sign_output_artifact_if_configured(&executable).expect("sign linked mobile asset harness");
 
     let run = Command::new(&executable)
         .arg(&bundle_root)

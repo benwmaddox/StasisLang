@@ -7,6 +7,8 @@ This checklist is the implementation plan and is aligned with:
 
 Status note:
 - This repository's stable compiler is implemented in Rust (`cargo build`, `cargo test`).
+- The current implementation map is `docs/compiler_architecture.md`. Older completed-slice notes
+  below are historical evidence and may name components that were removed by later cleanup slices.
 
 Locked decisions:
 - Entrypoint is `function main(): i32`.
@@ -340,21 +342,21 @@ functions.
 #### AW24 - Compiler-Owned Android Compile Plan
 - Language: `Rust compiler frontend + docs`.
 - Scope: Stop Android compile planning from growing as a parallel C compiler path.
-- Deliverable: `stasis_compiler::frontend::workshop` now exposes the platform-neutral `build_workshop_compile_plan`, which maps `IncrementalCompilerHost` output back to workshop symbols, entrypoints, function hashes, artifact paths, and reload classifications using compiler-owned metadata plus workshop layout fingerprints. Android consumes this shared plan through its bridge.
-- Tests: Focused Rust tests compile sample workshop projects through `IncrementalCompilerHost`, build Android compile plans, verify function metadata/artifact paths, and classify `FastReload` versus `ResetRequired`; Android shell verifier and debug APK build continue to pass.
+- Historical deliverable: `stasis_compiler::frontend::workshop` introduced the platform-neutral workshop compile plan. The analysis host it originally adapted was retired in the 2026-08-22 single-compiler cleanup; current consumers use compiler-owned snapshots and semantic edit plans.
+- Tests: Focused Rust tests compile sample workshop projects through the production compiler, verify metadata/artifact paths, and classify `FastReload` versus `ResetRequired`; Android shell verification remains the platform gate.
 - Done gate: The next JNI slice has a Rust compiler-owned contract to call instead of expanding the native C scaffold.
 - Status: `completed`
 #### AW25 - Compiler-Owned Android Artifact Rendering
 - Language: `Rust compiler frontend + docs`.
 - Scope: Move Android manifest, runtime-state, and function-stub artifact contents into the compiler-owned workshop contract.
 - Deliverable: `stasis_compiler::frontend::workshop` now exposes the platform-neutral `render_workshop_artifacts`, producing `build/native_compile_manifest.txt`, optional `build/runtime_state.txt`, and per-function `CompiledStub` artifact text from `WorkshopCompilePlan`. Android-specific persistence stays in the bridge.
-- Tests: Focused Rust tests render artifacts from real `IncrementalCompilerHost` output and verify manifest entrypoints, reload strings, runtime-state reset/preserve behavior, and function stub content; Android shell verifier covers the compiler-owned artifact API; debug APK builds.
+- Tests: Focused Rust tests render artifacts from production compiler output and verify manifest entrypoints, reload strings, and runtime-state reset/preserve behavior; Android shell verification covers the compiler-owned artifact API.
 - Done gate: JNI can switch from generating Android compile artifacts in C to writing compiler-rendered artifact text.
 - Status: `completed`
 #### AW26 - Rust Android Compiler Bridge Crate
 - Language: `Rust compiler bridge + docs`.
 - Scope: Start replacing Android C compile planning with a Rust bridge that calls the existing compiler/workshop APIs.
-- Deliverable: Added `crates/stasis_android_bridge` as a workspace crate with `rlib`/`cdylib` outputs, a safe `compile_android_workshop_project` API, and C ABI functions that load a workshop project, run `IncrementalCompilerHost`, build the compiler-owned Android compile plan, and write compiler-rendered manifest/runtime/function artifacts.
+- Deliverable: Added `crates/stasis_android_bridge` as a workspace crate with `rlib`/`cdylib` outputs, a safe `compile_android_workshop_project` API, and C ABI functions that load a workshop project, invoke the compiler-owned Android plan, and write compiler-rendered artifacts.
 - Tests: `cargo test -p stasis_android_bridge` covers artifact writing, fast-reload runtime-state preservation, and the C ABI compile message; Android shell verifier covers workspace/crate wiring and bridge API references; debug APK builds.
 - Done gate: Android now has a tested Rust bridge crate that reuses compiler structure and can replace the native C scaffold in the JNI layer.
 - Status: `completed`
@@ -962,7 +964,7 @@ Archived priority override (2026-02-13, historical):
 - AOT artifact lifecycle is now generation-bound: activation/retirement metadata is recorded against the committed pointer-table generation and surfaced through runner events/summary state.
 - Runtime relaunch path now passes `--no-runtime-launch` to spawned child processes to prevent recursive process trees during watch-mode swap iteration.
 - Simple `i32` return-body extraction now supports deterministic `if`/`else if`/`else` branch evaluation with branch-local `let`/assignment handling and fallthrough continuation to later top-level `return`.
-- AOT simple-body lowering now preserves conditional return chains as expression-level select trees (`SimpleI32Condition` + `SimpleI32ReturnExpr::Select`) instead of only compile-time branch selection.
+- Historical simple-body fallback experiment preserved conditional return chains as expression-level select trees; that alternate compiler path and its detector metadata were removed in the 2026-08-22 cleanup.
 - Incremental compiler function metrics now include declared return type metadata, and AOT stub emission uses return-type-aware signatures (`void` functions emit `return` without value; `i32` functions keep value-return lowering).
 - Deterministic simple-body condition evaluation now supports logical composition in `if` conditions (`&&`, `||`, `!`, and parenthesized grouping) in addition to comparison operators.
 - Symbolic simple-body condition extraction now preserves logical condition trees (`And`/`Or`/`Not`) for `if` return-chain lowering, enabling AOT condition emission beyond comparison-only predicates.
@@ -1210,7 +1212,7 @@ Archived priority override (2026-02-13, historical):
 - Added deterministic fake-toolchain coverage for executable linker path and CLI flow (`crates/stasis_jit::tests::aot_executable_linker_can_be_driven_by_configured_fake_linker`, `apps/stasis::compiler_backend::tests::self_host_aot_cli_links_runnable_executable_with_main_entry_symbol`).
 - `stasis aot-cli` now supports writing a machine-readable summary artifact (`--summary-file <path>`) containing staged bundle paths, entry symbol, and object layout contract for stage parity checks.
 - `stasis aot-cli` now supports optional `--entry-file <file.stasis>` host contract routing (`STASIS_AOT_ENTRY_FILE`) so self-host AOT can compile a selected program when a project directory contains multiple `main()` declarations; backend source discovery now resolves project-local import closure from that entry file instead of compiling every `.stasis` file under the directory.
-- `stasis aot-cli` now supports optional `--quality-gate` (`STASIS_AOT_QUALITY_GATE=1`) which rejects outputs when the selected entry symbol is still fallback-stub lowered, preventing shipping non-playable placeholder executables as "quality" game builds.
+- Historical opt-in fallback-stub quality gating was removed with the fallback compiler. Production AOT now fails unsupported lowering directly, and the Brickout bundle compile is a default test.
 - `.stasis` incremental parser compatibility was extended for Brickout `_v1` source forms used by self-host AOT CLI input: top-level `import`, `const`, `enum`, `struct`, and `global name: Type;` declarations, `function @inline ...` signatures, float literal tokenization compatibility (`123.45` treated as a contiguous numeric primary token), and comment-aware `for` header parsing (all `for` header segments are required; missing-segment forms are rejected).
 - Verified self-host `.stasis` compile path advances through Brickout `_v1` parsing/incremental analysis and now fails at host linker invocation stage when linker tooling is unavailable (`link.exe`/`STASIS_AOT_LINKER`), indicating parser-side `_v1` compatibility blockers are removed for this slice.
 - With `STASIS_AOT_LINKER` set to `lld-link.exe`, Brickout `_v1` self-host compile advances past linker discovery and currently fails on runtime-bridge object unresolved runtime symbols (`core::panicking::*`, `memset`) during final executable link, making runtime-bridge/object-link contract the active blocker.
@@ -1219,7 +1221,7 @@ Archived priority override (2026-02-13, historical):
 - Self-host compiler source staging buffer contract was raised to `262144` bytes (`compiler_state`, `.stasis` AOT CLI core temp source buffer, host analysis harness buffer, runtime bridge source-load buffer) so current `compiler/simple_pass_compiler.stasis` size no longer hard-fails lexing during stage analysis.
 - Added opt-in real-toolchain compiler-subset build smoke (`STASIS_RUN_REAL_SELF_HOST_COMPILER_SUBSET_BUILD_SMOKE=1`) that compiles the self-host compiler entry import-closure subset (entry/core/incremental/state/stdlib) via `--entry-file`, asserting 5-file staged contract build viability.
 - Added opt-in real-toolchain stage1 executable parity probe (`STASIS_RUN_REAL_SELF_HOST_STAGE1_EXEC_PARITY_SMOKE=1`) that publishes argv/source/staged-bridge env contracts and executes compiled stage1 compiler subset binary for stage2 summary generation; probe now completes with exit `0` and stage2 summary parity via runtime-bridge CLI-entry host extern routing.
-- AOT patch manifests now include fallback stub detail hints (`symbol`, `id_hash`, `sig_hash`, `body_hash`, `ordinal`) so stage1 executable parity failures can map exit-code body hashes back to concrete fallback symbols/functions deterministically during diagnostics.
+- Historical fallback-stub manifest hints were removed; current manifests describe only real emitted artifacts.
 - `compiler/stasis_aot_cli_entry.stasis` now lowers `compiler_cli_parse_from_argv` as a direct no-arg host extern call (`host_run_self_host_aot_cli_from_env`), and runtime bridge exports this symbol in both rustc and CLIF fallback objects so default stage1 executable path no longer depends on parse-bridge lowering.
 - Temporary parse-bridge shim scaffolding and parse-bridge-specific quality/reject gates were removed; unlowerable entry functions now surface through normal fallback-stub manifest diagnostics and strict/quality fallback gates.
 - Direct-call lowering now recognizes known host no-arg `i32` extern targets (`host_cli_arg_count`, `host_run_self_host_aot_cli_from_env`) when resolving call-target symbols, so this path no longer hard-fails unresolved-target gating for AOT stub emission.
@@ -1304,9 +1306,9 @@ Archived priority override (2026-02-13, historical):
 - Tests: benchmark smoke runs in CI-optional mode and validates output format/consistency.
 - Done gate: baseline numbers are recorded in docs and used as acceptance checks for subsequent slices.
 - Current progress:
-- Added deterministic benchmark executable: `cargo run -p stasis_compiler --release --example compile_bench`.
-- Benchmark executable now supports explicit mode selection: `--mode analysis` (in-process analysis only) and `--mode jit` (Cranelift machine-code generation via rust-native `JitProcess`).
-- Added benchmark smoke/unit checks: `cargo test -p stasis_compiler --example compile_bench`.
+- Historical `compile_bench` and its alternate analysis compiler were removed in the 2026-08-22
+  compiler cleanup. Active measurements use `rust_native_jit_bench` and
+  `project_selective_jit_bench`, both of which exercise the production compiler.
 - Baseline snapshot (2026-02-24, local machine, seed=1337, chunk_size=500, 1 sample each):
 - 1k functions: cold p50/p95 `4390.080ms`, incremental p50/p95 `4280.470ms`.
 - 5k functions: cold p50/p95 `7177.709ms`, incremental p50/p95 `4542.079ms` (completes within 5-minute budget).
@@ -1320,7 +1322,7 @@ Archived priority override (2026-02-13, historical):
 - Tests: existing incremental/reachability tests remain green; add explicit regression test asserting no external harness invocation on normal compile path.
 - Done gate: single-function incremental compile path executes entirely in-process.
 - Current progress:
-- `crates/stasis_compiler::IncrementalCompilerHost::compile_changed_files` now analyzes changed sources fully in-process (threaded Rust parser/evaluator path), with no per-file external harness process launch in normal operation.
+- The then-current analysis host moved in-process; it was later deleted when all consumers moved to the production `Compiler`/`JitProcess`/`AotProcess` pipeline.
 - Removed external harness-only tests and stale process-signing/override code paths from `crates/stasis_compiler/src/lib.rs`.
 - Preserved in-memory reachability behavior and changed/newly-reachable emission behavior under the new in-process analysis path.
 - `apps/stasis` runtime compile path now has an in-process engine-mode fast path: when `tick`+`render` entrypoints are present, backend compile bypasses legacy host analysis and compiles via rust-native JIT/AOT process contracts directly.
@@ -1420,7 +1422,7 @@ Archived priority override (2026-02-13, historical):
 - Slice CS5: Remove legacy `simple_*` detector metadata channels from compiler state and host contracts.
 - Language: `.stasis + Rust`.
 - Scope: delete obsolete detector/fallback metrics and rely on real parse/resolve/emit behavior for supported slices.
-- Deliverable: reduced `FunctionMetric`/state surface and simpler host<->compiler contract.
+- Deliverable: reduce compatibility metrics/state and simplify the host/compiler contract. The obsolete metric surface was fully removed in the 2026-08-22 cleanup.
 - Tests: replace detector-centric tests with behavior/e2e compile-and-run checks.
 - Done gate: no temporary fallback metadata contract remains in active compile path.
 - Current progress:

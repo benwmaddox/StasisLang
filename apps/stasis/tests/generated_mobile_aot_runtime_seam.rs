@@ -2,7 +2,7 @@
 
 use serde_json::json;
 use stasis::{
-    audit_mobile_aot_bindings, mobile_aot_function_for,
+    audit_mobile_aot_bindings, mobile_aot_function_for, sign_output_artifact_if_configured,
     write_mobile_aot_bindings_source_with_profile,
 };
 use stasis_compiler::backend::aot::AotProcess;
@@ -192,6 +192,7 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    sign_output_artifact_if_configured(&executable).expect("sign generated mobile runtime harness");
 
     let run = Command::new(&executable)
         .current_dir(&tree.0)
