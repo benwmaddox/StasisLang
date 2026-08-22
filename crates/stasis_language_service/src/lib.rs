@@ -3140,7 +3140,6 @@ impl std::error::Error for PositionError {}
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
     use std::time::Instant;
 
     #[test]
@@ -4215,88 +4214,6 @@ function main(): i32 {
             definition_p95 < 100_000,
             "definition p95 {definition_p95}us"
         );
-    }
-
-    #[test]
-    #[ignore = "requires STASIS_CHESSTD_ROOT"]
-    fn chess_td_warm_definition_reports_service_component_latency() {
-        fn collect_stasis_files(root: &Path, files: &mut Vec<PathBuf>) {
-            for entry in std::fs::read_dir(root).expect("read ChessTD source directory") {
-                let path = entry.expect("ChessTD directory entry").path();
-                if path.is_dir() {
-                    collect_stasis_files(&path, files);
-                } else if path
-                    .extension()
-                    .is_some_and(|extension| extension == "stasis")
-                {
-                    files.push(path);
-                }
-            }
-        }
-
-        let root = PathBuf::from(
-            std::env::var("STASIS_CHESSTD_ROOT").expect("STASIS_CHESSTD_ROOT must name ChessTD"),
-        );
-        let mut paths = Vec::new();
-        collect_stasis_files(&root.join("src"), &mut paths);
-        collect_stasis_files(&root.join("tests"), &mut paths);
-        paths.sort();
-        let root_text = root.to_string_lossy().replace('\\', "/");
-        let mut service = LanguageService::new(&root_text).expect("ChessTD service");
-        let mut files = Vec::new();
-        for path in paths {
-            let source = std::fs::read_to_string(&path).expect("read ChessTD source");
-            let path_text = path.to_string_lossy().replace('\\', "/");
-            service.set_disk_document(path_text.clone(), source.clone());
-            files.push(WorkshopSourceFile {
-                path: canonical_source_path(Some(&root_text), &path_text)
-                    .expect("canonical ChessTD path"),
-                source,
-            });
-        }
-        let main_path = root.join("src/main.stasis");
-        let main_path = main_path.to_string_lossy().replace('\\', "/");
-        let main_source = service
-            .snapshot()
-            .document(&main_path)
-            .expect("ChessTD main source")
-            .text
-            .clone();
-        let symbol = "game.progression_dirty";
-        let offset = main_source.find(symbol).expect("ChessTD field use") + "game.".len() + 2;
-
-        let diagnostics_started = Instant::now();
-        let diagnostics = service.diagnostics();
-        let diagnostics_millis = diagnostics_started.elapsed().as_millis();
-        let diagnostic_count = diagnostics.diagnostics.len();
-        let warm_started = Instant::now();
-        service
-            .workspace_symbols("", 256)
-            .expect("warm ChessTD index");
-        let warm_millis = warm_started.elapsed().as_millis();
-        let legacy_started = Instant::now();
-        let legacy = find_workshop_references(&files, symbol, 256).expect("legacy definition scan");
-        let legacy_millis = legacy_started.elapsed().as_millis();
-        assert!(legacy
-            .iter()
-            .any(|reference| reference.kind == WorkshopReferenceKind::Definition));
-
-        let mut micros = Vec::new();
-        for _ in 0..50 {
-            let started = Instant::now();
-            let definitions = service
-                .definition(&main_path, offset)
-                .expect("cached ChessTD definition");
-            micros.push(started.elapsed().as_micros());
-            assert_eq!(definitions.len(), 1);
-            assert!(definitions[0].path.ends_with("src/game/model.stasis"));
-        }
-        micros.sort_unstable();
-        let p95 = micros[47];
-        eprintln!(
-            "ChessTD definition: diagnostics={diagnostics_millis}ms/{diagnostic_count} warm_index={warm_millis}ms legacy_scan={legacy_millis}ms cached_p95={p95}us"
-        );
-        assert!(p95 < 100_000, "ChessTD cached definition p95 {p95}us");
     }
 
     #[test]

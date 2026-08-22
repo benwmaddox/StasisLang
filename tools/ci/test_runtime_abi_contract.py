@@ -1,5 +1,7 @@
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 
 from tools.ci import check_runtime_abi_contract as contract
 
@@ -17,6 +19,19 @@ class RuntimeAbiContractTests(unittest.TestCase):
         self.assertIn(old, overlays[path])
         overlays[path] = overlays[path].replace(old, new, 1)
         return contract.check(overlays=overlays)
+
+    def test_source_discovery_ignores_generated_copies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src" / "main.stasis"
+            source.parent.mkdir(parents=True)
+            source.write_text("function main(): i32 { return 0; }\n", encoding="utf-8")
+            for ignored in ("build", "dist", "target", ".stasis_cache"):
+                generated = root / ignored / "copy.stasis"
+                generated.parent.mkdir(parents=True)
+                generated.write_text("generated", encoding="utf-8")
+
+            self.assertEqual(contract.repository_stasis_sources(root), [source])
 
     def test_repository_contract_passes_and_emits_evidence(self):
         failures, evidence = contract.check(overlays=self.sources)

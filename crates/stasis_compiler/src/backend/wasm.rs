@@ -7,8 +7,7 @@
 use crate::backend::emit::{
     are_call_argument_and_param_compatible, build_compile_analysis_cache,
     compute_files_fingerprint, hash_global_path, is_i32_numeric_type,
-    resolve_extern_call_signatures_with, AssignOp, AssignTarget, ComparisonOp, ConstantValue,
-    SimpleCondition, SimpleExpr, SimpleStmt,
+    resolve_extern_call_signatures_with, ConstantValue,
 };
 use crate::backend::program_snapshot::ProgramSnapshot;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
@@ -17,6 +16,9 @@ use crate::frontend::types::{
     TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
+use crate::ir::hir::{
+    AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 const I32: u8 = 0x7f;
@@ -96,7 +98,7 @@ impl WasmProcess {
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
-        let index = self.compiler.index_pass()?;
+        let index = self.compiler.check()?;
         let mut types = self.compiler.types().clone();
         let source_revision =
             crate::backend::program_snapshot::semantic_revision_with_required_roots(
@@ -3292,6 +3294,20 @@ fn encode_expr_as(
     out: &mut Vec<u8>,
 ) -> Result<TypeId, String> {
     match value {
+        SimpleExpr::DefaultValue(type_id) => {
+            match *type_id {
+                TYPE_ID_F32 => {
+                    out.push(0x43);
+                    out.extend(0.0_f32.to_le_bytes());
+                }
+                TYPE_ID_F64 => {
+                    out.push(0x44);
+                    out.extend(0.0_f64.to_le_bytes());
+                }
+                _ => out.extend([0x41, 0x00]),
+            }
+            Ok(*type_id)
+        }
         SimpleExpr::Int(value) => {
             out.push(0x41);
             sleb(*value as i32, out);
