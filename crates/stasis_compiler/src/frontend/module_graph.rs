@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::frontend::lexer::{lex, Token, TokenKind};
-use crate::frontend::parser::parse_string_literal_text;
+use crate::frontend::lexer::{lex, lex_with_diagnostic, Token, TokenKind};
+use crate::frontend::parser::{lexer_error_context, parse_string_literal_text};
 use crate::{SourceDiagnostic, SourceDiagnosticCode, SourceDiagnosticEdit, SourceDiagnosticFix};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,8 +247,15 @@ fn display_path(path: &Path) -> String {
 }
 
 pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, SourceDiagnostic> {
-    let tokens = lex(source).map_err(|message| {
-        diagnostic(path, 0..source.len(), "", message).with_code(SourceDiagnosticCode::Parse)
+    let tokens = lex_with_diagnostic(source).map_err(|error| {
+        let context = lexer_error_context(source, error.message, error.offset);
+        diagnostic(
+            path,
+            context.start..context.end,
+            context.symbol,
+            context.message,
+        )
+        .with_code(SourceDiagnosticCode::Parse)
     })?;
     let mut imports = Vec::new();
     let mut cursor = 0usize;
@@ -626,6 +633,30 @@ mod tests {
         let edit = &error.fixes[0].edits[0];
         assert_eq!(&source[edit.start..edit.end], "import \"missing.stasis\";");
         assert!(edit.new_text.is_empty());
+    }
+
+    #[test]
+    fn imported_lexer_failure_preserves_active_function_context_and_span() {
+        let imported = concat!(
+            "function helper(): void {}\n",
+            "function active(): void { \"unterminated\n",
+        );
+        let error = graph(
+            &["main.stasis"],
+            &[
+                (
+                    "main.stasis",
+                    "import \"broken.stasis\";\nfunction main(): void {}\n",
+                ),
+                ("broken.stasis", imported),
+            ],
+        )
+        .expect_err("imported lexer failure must be reported");
+        assert_eq!(error.path, "broken.stasis");
+        assert_eq!(error.symbol, "active");
+        assert_eq!(error.start, imported.find("\"unterminated").unwrap());
+        assert_eq!(error.end, imported.len());
+        assert_eq!(error.code, SourceDiagnosticCode::Parse);
     }
 
     #[test]

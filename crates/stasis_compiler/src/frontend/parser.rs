@@ -811,7 +811,11 @@ fn function_name_hint(source: &str, tokens: &[Token], function_token_index: usiz
     String::new()
 }
 
-fn lexer_error_context(source: &str, message: String, offset: usize) -> ParserDiagnostic {
+pub(crate) fn lexer_error_context(
+    source: &str,
+    message: String,
+    offset: usize,
+) -> ParserDiagnostic {
     let mut symbol = String::new();
     let limit = offset.min(source.len());
     let bytes = source.as_bytes();
@@ -820,6 +824,17 @@ fn lexer_error_context(source: &str, message: String, offset: usize) -> ParserDi
         if bytes[index] == b'/' && index + 1 < limit && bytes[index + 1] == b'/' {
             index += 2;
             while index < limit && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index] == b'/' && index + 1 < limit && bytes[index + 1] == b'*' {
+            index += 2;
+            while index < limit {
+                if bytes[index] == b'*' && index + 1 < limit && bytes[index + 1] == b'/' {
+                    index += 2;
+                    break;
+                }
                 index += 1;
             }
             continue;
@@ -2210,6 +2225,20 @@ function tick(): i32 {
             .expect_err("unterminated string must fail");
         assert_eq!(error.symbol, "first");
         assert!(!error.symbol.contains("fake"));
+    }
+
+    #[test]
+    fn lexer_failure_ignores_function_text_inside_block_comment() {
+        let source = concat!(
+            "function first(): void {}\n",
+            "/* function fake(): void {} */\n",
+            "function actual(): void { \"unterminated\n",
+        );
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("unterminated string after block comment must fail");
+        assert_eq!(error.symbol, "actual");
+        assert_eq!(error.start, source.find("\"unterminated").unwrap());
+        assert_eq!(error.end, source.len());
     }
 
     #[test]

@@ -5915,6 +5915,36 @@ function tick(): void {}
     }
 
     #[test]
+    fn android_body_parse_failure_uses_typed_parse_envelope_and_function_context() {
+        let root = temp_project("body_parse_diagnostic");
+        let source = "function main(): void { let broken = ; }\n";
+        fs::write(root.join("src/main.stasis"), source).expect("write malformed body");
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("malformed body must fail");
+        assert!(
+            error.contains("diagnostic_schema=stasis.native_diagnostic.v1"),
+            "{error}"
+        );
+        assert!(error.contains("diagnostic_stage=parse"), "{error}");
+        assert!(error.contains("diagnostic_code=stasis.parse"), "{error}");
+        assert!(error.contains("diagnostic_file=src/main.stasis"), "{error}");
+        assert!(error.contains("diagnostic_symbol=main"), "{error}");
+        assert!(error.contains("diagnostic_line=1"), "{error}");
+        assert!(error.contains("diagnostic_end_line=1"), "{error}");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("body parse envelope");
+        assert_eq!(envelope["stage"], "parse");
+        assert_eq!(envelope["code"], "stasis.parse");
+        assert_eq!(envelope["context"]["file"], "src/main.stasis");
+        assert_eq!(envelope["context"]["symbol"], "main");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn android_import_parse_failure_preserves_imported_file_diagnostic() {
         let root = temp_project("import_parse_diagnostic");
         fs::create_dir_all(root.join("src/systems")).expect("systems directory");

@@ -831,13 +831,16 @@ impl Compiler {
                 let artifacts = match parse_simple_statements_with_debug(body, &mut self.types) {
                     Ok(artifacts) => artifacts,
                     Err(message) => {
-                        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                            file.path.clone(),
-                            function.source_range.start as usize,
-                            function.source_range.end as usize,
-                            function.name.clone(),
-                            message.clone(),
-                        ));
+                        self.last_source_diagnostic = Some(
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                function.source_range.start as usize,
+                                function.source_range.end as usize,
+                                function.name.clone(),
+                                message.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                        );
                         return Err(CompileError::Backend(message));
                     }
                 };
@@ -2925,6 +2928,28 @@ function unfinished(): void { continue; }
             .last_source_diagnostic()
             .expect("structured unreachable-function diagnostic");
         assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
+    fn body_parse_failure_is_typed_parse_diagnostic_with_function_context() {
+        let mut compiler = Compiler::new();
+        let source = "function main(): void { let broken = ; }\n";
+        compiler.upsert_file("body_parse.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("malformed body statement must fail parsing");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("body parse diagnostic");
+        assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
+        assert_eq!(diagnostic.path, "body_parse.stasis");
+        assert_eq!(diagnostic.symbol, "main");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "{ let broken = ; }"
+        );
+        assert!(diagnostic.message.contains("expression"));
     }
 
     #[test]
