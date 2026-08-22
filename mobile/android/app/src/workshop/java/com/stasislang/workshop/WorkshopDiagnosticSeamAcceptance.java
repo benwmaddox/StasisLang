@@ -94,10 +94,17 @@ final class WorkshopDiagnosticSeamAcceptance {
             }
             String reason = error.getMessage() == null ? error.getClass().getSimpleName()
                     : error.getMessage();
-            String output = new JSONObject().put("schema", "stasis.workshop_diagnostic_seam.v1")
-                    .put("test_id", "IT-031").put("event", "diagnostic_seam")
-                    .put("status", "failed").put("error", reason)
-                    .put("cases", cases).put("cleanup_receipt", cleanup).toString();
+            String output;
+            try {
+                output = new JSONObject().put("schema", "stasis.workshop_diagnostic_seam.v1")
+                        .put("test_id", "IT-031").put("event", "diagnostic_seam")
+                        .put("status", "failed").put("error", reason)
+                        .put("cases", cases).put("cleanup_receipt", cleanup).toString();
+            } catch (Exception serializationError) {
+                output = "{\"schema\":\"stasis.workshop_diagnostic_seam.v1\","
+                        + "\"test_id\":\"IT-031\",\"event\":\"diagnostic_seam\","
+                        + "\"status\":\"failed\",\"error\":" + JSONObject.quote(reason) + "}";
+            }
             Log.e(LOG_TAG, "Stasis Workshop IT-031: " + output);
             return output;
         }
@@ -157,7 +164,7 @@ final class WorkshopDiagnosticSeamAcceptance {
         return locationForOffset(source, start, source.length());
     }
 
-    private static JSONObject locationForOffset(String source, int start, int end) {
+    private static JSONObject locationForOffset(String source, int start, int end) throws Exception {
         int line = 1;
         int lineStart = 0;
         for (int index = 0; index < start; index++) {
