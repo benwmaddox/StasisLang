@@ -10,6 +10,8 @@ import org.json.JSONObject;
 final class WorkshopDiagnosticSeamAcceptance {
     private static final String LOG_TAG = "StasisWorkshop";
     private static final String MISSING_EXTERN = "extern function IT031_missing_extern(): void;";
+    private static final String RESOURCE_EXTERN =
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;";
 
     private WorkshopDiagnosticSeamAcceptance() {}
 
@@ -57,11 +59,10 @@ final class WorkshopDiagnosticSeamAcceptance {
             requireContext(render, null, "render", null);
             cases.put(caseEvidence(activity, "render_schema", render, renderMessage, null));
 
-            String missingResource = insertAfterInFunction(original,
+            String resourceSource = ensureGfxLoadSpriteExtern(original);
+            String missingResource = insertAfterInFunction(resourceSource,
                     "function on_code_swap(): void {", "function on_code_swap(): void {",
-                    "\n    let it031_sprite: Sprite;\n"
-                            + "    load_sprite_from(it031_sprite, "
-                            + "\"assets/IT031_missing.svg\", 32, 32);");
+                    "\n    gfx_load_sprite(\"assets/IT031_missing.svg\", 32, 32);");
             activity.acceptanceReplaceSource(projectRoot, missingResource);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "resource setup");
             String nativeResource = activity.runIt031Frame(projectRoot);
@@ -133,6 +134,105 @@ final class WorkshopDiagnosticSeamAcceptance {
         }
         int insertionPoint = anchorStart + anchor.length();
         return source.substring(0, insertionPoint) + insertion + source.substring(insertionPoint);
+    }
+
+    static String ensureGfxLoadSpriteExtern(String source) {
+        if (hasTopLevelGfxLoadSpriteDeclaration(source)) return source;
+        return RESOURCE_EXTERN + "\n" + source;
+    }
+
+    private static boolean hasTopLevelGfxLoadSpriteDeclaration(String source) {
+        String code = maskStringsAndComments(source);
+        int depth = 0;
+        boolean functionDeclaration = false;
+        int index = 0;
+        while (index < code.length()) {
+            char current = code.charAt(index);
+            if (current == '{') {
+                depth++;
+                functionDeclaration = false;
+                index++;
+                continue;
+            }
+            if (current == '}') {
+                depth = Math.max(0, depth - 1);
+                functionDeclaration = false;
+                index++;
+                continue;
+            }
+            if (current == ';') {
+                functionDeclaration = false;
+                index++;
+                continue;
+            }
+            if (!Character.isJavaIdentifierStart(current)) {
+                index++;
+                continue;
+            }
+            int end = index + 1;
+            while (end < code.length() && Character.isJavaIdentifierPart(code.charAt(end))) {
+                end++;
+            }
+            String token = code.substring(index, end);
+            if (depth == 0 && "function".equals(token)) {
+                functionDeclaration = true;
+            } else if (depth == 0 && functionDeclaration
+                    && "gfx_load_sprite".equals(token)) {
+                int after = end;
+                while (after < code.length() && Character.isWhitespace(code.charAt(after))) {
+                    after++;
+                }
+                if (after < code.length() && code.charAt(after) == '(') return true;
+            }
+            index = end;
+        }
+        return false;
+    }
+
+    private static String maskStringsAndComments(String source) {
+        char[] masked = source.toCharArray();
+        boolean inString = false;
+        boolean escaped = false;
+        boolean inLineComment = false;
+        boolean inBlockComment = false;
+        for (int index = 0; index < masked.length; index++) {
+            char current = masked[index];
+            if (inLineComment) {
+                if (current == '\n') inLineComment = false;
+                else masked[index] = ' ';
+                continue;
+            }
+            if (inBlockComment) {
+                if (current == '*' && index + 1 < masked.length && masked[index + 1] == '/') {
+                    masked[index] = ' ';
+                    masked[++index] = ' ';
+                    inBlockComment = false;
+                } else if (current != '\n') {
+                    masked[index] = ' ';
+                }
+                continue;
+            }
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (current == '\\') escaped = true;
+                else if (current == '"') inString = false;
+                if (current != '\n') masked[index] = ' ';
+                continue;
+            }
+            if (current == '/' && index + 1 < masked.length && masked[index + 1] == '/') {
+                masked[index] = ' ';
+                masked[++index] = ' ';
+                inLineComment = true;
+            } else if (current == '/' && index + 1 < masked.length && masked[index + 1] == '*') {
+                masked[index] = ' ';
+                masked[++index] = ' ';
+                inBlockComment = true;
+            } else if (current == '"') {
+                masked[index] = ' ';
+                inString = true;
+            }
+        }
+        return new String(masked);
     }
 
     static String insertBeforeFunctionAnchor(String source, String declaration, String anchor,
