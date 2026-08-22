@@ -54,6 +54,42 @@ Stasis Workshop IT-028: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-02
 Stasis Workshop IT-031: {"schema":"stasis.workshop_diagnostic_seam.v1","test_id":"IT-031","event":"diagnostic_seam","status":"passed","ordered":true,"cases":[{"name":"parse","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"parse","code":"stasis.parse","context":{"file":"src/main.stasis"},"detail":"parse detail","causes":["parse phase","parse detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"parse","code":"stasis.parse","context":{"file":"src/main.stasis"},"detail":"parse detail","causes":["parse phase","parse detail"]}},{"name":"extern_resolution","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"extern_resolution","code":"stasis.unresolvedExtern","context":{"file":"src/main.stasis","symbol":"IT031_missing_extern"},"detail":"extern detail","causes":["extern_resolution phase","extern detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"extern_resolution","code":"stasis.unresolvedExtern","context":{"file":"src/main.stasis","symbol":"IT031_missing_extern"},"detail":"extern detail","causes":["extern_resolution phase","extern detail"]}},{"name":"runtime_entry","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"runtime_entry","code":"stasis.runtimeEntry","context":{"symbol":"tick"},"detail":"runtime detail","causes":["runtime_entry phase","runtime detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"runtime_entry","code":"stasis.runtimeEntry","context":{"symbol":"tick"},"detail":"runtime detail","causes":["runtime_entry phase","runtime detail"]}},{"name":"render_schema","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"render_schema","code":"stasis.renderSchema","context":{"symbol":"render"},"detail":"render detail","causes":["render_schema phase","render detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"render_schema","code":"stasis.renderSchema","context":{"symbol":"render"},"detail":"render detail","causes":["render_schema phase","render detail"]}},{"name":"missing_resource","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"resource","code":"stasis.missingResource","context":{"resource":"assets/IT031_missing.svg"},"detail":"resource detail","causes":["resource phase","resource detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"resource","code":"stasis.missingResource","context":{"resource":"assets/IT031_missing.svg"},"detail":"resource detail","causes":["resource phase","resource detail"]}}],"cleanup_receipt":{"status":"Restored","compile":"CompileReady: status=0","frame":"passed","source_fingerprint":"1111111111111111","baseline_source_fingerprint":"1111111111111111","generation":3,"baseline_generation":3,"ui":{"blocking_error_visible":false,"status_healthy":true,"compile_ready":true,"compile_attempted":true,"game_runtime_active":true,"displayed_status":"Game updated - hot swapped"}}}
 """
 
+# Keep the fixture's IT-031 case evidence in separate bounded log records, as
+# the Android logcat line limit cannot carry five duplicated full cases.
+_full_it031_line = next(line for line in GOOD.splitlines()
+                        if line.startswith("Stasis Workshop IT-031: "))
+_full_it031_marker = json.loads(_full_it031_line.split(": ", 1)[1])
+_it031_cases = _full_it031_marker.pop("cases")
+for _case in _it031_cases:
+    _case["test_id"] = "IT-031"
+_it031_cases[0]["location"] = {
+    "expected": {"line": 3, "column": 1, "end_line": 4, "end_column": 1},
+    "actual": {"line": 3, "column": 1, "end_line": 4, "end_column": 1}}
+_full_it031_marker["case_count"] = len(_it031_cases)
+_full_it031_marker["case_names"] = [case["name"] for case in _it031_cases]
+_it031_case_lines = "\n".join(
+    "Stasis Workshop IT-031 case: " + json.dumps(case, separators=(",", ":"))
+    for case in _it031_cases)
+GOOD = GOOD.replace(
+    _full_it031_line,
+    _it031_case_lines + "\nStasis Workshop IT-031: "
+    + json.dumps(_full_it031_marker, separators=(",", ":")))
+
+
+def _it031_log(marker: dict) -> str:
+    cases = marker.get("cases", [])
+    cases = [dict(case, test_id="IT-031") for case in cases]
+    compact = {key: value for key, value in marker.items() if key != "cases"}
+    compact["case_count"] = len(cases)
+    compact["case_names"] = [case.get("name") for case in cases]
+    case_lines = "\n".join(
+        "Stasis Workshop IT-031 case: " + json.dumps(case, separators=(",", ":"))
+        for case in cases)
+    prefix = GOOD.split("Stasis Workshop IT-031 case:", 1)[0]
+    return prefix + case_lines + "\nStasis Workshop IT-031: " \
+        + json.dumps(compact, separators=(",", ":"))
+
+
 # A successful cleanup publication advances the live runtime generation while
 # restoring the original source fingerprint.
 GOOD = GOOD.replace('"generation":3,"baseline_generation":3',
@@ -110,8 +146,7 @@ class WorkshopSeamTests(unittest.TestCase):
         marker = {"schema": "stasis.workshop_diagnostic_seam.v1", "test_id": "IT-031",
                   "event": "diagnostic_seam", "status": "passed", "ordered": True,
                   "cases": cases, "cleanup_receipt": {"status": "Restored", "compile": "CompileReady: status=0", "frame": "passed", "source_fingerprint": "1111111111111111", "baseline_source_fingerprint": "1111111111111111", "generation": 4, "baseline_generation": 3, "ui": {"blocking_error_visible": False, "status_healthy": True, "compile_ready": True, "compile_attempted": True, "game_runtime_active": True, "displayed_status": "Game updated - hot swapped"}}}
-        result = verify_log(GOOD.split("Stasis Workshop IT-031:", 1)[0]
-                            + "Stasis Workshop IT-031: " + json.dumps(marker), MANIFEST)
+        result = verify_log(_it031_log(marker), MANIFEST)
         self.assertEqual(result["it031"]["test_id"], "IT-031")
 
     def test_rejects_it031_changed_java_detail(self):
@@ -145,12 +180,35 @@ class WorkshopSeamTests(unittest.TestCase):
                   "event": "diagnostic_seam", "status": "passed", "ordered": True,
                   "cases": cases, "cleanup_receipt": {"status": "Restored", "compile": "CompileReady: status=0", "frame": "passed", "source_fingerprint": "1111111111111111", "baseline_source_fingerprint": "1111111111111111", "generation": 4, "baseline_generation": 3, "ui": {"blocking_error_visible": False, "status_healthy": True, "compile_ready": True, "compile_attempted": True, "game_runtime_active": True, "displayed_status": "Game updated - hot swapped"}}}
         with self.assertRaisesRegex(SeamError, "changed between native and UI"):
-            verify_log(GOOD.split("Stasis Workshop IT-031:", 1)[0]
-                       + "Stasis Workshop IT-031: " + json.dumps(marker), MANIFEST)
+            verify_log(_it031_log(marker), MANIFEST)
 
     def test_rejects_missing_it031_marker(self):
         with self.assertRaisesRegex(SeamError, "IT-031"):
-            verify_log(GOOD.split("Stasis Workshop IT-031:", 1)[0], MANIFEST)
+            verify_log(GOOD.split("Stasis Workshop IT-031 case:", 1)[0], MANIFEST)
+
+    def test_rejects_missing_it031_case_marker(self):
+        case = next(line for line in GOOD.splitlines() if "IT-031 case" in line)
+        with self.assertRaisesRegex(SeamError, "exactly 5 IT-031 cases"):
+            verify_log(GOOD.replace(case + "\n", "", 1), MANIFEST)
+
+    def test_rejects_it031_case_order_change(self):
+        cases = [line for line in GOOD.splitlines() if "IT-031 case" in line]
+        swapped = GOOD.replace(cases[0] + "\n" + cases[1],
+                               cases[1] + "\n" + cases[0], 1)
+        with self.assertRaisesRegex(SeamError, "ordered native cases"):
+            verify_log(swapped, MANIFEST)
+
+    def test_rejects_truncated_it031_summary(self):
+        summary = next(line for line in GOOD.splitlines()
+                       if line.startswith("Stasis Workshop IT-031: "))
+        with self.assertRaisesRegex(SeamError, "IT-031"):
+            verify_log(GOOD.replace(summary, summary[:-1], 1), MANIFEST)
+
+    def test_rejects_malformed_it031_case_record(self):
+        case = next(line for line in GOOD.splitlines() if "IT-031 case" in line)
+        malformed = case.rsplit("}", 1)[0]
+        with self.assertRaisesRegex(SeamError, "invalid IT-031 case JSON|exactly 5 IT-031 cases"):
+            verify_log(GOOD.replace(case, malformed, 1), MANIFEST)
 
     def test_rejects_reversed_causes_and_generic_fallback(self):
         reversed_causes = GOOD.replace(
@@ -369,8 +427,10 @@ class WorkshopSeamTests(unittest.TestCase):
 
     def test_rejects_extra_or_unrelated_it028_raw_compile_error(self):
         raw = next(line for line in GOOD.splitlines() if line.startswith("CompileError: "))
+        summary = next(line for line in GOOD.splitlines()
+                       if line.startswith("Stasis Workshop IT-028: "))
         with self.assertRaisesRegex(SeamError, "exactly one raw CompileError"):
-            verify_log(GOOD + "\n" + raw, MANIFEST)
+            verify_log(GOOD.replace(summary, raw + "\n" + summary, 1), MANIFEST)
         with self.assertRaisesRegex(SeamError, "truncated|mismatched|out of order"):
             verify_log(GOOD.replace(raw, "CompileError: unrelated failure", 1), MANIFEST)
 
@@ -434,6 +494,13 @@ class WorkshopSeamTests(unittest.TestCase):
     def test_rejects_it028_cleanup_failure(self):
         with self.assertRaisesRegex(SeamError, "forbidden"):
             verify_log(GOOD + "\nIT-028 cleanup failed: StateError: unavailable\n", MANIFEST)
+
+    def test_it028_ignores_later_it031_compile_errors_and_summary_text(self):
+        later = GOOD.replace('"displayed_text":"resource detail"',
+                             '"displayed_text":"CompileError: resource detail"', 1)
+        later += "\nCompileError: src/main.stasis: later IT-031 resource failure\n"
+        result = verify_log(later, MANIFEST)
+        self.assertEqual(result["it028"]["test_id"], "IT-028")
 
 
 if __name__ == "__main__":

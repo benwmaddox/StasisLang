@@ -28,6 +28,7 @@ TOUCH_PRESENT = re.compile(r"Stasis Workshop IT-027 GLES: (\{[^\r\n]+\})")
 HOT_EDIT_MARKER = re.compile(r"Stasis Workshop IT-028: (\{[^\r\n]+\})")
 HOT_EDIT_CASE_MARKER = re.compile(r"Stasis Workshop IT-028 case: (\{[^\r\n]+\})")
 HOT_EDIT_PRESENT = re.compile(r"Stasis Workshop IT-028 GLES: (\{[^\r\n]+\})")
+DIAGNOSTIC_CASE_MARKER = re.compile(r"Stasis Workshop IT-031 case: (\{[^\r\n]+\})")
 DIAGNOSTIC_MARKER = re.compile(r"Stasis Workshop IT-031: (\{[^\r\n]+\})")
 COMPILE_ERROR_LINE = re.compile(r"^[^\r\n]*CompileError[^\r\n]*\r?$", re.MULTILINE)
 RAW_COMPILE_ERROR_LINE = re.compile(
@@ -241,7 +242,11 @@ def verify_it028(log: str, after_position: int) -> dict:
         + [(case_positions[index], "case") for index in range(3)])
     if [kind for _, kind in interleaved] != ["present", "case"] * 3:
         raise SeamError("IT-028 GLES and case evidence is not strictly interleaved")
-    raw_compile_error_lines = list(COMPILE_ERROR_LINE.finditer(log))
+    # IT-031 deliberately emits later runtime/resource failures and includes
+    # displayed diagnostic text in its JSON summary. Only IT-028's own evidence
+    # window may satisfy the exact raw compile-error proof.
+    raw_compile_error_lines = list(COMPILE_ERROR_LINE.finditer(
+        log, after_position, summary_match.start()))
     if len(raw_compile_error_lines) != 1:
         raise SeamError(
             f"expected exactly one raw CompileError line, found {len(raw_compile_error_lines)}"
@@ -280,12 +285,17 @@ def verify_it031(log: str, after_position: int) -> dict | None:
     marker_match, marker = markers[0]
     if marker_match.start() <= after_position:
         raise SeamError("IT-031 summary must follow IT-028")
+    case_markers = _json_markers(DIAGNOSTIC_CASE_MARKER, log, "IT-031 case", "IT-031")
+    if len(case_markers) != 5:
+        raise SeamError(f"expected exactly 5 IT-031 cases, found {len(case_markers)}")
+    if any(match.start() <= after_position or match.start() >= marker_match.start()
+           for match, _ in case_markers):
+        raise SeamError("IT-031 cases must follow IT-028 and precede its summary")
     if (marker.get("schema"), marker.get("test_id"), marker.get("event"),
             marker.get("status"), marker.get("ordered")) != (
                 "stasis.workshop_diagnostic_seam.v1", "IT-031", "diagnostic_seam",
                 "passed", True):
         raise SeamError("IT-031 marker does not report an ordered native diagnostic seam")
-    cases = marker.get("cases")
     expected = [
         ("parse", "parse", "stasis.parse"),
         ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
@@ -293,9 +303,12 @@ def verify_it031(log: str, after_position: int) -> dict | None:
         ("render_schema", "render_schema", "stasis.renderSchema"),
         ("missing_resource", "resource", "stasis.missingResource"),
     ]
-    if not isinstance(cases, list) or len(cases) != len(expected):
+    case_names = [case.get("name") for _, case in case_markers]
+    if marker.get("case_count") != len(expected) \
+            or marker.get("case_names") != [name for name, _, _ in expected] \
+            or case_names != [name for name, _, _ in expected]:
         raise SeamError("IT-031 must contain exactly five ordered native cases")
-    for case, (name, stage, code) in zip(cases, expected):
+    for (_, case), (name, stage, code) in zip(case_markers, expected):
         if not isinstance(case, dict) or case.get("name") != name or case.get("equal") is not True:
             raise SeamError(f"IT-031 case {name} is missing native/UI equality evidence")
         native = case.get("native")

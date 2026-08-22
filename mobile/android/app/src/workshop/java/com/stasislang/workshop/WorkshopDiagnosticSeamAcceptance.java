@@ -76,7 +76,12 @@ final class WorkshopDiagnosticSeamAcceptance {
                     .put("test_id", "IT-031").put("event", "diagnostic_seam")
                     .put("status", "passed").put("ordered", true).put("cases", cases)
                     .put("cleanup_receipt", cleanup);
-            Log.i(LOG_TAG, "Stasis Workshop IT-031: " + result);
+            JSONObject summary = new JSONObject().put("schema", "stasis.workshop_diagnostic_seam.v1")
+                    .put("test_id", "IT-031").put("event", "diagnostic_seam")
+                    .put("status", "passed").put("ordered", true)
+                    .put("case_count", cases.length()).put("case_names", caseNames(cases))
+                    .put("cleanup_receipt", cleanup);
+            Log.i(LOG_TAG, "Stasis Workshop IT-031: " + summary);
             return result.toString();
         } catch (Exception error) {
             JSONObject cleanup = new JSONObject();
@@ -93,7 +98,8 @@ final class WorkshopDiagnosticSeamAcceptance {
                 output = new JSONObject().put("schema", "stasis.workshop_diagnostic_seam.v1")
                         .put("test_id", "IT-031").put("event", "diagnostic_seam")
                         .put("status", "failed").put("error", reason)
-                        .put("cases", cases).put("cleanup_receipt", cleanup).toString();
+                        .put("case_count", cases.length()).put("case_names", caseNames(cases))
+                        .put("cleanup_receipt", cleanup).toString();
             } catch (Exception serializationError) {
                 output = "{\"schema\":\"stasis.workshop_diagnostic_seam.v1\","
                         + "\"test_id\":\"IT-031\",\"event\":\"diagnostic_seam\","
@@ -323,7 +329,8 @@ final class WorkshopDiagnosticSeamAcceptance {
         if (nativeDiagnostic.detail == null || !displayedText.contains(nativeDiagnostic.detail)) {
             throw new IllegalStateException(name + " UI display lost native detail");
         }
-        JSONObject evidence = new JSONObject().put("name", name)
+        JSONObject evidence = new JSONObject().put("test_id", "IT-031")
+                .put("name", name)
                 .put("native", nativeDiagnostic.toJson())
                 .put("ui", uiDiagnostic.toJson()).put("displayed_text", displayedText)
                 .put("equal", true);
@@ -336,7 +343,17 @@ final class WorkshopDiagnosticSeamAcceptance {
             evidence.put("location", new JSONObject().put("expected", expectedLocation)
                     .put("actual", actualLocation));
         }
+        Log.i(LOG_TAG, "Stasis Workshop IT-031 case: " + evidence);
         return evidence;
+    }
+
+    private static JSONArray caseNames(JSONArray cases) throws Exception {
+        JSONArray names = new JSONArray();
+        for (int index = 0; index < cases.length(); index++) {
+            JSONObject evidence = cases.optJSONObject(index);
+            if (evidence != null) names.put(evidence.optString("name", ""));
+        }
+        return names;
     }
 
     private static JSONObject expectedParseLocation(String source) throws Exception {
