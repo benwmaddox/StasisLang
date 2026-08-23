@@ -3357,6 +3357,13 @@ mod tests {
         let unused_path = root.join("src/unused.stasis");
         let unused_source = include_str!("../../../vscode-stasis/test/fixture/src/unused.stasis");
         fs::write(&unused_path, unused_source).expect("fixture unused source");
+        // The VS Code formatter opens a workspace-root document before asking
+        // for the import quick fix.  Keep the same unrelated global here: it
+        // must not shadow the f32 locals/parameters in the materialized stdlib.
+        let format_path = root.join(format!("format-input-{}.stasis", std::process::id()));
+        let format_path_text = format_path.to_string_lossy().replace('\\', "/");
+        let format_source = "global value: i32;\n";
+        fs::write(&format_path, format_source).expect("fixture formatter source");
         let toolchain_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
         let mut toolchain_documents = Vec::new();
         for directory in ["", "internal", "testing"] {
@@ -3392,6 +3399,7 @@ mod tests {
             unused_path.to_string_lossy().replace('\\', "/"),
             unused_source,
         );
+        service.set_disk_document(format_path_text, format_source);
         for (path, source) in toolchain_documents {
             service.set_disk_document(path, source);
         }

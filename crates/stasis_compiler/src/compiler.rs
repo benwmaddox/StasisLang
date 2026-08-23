@@ -3037,6 +3037,39 @@ function @effects(state) tick(): i32 { left(state); return 0; }
     }
 
     #[test]
+    fn local_and_parameter_types_shadow_same_named_globals_in_data_flow_validation() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "shadowing.stasis",
+            r#"
+global value: i32;
+
+function parameter_value(value: f32): f32 {
+    return value + 1.0;
+}
+
+function local_value(): f32 {
+    let value: f32[2];
+    value[0] = 1.0;
+    return value[0];
+}
+
+function global_value(): i32 {
+    return value;
+}
+
+function main(): i32 {
+    return global_value() + f32_to_i32(parameter_value(2.0) + local_value());
+}
+"#,
+        );
+
+        compiler
+            .check()
+            .expect("locals and parameters must shadow same-named globals");
+    }
+
+    #[test]
     fn data_flow_resolves_overloads_with_nested_intrinsic_arguments() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
