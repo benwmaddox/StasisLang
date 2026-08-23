@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "stasis_performance_metrics.h"
+#include "stasis_mobile_aot_runtime.h"
 
 void stasis_host_get_latest_performance_metrics(uint32_t *tick_us, uint32_t *render_us);
 int stasis_host_get_latest_performance_metrics_v1(
@@ -53,6 +54,23 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetAssetRoot(
     }
     setenv("STASIS_ASSET_ROOT", root, 1);
     (*env)->ReleaseStringUTFChars(env, path, root);
+}
+
+/* The join URL is deliberately a native-shell-only read.  It contains the
+ * pairing secret and must never enter Stasis globals, deterministic frames,
+ * logs, or the packaged guest. */
+JNIEXPORT jstring JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeReadNetworkJoinUrl(
+    JNIEnv *env,
+    jclass activity
+) {
+    (void)activity;
+    char url[2048];
+    int32_t length = stasis_mobile_network_copy_join_url(url, sizeof(url));
+    if (length <= 0 || (size_t)length >= sizeof(url)) {
+        return NULL;
+    }
+    return (*env)->NewStringUTF(env, url);
 }
 
 JNIEXPORT jboolean JNICALL

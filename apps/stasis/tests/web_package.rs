@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+use stasis_network::StaticBundle;
+
 const CONTINUE_LOOP_PARITY: &str =
     include_str!("../../../tests/stasis/seams/continue_loop_parity.stasis");
 const ROOTED_WEB_ASSET: &str = "/assets/smoke.svg";
@@ -519,6 +522,86 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     assert!(!output.join("web_export_smoke.html").exists());
 
     fs::remove_dir_all(&output).expect("clean web package test output");
+}
+
+#[test]
+fn network_web_package_embeds_retained_nested_assets_only() {
+    let root = repo_root();
+    let source = root.join("samples/windows_launch_smoke");
+    let workspace = root.join(format!("build/network-bundle-fixture-{}", stamp()));
+    copy_tree(&source, &workspace);
+
+    fs::create_dir_all(workspace.join("assets/fonts")).expect("create nested font directory");
+    fs::copy(
+        workspace.join("assets/smoke.ttf"),
+        workspace.join("assets/fonts/ui.ttf"),
+    )
+    .expect("copy retained font fixture");
+    let source_path = workspace.join("main.stasis");
+    let source_text = fs::read_to_string(&source_path)
+        .expect("read network fixture source")
+        .replace("assets/smoke.ttf", "assets/fonts/ui.ttf");
+    assert!(source_text.contains("load_font(\"assets/fonts/ui.ttf\""));
+    fs::write(&source_path, source_text).expect("rewrite retained font path");
+
+    let unused_path = workspace.join("assets/fonts/unused.ttf");
+    fs::copy(workspace.join("assets/smoke.ttf"), &unused_path).expect("copy unused font fixture");
+    let unused = fs::read(&unused_path).expect("read unused font fixture");
+    let manifest_path = workspace.join("assets/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read fixture asset manifest"))
+            .expect("parse fixture asset manifest");
+    let assets = manifest["assets"].as_array_mut().expect("asset entries");
+    assets
+        .iter_mut()
+        .find(|asset| asset["id"] == "smoke_font")
+        .expect("font entry")["path"] = serde_json::Value::String("assets/fonts/ui.ttf".into());
+    assets.push(serde_json::json!({
+        "id": "unused_asset",
+        "path": "assets/fonts/unused.ttf",
+        "content_sha256": format!("{:x}", Sha256::digest(&unused)),
+        "format": {"kind": "font", "encoding": "ttf"},
+        "dependencies": []
+    }));
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("encode fixture asset manifest"),
+    )
+    .expect("write fixture asset manifest");
+
+    let mut project: serde_json::Value = serde_json::from_slice(
+        &fs::read(workspace.join("stasis.json")).expect("read fixture project manifest"),
+    )
+    .expect("parse fixture project manifest");
+    project["capabilities"] = serde_json::json!({"network": true});
+    project["web"] = serde_json::json!({"entry": "main.stasis"});
+    fs::write(
+        workspace.join("stasis.json"),
+        serde_json::to_vec_pretty(&project).expect("encode fixture project manifest"),
+    )
+    .expect("write fixture project manifest");
+
+    let relative_output = PathBuf::from(format!("build/network-bundle-output-{}", stamp()));
+    let output = package(&workspace, &relative_output);
+    let bundle = StaticBundle::decode(
+        &fs::read(output.join("network_guest.bundle")).expect("read network guest bundle"),
+    )
+    .expect("decode network guest bundle");
+    for core in ["index.html", "game.js", "game.wasm"] {
+        assert!(
+            bundle.get(core).is_some(),
+            "missing core bundle file {core}"
+        );
+    }
+    let expected_font = fs::read(output.join("assets/fonts/ui.ttf")).expect("read staged font");
+    let font = bundle
+        .get("assets/fonts/ui.ttf")
+        .expect("retained nested font");
+    assert_eq!(font.mime, "font/ttf");
+    assert_eq!(font.bytes, expected_font);
+    assert!(bundle.get("assets/fonts/unused.ttf").is_none());
+
+    fs::remove_dir_all(&workspace).expect("clean network fixture");
 }
 
 #[test]
