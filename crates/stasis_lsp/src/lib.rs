@@ -54,8 +54,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use stasis_language_service::{
     CompletionResolveData, DiagnosticSeverity, Document, HoverInfo, LanguageCompletionItem,
-    LanguageHierarchyItem, LanguageHierarchyKind, LanguageInlayHintKind, LanguageLocation,
-    LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
+    LanguageDiagnosticOrigin, LanguageHierarchyItem, LanguageHierarchyKind, LanguageInlayHintKind,
+    LanguageLocation, LanguageService, LanguageSymbol, LanguageSymbolKind, Position,
     SignatureHelp as SharedSignatureHelp, TextChange, WorkspaceRevision,
 };
 use url::Url;
@@ -1145,10 +1145,13 @@ impl LanguageServer {
                 let diagnostics = if let Some(code) = action.diagnostic_code.as_ref() {
                     if request_diagnostics.is_empty() {
                         // VS Code may omit the diagnostics it is requesting actions for.
-                        // Keep an action only when its current-document edit is relevant to
-                        // the requested range, but do not claim an association we cannot
-                        // establish from the request context.
+                        // Keep an action only when its originating diagnostic is relevant to
+                        // the requested document/range, but do not claim an association we
+                        // cannot establish from the request context.
                         let action_touches_request = {
+                            let Some(origin) = action.diagnostic_origin.as_ref() else {
+                                return Ok(None);
+                            };
                             let snapshot = self.service.snapshot();
                             let document = snapshot.document(&path).ok_or_else(|| {
                                 format!("code-action document is not indexed: '{path}'")
@@ -1167,9 +1170,10 @@ impl LanguageServer {
                                         .map(|end| start..end)
                                 })
                                 .map_err(|error| error.to_string())?;
-                            action.edits.iter().any(|edit| {
-                                edit.path == path && ranges_touch(&edit.range, &requested)
-                            })
+                            // Do not infer provenance from edit targets: a valid fix may
+                            // edit multiple documents, and an unrelated file-wide edit must
+                            // not make it eligible for this request.
+                            diagnostic_origin_touches_request(origin, &path, &requested)
                         };
                         if !action_touches_request {
                             return Ok(None);
@@ -1797,6 +1801,14 @@ fn ranges_touch(left: &std::ops::Range<usize>, right: &std::ops::Range<usize>) -
         && right.start <= left.end
 }
 
+fn diagnostic_origin_touches_request(
+    origin: &LanguageDiagnosticOrigin,
+    path: &str,
+    requested: &std::ops::Range<usize>,
+) -> bool {
+    origin.path == path && ranges_touch(&origin.range, requested)
+}
+
 fn lsp_selection_range(
     document: &Document,
     ranges: Vec<std::ops::Range<usize>>,
@@ -2225,6 +2237,25 @@ mod tests {
         assert_eq!(action.title, "Remove unresolved import 'missing'");
         assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
         assert!(action.diagnostics.is_none());
+    }
+
+    #[test]
+    fn diagnostic_origin_filter_requires_requested_document_not_edit_target() {
+        let requested = 7..23;
+        let origin = LanguageDiagnosticOrigin {
+            path: "project/src/main.stasis".to_string(),
+            range: 7..23,
+        };
+        assert!(diagnostic_origin_touches_request(
+            &origin,
+            "project/src/main.stasis",
+            &requested
+        ));
+        assert!(!diagnostic_origin_touches_request(
+            &origin,
+            "project/src/helper.stasis",
+            &requested
+        ));
     }
 
     #[test]

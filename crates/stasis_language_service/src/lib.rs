@@ -576,11 +576,18 @@ pub struct RenamePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageDiagnosticOrigin {
+    pub path: String,
+    pub range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageCodeAction {
     pub title: String,
     pub kind: String,
     pub preferred: bool,
     pub diagnostic_code: Option<String>,
+    pub diagnostic_origin: Option<LanguageDiagnosticOrigin>,
     pub edits: Vec<RenameEdit>,
 }
 
@@ -1522,6 +1529,7 @@ impl LanguageService {
             kind: "source.organizeImports".to_string(),
             preferred: true,
             diagnostic_code: None,
+            diagnostic_origin: None,
             edits: vec![RenameEdit {
                 path: absolute_source_path(&project_root, &change.file),
                 range: 0..change.before_source.len(),
@@ -1767,6 +1775,10 @@ impl LanguageService {
                 kind: "quickfix".to_string(),
                 preferred: true,
                 diagnostic_code: Some(diagnostic.code.as_str().to_string()),
+                diagnostic_origin: Some(LanguageDiagnosticOrigin {
+                    path: published.path.clone(),
+                    range: diagnostic.start..diagnostic.end,
+                }),
                 edits: fix
                     .edits
                     .into_iter()
@@ -3637,6 +3649,7 @@ function main(): i32 {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "source.organizeImports");
         assert!(actions[0].preferred);
+        assert!(actions[0].diagnostic_origin.is_none());
         assert_eq!(actions[0].edits[0].range, 0..source.len());
         assert_eq!(
             actions[0].edits[0].new_text,
@@ -3674,6 +3687,13 @@ function main(): i32 {
         assert_eq!(
             actions[0].diagnostic_code.as_deref(),
             Some("stasis.missingModule")
+        );
+        assert_eq!(
+            actions[0].diagnostic_origin,
+            Some(LanguageDiagnosticOrigin {
+                path: main_text.clone(),
+                range: 7..23,
+            })
         );
         assert_eq!(
             &source[actions[0].edits[0].range.clone()],
