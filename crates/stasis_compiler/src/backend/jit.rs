@@ -1,6 +1,6 @@
 use crate::backend::emit::{
-    debug_variable_slot, CompileAnalysisCache, DirectStorageBinding, DirectStorageBindings,
-    RuntimeHelperLinkage,
+    debug_variable_slot, resolve_extern_call_signatures_with_index, CompileAnalysisCache,
+    DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage,
 };
 use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReason,
@@ -810,7 +810,21 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
             let (resolved_extern_signatures, extern_symbol_addresses) = self
                 .resolve_extern_call_signatures(&extern_signatures)
-                .map_err(crate::compiler::CompileError::Backend)?;
+                .map_err(|(index, error)| {
+                    if let Some(signature) = extern_signatures.get(index) {
+                        self.compiler.set_external_source_diagnostic(
+                            crate::SourceDiagnostic::new(
+                                signature.source_path.clone(),
+                                signature.source_start,
+                                signature.source_end,
+                                signature.name.clone(),
+                                error.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::UnresolvedExtern),
+                        );
+                    }
+                    crate::compiler::CompileError::Backend(error)
+                })?;
             let next_cache = build_compile_analysis_cache_from_resolved_externs(
                 self.compiler.files(),
                 self.compiler.functions(),
@@ -2274,8 +2288,8 @@ impl JitProcess {
     fn resolve_extern_call_signatures(
         &mut self,
         extern_signatures: &[ExternCallSignature],
-    ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
-        resolve_extern_call_signatures_with(extern_signatures, |_signature, candidate| {
+    ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), (usize, String)> {
+        resolve_extern_call_signatures_with_index(extern_signatures, |_signature, candidate| {
             self.resolve_host_symbol_address(candidate)
         })
     }

@@ -136,6 +136,18 @@ contains device/build identity, stage percentiles, logcat, and pixel captures.
 See `docs/android_preview_render_performance.md` for the baseline and ownership
 of the hardware-normalized limits.
 
+The Workshop render-acceptance build runs IT-031 immediately after IT-028. It
+mutates the real packaged source through five ordered cases (parse,
+extern-resolution, runtime-entry, render-schema, and missing-resource), then
+parses the versioned `stasis.native_diagnostic.v1` envelope in Java. Each case
+records the native and UI objects, stable stage/code, available file/symbol or
+resource context, detail, and outer-to-inner causes. The C JNI shim forwards
+the complete Rust string; it does not replace a detailed payload with
+`native preview frame failed`. The acceptance runner restores the exact
+packaged source in a `finally`-equivalent cleanup and requires a final healthy
+native frame before reporting pass. The bounded verifier requires the IT-031
+marker and rejects evidence that omits any ordered case or cleanup receipt.
+
 ## Hosted release-shell emulator
 
 The `Android Emulator Seams` GitHub Actions workflow provisions two isolated

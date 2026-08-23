@@ -218,6 +218,25 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
 
     def test_workshop_it025_isolated_from_release_shells(self):
         self.assertIn("[int]$StepTimeoutSeconds = 300", self.workshop_script)
+
+    def test_workshop_fatal_scan_delegates_only_valid_it031_case_records(self):
+        self.assertIn("ConvertFrom-Json -ErrorAction Stop", self.workshop_script)
+        self.assertIn('$case.test_id -eq "IT-031"', self.workshop_script)
+        self.assertIn("$null -ne $case.native", self.workshop_script)
+        self.assertIn("$null -ne $case.ui", self.workshop_script)
+        self.assertIn("$markerIndex = $line.IndexOf($markerText)", self.workshop_script)
+        self.assertIn("$line = $line.Remove($markerIndex, $markerText.Length)", self.workshop_script)
+        self.assertIn("$fatalScanLog | Select-String -SimpleMatch $fatalPatterns", self.workshop_script)
+        self.assertIn("Leave malformed case lines in the fatal scan", self.workshop_script)
+
+    def test_workshop_fatal_scan_retains_ambient_prefix_before_case_record(self):
+        self.assertIn('"Render resource error"', self.workshop_script)
+        self.assertIn('"resource restore failed"', self.workshop_script)
+        self.assertIn("Stasis Workshop IT-031 case:\\s+(\\{.*\\})\\s*$", self.workshop_script)
+        self.assertIn("$line = $_", self.workshop_script)
+        self.assertIn("$markerIndex = $line.IndexOf($markerText)", self.workshop_script)
+        self.assertIn("$line = $line.Remove($markerIndex, $markerText.Length)", self.workshop_script)
+        self.assertIn("$line\n    })", self.workshop_script)
         self.assertIn("[math]::Min($StepTimeoutSeconds, $remainingSeconds)", self.workshop_script)
         self.assertIn("verify_android_workshop_seam.py", self.workshop_script)
         self.assertIn('Join-Path (Join-Path (Join-Path $repoRoot "artifacts") "android_workshop_seam") "e"', self.workshop_script)

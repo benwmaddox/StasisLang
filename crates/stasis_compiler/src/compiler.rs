@@ -7,7 +7,7 @@ use crate::data_flow::{
     validate_program_semantics, CompilerLocalType, FunctionDataFlowSummary,
 };
 use crate::frontend::body_parser::parse_simple_statements_with_debug;
-use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
+use crate::frontend::indexer::{hash_text, index_file_with_diagnostic, IndexedCallDependency};
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
@@ -596,20 +596,24 @@ impl Compiler {
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
-            let indexed = match index_file(&self.files[file_id].content, &mut self.types) {
-                Ok(indexed) => indexed,
-                Err(message) => {
-                    let file = &self.files[file_id];
-                    self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                        file.path.clone(),
-                        0,
-                        file.content.len(),
-                        "",
-                        message.clone(),
-                    ));
-                    return Err(CompileError::Frontend(message));
-                }
-            };
+            let indexed =
+                match index_file_with_diagnostic(&self.files[file_id].content, &mut self.types) {
+                    Ok(indexed) => indexed,
+                    Err(diagnostic) => {
+                        let file = &self.files[file_id];
+                        self.last_source_diagnostic = Some(
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                diagnostic.start,
+                                diagnostic.end,
+                                diagnostic.symbol,
+                                diagnostic.message.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                        );
+                        return Err(CompileError::Frontend(diagnostic.message));
+                    }
+                };
             self.files[file_id].functions.clear();
             for indexed_function in indexed {
                 let storage_index = self.functions.len() as FunctionStorageIndex;
@@ -827,13 +831,16 @@ impl Compiler {
                 let artifacts = match parse_simple_statements_with_debug(body, &mut self.types) {
                     Ok(artifacts) => artifacts,
                     Err(message) => {
-                        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                            file.path.clone(),
-                            function.source_range.start as usize,
-                            function.source_range.end as usize,
-                            function.name.clone(),
-                            message.clone(),
-                        ));
+                        self.last_source_diagnostic = Some(
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                function.source_range.start as usize,
+                                function.source_range.end as usize,
+                                function.name.clone(),
+                                message.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                        );
                         return Err(CompileError::Backend(message));
                     }
                 };
@@ -1090,6 +1097,10 @@ impl Compiler {
 
     pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
         self.last_source_diagnostic.as_ref()
+    }
+
+    pub(crate) fn set_external_source_diagnostic(&mut self, diagnostic: crate::SourceDiagnostic) {
+        self.last_source_diagnostic = Some(diagnostic);
     }
 
     fn record_function_diagnostic(&mut self, function: &FunctionMeta, message: &str) {
@@ -2917,6 +2928,28 @@ function unfinished(): void { continue; }
             .last_source_diagnostic()
             .expect("structured unreachable-function diagnostic");
         assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
+    fn body_parse_failure_is_typed_parse_diagnostic_with_function_context() {
+        let mut compiler = Compiler::new();
+        let source = "function main(): void { let broken = ; }\n";
+        compiler.upsert_file("body_parse.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("malformed body statement must fail parsing");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("body parse diagnostic");
+        assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
+        assert_eq!(diagnostic.path, "body_parse.stasis");
+        assert_eq!(diagnostic.symbol, "main");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "{ let broken = ; }"
+        );
+        assert!(diagnostic.message.contains("expression"));
     }
 
     #[test]

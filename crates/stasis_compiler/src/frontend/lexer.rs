@@ -22,7 +22,17 @@ pub struct Token {
     pub end: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LexerDiagnostic {
+    pub message: String,
+    pub offset: usize,
+}
+
 pub fn lex(source: &str) -> Result<Vec<Token>, String> {
+    lex_with_diagnostic(source).map_err(|error| error.message)
+}
+
+pub fn lex_with_diagnostic(source: &str) -> Result<Vec<Token>, LexerDiagnostic> {
     let bytes = source.as_bytes();
     let mut tokens = Vec::new();
     let mut i = 0usize;
@@ -56,7 +66,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             if !closed {
-                return Err("unterminated string literal".to_string());
+                return Err(LexerDiagnostic {
+                    message: "unterminated string literal".to_string(),
+                    offset: start,
+                });
             }
             tokens.push(Token {
                 kind: TokenKind::StringLiteral,
