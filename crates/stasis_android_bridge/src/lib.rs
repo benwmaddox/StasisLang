@@ -297,6 +297,7 @@ pub fn resolve_android_workshop_sprite_asset(
             encoding,
             width,
             height,
+            ..
         } => (format!("{encoding:?}").to_ascii_lowercase(), width, height),
         AssetFormat::Audio { .. } => {
             return Err(format!(
@@ -1471,6 +1472,7 @@ fn run_android_workshop_tick_internal(
         }
         execute_lifecycle_noarg(&session.jit, "tick")
             .map_err(|error| AndroidBridgeError::phase("runtime_entry", "tick", error, None))?;
+        take_embedded_resource_error().map_err(|error| resource_phase_error("tick", error))?;
         session.tick_count = session.tick_count.saturating_add(1);
         execute_optional_lifecycle_noarg(&session.jit, "render")
             .map_err(|error| AndroidBridgeError::phase("runtime_entry", "render", error, None))?;
@@ -6369,9 +6371,9 @@ global host_f32: f32[64];
 global gfx_cmd_i32: i32[34608];
 global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
-function main(): void { gfx_load_sprite(\"../assets/missing.svg\", 32, 32); }
+function main(): void {}
 function tick(): void {}
-function render(): void {}
+function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }
 ",
         )
         .expect("write source");
@@ -6405,8 +6407,60 @@ function render(): void {}
             error.contains("render resource error"),
             "unexpected error: {error}"
         );
-        assert!(error.contains("missing.svg"), "unexpected error: {error}");
+        assert!(
+            error.contains("render_missing.svg"),
+            "unexpected error: {error}"
+        );
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("render resource envelope");
+        assert_eq!(envelope["stage"], "resource");
+        assert_eq!(envelope["code"], "stasis.missingResource");
+        assert_eq!(envelope["context"]["symbol"], "render");
+        assert_eq!(envelope["context"]["resource"], "assets/render_missing.svg");
         fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn c_bridge_drains_tick_resource_error_before_render() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("ffi_tick_resource_error");
+        fs::write(
+            root.join("src/main.stasis"),
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
+global host_i32: i32[768];\n\
+global host_f32: f32[64];\n\
+global gfx_cmd_i32: i32[34608];\n\
+global gfx_cmd_f32: f32[108676];\n\
+global gfx_cmd_u8: u8[65536];\n\
+function main(): void {}\n\
+function tick(): void { gfx_load_sprite(\"assets/tick_missing.svg\", 32, 32); }\n\
+function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }\n",
+        )
+        .expect("write source");
+        let error =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect_err("tick resource failure must stop before render");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("tick resource envelope");
+        assert_eq!(envelope["stage"], "resource");
+        assert_eq!(envelope["code"], "stasis.missingResource");
+        assert_eq!(envelope["context"]["symbol"], "tick");
+        assert_eq!(envelope["context"]["resource"], "assets/tick_missing.svg");
+        assert!(
+            !error.contains("render_missing.svg"),
+            "render must not mask tick error: {error}"
+        );
+        fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
     }
 
