@@ -2489,11 +2489,18 @@ fn expression_type(
             suffix,
             ..
         } => {
-            if let Some(type_id) = context
-                .path_types
-                .get(&indexed_state_path(collection_path, suffix))
-            {
-                return Some(*type_id);
+            // Indexed wildcard paths are compiler-global metadata.  A local
+            // or parameter with the same root must be resolved first, or an
+            // unrelated global array can override its element type.
+            let root = root_name(collection_path);
+            let has_lexical_root = local_types.contains_key(root) || aliases.contains_key(root);
+            if !has_lexical_root {
+                if let Some(type_id) = context
+                    .path_types
+                    .get(&indexed_state_path(collection_path, suffix))
+                {
+                    return Some(*type_id);
+                }
             }
             let collection = path_type(collection_path, context, local_types, aliases)?;
             let element = context.types.indexed_element_type_id(collection)?;

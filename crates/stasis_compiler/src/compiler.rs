@@ -3042,10 +3042,12 @@ function @effects(state) tick(): i32 { left(state); return 0; }
         compiler.upsert_file(
             "shadowing.stasis",
             r#"
-global value: i32;
+global value: i32[2];
+global float_values: f32[2];
 
-function parameter_value(value: f32): f32 {
-    return value + 1.0;
+function parameter_value(value: f32[2]): f32 {
+    value[0] = 1.0;
+    return value[0] + 1.0;
 }
 
 function local_value(): f32 {
@@ -3055,11 +3057,11 @@ function local_value(): f32 {
 }
 
 function global_value(): i32 {
-    return value;
+    return value[0];
 }
 
 function main(): i32 {
-    return global_value() + f32_to_i32(parameter_value(2.0) + local_value());
+    return global_value() + f32_to_i32(parameter_value(float_values) + local_value());
 }
 "#,
         );
