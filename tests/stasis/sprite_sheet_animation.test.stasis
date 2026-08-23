@@ -72,3 +72,29 @@ test `sprite sheet draw frame selects a row major cell`(): bool {
     }
     return gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] == 12.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] == 10.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 1.0;
 }
+
+test `sprite sheet scaled frame preserves custom geometry and nonfull UV`(): bool {
+    test_sheet.handle = 9;
+    test_sheet.columns = 2;
+    test_sheet.rows = 2;
+    test_sheet.cell_width = 12;
+    test_sheet.cell_height = 10;
+    gfx_cmd_begin();
+    test_sheet.draw_frame_scaled(3, 7.0, 11.0, 37.0, 29.0, 200, 90);
+    if (gfx_cmd_sprite_count() != 1) {
+        return false;
+    }
+    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 0] == 7.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 1] == 11.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] == 37.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] == 29.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 1.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 1.0;
+}
+
+test `sprite sheet scaled frame rejects invalid geometry and frames`(): bool {
+    test_sheet.handle = 9;
+    test_sheet.columns = 2;
+    test_sheet.rows = 2;
+    test_sheet.cell_width = 12;
+    test_sheet.cell_height = 10;
+    gfx_cmd_begin();
+    test_sheet.draw_frame_scaled(4, 0.0, 0.0, 37.0, 29.0, 255, 0);
+    test_sheet.draw_frame_scaled(1, 0.0, 0.0, 0.0, 29.0, 255, 0);
+    return gfx_cmd_sprite_count() == 0;
+}

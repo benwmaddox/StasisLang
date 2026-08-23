@@ -2,7 +2,7 @@
 
 `assets/manifest.json` is the shared project contract for asset identity, integrity, and optional build-time raster preparation. Desktop, JIT, AOT, Android Workshop, and published runtimes consume this contract rather than inventing platform-specific asset IDs or accepting arbitrary filesystem paths.
 
-Version 1 manifests remain valid and package their files unchanged. Version 2 adds optional display and sprite preparation metadata.
+Version 1 manifests remain valid and package their files unchanged. Version 2 adds optional display and sprite preparation metadata. Sprite-sheet layout metadata is optional and is also accepted by version 1 manifests for backward-compatible asset description.
 
 ## Prepared sprite example
 
@@ -50,6 +50,29 @@ min(max_physical_width / logical_width,
 Each prepared axis is the ceiling of `maximum logical axis * display scale * max_render_scale`. The source aspect ratio is retained, the result never exceeds either bound, and Stasis never enlarges a master. `max_render_scale` defaults to `1.0` and accepts `1.0..=8.0`; use it for the greatest zoom, bounce, or other enlargement that can actually be painted.
 
 Only PNG resizing is implemented initially. Other sprite encodings and assets without `prepare` are copied unchanged. SVG remains resolution-independent. PNG masters are resized with a Lanczos3 filter in linear-light, premultiplied-alpha space so gradients retain their brightness and transparent edge colors do not bleed into visible pixels. Opaque prepared PNGs are encoded as RGB; images with any transparency retain alpha.
+
+## Sprite-sheet layout
+
+A sprite may declare a uniform row-major atlas grid in its `format`:
+
+```json
+"format": {
+  "kind": "sprite",
+  "encoding": "png",
+  "width": 512,
+  "height": 256,
+  "layout": { "columns": 4, "rows": 2 }
+}
+```
+
+`columns` and `rows` are the number of equal-width and equal-height cells in
+the complete image. Each axis must be nonzero, no greater than 256, and divide
+the corresponding declared sprite dimension exactly. The resulting cell
+dimensions are therefore `width / columns` by `height / rows`. The metadata is
+preserved in resolved and prepared manifests. When a prepared PNG is resized,
+Stasis rounds the scaled cell dimensions first and then rebuilds the complete
+image from those whole cells, keeping frame boundaries exact and dimensions
+divisible by the declared grid.
 
 Fonts use `{"kind":"font","encoding":"ttf"}` or
 `{"kind":"font","encoding":"otf"}`. They are hash-validated and copied unchanged; sprite
@@ -111,5 +134,5 @@ The package contains only the selected display envelope's output, not multiple r
 - Android and iOS apply the same reachable-source asset closure as desktop release builds; platform packaging does not carry unused manifest entries or alternate prepared sizes.
 - Declared fonts use the same compiler-owned reference set and manifest closure as every other
   asset. Mobile packaging does not scan arbitrary string literals or copy undeclared font files.
-- Android uses one GL texture per resolved sprite and batches only consecutive commands that share texture and clip state. Atlas layout remains backend-private, so atlas coordinates never enter the manifest or render-command ABI.
+- Android uses one GL texture per resolved sprite and batches only consecutive commands that share texture and clip state. The optional uniform grid is exposed as asset metadata for tooling; runtime atlas coordinates remain backend-private and never enter the render-command ABI.
 - Missing, corrupt, oversized, hash-mismatched, or unsupported packaged sprites render the deterministic magenta checker fallback.

@@ -123,7 +123,21 @@ function load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, r
 }
 
 function draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void {
+    let width: f32 = 0.0;
+    let height: f32 = 0.0;
+    width.from_i32(self.cell_width);
+    height.from_i32(self.cell_height);
+    self.draw_frame_scaled(frame, x, y, width, height, alpha, rotation);
+}
+
+// Draw one validated row-major frame at caller-selected geometry. Keeping
+// frame selection and UV emission here avoids callers having to patch command
+// buffers after the command is appended (which would reset the frame UV).
+function draw_frame_scaled(self: SpriteSheet, frame: i32, x: f32, y: f32, width: f32, height: f32, alpha: i32, rotation: i32): void {
     if (self.handle == 0 || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
+        return;
+    }
+    if (width <= 0.0 || height <= 0.0) {
         return;
     }
     if (self.columns > 2147483647 / self.rows) {
@@ -147,10 +161,6 @@ function draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, r
     v0 = i32_to_f32(row) * inv_rows;
     u1 = i32_to_f32(column + 1) * inv_columns;
     v1 = i32_to_f32(row + 1) * inv_rows;
-    let width: f32 = 0.0;
-    let height: f32 = 0.0;
-    width.from_i32(self.cell_width);
-    height.from_i32(self.cell_height);
     gfx_cmd_sprite(self.handle, x, y, width, height, rotation, alpha);
     gfx_cmd_set_last_sprite_uv(u0, v0, u1, v1);
 }

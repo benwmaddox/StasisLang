@@ -252,12 +252,18 @@ pub fn resolve_android_workshop_sprite_asset(
             handle.get()
         )
     })?;
-    let (encoding, width, height) = match asset.entry.format {
+    let (encoding, width, height, layout) = match asset.entry.format {
         AssetFormat::Sprite {
             encoding,
             width,
             height,
-        } => (format!("{encoding:?}").to_ascii_lowercase(), width, height),
+            layout,
+        } => (
+            format!("{encoding:?}").to_ascii_lowercase(),
+            width,
+            height,
+            layout,
+        ),
         AssetFormat::Audio { .. } => {
             return Err(format!(
                 "asset handle {} identifies audio, not a sprite",
@@ -281,6 +287,10 @@ pub fn resolve_android_workshop_sprite_asset(
         "encoding": encoding,
         "width": width,
         "height": height,
+        "layout": layout.map(|layout| serde_json::json!({
+            "columns": layout.columns,
+            "rows": layout.rows,
+        })),
     }))
 }
 
@@ -3573,7 +3583,7 @@ mod tests {
         let hash = stasis_assets::sha256_bytes(pixels);
         fs::write(
             root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
-            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"hero","path":"assets/hero.png","content_sha256":"{hash}","format":{{"kind":"sprite","encoding":"png","width":4,"height":6}},"dependencies":[]}}]}}"#),
+            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"hero","path":"assets/hero.png","content_sha256":"{hash}","format":{{"kind":"sprite","encoding":"png","width":4,"height":6,"layout":{{"columns":2,"rows":3}}}},"dependencies":[]}}]}}"#),
         )
         .expect("write manifest");
 
@@ -3586,6 +3596,8 @@ mod tests {
         assert_eq!(resolved["encoding"], "png");
         assert_eq!(resolved["width"], 4);
         assert_eq!(resolved["height"], 6);
+        assert_eq!(resolved["layout"]["columns"], 2);
+        assert_eq!(resolved["layout"]["rows"], 3);
         assert_eq!(resolved["content_sha256"], hash);
         assert!(resolved["path"]
             .as_str()
