@@ -31,7 +31,7 @@ use stasis_compiler::backend::state_migration::{
 };
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, load_workshop_edit_workspace, load_workshop_project,
+    find_workshop_references, load_workshop_edit_workspace, load_workshop_project_with_diagnostic,
     plan_workshop_semantic_edits, workshop_reachable_files, workshop_source_items,
     write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopReload,
     WorkshopSemanticEditBatch, WorkshopSemanticEditPlan, WorkshopSourceFile,
@@ -51,6 +51,46 @@ pub const ANDROID_RENDER_GFX_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER
 pub const ANDROID_RENDER_GFX_F32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_F32_COUNT;
 pub const ANDROID_RENDER_GFX_U8_CAPACITY: usize = stasis_dynload::STASIS_RENDER_U8_COUNT;
 pub const ANDROID_RENDER_I_FRAME_TOKEN: usize = 26;
+
+#[derive(Debug)]
+enum AndroidBridgeError {
+    Plain(String),
+    Source(stasis_compiler::SourceDiagnostic),
+    Phase {
+        stage: &'static str,
+        symbol: &'static str,
+        detail: String,
+        resource: Option<String>,
+    },
+}
+
+impl From<String> for AndroidBridgeError {
+    fn from(value: String) -> Self {
+        Self::Plain(value)
+    }
+}
+
+impl From<&str> for AndroidBridgeError {
+    fn from(value: &str) -> Self {
+        Self::Plain(value.to_string())
+    }
+}
+
+impl AndroidBridgeError {
+    fn phase(
+        stage: &'static str,
+        symbol: &'static str,
+        detail: impl Into<String>,
+        resource: Option<String>,
+    ) -> Self {
+        Self::Phase {
+            stage,
+            symbol,
+            detail: detail.into(),
+            resource,
+        }
+    }
+}
 
 /// Stable identity for the real Rust bridge loaded by the Workshop JNI shim.
 /// The pointer is backed by a static NUL-terminated package-version literal.
@@ -454,7 +494,8 @@ pub fn execute_android_workshop_semantic_edit(
     let (after, plan) = plan_workshop_semantic_edits(&files, batch)?;
     let reachable = workshop_reachable_files(&after, entry_file)?;
     let source_fingerprint = fingerprint_workshop_sources(&reachable);
-    build_runtime_session(project_root, &reachable, source_fingerprint)?;
+    build_runtime_session(project_root, &reachable, source_fingerprint)
+        .map_err(|error| format_android_bridge_error(project_root, error))?;
     if dry_run {
         return Ok(serde_json::json!({
             "schema_version": 1,
@@ -570,12 +611,14 @@ pub fn compile_android_workshop_project(
     let started = Instant::now();
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
-    let files = load_workshop_project(project_root, entry_file)?;
+    let files = load_workshop_project_with_diagnostic(project_root, entry_file)
+        .map_err(|diagnostic| format_compiler_source_diagnostic(project_root, &diagnostic))?;
     let source_fingerprint = fingerprint_workshop_sources(&files);
     discard_pending_runtime_candidate_if_different(project_root, source_fingerprint);
     let previous = read_previous_android_plan(project_root)?;
     let had_runtime_session = has_runtime_session_for_project(project_root);
-    warm_or_reload_runtime_session(project_root, &files, source_fingerprint)?;
+    warm_or_reload_runtime_session(project_root, &files, source_fingerprint)
+        .map_err(|error| format_android_bridge_error(project_root, error))?;
     let finalized = (|| {
         let summary = current_android_jit_compile_summary(project_root, source_fingerprint)?;
         let reload = match (had_runtime_session, previous) {
@@ -810,7 +853,9 @@ pub fn run_android_workshop_tick(
     entry_file: impl AsRef<Path>,
     input: AndroidBridgeTickInput,
 ) -> Result<AndroidBridgeRunTickResult, String> {
+    let project_root = project_root.as_ref();
     run_android_workshop_tick_internal(project_root, entry_file, input, true)
+        .map_err(|error| format_android_bridge_error(project_root, error))
 }
 
 const MAX_EMBEDDED_FONTS: usize = 64;
@@ -848,7 +893,13 @@ struct EmbeddedResourceCatalog {
     sprite_refs: Vec<EmbeddedSpriteRef>,
     pending_sprite_releases: Vec<i32>,
     pending_sprite_release_cancellations: Vec<i32>,
-    error: Option<String>,
+    error: Option<EmbeddedResourceError>,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddedResourceError {
+    detail: String,
+    resource: Option<String>,
 }
 
 fn embedded_resource_catalog() -> &'static Mutex<Option<EmbeddedResourceCatalog>> {
@@ -959,21 +1010,50 @@ fn embedded_path(catalog: &EmbeddedResourceCatalog, bytes: &[u8]) -> Option<Path
 
 fn set_embedded_resource_error(catalog: &mut EmbeddedResourceCatalog, message: String) {
     if catalog.error.is_none() {
-        catalog.error = Some(message);
+        catalog.error = Some(EmbeddedResourceError {
+            detail: message,
+            resource: None,
+        });
     }
 }
 
-fn take_embedded_resource_error() -> Result<(), String> {
+fn set_embedded_resource_path_error(
+    catalog: &mut EmbeddedResourceCatalog,
+    message: String,
+    resource: &str,
+) {
+    if catalog.error.is_none() {
+        catalog.error = Some(EmbeddedResourceError {
+            detail: message,
+            resource: Some(resource.to_string()),
+        });
+    }
+}
+
+fn take_embedded_resource_error() -> Result<(), EmbeddedResourceError> {
     let mut slot = embedded_resource_catalog()
         .lock()
-        .map_err(|_| "embedded resource catalog mutex poisoned".to_string())?;
-    let catalog = slot
-        .as_mut()
-        .ok_or_else(|| "embedded resource catalog is not initialized".to_string())?;
+        .map_err(|_| EmbeddedResourceError {
+            detail: "embedded resource catalog mutex poisoned".to_string(),
+            resource: None,
+        })?;
+    let catalog = slot.as_mut().ok_or_else(|| EmbeddedResourceError {
+        detail: "embedded resource catalog is not initialized".to_string(),
+        resource: None,
+    })?;
     match catalog.error.take() {
-        Some(error) => Err(format!("render resource error: {error}")),
+        Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+fn resource_phase_error(symbol: &'static str, error: EmbeddedResourceError) -> AndroidBridgeError {
+    AndroidBridgeError::phase(
+        "resource",
+        symbol,
+        format!("render resource error: {}", error.detail),
+        error.resource,
+    )
 }
 
 fn embedded_load_sprite(path: &[u8], _max_w: i32, _max_h: i32) -> i32 {
@@ -985,9 +1065,10 @@ fn embedded_load_sprite(path: &[u8], _max_w: i32, _max_h: i32) -> i32 {
     };
     let display_path = String::from_utf8_lossy(path);
     let Some(absolute) = embedded_path(catalog, path) else {
-        set_embedded_resource_error(
+        set_embedded_resource_path_error(
             catalog,
             format!("sprite path is invalid or missing: {display_path}"),
+            &display_path,
         );
         return 0;
     };
@@ -1001,9 +1082,10 @@ fn embedded_load_sprite(path: &[u8], _max_w: i32, _max_h: i32) -> i32 {
         })
         .map_or(0, |asset| asset.handle.as_i32());
     if handle == 0 {
-        set_embedded_resource_error(
+        set_embedded_resource_path_error(
             catalog,
             format!("sprite is not declared in the asset manifest: {display_path}"),
+            &display_path,
         );
     } else if !embedded_acquire_sprite(catalog, handle) {
         return 0;
@@ -1156,21 +1238,27 @@ fn embedded_load_font(path: &[u8], size: i32) -> i32 {
     };
     let display_path = String::from_utf8_lossy(path);
     if size <= 0 {
-        set_embedded_resource_error(
+        set_embedded_resource_path_error(
             catalog,
             format!("font size must be positive: {display_path}"),
+            &display_path,
         );
         return 0;
     }
     let Some(absolute) = embedded_path(catalog, path) else {
-        set_embedded_resource_error(
+        set_embedded_resource_path_error(
             catalog,
             format!("font path is invalid or missing: {display_path}"),
+            &display_path,
         );
         return 0;
     };
     if !absolute.is_file() {
-        set_embedded_resource_error(catalog, format!("font file is missing: {display_path}"));
+        set_embedded_resource_path_error(
+            catalog,
+            format!("font file is missing: {display_path}"),
+            &display_path,
+        );
         return 0;
     }
     if let Some(font) = catalog
@@ -1330,7 +1418,7 @@ fn run_android_workshop_tick_internal(
     entry_file: impl AsRef<Path>,
     input: AndroidBridgeTickInput,
     read_legacy_render_commands: bool,
-) -> Result<AndroidBridgeRunTickResult, String> {
+) -> Result<AndroidBridgeRunTickResult, AndroidBridgeError> {
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
 
@@ -1341,7 +1429,8 @@ fn run_android_workshop_tick_internal(
             .as_ref()
             .is_none_or(|session| session.project_root != project_root);
         if needs_lazy_build {
-            let files = load_workshop_project(project_root, entry_file)?;
+            let files = load_workshop_project_with_diagnostic(project_root, entry_file)
+                .map_err(AndroidBridgeError::Source)?;
             let source_fingerprint = fingerprint_workshop_sources(&files);
             *session_slot = Some(build_runtime_session(
                 project_root,
@@ -1362,8 +1451,9 @@ fn run_android_workshop_tick_internal(
             false
         } else {
             write_production_host_frame(session, input)?;
-            execute_lifecycle_noarg(&session.jit, "main")?;
-            take_embedded_resource_error()?;
+            execute_lifecycle_noarg(&session.jit, "main")
+                .map_err(|error| AndroidBridgeError::phase("runtime_entry", "main", error, None))?;
+            take_embedded_resource_error().map_err(|error| resource_phase_error("main", error))?;
             session.initialized = true;
             session.previous_input = None;
             session.display_generation = 0;
@@ -1389,10 +1479,13 @@ fn run_android_workshop_tick_internal(
                 .jit
                 .write_i32_global_path("Input.screen_h", metrics.logical_h);
         }
-        execute_lifecycle_noarg(&session.jit, "tick")?;
+        execute_lifecycle_noarg(&session.jit, "tick")
+            .map_err(|error| AndroidBridgeError::phase("runtime_entry", "tick", error, None))?;
+        take_embedded_resource_error().map_err(|error| resource_phase_error("tick", error))?;
         session.tick_count = session.tick_count.saturating_add(1);
-        execute_optional_lifecycle_noarg(&session.jit, "render")?;
-        take_embedded_resource_error()?;
+        execute_optional_lifecycle_noarg(&session.jit, "render")
+            .map_err(|error| AndroidBridgeError::phase("runtime_entry", "render", error, None))?;
+        take_embedded_resource_error().map_err(|error| resource_phase_error("render", error))?;
         let write_runtime_state = should_write_jit_runtime_state(initialized, recompiled);
         let observed_game_tick_count = if read_legacy_render_commands || write_runtime_state {
             session.jit.read_i32_global_path("GameState.tick_count")
@@ -1591,19 +1684,21 @@ fn with_initialized_runtime_session<R>(
             .as_ref()
             .is_none_or(|session| session.project_root != project_root);
         if needs_lazy_build {
-            let files = load_workshop_project(project_root, entry_file)?;
+            let files = load_workshop_project_with_diagnostic(project_root, entry_file).map_err(
+                |diagnostic| format_compiler_source_diagnostic(project_root, &diagnostic),
+            )?;
             let source_fingerprint = fingerprint_workshop_sources(&files);
-            *session_slot = Some(build_runtime_session(
-                project_root,
-                &files,
-                source_fingerprint,
-            )?);
+            *session_slot = Some(
+                build_runtime_session(project_root, &files, source_fingerprint)
+                    .map_err(|error| format_android_bridge_error(project_root, error))?,
+            );
         }
 
         let session = session_slot
             .as_mut()
             .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
-        activate_pending_runtime_candidate(session)?;
+        activate_pending_runtime_candidate(session)
+            .map_err(|error| format_android_bridge_error(project_root, error))?;
         if !session.initialized {
             execute_lifecycle_noarg(&session.jit, "main")?;
             session.initialized = true;
@@ -1637,7 +1732,7 @@ fn build_runtime_session(
     project_root: &Path,
     files: &[WorkshopSourceFile],
     source_fingerprint: u64,
-) -> Result<AndroidRuntimeSession, String> {
+) -> Result<AndroidRuntimeSession, AndroidBridgeError> {
     install_embedded_resource_host(project_root)?;
     let mut jit = JitProcess::new();
     jit.set_local_runtime_helper_trampolines(true);
@@ -1645,8 +1740,11 @@ fn build_runtime_session(
     if let Err(error) = jit.compile() {
         return Err(jit
             .last_source_diagnostic()
-            .map(|diagnostic| format_compiler_source_diagnostic(project_root, diagnostic))
-            .unwrap_or_else(|| format!("Android JIT compile failed: {error:?}")));
+            .cloned()
+            .map(AndroidBridgeError::Source)
+            .unwrap_or_else(|| {
+                AndroidBridgeError::Plain(format!("Android JIT compile failed: {error:?}"))
+            }));
     }
     let display_metrics = AndroidDisplayMetrics::new(1, 1, 1, 1);
     Ok(AndroidRuntimeSession {
@@ -1672,7 +1770,7 @@ fn warm_or_reload_runtime_session(
     project_root: &Path,
     files: &[WorkshopSourceFile],
     source_fingerprint: u64,
-) -> Result<(), String> {
+) -> Result<(), AndroidBridgeError> {
     RUNTIME_SESSION.with(|session_cell| {
         let mut session_slot = session_cell.borrow_mut();
         match session_slot.as_mut() {
@@ -1706,7 +1804,7 @@ fn recompile_runtime_session(
     project_root: &Path,
     files: &[WorkshopSourceFile],
     source_fingerprint: u64,
-) -> Result<(), String> {
+) -> Result<(), AndroidBridgeError> {
     session.pending_candidate = None;
     session.pending_source_fingerprint = None;
     session.pending_resource_catalog = None;
@@ -1718,10 +1816,15 @@ fn recompile_runtime_session(
     if let Err(error) = candidate.compile_staged() {
         return Err(candidate
             .last_source_diagnostic()
-            .map(|diagnostic| format_compiler_source_diagnostic(project_root, diagnostic))
-            .unwrap_or_else(|| format!("Android JIT hot reload failed: {error:?}")));
+            .cloned()
+            .map(AndroidBridgeError::Source)
+            .unwrap_or_else(|| {
+                AndroidBridgeError::Plain(format!("Android JIT hot reload failed: {error:?}"))
+            }));
     }
-    candidate.validate_on_code_swap_signature()?;
+    candidate
+        .validate_on_code_swap_signature()
+        .map_err(|error| AndroidBridgeError::phase("runtime_entry", "on_code_swap", error, None))?;
     let resource_catalog = prepare_embedded_resource_catalog(project_root, true)?;
     session.pending_candidate = Some(candidate);
     session.pending_source_fingerprint = Some(source_fingerprint);
@@ -1729,7 +1832,9 @@ fn recompile_runtime_session(
     Ok(())
 }
 
-fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Result<bool, String> {
+fn activate_pending_runtime_candidate(
+    session: &mut AndroidRuntimeSession,
+) -> Result<bool, AndroidBridgeError> {
     let Some(candidate) = session.pending_candidate.take() else {
         return Ok(false);
     };
@@ -1755,6 +1860,10 @@ fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Re
         None
     };
     let run_hook = session.initialized && candidate.has_on_code_swap();
+    enum HookOutcome {
+        Applied,
+        Failed(AndroidBridgeError),
+    }
     let activation = activate_candidate_transactionally(
         Some(&session.jit),
         &candidate,
@@ -1762,16 +1871,30 @@ fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Re
         run_hook,
         || {
             if run_hook {
-                candidate.execute_optional_on_code_swap()
+                match candidate.execute_optional_on_code_swap() {
+                    Ok(()) => match take_embedded_resource_error() {
+                        Ok(()) => HookOutcome::Applied,
+                        Err(error) => {
+                            HookOutcome::Failed(resource_phase_error("on_code_swap", error))
+                        }
+                    },
+                    Err(error) => HookOutcome::Failed(AndroidBridgeError::phase(
+                        "runtime_entry",
+                        "on_code_swap",
+                        error,
+                        None,
+                    )),
+                }
             } else {
-                Ok(())
+                HookOutcome::Applied
             }
         },
-        Result::is_ok,
+        |outcome| matches!(outcome, HookOutcome::Applied),
     );
     let activation_error = match activation {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) | Err(error) => Some(error),
+        Ok(HookOutcome::Applied) => None,
+        Ok(HookOutcome::Failed(error)) => Some(error),
+        Err(error) => Some(AndroidBridgeError::Plain(error)),
     };
     if let Some(error) = activation_error {
         if let Some(previous) = previous_catalog {
@@ -2203,8 +2326,8 @@ pub extern "C" fn stasis_android_bridge_compile_project(
             format!("CompileError: panic while compiling Android project: {panic_message}")
         }
     };
-    CString::new(message)
-        .unwrap_or_else(|_| CString::new("CompileError: invalid bridge message").unwrap())
+    CString::new(message.replace('\0', "%00"))
+        .expect("compile diagnostic is NUL-safe")
         .into_raw()
 }
 
@@ -2361,23 +2484,9 @@ fn format_compiler_source_diagnostic(
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
     let source = fs::read_to_string(&disk_path).unwrap_or_default();
-    let inferred =
-        diagnostic.symbol.is_empty() && diagnostic.start == 0 && diagnostic.end == source.len();
-    let start = if inferred {
-        diagnostic_offset(&source, &diagnostic.message)
-    } else {
-        diagnostic.start
-    };
-    let end = if inferred {
-        start.saturating_add(1).min(source.len())
-    } else {
-        diagnostic.end
-    };
-    let symbol = if inferred {
-        diagnostic_symbol(&source, start, &diagnostic.message)
-    } else {
-        diagnostic.symbol.clone()
-    };
+    let start = diagnostic.start.min(source.len());
+    let end = diagnostic.end.max(start).min(source.len());
+    let symbol = diagnostic.symbol.clone();
     let (line, column) = source_line_column(&source, start);
     let (end_line, end_column) = source_line_column(&source, end);
     let file = disk_path
@@ -2386,10 +2495,10 @@ fn format_compiler_source_diagnostic(
         .unwrap_or(&disk_path)
         .to_string_lossy()
         .replace('\\', "/");
-    format!(
+    let legacy = format!(
         "{}: {}|diagnostic_file={}|diagnostic_line={}|diagnostic_column={}|diagnostic_end_line={}|diagnostic_end_column={}|diagnostic_symbol={}|diagnostic_message={}",
-        diagnostic.path,
-        diagnostic.message,
+        sanitize_legacy_prefix(&diagnostic.path),
+        sanitize_legacy_prefix(&diagnostic.message),
         percent_encode(&file),
         line,
         column,
@@ -2397,7 +2506,153 @@ fn format_compiler_source_diagnostic(
         end_column,
         percent_encode(&symbol),
         percent_encode(&diagnostic.message),
+    );
+    if matches!(
+        diagnostic.code,
+        stasis_compiler::SourceDiagnosticCode::Generic
+    ) {
+        return legacy;
+    }
+    let stage = diagnostic_stage(&diagnostic.code);
+    let causes = [format!("{stage} phase"), diagnostic.message.clone()];
+    format!(
+        "{legacy}{}",
+        format_native_diagnostic(
+            stage,
+            diagnostic.code.as_str(),
+            &diagnostic.message,
+            Some(&file),
+            if symbol.is_empty() {
+                None
+            } else {
+                Some(&symbol)
+            },
+            None,
+            &causes,
+        )
     )
+}
+
+fn sanitize_legacy_prefix(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\0' => sanitized.push_str("%00"),
+            '|' => sanitized.push_str("%7C"),
+            '\r' => sanitized.push_str("%0D"),
+            '\n' => sanitized.push_str("%0A"),
+            _ => sanitized.push(character),
+        }
+    }
+    sanitized
+}
+
+fn diagnostic_stage(code: &stasis_compiler::SourceDiagnosticCode) -> &'static str {
+    match code {
+        stasis_compiler::SourceDiagnosticCode::Parse => "parse",
+        stasis_compiler::SourceDiagnosticCode::UnresolvedExtern => "extern_resolution",
+        _ => "compile",
+    }
+}
+
+fn format_native_diagnostic(
+    stage: &str,
+    code: &str,
+    detail: &str,
+    file: Option<&str>,
+    symbol: Option<&str>,
+    resource: Option<&str>,
+    causes: &[String],
+) -> String {
+    let cause_values = if causes.is_empty() {
+        vec![detail.to_string()]
+    } else {
+        causes.to_vec()
+    };
+    let mut context = serde_json::Map::new();
+    if let Some(file) = file {
+        context.insert(
+            "file".to_string(),
+            serde_json::Value::String(file.to_string()),
+        );
+    }
+    if let Some(symbol) = symbol {
+        context.insert(
+            "symbol".to_string(),
+            serde_json::Value::String(symbol.to_string()),
+        );
+    }
+    if let Some(resource) = resource {
+        context.insert(
+            "resource".to_string(),
+            serde_json::Value::String(resource.to_string()),
+        );
+    }
+    let envelope = serde_json::json!({
+        "schema": "stasis.native_diagnostic.v1",
+        "version": 1,
+        "stage": stage,
+        "code": code,
+        "context": context,
+        "detail": detail,
+        "causes": &cause_values,
+    })
+    .to_string();
+    format!(
+        "|diagnostic_schema=stasis.native_diagnostic.v1|diagnostic_version=1|diagnostic_stage={}|diagnostic_code={}|diagnostic_detail={}|diagnostic_causes={}|diagnostic_envelope={}",
+        percent_encode(stage),
+        percent_encode(code),
+        percent_encode(detail),
+        percent_encode(&serde_json::to_string(&cause_values).unwrap_or_else(|_| "[]".to_string())),
+        percent_encode(&envelope),
+    )
+}
+
+fn format_runtime_diagnostic(
+    stage: &str,
+    code: &str,
+    detail: &str,
+    symbol: Option<&str>,
+    resource: Option<&str>,
+) -> String {
+    format!(
+        "{}{}",
+        sanitize_legacy_prefix(detail),
+        format_native_diagnostic(
+            stage,
+            code,
+            detail,
+            None,
+            symbol,
+            resource,
+            &[format!("{stage} phase"), detail.to_string()],
+        )
+    )
+}
+
+fn format_android_bridge_error(project_root: &Path, error: AndroidBridgeError) -> String {
+    match error {
+        AndroidBridgeError::Source(diagnostic) => {
+            format_compiler_source_diagnostic(project_root, &diagnostic)
+        }
+        AndroidBridgeError::Phase {
+            stage,
+            symbol,
+            detail,
+            resource,
+        } => {
+            let code = match stage {
+                "runtime_entry" => "stasis.runtimeEntry",
+                "render_schema" => "stasis.renderSchema",
+                "resource" => "stasis.missingResource",
+                _ => "stasis.runtime",
+            };
+            format_runtime_diagnostic(stage, code, &detail, Some(symbol), resource.as_deref())
+        }
+        AndroidBridgeError::Plain(detail) => {
+            format_runtime_diagnostic("runtime", "stasis.runtime", &detail, None, None)
+        }
+    }
 }
 
 fn diagnostic_offset(source: &str, error: &str) -> usize {
@@ -2641,16 +2896,18 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
     {
         return -1;
     }
+    let mut diagnostic_project_root = PathBuf::from(".");
     let result = catch_unwind(AssertUnwindSafe(|| unsafe {
         if project_root.is_null() || entry_file.is_null() {
-            return Err("null project root or entry file".to_string());
+            return Err(AndroidBridgeError::from("null project root or entry file"));
         }
-        let project_root = CStr::from_ptr(project_root)
-            .to_str()
-            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
-        let entry_file = CStr::from_ptr(entry_file)
-            .to_str()
-            .map_err(|error| format!("entry file was not UTF-8: {error}"))?;
+        let project_root = CStr::from_ptr(project_root).to_str().map_err(|error| {
+            AndroidBridgeError::Plain(format!("project root was not UTF-8: {error}"))
+        })?;
+        diagnostic_project_root = PathBuf::from(project_root);
+        let entry_file = CStr::from_ptr(entry_file).to_str().map_err(|error| {
+            AndroidBridgeError::Plain(format!("entry file was not UTF-8: {error}"))
+        })?;
         run_android_workshop_tick_internal(
             project_root,
             entry_file,
@@ -2666,8 +2923,9 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
         let i32_values = std::slice::from_raw_parts_mut(out_i32, out_i32_len);
         let f32_values = std::slice::from_raw_parts_mut(out_f32, out_f32_len);
         let u8_values = std::slice::from_raw_parts_mut(out_u8, out_u8_len);
-        stasis_dynload::copy_jit_render_active(i32_values, f32_values, u8_values)?;
-        write_android_display_metadata(i32_values)
+        stasis_dynload::copy_jit_render_active(i32_values, f32_values, u8_values)
+            .map_err(|error| AndroidBridgeError::phase("render_schema", "render", error, None))?;
+        write_android_display_metadata(i32_values).map_err(AndroidBridgeError::from)
     }));
     match result {
         Ok(Ok(())) => {
@@ -2675,7 +2933,8 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
             0
         }
         Ok(Err(error)) => {
-            LAST_FRAME_ERROR.with(|slot| *slot.borrow_mut() = Some(error));
+            let diagnostic = format_android_bridge_error(&diagnostic_project_root, error);
+            LAST_FRAME_ERROR.with(|slot| *slot.borrow_mut() = Some(diagnostic));
             unsafe {
                 *out_i32 = -1;
             }
@@ -2683,7 +2942,13 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
         }
         Err(_) => {
             LAST_FRAME_ERROR.with(|slot| {
-                *slot.borrow_mut() = Some("panic while running Android preview frame".to_string());
+                *slot.borrow_mut() = Some(format_runtime_diagnostic(
+                    "runtime_entry",
+                    "stasis.runtimeEntry",
+                    "panic while running Android preview frame",
+                    None,
+                    None,
+                ));
             });
             unsafe {
                 *out_i32 = -1;
@@ -2718,8 +2983,8 @@ pub extern "C" fn stasis_android_bridge_last_frame_error() -> *mut c_char {
             .clone()
             .unwrap_or_else(|| "native preview frame failed".to_string())
     });
-    CString::new(message)
-        .unwrap_or_else(|_| CString::new("native preview frame failed").unwrap())
+    CString::new(message.replace('\0', "%00"))
+        .expect("NUL-safe frame diagnostic")
         .into_raw()
 }
 
@@ -2962,6 +3227,130 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn native_diagnostic_envelope_preserves_context_detail_and_cause_order() {
+        let message = format_native_diagnostic(
+            "resource",
+            "stasis.missingResource",
+            "sprite path is invalid or missing: assets/missing.svg",
+            None,
+            None,
+            Some("assets/missing.svg"),
+            &["outer cause".to_string(), "inner cause".to_string()],
+        );
+        assert!(message.contains("diagnostic_schema=stasis.native_diagnostic.v1"));
+        assert!(message.contains("diagnostic_stage=resource"));
+        assert!(message.contains("diagnostic_code=stasis.missingResource"));
+        assert!(message.contains("diagnostic_envelope="));
+        let encoded = message
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .expect("encoded diagnostic envelope");
+        let decoded = percent_decode_for_test(encoded);
+        let envelope: serde_json::Value = serde_json::from_str(&decoded).expect("valid envelope");
+        assert_eq!(envelope["version"], 1);
+        assert_eq!(envelope["context"]["resource"], "assets/missing.svg");
+        assert_eq!(envelope["causes"][0], "outer cause");
+        assert_eq!(envelope["causes"][1], "inner cause");
+    }
+
+    #[test]
+    fn native_diagnostic_envelope_preserves_utf8_detail_and_context() {
+        let message = format_native_diagnostic(
+            "resource",
+            "stasis.missingResource",
+            "\u{8d44}\u{6e90} \u{2713}",
+            None,
+            None,
+            Some("assets/\u{4e16}\u{754c}.svg"),
+            &[
+                "resource phase".to_string(),
+                "\u{8d44}\u{6e90} \u{2713}".to_string(),
+            ],
+        );
+        let encoded = message
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .expect("encoded diagnostic envelope");
+        let decoded = percent_decode_for_test(encoded);
+        let envelope: serde_json::Value = serde_json::from_str(&decoded).expect("valid envelope");
+        assert_eq!(envelope["detail"], "\u{8d44}\u{6e90} \u{2713}");
+        assert_eq!(
+            envelope["context"]["resource"],
+            "assets/\u{4e16}\u{754c}.svg"
+        );
+        assert_eq!(envelope["causes"][0], "resource phase");
+        assert_eq!(envelope["causes"][1], "\u{8d44}\u{6e90} \u{2713}");
+    }
+
+    #[test]
+    fn native_diagnostic_envelope_percent_encodes_delimiters_and_nul() {
+        let message = format_native_diagnostic(
+            "resource",
+            "stasis.missingResource",
+            "bad|detail=\u{0}tail",
+            None,
+            None,
+            Some("assets/bad|name.svg"),
+            &[
+                "resource phase".to_string(),
+                "bad|detail=\u{0}tail".to_string(),
+            ],
+        );
+        assert!(!message.contains('\0'));
+        let encoded = message
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .expect("encoded diagnostic envelope");
+        let decoded = percent_decode_for_test(encoded);
+        let envelope: serde_json::Value = serde_json::from_str(&decoded).expect("valid envelope");
+        assert_eq!(envelope["detail"], "bad|detail=\u{0}tail");
+        assert_eq!(envelope["context"]["resource"], "assets/bad|name.svg");
+        LAST_FRAME_ERROR.with(|slot| *slot.borrow_mut() = Some(message));
+        let ptr = stasis_android_bridge_last_frame_error();
+        let forwarded = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        stasis_android_bridge_free_string(ptr);
+        LAST_FRAME_ERROR.with(|slot| *slot.borrow_mut() = None);
+        assert!(forwarded.contains("diagnostic_envelope="));
+        assert!(!forwarded.contains("native preview frame failed"));
+    }
+
+    #[test]
+    fn compile_legacy_diagnostic_boundary_encodes_nul_and_delimiter_text() {
+        let diagnostic = stasis_compiler::SourceDiagnostic::new(
+            "src/bad|diagnostic_envelope=\u{0}.stasis",
+            0,
+            1,
+            "second",
+            "detail|diagnostic_envelope=\u{0}tail",
+        )
+        .with_code(stasis_compiler::SourceDiagnosticCode::Parse);
+        let message = format_compiler_source_diagnostic(Path::new("."), &diagnostic);
+        assert!(!message.contains('\u{0}'));
+        assert!(message.contains("src/bad%7Cdiagnostic_envelope=%00.stasis"));
+        assert!(message.contains("detail%7Cdiagnostic_envelope=%00tail"));
+        CString::new(message).expect("encoded compiler diagnostic crosses C boundary");
+    }
+
+    fn percent_decode_for_test(value: &str) -> String {
+        let mut output = Vec::new();
+        let bytes = value.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' && index + 2 < bytes.len() {
+                let value = u8::from_str_radix(&value[index + 1..index + 3], 16).unwrap();
+                output.push(value);
+                index += 3;
+            } else {
+                output.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8(output).expect("UTF-8 envelope")
+    }
+
+    #[test]
     fn typed_sprite_release_refcounts_and_cancels_pending_event_on_reacquire() {
         let root = std::env::temp_dir().join("stasis_android_sprite_release_refs");
         let catalog = EmbeddedResourceCatalog {
@@ -3024,7 +3413,7 @@ mod tests {
         };
         assert!(!embedded_acquire_sprite(&mut catalog, 31));
         assert_eq!(
-            catalog.error.as_deref(),
+            catalog.error.as_ref().map(|error| error.detail.as_str()),
             Some("sprite reference count overflow")
         );
     }
@@ -5511,6 +5900,93 @@ function tick(): void {}
         assert!(error.contains("|diagnostic_column=17"));
         assert!(error.contains("|diagnostic_symbol=broken"));
         assert!(error.contains("|diagnostic_message="));
+        assert!(error.contains("diagnostic_stage=parse"));
+        assert!(error.contains("diagnostic_code=stasis.parse"));
+        assert!(error.contains("diagnostic_causes="));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_parse_failure_preserves_parser_owned_final_function_span() {
+        let root = temp_project("final_function_parse_diagnostic");
+        let source = "function first(): void { return; }\n\nfunction final_hook(): void {\n";
+        fs::write(root.join("src/main.stasis"), source).expect("write malformed source");
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("missing final brace must fail");
+        assert!(error.contains("diagnostic_file=src/main.stasis"), "{error}");
+        assert!(error.contains("diagnostic_symbol=final_hook"), "{error}");
+        assert!(error.contains("diagnostic_stage=parse"), "{error}");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("parse envelope");
+        assert_eq!(envelope["context"]["symbol"], "final_hook");
+        assert_eq!(envelope["context"]["file"], "src/main.stasis");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_body_parse_failure_uses_typed_parse_envelope_and_function_context() {
+        let root = temp_project("body_parse_diagnostic");
+        let source = "function main(): void { let broken = ; }\n";
+        fs::write(root.join("src/main.stasis"), source).expect("write malformed body");
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("malformed body must fail");
+        assert!(
+            error.contains("diagnostic_schema=stasis.native_diagnostic.v1"),
+            "{error}"
+        );
+        assert!(error.contains("diagnostic_stage=parse"), "{error}");
+        assert!(error.contains("diagnostic_code=stasis.parse"), "{error}");
+        assert!(error.contains("diagnostic_file=src/main.stasis"), "{error}");
+        assert!(error.contains("diagnostic_symbol=main"), "{error}");
+        assert!(error.contains("diagnostic_line=1"), "{error}");
+        assert!(error.contains("diagnostic_end_line=1"), "{error}");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("body parse envelope");
+        assert_eq!(envelope["stage"], "parse");
+        assert_eq!(envelope["code"], "stasis.parse");
+        assert_eq!(envelope["context"]["file"], "src/main.stasis");
+        assert_eq!(envelope["context"]["symbol"], "main");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_import_parse_failure_preserves_imported_file_diagnostic() {
+        let root = temp_project("import_parse_diagnostic");
+        fs::create_dir_all(root.join("src/systems")).expect("systems directory");
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"systems/broken.stasis\";\nfunction main(): void {}\n",
+        )
+        .expect("write entry source");
+        fs::write(
+            root.join("src/systems/broken.stasis"),
+            "import \"helper.txt\";\nfunction helper(): void {}\n",
+        )
+        .expect("write imported source");
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("invalid imported target must fail");
+        assert!(
+            error.contains("diagnostic_file=src/systems/broken.stasis"),
+            "{error}"
+        );
+        assert!(error.contains("diagnostic_stage=parse"), "{error}");
+        assert!(error.contains("diagnostic_code=stasis.parse"), "{error}");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("import parse envelope");
+        assert_eq!(envelope["context"]["file"], "src/systems/broken.stasis");
+        assert_eq!(envelope["context"]["symbol"], "helper.txt");
         fs::remove_dir_all(root).ok();
     }
 
@@ -5540,6 +6016,222 @@ function tick(): void {}
         assert!(error.contains("|diagnostic_symbol=on_code_swap"));
         fs::remove_dir_all(root).ok();
     }
+    #[test]
+    fn it031_extern_failure_preserves_typed_native_envelope() {
+        let root = temp_project("it031_unresolved_extern");
+        fs::write(
+            root.join("src/main.stasis"),
+            "extern function IT031_missing_extern(): void;\n\
+function main(): void {}\n\
+function tick(): void { IT031_missing_extern(); }\n\
+function render(): void {}\n\
+function on_code_swap(): void {}\n",
+        )
+        .expect("write source");
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("unresolved extern must fail");
+        assert!(
+            error.contains("diagnostic_schema=stasis.native_diagnostic.v1"),
+            "{error}"
+        );
+        assert!(
+            error.contains("diagnostic_stage=extern_resolution"),
+            "{error}"
+        );
+        assert!(
+            error.contains("diagnostic_code=stasis.unresolvedExtern"),
+            "{error}"
+        );
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("extern envelope");
+        assert_eq!(envelope["context"]["file"], "src/main.stasis");
+        assert_eq!(envelope["context"]["symbol"], "IT031_missing_extern");
+        assert_eq!(envelope["causes"][0], "extern_resolution phase");
+        assert_eq!(
+            envelope["causes"].as_array().unwrap().last().unwrap(),
+            &envelope["detail"]
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn it031_runtime_and_render_resource_phase_tags_preserve_detail() {
+        let runtime = format_android_bridge_error(
+            Path::new("."),
+            AndroidBridgeError::phase(
+                "runtime_entry",
+                "tick",
+                "entrypoint signature mismatch",
+                None,
+            ),
+        );
+        let render = format_android_bridge_error(
+            Path::new("."),
+            AndroidBridgeError::phase(
+                "render_schema",
+                "render",
+                "JIT frame is not a supported production gfx_cmd frame",
+                None,
+            ),
+        );
+        let resource = format_android_bridge_error(
+            Path::new("."),
+            AndroidBridgeError::phase(
+                "resource",
+                "render",
+                "render resource error: sprite path is invalid or missing: assets/IT031_missing.svg",
+                Some("assets/IT031_missing.svg".to_string()),
+            ),
+        );
+        for (message, stage, code) in [
+            (runtime, "runtime_entry", "stasis.runtimeEntry"),
+            (render, "render_schema", "stasis.renderSchema"),
+            (resource, "resource", "stasis.missingResource"),
+        ] {
+            let envelope = message
+                .split("diagnostic_envelope=")
+                .nth(1)
+                .map(percent_decode_for_test)
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                .expect("phase envelope");
+            assert_eq!(envelope["stage"], stage);
+            assert_eq!(envelope["code"], code);
+            assert_eq!(envelope["causes"][0], format!("{stage} phase"));
+            assert_eq!(
+                envelope["causes"].as_array().unwrap().last().unwrap(),
+                &envelope["detail"]
+            );
+        }
+    }
+
+    #[test]
+    fn it031_runtime_entry_frame_failure_is_typed_at_tick_call_site() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("it031_runtime_entry");
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): void {}\n\
+function tick(value: i32): i32 { return value; }\n\
+function render(): i32 { return 0; }\n\
+function on_code_swap(): void {}\n",
+        )
+        .expect("write source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("runtime-entry source compiles before invocation");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
+        let status = stasis_android_bridge_run_tick_frame_v2(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            0,
+            0,
+            0,
+            320,
+            240,
+            i32_values.as_mut_ptr(),
+            i32_values.len(),
+            f32_values.as_mut_ptr(),
+            f32_values.len(),
+            u8_values.as_mut_ptr(),
+            u8_values.len(),
+        );
+        assert_eq!(status, -1);
+        let error_ptr = stasis_android_bridge_last_frame_error();
+        let error = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        stasis_android_bridge_free_string(error_ptr);
+        assert!(error.contains("diagnostic_stage=runtime_entry"), "{error}");
+        assert!(
+            error.contains("diagnostic_code=stasis.runtimeEntry"),
+            "{error}"
+        );
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("runtime envelope");
+        assert_eq!(envelope["context"]["symbol"], "tick");
+        assert_eq!(envelope["causes"][0], "runtime_entry phase");
+        assert_eq!(
+            envelope["causes"].as_array().unwrap().last().unwrap(),
+            &envelope["detail"]
+        );
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn it031_render_schema_frame_failure_is_typed_at_copy_call_site() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("it031_render_schema");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global gfx_cmd_i32: i32[34608];\n\
+global gfx_cmd_f32: f32[125060];\n\
+global gfx_cmd_u8: u8[65536];\n\
+function main(): void {}\n\
+function tick(): i32 { return 0; }\n\
+function render(): i32 { gfx_cmd_i32[0] = 1196967473; gfx_cmd_i32[1] = 99; return 0; }\n\
+function on_code_swap(): void {}\n",
+        )
+        .expect("write source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("render-schema source compiles before invocation");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
+        let status = stasis_android_bridge_run_tick_frame_v2(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            0,
+            0,
+            0,
+            320,
+            240,
+            i32_values.as_mut_ptr(),
+            i32_values.len(),
+            f32_values.as_mut_ptr(),
+            f32_values.len(),
+            u8_values.as_mut_ptr(),
+            u8_values.len(),
+        );
+        assert_eq!(status, -1);
+        let error_ptr = stasis_android_bridge_last_frame_error();
+        let error = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        stasis_android_bridge_free_string(error_ptr);
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("render envelope");
+        assert_eq!(envelope["stage"], "render_schema");
+        assert_eq!(envelope["code"], "stasis.renderSchema");
+        assert_eq!(envelope["context"]["symbol"], "render");
+        assert_eq!(envelope["causes"][0], "render_schema phase");
+        assert_eq!(
+            envelope["causes"].as_array().unwrap().last().unwrap(),
+            &envelope["detail"]
+        );
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
+    }
+
     #[test]
     fn c_bridge_run_tick_frame_writes_packed_render_data() {
         let _guard = bridge_runtime_test_guard();
@@ -5690,9 +6382,9 @@ global host_f32: f32[64];
 global gfx_cmd_i32: i32[34608];
 global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
-function main(): void { gfx_load_sprite(\"../assets/missing.svg\", 32, 32); }
+function main(): void {}
 function tick(): void {}
-function render(): void {}
+function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }
 ",
         )
         .expect("write source");
@@ -5726,9 +6418,159 @@ function render(): void {}
             error.contains("render resource error"),
             "unexpected error: {error}"
         );
-        assert!(error.contains("missing.svg"), "unexpected error: {error}");
+        assert!(
+            error.contains("render_missing.svg"),
+            "unexpected error: {error}"
+        );
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("render resource envelope");
+        assert_eq!(envelope["stage"], "resource");
+        assert_eq!(envelope["code"], "stasis.missingResource");
+        assert_eq!(envelope["context"]["symbol"], "render");
+        assert_eq!(envelope["context"]["resource"], "assets/render_missing.svg");
         fs::remove_dir_all(&root).ok();
         clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn c_bridge_drains_tick_resource_error_before_render() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("ffi_tick_resource_error");
+        fs::write(
+            root.join("src/main.stasis"),
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
+global host_i32: i32[768];\n\
+global host_f32: f32[64];\n\
+global gfx_cmd_i32: i32[34608];\n\
+global gfx_cmd_f32: f32[108676];\n\
+global gfx_cmd_u8: u8[65536];\n\
+function main(): void {}\n\
+function tick(): void { gfx_load_sprite(\"assets/tick_missing.svg\", 32, 32); }\n\
+function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }\n",
+        )
+        .expect("write source");
+        let error =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect_err("tick resource failure must stop before render");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("tick resource envelope");
+        assert_eq!(envelope["stage"], "resource");
+        assert_eq!(envelope["code"], "stasis.missingResource");
+        assert_eq!(envelope["context"]["symbol"], "tick");
+        assert_eq!(envelope["context"]["resource"], "assets/tick_missing.svg");
+        assert!(
+            !error.contains("render_missing.svg"),
+            "render must not mask tick error: {error}"
+        );
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn embedded_resource_errors_own_path_context_for_sprite_and_font_forms() {
+        let root = temp_project("embedded_resource_error_context");
+        fs::create_dir_all(root.join("assets")).expect("assets directory");
+        fs::write(root.join("assets/undeclared.svg"), b"svg").expect("sprite fixture");
+        install_embedded_resource_host(&root).expect("install resource host");
+        embedded_load_sprite(b"assets/missing.svg", 32, 32);
+        let missing = take_embedded_resource_error().expect_err("missing sprite error");
+        assert_eq!(missing.resource.as_deref(), Some("assets/missing.svg"));
+        embedded_load_sprite(b"assets/undeclared.svg", 32, 32);
+        let undeclared = take_embedded_resource_error().expect_err("undeclared sprite error");
+        assert_eq!(
+            undeclared.resource.as_deref(),
+            Some("assets/undeclared.svg")
+        );
+        embedded_load_font(b"assets/missing.ttf", 12);
+        let missing_font = take_embedded_resource_error().expect_err("missing font error");
+        assert_eq!(missing_font.resource.as_deref(), Some("assets/missing.ttf"));
+        embedded_load_font(b"assets/undeclared.svg", 0);
+        let invalid_font = take_embedded_resource_error().expect_err("invalid font error");
+        assert_eq!(
+            invalid_font.resource.as_deref(),
+            Some("assets/undeclared.svg")
+        );
+        *embedded_resource_catalog().lock().unwrap() = None;
+        stasis_dynload::set_embedded_graphics_host(None);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn it031_missing_resource_on_initialized_hot_reload_reports_real_hook_error() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("it031_resource_hot_reload");
+        let baseline =
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
+global host_i32: i32[768];\n\
+global host_f32: f32[64];\n\
+global gfx_cmd_i32: i32[34608];\n\
+global gfx_cmd_f32: f32[108676];\n\
+global gfx_cmd_u8: u8[65536];\n\
+global GameState { tick_count: i32; }\n\
+function main(): void { GameState.tick_count = 7; }\n\
+function tick(): void { GameState.tick_count += 1; }\n\
+function render(): void {}\n\
+function on_code_swap(): void {}\n";
+        fs::write(root.join("src/main.stasis"), baseline).expect("baseline source");
+        let input = default_tick_input();
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), input)
+            .expect("initialize healthy runtime");
+        let baseline_state = inspect_android_runtime_state(&root).expect("baseline runtime state");
+        let edited = baseline
+            .replace(
+                "function tick(): void { GameState.tick_count += 1; }",
+                "function tick(): void { GameState.tick_count += 100; }",
+            )
+            .replace(
+                "function on_code_swap(): void {}",
+                "function on_code_swap(): void { gfx_load_sprite(\"assets/IT031_missing.svg\", 32, 32); }",
+            );
+        fs::write(root.join("src/main.stasis"), edited).expect("hot reload source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("stage hot reload candidate");
+        let error = run_android_workshop_tick(&root, Path::new("src/main.stasis"), input)
+            .expect_err("hook resource must fail after initialized activation");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("resource envelope");
+        assert_eq!(envelope["stage"], "resource");
+        assert_eq!(envelope["context"]["resource"], "assets/IT031_missing.svg");
+        assert_eq!(envelope["causes"][0], "resource phase");
+        let restored_state = inspect_android_runtime_state(&root).expect("restored runtime state");
+        assert_eq!(restored_state["generation"], baseline_state["generation"]);
+        assert_eq!(
+            restored_state["source_fingerprint"],
+            baseline_state["source_fingerprint"]
+        );
+        assert_eq!(
+            restored_state["game_tick_count"],
+            baseline_state["game_tick_count"]
+        );
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), input)
+            .expect("prior runtime remains healthy after rejected hook");
+        let post_failure_state =
+            inspect_android_runtime_state(&root).expect("post-failure runtime state");
+        assert_eq!(
+            post_failure_state["game_tick_count"].as_i64(),
+            baseline_state["game_tick_count"]
+                .as_i64()
+                .map(|value| value + 1)
+        );
+        clear_runtime_session_for_test();
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -5922,6 +6764,29 @@ function render(): void {}
             fs::read_to_string(root.join("src/main.stasis")).expect("preview source"),
             original
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn c_bridge_compile_failure_sanitizes_guest_nul_and_delimiter_detail() {
+        let root = temp_project("ffi_compile_diagnostic_boundary");
+        fs::write(
+            root.join("src/main.stasis"),
+            b"function @effects(bad|diagnostic_envelope=\0) on_code_swap(): void {}\n",
+        )
+        .expect("write malformed source");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let ptr = stasis_android_bridge_compile_project(root_c.as_ptr(), entry_c.as_ptr());
+        let message = unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .expect("compile diagnostic utf8")
+            .to_string();
+        stasis_android_bridge_free_string(ptr);
+        assert!(!message.contains('\0'));
+        assert!(!message.contains("bad|diagnostic_envelope="));
+        assert!(message.contains("diagnostic_envelope="));
+        assert!(message.contains("diagnostic_stage=parse"));
         fs::remove_dir_all(root).ok();
     }
 

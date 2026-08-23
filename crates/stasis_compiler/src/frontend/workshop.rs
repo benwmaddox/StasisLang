@@ -88,9 +88,16 @@ pub fn load_workshop_project(
     project_root: &Path,
     entry_file: &Path,
 ) -> Result<Vec<WorkshopSourceFile>, String> {
+    load_workshop_project_with_diagnostic(project_root, entry_file)
+        .map_err(|diagnostic| format!("workshop module graph failed: {}", diagnostic.message))
+}
+
+pub fn load_workshop_project_with_diagnostic(
+    project_root: &Path,
+    entry_file: &Path,
+) -> Result<Vec<WorkshopSourceFile>, crate::SourceDiagnostic> {
     let (_, sources) =
-        crate::frontend::module_graph::load_project_module_graph(project_root, entry_file)
-            .map_err(|diagnostic| format!("workshop module graph failed: {diagnostic:?}"))?;
+        crate::frontend::module_graph::load_project_module_graph(project_root, entry_file)?;
     Ok(sources
         .into_iter()
         .map(|(path, source)| WorkshopSourceFile { path, source })

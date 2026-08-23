@@ -1468,6 +1468,14 @@ def main() -> int:
     assert "all_invalid_unchanged" in acceptance
     assert "isDescriptorEnvelope" in acceptance
     assert "descriptor.optString(\"schema\")" in acceptance
+    diagnostic_model = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopNativeDiagnostic.java")
+    diagnostic_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopDiagnosticSeamAcceptance.java")
+    assert 'SCHEMA = "stasis.native_diagnostic.v1"' in diagnostic_model
+    assert "fromNative" in diagnostic_model and "causes" in diagnostic_model
+    assert "Stasis Workshop IT-031" in diagnostic_acceptance
+    assert "MISSING_EXTERN" in diagnostic_acceptance
+    assert "runIt031Frame" in activity
+    assert "WorkshopDiagnosticSeamAcceptance.run" in activity
     touch_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java")
     assert "Stasis Workshop IT-027" in touch_acceptance
     assert "ACTION_DOWN" in touch_acceptance and "ACTION_MOVE" in touch_acceptance

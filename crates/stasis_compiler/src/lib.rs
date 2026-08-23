@@ -12,6 +12,8 @@ pub mod performance;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceDiagnosticCode {
     Generic,
+    Parse,
+    UnresolvedExtern,
     MissingModule,
     DuplicateImportAlias,
 }
@@ -20,6 +22,8 @@ impl SourceDiagnosticCode {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Generic => "stasis.generic",
+            Self::Parse => "stasis.parse",
+            Self::UnresolvedExtern => "stasis.unresolvedExtern",
             Self::MissingModule => "stasis.missingModule",
             Self::DuplicateImportAlias => "stasis.duplicateImportAlias",
         }

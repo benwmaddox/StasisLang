@@ -1,7 +1,10 @@
 use std::ops::Range;
 
 use crate::frontend::lexer::{lex, TokenKind};
-use crate::frontend::parser::parse_top_level_functions;
+use crate::frontend::parser::{
+    parse_top_level_functions, parse_top_level_functions_with_diagnostic, ParsedFunctionSignature,
+    ParserDiagnostic,
+};
 use crate::frontend::types::{TypeId, TypeTable};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,31 +56,55 @@ pub fn source_function_items(source: &str) -> Result<Vec<IndexedSourceFunctionIt
 }
 
 pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunction>, String> {
-    let parsed = parse_top_level_functions(source)?;
+    index_file_with_diagnostic(source, types).map_err(|error| error.message)
+}
+
+pub fn index_file_with_diagnostic(
+    source: &str,
+    types: &mut TypeTable,
+) -> Result<Vec<IndexedFunction>, ParserDiagnostic> {
+    let parsed = parse_top_level_functions_with_diagnostic(source)?;
     let mut out = Vec::with_capacity(parsed.len());
     for function in parsed {
+        let signature_range = function.signature_range.clone();
+        let body_range = function.body_range.clone();
         let mut params = Vec::with_capacity(function.params.len());
         let mut param_names = Vec::with_capacity(function.params.len());
         let mut param_type_names = Vec::with_capacity(function.params.len());
         for param in &function.params {
-            let type_id = types.resolve_or_intern(&param.type_name)?;
+            let type_id = types
+                .resolve_or_intern(&param.type_name)
+                .map_err(|message| {
+                    diagnostic_for_function(&function, message, signature_range.clone())
+                })?;
             param_names.push(param.name.clone());
             param_type_names.push(param.type_name.clone());
             params.push(type_id);
         }
-        let return_type = types.resolve_or_intern(&function.return_type_name)?;
+        let return_type = types
+            .resolve_or_intern(&function.return_type_name)
+            .map_err(|message| {
+                diagnostic_for_function(&function, message, signature_range.clone())
+            })?;
         let name_hash = hash_text(&function.name);
         let inline = function
             .annotations
             .iter()
             .any(|annotation| annotation.name == "inline");
-        let effect_contract = parse_effect_contract(&function.annotations)?;
+        let effect_contract = parse_effect_contract(&function.annotations).map_err(|message| {
+            diagnostic_for_function(&function, message, signature_range.clone())
+        })?;
         let signature_hash = hash_signature(name_hash, &params, return_type, inline);
-        let body_text = source
-            .get(function.body_range.clone())
-            .ok_or_else(|| "invalid function body range".to_string())?;
+        let body_text = source.get(function.body_range.clone()).ok_or_else(|| {
+            diagnostic_for_function(
+                &function,
+                "invalid function body range".to_string(),
+                body_range.clone(),
+            )
+        })?;
         let body_hash = hash_text(body_text);
-        let dependencies = collect_dependencies(body_text)?;
+        let dependencies = collect_dependencies(body_text)
+            .map_err(|message| diagnostic_for_function(&function, message, body_range.clone()))?;
         out.push(IndexedFunction {
             name: function.name,
             name_hash,
@@ -96,6 +123,19 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
         });
     }
     Ok(out)
+}
+
+fn diagnostic_for_function(
+    function: &ParsedFunctionSignature,
+    message: String,
+    range: Range<usize>,
+) -> ParserDiagnostic {
+    ParserDiagnostic {
+        message,
+        start: range.start,
+        end: range.end.max(range.start + 1),
+        symbol: function.name.clone(),
+    }
 }
 
 pub fn hash_text(text: &str) -> u64 {
@@ -310,6 +350,18 @@ mod tests {
         assert!(!plain[0].inline);
         assert!(annotated[0].inline);
         assert_ne!(plain[0].signature_hash, annotated[0].signature_hash);
+    }
+
+    #[test]
+    fn semantic_index_diagnostics_keep_the_current_function_context() {
+        let mut types = TypeTable::new();
+        let source =
+            "function first(): void {}\nfunction @effects(state, state) second(): void {}\n";
+        let error = index_file_with_diagnostic(source, &mut types)
+            .expect_err("invalid effect contract must fail");
+        assert_eq!(error.symbol, "second");
+        assert!(error.start > source.find("function first").unwrap());
+        assert!(error.end > error.start);
     }
 
     #[test]
