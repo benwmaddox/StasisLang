@@ -351,6 +351,14 @@ stasis play game.stasis `
 
 This turns a graphical interaction into a repeatable test artifact. PNG bytes are deterministic for identical pixels, though rasterization may still differ across graphics backends, drivers, and platforms.
 
+Use PNG evidence for a representative still state. Use an MP4 recording when validation
+depends on motion, timing, animation, input, state transitions, or a multi-step interaction. Review
+the artifact itself after capture; the command succeeding does not prove that the rendered result is
+correct. These formats are intentionally easy to hand to human and multimodal AI reviewers. AI work
+summaries should include a `Visual evidence:` line with the inspected PNG/MP4 paths and what they
+prove, use `not applicable` for non-visual work, or state clearly when relevant capture was not
+available.
+
 For deterministic desktop-first video review, use the hidden fixed-rate recorder:
 
 ```powershell
