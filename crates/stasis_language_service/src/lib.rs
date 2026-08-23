@@ -3336,8 +3336,15 @@ mod tests {
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(root.join("src")).expect("fixture source directory");
         let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
         let source = include_str!("../../../vscode-stasis/test/fixture/src/main.stasis");
         fs::write(&path, source).expect("fixture source");
+        let helper_path = root.join("src/helper.stasis");
+        let helper_source = include_str!("../../../vscode-stasis/test/fixture/src/helper.stasis");
+        fs::write(&helper_path, helper_source).expect("fixture helper source");
+        let unused_path = root.join("src/unused.stasis");
+        let unused_source = include_str!("../../../vscode-stasis/test/fixture/src/unused.stasis");
+        fs::write(&unused_path, unused_source).expect("fixture unused source");
         let toolchain_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
         for directory in ["", "internal", "testing"] {
             let source_directory = toolchain_source.join("stdlib").join(directory);
@@ -3355,7 +3362,15 @@ mod tests {
             }
         }
         let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
-        service.set_disk_document(path.to_string_lossy(), source);
+        service.set_disk_document(path_text.clone(), source);
+        service.set_disk_document(
+            helper_path.to_string_lossy().replace('\\', "/"),
+            helper_source,
+        );
+        service.set_disk_document(
+            unused_path.to_string_lossy().replace('\\', "/"),
+            unused_source,
+        );
 
         let report = service.diagnostics();
         assert!(
@@ -3365,7 +3380,7 @@ mod tests {
         );
 
         service.open_document(
-            path.to_string_lossy(),
+            path_text.clone(),
             1,
             format!(
                 "{source}\nfunction lsp_diagnostic_probe(): i32 {{ while (true) {{ return 1; }} }}\n"
@@ -3380,6 +3395,28 @@ mod tests {
             "dirty fixture diagnostics: {:?}",
             dirty.diagnostics
         );
+
+        service.open_document(
+            path_text.clone(),
+            2,
+            format!("import \"missing.stasis\";\n{source}"),
+        );
+        let missing = service.diagnostics();
+        assert_eq!(missing.diagnostics.len(), 1);
+        assert_eq!(missing.diagnostics[0].code, "stasis.missingModule");
+        let actions = service
+            .code_actions(&path_text, &["quickfix".to_string()])
+            .expect("fixture missing-import quick fix");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Remove unresolved import 'missing'");
+        assert_eq!(
+            actions[0]
+                .diagnostic_origin
+                .as_ref()
+                .map(|origin| origin.path.as_str()),
+            Some(path_text.as_str())
+        );
+        assert_eq!(actions[0].edits[0].path, path_text);
         fs::remove_dir_all(root).ok();
     }
 

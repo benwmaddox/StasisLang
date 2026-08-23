@@ -2190,6 +2190,123 @@ mod tests {
     }
 
     #[test]
+    fn packaged_nested_project_open_sequence_returns_missing_import_quick_fix() {
+        let (mut server, uri, main_path) = test_server("packaged-nested-missing-import");
+        let (server_connection, client_connection) = Connection::memory();
+        let root = Path::new(&main_path)
+            .parent()
+            .expect("source directory")
+            .to_path_buf();
+        let helper_path = path_text(&root.join("helper.stasis"));
+        let unused_path = path_text(&root.join("unused.stasis"));
+        let source = "import \"helper.stasis\";\nimport \"unused.stasis\";\nfunction main(): i32 { return helper(); }\n";
+        server.service.set_disk_document(&main_path, source);
+        server
+            .service
+            .set_disk_document(&helper_path, "function helper(): i32 { return 1; }\n");
+        server.service.set_disk_document(
+            &unused_path,
+            "function unused_helper(): i32 { return 2; }\n",
+        );
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "stasis",
+                            "version": 1,
+                            "text": source
+                        }
+                    }),
+                ),
+            )
+            .expect("packaged didOpen");
+
+        let missing_import = "import \"missing.stasis\";\n";
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidChangeTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri, "version": 2},
+                        "contentChanges": [{
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 0}
+                            },
+                            "rangeLength": 0,
+                            "text": missing_import
+                        }]
+                    }),
+                ),
+            )
+            .expect("packaged didChange");
+        let Message::Notification(notification) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("didChange diagnostics")
+        else {
+            panic!("expected didChange diagnostics");
+        };
+        let published: PublishDiagnosticsParams =
+            serde_json::from_value(notification.params).expect("published diagnostics");
+        assert_eq!(
+            published.diagnostics[0].code,
+            Some(NumberOrString::String("stasis.missingModule".to_string()))
+        );
+
+        let service_actions = server
+            .service
+            .code_actions(&main_path, &["quickfix".to_string()])
+            .expect("packaged quick fixes");
+        assert_eq!(service_actions.len(), 1);
+        assert_eq!(
+            service_actions[0]
+                .diagnostic_origin
+                .as_ref()
+                .map(|origin| origin.path.as_str()),
+            Some(main_path.as_str())
+        );
+        assert_eq!(service_actions[0].edits[0].path, main_path);
+
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(97),
+                    CodeActionRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": missing_import.len() - 1}
+                        },
+                        "context": {
+                            "diagnostics": [],
+                            "only": ["quickfix"]
+                        }
+                    }),
+                ),
+            )
+            .expect("packaged quick-fix request");
+        let actions: Option<Vec<CodeActionOrCommand>> = serde_json::from_value(
+            receive_response(&client_connection, 97)
+                .response_result
+                .expect("code-action result"),
+        )
+        .expect("code-action response");
+        let CodeActionOrCommand::CodeAction(action) = &actions.expect("actions")[0] else {
+            panic!("expected code action");
+        };
+        assert_eq!(action.title, "Remove unresolved import 'missing'");
+        assert!(action.diagnostics.is_none());
+    }
+
+    #[test]
     fn standard_quick_fix_is_available_without_request_diagnostics() {
         let (mut server, uri, main_path) = test_server("missing-import-quick-fix-empty-context");
         let (server_connection, client_connection) = Connection::memory();
