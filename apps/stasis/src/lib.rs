@@ -2794,11 +2794,6 @@ fn run_play_in_process_inner(
         for data_watcher in &mut data_watchers {
             watch_events.extend(data_watcher.drain_stasis_changes());
         }
-        if replay.is_some() && !watch_events.is_empty() {
-            return Err(
-                "record/replay aborted because source, data, or assets changed".to_string(),
-            );
-        }
         let mut needs_data_reload = false;
         for event in watch_events {
             if live
@@ -2814,10 +2809,16 @@ fn run_play_in_process_inner(
                     || event_path == normalize_watch_path_for_log(meta_path)
             });
             if is_data_event {
+                if replay.is_some() {
+                    return Err("record/replay aborted because project data changed".to_string());
+                }
                 needs_data_reload = true;
                 continue;
             }
             if watch_asset_paths.contains(&event_path) {
+                if replay.is_some() {
+                    return Err("record/replay aborted because a project asset changed".to_string());
+                }
                 changed_asset_paths.entry(event_path).or_insert(event.path);
                 continue;
             }
@@ -2827,6 +2828,9 @@ fn run_play_in_process_inner(
                 watch_dependency_paths.as_ref(),
             );
             if submit {
+                if replay.is_some() {
+                    return Err("record/replay aborted because source code changed".to_string());
+                }
                 needs_recompile = true;
                 triggered_paths.push(normalize_watch_path_for_log(&event.path));
             } else {
@@ -2922,6 +2926,14 @@ fn run_play_in_process_inner(
                 budget.record(tick_micros);
             }
             if tick_rc != 0 {
+                if replay_player.is_some() {
+                    return Err(format!(
+                        "replay diverged at tick {next_tick}: guest tick() exited with status {tick_rc}"
+                    ));
+                }
+                if let Some(recorder) = replay_recorder.as_mut() {
+                    recorder.discard_tick(next_tick)?;
+                }
                 break;
             }
         }
@@ -2931,6 +2943,14 @@ fn run_play_in_process_inner(
             .map(|started| started.elapsed().as_micros().min(u64::MAX as u128) as u64)
             .unwrap_or(0);
         if render_rc != 0 {
+            if replay_player.is_some() {
+                return Err(format!(
+                    "replay diverged at tick {next_tick}: guest render() exited with status {render_rc}"
+                ));
+            }
+            if let Some(recorder) = replay_recorder.as_mut() {
+                recorder.discard_tick(next_tick)?;
+            }
             break;
         }
         if let Some(recorder) = replay_recorder.as_mut() {

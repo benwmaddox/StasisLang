@@ -175,6 +175,21 @@ impl ReplayRecorder {
         Ok(())
     }
 
+    pub(crate) fn discard_tick(&mut self, tick: u64) -> Result<(), String> {
+        let frame = self
+            .document
+            .frames
+            .last()
+            .ok_or_else(|| format!("replay recorder has no active tick {tick}"))?;
+        if frame.tick != tick || !frame.state_sha256.is_empty() {
+            return Err(format!(
+                "replay tick {tick} is not an unfinished active tick"
+            ));
+        }
+        self.document.frames.pop();
+        Ok(())
+    }
+
     pub(crate) fn publish(self) -> Result<PathBuf, String> {
         if self.document.frames.is_empty() {
             return Err("cannot publish a replay without a completed tick".to_string());
@@ -786,6 +801,37 @@ mod tests {
             let decoded = decode_scalar(&encoded, value).expect("decode exact scalar bits");
             assert_eq!(encode_scalar(decoded), encoded);
         }
+    }
+
+    #[test]
+    fn unfinished_tick_can_be_discarded_after_guest_shutdown() {
+        let mut recorder = ReplayRecorder {
+            output: PathBuf::from("unused.replay.json"),
+            document: ReplayDocument {
+                schema_version: REPLAY_SCHEMA_VERSION,
+                identity: ReplayIdentity {
+                    stasis_version: "test".to_string(),
+                    release_id: "test".to_string(),
+                    target: "test".to_string(),
+                    source_sha256: "0".repeat(64),
+                    state_layout_sha256: "0".repeat(64),
+                    host_i32_count: 2,
+                    host_f32_count: 1,
+                },
+                initial_state: InitialState {
+                    values: Vec::new(),
+                    state_sha256: "0".repeat(64),
+                },
+                frames: Vec::new(),
+            },
+            previous_i32: vec![0; 2],
+            previous_f32: vec![0.0; 1],
+        };
+        recorder
+            .begin_tick(1, &[7, 0], &[1.0])
+            .expect("begin unfinished tick");
+        recorder.discard_tick(1).expect("discard unfinished tick");
+        assert!(recorder.document.frames.is_empty());
     }
 
     #[test]
