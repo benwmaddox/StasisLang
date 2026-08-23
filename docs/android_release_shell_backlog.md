@@ -8,7 +8,9 @@ The current shell provides app identity/version/orientation from `stasis.json`,
 arm64 AOT execution, SDL graphics/audio/input/lifecycle handling, packaged
 sprites and fonts, app-private storage, a three-finger performance overlay,
 safe-inset-aware fatal diagnostics, and startup SHA-256 verification of every
-asset declared by `assets/manifest.json`.
+asset declared by `assets/manifest.json` on cold extraction. Cached startup
+reuse checks the versioned marker and extracted-tree metadata inventory instead
+of rehashing the complete asset tree.
 
 ## Potential additions
 
@@ -37,9 +39,11 @@ asset declared by `assets/manifest.json`.
 9. Delivery-size reporting. Record AAB size, estimated arm64 download/install
    size, native-library contribution, assets, symbols, and regression thresholds
    in release CI.
-10. Asset-copy optimization. Verify package assets once per version and retain a
-    validated version marker so large games do not recopy and rehash unchanged
-    content on every launch.
+10. Completed: asset-copy optimization. The Android shell verifies package
+   assets on a cold install/update, retains a versioned package/release and
+   manifest marker with a verified file inventory, and reuses it on ordinary
+   Activity creation and process restart. iOS continues to open immutable
+   app-bundle assets directly, so it has no extraction cache.
 
 Add these only through the generic shell or an explicit optional adapter. Do not
 reintroduce game-specific Android runtime flavors.

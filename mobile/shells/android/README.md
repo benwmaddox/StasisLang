@@ -19,10 +19,28 @@ game loader, or writable source is included.
 The Android activity adds one release diagnostic: a three-finger tap toggles a
 five-second rolling tick/render timing overlay with average, p50, p95, and
 60-fps frame-budget usage. It is hidden when the game starts. The same
-safe-inset-aware overlay layer presents startup/runtime resource failures, and
-startup verifies every packaged asset against its manifest SHA-256 before
-replacing the last validated app-private copy. Future candidates are recorded
-in `docs/android_release_shell_backlog.md`.
+safe-inset-aware overlay layer presents startup/runtime resource failures.
+
+Packaged assets are copied into the app-private directory only on a cold cache
+path. The cache reads the small packaged `assets/manifest.json` on every
+activity creation, then reuses a matching extracted tree when its versioned
+marker agrees on the package name, release identity, manifest SHA-256, and
+verified file inventory (size and modification time). A cold path copies the
+tree, SHA-256 verifies every declared asset, writes the marker last, and
+publishes by rename with rollback protection. This metadata inventory avoids
+rehashing all asset bytes on ordinary recreation while remaining inside the
+app-private trust boundary: missing, truncated, mutated, extra, partial, stale,
+or corrupt state is rejected and rebuilt. The marker seals a fully verified
+tree inside the app-private trust boundary; the inventory rejects observable
+metadata/tree changes without claiming cryptographic detection of a same-
+privilege rewrite that restores every recorded metadata value. Startup logs
+cold/reuse elapsed time and packaged/cache read-write byte counters.
+
+iOS does not use this extraction cache. Its immutable app-bundle assets are
+opened directly by the iOS shell; the Android cache is not forced onto that
+platform.
+
+Future candidates are recorded in `docs/android_release_shell_backlog.md`.
 
 The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for

@@ -70,6 +70,9 @@ jobs:
       - name: Test release provenance
         run: python -m unittest tools.ci.test_release_provenance
 
+      - name: Test Android verified asset cache
+        run: python tools/ci/test_android_asset_cache.py
+
       - name: Test render parity fixture and capture gate
         run: |
           python -m unittest tools.ci.test_verify_android_render_performance
