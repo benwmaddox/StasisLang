@@ -129,3 +129,36 @@ signing disabled; the driver builds `samples/mobile_storage_link` and verifies
 the arm64 executable, embedded SDL frameworks, packaged assets and provenance,
 and absence of Stasis source. A signed device install still requires the
 developer's `DEVELOPMENT_TEAM` and provisioning profile.
+
+When the project declares the optional `network` capability, packaging also
+requires a macOS host with Xcode and the `aarch64-apple-ios` Rust target. The
+toolchain builds `stasis_network` as a release static library, stages it under
+`ios/network/`, links it through the generated `StasisMobile.xcconfig`, and
+places the signed/static `network_guest.bundle` in the iOS asset root. The
+generated package metadata uses iOS paths and defines `STASIS_NETWORK_ENABLED=1`;
+non-network packages contain none of those references.
+
+Official toolchain archives resolve network libraries relative to the installed
+executable from `mobile/network/<target>/libstasis_network.a` and the shared
+`mobile/network/include/stasis_network.h`; they do not depend on the source
+checkout used to build the compiler. Source-tree Cargo builds retain a
+development fallback. Release assembly must therefore publish the prebuilt
+Android arm64/x86_64 libraries and, on macOS archives, the iOS arm64 library
+under that layout before advertising network mobile packaging.
+
+Nightly archives now receive these support files from a fail-closed, pinned
+mobile-network build job (Android NDK 27.0.12077973/API 26 and the macOS
+iphoneos SDK) before archive provenance is generated. Downstream network
+packaging therefore does not need the Stasis source checkout or Cargo to build
+the network library.
+
+The network shell requests `NSLocalNetworkUsageDescription` with a clear nearby
+friends explanation. v1 uses direct TCP/unicast and does not request Bonjour,
+multicast, or discovery entitlements. After host startup, the native UIKit shell
+offers a Copy URL / Dismiss alert. The pairing URL is copied through bounded
+native memory only and is never placed in Stasis state, snapshots, logs, or
+guest data. See Apple's [Local Network
+Privacy](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+and [`NSLocalNetworkUsageDescription`](https://developer.apple.com/documentation/BundleResources/Information-Property-List/NSLocalNetworkUsageDescription)
+guidance. Physical iOS signing, installation, and device pairing remain release
+gates.

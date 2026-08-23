@@ -1934,6 +1934,37 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
         .contains("android-x86_64 is a test-only emulator target; pass --development-build"));
     assert!(!project.join("x86_release").exists());
 
+    if !cfg!(target_os = "macos") {
+        let manifest_path = project.join("stasis.json");
+        let mut network_manifest: Value = serde_json::from_slice(
+            &fs::read(&manifest_path).expect("read mobile manifest for network fixture"),
+        )
+        .expect("parse mobile manifest for network fixture");
+        network_manifest["capabilities"] = json!({"network": true});
+        network_manifest["web"] = json!({"entry": "src/main.stasis"});
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&network_manifest).expect("encode network fixture manifest"),
+        )
+        .expect("write network fixture manifest");
+        let network_ios = stasis(
+            &[
+                "package-mobile",
+                "--target",
+                "ios-arm64",
+                "--out",
+                "network_ios",
+                "--development-build",
+            ],
+            &project,
+        );
+        assert_eq!(network_ios.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&network_ios.stderr)
+            .contains("requires a macOS host with Xcode"));
+        assert!(!project.join("network_ios").exists());
+        assert!(!project.join(".network_ios.staging").exists());
+    }
+
     fs::write(project.join("src/main.stasis"), "function main(: i32 {\n")
         .expect("write invalid mobile entry");
     let failed = stasis(
