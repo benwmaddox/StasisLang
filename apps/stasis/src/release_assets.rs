@@ -84,6 +84,7 @@ mod tests {
                 encoding: SpriteEncoding::Svg,
                 width: 32,
                 height: 32,
+                layout: None,
             },
             prepare: None,
             dependencies: vec![],
