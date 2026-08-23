@@ -80,6 +80,16 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Boundary: General input recording and the public replay/verify runtime remain owned by #148.
 - Status: `completed`.
 
+#### RR1 - Sparse HostFrame Record/Replay
+
+- Scope: Record a sparse non-default initial simulation snapshot, exact-bit HostFrame changes, and
+  post-render simulation hashes; replay through the existing graphical JIT tick/render path.
+- Tests: Exact zero-transition and float-bit codec tests, state reconstruction/divergence tests,
+  CLI parsing, and the `samples/windows_launch_smoke` record-to-replay-to-PNG executable seam.
+- Boundary: Graphics pixels are regenerated rather than stored. Schema v1 rejects live code/data/
+  asset changes and does not virtualize direct nondeterministic extern results outside HostFrame.
+- Status: `completed`.
+
 ### Selective Direct-Call JIT Patch Track
 
 The canonical ABI, state machine, failure table, platform matrix, and budgets are in

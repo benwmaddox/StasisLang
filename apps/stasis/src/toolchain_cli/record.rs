@@ -3,7 +3,8 @@ use clap::Args;
 use image::GenericImageView;
 use serde_json::json;
 use stasis::{
-    run_play_in_process_with_input_script_window_title_profile_and_capture, PlayFrameCaptureConfig,
+    run_play_in_process_with_input_script_window_title_profile_and_capture,
+    run_play_in_process_with_replay, PlayFrameCaptureConfig, PlayReplayConfig,
 };
 use std::fs;
 use std::io::Read;
@@ -43,6 +44,12 @@ pub(super) struct RecordArgs {
     /// Apply the existing deterministic pointer input timeline.
     #[arg(long, value_name = "PATH")]
     pub(super) input_script: Option<PathBuf>,
+    /// Replay a recorded HostFrame-diff session into the captured frames or MP4.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["input_script", "record_replay"])]
+    pub(super) replay: Option<PathBuf>,
+    /// Save this run as a replay session while also capturing frames or MP4.
+    #[arg(long, value_name = "PATH", conflicts_with = "replay")]
+    pub(super) record_replay: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +101,13 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         .as_deref()
         .map(|path| resolve_workspace_path(workspace, path, "input script"))
         .transpose()?;
+    let replay = if let Some(path) = args.replay.as_deref() {
+        Some(PlayReplayConfig::Replay(absolute_path(path)?))
+    } else if let Some(path) = args.record_replay.as_deref() {
+        Some(PlayReplayConfig::Record(absolute_path(path)?))
+    } else {
+        None
+    };
     let stage_root = parent.join(format!(
         ".stasis-recording-{}-{}",
         std::process::id(),
@@ -110,25 +124,42 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         ));
     }
 
-    let result = run_play_in_process_with_input_script_window_title_profile_and_capture(
-        &entry,
-        Some(&workspace.root),
-        None,
-        None,
-        input_script.as_deref(),
-        0,
-        Some(frame_count),
-        Some(&workspace.manifest.name),
-        None,
-        PlayFrameCaptureConfig {
-            output_dir: frames_dir.clone(),
-            width: args.width,
-            height: args.height,
-            fps: args.fps,
-            frame_count,
-            audio_output: (kind == OutputKind::Mp4).then(|| stage_root.join("audio.wav")),
-        },
-    );
+    let capture = PlayFrameCaptureConfig {
+        output_dir: frames_dir.clone(),
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+        frame_count,
+        audio_output: (kind == OutputKind::Mp4).then(|| stage_root.join("audio.wav")),
+    };
+    let result = if let Some(replay) = replay {
+        run_play_in_process_with_replay(
+            &entry,
+            Some(&workspace.root),
+            None,
+            None,
+            input_script.as_deref(),
+            0,
+            Some(frame_count),
+            Some(&workspace.manifest.name),
+            None,
+            Some(capture),
+            replay,
+        )
+    } else {
+        run_play_in_process_with_input_script_window_title_profile_and_capture(
+            &entry,
+            Some(&workspace.root),
+            None,
+            None,
+            input_script.as_deref(),
+            0,
+            Some(frame_count),
+            Some(&workspace.manifest.name),
+            None,
+            capture,
+        )
+    };
     if let Err(error) = result {
         cleanup_stage(&stage_root);
         return Err(format!(
@@ -520,6 +551,8 @@ mod tests {
             frames: Some(3),
             duration: None,
             input_script: None,
+            replay: None,
+            record_replay: None,
         }
     }
 

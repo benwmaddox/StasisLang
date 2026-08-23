@@ -22,6 +22,11 @@ frames. The loop has zero wall-clock pacing, so the frame sequence is driven by
 committed ticks and is repeatable for the same source, assets, backend, and input
 script. Capture starts after `main()` and excludes the loading frame.
 
+Add `--record-replay artifacts/run.replay.json` to publish the sparse HostFrame-diff session
+alongside the image output. To render a prior session instead of using live or scripted input, pass
+`--replay artifacts/run.replay.json`; the requested frame count must equal the replay tick count.
+This works for both PNG sequences and MP4 output. See [Record and replay](record_replay.md).
+
 Use an `.mp4` output to encode the staged PNGs with FFmpeg:
 
 ```powershell

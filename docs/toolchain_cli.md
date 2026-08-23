@@ -139,6 +139,11 @@ cloning a generated repository, reactivate the checked-in hook with
   counts, output format, staged frame/WAV validation, encoder failures, and partial-output cleanup
   are bounded and diagnosed. See
   [Deterministic headless recording](headless_recording.md).
+- `replay RECORDING [--entry ENTRY] [--tick-sleep-us N]`: validate the recording identity,
+  rebuild each complete HostFrame from sparse exact-bit changes, execute the normal JIT `tick()`
+  and `render()` entries, and stop at the first simulation-state hash divergence. `play` accepts
+  `--record-replay PATH` and `--replay PATH`; `record` accepts the same session modes so a replay
+  can be rendered directly to PNG or MP4. See [Record and replay](record_replay.md).
 - `play [ENTRY]`: launch the graphical hot-swap runtime. Without an entry override, discover the
   nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
   and display `name`. Explicit entries discover their own ancestor manifest, so project-root
@@ -194,8 +199,8 @@ cloning a generated repository, reactivate the checked-in hook with
 - `vendor update`: transactionally restore `vendor/stasis` from the selected executable and update
   its manifest identity immediately.
 
-`replay` and `verify` intentionally return deterministic unsupported diagnostics until the replay
-runtime contract lands; they do not fake successful behavior.
+`verify` remains reserved for a future non-presenting batch verifier. `replay` performs verification
+while presenting every reconstructed tick.
 
 ### Headless scenarios
 
