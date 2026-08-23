@@ -1145,8 +1145,35 @@ impl LanguageServer {
                 let diagnostics = if let Some(code) = action.diagnostic_code.as_ref() {
                     if request_diagnostics.is_empty() {
                         // VS Code may omit the diagnostics it is requesting actions for.
-                        // Keep the action available, but do not claim an association we
-                        // cannot establish from the request context.
+                        // Keep an action only when its current-document edit is relevant to
+                        // the requested range, but do not claim an association we cannot
+                        // establish from the request context.
+                        let action_touches_request = {
+                            let snapshot = self.service.snapshot();
+                            let document = snapshot.document(&path).ok_or_else(|| {
+                                format!("code-action document is not indexed: '{path}'")
+                            })?;
+                            let requested = document
+                                .byte_offset(Position {
+                                    line: params.range.start.line,
+                                    utf16_character: params.range.start.character,
+                                })
+                                .and_then(|start| {
+                                    document
+                                        .byte_offset(Position {
+                                            line: params.range.end.line,
+                                            utf16_character: params.range.end.character,
+                                        })
+                                        .map(|end| start..end)
+                                })
+                                .map_err(|error| error.to_string())?;
+                            action.edits.iter().any(|edit| {
+                                edit.path == path && ranges_touch(&edit.range, &requested)
+                            })
+                        };
+                        if !action_touches_request {
+                            return Ok(None);
+                        }
                         None
                     } else {
                         let matching = request_diagnostics
@@ -1763,6 +1790,13 @@ fn lsp_position(position: Position) -> lsp_types::Position {
     lsp_types::Position::new(position.line, position.utf16_character)
 }
 
+fn ranges_touch(left: &std::ops::Range<usize>, right: &std::ops::Range<usize>) -> bool {
+    left.start <= left.end
+        && right.start <= right.end
+        && left.start <= right.end
+        && right.start <= left.end
+}
+
 fn lsp_selection_range(
     document: &Document,
     ranges: Vec<std::ops::Range<usize>>,
@@ -2191,6 +2225,51 @@ mod tests {
         assert_eq!(action.title, "Remove unresolved import 'missing'");
         assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
         assert!(action.diagnostics.is_none());
+    }
+
+    #[test]
+    fn standard_quick_fix_without_request_diagnostics_is_suppressed_for_unrelated_range() {
+        let (mut server, uri, main_path) = test_server("missing-import-quick-fix-unrelated-range");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "import \"missing.stasis\";\nfunction main(): i32 { return 0; }\n";
+        server.service.open_document(main_path, 7, source);
+        server
+            .publish_diagnostics(&server_connection)
+            .expect("publish structured diagnostic");
+        let Message::Notification(_) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("diagnostic notification")
+        else {
+            panic!("expected diagnostic notification");
+        };
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(96),
+                    CodeActionRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 1, "character": 1},
+                            "end": {"line": 1, "character": 2}
+                        },
+                        "context": {
+                            "diagnostics": [],
+                            "only": ["quickfix"]
+                        }
+                    }),
+                ),
+            )
+            .expect("quick-fix request");
+        let actions: Option<Vec<CodeActionOrCommand>> = serde_json::from_value(
+            receive_response(&client_connection, 96)
+                .response_result
+                .expect("code-action result"),
+        )
+        .expect("code-action response");
+        assert!(actions.is_none());
     }
 
     #[test]
