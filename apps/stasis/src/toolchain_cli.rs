@@ -4,8 +4,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
     load_and_apply_play_data_bindings_for_test, resolve_play_data_binding_paths,
-    run_live_in_process, run_live_in_process_with_data, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
+    run_live_in_process, run_live_in_process_with_data, run_play_in_process_with_replay,
+    run_play_in_process_with_window_title, run_self_host_aot_cli_with_options, LiveRunConfig,
+    PlayReplayConfig, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetFormat, AssetLimits, AudioEncoding,
@@ -435,8 +436,16 @@ enum ToolchainCommand {
         #[arg(long, default_value_t = MAX_STATE_SNAPSHOT_BYTES as u64)]
         mobile_budget_bytes: u64,
     },
-    /// Replay support is reserved until the replay runtime lands.
-    Replay,
+    /// Replay one recorded HostFrame-diff session through tick and render.
+    Replay {
+        #[arg(value_name = "RECORDING")]
+        recording: PathBuf,
+        /// Override the manifest entry with a project-relative .stasis file.
+        #[arg(long, value_name = "ENTRY")]
+        entry: Option<PathBuf>,
+        #[arg(long, default_value_t = 16_000)]
+        tick_sleep_us: u64,
+    },
     /// Replay verification is reserved until the replay runtime lands.
     Verify,
     /// Print the installed toolchain version.
@@ -1015,7 +1024,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Package { .. } => "package",
         ToolchainCommand::PackageMobile { .. } => "package-mobile",
         ToolchainCommand::Inspect { .. } => "inspect",
-        ToolchainCommand::Replay => "replay",
+        ToolchainCommand::Replay { .. } => "replay",
         ToolchainCommand::Verify => "verify",
         ToolchainCommand::Version => "version",
         ToolchainCommand::EditorInfo => "editor-info",
@@ -1047,10 +1056,6 @@ fn execute(
         ToolchainCommand::Version => Ok(version_result()),
         ToolchainCommand::EditorInfo => editor_info_result(),
         ToolchainCommand::Env => env_result(workspace_arg.as_deref()),
-        ToolchainCommand::Replay => Err(
-            "replay is unavailable in toolchain 0.1; no replay runtime contract is implemented"
-                .to_string(),
-        ),
         ToolchainCommand::Verify => Err(
             "verify is unavailable in toolchain 0.1; no replay verification contract is implemented"
                 .to_string(),
@@ -1155,6 +1160,16 @@ fn execute(
                     }
                 }
                 ToolchainCommand::Record { args } => record::execute(&workspace, args),
+                ToolchainCommand::Replay {
+                    recording,
+                    entry,
+                    tick_sleep_us,
+                } => replay_workspace(
+                    &workspace,
+                    &recording,
+                    entry.as_deref(),
+                    tick_sleep_us,
+                ),
                 ToolchainCommand::Lsp { stdio } => {
                     if json_output {
                         Err("--json cannot be combined with lsp; LSP owns stdout".to_string())
@@ -2434,6 +2449,40 @@ fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
     Ok(CommandResult::success(
         "graphical watch session ended",
         json!({"backend": "jit", "headless": false, "watch": true}),
+    ))
+}
+
+fn replay_workspace(
+    workspace: &Workspace,
+    recording: &Path,
+    entry: Option<&Path>,
+    tick_sleep_us: u64,
+) -> Result<CommandResult, String> {
+    let entry = entry.unwrap_or_else(|| Path::new(&workspace.manifest.entry));
+    validate_relative_path("replay entry", entry)?;
+    let entry = workspace.root.join(entry);
+    validate_workspace_destination(workspace, "replay entry", &entry)?;
+    let recording = absolute_path(recording)?;
+    run_play_in_process_with_replay(
+        &entry,
+        Some(&workspace.root),
+        None,
+        None,
+        None,
+        tick_sleep_us,
+        None,
+        Some(&workspace.manifest.name),
+        None,
+        None,
+        PlayReplayConfig::Replay(recording.clone()),
+    )?;
+    Ok(CommandResult::success(
+        format!("replayed {}", recording.display()),
+        json!({
+            "backend": "jit",
+            "recording": recording,
+            "verified": true,
+        }),
     ))
 }
 
@@ -7742,6 +7791,31 @@ mod tests {
             "1"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn replay_accepts_a_recording_and_optional_entry() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "replay",
+            "runs/game.replay.json",
+            "--entry",
+            "src/alternate.stasis",
+            "--tick-sleep-us",
+            "0",
+        ])
+        .expect("parse replay command");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::Replay {
+                recording,
+                entry: Some(entry),
+                tick_sleep_us: 0,
+            } if recording == PathBuf::from("runs/game.replay.json")
+                && entry == PathBuf::from("src/alternate.stasis")
+        ));
     }
 
     #[test]

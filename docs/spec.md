@@ -704,6 +704,21 @@ Rules:
 - Cross-architecture hash claims require integer or Q16.16 simulation state; ordinary floating
   point remains the platform-floating profile defined in section 4.3.1.
 
+### 10.2 Runtime Record/Replay
+
+The development runtime supports schema-versioned replay sessions through the normal graphical
+JIT lifecycle. Recording begins after `main()` and captures a sparse initial simulation snapshot:
+only compiler-owned scalar and collection locations whose exact bits differ from the type default
+are stored. Every completed tick records only exact-bit HostFrame changes from the prior full
+snapshot and one simulation-state hash after `tick()` and `render()`.
+
+Playback reconstructs the complete HostFrame by applying those changes in tick order, publishes it
+before `tick()`, then runs `tick()` and `render()` normally. It never applies recorded gameplay
+state per tick. The post-render hash must match or playback fails at the first divergent tick.
+Graphics output and host/presentation buffers are excluded. Source, layout, toolchain release,
+target, and HostFrame identities must match; live code, data, or asset reloads abort the session.
+Ordinary floating-point replay retains the same-target profile from section 4.3.1.
+
 ## 11. Memory Model
 
 - All persistent data is global.

@@ -7,6 +7,7 @@ mod frame_pacer;
 mod host_set_registry;
 mod live_workspace;
 mod mobile_aot_bindings;
+mod record_replay;
 mod runtime_exec;
 mod stasis_test_runner;
 mod watch;
@@ -22,6 +23,7 @@ pub use mobile_aot_bindings::{
     audit_mobile_aot_bindings, escape_mobile_c_string_literal, mobile_aot_function_for,
     write_mobile_aot_bindings_source, write_mobile_aot_bindings_source_with_profile,
 };
+pub use record_replay::{simulation_state_hash, PlayReplayConfig};
 pub use stasis_test_runner::{
     natural_path_cmp, run_jit_tests_in_directory,
     run_jit_tests_in_directory_with_project_root_and_session,
@@ -33,6 +35,7 @@ pub use window_config::WindowConfig;
 use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
 use frame_pacer::FramePacer;
 use live_workspace::LiveWorkspace;
+use record_replay::{ReplayPlayer, ReplayRecorder};
 use runtime_exec::RuntimeLauncher;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -2146,6 +2149,7 @@ pub fn run_play_in_process(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -2180,6 +2184,7 @@ pub fn run_play_in_process_with_window_title(
         tick_sleep_micros,
         max_ticks,
         Some(window_title),
+        None,
         None,
         None,
         None,
@@ -2256,6 +2261,7 @@ pub fn run_play_in_process_with_input_script_window_title_profile_and_capture(
         profile,
         None,
         Some(capture),
+        None,
     )
 }
 
@@ -2283,6 +2289,37 @@ pub fn run_play_in_process_with_input_script_window_title_and_profile(
         profile,
         None,
         None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_replay(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+    capture: Option<PlayFrameCaptureConfig>,
+    replay: PlayReplayConfig,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        profile,
+        None,
+        capture,
+        Some(replay),
     )
 }
 
@@ -2329,6 +2366,7 @@ pub fn run_live_in_process_with_data(
         None,
         Some((server, config)),
         None,
+        None,
     )
 }
 
@@ -2340,11 +2378,12 @@ fn run_play_in_process_inner(
     data_bind_struct_meta: Option<&Path>,
     input_script: Option<&Path>,
     tick_sleep_micros: u64,
-    max_ticks: Option<u64>,
+    mut max_ticks: Option<u64>,
     window_title: Option<&str>,
     mut profile: Option<PlayProfileConfig>,
     live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
     capture: Option<PlayFrameCaptureConfig>,
+    replay: Option<PlayReplayConfig>,
 ) -> Result<(), String> {
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
     let launch_dir = std::env::current_dir()
@@ -2352,6 +2391,33 @@ fn run_play_in_process_inner(
     let _current_directory_guard = PlayCurrentDirectoryGuard {
         path: launch_dir.clone(),
     };
+    let replay = replay.map(|mode| match mode {
+        PlayReplayConfig::Record(path) => {
+            PlayReplayConfig::Record(resolve_play_sidecar_path(&path, &launch_dir))
+        }
+        PlayReplayConfig::Replay(path) => {
+            PlayReplayConfig::Replay(resolve_play_sidecar_path(&path, &launch_dir))
+        }
+    });
+    if input_script.is_some() && matches!(replay, Some(PlayReplayConfig::Replay(_))) {
+        return Err("--input-script cannot be combined with replay playback".to_string());
+    }
+    if live.is_some() && replay.is_some() {
+        return Err("live editing cannot be combined with record/replay".to_string());
+    }
+    let mut replay_player = match replay.as_ref() {
+        Some(PlayReplayConfig::Replay(path)) => Some(ReplayPlayer::load(path)?),
+        _ => None,
+    };
+    if let Some(player) = replay_player.as_ref() {
+        let frame_count = player.frame_count();
+        if max_ticks.is_some_and(|ticks| ticks != frame_count) {
+            return Err(format!(
+                "replay contains {frame_count} ticks; requested tick count must match"
+            ));
+        }
+        max_ticks = Some(frame_count);
+    }
     if let Some(output_path) = profile
         .as_mut()
         .and_then(|profile| profile.output_path.as_mut())
@@ -2566,6 +2632,22 @@ fn run_play_in_process_inner(
         return Err(format!("guest main() returned non-zero status {main_rc}"));
     }
 
+    if let Some(player) = replay_player.as_ref() {
+        player.initialize(&jit)?;
+    }
+    let mut replay_recorder = match replay.as_ref() {
+        Some(PlayReplayConfig::Record(path)) => Some(ReplayRecorder::start(
+            path.clone(),
+            &jit,
+            host_i32.len(),
+            host_f32.len(),
+        )?),
+        _ => None,
+    };
+
+    if max_ticks == Some(0) && matches!(replay, Some(PlayReplayConfig::Record(_))) {
+        return Err("record/replay requires at least one completed tick".to_string());
+    }
     if max_ticks == Some(0) {
         return Ok(());
     }
@@ -2727,10 +2809,16 @@ fn run_play_in_process_inner(
                     || event_path == normalize_watch_path_for_log(meta_path)
             });
             if is_data_event {
+                if replay.is_some() {
+                    return Err("record/replay aborted because project data changed".to_string());
+                }
                 needs_data_reload = true;
                 continue;
             }
             if watch_asset_paths.contains(&event_path) {
+                if replay.is_some() {
+                    return Err("record/replay aborted because a project asset changed".to_string());
+                }
                 changed_asset_paths.entry(event_path).or_insert(event.path);
                 continue;
             }
@@ -2740,6 +2828,9 @@ fn run_play_in_process_inner(
                 watch_dependency_paths.as_ref(),
             );
             if submit {
+                if replay.is_some() {
+                    return Err("record/replay aborted because source code changed".to_string());
+                }
                 needs_recompile = true;
                 triggered_paths.push(normalize_watch_path_for_log(&event.path));
             } else {
@@ -2797,19 +2888,22 @@ fn run_play_in_process_inner(
             stasis_dynload::set_recording_clock_frame(ticks_executed);
         }
         gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
-        if host_i32.get(9).copied().unwrap_or(0) != 0 {
-            break;
+        let next_tick = ticks_executed.saturating_add(1);
+        if let Some(player) = replay_player.as_mut() {
+            player.apply_next(next_tick, &mut host_i32, &mut host_f32)?;
+        } else {
+            if host_i32.get(9).copied().unwrap_or(0) != 0 {
+                break;
+            }
+            if let Some(timeline) = input_timeline.as_mut() {
+                apply_play_input_frame(timeline, next_tick, &mut host_i32, &mut host_f32)?;
+            }
+            if let Some(live) = live.as_ref() {
+                live.apply_input_override(&mut host_i32, &mut host_f32)?;
+            }
         }
-        if let Some(timeline) = input_timeline.as_mut() {
-            apply_play_input_frame(
-                timeline,
-                ticks_executed.saturating_add(1),
-                &mut host_i32,
-                &mut host_f32,
-            )?;
-        }
-        if let Some(live) = live.as_ref() {
-            live.apply_input_override(&mut host_i32, &mut host_f32)?;
+        if let Some(recorder) = replay_recorder.as_mut() {
+            recorder.begin_tick(next_tick, &host_i32, &host_f32)?;
         }
         gfx.host_bulk_apply_requests(
             &host_req_seq,
@@ -2832,6 +2926,14 @@ fn run_play_in_process_inner(
                 budget.record(tick_micros);
             }
             if tick_rc != 0 {
+                if replay_player.is_some() {
+                    return Err(format!(
+                        "replay diverged at tick {next_tick}: guest tick() exited with status {tick_rc}"
+                    ));
+                }
+                if let Some(recorder) = replay_recorder.as_mut() {
+                    recorder.discard_tick(next_tick)?;
+                }
                 break;
             }
         }
@@ -2841,7 +2943,21 @@ fn run_play_in_process_inner(
             .map(|started| started.elapsed().as_micros().min(u64::MAX as u128) as u64)
             .unwrap_or(0);
         if render_rc != 0 {
+            if replay_player.is_some() {
+                return Err(format!(
+                    "replay diverged at tick {next_tick}: guest render() exited with status {render_rc}"
+                ));
+            }
+            if let Some(recorder) = replay_recorder.as_mut() {
+                recorder.discard_tick(next_tick)?;
+            }
             break;
+        }
+        if let Some(recorder) = replay_recorder.as_mut() {
+            recorder.finish_tick(&jit)?;
+        }
+        if let Some(player) = replay_player.as_ref() {
+            player.verify_tick(next_tick, &jit)?;
         }
 
         if measure_hud {
@@ -2930,6 +3046,10 @@ fn run_play_in_process_inner(
         .map(RecordingAudioSink::finish)
         .transpose();
     audio_finish?;
+    if let Some(recorder) = replay_recorder {
+        let path = recorder.publish()?;
+        println!("replay_recording={}", path.display());
+    }
 
     Ok(())
 }
