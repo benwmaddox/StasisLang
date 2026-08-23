@@ -76,6 +76,18 @@ class Sdl3MigrationContractTests(unittest.TestCase):
                 any("SDL3 must own the iOS main wrapper" in error for error in validate(root))
             )
 
+    def test_ios_network_presenter_is_separate_and_compiled_by_xcode(self):
+        ios_main = ROOT / "mobile/shells/ios/StasisMobile/main.m"
+        network_source = ROOT / "mobile/shells/ios/StasisMobile/stasis_ios_network.m"
+        project = ROOT / "mobile/shells/ios/StasisMobile.xcodeproj/project.pbxproj"
+        self.assertEqual(ios_main.read_text(encoding="utf-8").strip(), "#include <SDL3/SDL_main.h>")
+        network_text = network_source.read_text(encoding="utf-8")
+        self.assertIn("stasis_mobile_network_present_join_url", network_text)
+        self.assertNotIn("stasis_mobile_network_present_join_url", ios_main.read_text(encoding="utf-8"))
+        project_text = project.read_text(encoding="utf-8")
+        self.assertIn("stasis_ios_network.m in Sources", project_text)
+        self.assertIn("path = StasisMobile/stasis_ios_network.m", project_text)
+
     def test_ios_ci_dependency_drift_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

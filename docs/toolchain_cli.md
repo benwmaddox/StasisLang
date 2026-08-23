@@ -171,7 +171,12 @@ cloning a generated repository, reactivate the checked-in hook with
   the game-named executable as the only root file and place all support files under `app/`.
 - `package-mobile --target android-arm64|ios-arm64 [--entry PATH]`: atomically assemble the
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
-  Xcode app shell.
+  Xcode app shell. Network-enabled iOS packages require macOS/Xcode, stage and link the
+  `stasis_network` arm64 static library, and include the local-network privacy declaration;
+  direct TCP/unicast does not require Bonjour discovery entitlements. Official archives resolve
+  prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;
+  nightly archives contain all Android arm64/x86_64 and iOS arm64 support libraries, while source
+  checkouts may build them from the workspace as a development fallback.
 - `package --target android-arm64|ios-arm64`: compatibility spelling that uses the manifest entry.
 - Successful human-readable `build`, `package`, and `package-mobile` commands end with a
   `Completed in ...` line. Durations use milliseconds for sub-second work, seconds for work under

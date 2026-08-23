@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "apps/stasis",
   "crates/stasis_assets",
+  "crates/stasis_network",
   "crates/stasis_compiler",
   "crates/stasis_dynload",
   "crates/stasis_android_bridge",
@@ -31,6 +32,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
+tungstenite = "0.27"
+getrandom = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 atomic-write-file = "0.3"

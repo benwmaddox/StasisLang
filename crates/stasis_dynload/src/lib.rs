@@ -152,6 +152,8 @@ pub struct JitHostEntryTargets {
 static JIT_HOST_ENTRY_TARGETS: AtomicUsize = AtomicUsize::new(0);
 
 static JIT_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "network")]
+static NETWORK_HOST_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static JIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
 static JIT_PROFILE_GENERATION: AtomicU64 = AtomicU64::new(1);
 static RECORDING_CLOCK_FPS: AtomicU64 = AtomicU64::new(0);
@@ -3808,6 +3810,281 @@ fn jit_global_text_bytes(value_id: i32) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_supported() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_network_supported();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_random_seed() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_network_random_seed();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_start(content_id: i32, content_length: i32) -> i32 {
+    stasis_jit_network_host_start_bind(content_id, content_length, 0x7f000001)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_start_bind(
+    content_id: i32,
+    content_length: i32,
+    bind_ipv4: i32,
+) -> i32 {
+    if content_length <= 0 || content_length as usize > 32 * 1024 * 1024 {
+        return -1;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (content_id, content_length, bind_ipv4);
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        if NETWORK_HOST_HANDLE.load(Ordering::Acquire) != 0 {
+            return -2;
+        }
+        let Some(content) = jit_text_arg_bytes(content_id) else {
+            return -1;
+        };
+        let length = content_length as usize;
+        if length > content.len() {
+            return -1;
+        }
+        let mut port = 0_u16;
+        let handle = stasis_network::stasis_network_host_start_bind(
+            0,
+            bind_ipv4 as u32,
+            content[..length].as_ptr(),
+            length,
+            &mut port,
+        );
+        if handle.is_null() {
+            return -3;
+        }
+        NETWORK_HOST_HANDLE.store(handle as usize, Ordering::Release);
+        i32::from(port)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_start_text(content_id: i32) -> i32 {
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = content_id;
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        let Some(content) = jit_text_arg_bytes(content_id) else {
+            return -1;
+        };
+        stasis_jit_network_host_start_bind(content_id, content.len() as i32, 0x7f000001)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_start_bind_text(content_id: i32, bind_ipv4: i32) -> i32 {
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (content_id, bind_ipv4);
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        let Some(content) = jit_text_arg_bytes(content_id) else {
+            return -1;
+        };
+        stasis_jit_network_host_start_bind(content_id, content.len() as i32, bind_ipv4)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_status() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            0
+        } else {
+            unsafe {
+                stasis_network::stasis_network_host_status(
+                    handle as *mut stasis_network::NetworkHost,
+                )
+            }
+        }
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_overflow_count() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            0
+        } else {
+            unsafe {
+                stasis_network::stasis_network_host_overflow_count(
+                    handle as *mut stasis_network::NetworkHost,
+                ) as i32
+            }
+        }
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_port() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            0
+        } else {
+            unsafe {
+                stasis_network::stasis_network_host_port(handle as *mut stasis_network::NetworkHost)
+                    as i32
+            }
+        }
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_poll(
+    out_fields_id: i32,
+    out_field_capacity: i32,
+    out_payload_id: i32,
+    out_payload_capacity: i32,
+) -> i32 {
+    if out_field_capacity < 3 || out_payload_capacity < 0 {
+        return -1;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (out_fields_id, out_payload_id);
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            return -3;
+        }
+        let mut event = stasis_network::StasisNetworkEvent {
+            kind: 0,
+            connection: 0,
+            length: 0,
+            payload: [0; stasis_network::MAX_MESSAGE_BYTES],
+        };
+        let result = unsafe {
+            stasis_network::stasis_network_host_poll(
+                handle as *mut stasis_network::NetworkHost,
+                &mut event,
+            )
+        };
+        if result <= 0 {
+            return result;
+        }
+        if event.length as usize > out_payload_capacity as usize {
+            return -1;
+        }
+        for (index, value) in [
+            event.kind as i32,
+            event.connection as i32,
+            event.length as i32,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            stasis_jit_global_i32_array_store(out_fields_id, 0, index as i32, value);
+        }
+        for index in 0..event.length as usize {
+            stasis_jit_global_i32_array_store(
+                out_payload_id,
+                0,
+                index as i32,
+                i32::from(event.payload[index]),
+            );
+        }
+        result
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_send(
+    connection: i32,
+    payload_id: i32,
+    payload_length: i32,
+) -> i32 {
+    if connection <= 0 || payload_length < 0 || payload_length as usize > 64 * 1024 {
+        return -1;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = payload_id;
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            return -3;
+        }
+        let mut payload = Vec::with_capacity(payload_length as usize);
+        for index in 0..payload_length {
+            let value = stasis_jit_global_i32_array_load(payload_id, 0, index);
+            let Ok(value) = u8::try_from(value) else {
+                return -1;
+            };
+            payload.push(value);
+        }
+        unsafe {
+            stasis_network::stasis_network_host_send(
+                handle as *mut stasis_network::NetworkHost,
+                connection as u32,
+                payload.as_ptr(),
+                payload.len(),
+            )
+        }
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_stop() {
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.swap(0, Ordering::AcqRel);
+        if handle != 0 {
+            unsafe {
+                stasis_network::stasis_network_host_stop(
+                    handle as *mut stasis_network::NetworkHost,
+                );
+            }
+        }
+    }
+}
+
 fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
     if let Some(bytes) = jit_global_text_bytes(value_id) {
         return Some(bytes);
@@ -6105,6 +6382,21 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("dynload test lock mutex poisoned")
+    }
+
+    #[test]
+    fn network_seed_bridge_is_capability_gated() {
+        #[cfg(feature = "network")]
+        {
+            assert_eq!(stasis_jit_network_supported(), 1);
+            let seed = stasis_jit_network_host_random_seed();
+            assert!(seed > 0 && seed <= i32::MAX);
+        }
+        #[cfg(not(feature = "network"))]
+        {
+            assert_eq!(stasis_jit_network_supported(), 0);
+            assert_eq!(stasis_jit_network_host_random_seed(), 0);
+        }
     }
 
     struct EmbeddedHostReset;

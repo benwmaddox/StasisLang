@@ -14,6 +14,9 @@
 #include "stasis_mobile_runtime.h"
 
 void stasis_host_report_runtime_error(const char *message);
+#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
+void stasis_mobile_network_present_join_url(void);
+#endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 int stasis_test_get_render_submission_state(int32_t *out_i32, int32_t capacity);
 int stasis_gfx_get_resource_lifecycle(int32_t *out_i32, int count);
@@ -172,12 +175,16 @@ int SDL_main(int argc, char **argv) {
     if (status != STASIS_MOBILE_RUNTIME_OK) {
         report_runtime_status("Stasis mobile initialization", status);
         SDL_Log("Stasis mobile initialization stopped with status %d", status);
-    }
-#if defined(STASIS_ENABLE_SEAM_TESTS)
-    else if (seam_test_id != NULL && seam_test_id[0] != '\0') {
-        log_seam_marker(seam_test_id, "initialized", 0);
-    }
+    } else {
+#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
+        stasis_mobile_network_present_join_url();
 #endif
+#if defined(STASIS_ENABLE_SEAM_TESTS)
+        if (seam_test_id != NULL && seam_test_id[0] != '\0') {
+            log_seam_marker(seam_test_id, "initialized", 0);
+        }
+#endif
+    }
     StasisMobileFramePacer frame_pacer;
 #if defined(STASIS_ENABLE_SEAM_TESTS)
     int32_t frame = 0;
