@@ -2489,11 +2489,18 @@ fn expression_type(
             suffix,
             ..
         } => {
-            if let Some(type_id) = context
-                .path_types
-                .get(&indexed_state_path(collection_path, suffix))
-            {
-                return Some(*type_id);
+            // Indexed wildcard paths are compiler-global metadata.  A local
+            // or parameter with the same root must be resolved first, or an
+            // unrelated global array can override its element type.
+            let root = root_name(collection_path);
+            let has_lexical_root = local_types.contains_key(root) || aliases.contains_key(root);
+            if !has_lexical_root {
+                if let Some(type_id) = context
+                    .path_types
+                    .get(&indexed_state_path(collection_path, suffix))
+                {
+                    return Some(*type_id);
+                }
             }
             let collection = path_type(collection_path, context, local_types, aliases)?;
             let element = context.types.indexed_element_type_id(collection)?;
@@ -2539,17 +2546,21 @@ fn path_type(
     local_types: &BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
 ) -> Option<TypeId> {
-    if let Some(type_id) = context.path_types.get(path) {
-        return Some(*type_id);
-    }
     let root = root_name(path);
-    let root_type = local_types.get(root).copied().or_else(|| {
-        aliases
-            .get(root)
-            .and_then(|alias| context.path_types.get(alias).copied())
-    })?;
     let suffix = path.strip_prefix(root)?.trim_start_matches('.');
-    field_suffix_type(root_type, suffix, &context.field_types)
+
+    // A local or parameter shadows a global with the same path root.  Resolve
+    // the complete local path before falling back to the compiler's global
+    // path table; otherwise a workspace file can make a local f32 look like
+    // an unrelated global i32 during semantic validation.
+    if let Some(root_type) = local_types.get(root).copied() {
+        return field_suffix_type(root_type, suffix, &context.field_types);
+    }
+    if let Some(alias) = aliases.get(root) {
+        let root_type = context.path_types.get(alias).copied()?;
+        return field_suffix_type(root_type, suffix, &context.field_types);
+    }
+    context.path_types.get(path).copied()
 }
 
 fn field_suffix_type(
