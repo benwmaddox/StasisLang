@@ -2888,6 +2888,52 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "storage_load_ascii" | "stasis_storage_load_ascii" | "stasis_jit_storage_load_ascii" => {
             function_address(stasis_dynload::stasis_jit_storage_load_ascii as *const ())
         }
+        "network_supported" | "stasis_network_supported" | "stasis_jit_network_supported" => {
+            function_address(stasis_dynload::stasis_jit_network_supported as *const ())
+        }
+        "network_host_random_seed"
+        | "stasis_network_host_random_seed"
+        | "stasis_jit_network_host_random_seed" => {
+            function_address(stasis_dynload::stasis_jit_network_host_random_seed as *const ())
+        }
+        "network_host_start" | "stasis_network_host_start" | "stasis_jit_network_host_start" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start as *const ())
+        }
+        "network_host_start_text"
+        | "stasis_network_host_start_text"
+        | "stasis_jit_network_host_start_text" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_text as *const ())
+        }
+        "network_host_start_bind"
+        | "stasis_network_host_start_bind"
+        | "stasis_jit_network_host_start_bind" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_bind as *const ())
+        }
+        "network_host_start_bind_text"
+        | "stasis_network_host_start_bind_text"
+        | "stasis_jit_network_host_start_bind_text" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_bind_text as *const ())
+        }
+        "network_host_poll" | "stasis_network_host_poll" | "stasis_jit_network_host_poll" => {
+            function_address(stasis_dynload::stasis_jit_network_host_poll as *const ())
+        }
+        "network_host_send" | "stasis_network_host_send" | "stasis_jit_network_host_send" => {
+            function_address(stasis_dynload::stasis_jit_network_host_send as *const ())
+        }
+        "network_host_status" | "stasis_network_host_status" | "stasis_jit_network_host_status" => {
+            function_address(stasis_dynload::stasis_jit_network_host_status as *const ())
+        }
+        "network_host_overflow_count"
+        | "stasis_network_host_overflow_count"
+        | "stasis_jit_network_host_overflow_count" => {
+            function_address(stasis_dynload::stasis_jit_network_host_overflow_count as *const ())
+        }
+        "network_host_port" | "stasis_network_host_port" | "stasis_jit_network_host_port" => {
+            function_address(stasis_dynload::stasis_jit_network_host_port as *const ())
+        }
+        "network_host_stop" | "stasis_network_host_stop" | "stasis_jit_network_host_stop" => {
+            function_address(stasis_dynload::stasis_jit_network_host_stop as *const ())
+        }
         "storage_load_i32" | "stasis_storage_load_i32" | "stasis_jit_storage_load_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_load_i32 as *const ())
         }

@@ -1,6 +1,8 @@
 package @STASIS_PACKAGE_ID@;
 
 import android.content.res.AssetManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.os.Build;
@@ -34,12 +36,14 @@ public final class MainActivity extends SDLActivity {
     private static final int MAX_MANIFEST_ASSETS = 4096;
     private static final long MAX_ASSET_BYTES = 128L * 1024L * 1024L;
     private static final long MAX_TOTAL_ASSET_BYTES = 150L * 1024L * 1024L;
+    private static final boolean STASIS_NETWORK_ENABLED = @STASIS_NETWORK_ENABLED@ != 0;
 
     private static native void nativeSetAssetRoot(String path);
     private static native void nativeSetSeamTestId(String testId);
     private static native boolean nativeReadPerformanceMetrics(float[] output);
     private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
     private static native String nativeReadRuntimeError();
+    private static native String nativeReadNetworkJoinUrl();
 
     private final Handler hudHandler = new Handler(Looper.getMainLooper());
     private final float[] nativePerformance = new float[14];
@@ -52,6 +56,8 @@ public final class MainActivity extends SDLActivity {
     private FrameLayout diagnosticLayer;
     private TextView performanceHud;
     private TextView runtimeError;
+    private TextView joinUrl;
+    private String joinUrlValue;
     private Runnable hudUpdater;
     private String displayedRuntimeError;
 
@@ -180,6 +186,31 @@ public final class MainActivity extends SDLActivity {
                 Gravity.BOTTOM | Gravity.START);
         errorParams.setMargins(dp(8), 0, dp(8), dp(8));
         diagnosticLayer.addView(runtimeError, errorParams);
+        if (STASIS_NETWORK_ENABLED) {
+            joinUrl = new TextView(this);
+            joinUrl.setTextColor(Color.WHITE);
+            joinUrl.setTextSize(14.0f);
+            joinUrl.setPadding(dp(10), dp(8), dp(10), dp(8));
+            joinUrl.setBackgroundColor(Color.argb(220, 20, 28, 38));
+            joinUrl.setText("Waiting for local network host…");
+            joinUrl.setContentDescription("Manual network join URL");
+            joinUrl.setTextIsSelectable(true);
+            joinUrl.setOnClickListener(view -> {
+                if (joinUrlValue == null || joinUrlValue.isEmpty()) return;
+                ClipboardManager clipboard =
+                        (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Stasis join URL", joinUrlValue));
+                    joinUrl.setText("Join URL copied\n" + joinUrlValue);
+                }
+            });
+            FrameLayout.LayoutParams joinParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            joinParams.setMargins(dp(8), dp(8), dp(8), 0);
+            diagnosticLayer.addView(joinUrl, joinParams);
+        }
         diagnosticLayer.requestApplyInsets();
     }
 
@@ -201,6 +232,7 @@ public final class MainActivity extends SDLActivity {
             @Override public void run() {
                 updatePerformanceHud();
                 updateRuntimeError();
+                updateJoinUrl();
                 if (hudUpdater != null) {
                     hudHandler.postDelayed(this, HUD_UPDATE_INTERVAL_MS);
                 }
@@ -264,6 +296,32 @@ public final class MainActivity extends SDLActivity {
     private void updateRuntimeError() {
         String message = nativeReadRuntimeError();
         if (message != null && !message.isEmpty()) showRuntimeError(message);
+    }
+
+    private void updateJoinUrl() {
+        if (!STASIS_NETWORK_ENABLED || joinUrl == null) return;
+        String candidate = nativeReadNetworkJoinUrl();
+        if (candidate == null || candidate.isEmpty()) {
+            if (joinUrlValue == null) joinUrl.setText("Waiting for local network host…");
+            return;
+        }
+        if (!isUsableJoinUrl(candidate)) {
+            joinUrlValue = null;
+            joinUrl.setText("Local network address unavailable");
+            return;
+        }
+        if (!candidate.equals(joinUrlValue)) {
+            joinUrlValue = candidate;
+            joinUrl.setText("Tap to copy join URL\n" + candidate);
+        }
+    }
+
+    private static boolean isUsableJoinUrl(String value) {
+        String lower = value.toLowerCase(java.util.Locale.ROOT);
+        return lower.startsWith("http://")
+                && !lower.contains("localhost")
+                && !lower.contains("127.0.0.1")
+                && !lower.contains("0.0.0.0");
     }
 
     private void showRuntimeError(String message) {

@@ -11,6 +11,9 @@ Release toolchains omit `--development-build`. The default output is
 
 - `index.html`, `game.js`, and `game.wasm`: an inspectable static-hosting bundle;
 - `assets/`: the same reachable, prepared release assets selected for Android/desktop packaging;
+- network-enabled packages additionally contain `network_guest.bundle`, a bounded archive of the
+  three core web files plus every reachable prepared asset (including nested font/audio/image
+  paths) used by the native LAN host;
 - `stasis_provenance.json`: the normal package provenance receipt.
 
 Release packaging runs Binaryen's `wasm-opt -Oz` when `wasm-opt` is on `PATH` and also accepts the

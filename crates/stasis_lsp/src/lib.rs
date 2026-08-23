@@ -1142,24 +1142,60 @@ impl LanguageServer {
             .code_actions(&path, &requested_kinds)?
             .into_iter()
             .map(|action| {
-                let diagnostics = action.diagnostic_code.as_ref().map(|code| {
-                    request_diagnostics
-                        .iter()
-                        .filter(|diagnostic| {
-                            diagnostic.code.as_ref() == Some(&NumberOrString::String(code.clone()))
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                });
-                if action.diagnostic_code.is_some()
-                    && diagnostics.as_ref().is_none_or(Vec::is_empty)
-                {
-                    return Ok(None);
-                }
+                let diagnostics = if let Some(code) = action.diagnostic_code.as_ref() {
+                    if request_diagnostics.is_empty() {
+                        // VS Code may omit the diagnostics it is requesting actions for.
+                        // Keep an action only when its current-document edit is relevant to
+                        // the requested range, but do not claim an association we cannot
+                        // establish from the request context.
+                        let action_touches_request = {
+                            let snapshot = self.service.snapshot();
+                            let document = snapshot.document(&path).ok_or_else(|| {
+                                format!("code-action document is not indexed: '{path}'")
+                            })?;
+                            let requested = document
+                                .byte_offset(Position {
+                                    line: params.range.start.line,
+                                    utf16_character: params.range.start.character,
+                                })
+                                .and_then(|start| {
+                                    document
+                                        .byte_offset(Position {
+                                            line: params.range.end.line,
+                                            utf16_character: params.range.end.character,
+                                        })
+                                        .map(|end| start..end)
+                                })
+                                .map_err(|error| error.to_string())?;
+                            action.edits.iter().any(|edit| {
+                                edit.path == path && ranges_touch(&edit.range, &requested)
+                            })
+                        };
+                        if !action_touches_request {
+                            return Ok(None);
+                        }
+                        None
+                    } else {
+                        let matching = request_diagnostics
+                            .iter()
+                            .filter(|diagnostic| {
+                                diagnostic.code.as_ref()
+                                    == Some(&NumberOrString::String(code.clone()))
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if matching.is_empty() {
+                            return Ok(None);
+                        }
+                        Some(matching)
+                    }
+                } else {
+                    None
+                };
                 Ok(Some(CodeActionOrCommand::CodeAction(CodeAction {
                     title: action.title,
                     kind: Some(CodeActionKind::from(action.kind)),
-                    diagnostics: diagnostics.filter(|diagnostics| !diagnostics.is_empty()),
+                    diagnostics,
                     edit: Some(self.workspace_edit(action.edits)?),
                     command: None,
                     is_preferred: Some(action.preferred),
@@ -1754,6 +1790,13 @@ fn lsp_position(position: Position) -> lsp_types::Position {
     lsp_types::Position::new(position.line, position.utf16_character)
 }
 
+fn ranges_touch(left: &std::ops::Range<usize>, right: &std::ops::Range<usize>) -> bool {
+    left.start <= left.end
+        && right.start <= right.end
+        && left.start <= right.end
+        && right.start <= left.end
+}
+
 fn lsp_selection_range(
     document: &Document,
     ranges: Vec<std::ops::Range<usize>>,
@@ -2132,6 +2175,150 @@ mod tests {
             &edits[0].edits[0],
             OneOf::Left(edit) if edit.new_text.is_empty()
         ));
+    }
+
+    #[test]
+    fn standard_quick_fix_is_available_without_request_diagnostics() {
+        let (mut server, uri, main_path) = test_server("missing-import-quick-fix-empty-context");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "import \"missing.stasis\";\nfunction main(): i32 { return 0; }\n";
+        server.service.open_document(main_path, 7, source);
+        server
+            .publish_diagnostics(&server_connection)
+            .expect("publish structured diagnostic");
+        let Message::Notification(_) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("diagnostic notification")
+        else {
+            panic!("expected diagnostic notification");
+        };
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(94),
+                    CodeActionRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 0, "character": 7},
+                            "end": {"line": 0, "character": 23}
+                        },
+                        "context": {
+                            "diagnostics": [],
+                            "only": ["quickfix"]
+                        }
+                    }),
+                ),
+            )
+            .expect("quick-fix request");
+        let actions: Option<Vec<CodeActionOrCommand>> = serde_json::from_value(
+            receive_response(&client_connection, 94)
+                .response_result
+                .expect("code-action result"),
+        )
+        .expect("code-action response");
+        let CodeActionOrCommand::CodeAction(action) = &actions.expect("actions")[0] else {
+            panic!("expected code action");
+        };
+        assert_eq!(action.title, "Remove unresolved import 'missing'");
+        assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
+        assert!(action.diagnostics.is_none());
+    }
+
+    #[test]
+    fn standard_quick_fix_without_request_diagnostics_is_suppressed_for_unrelated_range() {
+        let (mut server, uri, main_path) = test_server("missing-import-quick-fix-unrelated-range");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "import \"missing.stasis\";\nfunction main(): i32 { return 0; }\n";
+        server.service.open_document(main_path, 7, source);
+        server
+            .publish_diagnostics(&server_connection)
+            .expect("publish structured diagnostic");
+        let Message::Notification(_) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("diagnostic notification")
+        else {
+            panic!("expected diagnostic notification");
+        };
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(96),
+                    CodeActionRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 1, "character": 1},
+                            "end": {"line": 1, "character": 2}
+                        },
+                        "context": {
+                            "diagnostics": [],
+                            "only": ["quickfix"]
+                        }
+                    }),
+                ),
+            )
+            .expect("quick-fix request");
+        let actions: Option<Vec<CodeActionOrCommand>> = serde_json::from_value(
+            receive_response(&client_connection, 96)
+                .response_result
+                .expect("code-action result"),
+        )
+        .expect("code-action response");
+        assert!(actions.is_none());
+    }
+
+    #[test]
+    fn standard_quick_fix_drops_nonmatching_structured_diagnostic() {
+        let (mut server, uri, main_path) = test_server("missing-import-quick-fix-nonmatching");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "import \"missing.stasis\";\nfunction main(): i32 { return 0; }\n";
+        server.service.open_document(main_path, 7, source);
+        server
+            .publish_diagnostics(&server_connection)
+            .expect("publish structured diagnostic");
+        let Message::Notification(notification) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("diagnostic notification")
+        else {
+            panic!("expected diagnostic notification");
+        };
+        let mut diagnostic: PublishDiagnosticsParams =
+            serde_json::from_value(notification.params).expect("published diagnostics");
+        diagnostic.diagnostics[0].code =
+            Some(NumberOrString::String("stasis.otherDiagnostic".to_string()));
+        server
+            .handle_request(
+                &server_connection,
+                Request::new(
+                    RequestId::from(95),
+                    CodeActionRequest::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 0, "character": 7},
+                            "end": {"line": 0, "character": 23}
+                        },
+                        "context": {
+                            "diagnostics": diagnostic.diagnostics,
+                            "only": ["quickfix"]
+                        }
+                    }),
+                ),
+            )
+            .expect("quick-fix request");
+        let actions: Option<Vec<CodeActionOrCommand>> = serde_json::from_value(
+            receive_response(&client_connection, 95)
+                .response_result
+                .expect("code-action result"),
+        )
+        .expect("code-action response");
+        assert!(actions.is_none());
     }
 
     #[test]
