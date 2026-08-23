@@ -81,6 +81,22 @@ pub struct SpritePreparation {
     pub max_render_scale: f64,
 }
 
+/// The uniform, row-major grid stored in a sprite-sheet atlas.
+///
+/// A layout describes the logical cells in the complete source image. Every
+/// cell has the same dimensions; the source width must be divisible by
+/// `columns` and the source height by `rows`. The manifest resolver bounds
+/// each axis to keep malformed metadata from creating unreasonably large
+/// frame counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpriteSheetLayout {
+    pub columns: u32,
+    pub rows: u32,
+}
+
+pub const MAX_SPRITE_SHEET_AXIS: u32 = 256;
+
 fn default_render_scale() -> f64 {
     1.0
 }
@@ -92,6 +108,8 @@ pub enum AssetFormat {
         encoding: SpriteEncoding,
         width: u32,
         height: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<SpriteSheetLayout>,
     },
     Audio {
         encoding: AudioEncoding,
@@ -517,8 +535,25 @@ pub fn prepare_asset_bundle(
             target_height as f64 / declared_height as f64,
         )
         .min(1.0);
-        let output_width = ((declared_width as f64 * ratio).round() as u32).max(1);
-        let output_height = ((declared_height as f64 * ratio).round() as u32).max(1);
+        let (output_width, output_height) = match entry.format {
+            AssetFormat::Sprite {
+                layout: Some(layout),
+                ..
+            } => {
+                // Resize whole cells so the prepared atlas cannot split a
+                // frame at a fractional boundary. The manifest validator has
+                // already established divisibility and bounded axes.
+                let source_cell_width = declared_width / layout.columns;
+                let source_cell_height = declared_height / layout.rows;
+                let cell_width = ((source_cell_width as f64 * ratio).round() as u32).max(1);
+                let cell_height = ((source_cell_height as f64 * ratio).round() as u32).max(1);
+                (cell_width * layout.columns, cell_height * layout.rows)
+            }
+            _ => (
+                ((declared_width as f64 * ratio).round() as u32).max(1),
+                ((declared_height as f64 * ratio).round() as u32).max(1),
+            ),
+        };
         if output_width == declared_width && output_height == declared_height {
             validate_png_dimensions(source, declared_width, declared_height)?;
             fs::copy(&source.absolute_path, &destination)
@@ -828,6 +863,7 @@ fn validate_entry(entry: &AssetEntry) -> Result<(), AssetManifestError> {
             encoding,
             width,
             height,
+            layout,
         } => {
             if width == 0 || height == 0 || width > 16_384 || height > 16_384 {
                 return Err(entry_error(
@@ -835,6 +871,25 @@ fn validate_entry(entry: &AssetEntry) -> Result<(), AssetManifestError> {
                     entry,
                     "sprite dimensions must be within 1..=16384",
                 ));
+            }
+            if let Some(layout) = layout {
+                if layout.columns == 0
+                    || layout.rows == 0
+                    || layout.columns > MAX_SPRITE_SHEET_AXIS
+                    || layout.rows > MAX_SPRITE_SHEET_AXIS
+                    || width % layout.columns != 0
+                    || height % layout.rows != 0
+                    || width / layout.columns == 0
+                    || height / layout.rows == 0
+                {
+                    return Err(entry_error(
+                        "asset_sprite_layout_invalid",
+                        entry,
+                        format!(
+                            "sprite-sheet layout must have columns and rows within 1..={MAX_SPRITE_SHEET_AXIS} and divide the nonzero sprite dimensions evenly"
+                        ),
+                    ));
+                }
             }
             validate_extension(entry, sprite_extension(encoding))?;
         }
@@ -1109,6 +1164,7 @@ mod tests {
                 encoding: SpriteEncoding::Png,
                 width: 2,
                 height: 3,
+                layout: None,
             },
             prepare: None,
             dependencies: vec![],
@@ -1377,6 +1433,77 @@ mod tests {
     }
 
     #[test]
+    fn old_sprite_json_defaults_to_no_layout_and_omits_field() {
+        let format: AssetFormat =
+            serde_json::from_str(r#"{"kind":"sprite","encoding":"svg","width":32,"height":32}"#)
+                .unwrap();
+        assert_eq!(
+            format,
+            AssetFormat::Sprite {
+                encoding: SpriteEncoding::Svg,
+                width: 32,
+                height: 32,
+                layout: None,
+            }
+        );
+        assert!(serde_json::to_value(&format)
+            .unwrap()
+            .get("layout")
+            .is_none());
+    }
+
+    #[test]
+    fn sprite_layout_roundtrips_and_rejects_invalid_grids() {
+        let layout = SpriteSheetLayout {
+            columns: 4,
+            rows: 3,
+        };
+        let format = AssetFormat::Sprite {
+            encoding: SpriteEncoding::Png,
+            width: 800,
+            height: 600,
+            layout: Some(layout),
+        };
+        let encoded = serde_json::to_string(&format).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AssetFormat>(&encoded).unwrap(),
+            format
+        );
+
+        let root = project("sprite_layout_invalid");
+        let bytes = b"sprite layout";
+        let path = "assets/images/sheet.png";
+        fs::write(root.join("assets/images/sheet.png"), bytes).unwrap();
+        let cases = [
+            SpriteSheetLayout {
+                columns: 0,
+                rows: 1,
+            },
+            SpriteSheetLayout {
+                columns: MAX_SPRITE_SHEET_AXIS + 1,
+                rows: 1,
+            },
+            SpriteSheetLayout {
+                columns: 4,
+                rows: 4,
+            },
+        ];
+        for invalid in cases {
+            let mut entry = sprite("sheet", path, bytes);
+            entry.format = AssetFormat::Sprite {
+                encoding: SpriteEncoding::Png,
+                width: 2,
+                height: 3,
+                layout: Some(invalid),
+            };
+            write_manifest(&root, vec![entry]);
+            let error = load_project_asset_manifest(&root, AssetLimits::default()).unwrap_err();
+            assert_eq!(error.code, "asset_sprite_layout_invalid");
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn prepares_png_for_logical_display_size_and_reuses_cache() {
         let root = project("prepare_png");
         let source_path = root.join("assets/images/hero.png");
@@ -1393,6 +1520,10 @@ mod tests {
             encoding: SpriteEncoding::Png,
             width: 800,
             height: 800,
+            layout: Some(SpriteSheetLayout {
+                columns: 4,
+                rows: 4,
+            }),
         };
         hero.prepare = Some(SpritePreparation {
             max_logical_width: 50,
@@ -1426,6 +1557,8 @@ mod tests {
         assert_eq!(first.cache_hits, 0);
         let prepared = image::open(output.join("assets/images/hero.png")).unwrap();
         assert_eq!((prepared.width(), prepared.height()), (200, 200));
+        assert_eq!(prepared.width() % 4, 0);
+        assert_eq!(prepared.height() % 4, 0);
         assert_eq!(prepared.color(), image::ColorType::Rgb8);
         let generated: AssetManifest =
             serde_json::from_slice(&fs::read(output.join(DEFAULT_ASSET_MANIFEST_PATH)).unwrap())
@@ -1437,6 +1570,18 @@ mod tests {
         assert_ne!(
             generated.assets[0].content_sha256,
             sha256_bytes(&source_bytes)
+        );
+        assert_eq!(
+            generated.assets[0].format,
+            AssetFormat::Sprite {
+                encoding: SpriteEncoding::Png,
+                width: 200,
+                height: 200,
+                layout: Some(SpriteSheetLayout {
+                    columns: 4,
+                    rows: 4,
+                }),
+            }
         );
 
         let second = prepare_asset_bundle(&resolved, &output, &cache).unwrap();
