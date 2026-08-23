@@ -47,3 +47,7 @@ Narrate each hypothesis before its action. The displayed duration is an end-to-e
 - Copy the accepted MP4 to a phone-share directory and verify it with the same LAN URL used by the viewer.
 
 For a fully scripted take, keep the action and narration scripts beside the captured artifact, record the exact command sequence and model disclosure, and retain rejected takes only as local QA evidence.
+
+In an AI-authored work summary, include `Visual evidence:` with the accepted MP4 path, any sampled
+PNG frame paths, and the specific behavior each artifact proves. If the recording could not be made
+or inspected, report that validation gap explicitly.

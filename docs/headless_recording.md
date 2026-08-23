@@ -89,3 +89,14 @@ stasis --workspace samples/windows_launch_smoke record main.stasis `
 Open `artifacts/codex-review/frame-000001.png` and
 `frame-000003.png` in the Codex visual review pane. Keep the command, input
 script, and renderer diagnostics with the artifact when reporting a mismatch.
+
+Use PNG when one or a few representative states prove the visual claim. Use
+MP4 when correctness depends on motion, timing, animation, audio, input, state
+transitions, or a multi-step interaction. AI review should inspect the MP4 and,
+when useful, selected PNG frames from the same deterministic take rather than
+treating successful encoding as proof of correct behavior.
+
+Every AI-authored work summary must include a `Visual evidence:` line naming
+the inspected PNG and/or MP4 paths and the behavior they prove. Use
+`Visual evidence: not applicable` for work with no user-visible behavior. If
+capture was relevant but unavailable, report the remaining validation gap.
