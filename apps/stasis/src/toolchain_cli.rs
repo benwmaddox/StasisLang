@@ -8063,7 +8063,8 @@ mod tests {
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
         assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
-            .expect("read shared mobile main");
+            .expect("read shared mobile main")
+            .replace("\r\n", "\n");
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
         assert!(mobile_main.contains("Stasis seam:"));
         assert!(mobile_main.contains("seam_state_checksum"));
@@ -8072,7 +8073,9 @@ mod tests {
         assert!(mobile_main.contains("restore_failures"));
         assert!(mobile_main.contains("frame == 1"));
         assert!(mobile_main.contains("frame % 30 == 0"));
-        assert!(mobile_main.contains("} else {\n#if defined(__APPLE__)"));
+        assert!(mobile_main.contains(
+            "} else {\n#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
+        ));
         assert!(mobile_main.contains("stasis_mobile_network_present_join_url();"));
         assert!(mobile_main.contains("if (seam_test_id != NULL && seam_test_id[0] != '\\0')"));
         assert!(!mobile_main.contains("}\n#if defined(STASIS_ENABLE_SEAM_TESTS)\n    else if"));
@@ -8245,6 +8248,7 @@ mod tests {
         network_workspace.manifest.capabilities = Some(ProjectCapabilities { network: true });
         network_workspace.manifest.web = Some(WebProjectManifest {
             entry: "src/main.stasis".to_string(),
+            loading_font: None,
         });
         let ios_network = root.join("ios-network-package");
         fs::create_dir_all(ios_network.join("ios/network/include"))
@@ -8316,15 +8320,24 @@ mod tests {
             .join("ios/network/include/stasis_network.h")
             .is_file());
         let network_main = fs::read_to_string(ios_network.join("ios/StasisMobile/main.m"))
-            .expect("read network iOS native presenter");
-        assert!(network_main.contains("stasis_mobile_network_present_join_url"));
-        assert!(network_main.contains("stasis_mobile_network_copy_join_url"));
-        assert!(network_main.contains("alertControllerWithTitle:@\"mobile_smoke\""));
-        assert!(network_main.contains("message:joinURL"));
-        assert!(!network_main.contains("@STASIS_"));
-        assert!(!network_main.contains("Join Maddox"));
-        assert!(!network_main.contains("NSLog"));
-        assert!(!network_main.contains("printf"));
+            .expect("read network iOS SDL3 main wrapper");
+        assert_eq!(network_main.trim(), "#include <SDL3/SDL_main.h>");
+        let network_presenter =
+            fs::read_to_string(ios_network.join("ios/StasisMobile/stasis_ios_network.m"))
+                .expect("read network iOS native presenter");
+        assert!(network_presenter.contains("stasis_mobile_network_present_join_url"));
+        assert!(network_presenter.contains("stasis_mobile_network_copy_join_url"));
+        assert!(network_presenter.contains("alertControllerWithTitle:@\"mobile_smoke\""));
+        assert!(network_presenter.contains("message:joinURL"));
+        assert!(!network_presenter.contains("@STASIS_"));
+        assert!(!network_presenter.contains("Join Maddox"));
+        assert!(!network_presenter.contains("NSLog"));
+        assert!(!network_presenter.contains("printf"));
+        assert!(
+            fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
+                .expect("read network iOS Xcode project")
+                .contains("stasis_ios_network.m in Sources")
+        );
 
         let android_network = root.join("android-network-package");
         fs::create_dir_all(android_network.join("android/app/src/main/cpp/network/include"))
@@ -8542,6 +8555,7 @@ mod tests {
         assert!(validate_mobile_network_guest_contract(&manifest, PackageTarget::Web).is_ok());
         manifest.web = Some(WebProjectManifest {
             entry: "src/guest_main.stasis".to_string(),
+            loading_font: None,
         });
         assert!(manifest.validate().is_ok());
         assert!(
