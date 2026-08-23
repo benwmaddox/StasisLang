@@ -81,6 +81,18 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_sys_memmove_f32",
     "stasis_jit_sys_memmove_i32",
     "stasis_jit_sys_memmove_u8",
+    "stasis_jit_network_supported",
+    "stasis_jit_network_host_random_seed",
+    "stasis_jit_network_host_start",
+    "stasis_jit_network_host_start_text",
+    "stasis_jit_network_host_start_bind",
+    "stasis_jit_network_host_start_bind_text",
+    "stasis_jit_network_host_poll",
+    "stasis_jit_network_host_send",
+    "stasis_jit_network_host_status",
+    "stasis_jit_network_host_overflow_count",
+    "stasis_jit_network_host_port",
+    "stasis_jit_network_host_stop",
 ];
 
 pub(crate) fn is_aot_runtime_export_symbol(symbol: &str) -> bool {
@@ -102,6 +114,9 @@ mod tests {
             "stasis_jit_gfx_release_sprite"
         ));
         assert!(is_aot_runtime_export_symbol("stasis_jit_audio_load_music"));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_network_host_random_seed"
+        ));
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_audio_set_music_volume"
         ));
