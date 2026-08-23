@@ -292,7 +292,7 @@ public final class StasisAssetCacheTest {
                 }
             }
         } else {
-            Files.copy(source, destination);
+            Files.copy(source, destination, java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
         }
     }
 
