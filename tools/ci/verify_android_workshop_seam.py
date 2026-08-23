@@ -184,7 +184,7 @@ def verify_it028(log: str, after_position: int) -> dict:
         "end_line": hook_source_line + 2,
         "end_column": 2,
         "symbol": "on_code_swap",
-        "message": "unknown call target 'IT028_missing_target'",
+        "message": "cannot resolve call 'IT028_missing_target'",
     }
     if not isinstance(hook_source_line, int) or hook_source_line <= 0 \
             or set(structured) != set(expected_diagnostic) \
