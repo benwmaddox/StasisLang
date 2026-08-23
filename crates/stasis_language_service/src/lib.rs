@@ -3335,6 +3335,18 @@ mod tests {
         ));
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(root.join("src")).expect("fixture source directory");
+        fs::write(
+            root.join("stasis.json"),
+            r#"{
+  "manifest_version": 1,
+  "name": "vscode_e2e",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain"
+}"#,
+        )
+        .expect("fixture manifest");
         let path = root.join("src/main.stasis");
         let path_text = path.to_string_lossy().replace('\\', "/");
         let source = include_str!("../../../vscode-stasis/test/fixture/src/main.stasis");
@@ -3346,6 +3358,7 @@ mod tests {
         let unused_source = include_str!("../../../vscode-stasis/test/fixture/src/unused.stasis");
         fs::write(&unused_path, unused_source).expect("fixture unused source");
         let toolchain_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
+        let mut toolchain_documents = Vec::new();
         for directory in ["", "internal", "testing"] {
             let source_directory = toolchain_source.join("stdlib").join(directory);
             let cached_directory = root
@@ -3357,10 +3370,18 @@ mod tests {
                 if entry.path().extension().and_then(|value| value.to_str()) != Some("stasis") {
                     continue;
                 }
-                fs::copy(entry.path(), cached_directory.join(entry.file_name()))
-                    .expect("cached toolchain source");
+                let cached_path = cached_directory.join(entry.file_name());
+                fs::copy(entry.path(), &cached_path).expect("cached toolchain source");
+                toolchain_documents.push((
+                    cached_path.to_string_lossy().replace('\\', "/"),
+                    fs::read_to_string(entry.path()).expect("toolchain source text"),
+                ));
             }
         }
+        assert!(toolchain_documents.iter().any(|(path, source)| {
+            path.ends_with("/stdlib/memory.stasis")
+                && source.contains("mem_set_f32(dst, dst_cap, dst_index, 0.0, count)")
+        }));
         let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
         service.set_disk_document(path_text.clone(), source);
         service.set_disk_document(
@@ -3371,6 +3392,9 @@ mod tests {
             unused_path.to_string_lossy().replace('\\', "/"),
             unused_source,
         );
+        for (path, source) in toolchain_documents {
+            service.set_disk_document(path, source);
+        }
 
         let report = service.diagnostics();
         assert!(
@@ -3417,6 +3441,23 @@ mod tests {
             Some(path_text.as_str())
         );
         assert_eq!(actions[0].edits[0].path, path_text);
+
+        let memory_source = "import \"../.stasis_cache/toolchain/src/stdlib/memory.stasis\";\n\
+import \"missing.stasis\";\n\
+global memory_probe: f32[1];\n\
+function main(): i32 { return mem_zero_f32(memory_probe, 1, 0, 1); }\n";
+        service.open_document(path_text.clone(), 3, memory_source);
+        let memory_missing = service.diagnostics();
+        assert_eq!(memory_missing.diagnostics.len(), 1);
+        assert_eq!(memory_missing.diagnostics[0].code, "stasis.missingModule");
+        let memory_actions = service
+            .code_actions(&path_text, &["quickfix".to_string()])
+            .expect("memory-backed missing-import quick fix");
+        assert_eq!(memory_actions.len(), 1);
+        assert_eq!(
+            memory_actions[0].title,
+            "Remove unresolved import 'missing'"
+        );
         fs::remove_dir_all(root).ok();
     }
 

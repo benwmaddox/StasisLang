@@ -220,5 +220,5 @@ function mem_set_f32(dst: f32[], dst_cap: i32, dst_index: i32, value: f32, count
 }
 
 function mem_zero_f32(dst: f32[], dst_cap: i32, dst_index: i32, count: i32): i32 {
-    return mem_set_f32(dst, dst_cap, dst_index, 0, count);
+    return mem_set_f32(dst, dst_cap, dst_index, 0.0, count);
 }
