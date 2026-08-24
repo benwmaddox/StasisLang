@@ -1,5 +1,7 @@
 #![deny(warnings)]
 
+pub mod realtime;
+
 use std::collections::{BTreeMap, HashMap};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -7,7 +9,7 @@ use std::os::raw::{c_char, c_uchar};
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use thiserror::Error;
@@ -990,6 +992,534 @@ pub struct StasisNetworkEvent {
     pub length: u32,
     pub payload: [c_uchar; MAX_MESSAGE_BYTES],
 }
+
+static REALTIME_SESSION: OnceLock<Mutex<Option<realtime::RealtimeSession>>> = OnceLock::new();
+
+fn realtime_slot() -> &'static Mutex<Option<realtime::RealtimeSession>> {
+    REALTIME_SESSION.get_or_init(|| Mutex::new(None))
+}
+
+fn realtime_admission_code(outcome: realtime::AdmissionOutcome) -> i32 {
+    match outcome {
+        realtime::AdmissionOutcome::Accepted | realtime::AdmissionOutcome::AcceptedReordered => 0,
+        realtime::AdmissionOutcome::Duplicate => 1,
+        realtime::AdmissionOutcome::Inactive => -4,
+        realtime::AdmissionOutcome::ResyncRequired => -5,
+        realtime::AdmissionOutcome::Malformed => -1,
+        realtime::AdmissionOutcome::Conflict => -6,
+        realtime::AdmissionOutcome::Stale => -7,
+        realtime::AdmissionOutcome::Late => -8,
+        realtime::AdmissionOutcome::TooFar => -9,
+        realtime::AdmissionOutcome::Full => -10,
+    }
+}
+
+fn realtime_admission_precedence(outcome: realtime::AdmissionOutcome) -> u8 {
+    match outcome {
+        realtime::AdmissionOutcome::ResyncRequired => 100,
+        realtime::AdmissionOutcome::Conflict => 90,
+        realtime::AdmissionOutcome::Full => 80,
+        realtime::AdmissionOutcome::Malformed => 70,
+        realtime::AdmissionOutcome::Inactive => 60,
+        realtime::AdmissionOutcome::Stale => 50,
+        realtime::AdmissionOutcome::Late => 40,
+        realtime::AdmissionOutcome::TooFar => 30,
+        realtime::AdmissionOutcome::Duplicate => 20,
+        realtime::AdmissionOutcome::AcceptedReordered => 10,
+        realtime::AdmissionOutcome::Accepted => 0,
+    }
+}
+
+pub const REALTIME_NATIVE_MAX_PAYLOAD: usize = realtime::MAX_ENVELOPE_BYTES;
+
+pub fn submit_realtime_payload_bytes(bytes: &[u8]) -> i32 {
+    if bytes.len() > REALTIME_NATIVE_MAX_PAYLOAD {
+        return -1;
+    }
+    let Ok(envelope) = realtime::ControlEnvelope::decode(bytes) else {
+        return -1;
+    };
+    if envelope.transitions().iter().any(|transition| {
+        transition.seat as usize >= realtime::REALTIME_MAX_SEATS
+            || transition.epoch > realtime::GUEST_MAX_EPOCH
+            || transition.sequence > i32::MAX as u32
+            || transition.apply_tick > realtime::GUEST_MAX_TICK
+    }) {
+        return -1;
+    }
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -2;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -3;
+    };
+    let report = session.submit_envelope(&envelope);
+    report
+        .outcomes()
+        .iter()
+        .copied()
+        .max_by_key(|outcome| realtime_admission_precedence(*outcome))
+        .map(realtime_admission_code)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+/// Submits `length` RTC1 byte values stored as signed 32-bit ABI elements.
+///
+/// # Safety
+///
+/// `payload` must be non-null, correctly aligned, and valid for `length`
+/// contiguous `i32` reads.
+pub unsafe extern "C" fn stasis_realtime_submit_payload(payload: *const i32, length: i32) -> i32 {
+    if payload.is_null() || length < 0 || length as usize > REALTIME_NATIVE_MAX_PAYLOAD {
+        return -1;
+    }
+    let values = unsafe { std::slice::from_raw_parts(payload, length as usize) };
+    let Ok(bytes) = values
+        .iter()
+        .copied()
+        .map(u8::try_from)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return -1;
+    };
+    submit_realtime_payload_bytes(&bytes)
+}
+
+#[no_mangle]
+/// Encodes one transition into caller-owned signed 32-bit ABI elements.
+///
+/// # Safety
+///
+/// `out_payload` must be valid for `capacity` contiguous `i32` writes.
+pub unsafe extern "C" fn stasis_realtime_build_payload(
+    out_payload: *mut i32,
+    capacity: i32,
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32,
+) -> i32 {
+    if out_payload.is_null()
+        || capacity < 0
+        || seat < 0
+        || seat as usize >= realtime::REALTIME_MAX_SEATS
+        || epoch <= 0
+        || epoch > realtime::GUEST_MAX_EPOCH as i32
+        || sequence <= 0
+        || apply_tick < 0
+    {
+        return -1;
+    }
+    let Ok(envelope) = realtime::ControlEnvelope::from_transition(realtime::ScheduledTransition {
+        seat: seat as u8,
+        epoch: epoch as u32,
+        sequence: sequence as u32,
+        apply_tick: apply_tick as u64,
+        state: realtime::ControlState::new(
+            match u16::try_from(buttons) {
+                Ok(value) => value,
+                Err(_) => return -1,
+            },
+            match i8::try_from(axis_x) {
+                Ok(value) => value,
+                Err(_) => return -1,
+            },
+            match i8::try_from(axis_y) {
+                Ok(value) => value,
+                Err(_) => return -1,
+            },
+        ),
+    }) else {
+        return -1;
+    };
+    let bytes = envelope.encode();
+    if (capacity as usize) < bytes.len() {
+        return -11;
+    }
+    unsafe {
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            *out_payload.add(index) = i32::from(byte);
+        }
+    }
+    bytes.len() as i32
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_resync_required() -> i32 {
+    realtime_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|session| session.resync_required()))
+        .map(i32::from)
+        .unwrap_or(-1)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_record_hash(tick: i32, hash_low: i32, hash_high: i32) -> i32 {
+    if tick < 0 {
+        return -1;
+    }
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -2;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -3;
+    };
+    let hash = realtime_guest_hash(hash_low, hash_high);
+    match session.record_authoritative_hash(tick as u64, hash) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+fn realtime_guest_hash(hash_low: i32, hash_high: i32) -> u64 {
+    u64::from(hash_low as u32) | (u64::from(hash_high as u32) << 32)
+}
+
+#[no_mangle]
+/// Applies a bounded authoritative snapshot from caller-owned ABI arrays.
+///
+/// # Safety
+///
+/// Every array pointer must be non-null, correctly aligned, and valid for
+/// `seat_count` contiguous `i32` reads.
+pub unsafe extern "C" fn stasis_realtime_apply_snapshot(
+    revision: i32,
+    tick: i32,
+    seat_count: i32,
+    buttons: *const i32,
+    axis_x: *const i32,
+    axis_y: *const i32,
+    sequences: *const i32,
+    epochs: *const i32,
+    active: *const i32,
+) -> i32 {
+    if revision <= 0
+        || tick < 0
+        || seat_count <= 0
+        || seat_count as usize > realtime::REALTIME_MAX_SEATS
+        || buttons.is_null()
+        || axis_x.is_null()
+        || axis_y.is_null()
+        || sequences.is_null()
+        || epochs.is_null()
+        || active.is_null()
+    {
+        return -1;
+    }
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -2;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -3;
+    };
+    if seat_count as usize != session.seats() {
+        return -1;
+    }
+    let mut controls = [realtime::ControlState::neutral(); realtime::REALTIME_MAX_SEATS];
+    let mut sequence_floors = [0_u32; realtime::REALTIME_MAX_SEATS];
+    let mut seat_epochs = [1_u32; realtime::REALTIME_MAX_SEATS];
+    let mut active_seats = [false; realtime::REALTIME_MAX_SEATS];
+    for index in 0..seat_count as usize {
+        let button = unsafe { *buttons.add(index) };
+        let x = unsafe { *axis_x.add(index) };
+        let y = unsafe { *axis_y.add(index) };
+        let sequence = unsafe { *sequences.add(index) };
+        let epoch = unsafe { *epochs.add(index) };
+        let is_active = unsafe { *active.add(index) };
+        let (Ok(button), Ok(x), Ok(y), Ok(sequence), Ok(epoch)) = (
+            u16::try_from(button),
+            i8::try_from(x),
+            i8::try_from(y),
+            u32::try_from(sequence),
+            u32::try_from(epoch),
+        ) else {
+            return -1;
+        };
+        if sequence > i32::MAX as u32
+            || epoch > realtime::GUEST_MAX_EPOCH
+            || !matches!(is_active, 0 | 1)
+        {
+            return -1;
+        }
+        let state = realtime::ControlState::new(button, x, y);
+        controls[index] = state;
+        sequence_floors[index] = sequence;
+        seat_epochs[index] = epoch;
+        active_seats[index] = is_active != 0;
+    }
+    let snapshot = realtime::AuthoritativeSnapshot::new(
+        revision as u64,
+        tick as u64,
+        controls,
+        sequence_floors,
+        seat_epochs,
+        active_seats,
+    );
+    match session.apply_authoritative_snapshot(snapshot) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_start(
+    simulation_hz: i32,
+    presentation_hz: i32,
+    control_hz: i32,
+    input_delay_ticks: i32,
+    seats: i32,
+) -> i32 {
+    let (Ok(simulation_hz), Ok(presentation_hz), Ok(control_hz), Ok(input_delay_ticks), Ok(seats)) = (
+        u32::try_from(simulation_hz),
+        u32::try_from(presentation_hz),
+        u32::try_from(control_hz),
+        u32::try_from(input_delay_ticks),
+        usize::try_from(seats),
+    ) else {
+        return -1;
+    };
+    let Ok(config) = realtime::RealtimeConfig::new(
+        simulation_hz,
+        presentation_hz,
+        control_hz,
+        input_delay_ticks,
+    ) else {
+        return -1;
+    };
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -2;
+    };
+    if slot.is_some() {
+        return -3;
+    }
+    let Ok(session) = realtime::RealtimeSession::new(config, seats) else {
+        return -1;
+    };
+    *slot = Some(session);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_stop() -> i32 {
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -1;
+    };
+    *slot = None;
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_current_tick() -> i32 {
+    realtime_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| {
+            slot.as_ref()
+                .and_then(|session| i32::try_from(session.current_tick()).ok())
+        })
+        .unwrap_or(-1)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_current_epoch(seat: i32) -> i32 {
+    let Ok(seat) = usize::try_from(seat) else {
+        return -1;
+    };
+    realtime_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().and_then(|session| session.epoch(seat)))
+        .and_then(|epoch| i32::try_from(epoch).ok())
+        .unwrap_or(-1)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_schedule(
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32,
+) -> i32 {
+    if seat < 0
+        || seat as usize >= realtime::REALTIME_MAX_SEATS
+        || epoch <= 0
+        || epoch > realtime::GUEST_MAX_EPOCH as i32
+        || sequence <= 0
+        || apply_tick < 0
+        || buttons < 0
+        || buttons > i32::from(u16::MAX)
+        || !(-128..=127).contains(&axis_x)
+        || !(-128..=127).contains(&axis_y)
+    {
+        return -1;
+    }
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -2;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -3;
+    };
+    let outcome = session.submit_transition(realtime::ScheduledTransition {
+        seat: seat as u8,
+        epoch: epoch as u32,
+        sequence: sequence as u32,
+        apply_tick: apply_tick as u64,
+        state: realtime::ControlState::new(buttons as u16, axis_x as i8, axis_y as i8),
+    });
+    realtime_admission_code(outcome)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_advance() -> i32 {
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -1;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -2;
+    };
+    if session.current_tick() >= realtime::GUEST_MAX_TICK {
+        return -4;
+    }
+    match session.advance_tick() {
+        Ok(_) => 0,
+        Err(realtime::TickError::Exhausted) => -3,
+    }
+}
+
+#[no_mangle]
+/// Writes the latest completed control state for `seat` to caller-owned outputs.
+///
+/// # Safety
+///
+/// Each output pointer must be non-null, correctly aligned, and valid for one
+/// write of its pointee type.
+pub unsafe extern "C" fn stasis_realtime_read_control(
+    seat: i32,
+    out_buttons: *mut i32,
+    out_axis_x: *mut i32,
+    out_axis_y: *mut i32,
+) -> i32 {
+    if seat < 0 || out_buttons.is_null() || out_axis_x.is_null() || out_axis_y.is_null() {
+        return -1;
+    }
+    let Ok(slot) = realtime_slot().lock() else {
+        return -2;
+    };
+    let Some(control) = slot
+        .as_ref()
+        .and_then(|session| session.control(seat as usize))
+    else {
+        return -3;
+    };
+    unsafe {
+        *out_buttons = i32::from(control.buttons);
+        *out_axis_x = i32::from(control.axis_x);
+        *out_axis_y = i32::from(control.axis_y);
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_disconnect(seat: i32) -> i32 {
+    let Ok(seat) = usize::try_from(seat) else {
+        return -3;
+    };
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -1;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -2;
+    };
+    if session
+        .epoch(seat)
+        .is_some_and(|epoch| epoch >= realtime::GUEST_MAX_EPOCH)
+    {
+        return -4;
+    }
+    session.disconnect(seat).map(|_| 0).unwrap_or(-3)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_reconnect(seat: i32) -> i32 {
+    let Ok(seat) = usize::try_from(seat) else {
+        return -3;
+    };
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -1;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -2;
+    };
+    if session
+        .epoch(seat)
+        .is_some_and(|epoch| epoch >= realtime::GUEST_MAX_EPOCH)
+    {
+        return -4;
+    }
+    session.reconnect(seat).map(|_| 0).unwrap_or(-3)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_pause() -> i32 {
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -1;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -2;
+    };
+    if (0..session.seats()).any(|seat| {
+        session
+            .epoch(seat)
+            .is_some_and(|epoch| epoch >= realtime::GUEST_MAX_EPOCH)
+    }) {
+        return -4;
+    }
+    session.pause().map(|_| 0).unwrap_or(-3)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_focus_lost() -> i32 {
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -1;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -2;
+    };
+    if (0..session.seats()).any(|seat| {
+        session
+            .epoch(seat)
+            .is_some_and(|epoch| epoch >= realtime::GUEST_MAX_EPOCH)
+    }) {
+        return -4;
+    }
+    session.focus_lost().map(|_| 0).unwrap_or(-3)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_realtime_rematch() -> i32 {
+    let Ok(mut slot) = realtime_slot().lock() else {
+        return -1;
+    };
+    let Some(session) = slot.as_mut() else {
+        return -2;
+    };
+    if (0..session.seats()).any(|seat| {
+        session
+            .epoch(seat)
+            .is_some_and(|epoch| epoch >= realtime::GUEST_MAX_EPOCH)
+    }) {
+        return -4;
+    }
+    session.rematch().map(|_| 0).unwrap_or(-3)
+}
 #[no_mangle]
 pub extern "C" fn stasis_network_abi_version() -> u32 {
     ABI_VERSION
@@ -1170,6 +1700,18 @@ mod tests {
     use std::time::{Duration, Instant};
     use tungstenite::client::IntoClientRequest;
     use tungstenite::connect;
+
+    #[test]
+    fn realtime_guest_abi_signatures_and_hash_lanes_are_exact() {
+        let _: unsafe extern "C" fn(*mut i32, i32, i32, i32, i32, i32, i32, i32, i32) -> i32 =
+            stasis_realtime_build_payload;
+        let _: extern "C" fn(i32, i32, i32) -> i32 = stasis_realtime_record_hash;
+        let _: extern "C" fn(i32, i32, i32, i32, i32, i32, i32) -> i32 = stasis_realtime_schedule;
+        assert_eq!(
+            realtime_guest_hash(0x0123_4567, 0x89ab_cdef_u32 as i32),
+            0x89ab_cdef_0123_4567
+        );
+    }
 
     #[test]
     fn positive_seed_mapping_is_bounded_and_nonzero() {

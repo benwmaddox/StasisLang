@@ -2379,6 +2379,36 @@ pub fn preflight_jit_i32_array_capacity(
     )
 }
 
+/// Returns the registered/owned capacity without growing or mutating a JIT
+/// collection. Realtime ABI wrappers use this before every bounded load/store.
+pub fn jit_i32_array_capacity(collection_hash: i32, field_hash: i32) -> Option<usize> {
+    if let Some((_, len)) = registered_i32_arrays()
+        .lock()
+        .expect("registered i32 array table mutex poisoned")
+        .get(&(collection_hash, field_hash))
+        .copied()
+    {
+        return Some(len);
+    }
+    if let Some(len) = owned_i32_arrays()
+        .lock()
+        .expect("owned i32 array table mutex poisoned")
+        .get(&(collection_hash, field_hash))
+        .map(Vec::len)
+    {
+        return Some(len);
+    }
+    let fallback = jit_i32_array_global_table()
+        .lock()
+        .expect("jit i32 array table mutex poisoned");
+    let max_index = fallback
+        .keys()
+        .filter(|(collection, field, _)| *collection == collection_hash && *field == field_hash)
+        .map(|(_, _, index)| *index)
+        .max()?;
+    usize::try_from(max_index).ok()?.checked_add(1)
+}
+
 pub fn preflight_jit_f32_array_capacity(
     collection_hash: i32,
     field_hash: i32,
@@ -4056,7 +4086,7 @@ pub extern "C" fn stasis_jit_network_host_send(
         for index in 0..payload_length {
             let value = stasis_jit_global_i32_array_load(payload_id, 0, index);
             let Ok(value) = u8::try_from(value) else {
-                return -1;
+                return -30 - index;
             };
             payload.push(value);
         }
@@ -4082,6 +4112,461 @@ pub extern "C" fn stasis_jit_network_host_stop() {
                 );
             }
         }
+    }
+}
+
+// Bounded realtime controls use the same Rust scheduler for native and JIT
+// guests.  These wrappers intentionally expose only scalar operations; game
+// state and rendering remain owned by the guest.
+fn stasis_network_payload_limit() -> usize {
+    #[cfg(feature = "network")]
+    {
+        stasis_network::REALTIME_NATIVE_MAX_PAYLOAD
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+
+const REALTIME_GUEST_MAX_TICK: u64 = i32::MAX as u64;
+const REALTIME_GUEST_MAX_EPOCH: i32 = i32::MAX;
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_start(
+    simulation_hz: i32,
+    presentation_hz: i32,
+    control_hz: i32,
+    input_delay_ticks: i32,
+    seats: i32,
+) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        if simulation_hz < 0
+            || presentation_hz < 0
+            || control_hz < 0
+            || input_delay_ticks < 0
+            || seats < 0
+        {
+            return -1;
+        }
+        return stasis_network::stasis_realtime_start(
+            simulation_hz,
+            presentation_hz,
+            control_hz,
+            input_delay_ticks,
+            seats,
+        );
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (
+            simulation_hz,
+            presentation_hz,
+            control_hz,
+            input_delay_ticks,
+            seats,
+        );
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_stop() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_stop();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_submit_payload(payload_id: i32, payload_length: i32) -> i32 {
+    if payload_length < 0 || payload_length as usize > stasis_network_payload_limit() {
+        return -1;
+    }
+    if jit_i32_array_capacity(payload_id, 0)
+        .is_none_or(|capacity| capacity < payload_length as usize)
+    {
+        return -11;
+    }
+    #[cfg(feature = "network")]
+    {
+        let mut payload = Vec::with_capacity(payload_length as usize);
+        for index in 0..payload_length {
+            let value = stasis_jit_global_i32_array_load(payload_id, 0, index);
+            let Ok(value) = u8::try_from(value) else {
+                return -1;
+            };
+            payload.push(value);
+        }
+        return stasis_network::submit_realtime_payload_bytes(&payload);
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = payload_id;
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_build_payload(
+    out_payload_id: i32,
+    capacity: i32,
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32,
+) -> i32 {
+    if seat < 0
+        || seat >= 8
+        || epoch <= 0
+        || sequence <= 0
+        || apply_tick < 0
+        || apply_tick as u64 > REALTIME_GUEST_MAX_TICK
+        || epoch > REALTIME_GUEST_MAX_EPOCH
+        || buttons < 0
+        || buttons > i32::from(u16::MAX)
+        || !(-128..=127).contains(&axis_x)
+        || !(-128..=127).contains(&axis_y)
+        || capacity < 0
+        || capacity as usize > stasis_network_payload_limit()
+    {
+        return -1;
+    }
+    #[cfg(feature = "network")]
+    {
+        if jit_i32_array_capacity(out_payload_id, 0)
+            .is_none_or(|registered| registered < capacity as usize)
+        {
+            return -11;
+        }
+        let mut payload = vec![0_i32; capacity as usize];
+        let length = unsafe {
+            stasis_network::stasis_realtime_build_payload(
+                payload.as_mut_ptr(),
+                capacity,
+                seat,
+                epoch,
+                sequence,
+                apply_tick,
+                buttons,
+                axis_x,
+                axis_y,
+            )
+        };
+        if length < 0 {
+            return length;
+        }
+        for (index, value) in payload.into_iter().take(length as usize).enumerate() {
+            stasis_jit_global_i32_array_store(out_payload_id, 0, index as i32, value);
+        }
+        return length;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = out_payload_id;
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_resync_required() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_resync_required();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_record_hash(tick: i32, hash_low: i32, hash_high: i32) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_record_hash(tick, hash_low, hash_high);
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (tick, hash_low, hash_high);
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_apply_snapshot(
+    revision: i32,
+    tick: i32,
+    seat_count: i32,
+    buttons_id: i32,
+    axis_x_id: i32,
+    axis_y_id: i32,
+    sequences_id: i32,
+    epochs_id: i32,
+    active_id: i32,
+) -> i32 {
+    if revision <= 0 || tick < 0 || seat_count <= 0 || seat_count > 8 {
+        return -1;
+    }
+    let count = seat_count as usize;
+    for id in [
+        buttons_id,
+        axis_x_id,
+        axis_y_id,
+        sequences_id,
+        epochs_id,
+        active_id,
+    ] {
+        if jit_i32_array_capacity(id, 0).is_none_or(|capacity| capacity < count) {
+            return -11;
+        }
+    }
+    #[cfg(feature = "network")]
+    {
+        let mut buttons = Vec::<i32>::with_capacity(count);
+        let mut axis_x = Vec::<i32>::with_capacity(count);
+        let mut axis_y = Vec::<i32>::with_capacity(count);
+        let mut sequences = Vec::<i32>::with_capacity(count);
+        let mut epochs = Vec::<i32>::with_capacity(count);
+        let mut active = Vec::<i32>::with_capacity(count);
+        for index in 0..seat_count {
+            let button = stasis_jit_global_i32_array_load(buttons_id, 0, index);
+            let x = stasis_jit_global_i32_array_load(axis_x_id, 0, index);
+            let y = stasis_jit_global_i32_array_load(axis_y_id, 0, index);
+            let sequence = stasis_jit_global_i32_array_load(sequences_id, 0, index);
+            let epoch = stasis_jit_global_i32_array_load(epochs_id, 0, index);
+            let is_active = stasis_jit_global_i32_array_load(active_id, 0, index);
+            if button < 0
+                || button > i32::from(u16::MAX)
+                || !(-128..=127).contains(&x)
+                || !(-128..=127).contains(&y)
+                || sequence < 0
+                || epoch <= 0
+                || epoch > REALTIME_GUEST_MAX_EPOCH
+                || !matches!(is_active, 0 | 1)
+            {
+                return -1;
+            }
+            buttons.push(button);
+            axis_x.push(x);
+            axis_y.push(y);
+            sequences.push(sequence);
+            epochs.push(epoch);
+            active.push(is_active);
+        }
+        return unsafe {
+            stasis_network::stasis_realtime_apply_snapshot(
+                revision,
+                tick,
+                seat_count,
+                buttons.as_ptr(),
+                axis_x.as_ptr(),
+                axis_y.as_ptr(),
+                sequences.as_ptr(),
+                epochs.as_ptr(),
+                active.as_ptr(),
+            )
+        };
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (
+            buttons_id,
+            axis_x_id,
+            axis_y_id,
+            sequences_id,
+            epochs_id,
+            active_id,
+        );
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_current_tick() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_current_tick();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_current_epoch(seat: i32) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return if seat < 0 {
+            -1
+        } else {
+            stasis_network::stasis_realtime_current_epoch(seat)
+        };
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = seat;
+        -1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_schedule(
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32,
+) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        if seat < 0 || epoch < 0 || sequence < 0 || buttons < 0 {
+            return -1;
+        }
+        return stasis_network::stasis_realtime_schedule(
+            seat, epoch, sequence, apply_tick, buttons, axis_x, axis_y,
+        );
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (seat, epoch, sequence, apply_tick, buttons, axis_x, axis_y);
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_advance() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_advance();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_read_control(
+    seat: i32,
+    out_buttons_id: i32,
+    out_axis_x_id: i32,
+    out_axis_y_id: i32,
+) -> i32 {
+    if seat < 0 {
+        return -1;
+    }
+    if [out_buttons_id, out_axis_x_id, out_axis_y_id]
+        .into_iter()
+        .any(|id| jit_i32_array_capacity(id, 0).is_none_or(|capacity| capacity < 1))
+    {
+        return -11;
+    }
+    #[cfg(feature = "network")]
+    {
+        let mut buttons = 0_i32;
+        let mut axis_x = 0_i32;
+        let mut axis_y = 0_i32;
+        let result = unsafe {
+            stasis_network::stasis_realtime_read_control(
+                seat,
+                &mut buttons,
+                &mut axis_x,
+                &mut axis_y,
+            )
+        };
+        if result == 0 {
+            stasis_jit_global_i32_array_store(out_buttons_id, 0, 0, buttons as i32);
+            stasis_jit_global_i32_array_store(out_axis_x_id, 0, 0, axis_x);
+            stasis_jit_global_i32_array_store(out_axis_y_id, 0, 0, axis_y);
+        }
+        return result;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (out_buttons_id, out_axis_x_id, out_axis_y_id);
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_disconnect(seat: i32) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return if seat < 0 {
+            -1
+        } else {
+            stasis_network::stasis_realtime_disconnect(seat)
+        };
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = seat;
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_reconnect(seat: i32) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return if seat < 0 {
+            -1
+        } else {
+            stasis_network::stasis_realtime_reconnect(seat)
+        };
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = seat;
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_pause() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_pause();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_focus_lost() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_focus_lost();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_rematch() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_rematch();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
     }
 }
 

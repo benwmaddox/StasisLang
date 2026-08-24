@@ -1641,6 +1641,25 @@ Archived priority override (2026-02-13, historical):
 - Host-set misuse cannot produce partial state mutation or silent nondeterminism.
 - Status: `planned (post-S10b)`
 
+### RN1 - Realtime control scheduling and replay
+
+- Scope: Define one bounded, fixed-tick control contract over the existing
+  production network envelope for realtime games.
+- Deliverable: `stasis_network::realtime` validates rates, schedules and
+  deduplicates future transitions, applies held/neutral controls at exact
+  ticks without packet stalls, defines epoch-qualified lifecycle and monotonic
+  snapshot policy, and records replay transitions, lifecycle events, ticks,
+  and authoritative hashes. Stable native/JIT entrypoints expose bounded RTC1,
+  correction, hash, and lifecycle operations to `realtime_controls.stasis`;
+  replay callbacks remain host-owned. Turn-based networking remains unchanged.
+- Tests: Deterministic two-device 60 Hz simulation fixture with lower-rate
+  controls and measurable delay; loss/reorder/duplicate, lifecycle,
+  malformed/full bounds, matching hashes, replay reproduction, the production
+  WebSocket envelope, guest-domain/short-buffer/mixed-outcome rejection, an
+  executable Stasis JIT guest seam, and AOT object imports for the stable native
+  contract.
+- Status: `complete (2026-08-24)`.
+
 ### S17 - Immediate Axis Placement and Float Presentation Geometry
 
 - Source requirements: `docs/immediate_layout_prd.md`.
