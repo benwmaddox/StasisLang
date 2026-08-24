@@ -8246,8 +8246,23 @@ mod tests {
             android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
         )
         .expect("read Android activity");
-        assert!(java.contains(".stasis_game.staging"));
-        assert!(java.contains("new File(root, \".\")"));
+        let asset_cache = fs::read_to_string(
+            android.join("android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java"),
+        )
+        .expect("read Android asset cache");
+        assert!(asset_cache.contains("CACHE_SCHEMA = \"stasis.android.asset-cache\""));
+        assert!(asset_cache.contains("MAX_MARKER_BYTES"));
+        assert!(asset_cache.contains("publicationInterceptor.beforeInstall"));
+        assert!(asset_cache.contains("inventoryMatches"));
+        assert!(asset_cache.contains("rename(backup, root)"));
+        assert!(asset_cache.contains("BACKUP_ALT_NAME"));
+        assert!(asset_cache.contains("MAX_COPIED_TREE_BYTES"));
+        assert!(asset_cache.contains("child.equals(\".\")"));
+        assert!(java.contains("StasisAssetCache.Result"));
+        assert!(java.contains("packageInfo.lastUpdateTime"));
+        assert!(java.contains("INVALID_ASSET_ROOT"));
+        assert!(java.contains("Asset cache mode="));
+        assert!(java.contains("packaged_read_bytes="));
         assert!(java.contains("event.getPointerCount() >= 3"));
         assert!(java.contains("nativeReadPerformanceMetrics"));
         assert!(java.contains("nativeSetPerformanceMetricsEnabled(show)"));
@@ -8258,9 +8273,8 @@ mod tests {
         assert!(java.contains("appendWorkload"));
         assert!(!java.contains("percentile("));
         assert!(java.contains("performanceHud.setSingleLine(false)"));
-        assert!(java.contains("verifyAssetManifest(staging)"));
-        assert!(java.contains("manifestVersion != 1 && manifestVersion != 2"));
-        assert!(java.contains("Asset verification failed before runtime startup"));
+        assert!(java.contains("new AndroidAssetSource(getAssets())"));
+        assert!(java.contains("Asset cache preparation failed before runtime startup"));
         assert!(java.contains("setOnApplyWindowInsetsListener"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
