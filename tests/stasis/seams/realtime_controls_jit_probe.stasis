@@ -1,0 +1,145 @@
+import "../../../src/stdlib/realtime_controls.stasis";
+
+global realtime_probe_buttons: i32[1];
+global realtime_probe_axis_x: i32[1];
+global realtime_probe_axis_y: i32[1];
+global realtime_payload: i32[64];
+global realtime_short: i32[1];
+
+function realtime_controls_jit_probe(): i32 {
+    realtime_stop();
+    if (realtime_start(60, 120, 20, 2, 1) != 0) {
+        return 1;
+    }
+
+    let epoch: i32 = realtime_current_epoch(0);
+    if (epoch <= 0) {
+        return 2;
+    }
+    if (realtime_build_payload(realtime_short, 29, 0, epoch, 1, 2, 1, 1, 0) != -11) {
+        return 26;
+    }
+    if (realtime_submit_payload(realtime_short, 29) != -11) {
+        return 27;
+    }
+    if (realtime_apply_snapshot(1, 0, 2, realtime_short, realtime_short, realtime_short, realtime_short, realtime_short, realtime_short) != -11) {
+        return 28;
+    }
+    if (realtime_build_payload(realtime_payload, 64, 256, epoch, 1, 2, 1, 1, 0) != -1) {
+        return 29;
+    }
+    if (realtime_build_payload(realtime_payload, 64, 0, 0, 1, 2, 1, 1, 0) != -1) {
+        return 30;
+    }
+    if (realtime_build_payload(realtime_payload, 64, 0, epoch, 0, 2, 1, 1, 0) != -1) {
+        return 31;
+    }
+    if (realtime_build_payload(realtime_payload, 64, 0, epoch, 1, 2, 1, 128, 0) != -1) {
+        return 32;
+    }
+    if (realtime_build_payload(realtime_payload, 64, 0, epoch, 1, 2, 1, 1, 0) != 29) {
+        return 3;
+    }
+    if (realtime_payload[0] != 82) {
+        return 201;
+    }
+    if (realtime_payload[1] != 84) {
+        return 202;
+    }
+    if (realtime_payload[2] != 67) {
+        return 203;
+    }
+    if (realtime_payload[3] != 49) {
+        return 204;
+    }
+    if (realtime_payload[5] != 1 || realtime_payload[6] != 1) {
+        return 205;
+    }
+    if (realtime_payload[8] != 0 || realtime_payload[12] != epoch) {
+        return 206;
+    }
+    if (realtime_payload[16] != 1 || realtime_payload[24] != 2) {
+        return 207;
+    }
+    if (realtime_payload[26] != 1 || realtime_payload[27] != 1) {
+        return 208;
+    }
+    let submit_result: i32 = realtime_submit_payload(realtime_payload, 29);
+    if (submit_result != 0) {
+        return 100 - submit_result;
+    }
+    if (realtime_current_tick() != 0) {
+        return 4;
+    }
+
+    if (realtime_read_control(0, realtime_probe_buttons, realtime_probe_axis_x, realtime_probe_axis_y) != 0) {
+        return 5;
+    }
+    if (realtime_probe_buttons[0] != 0 || realtime_probe_axis_x[0] != 0) {
+        return 6;
+    }
+    if (realtime_advance() != 0 || realtime_current_tick() != 1) {
+        return 7;
+    }
+    if (realtime_record_hash(1, 19088743, -1985229329) != 0) {
+        return 33;
+    }
+    if (realtime_read_control(0, realtime_probe_buttons, realtime_probe_axis_x, realtime_probe_axis_y) != 0) {
+        return 8;
+    }
+    if (realtime_probe_buttons[0] != 0) {
+        return 9;
+    }
+
+    if (realtime_advance() != 0 || realtime_current_tick() != 2) {
+        return 10;
+    }
+    if (realtime_read_control(0, realtime_probe_buttons, realtime_probe_axis_x, realtime_probe_axis_y) != 0) {
+        return 11;
+    }
+    if (realtime_probe_buttons[0] != 1 || realtime_probe_axis_x[0] != 1) {
+        return 12;
+    }
+
+    if (realtime_schedule(0, epoch, 2, 4, 0, 0, 0) != 0) {
+        return 13;
+    }
+    if (realtime_advance() != 0) {
+        return 14;
+    }
+    if (realtime_read_control(0, realtime_probe_buttons, realtime_probe_axis_x, realtime_probe_axis_y) != 0) {
+        return 15;
+    }
+    if (realtime_probe_buttons[0] != 1) {
+        return 16;
+    }
+    if (realtime_advance() != 0) {
+        return 17;
+    }
+    if (realtime_read_control(0, realtime_probe_buttons, realtime_probe_axis_x, realtime_probe_axis_y) != 0) {
+        return 18;
+    }
+    if (realtime_probe_buttons[0] != 0 || realtime_probe_axis_x[0] != 0) {
+        return 19;
+    }
+    if (realtime_current_tick() != 4) {
+        return 20;
+    }
+
+    if (realtime_disconnect(0) != 0) {
+        return 21;
+    }
+    if (realtime_schedule(0, epoch, 3, 6, 1, 0, 0) != -4) {
+        return 22;
+    }
+    if (realtime_reconnect(0) != 0) {
+        return 23;
+    }
+    if (realtime_current_epoch(0) <= epoch) {
+        return 24;
+    }
+    if (realtime_stop() != 0) {
+        return 25;
+    }
+    return 0;
+}

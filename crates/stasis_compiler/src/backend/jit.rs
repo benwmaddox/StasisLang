@@ -2934,6 +2934,73 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "network_host_stop" | "stasis_network_host_stop" | "stasis_jit_network_host_stop" => {
             function_address(stasis_dynload::stasis_jit_network_host_stop as *const ())
         }
+        "realtime_start" | "stasis_realtime_start" | "stasis_jit_realtime_start" => {
+            function_address(stasis_dynload::stasis_jit_realtime_start as *const ())
+        }
+        "realtime_stop" | "stasis_realtime_stop" | "stasis_jit_realtime_stop" => {
+            function_address(stasis_dynload::stasis_jit_realtime_stop as *const ())
+        }
+        "realtime_submit_payload"
+        | "stasis_realtime_submit_payload"
+        | "stasis_jit_realtime_submit_payload" => {
+            function_address(stasis_dynload::stasis_jit_realtime_submit_payload as *const ())
+        }
+        "realtime_build_payload"
+        | "stasis_realtime_build_payload"
+        | "stasis_jit_realtime_build_payload" => {
+            function_address(stasis_dynload::stasis_jit_realtime_build_payload as *const ())
+        }
+        "realtime_resync_required"
+        | "stasis_realtime_resync_required"
+        | "stasis_jit_realtime_resync_required" => {
+            function_address(stasis_dynload::stasis_jit_realtime_resync_required as *const ())
+        }
+        "realtime_record_hash"
+        | "stasis_realtime_record_hash"
+        | "stasis_jit_realtime_record_hash" => {
+            function_address(stasis_dynload::stasis_jit_realtime_record_hash as *const ())
+        }
+        "realtime_apply_snapshot"
+        | "stasis_realtime_apply_snapshot"
+        | "stasis_jit_realtime_apply_snapshot" => {
+            function_address(stasis_dynload::stasis_jit_realtime_apply_snapshot as *const ())
+        }
+        "realtime_current_tick"
+        | "stasis_realtime_current_tick"
+        | "stasis_jit_realtime_current_tick" => {
+            function_address(stasis_dynload::stasis_jit_realtime_current_tick as *const ())
+        }
+        "realtime_current_epoch"
+        | "stasis_realtime_current_epoch"
+        | "stasis_jit_realtime_current_epoch" => {
+            function_address(stasis_dynload::stasis_jit_realtime_current_epoch as *const ())
+        }
+        "realtime_schedule" | "stasis_realtime_schedule" | "stasis_jit_realtime_schedule" => {
+            function_address(stasis_dynload::stasis_jit_realtime_schedule as *const ())
+        }
+        "realtime_advance" | "stasis_realtime_advance" | "stasis_jit_realtime_advance" => {
+            function_address(stasis_dynload::stasis_jit_realtime_advance as *const ())
+        }
+        "realtime_read_control"
+        | "stasis_realtime_read_control"
+        | "stasis_jit_realtime_read_control" => {
+            function_address(stasis_dynload::stasis_jit_realtime_read_control as *const ())
+        }
+        "realtime_disconnect" | "stasis_realtime_disconnect" | "stasis_jit_realtime_disconnect" => {
+            function_address(stasis_dynload::stasis_jit_realtime_disconnect as *const ())
+        }
+        "realtime_reconnect" | "stasis_realtime_reconnect" | "stasis_jit_realtime_reconnect" => {
+            function_address(stasis_dynload::stasis_jit_realtime_reconnect as *const ())
+        }
+        "realtime_pause" | "stasis_realtime_pause" | "stasis_jit_realtime_pause" => {
+            function_address(stasis_dynload::stasis_jit_realtime_pause as *const ())
+        }
+        "realtime_focus_lost" | "stasis_realtime_focus_lost" | "stasis_jit_realtime_focus_lost" => {
+            function_address(stasis_dynload::stasis_jit_realtime_focus_lost as *const ())
+        }
+        "realtime_rematch" | "stasis_realtime_rematch" | "stasis_jit_realtime_rematch" => {
+            function_address(stasis_dynload::stasis_jit_realtime_rematch as *const ())
+        }
         "storage_load_i32" | "stasis_storage_load_i32" | "stasis_jit_storage_load_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_load_i32 as *const ())
         }

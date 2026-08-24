@@ -421,3 +421,32 @@ Before merging a game change, answer:
 The structure can remain in one file or grow into focused systems. The useful
 part stays the same: bind input once, update explicit state in a visible order,
 and render the result without changing the game.
+
+## Realtime network controls
+
+Realtime games use the bounded contract in
+[`realtime_networking.md`](realtime_networking.md). Raw control changes are
+scheduled for future authoritative simulation ticks, submitted independently
+of the tick loop, and applied in stable order at their exact due tick. Held
+state persists and neutral release is explicit. Missing, delayed, duplicated,
+reordered, stale, conflicting, too-far, and malformed transitions have
+deterministic admission outcomes; a missing packet never stalls simulation or
+rendering. Conflicting pending variants quarantine their shared identity so
+arrival order cannot change the result.
+
+The production transport carries the module's versioned control payload inside
+its existing message envelope. Host-authoritative games correct clients with
+snapshots after due-time loss, while deterministic-peer games must recover a
+lost transition before due and require matching rates, integer state
+transitions, and replay hashes. Rendering may interpolate completed states
+only. Turn-based games keep their existing command path and do not use the
+realtime control API.
+
+Stasis guests import `src/stdlib/realtime_controls.stasis`. Its externs map to
+stable `stasis_realtime_*` native symbols for AOT and explicit JIT adapters in
+`stasis_dynload`; the host retains ownership of queues, clocks, snapshots, and
+replay storage. Guests can build/submit bounded RTC1 payloads, apply scalar-array
+snapshot corrections, attach authoritative hashes, and inspect resync state;
+game-token restoration and replay callbacks stay in Rust. Guest reads return
+the last completed control state and never advance simulation or presentation
+time. The guest ABI intentionally bounds ticks and epochs to `i32::MAX`.
