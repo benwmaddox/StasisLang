@@ -1360,6 +1360,7 @@
     if (canvas.width === width && canvas.height === height) return;
     canvas.width = width;
     canvas.height = height;
+    if (typeof window.STASIS_REFIT_VIEWPORT === "function") window.STASIS_REFIT_VIEWPORT();
     markResized();
   }
 
@@ -1390,7 +1391,6 @@
     } else if (flags & 4) {
       setCanvasSize(width, height);
       document.body.dataset.windowMode = "maximized";
-      markResized();
     }
     document.body.dataset.windowRequestSeq = String(sequence);
   }
@@ -1522,6 +1522,7 @@
   addEventListener("resize", markResized);
   addEventListener("orientationchange", markResized);
   if (window.visualViewport) window.visualViewport.addEventListener("resize", markResized);
+  addEventListener("stasis-viewport-extent", markResized);
   document.addEventListener("fullscreenchange", markResized);
   // @stasis-feature audio begin
   void enableWebAudio();
