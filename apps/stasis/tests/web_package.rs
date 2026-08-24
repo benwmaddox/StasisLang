@@ -530,6 +530,15 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     assert!(index.contains(r#"<title>web_export_smoke</title>"#));
     assert!(index.contains(r#"<h1 id="stasis-loading-title">web_export_smoke</h1>"#));
     assert!(index.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
+    assert_eq!(index.matches("viewport-fit=cover").count(), 1);
+    assert_eq!(index.matches("safe-area-inset-").count(), 8);
+    assert_eq!(index.matches("100svh").count(), 1);
+    assert_eq!(index.matches("100dvh").count(), 1);
+    assert_eq!(index.matches("<script>\n    (() => {").count(), 1);
+    assert_eq!(index.matches("      addEventListener(\"resize\", fit)").count(), 1);
+    assert_eq!(index.matches("      addEventListener(\"orientationchange\", fit)").count(), 1);
+    assert_eq!(index.matches("visualViewport.addEventListener").count(), 2);
+    assert_eq!(index.matches("new MutationObserver(fit)").count(), 1);
     assert!(!index.contains("stasis-audio"));
     assert!(!index.contains("Enable sound"));
     for expected in [

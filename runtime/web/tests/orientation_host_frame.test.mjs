@@ -5,8 +5,9 @@ import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
-async function runSequence(first, second) {
+async function runSequence(first, second, options = {}) {
   const events = new Map();
+  const visualViewportEvents = new Map();
   const raf = [];
   const ticks = [];
   let now = 0;
@@ -15,6 +16,12 @@ async function runSequence(first, second) {
     host_i32: { offset: 0, length: 768 },
     host_f32: { offset: 768 * 4, length: 64 }
   }, strings: {}, assets: {} };
+  const requestGlobals = options.backingRequest ? {
+    host_req_seq: { value: 0 },
+    host_req_flags: { value: 0 },
+    host_req_window_w_px: { value: first[0] },
+    host_req_window_h_px: { value: first[1] }
+  } : {};
   let canvasWidth = first[0];
   let canvasHeight = first[1];
   const context = {
@@ -54,9 +61,15 @@ async function runSequence(first, second) {
   let screenWidth = first[0];
   let screenHeight = first[1];
   const screen = { get width() { return screenWidth; }, get height() { return screenHeight; } };
+  const visualViewport = {
+    width: first[0],
+    height: first[1],
+    addEventListener(type, listener) { visualViewportEvents.set(type, listener); }
+  };
   const instance = {
     exports: {
       memory,
+      ...requestGlobals,
       main: () => 0,
       tick: () => {
         const i32 = new Int32Array(memory.buffer, 0, 768);
@@ -64,7 +77,7 @@ async function runSequence(first, second) {
         if (i32[547]) actionCount += 1;
         ticks.push({
           resized: i32[11], displayGeneration: i32[30], native: [i32[22], i32[23]], drawable: [i32[24], i32[25]],
-          logical: [f32[50], f32[51]], pointerCount: i32[7], wentDown: i32[546], wentUp: i32[547], actionCount
+          logical: [f32[50], f32[51]], pointer: [f32[0], f32[1]], pointerCount: i32[7], wentDown: i32[546], wentUp: i32[547], actionCount
         });
       },
       render: () => 0,
@@ -82,7 +95,14 @@ async function runSequence(first, second) {
     AudioContext: class { constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; } close() {} resume() {} },
     TextDecoder, setTimeout, clearTimeout, STASIS_GAME: game,
   };
-  contextObject.window = { STASIS_GAME: game, screen };
+  contextObject.window = {
+    STASIS_GAME: game,
+    screen,
+    visualViewport,
+    STASIS_REFIT_VIEWPORT: options.backingRequest
+      ? () => { canvasWidth = canvas.width; canvasHeight = canvas.height; }
+      : undefined
+  };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
@@ -90,7 +110,7 @@ async function runSequence(first, second) {
   const frame = () => { now += 16; raf.shift()(now); };
   frame();
   const dispatch = (type, event = {}) => canvas.listeners.get(type)?.(event);
-  dispatch("pointerdown", { pointerId: 7, clientX: 90, clientY: 180 });
+  dispatch("pointerdown", { pointerId: 7, clientX: first[0] - 1, clientY: first[1] - 1 });
   frame();
   const down = ticks.at(-1);
   assert.equal(down.pointerCount, 1);
@@ -98,9 +118,32 @@ async function runSequence(first, second) {
   assert.equal(down.wentUp, 0);
   assert.equal(down.logical[0], first[0]);
   assert.equal(down.logical[1], first[1]);
+  assert.deepEqual(down.pointer, [first[0] - 1, first[1] - 1]);
+  if (options.backingRequest) {
+    screenWidth = second[0]; screenHeight = second[1];
+    requestGlobals.host_req_seq.value = 1;
+    requestGlobals.host_req_flags.value = 4;
+    requestGlobals.host_req_window_w_px.value = second[0];
+    requestGlobals.host_req_window_h_px.value = second[1];
+    frame();
+    const backingResize = ticks.at(-1);
+    assert.equal(backingResize.resized, 1);
+    assert.equal(backingResize.displayGeneration, 2);
+    assert.deepEqual(backingResize.drawable, second);
+    assert.deepEqual(backingResize.logical, second, "intentional backing resize reaches the same HostFrame");
+    requestGlobals.host_req_seq.value = 2;
+    frame();
+    const unchangedRequest = ticks.at(-1);
+    assert.equal(unchangedRequest.resized, 0, "same-size maximized request does not report a resize");
+    assert.equal(unchangedRequest.displayGeneration, 2);
+    return ticks;
+  }
   screenWidth = second[0]; screenHeight = second[1];
   canvasWidth = second[0]; canvasHeight = second[1];
+  visualViewport.width = second[0]; visualViewport.height = second[1];
+  visualViewportEvents.get("resize")();
   events.get("window:resize")();
+  events.get("window:orientationchange")();
   assert.deepEqual([screen.width, screen.height], second);
   frame();
   const resized = ticks.at(-1);
@@ -109,11 +152,15 @@ async function runSequence(first, second) {
   assert.deepEqual(resized.native, second);
   assert.deepEqual(resized.drawable, second);
   assert.deepEqual(resized.logical, first, "guest canvas remains selected logical size");
-  dispatch("pointerup", { pointerId: 7, clientX: 90, clientY: 180 });
+  dispatch("pointerup", { pointerId: 7, clientX: second[0] - 1, clientY: second[1] - 1 });
   frame();
   const up = ticks.at(-1);
   assert.equal(up.resized, 0);
   assert.equal(up.wentUp, 1);
+  assert.deepEqual(up.pointer, [
+    Math.round((second[0] - 1) * first[0] / second[0]),
+    Math.round((second[1] - 1) * first[1] / second[1])
+  ]);
   assert.equal(up.actionCount, 1, "release increments the action counter exactly once");
   frame();
   const quiet = ticks.at(-1);
@@ -131,4 +178,8 @@ test("web HostFrame portrait to landscape preserves actionable release", async (
 
 test("web HostFrame landscape to portrait preserves actionable release", async () => {
   await runSequence([720, 360], [360, 720]);
+});
+
+test("web HostFrame reports synchronous intentional backing resize", async () => {
+  await runSequence([360, 720], [320, 640], { backingRequest: true });
 });

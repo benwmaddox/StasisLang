@@ -2,17 +2,36 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <link rel="icon" href="data:,">
   __STASIS_LOADING_FONT_FACE__
   <title>__STASIS_GAME_TITLE__</title>
   <style>
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; overflow: hidden; background: #081613; color: #f3eee1; }
-    main { position: relative; width: min(960px, 100vw); }
-    canvas { display: block; width: 100%; aspect-ratio: 16 / 9; background: #091b2d; touch-action: none; }
+    html { width: 100%; height: 100%; overflow: hidden; }
+    body {
+      box-sizing: border-box;
+      width: var(--stasis-visible-width, 100%);
+      height: 100vh;
+      height: 100svh;
+      height: var(--stasis-visible-height, 100dvh);
+      min-height: var(--stasis-visible-height, 100%);
+      max-height: var(--stasis-visible-height, 100%);
+      position: relative;
+      left: var(--stasis-visible-offset-left, 0px);
+      top: var(--stasis-visible-offset-top, 0px);
+      margin: 0;
+      padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background: #081613;
+      color: #f3eee1;
+    }
+    main { position: relative; width: min(960px, 100%); max-width: 100%; aspect-ratio: 16 / 9; }
+    canvas { display: block; width: 100%; height: 100%; aspect-ratio: 16 / 9; background: #091b2d; touch-action: none; }
     __STASIS_PERFORMANCE_HUD_STYLE__
-    #stasis-loading { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: clamp(1.5rem, 7vw, 5rem); box-sizing: border-box; overflow: hidden; isolation: isolate; background: linear-gradient(145deg, #102a24 0%, #0b1d1a 48%, #07131d 100%); color: #f3eee1; text-align: center; }
+    #stasis-loading { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: calc(env(safe-area-inset-top, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-right, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-bottom, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-left, 0px) + clamp(1.5rem, 7vw, 5rem)); box-sizing: border-box; overflow: hidden; isolation: isolate; background: linear-gradient(145deg, #102a24 0%, #0b1d1a 48%, #07131d 100%); color: #f3eee1; text-align: center; }
     #stasis-loading::before, #stasis-loading::after { position: absolute; z-index: -1; display: block; content: ""; pointer-events: none; }
     #stasis-loading::before { width: min(86vw, 56rem); height: min(86vw, 56rem); border: 1px solid #bca66b22; border-radius: 50%; background: radial-gradient(circle, #c6a96b0d 0%, transparent 67%); transform: translate(22%, -25%); }
     #stasis-loading::after { inset: 0; background: linear-gradient(90deg, transparent 0 49.95%, #bca66b10 50%, transparent 50.05%); opacity: .65; }
@@ -42,6 +61,78 @@
     __STASIS_PERFORMANCE_HUD__
     <pre id="stasis-error"></pre>
   </main>
+  <script>
+    (() => {
+      const canvas = document.getElementById("stasis-canvas");
+      const shell = canvas && canvas.parentElement;
+      if (!canvas || !shell) return;
+
+      const finite = value => Number.isFinite(value) && value > 0 ? value : 0;
+      const safeInset = side => {
+        const styles = typeof getComputedStyle === "function" ? getComputedStyle(document.body) : null;
+        const value = styles && parseFloat(styles.getPropertyValue(`padding-${side}`));
+        return Number.isFinite(value) && value > 0 ? value : 0;
+      };
+      const visibleViewport = () => {
+        const visual = window.visualViewport;
+        const width = finite(visual && visual.width) || finite(document.documentElement && document.documentElement.clientWidth) || finite(window.innerWidth);
+        const height = finite(visual && visual.height) || finite(document.documentElement && document.documentElement.clientHeight) || finite(window.innerHeight);
+        return {
+          width,
+          height,
+          offsetLeft: finite(visual && visual.offsetLeft),
+          offsetTop: finite(visual && visual.offsetTop),
+          left: safeInset("left"),
+          right: safeInset("right"),
+          top: safeInset("top"),
+          bottom: safeInset("bottom")
+        };
+      };
+
+      let lastExtent = "";
+      let lastPosition = "";
+      const fit = () => {
+        const viewport = visibleViewport();
+        const availableWidth = Math.max(1, viewport.width - viewport.left - viewport.right);
+        const availableHeight = Math.max(1, viewport.height - viewport.top - viewport.bottom);
+        const backingWidth = finite(canvas.width) || 16;
+        const backingHeight = finite(canvas.height) || 9;
+        const ratio = backingWidth / backingHeight;
+        const width = Math.max(1, Math.min(960, availableWidth, availableHeight * ratio));
+        const height = width / ratio;
+        const extentKey = [viewport.width, viewport.height, viewport.left, viewport.right, viewport.top, viewport.bottom, backingWidth, backingHeight].join(":");
+        const positionKey = `${viewport.offsetLeft}:${viewport.offsetTop}`;
+        const extentChanged = extentKey !== lastExtent;
+        const positionChanged = positionKey !== lastPosition;
+        if (!extentChanged && !positionChanged) return;
+        lastExtent = extentKey;
+        lastPosition = positionKey;
+        document.documentElement.style.setProperty("--stasis-visible-offset-left", `${viewport.offsetLeft}px`);
+        document.documentElement.style.setProperty("--stasis-visible-offset-top", `${viewport.offsetTop}px`);
+        if (!extentChanged) return;
+        document.documentElement.style.setProperty("--stasis-visible-width", `${viewport.width}px`);
+        document.documentElement.style.setProperty("--stasis-visible-height", `${viewport.height}px`);
+        shell.style.width = `${width}px`;
+        shell.style.height = `${height}px`;
+        shell.style.aspectRatio = `${backingWidth} / ${backingHeight}`;
+        if (typeof window.dispatchEvent === "function" && typeof Event === "function") {
+          window.dispatchEvent(new Event("stasis-viewport-extent"));
+        }
+      };
+
+      window.STASIS_REFIT_VIEWPORT = fit;
+      fit();
+      addEventListener("resize", fit);
+      addEventListener("orientationchange", fit);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", fit);
+        window.visualViewport.addEventListener("scroll", fit);
+      }
+      if (typeof MutationObserver === "function") {
+        new MutationObserver(fit).observe(canvas, { attributes: true, attributeFilter: ["width", "height"] });
+      }
+    })();
+  </script>
   <script src="game.js"></script>
 </body>
 </html>

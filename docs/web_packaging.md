@@ -44,6 +44,20 @@ Self-contained single-file HTML output is intentionally deferred; web packages k
 assets external so hosted output remains compact and follows the same asset preparation path as
 Android and desktop packages.
 
+The browser shell owns page fitting and the guest owns its logical canvas. The shared `index.html`
+shell opts into `viewport-fit=cover`, reserves the CSS safe-area insets, and uses `svh`/`dvh`
+fallbacks. Its inline fitter uses `visualViewport.width`/`height` when available (with the layout
+viewport as a fallback), refitting on window resize, orientation changes, and visual-viewport
+resize/scroll. The shell keeps the canvas aspect ratio centered inside the currently visible safe
+area; the body clip box moves with a nonzero visual-viewport origin so its overflow clip and canvas
+remain together. It changes CSS dimensions only and never rewrites the canvas `width`/`height`
+backing resolution. A `MutationObserver` refits after an intentional intrinsic backing-size change without
+observing the fitter's own style writes, so it cannot form a resize loop. Pointer coordinates remain
+guest-logical through `getBoundingClientRect()` in the runtime, including after a toolbar or
+orientation change. The runtime's private synchronous refit hook runs before an intentional
+backing resize is reported in HostFrame; extent events are coalesced into one generation, while
+origin-only scroll remains quiet. Consumers should not add post-processing resize or fullscreen controls.
+
 Web packages do not render an audio-enable control. The runtime requests audio immediately and
 automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts
 the audio context suspended.
