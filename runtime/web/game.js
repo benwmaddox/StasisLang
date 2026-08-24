@@ -198,6 +198,7 @@
   let tickIndex = 0;
   let resized = true;
   let displayGeneration = 1;
+  let resizeGenerationPending = true;
   let densityGeneration = 1;
   let lastWindowRequest = -1;
   let pendingFullscreen;
@@ -1335,6 +1336,7 @@
     document.body.dataset.hostTimeMs = String(i32[0]);
     if (resized) document.body.dataset.resizeTick = String(i32[10]);
     resized = false;
+    resizeGenerationPending = false;
   }
 
   function finishHostFrame() {
@@ -1358,10 +1360,15 @@
     if (canvas.width === width && canvas.height === height) return;
     canvas.width = width;
     canvas.height = height;
-    canvas.style.aspectRatio = `${width} / ${height}`;
-    canvas.parentElement.style.width = `min(100vw, calc(100vh * ${width} / ${height}))`;
+    markResized();
+  }
+
+  function markResized() {
     resized = true;
-    displayGeneration += 1;
+    if (!resizeGenerationPending) {
+      displayGeneration += 1;
+      resizeGenerationPending = true;
+    }
   }
 
   function applyWindowRequest() {
@@ -1383,7 +1390,7 @@
     } else if (flags & 4) {
       setCanvasSize(width, height);
       document.body.dataset.windowMode = "maximized";
-      resized = true;
+      markResized();
     }
     document.body.dataset.windowRequestSeq = String(sequence);
   }
@@ -1512,8 +1519,10 @@
     pointer.wentUp = true;
   });
   canvas.addEventListener("pointercancel", () => { pointer.hover = false; pointer.down = false; pointer.wentUp = true; });
-  addEventListener("resize", () => { resized = true; displayGeneration += 1; });
-  document.addEventListener("fullscreenchange", () => { resized = true; displayGeneration += 1; });
+  addEventListener("resize", markResized);
+  addEventListener("orientationchange", markResized);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", markResized);
+  document.addEventListener("fullscreenchange", markResized);
   // @stasis-feature audio begin
   void enableWebAudio();
   // @stasis-feature audio end

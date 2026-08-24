@@ -7,6 +7,7 @@ const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
 async function runSequence(first, second) {
   const events = new Map();
+  const visualViewportEvents = new Map();
   const raf = [];
   const ticks = [];
   let now = 0;
@@ -54,6 +55,11 @@ async function runSequence(first, second) {
   let screenWidth = first[0];
   let screenHeight = first[1];
   const screen = { get width() { return screenWidth; }, get height() { return screenHeight; } };
+  const visualViewport = {
+    width: first[0],
+    height: first[1],
+    addEventListener(type, listener) { visualViewportEvents.set(type, listener); }
+  };
   const instance = {
     exports: {
       memory,
@@ -64,7 +70,7 @@ async function runSequence(first, second) {
         if (i32[547]) actionCount += 1;
         ticks.push({
           resized: i32[11], displayGeneration: i32[30], native: [i32[22], i32[23]], drawable: [i32[24], i32[25]],
-          logical: [f32[50], f32[51]], pointerCount: i32[7], wentDown: i32[546], wentUp: i32[547], actionCount
+          logical: [f32[50], f32[51]], pointer: [f32[0], f32[1]], pointerCount: i32[7], wentDown: i32[546], wentUp: i32[547], actionCount
         });
       },
       render: () => 0,
@@ -82,7 +88,7 @@ async function runSequence(first, second) {
     AudioContext: class { constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; } close() {} resume() {} },
     TextDecoder, setTimeout, clearTimeout, STASIS_GAME: game,
   };
-  contextObject.window = { STASIS_GAME: game, screen };
+  contextObject.window = { STASIS_GAME: game, screen, visualViewport };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
@@ -90,7 +96,7 @@ async function runSequence(first, second) {
   const frame = () => { now += 16; raf.shift()(now); };
   frame();
   const dispatch = (type, event = {}) => canvas.listeners.get(type)?.(event);
-  dispatch("pointerdown", { pointerId: 7, clientX: 90, clientY: 180 });
+  dispatch("pointerdown", { pointerId: 7, clientX: first[0] - 1, clientY: first[1] - 1 });
   frame();
   const down = ticks.at(-1);
   assert.equal(down.pointerCount, 1);
@@ -98,9 +104,13 @@ async function runSequence(first, second) {
   assert.equal(down.wentUp, 0);
   assert.equal(down.logical[0], first[0]);
   assert.equal(down.logical[1], first[1]);
+  assert.deepEqual(down.pointer, [first[0] - 1, first[1] - 1]);
   screenWidth = second[0]; screenHeight = second[1];
   canvasWidth = second[0]; canvasHeight = second[1];
+  visualViewport.width = second[0]; visualViewport.height = second[1];
+  visualViewportEvents.get("resize")();
   events.get("window:resize")();
+  events.get("window:orientationchange")();
   assert.deepEqual([screen.width, screen.height], second);
   frame();
   const resized = ticks.at(-1);
@@ -109,11 +119,15 @@ async function runSequence(first, second) {
   assert.deepEqual(resized.native, second);
   assert.deepEqual(resized.drawable, second);
   assert.deepEqual(resized.logical, first, "guest canvas remains selected logical size");
-  dispatch("pointerup", { pointerId: 7, clientX: 90, clientY: 180 });
+  dispatch("pointerup", { pointerId: 7, clientX: second[0] - 1, clientY: second[1] - 1 });
   frame();
   const up = ticks.at(-1);
   assert.equal(up.resized, 0);
   assert.equal(up.wentUp, 1);
+  assert.deepEqual(up.pointer, [
+    Math.round((second[0] - 1) * first[0] / second[0]),
+    Math.round((second[1] - 1) * first[1] / second[1])
+  ]);
   assert.equal(up.actionCount, 1, "release increments the action counter exactly once");
   frame();
   const quiet = ticks.at(-1);
