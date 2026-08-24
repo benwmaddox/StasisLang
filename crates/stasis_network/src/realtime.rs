@@ -286,6 +286,7 @@ impl ControlEnvelope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickAdvance {
     pub tick: u64,
+    configured_seats: usize,
     controls: [ControlState; REALTIME_MAX_SEATS],
     applied: [ScheduledTransition; MAX_PENDING_TRANSITIONS],
     applied_count: usize,
@@ -303,7 +304,7 @@ impl TickAdvance {
     }
 
     pub fn control(&self, seat: usize) -> Option<ControlState> {
-        self.controls.get(seat).copied()
+        (seat < self.configured_seats).then(|| self.controls[seat])
     }
 
     pub fn applied_transitions(&self) -> &[ScheduledTransition] {
@@ -697,11 +698,11 @@ impl RealtimeSession {
     }
 
     pub fn epoch(&self, seat: usize) -> Option<u32> {
-        self.epochs.get(seat).copied()
+        (seat < self.seats).then(|| self.epochs[seat])
     }
 
     pub fn is_active(&self, seat: usize) -> Option<bool> {
-        self.active.get(seat).copied()
+        (seat < self.seats).then(|| self.active[seat])
     }
 
     pub const fn resync_required(&self) -> bool {
@@ -713,7 +714,7 @@ impl RealtimeSession {
     }
 
     pub fn control(&self, seat: usize) -> Option<ControlState> {
-        self.controls.get(seat).copied()
+        (seat < self.seats).then(|| self.controls[seat])
     }
 
     pub fn pending_len(&self) -> usize {
@@ -802,7 +803,7 @@ impl RealtimeSession {
             self.resync_required = true;
             return AdmissionOutcome::ResyncRequired;
         }
-        if self.pending_count == MAX_PENDING_TRANSITIONS || !self.replay.has_capacity() {
+        if self.pending_count == MAX_PENDING_TRANSITIONS {
             return AdmissionOutcome::Full;
         }
         let reordered = transition.sequence < self.highest_sequence[seat];
@@ -952,6 +953,7 @@ impl RealtimeSession {
         let applied_count = due_count;
         let advance = TickAdvance {
             tick: self.current_tick,
+            configured_seats: self.seats,
             controls: self.controls,
             applied,
             applied_count,
@@ -1115,12 +1117,6 @@ impl RealtimeSession {
         self.quarantined = [(0, 0, 0); MAX_PENDING_TRANSITIONS];
         self.quarantined_count = 0;
         self.resync_required = false;
-    }
-}
-
-impl ReplayLog {
-    fn has_capacity(&self) -> bool {
-        self.records.len() < self.limit
     }
 }
 

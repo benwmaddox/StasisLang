@@ -4,9 +4,10 @@ use stasis_network::realtime::{
     ScheduledTransition, SnapshotError, MAX_PENDING_TRANSITIONS, REALTIME_MAX_SEATS,
 };
 use stasis_network::{
-    stasis_realtime_advance, stasis_realtime_current_tick, stasis_realtime_read_control,
-    stasis_realtime_schedule, stasis_realtime_start, stasis_realtime_stop,
-    stasis_realtime_submit_payload, BundleFile, EventKind, NetworkHost, StaticBundle,
+    stasis_realtime_advance, stasis_realtime_current_epoch, stasis_realtime_current_tick,
+    stasis_realtime_read_control, stasis_realtime_schedule, stasis_realtime_start,
+    stasis_realtime_stop, stasis_realtime_submit_payload, BundleFile, EventKind, NetworkHost,
+    StaticBundle,
 };
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -239,6 +240,14 @@ fn native_guest_payload_bounds_and_mixed_outcomes_are_visible() {
 
     assert_eq!(stasis_realtime_stop(), 0);
     assert_eq!(stasis_realtime_start(60, 60, 60, 1, 1), 0);
+    assert_eq!(stasis_realtime_current_epoch(1), -1);
+    let (mut invalid_buttons, mut invalid_x, mut invalid_y) = (0, 0, 0);
+    assert_eq!(
+        unsafe {
+            stasis_realtime_read_control(1, &mut invalid_buttons, &mut invalid_x, &mut invalid_y)
+        },
+        -3
+    );
     let mut mixed = ControlEnvelope::new();
     mixed
         .push(transition_in_epoch(0, 1, 1, 1, ControlState::new(1, 1, 0)))
@@ -297,6 +306,26 @@ fn rates_are_independent_and_delay_is_genuinely_future() {
     let session = RealtimeSession::new(config, 2).expect("session");
     assert_eq!(session.earliest_apply_tick(), 3);
     assert_eq!(session.latest_apply_tick(), 240);
+}
+
+#[test]
+fn scalar_accessors_reject_fixed_array_seats_outside_configuration() {
+    let config = RealtimeConfig::new(60, 60, 60, 1).expect("config");
+    let mut session = RealtimeSession::new(config, 2).expect("session");
+    assert!(session.epoch(0).is_some());
+    assert!(session.is_active(1).is_some());
+    assert!(session.control(1).is_some());
+    assert_eq!(session.epoch(2), None);
+    assert_eq!(session.is_active(2), None);
+    assert_eq!(session.control(2), None);
+    assert_eq!(session.epoch(REALTIME_MAX_SEATS - 1), None);
+    assert_eq!(session.is_active(REALTIME_MAX_SEATS - 1), None);
+    assert_eq!(session.control(REALTIME_MAX_SEATS - 1), None);
+    let advance = session.advance_tick().expect("tick");
+    assert!(advance.control(0).is_some());
+    assert!(advance.control(1).is_some());
+    assert_eq!(advance.control(2), None);
+    assert_eq!(advance.control(REALTIME_MAX_SEATS - 1), None);
 }
 
 #[test]
@@ -927,4 +956,13 @@ fn queue_full_replay_overflow_and_hash_attachment_are_explicit() {
         overflow.replay().replay(config, 1, |_tick, _controls| 0),
         Err(ReplayError::Incomplete)
     );
+    assert_eq!(
+        overflow.submit_transition(transition(0, 1, 6, ControlState::new(3, 1, 0))),
+        AdmissionOutcome::Accepted
+    );
+    let advance = overflow
+        .advance_tick()
+        .expect("live tick after replay overflow");
+    assert_eq!(advance.control(0), Some(ControlState::new(3, 1, 0)));
+    assert!(!overflow.replay().is_complete());
 }
