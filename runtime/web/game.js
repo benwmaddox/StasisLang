@@ -447,11 +447,55 @@
     sprites.set(handle, image);
     return handle;
   };
+  const setCanvasFont = (font, size = font.renderSize) => {
+    context.font = `${size}px ${font.family}`;
+    context.textBaseline = "alphabetic";
+    if ("fontKerning" in context) context.fontKerning = "none";
+  };
+  const measureTextRun = (font, text) => {
+    context.save();
+    setCanvasFont(font);
+    const metrics = context.measureText(text);
+    context.restore();
+    const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
+      ? Math.max(0, metrics.actualBoundingBoxDescent)
+      : Math.max(0, font.size - font.baseline);
+    return { width: metrics.width, height: font.baseline + descent };
+  };
+  const refreshTextRun = run => {
+    const font = fonts.get(run.font);
+    if (!font?.ready) return;
+    const metrics = measureTextRun(font, run.text);
+    setViewField(run.base, run.index, "width", metrics.width);
+    setViewField(run.base, run.index, "height", metrics.height);
+  };
+  const calibrateFont = font => {
+    context.save();
+    setCanvasFont(font, 1000);
+    const metrics = context.measureText("Mg");
+    context.restore();
+    const ascent = Number.isFinite(metrics.fontBoundingBoxAscent)
+      ? metrics.fontBoundingBoxAscent
+      : 1000;
+    const descent = Number.isFinite(metrics.fontBoundingBoxDescent)
+      ? metrics.fontBoundingBoxDescent
+      : 0;
+    const nativeHeight = ascent + descent;
+    const scale = nativeHeight > 0 ? font.size / nativeHeight : font.size / 1000;
+    font.renderSize = 1000 * scale;
+    font.baseline = ascent * scale;
+    font.ready = true;
+    font.pendingRuns.forEach(refreshTextRun);
+    font.pendingRuns.length = 0;
+  };
   const loadFont = (pathId, size) => {
     const handle = nextHandle++;
     const family = `stasis-font-${handle}`;
     const font = new FontFace(family, `url(${assetValue(pathId)})`);
-    fonts.set(handle, { family, size });
+    const fontInfo = {
+      family, size, renderSize: size, baseline: size, ready: false, pendingRuns: []
+    };
+    fonts.set(handle, fontInfo);
     const load = Promise.resolve()
       .then(() => font.load())
       .then(loaded => {
@@ -465,7 +509,7 @@
     const font = fonts.get(fontHandle);
     if (!font) return 0;
     context.save();
-    context.font = `${font.size}px ${font.family}`;
+    setCanvasFont(font);
     const width = context.measureText(stringValue(textId)).width;
     context.restore();
     return width;
@@ -855,10 +899,14 @@
       const text = stringValue(textId);
       cachedText.set(handle, { font, text });
       const fontInfo = fonts.get(font) || { size: 16 };
-      return setViewField(base, index, "font", font)
+      const run = { base, index, font, text };
+      const loaded = setViewField(base, index, "font", font)
         && setViewField(base, index, "handle", handle)
         && setViewField(base, index, "width", text.length * fontInfo.size * 0.6)
-        && setViewField(base, index, "height", fontInfo.size) ? 1 : 0;
+        && setViewField(base, index, "height", fontInfo.size);
+      if (loaded && fontInfo.ready) refreshTextRun(run);
+      else if (loaded && fontInfo.pendingRuns) fontInfo.pendingRuns.push(run);
+      return loaded ? 1 : 0;
     },
     storage_load_i32: (scope, key, fallback) => {
       const value = storageGet(storageKey(scope, key));
@@ -1156,7 +1204,9 @@
       const offset = i32[baseI + 1];
       const cached = offset < 0 ? cachedText.get(-offset) : null;
       const fontHandle = cached ? cached.font : i32[baseI];
-      const font = fonts.get(fontHandle) || { family: "ui-monospace", size: 18 };
+      const font = fonts.get(fontHandle) || {
+        family: "ui-monospace", size: 18, renderSize: 18, baseline: 18
+      };
       let text = cached ? cached.text : "";
       if (!cached && game.memory.gfx_cmd_u8) {
         const bytesLayout = game.memory.gfx_cmd_u8;
@@ -1166,9 +1216,8 @@
       context.save();
       context.globalAlpha = f32[baseF + 5];
       context.fillStyle = `rgb(${Math.round(f32[baseF + 2] * 255)} ${Math.round(f32[baseF + 3] * 255)} ${Math.round(f32[baseF + 4] * 255)})`;
-      context.font = `${font.size}px ${font.family}`;
-      context.textBaseline = "top";
-      context.fillText(text, f32[baseF], f32[baseF + 1]);
+      setCanvasFont(font);
+      context.fillText(text, f32[baseF], f32[baseF + 1] + font.baseline);
       context.restore();
     };
     const lineCount = Math.max(0, Math.min(i32[3], 10000));
@@ -1490,6 +1539,7 @@
       ]);
       await document.fonts.ready;
       setLoading("", "ready");
+      fonts.forEach(calibrateFont);
       document.body.dataset.ready = "true";
       document.body.dataset.runtime = "wasm";
       document.body.dataset.mainResult = String(mainResult);
