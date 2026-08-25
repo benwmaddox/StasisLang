@@ -223,6 +223,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn(
+            'test_release_shell_emulator.ps1 -TestId "$STASIS_RELEASE_SHELL_TEST_ID"',
+            self.workflow,
+        )
+        self.assertNotIn(
             'test_release_shell_emulator.ps1 -TestId "$env:STASIS_RELEASE_SHELL_TEST_ID"',
             self.workflow,
         )
