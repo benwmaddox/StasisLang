@@ -704,6 +704,21 @@ Rules:
 - Cross-architecture hash claims require integer or Q16.16 simulation state; ordinary floating
   point remains the platform-floating profile defined in section 4.3.1.
 
+### 10.2 Runtime Record/Replay
+
+The development runtime supports schema-versioned replay sessions through the normal graphical
+JIT lifecycle. Recording begins after `main()` and captures a sparse initial simulation snapshot:
+only compiler-owned scalar and collection locations whose exact bits differ from the type default
+are stored. Every completed tick records only exact-bit HostFrame changes from the prior full
+snapshot and one simulation-state hash after `tick()` and `render()`.
+
+Playback reconstructs the complete HostFrame by applying those changes in tick order, publishes it
+before `tick()`, then runs `tick()` and `render()` normally. It never applies recorded gameplay
+state per tick. The post-render hash must match or playback fails at the first divergent tick.
+Graphics output and host/presentation buffers are excluded. Source, layout, toolchain release,
+target, and HostFrame identities must match; live code, data, or asset reloads abort the session.
+Ordinary floating-point replay retains the same-target profile from section 4.3.1.
+
 ## 11. Memory Model
 
 - All persistent data is global.
@@ -1028,6 +1043,46 @@ Rules:
 - New compiler frontend/backend behavior is implemented in Rust.
 - Language semantics remain spec-driven from this document; compiler behavior must conform to it.
 - Tick-path runtime must remain free of parser/semantic/codegen work.
+
+### 17.2 Realtime Networking Contract
+
+Realtime control networking is a Rust host contract exposed to Stasis guests
+through the `realtime_controls.stasis` wrapper and stable native
+`stasis_realtime_*` ABI. `stasis_network::realtime` validates bounded simulation,
+presentation, control-sampling, and future-delay rates; carries fixed-size
+versioned control transitions through the existing production network message
+envelope; and applies persistent per-seat state at exact authoritative ticks.
+Submission and tick advancement are separate operations. `advance_tick`
+advances one tick without waiting for packets or fails without mutation when
+tick space is exhausted. Held controls persist, neutral
+release is an ordinary transition, and duplicate/reordered/stale/conflicting,
+late, too-far, malformed, and full cases have deterministic outcomes. Pending
+conflicts quarantine the shared seat/sequence identity, making opposite
+arrival orders converge; post-application conflicts are late/stale and never
+rewrite history.
+
+Disconnect, reconnect, pause, focus loss, snapshot recovery, and rematch have
+explicit neutral/reset behavior, per-seat connection epochs, and monotonic
+snapshot revisions. Host-authoritative sessions correct clients from snapshots.
+Deterministic-peer sessions require identical validated
+contracts, stable transition ordering, and matching replay hashes. Replays
+contain accepted scheduled transitions, quarantine decisions, simulation ticks,
+and exactly one caller-supplied authoritative hash per tick. Hashes are
+attached only by tick-qualified immediate completion; overflow makes a log
+incomplete while simulation continues. Rendering/interpolation remains
+presentation-only and cannot mutate simulation state. Deterministic peers must
+recover loss before due; host-authoritative clients use snapshot correction
+after due. Existing turn-based command networking is unchanged and does not
+use this API.
+
+The stable guest ABI exposes bounded RTC1 construction/submission, scalar-array
+snapshot correction, hash attachment, resync inspection, lifecycle operations,
+and completed-control reads. Rust retains replay callbacks and snapshot game
+tokens. Because Stasis integers are signed 32-bit values, guest-driven tick and
+epoch domains stop at `i32::MAX` without partial mutation; the Rust-only contract
+retains its wider internal tick domain. RTC1 buffers and snapshot arrays are
+capacity-checked at the JIT boundary, and authoritative hashes use two unsigned
+32-bit lanes so the guest ABI retains the complete 64-bit value.
 
 ## 18. Status Note
 

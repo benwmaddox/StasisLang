@@ -270,7 +270,7 @@ final class WorkshopHotEditAcceptance {
                 .put("line", hookLine).put("column", 31)
                 .put("end_line", hookLine + 2).put("end_column", 2)
                 .put("symbol", "on_code_swap")
-                .put("message", "unknown call target 'IT028_missing_target'");
+                .put("message", "cannot resolve call 'IT028_missing_target'");
     }
 
     private static boolean diagnosticsEqual(JSONObject actual, JSONObject expected) {

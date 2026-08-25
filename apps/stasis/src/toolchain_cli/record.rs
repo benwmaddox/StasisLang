@@ -3,7 +3,8 @@ use clap::Args;
 use image::GenericImageView;
 use serde_json::json;
 use stasis::{
-    run_play_in_process_with_input_script_window_title_profile_and_capture, PlayFrameCaptureConfig,
+    run_play_in_process_with_input_script_window_title_profile_and_capture,
+    run_play_in_process_with_replay, PlayFrameCaptureConfig, PlayReplayConfig,
 };
 use std::fs;
 use std::io::Read;
@@ -46,6 +47,12 @@ pub(super) struct RecordArgs {
     /// Invoke this guest function once before each tick: function name(frame: i32): i32.
     #[arg(long, value_name = "FUNCTION")]
     pub(super) before_tick: Option<String>,
+    /// Replay a recorded HostFrame-diff session into the captured frames or MP4.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["input_script", "record_replay"])]
+    pub(super) replay: Option<PathBuf>,
+    /// Save this run as a replay session while also capturing frames or MP4.
+    #[arg(long, value_name = "PATH", conflicts_with = "replay")]
+    pub(super) record_replay: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +105,34 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         .as_deref()
         .map(|path| resolve_workspace_path(workspace, path, "input script"))
         .transpose()?;
+    let replay_record_output = args
+        .record_replay
+        .as_deref()
+        .map(absolute_path)
+        .transpose()?;
+    if let Some(replay_output) = replay_record_output.as_ref() {
+        if replay_output == &output {
+            return Err("--record-replay must differ from --output".to_string());
+        }
+        if replay_output.exists() {
+            return Err(format!(
+                "replay recording already exists; refusing to replace {}",
+                replay_output.display()
+            ));
+        }
+        let parent = replay_output.parent().ok_or_else(|| {
+            format!(
+                "replay recording output has no parent: {}",
+                replay_output.display()
+            )
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "recording stage failed: could not create replay output parent {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
     let stage_root = parent.join(format!(
         ".stasis-recording-{}-{}",
         std::process::id(),
@@ -105,13 +140,21 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             .duration_since(UNIX_EPOCH)
             .map_or(0, |value| value.as_nanos())
     ));
+    let frames_dir = (kind != OutputKind::Mp3).then(|| stage_root.join("frames"));
+    let staged_replay = stage_root.join("recording.replay.json");
+    let replay = if let Some(path) = args.replay.as_deref() {
+        Some(PlayReplayConfig::Replay(absolute_path(path)?))
+    } else if replay_record_output.is_some() {
+        Some(PlayReplayConfig::Record(staged_replay.clone()))
+    } else {
+        None
+    };
     if let Err(error) = fs::create_dir(&stage_root) {
         return Err(format!(
             "recording stage failed: could not create {}: {error}",
             stage_root.display()
         ));
     }
-    let frames_dir = (kind != OutputKind::Mp3).then(|| stage_root.join("frames"));
     if let Some(frames_dir) = frames_dir.as_ref() {
         if let Err(error) = fs::create_dir_all(frames_dir) {
             cleanup_stage(&stage_root);
@@ -122,27 +165,44 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         }
     }
 
-    let result = run_play_in_process_with_input_script_window_title_profile_and_capture(
-        &entry,
-        Some(&workspace.root),
-        None,
-        None,
-        input_script.as_deref(),
-        0,
-        Some(frame_count),
-        Some(&workspace.manifest.name),
-        None,
-        PlayFrameCaptureConfig {
-            output_dir: frames_dir.clone(),
-            width: args.width,
-            height: args.height,
-            fps: args.fps,
-            frame_count,
-            audio_output: matches!(kind, OutputKind::Mp4 | OutputKind::Mp3)
-                .then(|| stage_root.join("audio.wav")),
-            before_tick_function: args.before_tick.clone(),
-        },
-    );
+    let capture = PlayFrameCaptureConfig {
+        output_dir: frames_dir.clone(),
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+        frame_count,
+        audio_output: matches!(kind, OutputKind::Mp4 | OutputKind::Mp3)
+            .then(|| stage_root.join("audio.wav")),
+        before_tick_function: args.before_tick.clone(),
+    };
+    let result = if let Some(replay) = replay {
+        run_play_in_process_with_replay(
+            &entry,
+            Some(&workspace.root),
+            None,
+            None,
+            input_script.as_deref(),
+            0,
+            Some(frame_count),
+            Some(&workspace.manifest.name),
+            None,
+            Some(capture),
+            replay,
+        )
+    } else {
+        run_play_in_process_with_input_script_window_title_profile_and_capture(
+            &entry,
+            Some(&workspace.root),
+            None,
+            None,
+            input_script.as_deref(),
+            0,
+            Some(frame_count),
+            Some(&workspace.manifest.name),
+            None,
+            capture,
+        )
+    };
     if let Err(error) = result {
         cleanup_stage(&stage_root);
         return Err(format!(
@@ -210,6 +270,21 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         cleanup_stage(&stage_root);
         return Err(error);
     }
+    if let Some(replay_output) = replay_record_output.as_ref() {
+        if let Err(error) = stasis_dynload::atomic_rename_no_replace(&staged_replay, replay_output)
+        {
+            let rollback = rollback_published_output(&output, kind);
+            cleanup_stage(&stage_root);
+            return Err(format!(
+                "recording replay publication failed for {}: {error}{}",
+                replay_output.display(),
+                rollback
+                    .err()
+                    .map(|error| format!("; primary output rollback failed: {error}"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
     cleanup_stage(&stage_root);
 
     let format = match kind {
@@ -233,8 +308,17 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             "fps": args.fps,
             "frames": frame_count,
             "entry": entry,
+            "replay_recording": replay_record_output,
         }),
     ))
+}
+
+fn rollback_published_output(output: &Path, kind: OutputKind) -> Result<(), String> {
+    let result = match kind {
+        OutputKind::PngSequence => fs::remove_dir_all(output),
+        OutputKind::Mp4 | OutputKind::Mp3 => fs::remove_file(output),
+    };
+    result.map_err(|error| format!("could not remove {}: {error}", output.display()))
 }
 
 fn cleanup_stage(stage_root: &Path) {
@@ -610,6 +694,8 @@ mod tests {
             duration: None,
             input_script: None,
             before_tick: None,
+            replay: None,
+            record_replay: None,
         }
     }
 
@@ -643,6 +729,35 @@ mod tests {
         assert_eq!(output_kind(Path::new("capture.MP4")), Ok(OutputKind::Mp4));
         assert_eq!(output_kind(Path::new("capture.mp3")), Ok(OutputKind::Mp3));
         assert!(output_kind(Path::new("capture.mov")).is_err());
+    }
+
+    #[test]
+    fn published_primary_outputs_can_be_rolled_back() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "stasis-record-publish-rollback-{}-{stamp}",
+            std::process::id()
+        ));
+        let frames = root.join("frames");
+        fs::create_dir_all(&frames).expect("create published PNG directory");
+        fs::write(frames.join("frame.png"), b"frame").expect("write published PNG");
+        rollback_published_output(&frames, OutputKind::PngSequence).expect("rollback PNG output");
+        assert!(!frames.exists());
+
+        fs::create_dir_all(&root).expect("recreate test root");
+        let mp4 = root.join("recording.mp4");
+        fs::write(&mp4, b"mp4").expect("write published MP4");
+        rollback_published_output(&mp4, OutputKind::Mp4).expect("rollback MP4 output");
+        assert!(!mp4.exists());
+
+        let mp3 = root.join("recording.mp3");
+        fs::write(&mp3, b"mp3").expect("write published MP3");
+        rollback_published_output(&mp3, OutputKind::Mp3).expect("rollback MP3 output");
+        assert!(!mp3.exists());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

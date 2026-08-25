@@ -111,7 +111,10 @@ REQUIRED_FILES = [
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
     "mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java",
+    "mobile/shells/android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java",
     "mobile/shells/android/app/src/main/cpp/stasis_android_assets.c",
+    "tools/ci/test_android_asset_cache.py",
+    "tools/ci/java/com/stasislang/shell/StasisAssetCacheTest.java",
     "tools/ci/check_android_release_package.py",
     "tests/android/AiQueuePolicyTest.java",
     "tests/android/WorkshopProjectFormatPolicyTest.java",
@@ -1353,6 +1356,7 @@ def main() -> int:
     assert "setContentView(status)" not in activity
 
     release_activity = read("mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java")
+    release_cache = read("mobile/shells/android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java")
     release_bridge = read("mobile/shells/android/app/src/main/cpp/stasis_android_assets.c")
     assert "System.loadLibrary(\"SDL3\")" in release_activity
     assert "System.loadLibrary(\"SDL3_image\")" in release_activity
@@ -1370,10 +1374,22 @@ def main() -> int:
     assert "performanceHud.setSingleLine(false)" in release_activity
     assert "setOnApplyWindowInsetsListener" in release_activity
     assert "getDisplayCutout" in release_activity
-    assert "verifyAssetManifest(staging)" in release_activity
-    assert 'MessageDigest.getInstance("SHA-256")' in release_activity
-    assert "MAX_MANIFEST_ASSETS = 4096" in release_activity
-    assert "MAX_TOTAL_ASSET_BYTES" in release_activity
+    assert "StasisAssetCache.Result" in release_activity
+    assert "new AndroidAssetSource(getAssets())" in release_activity
+    assert "packageInfo.lastUpdateTime" in release_activity
+    assert "INVALID_ASSET_ROOT" in release_activity
+    assert "nativeSetAssetRoot(invalidAssetRoot.getAbsolutePath())" in release_activity
+    assert "Asset cache mode=" in release_activity
+    assert "packaged_read_bytes=" in release_activity
+    assert "CACHE_SCHEMA = \"stasis.android.asset-cache\"" in release_cache
+    assert "MAX_MARKER_BYTES" in release_cache
+    assert "inventoryMatches" in release_cache
+    assert "publicationInterceptor.beforeInstall" in release_cache
+    assert "rename(backup, root)" in release_cache
+    assert "BACKUP_ALT_NAME" in release_cache
+    assert "MAX_COPIED_TREE_BYTES" in release_cache
+    assert 'child.equals(".")' in release_cache
+    assert "stasis asset cache JVM scenarios" in read("tools/ci/java/com/stasislang/shell/StasisAssetCacheTest.java")
     assert "stasis_host_get_latest_performance_metrics" in release_bridge
     assert "stasis_host_get_latest_performance_metrics_v1" in release_bridge
     assert "stasis_performance_metrics.h" in release_bridge
@@ -1468,6 +1484,14 @@ def main() -> int:
     assert "all_invalid_unchanged" in acceptance
     assert "isDescriptorEnvelope" in acceptance
     assert "descriptor.optString(\"schema\")" in acceptance
+    diagnostic_model = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopNativeDiagnostic.java")
+    diagnostic_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopDiagnosticSeamAcceptance.java")
+    assert 'SCHEMA = "stasis.native_diagnostic.v1"' in diagnostic_model
+    assert "fromNative" in diagnostic_model and "causes" in diagnostic_model
+    assert "Stasis Workshop IT-031" in diagnostic_acceptance
+    assert "MISSING_EXTERN" in diagnostic_acceptance
+    assert "runIt031Frame" in activity
+    assert "WorkshopDiagnosticSeamAcceptance.run" in activity
     touch_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java")
     assert "Stasis Workshop IT-027" in touch_acceptance
     assert "ACTION_DOWN" in touch_acceptance and "ACTION_MOVE" in touch_acceptance

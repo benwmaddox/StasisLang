@@ -59,6 +59,9 @@ project root and nested directories. `--workspace PATH` selects a project explic
   "entry": "src/main.stasis",
   "tests": "tests",
   "output": "build",
+  "web": {
+    "loading_font": "/assets/fonts/display.ttf"
+  },
   "vendor": {
     "stasis": {
       "release_id": "nightly-20260805-123",
@@ -67,6 +70,10 @@ project root and nested directories. `--workspace PATH` selects a project explic
   }
 }
 ```
+
+The optional `web.loading_font` value must identify an existing `.ttf`, `.otf`, `.woff`, or
+`.woff2` file under the project `assets/` directory. Both `/assets/...` and `assets/...` forms are
+accepted; web packaging normalizes them to a package-relative URL for the static loading shell.
 
 The vendor release and hash describe the exact checked-in `vendor/stasis` snapshot.
 `manifest_version` versions the JSON schema and is independent of the selected toolchain release.
@@ -136,6 +143,11 @@ cloning a generated repository, reactivate the checked-in hook with
   counts, output format, staged frame/WAV validation, encoder failures, and partial-output cleanup
   are bounded and diagnosed. See
   [Deterministic headless recording](headless_recording.md).
+- `replay RECORDING [--entry ENTRY] [--tick-sleep-us N]`: validate the recording identity,
+  rebuild each complete HostFrame from sparse exact-bit changes, execute the normal JIT `tick()`
+  and `render()` entries, and stop at the first simulation-state hash divergence. `play` accepts
+  `--record-replay PATH` and `--replay PATH`; `record` accepts the same session modes so a replay
+  can be rendered directly to PNG or MP4. See [Record and replay](record_replay.md).
 - `play [ENTRY]`: launch the graphical hot-swap runtime. Without an entry override, discover the
   nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
   and display `name`. Explicit entries discover their own ancestor manifest, so project-root
@@ -168,7 +180,12 @@ cloning a generated repository, reactivate the checked-in hook with
   the game-named executable as the only root file and place all support files under `app/`.
 - `package-mobile --target android-arm64|ios-arm64 [--entry PATH]`: atomically assemble the
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
-  Xcode app shell.
+  Xcode app shell. Network-enabled iOS packages require macOS/Xcode, stage and link the
+  `stasis_network` arm64 static library, and include the local-network privacy declaration;
+  direct TCP/unicast does not require Bonjour discovery entitlements. Official archives resolve
+  prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;
+  nightly archives contain all Android arm64/x86_64 and iOS arm64 support libraries, while source
+  checkouts may build them from the workspace as a development fallback.
 - `package --target android-arm64|ios-arm64`: compatibility spelling that uses the manifest entry.
 - Successful human-readable `build`, `package`, and `package-mobile` commands end with a
   `Completed in ...` line. Durations use milliseconds for sub-second work, seconds for work under
@@ -186,8 +203,8 @@ cloning a generated repository, reactivate the checked-in hook with
 - `vendor update`: transactionally restore `vendor/stasis` from the selected executable and update
   its manifest identity immediately.
 
-`replay` and `verify` intentionally return deterministic unsupported diagnostics until the replay
-runtime contract lands; they do not fake successful behavior.
+`verify` remains reserved for a future non-presenting batch verifier. `replay` performs verification
+while presenting every reconstructed tick.
 
 ### Headless scenarios
 

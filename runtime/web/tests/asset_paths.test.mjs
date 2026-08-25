@@ -14,11 +14,15 @@ async function loadRuntime(game, options = {}) {
   let env;
   const memory = new WebAssembly.Memory({ initial: 1 });
   const context2d = {
+    fontKerning: "auto",
+    textBaseline: "alphabetic",
     fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {}, moveTo() {},
     lineTo() {}, stroke() {}, drawImage() {}, translate() {}, rotate() {},
     measureText(value) {
       measurements.push({ font: this.font, value });
-      return { width: value.length * 7 };
+      return options.measureText?.({
+        font: this.font, fontKerning: this.fontKerning, textBaseline: this.textBaseline, value
+      }) || { width: value.length * 7 };
     }
   };
   const canvas = {
@@ -118,7 +122,7 @@ async function loadRuntime(game, options = {}) {
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(typeof env?.gfx_load_sprite, "function", errorBox.textContent);
   return {
-    env, imageSources, measurements, animationFrames, addedFonts, fontSources,
+    env, memory, imageSources, measurements, animationFrames, addedFonts, fontSources,
     document, errorBox, runtimePromise,
   };
 }
@@ -193,6 +197,50 @@ test("web measure_text uses the registered Canvas font and string handle", async
   assert.equal(typeof env.measure_text, "function");
   assert.equal(env.measure_text(font, 1), 42);
   assert.deepEqual(measurements, [{ font: "20px stasis-font-1", value: "marble" }]);
+});
+
+test("web cached text matches native pixel-height metrics before the first frame", async () => {
+  const game = {
+    memory: {
+      "run.font": { offset: 0, length: 1, stride: 4, type_id: 1 },
+      "run.handle": { offset: 4, length: 1, stride: 4, type_id: 1 },
+      "run.width": { offset: 8, length: 1, stride: 4, type_id: 2 },
+      "run.height": { offset: 12, length: 1, stride: 4, type_id: 2 },
+    },
+    views: {
+      "101": {
+        font: "run.font", handle: "run.handle", width: "run.width", height: "run.height",
+      },
+    },
+    strings: { "1": "assets/font.ttf", "2": "GAMBIT GUARD" },
+  };
+  let loadedFont = 0;
+  const result = await loadRuntime(game, {
+    main: env => {
+      loadedFont = env.load_font(1, 24);
+      assert.equal(env.stasis_jit_text_run_load_from(101, 0, 1, loadedFont, 2), 1);
+    },
+    measureText: metrics => {
+      assert.equal(metrics.textBaseline, "alphabetic");
+      assert.equal(metrics.fontKerning, "none");
+      if (metrics.font === "1000px stasis-font-1") {
+        return { width: 500, fontBoundingBoxAscent: 1011, fontBoundingBoxDescent: 353 };
+      }
+      assert.ok(Math.abs(Number.parseFloat(metrics.font) - 17.5953079) < 0.0001);
+      return { width: 139.25, actualBoundingBoxDescent: 0.25 };
+    },
+  });
+  await result.runtimePromise;
+
+  const view = new DataView(result.memory.buffer);
+  assert.equal(view.getInt32(0, true), loadedFont);
+  assert.ok(view.getInt32(4, true) > 0);
+  assert.equal(view.getFloat32(8, true), 139.25);
+  assert.ok(Math.abs(view.getFloat32(12, true) - 18.038856) < 0.0001);
+  assert.deepEqual(result.measurements.map(({ font, value }) => ({ font, value })), [
+    { font: "1000px stasis-font-1", value: "Mg" },
+    { font: "17.595307917888565px stasis-font-1", value: "GAMBIT GUARD" },
+  ]);
 });
 
 test("web startup fails visibly when a declared font cannot load", async () => {

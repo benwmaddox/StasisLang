@@ -7431,27 +7431,48 @@ static uint32_t fnv1a_u32(const unsigned char* data, int len) {
     return h;
 }
 
+static int stasis_font_atlas_pixels(int atlas_size, size_t* pixels_out) {
+    if (atlas_size <= 0 || !pixels_out) return 0;
+    const size_t extent = (size_t)atlas_size;
+    if (extent > SIZE_MAX / extent) return 0;
+    *pixels_out = extent * extent;
+    return 1;
+}
+
 static int stasis_build_font_atlas(StasisFont* font) {
     if (!font || !font->ttf_buffer || font->font_size <= 0) return 0;
 
     const float pixel_scale = g_pixel_scale < 1.0f ? 1.0f : g_pixel_scale;
     const int raster_size = stasis_display_scaled_extent(font->font_size, pixel_scale);
-    const int atlas_size = stasis_display_font_atlas_extent(pixel_scale);
-    const size_t atlas_pixels = (size_t)atlas_size * (size_t)atlas_size;
-    unsigned char* atlas_bitmap = (unsigned char*)malloc(atlas_pixels);
-    if (!atlas_bitmap) return 0;
-
+    int atlas_size = stasis_display_font_atlas_extent(pixel_scale);
+    size_t atlas_pixels = 0;
+    unsigned char* atlas_bitmap = NULL;
     stbtt_bakedchar baked_chars[FONT_NUM_CHARS];
-    int result = stbtt_BakeFontBitmap(font->ttf_buffer, 0, (float)raster_size,
-        atlas_bitmap, atlas_size, atlas_size, FONT_FIRST_CHAR, FONT_NUM_CHARS, baked_chars);
-    if (result <= 0) {
+    int result = 0;
+    for (;;) {
+        if (!stasis_font_atlas_pixels(atlas_size, &atlas_pixels)) return 0;
+        atlas_bitmap = (unsigned char*)malloc(atlas_pixels);
+        if (!atlas_bitmap) return 0;
+        result = stbtt_BakeFontBitmap(font->ttf_buffer, 0, (float)raster_size,
+            atlas_bitmap, atlas_size, atlas_size, FONT_FIRST_CHAR, FONT_NUM_CHARS, baked_chars);
+        if (result > 0) break;
+
         free(atlas_bitmap);
-        SDL_Log("stasis_load_font: BakeFontBitmap failed size=%d atlas=%d", raster_size, atlas_size);
-        return 0;
+        atlas_bitmap = NULL;
+        const int next_atlas_size = stasis_display_font_atlas_next_extent(atlas_size);
+        if (next_atlas_size == 0) {
+            SDL_Log("stasis_load_font: BakeFontBitmap failed size=%d atlas=%d", raster_size, atlas_size);
+            return 0;
+        }
+        atlas_size = next_atlas_size;
     }
 
     if (g_use_sdl_renderer) {
         if (!g_renderer) {
+            free(atlas_bitmap);
+            return 0;
+        }
+        if (atlas_pixels > SIZE_MAX / 4u) {
             free(atlas_bitmap);
             return 0;
         }

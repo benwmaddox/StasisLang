@@ -11,6 +11,13 @@ workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
+[features]
+default = []
+network = ["dep:stasis_network"]
+
+[dependencies]
+stasis_network = { path = "../stasis_network", optional = true }
+
 [build-dependencies]
 cc = "1.2"
 

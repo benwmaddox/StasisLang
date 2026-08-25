@@ -6,6 +6,7 @@
 	objects = {
 
 		100000000000000000000001 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* main.m */; };
+		100000000000000000000009 /* stasis_ios_network.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* stasis_ios_network.m */; };
 		100000000000000000000002 /* stasis_mobile_main.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* stasis_mobile_main.c */; };
 		100000000000000000000003 /* stasis_mobile_runtime.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* stasis_mobile_runtime.c */; };
 		100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* stasis_mobile_aot_runtime.c */; };
@@ -19,6 +20,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000001 /* main.m in Sources */,
+				100000000000000000000009 /* stasis_ios_network.m in Sources */,
 				100000000000000000000002 /* stasis_mobile_main.c in Sources */,
 				100000000000000000000003 /* stasis_mobile_runtime.c in Sources */,
 				100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */,
@@ -56,11 +58,13 @@
 		200000000000000000000008 /* StasisMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StasisMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000009 /* StasisMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = StasisMobile.xcconfig; sourceTree = "<group>"; };
 		200000000000000000000010 /* stasis_audio_assets.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_audio_assets.c; sourceTree = "<group>"; };
+		200000000000000000000011 /* stasis_ios_network.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_network.m; sourceTree = "<group>"; };
 
 		400000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
 				200000000000000000000001 /* main.m */,
+				200000000000000000000011 /* stasis_ios_network.m */,
 				200000000000000000000002 /* stasis_mobile_main.c */,
 				200000000000000000000003 /* stasis_mobile_runtime.c */,
 				200000000000000000000004 /* stasis_mobile_aot_runtime.c */,

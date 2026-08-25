@@ -448,6 +448,41 @@ impl TypeTable {
             ))
         )
     }
+
+    pub(crate) fn is_i32_abi_compatible(&self, type_id: TypeId) -> bool {
+        if type_id == TYPE_ID_I32
+            || type_id == TYPE_ID_BOOL
+            || self.unsigned_integer_bits(type_id).is_some()
+        {
+            return true;
+        }
+        self.type_info(type_id).is_some_and(|info| {
+            matches!(
+                info.category,
+                TypeCategory::Named
+                    | TypeCategory::ArrayFixed
+                    | TypeCategory::ArrayView
+                    | TypeCategory::AsciiFixed
+                    | TypeCategory::AsciiView
+                    | TypeCategory::Utf8Fixed
+                    | TypeCategory::Utf8View
+            )
+        })
+    }
+
+    pub(crate) fn assignment_types_are_compatible(
+        &self,
+        target_type: TypeId,
+        expression_type: TypeId,
+    ) -> bool {
+        if target_type == expression_type {
+            return true;
+        }
+        if target_type == TYPE_ID_BOOL || expression_type == TYPE_ID_BOOL {
+            return false;
+        }
+        self.is_i32_abi_compatible(target_type) && self.is_i32_abi_compatible(expression_type)
+    }
 }
 
 fn are_i32_scalar_abi_compatible(argument: &TypeKey, parameter: &TypeKey) -> bool {

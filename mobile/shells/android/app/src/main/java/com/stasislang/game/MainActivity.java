@@ -1,7 +1,10 @@
 package @STASIS_PACKAGE_ID@;
 
 import android.content.res.AssetManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageInfo;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -13,33 +16,26 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import com.stasislang.shell.StasisAssetCache;
 import org.libsdl.app.SDLActivity;
-import org.json.JSONArray;
-import org.json.JSONObject;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HashSet;
 
 public final class MainActivity extends SDLActivity {
     private static final String STASIS_ANDROID_ORIENTATION = "@STASIS_ANDROID_ORIENTATION@";
+    private static final String INVALID_ASSET_ROOT = ".stasis_asset_root_unavailable";
     private static final long HUD_UPDATE_INTERVAL_MS = 200L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
-    private static final int MAX_MANIFEST_BYTES = 1024 * 1024;
-    private static final int MAX_MANIFEST_ASSETS = 4096;
-    private static final long MAX_ASSET_BYTES = 128L * 1024L * 1024L;
-    private static final long MAX_TOTAL_ASSET_BYTES = 150L * 1024L * 1024L;
+    private static final boolean STASIS_NETWORK_ENABLED = @STASIS_NETWORK_ENABLED@ != 0;
 
     private static native void nativeSetAssetRoot(String path);
+    private static native void nativeSetAssetManifestSha256(String sha256);
     private static native void nativeSetSeamTestId(String testId);
     private static native boolean nativeReadPerformanceMetrics(float[] output);
     private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
     private static native String nativeReadRuntimeError();
+    private static native String nativeReadNetworkJoinUrl();
 
     private final Handler hudHandler = new Handler(Looper.getMainLooper());
     private final float[] nativePerformance = new float[14];
@@ -52,6 +48,8 @@ public final class MainActivity extends SDLActivity {
     private FrameLayout diagnosticLayer;
     private TextView performanceHud;
     private TextView runtimeError;
+    private TextView joinUrl;
+    private String joinUrlValue;
     private Runnable hudUpdater;
     private String displayedRuntimeError;
 
@@ -84,32 +82,45 @@ public final class MainActivity extends SDLActivity {
         if (BuildConfig.STASIS_SEAM_TESTS && seamTestId != null) {
             nativeSetSeamTestId(seamTestId);
         }
-        File root = new File(getFilesDir(), "stasis_game");
-        File staging = new File(getFilesDir(), ".stasis_game.staging");
+        File invalidAssetRoot = new File(getFilesDir(), INVALID_ASSET_ROOT + "."
+                + Long.toHexString(System.nanoTime()));
+        while (invalidAssetRoot.exists()) {
+            invalidAssetRoot = new File(getFilesDir(), INVALID_ASSET_ROOT + "."
+                    + Long.toHexString(System.nanoTime()));
+        }
+        nativeSetAssetRoot(invalidAssetRoot.getAbsolutePath());
         String startupError = null;
         try {
-            deleteTree(staging);
-            copyAssetTree(getAssets(), "stasis_game", staging);
-            verifyAssetManifest(staging);
-            deleteTree(root);
-            if (!staging.renameTo(root)) {
-                throw new IOException("Unable to publish " + root);
+            PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+            long versionCode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? packageInfo.getLongVersionCode() : packageInfo.versionCode;
+            String releaseIdentity = versionCode + ":" + packageInfo.versionName + ":"
+                    + packageInfo.lastUpdateTime;
+            long startedNanos = System.nanoTime();
+            StasisAssetCache.Result result = new StasisAssetCache(
+                    new AndroidAssetSource(getAssets()), getFilesDir(), getPackageName(),
+                    releaseIdentity).prepare();
+            StasisAssetCache.Metrics metrics = result.getMetrics();
+            long elapsedMillis = (System.nanoTime() - startedNanos) / 1_000_000L;
+            Log.i("Stasis", "Asset cache mode=" + (result.isReused() ? "reuse" : "cold")
+                    + " elapsed_ms=" + elapsedMillis
+                    + " packaged_read_bytes=" + metrics.getPackagedReadBytes()
+                    + " cache_read_bytes=" + metrics.getCacheReadBytes()
+                    + " cache_write_bytes=" + metrics.getCacheWriteBytes());
+            File root = result.getRoot();
+            File assetBase = new File(root, "@STASIS_ASSET_BASE@");
+            if (!assetBase.isDirectory()) throw new IOException("validated asset base is unavailable");
+            if (BuildConfig.STASIS_SEAM_TESTS && "IT-021".equals(seamTestId)) {
+                assetBase = assetBase.getCanonicalFile();
             }
-        } catch (IOException error) {
-            Log.e("Stasis", "Asset verification failed before runtime startup", error);
-            try {
-                deleteTree(staging);
-            } catch (IOException ignored) {
-                // The original failure is the actionable diagnostic.
+            nativeSetAssetRoot(assetBase.getPath());
+            if (BuildConfig.STASIS_SEAM_TESTS && "IT-021".equals(seamTestId)) {
+                nativeSetAssetManifestSha256(result.getManifestSha256());
             }
+        } catch (Exception error) {
+            Log.e("Stasis", "Asset cache preparation failed before runtime startup", error);
             startupError = "Asset verification failed: " + error.getMessage();
         }
-        File assetBase = new File(root, "@STASIS_ASSET_BASE@");
-        if (!assetBase.isDirectory()) {
-            if (!root.isDirectory()) root.mkdirs();
-            startupError = "Bundled Stasis asset base is unavailable";
-        }
-        nativeSetAssetRoot(assetBase.getAbsolutePath());
         super.onCreate(state);
         installDiagnosticOverlay();
         if (startupError != null) showRuntimeError(startupError);
@@ -180,6 +191,31 @@ public final class MainActivity extends SDLActivity {
                 Gravity.BOTTOM | Gravity.START);
         errorParams.setMargins(dp(8), 0, dp(8), dp(8));
         diagnosticLayer.addView(runtimeError, errorParams);
+        if (STASIS_NETWORK_ENABLED) {
+            joinUrl = new TextView(this);
+            joinUrl.setTextColor(Color.WHITE);
+            joinUrl.setTextSize(14.0f);
+            joinUrl.setPadding(dp(10), dp(8), dp(10), dp(8));
+            joinUrl.setBackgroundColor(Color.argb(220, 20, 28, 38));
+            joinUrl.setText("Waiting for local network host…");
+            joinUrl.setContentDescription("Manual network join URL");
+            joinUrl.setTextIsSelectable(true);
+            joinUrl.setOnClickListener(view -> {
+                if (joinUrlValue == null || joinUrlValue.isEmpty()) return;
+                ClipboardManager clipboard =
+                        (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Stasis join URL", joinUrlValue));
+                    joinUrl.setText("Join URL copied\n" + joinUrlValue);
+                }
+            });
+            FrameLayout.LayoutParams joinParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            joinParams.setMargins(dp(8), dp(8), dp(8), 0);
+            diagnosticLayer.addView(joinUrl, joinParams);
+        }
         diagnosticLayer.requestApplyInsets();
     }
 
@@ -201,6 +237,7 @@ public final class MainActivity extends SDLActivity {
             @Override public void run() {
                 updatePerformanceHud();
                 updateRuntimeError();
+                updateJoinUrl();
                 if (hudUpdater != null) {
                     hudHandler.postDelayed(this, HUD_UPDATE_INTERVAL_MS);
                 }
@@ -266,6 +303,32 @@ public final class MainActivity extends SDLActivity {
         if (message != null && !message.isEmpty()) showRuntimeError(message);
     }
 
+    private void updateJoinUrl() {
+        if (!STASIS_NETWORK_ENABLED || joinUrl == null) return;
+        String candidate = nativeReadNetworkJoinUrl();
+        if (candidate == null || candidate.isEmpty()) {
+            if (joinUrlValue == null) joinUrl.setText("Waiting for local network host…");
+            return;
+        }
+        if (!isUsableJoinUrl(candidate)) {
+            joinUrlValue = null;
+            joinUrl.setText("Local network address unavailable");
+            return;
+        }
+        if (!candidate.equals(joinUrlValue)) {
+            joinUrlValue = candidate;
+            joinUrl.setText("Tap to copy join URL\n" + candidate);
+        }
+    }
+
+    private static boolean isUsableJoinUrl(String value) {
+        String lower = value.toLowerCase(java.util.Locale.ROOT);
+        return lower.startsWith("http://")
+                && !lower.contains("localhost")
+                && !lower.contains("127.0.0.1")
+                && !lower.contains("0.0.0.0");
+    }
+
     private void showRuntimeError(String message) {
         if (runtimeError == null || message == null || message.equals(displayedRuntimeError)) return;
         displayedRuntimeError = message;
@@ -293,144 +356,22 @@ public final class MainActivity extends SDLActivity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private static void verifyAssetManifest(File root) throws IOException {
-        File manifestFile = new File(root, "assets/manifest.json");
-        byte[] manifestBytes = readBounded(manifestFile, MAX_MANIFEST_BYTES);
-        try {
-            JSONObject manifest = new JSONObject(new String(manifestBytes, "UTF-8"));
-            int manifestVersion = manifest.optInt("version", -1);
-            if (!"stasis-assets".equals(manifest.optString("schema"))
-                    || (manifestVersion != 1 && manifestVersion != 2)) {
-                throw new IOException("Unsupported packaged asset manifest");
-            }
-            JSONArray assets = manifest.getJSONArray("assets");
-            if (assets.length() > MAX_MANIFEST_ASSETS) {
-                throw new IOException("Asset manifest exceeds the entry limit");
-            }
-            String rootPath = root.getCanonicalPath() + File.separator;
-            HashSet<String> ids = new HashSet<>();
-            HashSet<String> paths = new HashSet<>();
-            long totalBytes = 0;
-            for (int index = 0; index < assets.length(); index++) {
-                JSONObject asset = assets.getJSONObject(index);
-                String id = asset.getString("id");
-                String path = asset.getString("path");
-                String expectedHash = asset.getString("content_sha256");
-                if (id.isEmpty() || !ids.add(id)) {
-                    throw new IOException("Asset manifest contains an invalid or duplicate id");
-                }
-                if (!isSafeAssetPath(path) || !paths.add(path)) {
-                    throw new IOException("Asset manifest contains an unsafe or duplicate path");
-                }
-                if (!expectedHash.matches("[0-9a-f]{64}")) {
-                    throw new IOException("Asset manifest contains an invalid SHA-256 value");
-                }
-                File assetFile = new File(root, path);
-                String assetPath = assetFile.getCanonicalPath();
-                if (!assetPath.startsWith(rootPath) || !assetFile.isFile()
-                        || assetFile.length() > MAX_ASSET_BYTES) {
-                    throw new IOException("Packaged asset is missing, unsafe, or oversized: " + path);
-                }
-                totalBytes += assetFile.length();
-                if (totalBytes > MAX_TOTAL_ASSET_BYTES) {
-                    throw new IOException("Packaged assets exceed the total byte limit");
-                }
-                if (!expectedHash.equals(sha256(assetFile))) {
-                    throw new IOException("Packaged asset hash mismatch: " + path);
-                }
-            }
-        } catch (IOException error) {
-            throw error;
-        } catch (Exception error) {
-            throw new IOException("Asset manifest could not be parsed", error);
-        }
-    }
+    private static final class AndroidAssetSource implements StasisAssetCache.AssetSource {
+        private final AssetManager assets;
 
-    private static boolean isSafeAssetPath(String path) {
-        return path.startsWith("assets/") && !path.endsWith("/")
-                && path.indexOf('\\') < 0 && path.indexOf('\0') < 0
-                && !path.contains("//") && !path.contains("/../")
-                && !path.endsWith("/..") && !path.contains("/./")
-                && !path.endsWith("/.");
-    }
+        AndroidAssetSource(AssetManager assets) {
+            this.assets = assets;
+        }
 
-    private static byte[] readBounded(File file, int limit) throws IOException {
-        if (!file.isFile() || file.length() > limit) {
-            throw new IOException("Asset manifest is missing or oversized");
+        @Override
+        public String[] list(String path) throws IOException {
+            String[] children = assets.list(path);
+            return children == null ? new String[0] : children;
         }
-        try (FileInputStream input = new FileInputStream(file);
-                ByteArrayOutputStream output = new ByteArrayOutputStream((int)file.length())) {
-            byte[] buffer = new byte[16384];
-            int total = 0;
-            int count;
-            while ((count = input.read(buffer)) != -1) {
-                total += count;
-                if (total > limit) throw new IOException("Asset manifest exceeds the byte limit");
-                output.write(buffer, 0, count);
-            }
-            return output.toByteArray();
-        }
-    }
 
-    private static String sha256(File file) throws IOException {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException error) {
-            throw new IOException("SHA-256 is unavailable", error);
-        }
-        try (FileInputStream input = new FileInputStream(file)) {
-            byte[] buffer = new byte[16384];
-            int count;
-            while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
-        }
-        StringBuilder result = new StringBuilder(64);
-        for (byte value : digest.digest()) {
-            int unsigned = value & 0xff;
-            if (unsigned < 16) result.append('0');
-            result.append(Integer.toHexString(unsigned));
-        }
-        return result.toString();
-    }
-
-    private static void copyAssetTree(AssetManager assets, String assetPath, File output)
-            throws IOException {
-        String[] children = assets.list(assetPath);
-        if (children != null && children.length > 0) {
-            if (!output.isDirectory() && !output.mkdirs()) {
-                throw new IOException("Unable to create " + output);
-            }
-            for (String child : children) {
-                copyAssetTree(assets, assetPath + "/" + child, new File(output, child));
-            }
-            return;
-        }
-        File parent = output.getParentFile();
-        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
-            throw new IOException("Unable to create " + parent);
-        }
-        try (InputStream input = assets.open(assetPath);
-                FileOutputStream stream = new FileOutputStream(output)) {
-            byte[] buffer = new byte[16384];
-            int count;
-            while ((count = input.read(buffer)) != -1) {
-                stream.write(buffer, 0, count);
-            }
-        }
-    }
-
-    private static void deleteTree(File path) throws IOException {
-        if (!path.exists()) {
-            return;
-        }
-        File[] children = path.listFiles();
-        if (children != null) {
-            for (File child : children) {
-                deleteTree(child);
-            }
-        }
-        if (!path.delete()) {
-            throw new IOException("Unable to remove " + path);
+        @Override
+        public InputStream open(String path) throws IOException {
+            return assets.open(path);
         }
     }
 

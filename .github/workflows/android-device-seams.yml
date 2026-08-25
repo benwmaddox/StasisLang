@@ -3,6 +3,12 @@ name: Android Emulator Seams
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      release_shell_test_id:
+        description: "Optional release-shell seam test ID (for example IT-021)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: android-emulator-seams-nightly
@@ -14,6 +20,7 @@ jobs:
     timeout-minutes: 75
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
       STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
@@ -59,12 +66,14 @@ jobs:
 
       - name: Run generated Android AOT release-shell seams
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STASIS_RELEASE_SHELL_TEST_ID: ${{ inputs.release_shell_test_id }}
         with:
           api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7
-          cores: 4
+          cores: 2
           ram-size: 4096M
           ndk: 27.0.12077973
           cmake: 3.22.1
@@ -73,7 +82,7 @@ jobs:
             -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
             -no-boot-anim -camera-back none
           script: |
-            pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1
+            pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1 -TestId "$STASIS_RELEASE_SHELL_TEST_ID"
 
       - name: Upload Android release-shell evidence
         if: always()
@@ -107,11 +116,20 @@ jobs:
           path: artifacts/android_orientation_metrics/e
           if-no-files-found: warn
 
+      - name: Upload Android packaged-assets evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-packaged-assets-seam
+          path: artifacts/android_packaged_assets/e
+          if-no-files-found: warn
+
   workshop-seams:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
       STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
@@ -162,7 +180,7 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7
-          cores: 4
+          cores: 2
           ram-size: 4096M
           ndk: 27.0.12077973
           cmake: 3.22.1

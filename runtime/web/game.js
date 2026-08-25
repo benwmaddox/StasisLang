@@ -23,6 +23,152 @@
   const cachedText = new Map();
   let nextHandle = 1;
   let instance;
+  // @stasis-feature network begin
+  const NETWORK_MAX_MESSAGE = 64 * 1024;
+  const NETWORK_MAX_BUFFERED = 1024 * 1024;
+  const networkClient = {
+    socket: null, state: 0, error: 0, queue: [], queuedBytes: 0,
+    outbound: [], outboundBytes: 0,
+    resume: null, desiredSeat: -1, lastSequence: 0
+  };
+  const networkLocation = () => globalThis.location || null;
+  const networkBytesFromHex = value => {
+    if (typeof value !== "string" || value.length !== 32 || !/^[0-9a-f]{32}$/i.test(value)) return null;
+    const bytes = new Uint8Array(16);
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = parseInt(value.slice(index * 2, index * 2 + 2), 16);
+    return bytes;
+  };
+  const networkResumeCredential = () => {
+    const key = `stasis:resume:${networkLocation()?.origin || "unknown"}`;
+    let value = null;
+    try { value = localStorage.getItem(key); } catch (_) { value = null; }
+    if (!networkBytesFromHex(value)) {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      value = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+      try { localStorage.setItem(key, value); } catch (_) { /* ephemeral storage is valid */ }
+    }
+    return value;
+  };
+  const networkCheckpointKey = credential => {
+    // Keep the raw resume credential out of storage keys and all Wasm-visible
+    // values while still separating metadata between adapter identities.
+    let hash = 2166136261;
+    const source = `${networkLocation()?.origin || "unknown"}:${credential}`;
+    for (let index = 0; index < source.length; index += 1) {
+      hash = Math.imul(hash ^ source.charCodeAt(index), 16777619) | 0;
+    }
+    return `stasis:checkpoint:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  };
+  const networkLoadCheckpoint = () => {
+    // Non-network runtime tests and ordinary packages may not provide a
+    // browser location/WebSocket.  Do not allocate adapter credentials there.
+    if (!networkLocation() || typeof WebSocket !== "function") return;
+    const credential = networkResumeCredential();
+    let raw = null;
+    try { raw = localStorage.getItem(networkCheckpointKey(credential)); } catch (_) { raw = null; }
+    try {
+      const checkpoint = JSON.parse(raw || "null");
+      if (checkpoint && Number.isInteger(checkpoint.seat) && checkpoint.seat >= -1 && checkpoint.seat < 8
+          && Number.isInteger(checkpoint.lastSequence) && checkpoint.lastSequence >= 0
+          && checkpoint.lastSequence <= 0x7fffffff) {
+        networkClient.desiredSeat = checkpoint.seat;
+        networkClient.lastSequence = checkpoint.lastSequence;
+      }
+    } catch (_) {
+      // Malformed adapter metadata falls back to a fresh seat/sequence.
+    }
+  };
+  const networkPairingSecret = () => {
+    const currentLocation = networkLocation();
+    if (!currentLocation) return null;
+    const fragment = new URLSearchParams(currentLocation.hash.startsWith("#") ? currentLocation.hash.slice(1) : currentLocation.hash);
+    const secret = fragment.get("secret");
+    return typeof secret === "string" && /^[0-9a-f]{32,128}$/i.test(secret) ? secret.toLowerCase() : null;
+  };
+  const networkEnqueue = bytes => {
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength > NETWORK_MAX_MESSAGE
+      || bytes.byteLength + networkClient.queuedBytes > NETWORK_MAX_BUFFERED
+      || networkClient.queue.length >= 256) { networkClient.error = -3; return false; }
+    networkClient.queue.push(bytes.slice());
+    networkClient.queuedBytes += bytes.byteLength;
+    return true;
+  };
+  const networkConnect = () => {
+    if (networkClient.socket && (networkClient.socket.readyState === WebSocket.OPEN || networkClient.socket.readyState === WebSocket.CONNECTING)) return 0;
+    const secret = networkPairingSecret();
+    const currentLocation = networkLocation();
+    if (!secret || !currentLocation || typeof WebSocket !== "function") { networkClient.state = -4; networkClient.error = -4; return -4; }
+    const credential = networkResumeCredential();
+    const protocol = `stasis-resume-v1.${credential}`;
+    const socketUrl = `${currentLocation.protocol === "https:" ? "wss:" : "ws:"}//${currentLocation.host}/session`;
+    try {
+      const socket = new WebSocket(socketUrl, ["stasis-v1", secret, protocol]);
+      socket.binaryType = "arraybuffer";
+      socket.onopen = () => {
+        networkClient.state = 1;
+        networkClient.error = 0;
+        while (networkClient.outbound.length > 0) {
+          const bytes = networkClient.outbound.shift();
+          networkClient.outboundBytes -= bytes.byteLength;
+          try { socket.send(bytes); } catch (_) { networkClient.error = -2; break; }
+        }
+      };
+      socket.onmessage = event => {
+        const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : null;
+        if (bytes) networkEnqueue(bytes);
+        else networkClient.error = -2;
+      };
+      socket.onerror = () => { networkClient.state = -2; networkClient.error = -2; };
+      socket.onclose = () => { networkClient.state = 0; networkClient.socket = null; };
+      networkClient.socket = socket;
+      networkClient.state = 2;
+      return 0;
+    } catch (_) { networkClient.state = -2; networkClient.error = -2; return -2; }
+  };
+  const networkPoll = (outId, capacity) => {
+    const output = resolveU8Memory(outId);
+    if (!output || !Number.isInteger(capacity) || capacity < 0 || capacity > output.length) return -1;
+    const next = networkClient.queue[0];
+    if (!next) return networkClient.error || 0;
+    if (next.byteLength > capacity) return -1;
+    for (let index = 0; index < next.byteLength; index += 1) writeU8(output, index, next[index]);
+    networkClient.queue.shift();
+    networkClient.queuedBytes -= next.byteLength;
+    return next.byteLength;
+  };
+  const networkSend = (payloadId, length) => {
+    const source = resolveU8Memory(payloadId);
+    if (!source || !Number.isInteger(length) || length < 0 || length > NETWORK_MAX_MESSAGE || length > source.length) return -1;
+    const bytes = new Uint8Array(length);
+    for (let index = 0; index < length; index += 1) bytes[index] = readU8(source, index);
+    if (!networkClient.socket || networkClient.socket.readyState === WebSocket.CONNECTING) {
+      if (networkClient.outboundBytes + length > NETWORK_MAX_BUFFERED || networkClient.outbound.length >= 256) return -3;
+      networkClient.outbound.push(bytes);
+      networkClient.outboundBytes += length;
+      return 0;
+    }
+    if (networkClient.socket.readyState !== WebSocket.OPEN) return -2;
+    try { networkClient.socket.send(bytes); return 0; } catch (_) { networkClient.error = -2; return -2; }
+  };
+  const networkCheckpoint = (seat, lastSequence) => {
+    if (!Number.isInteger(seat) || seat < -1 || seat >= 8
+        || !Number.isInteger(lastSequence) || lastSequence < 0
+        || lastSequence > 0x7fffffff) {
+      networkClient.error = -1;
+      return -1;
+    }
+    networkClient.desiredSeat = seat;
+    networkClient.lastSequence = lastSequence;
+    try {
+      localStorage.setItem(networkCheckpointKey(networkResumeCredential()), JSON.stringify({ seat, lastSequence }));
+    } catch (_) {
+      // Storage denial leaves the in-memory checkpoint valid for this page.
+    }
+    return 0;
+  };
+  networkLoadCheckpoint();
+  // @stasis-feature network end
   // @stasis-feature audio begin
   let audioContext;
   let audioEnablePromise;
@@ -52,6 +198,7 @@
   let tickIndex = 0;
   let resized = true;
   let displayGeneration = 1;
+  let resizeGenerationPending = true;
   let densityGeneration = 1;
   let lastWindowRequest = -1;
   let pendingFullscreen;
@@ -301,11 +448,55 @@
     sprites.set(handle, image);
     return handle;
   };
+  const setCanvasFont = (font, size = font.renderSize) => {
+    context.font = `${size}px ${font.family}`;
+    context.textBaseline = "alphabetic";
+    if ("fontKerning" in context) context.fontKerning = "none";
+  };
+  const measureTextRun = (font, text) => {
+    context.save();
+    setCanvasFont(font);
+    const metrics = context.measureText(text);
+    context.restore();
+    const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
+      ? Math.max(0, metrics.actualBoundingBoxDescent)
+      : Math.max(0, font.size - font.baseline);
+    return { width: metrics.width, height: font.baseline + descent };
+  };
+  const refreshTextRun = run => {
+    const font = fonts.get(run.font);
+    if (!font?.ready) return;
+    const metrics = measureTextRun(font, run.text);
+    setViewField(run.base, run.index, "width", metrics.width);
+    setViewField(run.base, run.index, "height", metrics.height);
+  };
+  const calibrateFont = font => {
+    context.save();
+    setCanvasFont(font, 1000);
+    const metrics = context.measureText("Mg");
+    context.restore();
+    const ascent = Number.isFinite(metrics.fontBoundingBoxAscent)
+      ? metrics.fontBoundingBoxAscent
+      : 1000;
+    const descent = Number.isFinite(metrics.fontBoundingBoxDescent)
+      ? metrics.fontBoundingBoxDescent
+      : 0;
+    const nativeHeight = ascent + descent;
+    const scale = nativeHeight > 0 ? font.size / nativeHeight : font.size / 1000;
+    font.renderSize = 1000 * scale;
+    font.baseline = ascent * scale;
+    font.ready = true;
+    font.pendingRuns.forEach(refreshTextRun);
+    font.pendingRuns.length = 0;
+  };
   const loadFont = (pathId, size) => {
     const handle = nextHandle++;
     const family = `stasis-font-${handle}`;
     const font = new FontFace(family, `url(${assetValue(pathId)})`);
-    fonts.set(handle, { family, size });
+    const fontInfo = {
+      family, size, renderSize: size, baseline: size, ready: false, pendingRuns: []
+    };
+    fonts.set(handle, fontInfo);
     const load = Promise.resolve()
       .then(() => font.load())
       .then(loaded => {
@@ -319,7 +510,7 @@
     const font = fonts.get(fontHandle);
     if (!font) return 0;
     context.save();
-    context.font = `${font.size}px ${font.family}`;
+    setCanvasFont(font);
     const width = context.measureText(stringValue(textId)).width;
     context.restore();
     return width;
@@ -638,6 +829,16 @@
     sys_memcpy_u8: sysMemcpyU8,
     sys_memcpy_i32: sysMemcpyI32,
     sys_memcpy_f32: sysMemcpyF32,
+    // @stasis-feature network begin
+    stasis_web_network_supported: () => typeof WebSocket === "function" ? 1 : 0,
+    stasis_web_network_connect: networkConnect,
+    stasis_web_network_status: () => networkClient.state,
+    stasis_web_network_poll: networkPoll,
+    stasis_web_network_send: networkSend,
+    stasis_web_network_checkpoint: networkCheckpoint,
+    stasis_web_network_resume_seat: () => networkClient.desiredSeat,
+    stasis_web_network_last_sequence: () => networkClient.lastSequence,
+    // @stasis-feature network end
     web_input_axis: () => (keys.has("ArrowRight") || keys.has("KeyD") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("KeyA") ? 1 : 0),
     web_input_fire: () => keys.has("Space") || pointer.down ? 1 : 0,
     web_pointer_x: () => pointer.x | 0,
@@ -699,10 +900,14 @@
       const text = stringValue(textId);
       cachedText.set(handle, { font, text });
       const fontInfo = fonts.get(font) || { size: 16 };
-      return setViewField(base, index, "font", font)
+      const run = { base, index, font, text };
+      const loaded = setViewField(base, index, "font", font)
         && setViewField(base, index, "handle", handle)
         && setViewField(base, index, "width", text.length * fontInfo.size * 0.6)
-        && setViewField(base, index, "height", fontInfo.size) ? 1 : 0;
+        && setViewField(base, index, "height", fontInfo.size);
+      if (loaded && fontInfo.ready) refreshTextRun(run);
+      else if (loaded && fontInfo.pendingRuns) fontInfo.pendingRuns.push(run);
+      return loaded ? 1 : 0;
     },
     storage_load_i32: (scope, key, fallback) => {
       const value = storageGet(storageKey(scope, key));
@@ -1000,7 +1205,9 @@
       const offset = i32[baseI + 1];
       const cached = offset < 0 ? cachedText.get(-offset) : null;
       const fontHandle = cached ? cached.font : i32[baseI];
-      const font = fonts.get(fontHandle) || { family: "ui-monospace", size: 18 };
+      const font = fonts.get(fontHandle) || {
+        family: "ui-monospace", size: 18, renderSize: 18, baseline: 18
+      };
       let text = cached ? cached.text : "";
       if (!cached && game.memory.gfx_cmd_u8) {
         const bytesLayout = game.memory.gfx_cmd_u8;
@@ -1010,9 +1217,8 @@
       context.save();
       context.globalAlpha = f32[baseF + 5];
       context.fillStyle = `rgb(${Math.round(f32[baseF + 2] * 255)} ${Math.round(f32[baseF + 3] * 255)} ${Math.round(f32[baseF + 4] * 255)})`;
-      context.font = `${font.size}px ${font.family}`;
-      context.textBaseline = "top";
-      context.fillText(text, f32[baseF], f32[baseF + 1]);
+      setCanvasFont(font);
+      context.fillText(text, f32[baseF], f32[baseF + 1] + font.baseline);
       context.restore();
     };
     const lineCount = Math.max(0, Math.min(i32[3], 10000));
@@ -1130,6 +1336,7 @@
     document.body.dataset.hostTimeMs = String(i32[0]);
     if (resized) document.body.dataset.resizeTick = String(i32[10]);
     resized = false;
+    resizeGenerationPending = false;
   }
 
   function finishHostFrame() {
@@ -1153,10 +1360,16 @@
     if (canvas.width === width && canvas.height === height) return;
     canvas.width = width;
     canvas.height = height;
-    canvas.style.aspectRatio = `${width} / ${height}`;
-    canvas.parentElement.style.width = `min(100vw, calc(100vh * ${width} / ${height}))`;
+    if (typeof window.STASIS_REFIT_VIEWPORT === "function") window.STASIS_REFIT_VIEWPORT();
+    markResized();
+  }
+
+  function markResized() {
     resized = true;
-    displayGeneration += 1;
+    if (!resizeGenerationPending) {
+      displayGeneration += 1;
+      resizeGenerationPending = true;
+    }
   }
 
   function applyWindowRequest() {
@@ -1178,7 +1391,6 @@
     } else if (flags & 4) {
       setCanvasSize(width, height);
       document.body.dataset.windowMode = "maximized";
-      resized = true;
     }
     document.body.dataset.windowRequestSeq = String(sequence);
   }
@@ -1307,8 +1519,11 @@
     pointer.wentUp = true;
   });
   canvas.addEventListener("pointercancel", () => { pointer.hover = false; pointer.down = false; pointer.wentUp = true; });
-  addEventListener("resize", () => { resized = true; displayGeneration += 1; });
-  document.addEventListener("fullscreenchange", () => { resized = true; displayGeneration += 1; });
+  addEventListener("resize", markResized);
+  addEventListener("orientationchange", markResized);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", markResized);
+  addEventListener("stasis-viewport-extent", markResized);
+  document.addEventListener("fullscreenchange", markResized);
   // @stasis-feature audio begin
   void enableWebAudio();
   // @stasis-feature audio end
@@ -1334,6 +1549,7 @@
       ]);
       await document.fonts.ready;
       setLoading("", "ready");
+      fonts.forEach(calibrateFont);
       document.body.dataset.ready = "true";
       document.body.dataset.runtime = "wasm";
       document.body.dataset.mainResult = String(mainResult);

@@ -8,6 +8,7 @@ import ast
 import hashlib
 import json
 import operator
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,28 @@ REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, ANDROID,
     JAVA_RENDERER, WORKSHOP, JNI, NATIVE_HOST,
 )
+IGNORED_SOURCE_DIRS = {
+    ".git",
+    ".gradle",
+    ".stasis_cache",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+}
+
+
+def repository_stasis_sources(directory: Path) -> list[Path]:
+    sources: list[Path] = []
+    for current_root, directories, filenames in os.walk(directory):
+        directories[:] = sorted(
+            name for name in directories if name not in IGNORED_SOURCE_DIRS
+        )
+        for filename in sorted(filenames):
+            if filename.endswith(".stasis"):
+                sources.append(Path(current_root) / filename)
+    return sources
 
 DESCRIPTOR_PATTERNS = {
     "i32": r'X\(I32,\s*"i32",\s*STASIS_RENDER_I32_COUNT\s*\*\s*sizeof\(int32_t\),\s*_Alignof\(int32_t\)\)',
@@ -362,7 +385,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         directory = root / base
         if not directory.exists():
             continue
-        for path in directory.rglob("*.stasis"):
+        for path in repository_stasis_sources(directory):
             text = path.read_text(encoding="utf-8")
             for name, expected in arrays.items():
                 if not re.search(rf"\bglobal\s+{re.escape(name)}\s*:", text):

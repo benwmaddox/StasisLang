@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IT012_EXPECTED_TRACE 3312025514u
+#define IT012_EXPECTED_TRACE 2880741754u
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -24,6 +24,12 @@ extern int32_t stasis_mobile_render_entry(void);
 static int32_t submitted_frames;
 static uint32_t submitted_trace;
 static int32_t submitted_rects;
+static int32_t submitted_text_count;
+static int32_t submitted_text_bytes_used;
+static int32_t submitted_text_font;
+static int32_t submitted_text_offset;
+static int32_t submitted_text_length;
+static uint8_t submitted_text_bytes[STASIS_RENDER_TEXT_MAX_BYTES];
 static int32_t polled_events;
 static int32_t pause_transitions;
 static int32_t last_pause_value;
@@ -80,6 +86,17 @@ void stasis_gfx_submit_u8(int32_t *i32s, const float *f32s, const uint8_t *u8s) 
     submitted_frames += 1;
     submitted_trace = stasis_render_trace(i32s, f32s, u8s);
     submitted_rects = i32s[STASIS_RENDER_I_RECT_COUNT];
+    submitted_text_count = i32s[STASIS_RENDER_I_TEXT_COUNT];
+    submitted_text_bytes_used = i32s[STASIS_RENDER_I_TEXT_BYTES_USED];
+    if (submitted_text_count > 0) {
+        const int32_t base = STASIS_RENDER_I_TEXT_BASE;
+        submitted_text_font = i32s[base + 0];
+        submitted_text_offset = i32s[base + 1];
+        submitted_text_length = i32s[base + 2];
+    }
+    if (submitted_text_bytes_used > 0 && submitted_text_bytes_used <= STASIS_RENDER_TEXT_MAX_BYTES) {
+        memcpy(submitted_text_bytes, u8s, (size_t)submitted_text_bytes_used);
+    }
     submit_tick_marker = stasis_jit_global_i32_load(hash_path("tick_host_marker"));
     submit_render_score = stasis_jit_global_i32_load(hash_path("render_score"));
 }
@@ -172,6 +189,12 @@ static void reset_frame_observations(void) {
     submitted_frames = 0;
     submitted_trace = 0;
     submitted_rects = 0;
+    submitted_text_count = 0;
+    submitted_text_bytes_used = 0;
+    submitted_text_font = 0;
+    submitted_text_offset = 0;
+    submitted_text_length = 0;
+    memset(submitted_text_bytes, 0, sizeof(submitted_text_bytes));
 }
 
 int main(void) {
@@ -215,8 +238,21 @@ int main(void) {
     CHECK(submit_tick_marker == 77 && submit_render_score == 15);
     CHECK(submitted_frames == 1);
     CHECK(submitted_rects == 1);
+    CHECK(submitted_text_count == 1);
+    CHECK(submitted_text_bytes_used == 6);
+    CHECK(submitted_text_font == 7);
+    CHECK(submitted_text_offset == 0);
+    CHECK(submitted_text_length == 5);
+    CHECK(submitted_text_bytes[0] == 67);
+    CHECK(submitted_text_bytes[1] == 97);
+    CHECK(submitted_text_bytes[2] == 102);
+    CHECK(submitted_text_bytes[3] == 195);
+    CHECK(submitted_text_bytes[4] == 169);
+    CHECK(submitted_text_bytes[5] == 0);
+    CHECK(stasis_jit_global_i32_load(hash_path("forwarded_byte_length")) == 5);
+    CHECK(stasis_jit_global_i32_load(hash_path("forwarded_char_length")) == 4);
     CHECK(submitted_trace == IT012_EXPECTED_TRACE);
-    printf("stasis.seam_test.v1 IT-012 state=15 frames=1 rects=1 trace=%u\n", submitted_trace);
+    printf("stasis.seam_test.v1 IT-012 state=15 frames=1 rects=1 texts=1 bytes=5 chars=4 trace=%u\n", submitted_trace);
     printf("stasis.seam_test.v1 IT-014 order=123 marker=77 request=41:5:640:360 render_score=15 frames=1\n");
     stasis_mobile_runtime_shutdown();
 

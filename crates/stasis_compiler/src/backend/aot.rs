@@ -7,7 +7,7 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
 };
 use crate::identity::SymbolId;
-use crate::ir::hir::FunctionHIR;
+use crate::ir::hir::{AssignTarget, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
@@ -169,7 +169,9 @@ impl AotProcess {
     }
 
     fn compile_internal(&mut self) -> CompileResult<CompileReport> {
-        let index = self.compiler.index_pass()?;
+        // Keep release compilation on the same whole-program validity contract as JIT, tooling,
+        // and the language service. Reachability controls emission only.
+        let index = self.compiler.check()?;
         self.validate_host_aliases()
             .map_err(crate::compiler::CompileError::Backend)?;
         self.compiler
@@ -1398,7 +1400,8 @@ fn record_string_literals_in_expr(
     out: &mut BTreeMap<i32, String>,
 ) -> Result<(), String> {
     match expression {
-        SimpleExpr::Int(_)
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::Identifier(_) => Ok(()),
@@ -1600,6 +1603,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aot_rejects_invalid_unreachable_function_body() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "dead.stasis",
+            "function main(): i32 { return 0; }\nfunction unfinished(): i32 { while (true) { return 1; } }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject invalid dead code");
+        assert!(
+            format!("{error:?}").contains("while"),
+            "unexpected diagnostic: {error:?}"
+        );
+        assert!(process.program_snapshot().is_none());
+        assert!(process.artifacts().is_empty());
+    }
+
+    #[test]
     fn aot_enforces_the_same_effect_contracts_as_jit() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -1626,6 +1648,77 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static CLIF_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(windows)]
+    fn sign_test_executable(path: &Path) {
+        sign_test_artifact(path, false);
+    }
+
+    #[cfg(windows)]
+    fn sign_page_hashed_test_executable(path: &Path) {
+        sign_test_artifact(path, true);
+    }
+
+    #[cfg(windows)]
+    fn sign_test_artifact(path: &Path, page_hashes: bool) {
+        let Some(sign_tool) =
+            std::env::var_os("STASIS_AOT_SIGN_TOOL").filter(|tool| !tool.is_empty())
+        else {
+            assert_ne!(
+                std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").as_deref(),
+                Some(std::ffi::OsStr::new("1")),
+                "signed execution is required but STASIS_AOT_SIGN_TOOL is not set"
+            );
+            return;
+        };
+        let mut command = Command::new(&sign_tool);
+        command.arg(path);
+        if page_hashes {
+            command.env("STASIS_SIGN_PAGE_HASHES", "1");
+        } else {
+            command.env_remove("STASIS_SIGN_PAGE_HASHES");
+        }
+        let status = command.status().unwrap_or_else(|error| {
+            panic!(
+                "failed to launch signer {:?} for {}: {error}",
+                sign_tool,
+                path.display()
+            )
+        });
+        assert!(
+            status.success(),
+            "signer {:?} failed for {} with status {:?}",
+            sign_tool,
+            path.display(),
+            status.code()
+        );
+    }
+
+    #[cfg(windows)]
+    fn run_signed_test_executable(
+        path: &Path,
+        environment: &[(&str, &Path)],
+    ) -> std::process::ExitStatus {
+        let launch = || {
+            Command::new(path)
+                .envs(environment.iter().map(|(name, value)| (*name, *value)))
+                .status()
+        };
+        sign_test_executable(path);
+        match launch() {
+            Ok(status) => status,
+            Err(error) if error.raw_os_error() == Some(4551) => {
+                sign_page_hashed_test_executable(path);
+                launch().unwrap_or_else(|retry_error| {
+                    panic!(
+                        "failed to run {} after page-hash signing retry: {retry_error}",
+                        path.display()
+                    )
+                })
+            }
+            Err(error) => panic!("failed to run {}: {error}", path.display()),
+        }
+    }
 
     const GFX_CAPACITY_FIXTURE: &str =
         include_str!("../../../../tests/stasis/seams/gfx_cmd_capacity_probe.stasis");
@@ -2261,8 +2354,9 @@ mod tests {
             .to_path_buf();
         let (import_library, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
         effective_config.runtime_lib_paths.push(import_library);
-        fs::copy(&runtime_dll, temp_root.join("stasis_dynload.dll"))
-            .expect("copy AOT test runtime");
+        let copied_runtime_dll = temp_root.join("stasis_dynload.dll");
+        fs::copy(&runtime_dll, &copied_runtime_dll).expect("copy AOT test runtime");
+        sign_test_executable(&copied_runtime_dll);
         let link_result = process.link_executable_for_i32_noarg_function(
             function_name,
             &exe_path,
@@ -2279,10 +2373,7 @@ mod tests {
         }
         link_result.expect("link executable");
 
-        let status = Command::new(&exe_path)
-            .envs(environment.iter().map(|(name, value)| (*name, *value)))
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, environment);
         let code = status.code().expect("expected process exit code");
         let _ = fs::remove_dir_all(&temp_root);
         Some(code)
@@ -2728,13 +2819,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target"),
+                    message.contains("cannot resolve call 'helper'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -2988,16 +3079,17 @@ function end_frame(): void { return; }
     }
 
     #[test]
-    fn aot_process_skips_unreachable_invalid_function_body() {
+    fn aot_process_rejects_unreachable_unresolved_call() {
         let mut process = AotProcess::new();
         process.upsert_file(
             "sample.stasis",
             "function bad(): i32 { return missing(); }\nfunction tick(): i32 { return 1; }\n",
         );
-        let report = process.compile().expect("compile");
-        assert_eq!(report.index.parsed_functions, 2);
-        assert_eq!(report.emit.emitted_functions, 1);
-        assert_eq!(process.artifacts().len(), 1);
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject unreachable unresolved calls");
+        assert!(format!("{error:?}").contains("cannot resolve call 'missing'"));
+        assert!(process.artifacts().is_empty());
     }
 
     #[test]
@@ -3221,8 +3313,9 @@ function end_frame(): void { return; }
             .to_path_buf();
         let (import_library, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
         link_config.runtime_lib_paths.push(import_library);
-        fs::copy(&runtime_dll, temp_root.join("stasis_dynload.dll"))
-            .expect("copy AOT test runtime");
+        let copied_runtime_dll = temp_root.join("stasis_dynload.dll");
+        fs::copy(&runtime_dll, &copied_runtime_dll).expect("copy AOT test runtime");
+        sign_test_executable(&copied_runtime_dll);
         let executable = temp_root.join("receiver_bundle.exe");
         let object_paths = bundle.object_paths().cloned().collect::<Vec<_>>();
         stasis_jit::link_objects_to_executable(
@@ -3232,6 +3325,7 @@ function end_frame(): void { return; }
             &link_config,
         )
         .expect("link every receiver overload object");
+        sign_page_hashed_test_executable(&executable);
         let status = Command::new(&executable)
             .status()
             .unwrap_or_else(|error| panic!("failed to run {}: {error}", executable.display()));
@@ -3577,9 +3671,7 @@ function end_frame(): void { return; }
         }
         link_result.expect("link executable");
 
-        let status = Command::new(&exe_path)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, &[]);
         assert_eq!(
             status.code(),
             Some(27),
@@ -3706,9 +3798,7 @@ function end_frame(): void { return; }
             .link_executable_for_i32_noarg_function("main", &exe_path, &link_config)
             .expect("link immediate axis layout without runtime library");
 
-        let status = Command::new(&exe_path)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, &[]);
         assert_eq!(
             status.code(),
             Some(0),
@@ -3756,9 +3846,7 @@ function end_frame(): void { return; }
         }
         link_result.expect("link executable");
 
-        let status = Command::new(&exe_path)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, &[]);
         assert_eq!(
             status.code(),
             Some(10),
@@ -4020,9 +4108,7 @@ function end_frame(): void { return; }
         }
         link_result.expect("link executable");
 
-        let status = Command::new(&exe_path)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, &[]);
         assert_eq!(
             status.code(),
             Some(7),
@@ -4062,9 +4148,7 @@ function end_frame(): void { return; }
             }
         }
         link_result.expect("link first executable");
-        let first_status = Command::new(&exe_first)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_first.display()));
+        let first_status = run_signed_test_executable(&exe_first, &[]);
         assert_eq!(first_status.code(), Some(5));
 
         process.upsert_file("sample.stasis", "function main(): i32 { return 9; }\n");
@@ -4073,9 +4157,7 @@ function end_frame(): void { return; }
         process
             .link_executable_for_i32_noarg_function("main", &exe_second, &link_config)
             .expect("link second executable");
-        let second_status = Command::new(&exe_second)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_second.display()));
+        let second_status = run_signed_test_executable(&exe_second, &[]);
         assert_eq!(second_status.code(), Some(9));
 
         let _ = fs::remove_dir_all(&temp_root);

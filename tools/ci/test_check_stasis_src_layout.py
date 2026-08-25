@@ -27,6 +27,19 @@ class StasisSourceDiscoveryTests(unittest.TestCase):
 
             self.assertEqual(discovered, [application])
 
+    def test_excludes_generated_and_cache_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            application = root / "sample" / "main.stasis"
+            application.parent.mkdir(parents=True)
+            application.write_text("function main(): i32 { return 0; }\n", encoding="utf-8")
+            for ignored in ("build", "dist", "target", ".stasis_cache", "node_modules"):
+                generated = root / ignored / "copied.stasis"
+                generated.parent.mkdir(parents=True)
+                generated.write_text("invalid generated copy", encoding="utf-8")
+
+            self.assertEqual(discover_stasis_files([root]), [application])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,8 @@
 param(
     [string]$Serial = $env:ANDROID_SERIAL,
     [string]$ArtifactRoot = "artifacts",
-    [int]$PerSeamTimeoutSeconds = 840
+    [string]$TestId = "",
+    [int]$PerSeamTimeoutSeconds = 660
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,24 +47,43 @@ $artifactRootPath = if ([System.IO.Path]::IsPathRooted($ArtifactRoot)) {
 }
 $seams = @(
     @{
+        TestId = "IT-020"
         Project = "samples/android_resource_restore_seam"
         Output = "android_resource_restore"
     },
     @{
+        TestId = "IT-017"
         Project = "samples/android_aot_seam"
         Output = "android_release_shell"
     },
     @{
+        TestId = "IT-018"
         Project = "samples/android_touch_seam"
         Output = "android_touch_roundtrip"
     },
     @{
+        TestId = "IT-019"
         Project = "samples/android_orientation_seam"
         Output = "android_orientation_metrics"
+    },
+    @{
+        TestId = "IT-021"
+        Project = "samples/android_packaged_assets_seam"
+        Output = "android_packaged_assets"
     }
 )
 
-foreach ($seam in $seams) {
+$validTestIds = @($seams | ForEach-Object { $_.TestId })
+if ($TestId -and $TestId -notin $validTestIds) {
+    throw "Unknown Android release-shell seam test ID '$TestId'; expected one of $($validTestIds -join ', ')"
+}
+$selectedSeams = if ($TestId) {
+    @($seams | Where-Object { $_.TestId -eq $TestId })
+} else {
+    $seams
+}
+
+foreach ($seam in $selectedSeams) {
     & (Join-Path $scriptRoot "test_release_shell.ps1") `
         -Serial $Serial `
         -ProjectPath $seam.Project `

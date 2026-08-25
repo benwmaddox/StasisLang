@@ -19,8 +19,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 crossterm = "0.28"
-stasis_dynload = { path = "../../crates/stasis_dynload" }
+stasis_dynload = { path = "../../crates/stasis_dynload", features = ["network"] }
 stasis_assets = { path = "../../crates/stasis_assets" }
+stasis_network = { path = "../../crates/stasis_network" }
 stasis_ai = { path = "../../crates/stasis_ai" }
 image.workspace = true
 atomic-write-file.workspace = true

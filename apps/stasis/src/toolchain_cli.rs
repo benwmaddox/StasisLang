@@ -4,11 +4,13 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
     load_and_apply_play_data_bindings_for_test, resolve_play_data_binding_paths,
-    run_live_in_process, run_live_in_process_with_data, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
+    run_live_in_process, run_live_in_process_with_data, run_play_in_process_with_replay,
+    run_play_in_process_with_window_title, run_self_host_aot_cli_with_options, LiveRunConfig,
+    PlayReplayConfig, StasisTestRunSession,
 };
 use stasis_assets::{
-    load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
+    load_project_asset_manifest, prepare_asset_bundle, AssetFormat, AssetLimits, AudioEncoding,
+    FontEncoding, SpriteEncoding, DEFAULT_ASSET_MANIFEST_PATH,
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
@@ -434,8 +436,16 @@ enum ToolchainCommand {
         #[arg(long, default_value_t = MAX_STATE_SNAPSHOT_BYTES as u64)]
         mobile_budget_bytes: u64,
     },
-    /// Replay support is reserved until the replay runtime lands.
-    Replay,
+    /// Replay one recorded HostFrame-diff session through tick and render.
+    Replay {
+        #[arg(value_name = "RECORDING")]
+        recording: PathBuf,
+        /// Override the manifest entry with a project-relative .stasis file.
+        #[arg(long, value_name = "ENTRY")]
+        entry: Option<PathBuf>,
+        #[arg(long, default_value_t = 16_000)]
+        tick_sleep_us: u64,
+    },
     /// Replay verification is reserved until the replay runtime lands.
     Verify,
     /// Print the installed toolchain version.
@@ -658,6 +668,13 @@ impl PackageTarget {
         matches!(self, Self::AndroidArm64 | Self::AndroidX86_64)
     }
 
+    fn is_mobile(self) -> bool {
+        matches!(
+            self,
+            Self::AndroidArm64 | Self::AndroidX86_64 | Self::IosArm64
+        )
+    }
+
     fn android_abi(self) -> Option<&'static str> {
         match self {
             Self::AndroidArm64 => Some("arm64-v8a"),
@@ -680,6 +697,24 @@ struct ProjectManifest {
     vendor: Option<VendorManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     android: Option<AndroidProjectManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<ProjectCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web: Option<WebProjectManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct ProjectCapabilities {
+    #[serde(default)]
+    network: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebProjectManifest {
+    #[serde(default)]
+    entry: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loading_font: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -713,6 +748,8 @@ impl ProjectManifest {
             stdlib: None,
             vendor: None,
             android: None,
+            capabilities: None,
+            web: None,
         }
     }
 
@@ -730,6 +767,11 @@ impl ProjectManifest {
             ("output", self.output.as_str()),
         ] {
             validate_relative_path(field, Path::new(value))?;
+        }
+        if let Some(web) = &self.web {
+            if !web.entry.is_empty() {
+                validate_relative_path("web.entry", Path::new(&web.entry))?;
+            }
         }
         if self
             .stdlib
@@ -785,6 +827,11 @@ impl ProjectManifest {
                 })
             {
                 return Err("android version_name is invalid".to_string());
+            }
+        }
+        if let Some(web) = &self.web {
+            if let Some(path) = web.loading_font.as_deref() {
+                normalize_web_loading_font_path(path)?;
             }
         }
         Ok(())
@@ -977,7 +1024,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Package { .. } => "package",
         ToolchainCommand::PackageMobile { .. } => "package-mobile",
         ToolchainCommand::Inspect { .. } => "inspect",
-        ToolchainCommand::Replay => "replay",
+        ToolchainCommand::Replay { .. } => "replay",
         ToolchainCommand::Verify => "verify",
         ToolchainCommand::Version => "version",
         ToolchainCommand::EditorInfo => "editor-info",
@@ -1009,10 +1056,6 @@ fn execute(
         ToolchainCommand::Version => Ok(version_result()),
         ToolchainCommand::EditorInfo => editor_info_result(),
         ToolchainCommand::Env => env_result(workspace_arg.as_deref()),
-        ToolchainCommand::Replay => Err(
-            "replay is unavailable in toolchain 0.1; no replay runtime contract is implemented"
-                .to_string(),
-        ),
         ToolchainCommand::Verify => Err(
             "verify is unavailable in toolchain 0.1; no replay verification contract is implemented"
                 .to_string(),
@@ -1117,6 +1160,16 @@ fn execute(
                     }
                 }
                 ToolchainCommand::Record { args } => record::execute(&workspace, args),
+                ToolchainCommand::Replay {
+                    recording,
+                    entry,
+                    tick_sleep_us,
+                } => replay_workspace(
+                    &workspace,
+                    &recording,
+                    entry.as_deref(),
+                    tick_sleep_us,
+                ),
                 ToolchainCommand::Lsp { stdio } => {
                     if json_output {
                         Err("--json cannot be combined with lsp; LSP owns stdout".to_string())
@@ -1442,6 +1495,26 @@ fn load_workspace_with_vendor_gate(
     let mut manifest: ProjectManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
     manifest.validate()?;
+    if let Some(web) = manifest.web.as_ref() {
+        if let Some(path) = web.loading_font.as_deref() {
+            let normalized = normalize_web_loading_font_path(path)?;
+            let font = root.join(&normalized);
+            let assets_root = root.join("assets").canonicalize().ok();
+            let resolved_font = font.canonicalize().ok();
+            if !font.is_file()
+                || !assets_root.as_deref().is_some_and(|assets| {
+                    resolved_font
+                        .as_deref()
+                        .is_some_and(|resolved| resolved.starts_with(assets))
+                })
+            {
+                return Err(format!(
+                    "web.loading_font must name an existing file under assets: {}",
+                    font.display()
+                ));
+            }
+        }
+    }
     if manifest.stdlib.as_deref() == Some("toolchain") {
         sync_toolchain_stdlib(&root)?;
     }
@@ -2376,6 +2449,40 @@ fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
     Ok(CommandResult::success(
         "graphical watch session ended",
         json!({"backend": "jit", "headless": false, "watch": true}),
+    ))
+}
+
+fn replay_workspace(
+    workspace: &Workspace,
+    recording: &Path,
+    entry: Option<&Path>,
+    tick_sleep_us: u64,
+) -> Result<CommandResult, String> {
+    let entry = entry.unwrap_or_else(|| Path::new(&workspace.manifest.entry));
+    validate_relative_path("replay entry", entry)?;
+    let entry = workspace.root.join(entry);
+    validate_workspace_destination(workspace, "replay entry", &entry)?;
+    let recording = absolute_path(recording)?;
+    run_play_in_process_with_replay(
+        &entry,
+        Some(&workspace.root),
+        None,
+        None,
+        None,
+        tick_sleep_us,
+        None,
+        Some(&workspace.manifest.name),
+        None,
+        None,
+        PlayReplayConfig::Replay(recording.clone()),
+    )?;
+    Ok(CommandResult::success(
+        format!("replayed {}", recording.display()),
+        json!({
+            "backend": "jit",
+            "recording": recording,
+            "verified": true,
+        }),
     ))
 }
 
@@ -3820,9 +3927,14 @@ fn package_web_workspace(
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
 
     let assembled = (|| -> Result<(bool, usize, usize), String> {
-        let files =
-            load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
-        let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
+        let web_entry = workspace
+            .manifest
+            .web
+            .as_ref()
+            .and_then(|web| (!web.entry.is_empty()).then_some(web.entry.as_str()))
+            .unwrap_or(workspace.manifest.entry.as_str());
+        let files = load_workshop_edit_workspace(&workspace.root, Path::new(web_entry))?;
+        let files = workshop_reachable_files(&files, Path::new(web_entry))?;
         let mut process = WasmProcess::new();
         process.set_debug_symbols(development_build);
         process.set_project_root(display_path(&workspace.root))?;
@@ -3867,6 +3979,14 @@ fn package_web_workspace(
             })
             .transpose()?;
         stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
+        stage_web_loading_font(workspace, &staging_root)?;
+        let loading_font = workspace
+            .manifest
+            .web
+            .as_ref()
+            .and_then(|web| web.loading_font.as_deref())
+            .map(normalize_web_loading_font_path)
+            .transpose()?;
         let runtime_config = web_runtime_config(workspace, &process, development_build);
         let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
@@ -3874,7 +3994,11 @@ fn package_web_workspace(
         let audio_enabled = process.imported_symbols().iter().any(|symbol| {
             symbol.starts_with("audio_") || symbol.contains("_audio_") || symbol == "web_play_tone"
         });
-        let linked_runtime = link_web_runtime(&process, audio_enabled);
+        let network_enabled = process
+            .imported_symbols()
+            .iter()
+            .any(|symbol| symbol.starts_with("stasis_web_network_"));
+        let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled);
         let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
@@ -3883,9 +4007,73 @@ fn package_web_workspace(
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
         fs::write(
             staging_root.join("index.html"),
-            web_index_html(&workspace.manifest.name, development_build),
+            web_index_html(
+                &workspace.manifest.name,
+                development_build,
+                loading_font.as_deref(),
+            ),
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
+
+        if workspace
+            .manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        {
+            let mut bundle_files = vec![
+                stasis_network::BundleFile {
+                    path: "index.html".to_string(),
+                    mime: "text/html; charset=utf-8".to_string(),
+                    bytes: fs::read(staging_root.join("index.html"))
+                        .map_err(|error| format!("failed to read staged web index: {error}"))?,
+                },
+                stasis_network::BundleFile {
+                    path: "game.js".to_string(),
+                    mime: "text/javascript".to_string(),
+                    bytes: runtime_bundle.as_bytes().to_vec(),
+                },
+                stasis_network::BundleFile {
+                    path: "game.wasm".to_string(),
+                    mime: "application/wasm".to_string(),
+                    bytes: wasm.bytes.clone(),
+                },
+            ];
+            if let Some(retained) = retained.as_ref() {
+                let mut assets = retained.assets.iter().collect::<Vec<_>>();
+                assets.sort_by(|left, right| left.entry.path.cmp(&right.entry.path));
+                for asset in assets {
+                    let staged_path = staging_root.join(&asset.entry.path);
+                    let bytes = fs::read(&staged_path).map_err(|error| {
+                        format!(
+                            "failed to read staged network guest asset {}: {error}",
+                            staged_path.display()
+                        )
+                    })?;
+                    bundle_files.push(stasis_network::BundleFile {
+                        path: asset.entry.path.clone(),
+                        mime: network_guest_asset_mime(&asset.entry.format).to_string(),
+                        bytes,
+                    });
+                }
+            }
+            let bundle = stasis_network::StaticBundle::new(bundle_files)
+                .map_err(|error| format!("failed to create network guest bundle: {error}"))?;
+            let encoded = bundle
+                .encode()
+                .map_err(|error| format!("failed to encode network guest bundle: {error}"))?;
+            fs::write(staging_root.join("network_guest.bundle"), &encoded)
+                .map_err(|error| format!("failed to write network guest bundle: {error}"))?;
+            write_json_file(
+                &staging_root.join("network_guest.bundle.json"),
+                &json!({
+                    "format": "stasis.static_bundle.v1",
+                    "path": "network_guest.bundle",
+                    "length": encoded.len(),
+                    "sha256": format!("{:x}", Sha256::digest(&encoded)),
+                }),
+            )?;
+        }
 
         write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
         Ok((wasm.optimized, wasm.input_bytes, wasm.bytes.len()))
@@ -3920,6 +4108,18 @@ fn package_web_workspace(
             "wasm_output_bytes": wasm_output_bytes,
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
+            "web_entry": workspace
+                .manifest
+                .web
+                .as_ref()
+                .and_then(|web| (!web.entry.is_empty()).then_some(web.entry.as_str()))
+                .unwrap_or(workspace.manifest.entry.as_str()),
+            "network_guest_bundle": workspace
+                .manifest
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.network)
+                .then_some("network_guest.bundle"),
         }),
     ))
 }
@@ -3974,7 +4174,7 @@ fn publish_package_output(staging_root: &Path, package_root: &Path) -> Result<()
     Ok(())
 }
 
-fn web_index_html(title: &str, development_build: bool) -> String {
+fn web_index_html(title: &str, development_build: bool, loading_font: Option<&str>) -> String {
     let (hud_style, hud) = if development_build {
         (
             "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
@@ -3983,10 +4183,34 @@ fn web_index_html(title: &str, development_build: bool) -> String {
     } else {
         ("", "")
     };
+    let (loading_font_face, loading_font_family) = loading_font
+        .map(|path| {
+            let (mime, format) = match Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("ttf") => ("ttf", "truetype"),
+                Some("otf") => ("otf", "opentype"),
+                Some("woff") => ("woff", "woff"),
+                Some("woff2") => ("woff2", "woff2"),
+                _ => ("font", "font"),
+            };
+            (
+                format!(
+                    "<link rel=\"preload\" href=\"{path}\" as=\"font\" type=\"font/{mime}\" crossorigin>\n  <style>@font-face {{ font-family: \"StasisLoadingFont\"; src: url(\"{path}\") format(\"{format}\"); font-display: block; }}</style>"
+                ),
+                "\"StasisLoadingFont\", ".to_string(),
+            )
+        })
+        .unwrap_or_else(|| (String::new(), String::new()));
     WEB_INDEX_HTML
         .replace("__STASIS_GAME_TITLE__", title)
         .replace("__STASIS_PERFORMANCE_HUD_STYLE__", hud_style)
         .replace("__STASIS_PERFORMANCE_HUD__", hud)
+        .replace("__STASIS_LOADING_FONT_FACE__", &loading_font_face)
+        .replace("__STASIS_LOADING_FONT_FAMILY__", &loading_font_family)
 }
 
 fn lean_web_runtime(process: &WasmProcess) -> Option<String> {
@@ -4018,11 +4242,12 @@ fn lean_web_runtime(process: &WasmProcess) -> Option<String> {
     Some(WEB_MINIMAL_RUNTIME_JS.replace("__STASIS_IMPORTS__", &imports.join("\n")))
 }
 
-fn link_web_runtime(process: &WasmProcess, audio_enabled: bool) -> String {
+fn link_web_runtime(process: &WasmProcess, audio_enabled: bool, network_enabled: bool) -> String {
     if let Some(runtime) = lean_web_runtime(process) {
         return runtime;
     }
-    strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled)
+    let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled);
+    strip_web_runtime_feature(&runtime, "network", network_enabled)
 }
 
 fn strip_web_runtime_feature(source: &str, feature: &str, enabled: bool) -> String {
@@ -4206,6 +4431,27 @@ fn stage_workspace_assets(
     Ok(())
 }
 
+fn network_guest_asset_mime(format: &AssetFormat) -> &'static str {
+    match format {
+        AssetFormat::Sprite { encoding, .. } => match encoding {
+            SpriteEncoding::Png => "image/png",
+            SpriteEncoding::Svg => "image/svg+xml",
+            SpriteEncoding::Jpeg => "image/jpeg",
+            SpriteEncoding::Webp => "image/webp",
+        },
+        AssetFormat::Audio { encoding, .. } => match encoding {
+            AudioEncoding::Wav => "audio/wav",
+            AudioEncoding::Ogg => "audio/ogg",
+            AudioEncoding::Mp3 => "audio/mpeg",
+            AudioEncoding::M4a => "audio/mp4",
+        },
+        AssetFormat::Font { encoding } => match encoding {
+            FontEncoding::Ttf => "font/ttf",
+            FontEncoding::Otf => "font/otf",
+        },
+    }
+}
+
 fn package_mobile_command(
     workspace: &Workspace,
     target: MobilePackageTarget,
@@ -4240,6 +4486,28 @@ fn package_mobile_command(
     )
 }
 
+fn validate_mobile_network_guest_contract(
+    manifest: &ProjectManifest,
+    target: PackageTarget,
+) -> Result<(), String> {
+    if target.is_mobile()
+        && manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        && manifest
+            .web
+            .as_ref()
+            .map_or(true, |web| web.entry.is_empty())
+    {
+        return Err(
+            "network-enabled mobile projects must declare web.entry for the guest bundle"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn package_mobile_workspace(
     workspace: &Workspace,
     target: PackageTarget,
@@ -4250,6 +4518,20 @@ fn package_mobile_workspace(
     profile_warmup_frames: u32,
     profile_sample_frames: u32,
 ) -> Result<CommandResult, String> {
+    validate_mobile_network_guest_contract(&workspace.manifest, target)?;
+    if matches!(target, PackageTarget::IosArm64)
+        && workspace
+            .manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        && !cfg!(target_os = "macos")
+    {
+        return Err(
+            "network-enabled iOS packaging requires a macOS host with Xcode and the iOS Rust toolchain"
+                .to_string(),
+        );
+    }
     if matches!(target, PackageTarget::AndroidX86_64) && !development_build {
         return Err(
             "android-x86_64 is a test-only emulator target; pass --development-build".to_string(),
@@ -4326,7 +4608,34 @@ fn package_mobile_workspace(
                 String::from_utf8_lossy(&child.stderr).trim()
             ));
         }
-        assemble_mobile_shell(workspace, target, &aot_root, &staging_root, &provenance)?;
+        let web_guest_bundle = if workspace
+            .manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        {
+            let web_guest_root = staging_root.join("web-guest");
+            package_web_workspace(workspace, &web_guest_root, development_build)?;
+            Some(web_guest_root.join("network_guest.bundle"))
+        } else {
+            None
+        };
+        if workspace
+            .manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        {
+            stage_mobile_network_library(&staging_root, target)?;
+        }
+        assemble_mobile_shell(
+            workspace,
+            target,
+            &aot_root,
+            &staging_root,
+            &provenance,
+            web_guest_bundle.as_deref(),
+        )?;
         Ok(())
     })();
     if let Err(error) = child_result {
@@ -4357,12 +4666,275 @@ fn package_mobile_workspace(
     ))
 }
 
+fn stage_mobile_network_library(staging_root: &Path, target: PackageTarget) -> Result<(), String> {
+    match target {
+        PackageTarget::IosArm64 => stage_ios_network_library(staging_root),
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+            stage_android_network_library(staging_root, target)
+        }
+        PackageTarget::Desktop | PackageTarget::Web => {
+            Err("network static library requires a mobile target".to_string())
+        }
+    }
+}
+
+fn network_support_target(target: PackageTarget) -> Option<&'static str> {
+    match target {
+        PackageTarget::AndroidArm64 => Some("android-arm64"),
+        PackageTarget::AndroidX86_64 => Some("android-x86_64"),
+        PackageTarget::IosArm64 => Some("ios-arm64"),
+        PackageTarget::Desktop | PackageTarget::Web => None,
+    }
+}
+
+fn bundled_network_artifacts_for_executable(
+    executable: &Path,
+    target: PackageTarget,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let target_name = network_support_target(target)
+        .ok_or_else(|| "network static library requires a mobile target".to_string())?;
+    let executable_dir = executable.parent().unwrap_or(Path::new("."));
+    for support_root in [
+        executable_dir.join("mobile/network"),
+        executable_dir.join("../mobile/network"),
+    ] {
+        let library = support_root.join(target_name).join("libstasis_network.a");
+        let header = support_root.join("include/stasis_network.h");
+        if library.is_file() && header.is_file() {
+            return Ok(Some((library, header)));
+        }
+    }
+    Ok(None)
+}
+
+fn stage_network_artifacts(
+    staging_root: &Path,
+    target: PackageTarget,
+    library: &Path,
+    header: &Path,
+) -> Result<(), String> {
+    let destination = match target {
+        PackageTarget::IosArm64 => staging_root.join("ios/network"),
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+            staging_root.join("android/app/src/main/cpp/network")
+        }
+        PackageTarget::Desktop | PackageTarget::Web => {
+            return Err("network static library requires a mobile target".to_string())
+        }
+    };
+    fs::create_dir_all(destination.join("include"))
+        .map_err(|error| format!("failed to create network staging: {error}"))?;
+    copy_file(library, &destination.join("libstasis_network.a"))?;
+    copy_file(header, &destination.join("include/stasis_network.h"))?;
+    Ok(())
+}
+
+fn source_network_workspace() -> Option<PathBuf> {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)?
+        .to_path_buf();
+    (source_root.join("Cargo.toml").is_file()
+        && source_root
+            .join("crates/stasis_network/Cargo.toml")
+            .is_file())
+    .then_some(source_root)
+}
+
+fn stage_android_network_library(staging_root: &Path, target: PackageTarget) -> Result<(), String> {
+    if let Some((library, header)) = bundled_network_artifacts_for_executable(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+        target,
+    )? {
+        return stage_network_artifacts(staging_root, target, &library, &header);
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing prebuilt mobile/network network libraries; reinstall the complete release archive"
+            .to_string()
+    })?;
+    let (rust_target, api_level) = match target {
+        PackageTarget::AndroidArm64 => ("aarch64-linux-android", "aarch64-linux-android26"),
+        PackageTarget::AndroidX86_64 => ("x86_64-linux-android", "x86_64-linux-android26"),
+        _ => return Err("network static library requires an Android target".to_string()),
+    };
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut command = Command::new(cargo);
+    command.current_dir(&source_root).args([
+        "build",
+        "-p",
+        "stasis_network",
+        "--target",
+        rust_target,
+        "--release",
+    ]);
+    let Some(clang) = android_ndk_clang("clang") else {
+        return Err(
+            "network-enabled Android packaging requires an installed Android NDK clang".to_string(),
+        );
+    };
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str(&format!("-C link-arg=--target={api_level}"));
+    let linker_key = format!(
+        "CARGO_TARGET_{}_LINKER",
+        rust_target.replace('-', "_").to_ascii_uppercase()
+    );
+    command
+        .env(linker_key, &clang)
+        .env(format!("CC_{rust_target}"), &clang)
+        .env(format!("CXX_{rust_target}"), &clang)
+        .env(
+            format!("CFLAGS_{rust_target}"),
+            format!("--target={api_level}"),
+        )
+        .env("RUSTFLAGS", rustflags);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to build stasis_network for Android: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Android stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = source_root.join(format!("target/{rust_target}/release/libstasis_network.a"));
+    if !library.is_file() {
+        return Err(format!(
+            "Android stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    stage_network_artifacts(
+        staging_root,
+        target,
+        &library,
+        &source_root.join("crates/stasis_network/include/stasis_network.h"),
+    )
+}
+
+fn stage_ios_network_library(staging_root: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "network-enabled iOS packaging requires a macOS host with Xcode and the iOS Rust toolchain"
+                .to_string(),
+        );
+    }
+    if let Some((library, header)) = bundled_network_artifacts_for_executable(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+        PackageTarget::IosArm64,
+    )? {
+        return stage_network_artifacts(staging_root, PackageTarget::IosArm64, &library, &header);
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing prebuilt mobile/network network libraries; reinstall the complete release archive"
+            .to_string()
+    })?;
+    let rust_target = "aarch64-apple-ios";
+    let xcrun = Command::new("xcrun")
+        .args(["--sdk", "iphoneos", "--find", "clang"])
+        .output()
+        .map_err(|error| {
+            format!(
+                "network-enabled iOS packaging requires Xcode's iphoneos clang (run xcrun --sdk iphoneos --find clang): {error}"
+            )
+        })?;
+    if !xcrun.status.success() {
+        return Err(format!(
+            "network-enabled iOS packaging requires Xcode's iphoneos clang (xcrun failed): {}",
+            String::from_utf8_lossy(&xcrun.stderr).trim()
+        ));
+    }
+    let clang = String::from_utf8_lossy(&xcrun.stdout).trim().to_string();
+    if clang.is_empty() {
+        return Err(
+            "network-enabled iOS packaging requires Xcode's iphoneos clang (xcrun returned no path)"
+                .to_string(),
+        );
+    }
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(&source_root)
+        .args([
+            "build",
+            "-p",
+            "stasis_network",
+            "--target",
+            rust_target,
+            "--release",
+        ])
+        .env("CARGO_TARGET_AARCH64_APPLE_IOS_LINKER", &clang)
+        .env("CC_aarch64_apple_ios", &clang)
+        .env("CXX_aarch64_apple_ios", &clang);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to build stasis_network for iOS: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "iOS stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = source_root.join(format!("target/{rust_target}/release/libstasis_network.a"));
+    if !library.is_file() {
+        return Err(format!(
+            "iOS stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    stage_network_artifacts(
+        staging_root,
+        PackageTarget::IosArm64,
+        &library,
+        &source_root.join("crates/stasis_network/include/stasis_network.h"),
+    )
+}
+
+fn android_ndk_clang(executable: &str) -> Option<PathBuf> {
+    let sdk = env::var_os("ANDROID_NDK_HOME")
+        .or_else(|| env::var_os("ANDROID_NDK_ROOT"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            let sdk = env::var_os("ANDROID_SDK_ROOT")
+                .or_else(|| env::var_os("ANDROID_HOME"))
+                .map(PathBuf::from)?;
+            let mut versions = fs::read_dir(sdk.join("ndk"))
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            versions.sort();
+            versions.pop()
+        })?;
+    let directory = sdk.join("toolchains/llvm/prebuilt/windows-x86_64/bin");
+    let exe_path = directory.join(format!("{executable}.exe"));
+    if exe_path.is_file() {
+        return Some(exe_path);
+    }
+    let path = directory.join(executable);
+    if path.is_file() {
+        return Some(path);
+    }
+    let cmd_path = directory.join(format!("{executable}.cmd"));
+    cmd_path.is_file().then_some(cmd_path)
+}
+
 fn assemble_mobile_shell(
     workspace: &Workspace,
     target: PackageTarget,
     aot_root: &Path,
     staging_root: &Path,
     provenance: &Value,
+    web_guest_bundle: Option<&Path>,
 ) -> Result<(), String> {
     let mobile_assets = bundled_mobile_assets_dir()?;
     let runtime = bundled_mobile_runtime_dir()?;
@@ -4417,6 +4989,19 @@ fn assemble_mobile_shell(
         .map(|manifest| manifest.version_name.as_str())
         .unwrap_or("1.0");
     let jni_package = package_id.replace('.', "_");
+    let network_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network);
+    let local_network_usage = if network_enabled && matches!(target, PackageTarget::IosArm64) {
+        format!(
+            "    <key>NSLocalNetworkUsageDescription</key><string>{} uses your local network so nearby friends can join games hosted on this device.</string>\n",
+            app_name
+        )
+    } else {
+        String::new()
+    };
     let replacements = [
         ("@STASIS_APP_NAME@", app_name),
         ("@STASIS_PACKAGE_ID@", package_id.as_str()),
@@ -4429,10 +5014,33 @@ fn assemble_mobile_shell(
         ),
         ("@STASIS_ANDROID_VERSION_NAME@", android_version_name),
         ("@STASIS_ANDROID_ABI@", target.android_abi().unwrap_or("")),
+        (
+            "@STASIS_NETWORK_ENABLED@",
+            if network_enabled { "1" } else { "0" },
+        ),
+        (
+            "@STASIS_NETWORK_PERMISSION@",
+            if network_enabled {
+                "    <uses-permission android:name=\"android.permission.INTERNET\" />\n"
+            } else {
+                ""
+            },
+        ),
+        ("@STASIS_LOCAL_NETWORK_USAGE@", local_network_usage.as_str()),
     ];
     replace_shell_tokens(&common_destination, &replacements)?;
     replace_shell_tokens(&platform_destination, &replacements)?;
     copy_required_dir(&asset_source, &asset_destination)?;
+    if let Some(bundle) = web_guest_bundle {
+        copy_file(bundle, &asset_destination.join("network_guest.bundle"))?;
+        let metadata = bundle.with_extension("bundle.json");
+        if metadata.is_file() {
+            copy_file(
+                &metadata,
+                &asset_destination.join("network_guest.bundle.json"),
+            )?;
+        }
+    }
     write_json_file(&asset_destination.join(PACKAGE_PROVENANCE_NAME), provenance)?;
     fs::write(
         asset_destination.join("stasis_asset_base.marker"),
@@ -4446,8 +5054,45 @@ fn assemble_mobile_shell(
         ));
     }
     if matches!(target, PackageTarget::IosArm64) {
-        write_ios_object_config(aot_root, &staging_root.join("ios/StasisMobile.xcconfig"))?;
+        write_ios_object_config(
+            aot_root,
+            &staging_root.join("ios/StasisMobile.xcconfig"),
+            network_enabled,
+        )?;
     }
+    let network_library = if network_enabled {
+        Some(match target {
+            PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                "android/app/src/main/cpp/network/libstasis_network.a"
+            }
+            PackageTarget::IosArm64 => "ios/network/libstasis_network.a",
+            PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
+        })
+    } else {
+        None
+    };
+    let network_header = if network_enabled {
+        Some(match target {
+            PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                "android/app/src/main/cpp/network/include/stasis_network.h"
+            }
+            PackageTarget::IosArm64 => "ios/network/include/stasis_network.h",
+            PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
+        })
+    } else {
+        None
+    };
+    let network_guest_bundle = if network_enabled {
+        Some(match target {
+            PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                "android/app/src/main/assets/stasis_game/network_guest.bundle"
+            }
+            PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game/network_guest.bundle",
+            PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
+        })
+    } else {
+        None
+    };
     fs::write(
         staging_root.join("stasis_mobile_package.json"),
         serde_json::to_string_pretty(&json!({
@@ -4469,6 +5114,10 @@ fn assemble_mobile_shell(
                 PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game",
                 PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
+            "network": network_enabled,
+            "network_library": network_library,
+            "network_header": network_header,
+            "network_guest_bundle": network_guest_bundle,
         }))
         .map_err(|error| format!("failed to encode mobile package manifest: {error}"))?
             + "\n",
@@ -4823,7 +5472,11 @@ fn replace_shell_tokens(root: &Path, replacements: &[(&str, &str)]) -> Result<()
     Ok(())
 }
 
-fn write_ios_object_config(aot_root: &Path, output: &Path) -> Result<(), String> {
+fn write_ios_object_config(
+    aot_root: &Path,
+    output: &Path,
+    network_enabled: bool,
+) -> Result<(), String> {
     let mut objects = Vec::new();
     for entry in fs::read_dir(aot_root)
         .map_err(|error| format!("failed to read {}: {error}", aot_root.display()))?
@@ -4849,10 +5502,29 @@ fn write_ios_object_config(aot_root: &Path, output: &Path) -> Result<(), String>
         })
         .collect::<Vec<_>>()
         .join(" ");
+    let network_flags = if network_enabled {
+        " STASIS_NETWORK_ENABLED=1"
+    } else {
+        ""
+    };
+    let network_headers = if network_enabled {
+        " $(PROJECT_DIR)/network/include"
+    } else {
+        ""
+    };
+    let network_library = if network_enabled {
+        " $(PROJECT_DIR)/network/libstasis_network.a"
+    } else {
+        ""
+    };
     fs::write(
         output,
         format!(
-            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited) STASIS_GRAPHICS_SDL_ONLY=1\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image {object_flags}\n"
+            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited) STASIS_GRAPHICS_SDL_ONLY=1{network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
+            network_flags = network_flags,
+            network_headers = network_headers,
+            network_library = network_library,
+            object_flags = object_flags,
         ),
     )
     .map_err(|error| format!("failed to write {}: {error}", output.display()))
@@ -5837,6 +6509,52 @@ fn validate_relative_path(field: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn stage_web_loading_font(workspace: &Workspace, destination_root: &Path) -> Result<(), String> {
+    let Some(path) = workspace
+        .manifest
+        .web
+        .as_ref()
+        .and_then(|web| web.loading_font.as_deref())
+    else {
+        return Ok(());
+    };
+    let path = normalize_web_loading_font_path(path)?;
+    let source = workspace.root.join(&path);
+    let destination = destination_root.join(&path);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    copy_file(&source, &destination)
+}
+
+fn normalize_web_loading_font_path(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let value = value.strip_prefix('/').unwrap_or(value);
+    if value.is_empty() || value.contains('\\') {
+        return Err(
+            "web.loading_font must be an assets-relative path such as /assets/ui.ttf".to_string(),
+        );
+    }
+    let path = Path::new(value);
+    validate_relative_path("web.loading_font", path)?;
+    let normalized = value.replace('\\', "/");
+    if !normalized.starts_with("assets/") || normalized.len() == "assets/".len() {
+        return Err("web.loading_font must point to a file under assets/".to_string());
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "web.loading_font must have a web font extension".to_string())?;
+    if !matches!(extension.as_str(), "ttf" | "otf" | "woff" | "woff2") {
+        return Err(
+            "web.loading_font must use a .ttf, .otf, .woff, or .woff2 extension".to_string(),
+        );
+    }
+    Ok(normalized)
+}
+
 fn validate_optional_workspace_path(
     workspace: &Workspace,
     field: &str,
@@ -5937,14 +6655,14 @@ mod tests {
 
     #[test]
     fn release_web_index_omits_performance_hud() {
-        let release = web_index_html("release-game", false);
+        let release = web_index_html("release-game", false, None);
         assert!(!release.contains("stasis-hud"));
         assert!(!release.contains("__STASIS_"));
         assert!(release.contains(r#"<h1 id="stasis-loading-title">release-game</h1>"#));
         assert!(release.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
         assert!(release.contains(r#"id="stasis-loading" role="status" aria-live="polite""#));
 
-        let development = web_index_html("development-game", true);
+        let development = web_index_html("development-game", true, None);
         assert!(development.contains(r#"id="stasis-hud""#));
         assert!(development.contains(r#"<h1 id="stasis-loading-title">development-game</h1>"#));
         for html in [&release, &development] {
@@ -5953,6 +6671,45 @@ mod tests {
             assert!(html.contains("inset: 0; margin: 0;"));
             assert!(html.contains("white-space: pre-wrap;"));
             assert!(html.contains("#stasis-error:empty { display: none; }"));
+        }
+    }
+
+    #[test]
+    fn configured_web_loading_font_is_preloaded_and_used_by_shell() {
+        let html = web_index_html("font-game", false, Some("assets/fonts/ui.ttf"));
+        assert!(html.contains(
+            r#"<link rel="preload" href="assets/fonts/ui.ttf" as="font" type="font/ttf" crossorigin>"#
+        ));
+        assert!(html.contains(
+            r#"@font-face { font-family: "StasisLoadingFont"; src: url("assets/fonts/ui.ttf") format("truetype");"#
+        ));
+        assert!(
+            html.contains(r#"font-family: "StasisLoadingFont", Georgia, "Times New Roman", serif"#)
+        );
+        assert!(!html.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn web_loading_font_paths_accept_rooted_assets_and_reject_escape() {
+        assert_eq!(
+            normalize_web_loading_font_path("/assets/fonts/ui.ttf").unwrap(),
+            "assets/fonts/ui.ttf"
+        );
+        assert_eq!(
+            normalize_web_loading_font_path("assets/fonts/ui.woff2").unwrap(),
+            "assets/fonts/ui.woff2"
+        );
+        for path in [
+            "../assets/fonts/ui.ttf",
+            "assets/../outside.ttf",
+            "assets/fonts/ui.txt",
+            "fonts/ui.ttf",
+            "assets/fonts\\ui.ttf",
+        ] {
+            assert!(
+                normalize_web_loading_font_path(path).is_err(),
+                "accepted invalid web loading font path {path}"
+            );
         }
     }
 
@@ -6098,7 +6855,7 @@ mod tests {
         }
         assert!(!memory.contains_key("unrelated"));
 
-        let runtime = link_web_runtime(&process, false);
+        let runtime = link_web_runtime(&process, false, false);
         assert!(runtime.contains("const sysMemcpyU8 ="));
         assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
     }
@@ -6168,6 +6925,16 @@ mod tests {
             .join()
             .expect("join terminal")
             .expect("terminal result");
+    }
+
+    #[test]
+    fn web_network_runtime_is_feature_stripped_for_normal_games() {
+        let stripped = strip_web_runtime_feature(WEB_RUNTIME_JS, "network", false);
+        assert!(!stripped.contains("stasis_web_network_connect"));
+        assert!(!stripped.contains("stasis_web_network_checkpoint"));
+        let linked = strip_web_runtime_feature(WEB_RUNTIME_JS, "network", true);
+        assert!(linked.contains("stasis_web_network_connect"));
+        assert!(linked.contains("stasis_web_network_checkpoint"));
     }
 
     #[test]
@@ -7027,6 +7794,31 @@ mod tests {
     }
 
     #[test]
+    fn replay_accepts_a_recording_and_optional_entry() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "replay",
+            "runs/game.replay.json",
+            "--entry",
+            "src/alternate.stasis",
+            "--tick-sleep-us",
+            "0",
+        ])
+        .expect("parse replay command");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::Replay {
+                recording,
+                entry: Some(entry),
+                tick_sleep_us: 0,
+            } if recording == PathBuf::from("runs/game.replay.json")
+                && entry == PathBuf::from("src/alternate.stasis")
+        ));
+    }
+
+    #[test]
     fn tui_entry_is_optional_and_accepts_an_override() {
         let manifest_entry =
             ToolchainCli::try_parse_from(["stasis", "tui"]).expect("parse manifest TUI entry");
@@ -7314,6 +8106,7 @@ mod tests {
             &aot,
             &android,
             &provenance,
+            None,
         )
         .expect("assemble Android shell");
         let android_cmake =
@@ -7344,7 +8137,8 @@ mod tests {
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
         assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
-            .expect("read shared mobile main");
+            .expect("read shared mobile main")
+            .replace("\r\n", "\n");
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
         assert!(mobile_main.contains("Stasis seam:"));
         assert!(mobile_main.contains("seam_state_checksum"));
@@ -7353,6 +8147,17 @@ mod tests {
         assert!(mobile_main.contains("restore_failures"));
         assert!(mobile_main.contains("frame == 1"));
         assert!(mobile_main.contains("frame % 30 == 0"));
+        assert!(mobile_main.contains(
+            "} else {\n#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
+        ));
+        assert!(mobile_main.contains("stasis_mobile_network_present_join_url();"));
+        assert!(mobile_main.contains("if (seam_test_id != NULL && seam_test_id[0] != '\\0')"));
+        assert!(mobile_main.contains("STASIS_ASSET_MANIFEST_SHA256"));
+        assert!(mobile_main.contains("audio_queued_before"));
+        assert!(mobile_main.contains("audio_nonzero_after_prefix"));
+        assert!(mobile_main.contains("audio_replay_matches"));
+        assert!(mobile_main.contains("stasis_set_recording_audio_config(1)"));
+        assert!(!mobile_main.contains("}\n#if defined(STASIS_ENABLE_SEAM_TESTS)\n    else if"));
         let android_activity = fs::read_to_string(
             android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
         )
@@ -7360,6 +8165,8 @@ mod tests {
         assert!(android_activity.contains("stasis.seam_test_id"));
         assert!(android_activity.contains("BuildConfig.STASIS_SEAM_TESTS"));
         assert!(android_activity.contains("nativeSetSeamTestId"));
+        assert!(android_activity.contains("nativeSetAssetManifestSha256"));
+        assert!(android_activity.contains("getManifestSha256"));
         assert!(android_activity
             .contains("private static final String STASIS_ANDROID_ORIENTATION = \"fullSensor\";"));
         assert!(!android_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
@@ -7386,6 +8193,7 @@ mod tests {
             &aot,
             &android_landscape,
             &provenance,
+            None,
         )
         .expect("assemble landscape Android shell");
         let landscape_activity = fs::read_to_string(
@@ -7397,10 +8205,9 @@ mod tests {
             "private static final String STASIS_ANDROID_ORIENTATION = \"sensorLandscape\";"
         ));
         assert!(!landscape_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
-        let landscape_manifest = fs::read_to_string(
-            android_landscape.join("android/app/src/main/AndroidManifest.xml"),
-        )
-        .expect("read landscape Android manifest");
+        let landscape_manifest =
+            fs::read_to_string(android_landscape.join("android/app/src/main/AndroidManifest.xml"))
+                .expect("read landscape Android manifest");
         assert!(landscape_manifest.contains("android:screenOrientation=\"sensorLandscape\""));
 
         let android_jni =
@@ -7415,6 +8222,8 @@ mod tests {
                 .expect("read Android CMake project");
         assert!(android_cmake.contains("STASIS_ENABLE_SEAM_TESTS"));
         assert!(android_jni.contains("STASIS_SEAM_TEST_ID"));
+        assert!(android_jni.contains("nativeSetAssetManifestSha256"));
+        assert!(android_jni.contains("STASIS_ASSET_MANIFEST_SHA256"));
         let runtime_header = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.h"))
             .expect("read shared mobile runtime header");
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
@@ -7426,7 +8235,9 @@ mod tests {
         assert!(android
             .join("runtime/stasis_renderer_lifecycle.h")
             .is_file());
-        assert!(android.join("runtime/stasis_performance_metrics.h").is_file());
+        assert!(android
+            .join("runtime/stasis_performance_metrics.h")
+            .is_file());
         assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
             .is_file());
@@ -7444,8 +8255,23 @@ mod tests {
             android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
         )
         .expect("read Android activity");
-        assert!(java.contains(".stasis_game.staging"));
-        assert!(java.contains("new File(root, \".\")"));
+        let asset_cache = fs::read_to_string(
+            android.join("android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java"),
+        )
+        .expect("read Android asset cache");
+        assert!(asset_cache.contains("CACHE_SCHEMA = \"stasis.android.asset-cache\""));
+        assert!(asset_cache.contains("MAX_MARKER_BYTES"));
+        assert!(asset_cache.contains("publicationInterceptor.beforeInstall"));
+        assert!(asset_cache.contains("inventoryMatches"));
+        assert!(asset_cache.contains("rename(backup, root)"));
+        assert!(asset_cache.contains("BACKUP_ALT_NAME"));
+        assert!(asset_cache.contains("MAX_COPIED_TREE_BYTES"));
+        assert!(asset_cache.contains("child.equals(\".\")"));
+        assert!(java.contains("StasisAssetCache.Result"));
+        assert!(java.contains("packageInfo.lastUpdateTime"));
+        assert!(java.contains("INVALID_ASSET_ROOT"));
+        assert!(java.contains("Asset cache mode="));
+        assert!(java.contains("packaged_read_bytes="));
         assert!(java.contains("event.getPointerCount() >= 3"));
         assert!(java.contains("nativeReadPerformanceMetrics"));
         assert!(java.contains("nativeSetPerformanceMetricsEnabled(show)"));
@@ -7456,9 +8282,8 @@ mod tests {
         assert!(java.contains("appendWorkload"));
         assert!(!java.contains("percentile("));
         assert!(java.contains("performanceHud.setSingleLine(false)"));
-        assert!(java.contains("verifyAssetManifest(staging)"));
-        assert!(java.contains("manifestVersion != 1 && manifestVersion != 2"));
-        assert!(java.contains("Asset verification failed before runtime startup"));
+        assert!(java.contains("new AndroidAssetSource(getAssets())"));
+        assert!(java.contains("Asset cache preparation failed before runtime startup"));
         assert!(java.contains("setOnApplyWindowInsetsListener"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
@@ -7477,8 +8302,15 @@ mod tests {
 
         let ios = root.join("ios-package");
         fs::create_dir_all(&ios).expect("create iOS staging");
-        assemble_mobile_shell(&workspace, PackageTarget::IosArm64, &aot, &ios, &provenance)
-            .expect("assemble iOS shell");
+        assemble_mobile_shell(
+            &workspace,
+            PackageTarget::IosArm64,
+            &aot,
+            &ios,
+            &provenance,
+            None,
+        )
+        .expect("assemble iOS shell");
         let project = fs::read_to_string(ios.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
             .expect("read Xcode project");
         let config =
@@ -7502,8 +8334,198 @@ mod tests {
         assert!(ios
             .join("ios/StasisMobile/stasis_game/stasis_asset_base.marker")
             .is_file());
+        let ios_info = fs::read_to_string(ios.join("ios/StasisMobile/Info.plist"))
+            .expect("read non-network iOS Info.plist");
+        assert!(!ios_info.contains("NSLocalNetworkUsageDescription"));
+        assert!(!config.contains("STASIS_NETWORK_ENABLED"));
+        assert!(!config.contains("network/libstasis_network.a"));
         assert!(!project.contains("@STASIS_"));
 
+        let mut network_workspace = workspace.clone();
+        network_workspace.manifest.capabilities = Some(ProjectCapabilities { network: true });
+        network_workspace.manifest.web = Some(WebProjectManifest {
+            entry: "src/main.stasis".to_string(),
+            loading_font: None,
+        });
+        let ios_network = root.join("ios-network-package");
+        fs::create_dir_all(ios_network.join("ios/network/include"))
+            .expect("create iOS network staging fixture");
+        fs::write(
+            ios_network.join("ios/network/libstasis_network.a"),
+            b"fixture static library",
+        )
+        .expect("write iOS network library fixture");
+        fs::write(
+            ios_network.join("ios/network/include/stasis_network.h"),
+            b"/* fixture network header */\n",
+        )
+        .expect("write iOS network header fixture");
+        let guest_bundle = root.join("network_guest.bundle");
+        fs::write(&guest_bundle, b"fixture guest bundle")
+            .expect("write network guest bundle fixture");
+        fs::write(
+            guest_bundle.with_extension("bundle.json"),
+            b"{\"schema\":\"stasis.network_guest_bundle.v1\"}\n",
+        )
+        .expect("write network guest metadata fixture");
+        assemble_mobile_shell(
+            &network_workspace,
+            PackageTarget::IosArm64,
+            &aot,
+            &ios_network,
+            &provenance,
+            Some(&guest_bundle),
+        )
+        .expect("assemble network-enabled iOS shell");
+        let network_config = fs::read_to_string(ios_network.join("ios/StasisMobile.xcconfig"))
+            .expect("read network iOS config");
+        assert!(network_config.contains("STASIS_NETWORK_ENABLED=1"));
+        assert!(network_config.contains("$(PROJECT_DIR)/network/include"));
+        assert!(network_config.contains("$(PROJECT_DIR)/network/libstasis_network.a"));
+        let network_info = fs::read_to_string(ios_network.join("ios/StasisMobile/Info.plist"))
+            .expect("read network iOS Info.plist");
+        assert!(network_info.contains("NSLocalNetworkUsageDescription"));
+        assert!(network_info.contains("mobile_smoke uses your local network"));
+        let network_receipt: Value = serde_json::from_str(
+            &fs::read_to_string(ios_network.join("stasis_mobile_package.json"))
+                .expect("read network iOS package receipt"),
+        )
+        .expect("parse network iOS package receipt");
+        assert_eq!(network_receipt["network"], true);
+        assert_eq!(
+            network_receipt["network_library"],
+            "ios/network/libstasis_network.a"
+        );
+        assert_eq!(
+            network_receipt["network_header"],
+            "ios/network/include/stasis_network.h"
+        );
+        assert_eq!(
+            network_receipt["network_guest_bundle"],
+            "ios/StasisMobile/stasis_game/network_guest.bundle"
+        );
+        let network_asset_root = ios_network.join("ios/StasisMobile/stasis_game");
+        assert!(network_asset_root.join("network_guest.bundle").is_file());
+        assert!(network_asset_root
+            .join("network_guest.bundle.json")
+            .is_file());
+        assert!(network_asset_root.join("assets/manifest.json").is_file());
+        assert!(ios_network
+            .join("ios/network/libstasis_network.a")
+            .is_file());
+        assert!(ios_network
+            .join("ios/network/include/stasis_network.h")
+            .is_file());
+        let network_main = fs::read_to_string(ios_network.join("ios/StasisMobile/main.m"))
+            .expect("read network iOS SDL3 main wrapper");
+        assert_eq!(network_main.trim(), "#include <SDL3/SDL_main.h>");
+        let network_presenter =
+            fs::read_to_string(ios_network.join("ios/StasisMobile/stasis_ios_network.m"))
+                .expect("read network iOS native presenter");
+        assert!(network_presenter.contains("stasis_mobile_network_present_join_url"));
+        assert!(network_presenter.contains("stasis_mobile_network_copy_join_url"));
+        assert!(network_presenter.contains("alertControllerWithTitle:@\"mobile_smoke\""));
+        assert!(network_presenter.contains("message:joinURL"));
+        assert!(!network_presenter.contains("@STASIS_"));
+        assert!(!network_presenter.contains("Join Maddox"));
+        assert!(!network_presenter.contains("NSLog"));
+        assert!(!network_presenter.contains("printf"));
+        assert!(
+            fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
+                .expect("read network iOS Xcode project")
+                .contains("stasis_ios_network.m in Sources")
+        );
+
+        let android_network = root.join("android-network-package");
+        fs::create_dir_all(android_network.join("android/app/src/main/cpp/network/include"))
+            .expect("create Android network staging fixture");
+        fs::write(
+            android_network.join("android/app/src/main/cpp/network/libstasis_network.a"),
+            b"fixture Android static library",
+        )
+        .expect("write Android network library fixture");
+        fs::write(
+            android_network.join("android/app/src/main/cpp/network/include/stasis_network.h"),
+            b"/* fixture Android network header */\n",
+        )
+        .expect("write Android network header fixture");
+        assemble_mobile_shell(
+            &network_workspace,
+            PackageTarget::AndroidArm64,
+            &aot,
+            &android_network,
+            &provenance,
+            Some(&guest_bundle),
+        )
+        .expect("assemble network-enabled Android shell");
+        let android_network_cmake =
+            fs::read_to_string(android_network.join("android/app/src/main/cpp/CMakeLists.txt"))
+                .expect("read network Android CMake");
+        assert!(android_network_cmake.contains("STASIS_NETWORK_ENABLED 1"));
+        let android_network_manifest =
+            fs::read_to_string(android_network.join("android/app/src/main/AndroidManifest.xml"))
+                .expect("read network Android manifest");
+        assert!(android_network_manifest.contains("android.permission.INTERNET"));
+        let android_network_receipt: Value = serde_json::from_str(
+            &fs::read_to_string(android_network.join("stasis_mobile_package.json"))
+                .expect("read network Android package receipt"),
+        )
+        .expect("parse network Android package receipt");
+        assert_eq!(
+            android_network_receipt["network_library"],
+            "android/app/src/main/cpp/network/libstasis_network.a"
+        );
+        assert_eq!(
+            android_network_receipt["network_header"],
+            "android/app/src/main/cpp/network/include/stasis_network.h"
+        );
+        assert_eq!(
+            android_network_receipt["network_guest_bundle"],
+            "android/app/src/main/assets/stasis_game/network_guest.bundle"
+        );
+        assert!(android_network
+            .join("android/app/src/main/assets/stasis_game/network_guest.bundle")
+            .is_file());
+
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn bundled_network_artifacts_resolve_from_a_relocated_toolchain_root() {
+        let root = temp_dir("relocated_network_support");
+        let executable = root.join("bin/stasis");
+        let support = root.join("mobile/network");
+        fs::create_dir_all(support.join("ios-arm64"))
+            .expect("create relocated iOS support directory");
+        fs::create_dir_all(support.join("include"))
+            .expect("create relocated network include directory");
+        fs::create_dir_all(executable.parent().expect("executable parent"))
+            .expect("create relocated executable directory");
+        fs::write(&executable, b"relocated stasis executable").expect("write executable fixture");
+        fs::write(
+            support.join("ios-arm64/libstasis_network.a"),
+            b"relocated iOS network library",
+        )
+        .expect("write relocated network library");
+        fs::write(
+            support.join("include/stasis_network.h"),
+            b"/* relocated network header */\n",
+        )
+        .expect("write relocated network header");
+        let (library, header) =
+            bundled_network_artifacts_for_executable(&executable, PackageTarget::IosArm64)
+                .expect("resolve relocated network support")
+                .expect("relocated support artifacts");
+        assert_eq!(
+            fs::canonicalize(library).expect("canonicalize relocated library"),
+            fs::canonicalize(support.join("ios-arm64/libstasis_network.a"))
+                .expect("canonicalize expected library")
+        );
+        assert_eq!(
+            fs::canonicalize(header).expect("canonicalize relocated header"),
+            fs::canonicalize(support.join("include/stasis_network.h"))
+                .expect("canonicalize expected header")
+        );
         remove_temp(&root);
     }
 
@@ -7614,6 +8636,30 @@ mod tests {
         let mut invalid_version = valid;
         invalid_version.android.as_mut().unwrap().version_name = "1.0'debug".to_string();
         assert!(invalid_version.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_validates_network_guest_entry_contract() {
+        let mut manifest = ProjectManifest::new("network_game".to_string());
+        manifest.capabilities = Some(ProjectCapabilities { network: true });
+        assert!(manifest.validate().is_ok());
+        assert!(
+            validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_err()
+        );
+        assert!(
+            validate_mobile_network_guest_contract(&manifest, PackageTarget::IosArm64).is_err()
+        );
+        assert!(validate_mobile_network_guest_contract(&manifest, PackageTarget::Web).is_ok());
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest_main.stasis".to_string(),
+            loading_font: None,
+        });
+        assert!(manifest.validate().is_ok());
+        assert!(
+            validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_ok()
+        );
+        manifest.web.as_mut().unwrap().entry = "../guest.stasis".to_string();
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

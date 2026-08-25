@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+use stasis_network::StaticBundle;
+
 const CONTINUE_LOOP_PARITY: &str =
     include_str!("../../../tests/stasis/seams/continue_loop_parity.stasis");
 const ROOTED_WEB_ASSET: &str = "/assets/smoke.svg";
@@ -520,11 +523,32 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
             .any(|window| window == b"player_x"),
         "local release retained development-only Wasm symbols"
     );
-    let runtime = fs::read_to_string(output.join("game.js")).expect("game.js");
+    let runtime = fs::read_to_string(output.join("game.js"))
+        .expect("game.js")
+        .replace("\r\n", "\n");
     let index = fs::read_to_string(output.join("index.html")).expect("index.html");
     assert!(index.contains(r#"<title>web_export_smoke</title>"#));
     assert!(index.contains(r#"<h1 id="stasis-loading-title">web_export_smoke</h1>"#));
     assert!(index.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
+    assert_eq!(index.matches("viewport-fit=cover").count(), 1);
+    assert_eq!(index.matches("safe-area-inset-").count(), 8);
+    assert_eq!(index.matches("100svh").count(), 1);
+    assert_eq!(index.matches("100dvh").count(), 1);
+    assert_eq!(index.matches("<script>\n    (() => {").count(), 1);
+    assert_eq!(
+        index
+            .matches("      addEventListener(\"resize\", fit)")
+            .count(),
+        1
+    );
+    assert_eq!(
+        index
+            .matches("      addEventListener(\"orientationchange\", fit)")
+            .count(),
+        1
+    );
+    assert_eq!(index.matches("visualViewport.addEventListener").count(), 2);
+    assert_eq!(index.matches("new MutationObserver(fit)").count(), 1);
     assert!(!index.contains("stasis-audio"));
     assert!(!index.contains("Enable sound"));
     for expected in [
@@ -584,13 +608,95 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
 }
 
 #[test]
+fn network_web_package_embeds_retained_nested_assets_only() {
+    let root = repo_root();
+    let source = root.join("samples/windows_launch_smoke");
+    let workspace = root.join(format!("build/network-bundle-fixture-{}", stamp()));
+    copy_tree(&source, &workspace);
+
+    fs::create_dir_all(workspace.join("assets/fonts")).expect("create nested font directory");
+    fs::copy(
+        workspace.join("assets/smoke.ttf"),
+        workspace.join("assets/fonts/ui.ttf"),
+    )
+    .expect("copy retained font fixture");
+    let source_path = workspace.join("main.stasis");
+    let source_text = fs::read_to_string(&source_path)
+        .expect("read network fixture source")
+        .replace("assets/smoke.ttf", "assets/fonts/ui.ttf");
+    assert!(source_text.contains("load_font(\"assets/fonts/ui.ttf\""));
+    fs::write(&source_path, source_text).expect("rewrite retained font path");
+
+    let unused_path = workspace.join("assets/fonts/unused.ttf");
+    fs::copy(workspace.join("assets/smoke.ttf"), &unused_path).expect("copy unused font fixture");
+    let unused = fs::read(&unused_path).expect("read unused font fixture");
+    let manifest_path = workspace.join("assets/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read fixture asset manifest"))
+            .expect("parse fixture asset manifest");
+    let assets = manifest["assets"].as_array_mut().expect("asset entries");
+    assets
+        .iter_mut()
+        .find(|asset| asset["id"] == "smoke_font")
+        .expect("font entry")["path"] = serde_json::Value::String("assets/fonts/ui.ttf".into());
+    assets.push(serde_json::json!({
+        "id": "unused_asset",
+        "path": "assets/fonts/unused.ttf",
+        "content_sha256": format!("{:x}", Sha256::digest(&unused)),
+        "format": {"kind": "font", "encoding": "ttf"},
+        "dependencies": []
+    }));
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("encode fixture asset manifest"),
+    )
+    .expect("write fixture asset manifest");
+
+    let mut project: serde_json::Value = serde_json::from_slice(
+        &fs::read(workspace.join("stasis.json")).expect("read fixture project manifest"),
+    )
+    .expect("parse fixture project manifest");
+    project["capabilities"] = serde_json::json!({"network": true});
+    project["web"] = serde_json::json!({"entry": "main.stasis"});
+    fs::write(
+        workspace.join("stasis.json"),
+        serde_json::to_vec_pretty(&project).expect("encode fixture project manifest"),
+    )
+    .expect("write fixture project manifest");
+
+    let relative_output = PathBuf::from(format!("build/network-bundle-output-{}", stamp()));
+    let output = package(&workspace, &relative_output);
+    let bundle = StaticBundle::decode(
+        &fs::read(output.join("network_guest.bundle")).expect("read network guest bundle"),
+    )
+    .expect("decode network guest bundle");
+    for core in ["index.html", "game.js", "game.wasm"] {
+        assert!(
+            bundle.get(core).is_some(),
+            "missing core bundle file {core}"
+        );
+    }
+    let expected_font = fs::read(output.join("assets/fonts/ui.ttf")).expect("read staged font");
+    let font = bundle
+        .get("assets/fonts/ui.ttf")
+        .expect("retained nested font");
+    assert_eq!(font.mime, "font/ttf");
+    assert_eq!(font.bytes, expected_font);
+    assert!(bundle.get("assets/fonts/unused.ttf").is_none());
+
+    fs::remove_dir_all(&workspace).expect("clean network fixture");
+}
+
+#[test]
 fn minimal_pong_and_standard_reference_omit_audio_and_input() {
     let workspace = repo_root().join("samples/pong_web_minimal");
     let relative_output = PathBuf::from(format!("build/web-package-test-{}", stamp()));
     let output = package(&workspace, &relative_output);
 
     let wasm = fs::read(output.join("game.wasm")).expect("minimal Pong Wasm");
-    let runtime = fs::read_to_string(output.join("game.js")).expect("minimal Pong runtime");
+    let runtime = fs::read_to_string(output.join("game.js"))
+        .expect("minimal Pong runtime")
+        .replace("\r\n", "\n");
     let index = fs::read_to_string(output.join("index.html")).expect("minimal Pong index");
     for reachable in ["main", "tick", "render", "web_draw_rect"] {
         assert!(
@@ -724,6 +830,78 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     assert!(output.join("assets/smoke.ttf").is_file());
 
     fs::remove_dir_all(&output).expect("clean existing game web package");
+}
+
+#[test]
+fn configured_web_loading_font_is_staged_and_missing_font_fails_check() {
+    let source = repo_root().join("samples/windows_launch_smoke");
+    let workspace = repo_root()
+        .join("build")
+        .join(format!("web-loading-font-test-{}", stamp()));
+    copy_tree(&source, &workspace);
+    let manifest_path = workspace.join("stasis.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read fixture manifest"))
+            .expect("parse fixture manifest");
+    manifest["web"] = serde_json::json!({"loading_font": "/assets/smoke.ttf"});
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize fixture manifest"),
+    )
+    .expect("write fixture manifest");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    let index = fs::read_to_string(output.join("index.html")).expect("read configured index");
+    assert!(index.contains(
+        r#"<link rel="preload" href="assets/smoke.ttf" as="font" type="font/ttf" crossorigin>"#
+    ));
+    assert!(index.contains(
+        r#"@font-face { font-family: "StasisLoadingFont"; src: url("assets/smoke.ttf") format("truetype");"#
+    ));
+    assert!(output.join("assets/smoke.ttf").is_file());
+    fs::remove_dir_all(&output).expect("clean configured package");
+
+    manifest["web"]["loading_font"] = serde_json::json!("assets/smoke.ttf");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize relative manifest"),
+    )
+    .expect("write relative manifest");
+    let relative_output = package(&workspace, Path::new("build/web-package-relative"));
+    let relative_index =
+        fs::read_to_string(relative_output.join("index.html")).expect("read relative index");
+    assert!(relative_index.contains(
+        r#"<link rel="preload" href="assets/smoke.ttf" as="font" type="font/ttf" crossorigin>"#
+    ));
+    assert!(relative_output.join("assets/smoke.ttf").is_file());
+    fs::remove_dir_all(&relative_output).expect("clean relative package");
+
+    manifest["web"]["loading_font"] = serde_json::json!("/assets/missing.ttf");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize missing manifest"),
+    )
+    .expect("write missing manifest");
+    let check = Command::new(env!("CARGO_BIN_EXE_stasis"))
+        .arg("check")
+        .arg("--workspace")
+        .arg(&workspace)
+        .output()
+        .expect("run missing loading font check");
+    assert!(
+        !check.status.success(),
+        "missing loading font unexpectedly passed"
+    );
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert!(
+        diagnostics.contains("web.loading_font must name an existing file"),
+        "missing font diagnostic was not clear: {diagnostics}"
+    );
+    fs::remove_dir_all(&workspace).expect("clean loading font fixture");
 }
 
 #[test]

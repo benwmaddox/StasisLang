@@ -1,0 +1,164 @@
+// Host-owned bounded realtime scheduler.  The host/JIT bridge owns one
+// session; submitting a transition never advances the guest simulation.
+
+function @extern("stasis_realtime_start") realtime_start_raw(
+    simulation_hz: i32,
+    presentation_hz: i32,
+    control_hz: i32,
+    input_delay_ticks: i32,
+    seats: i32
+): i32;
+function @extern("stasis_realtime_stop") realtime_stop_raw(): i32;
+function @extern("stasis_realtime_submit_payload") realtime_submit_payload_raw(payload: i32[], length: i32): i32;
+function @extern("stasis_realtime_build_payload") realtime_build_payload_raw(
+    out_payload: i32[],
+    capacity: i32,
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32
+): i32;
+function @extern("stasis_realtime_resync_required") realtime_resync_required_raw(): i32;
+function @extern("stasis_realtime_record_hash") realtime_record_hash_raw(tick: i32, hash_low: i32, hash_high: i32): i32;
+function @extern("stasis_realtime_apply_snapshot") realtime_apply_snapshot_raw(
+    revision: i32,
+    tick: i32,
+    seat_count: i32,
+    buttons: i32[],
+    axis_x: i32[],
+    axis_y: i32[],
+    sequences: i32[],
+    epochs: i32[],
+    active: i32[]
+): i32;
+function @extern("stasis_realtime_current_tick") realtime_current_tick_raw(): i32;
+function @extern("stasis_realtime_current_epoch") realtime_current_epoch_raw(seat: i32): i32;
+function @extern("stasis_realtime_schedule") realtime_schedule_raw(
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32
+): i32;
+function @extern("stasis_realtime_advance") realtime_advance_raw(): i32;
+function @extern("stasis_realtime_read_control") realtime_read_control_raw(seat: i32, out_buttons: i32[], out_axis_x: i32[], out_axis_y: i32[]): i32;
+function @extern("stasis_realtime_disconnect") realtime_disconnect_raw(seat: i32): i32;
+function @extern("stasis_realtime_reconnect") realtime_reconnect_raw(seat: i32): i32;
+function @extern("stasis_realtime_pause") realtime_pause_raw(): i32;
+function @extern("stasis_realtime_focus_lost") realtime_focus_lost_raw(): i32;
+function @extern("stasis_realtime_rematch") realtime_rematch_raw(): i32;
+
+function realtime_start(simulation_hz: i32, presentation_hz: i32, control_hz: i32, input_delay_ticks: i32, seats: i32): i32 {
+    return realtime_start_raw(simulation_hz, presentation_hz, control_hz, input_delay_ticks, seats);
+}
+
+function realtime_stop(): i32 {
+    return realtime_stop_raw();
+}
+
+function realtime_submit_payload(payload: i32[], length: i32): i32 {
+    if (length < 0 || length > payload.max_length) {
+        return -11;
+    }
+    return realtime_submit_payload_raw(payload, length);
+}
+
+function realtime_build_payload(
+    out_payload: i32[],
+    capacity: i32,
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32
+): i32 {
+    if (capacity < 0 || capacity > out_payload.max_length) {
+        return -11;
+    }
+    return realtime_build_payload_raw(out_payload, capacity, seat, epoch, sequence, apply_tick, buttons, axis_x, axis_y);
+}
+
+function realtime_resync_required(): i32 {
+    return realtime_resync_required_raw();
+}
+
+function realtime_record_hash(tick: i32, hash_low: i32, hash_high: i32): i32 {
+    return realtime_record_hash_raw(tick, hash_low, hash_high);
+}
+
+function realtime_apply_snapshot(
+    revision: i32,
+    tick: i32,
+    seat_count: i32,
+    buttons: i32[],
+    axis_x: i32[],
+    axis_y: i32[],
+    sequences: i32[],
+    epochs: i32[],
+    active: i32[]
+): i32 {
+    if (revision <= 0 || tick < 0 || seat_count <= 0 || seat_count > 8) {
+        return -1;
+    }
+    if (
+        buttons.max_length < seat_count
+        || axis_x.max_length < seat_count
+        || axis_y.max_length < seat_count
+        || sequences.max_length < seat_count
+        || epochs.max_length < seat_count
+        || active.max_length < seat_count
+    ) {
+        return -11;
+    }
+    return realtime_apply_snapshot_raw(revision, tick, seat_count, buttons, axis_x, axis_y, sequences, epochs, active);
+}
+
+function realtime_current_tick(): i32 {
+    return realtime_current_tick_raw();
+}
+
+function realtime_current_epoch(seat: i32): i32 {
+    return realtime_current_epoch_raw(seat);
+}
+
+function realtime_schedule(seat: i32, epoch: i32, sequence: i32, apply_tick: i32, buttons: i32, axis_x: i32, axis_y: i32): i32 {
+    return realtime_schedule_raw(seat, epoch, sequence, apply_tick, buttons, axis_x, axis_y);
+}
+
+function realtime_advance(): i32 {
+    return realtime_advance_raw();
+}
+
+function realtime_read_control(seat: i32, out_buttons: i32[], out_axis_x: i32[], out_axis_y: i32[]): i32 {
+    if (out_buttons.max_length < 1 || out_axis_x.max_length < 1 || out_axis_y.max_length < 1) {
+        return -11;
+    }
+    return realtime_read_control_raw(seat, out_buttons, out_axis_x, out_axis_y);
+}
+
+function realtime_disconnect(seat: i32): i32 {
+    return realtime_disconnect_raw(seat);
+}
+
+function realtime_reconnect(seat: i32): i32 {
+    return realtime_reconnect_raw(seat);
+}
+
+function realtime_pause(): i32 {
+    return realtime_pause_raw();
+}
+
+function realtime_focus_lost(): i32 {
+    return realtime_focus_lost_raw();
+}
+
+function realtime_rematch(): i32 {
+    return realtime_rematch_raw();
+}

@@ -2,19 +2,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::backend::emit::{
-    parse_simple_statements_with_debug, ParsedSimpleStatements, SimpleCondition, SimpleExpr,
-    SimpleStmt,
-};
 use crate::data_flow::{
     build_function_data_flow_summaries, compiler_local_types, validate_effect_contracts,
-    CompilerLocalType, FunctionDataFlowSummary,
+    validate_program_semantics, CompilerLocalType, FunctionDataFlowSummary,
 };
-use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
+use crate::frontend::body_parser::parse_simple_statements_with_debug;
+use crate::frontend::indexer::{hash_text, index_file_with_diagnostic, IndexedCallDependency};
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
-use crate::ir::hir::{Block, DebugStatement, FunctionHIR};
+use crate::ir::hir::{
+    DebugStatement, FunctionHIR, ParsedSimpleStatements, SimpleCondition, SimpleExpr, SimpleStmt,
+};
 
 pub type FunctionId = FnId;
 pub type FunctionStorageIndex = u32;
@@ -300,9 +299,6 @@ impl SymbolTable {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct DependencyGraph;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
     Frontend(String),
@@ -335,7 +331,6 @@ pub struct Compiler {
     files: Vec<SourceFile>,
     functions: Vec<FunctionMeta>,
     function_index_by_id: HashMap<FunctionId, usize>,
-    deps: DependencyGraph,
     types: TypeTable,
     parsed_statements: Vec<Vec<SimpleStmt>>,
     parsed_debug_statements: Vec<Vec<DebugStatement>>,
@@ -491,17 +486,17 @@ impl Compiler {
     where
         F: FnMut(&FunctionMeta, &FunctionHIR, &TypeTable) -> Result<(), String>,
     {
-        let index = self.index_pass()?;
+        let index = self.check()?;
         let emit = self.emit_pass_with(&mut emit_function)?;
         Ok(CompileReport { index, emit })
     }
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
-        self.index_pass_with_scope(false)
+        self.check()
     }
 
     pub fn check(&mut self) -> CompileResult<IndexPassResult> {
-        let index = self.index_pass_with_scope(true)?;
+        let index = self.analyze_program()?;
         let functions = self.functions.clone();
         for function in functions {
             if let Err(error) = self.lower_function_to_hir(&function) {
@@ -512,7 +507,7 @@ impl Compiler {
         Ok(index)
     }
 
-    fn index_pass_with_scope(&mut self, analyze_all: bool) -> CompileResult<IndexPassResult> {
+    fn analyze_program(&mut self) -> CompileResult<IndexPassResult> {
         self.last_source_diagnostic = None;
         if let Some(error) = self.pending_path_error.take() {
             return Err(CompileError::Frontend(error));
@@ -597,26 +592,28 @@ impl Compiler {
         self.parsed_statements.clear();
         self.parsed_debug_statements.clear();
         self.parsed_statement_ids.clear();
-        self.deps = DependencyGraph;
-
         let mut dependencies_by_function: Vec<Vec<IndexedCallDependency>> = Vec::new();
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
-            let indexed = match index_file(&self.files[file_id].content, &mut self.types) {
-                Ok(indexed) => indexed,
-                Err(message) => {
-                    let file = &self.files[file_id];
-                    self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                        file.path.clone(),
-                        0,
-                        file.content.len(),
-                        "",
-                        message.clone(),
-                    ));
-                    return Err(CompileError::Frontend(message));
-                }
-            };
+            let indexed =
+                match index_file_with_diagnostic(&self.files[file_id].content, &mut self.types) {
+                    Ok(indexed) => indexed,
+                    Err(diagnostic) => {
+                        let file = &self.files[file_id];
+                        self.last_source_diagnostic = Some(
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                diagnostic.start,
+                                diagnostic.end,
+                                diagnostic.symbol,
+                                diagnostic.message.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                        );
+                        return Err(CompileError::Frontend(diagnostic.message));
+                    }
+                };
             self.files[file_id].functions.clear();
             for indexed_function in indexed {
                 let storage_index = self.functions.len() as FunctionStorageIndex;
@@ -758,17 +755,13 @@ impl Compiler {
 
         self.parsed_statements = vec![Vec::new(); self.functions.len()];
         self.parsed_debug_statements = vec![Vec::new(); self.functions.len()];
-        let reachable = if analyze_all {
-            self.functions.iter().map(|function| function.id).collect()
-        } else {
-            crate::backend::reachability::compute_reachable_function_ids(
-                &self.functions,
-                &self.analysis_required_roots,
-            )
-        };
-        self.prepare_statement_artifacts(&reachable.iter().copied().collect::<Vec<_>>())?;
-
+        let all_functions = self
+            .functions
+            .iter()
+            .map(|function| function.id)
+            .collect::<Vec<_>>();
         self.propagate_dirty_from_signature_changes(&signature_changed_ids);
+        self.prepare_statement_artifacts(&all_functions)?;
         let dirty_functions = self
             .functions
             .iter()
@@ -838,13 +831,16 @@ impl Compiler {
                 let artifacts = match parse_simple_statements_with_debug(body, &mut self.types) {
                     Ok(artifacts) => artifacts,
                     Err(message) => {
-                        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                            file.path.clone(),
-                            function.source_range.start as usize,
-                            function.source_range.end as usize,
-                            function.name.clone(),
-                            message.clone(),
-                        ));
+                        self.last_source_diagnostic = Some(
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                function.source_range.start as usize,
+                                function.source_range.end as usize,
+                                function.name.clone(),
+                                message.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                        );
                         return Err(CompileError::Backend(message));
                     }
                 };
@@ -856,6 +852,7 @@ impl Compiler {
                     &self.files,
                     &self.functions,
                     &self.module_resolution,
+                    true,
                 ) {
                     return Err(CompileError::Frontend(message));
                 }
@@ -868,10 +865,28 @@ impl Compiler {
             self.parsed_statement_ids.insert(*function_id);
         }
         self.statement_cache = next_statement_cache;
+        let mut analysis_statements = self.parsed_statements.clone();
+        for function in self
+            .functions
+            .iter()
+            .filter(|function| self.parsed_statement_ids.contains(&function.id))
+        {
+            let file = &self.files[function.file_id as usize];
+            qualify_module_calls(
+                &mut analysis_statements[function.storage_index as usize],
+                &file.path,
+                &self.module_graph,
+                &self.files,
+                &self.functions,
+                &self.module_resolution,
+                false,
+            )
+            .map_err(CompileError::Frontend)?;
+        }
         let (summaries, context_fingerprint) = build_function_data_flow_summaries(
             &self.files,
             &self.functions,
-            &self.parsed_statements,
+            &analysis_statements,
             &self.parsed_statement_ids,
             &changed_function_ids,
             &self.types,
@@ -883,6 +898,7 @@ impl Compiler {
             self.data_flow_summaries = summaries.into();
         }
         self.data_flow_context_fingerprint = context_fingerprint;
+        self.refresh_resolved_dependency_graph()?;
         if let Err(violation) =
             validate_effect_contracts(&self.files, &self.functions, &self.data_flow_summaries)
         {
@@ -894,6 +910,84 @@ impl Compiler {
                 violation.message.clone(),
             ));
             return Err(CompileError::Frontend(violation.message));
+        }
+        if let Err((storage_index, message)) = validate_program_semantics(
+            &self.files,
+            &self.functions,
+            &analysis_statements,
+            &self.types,
+        ) {
+            if let Some(function) = self.functions.get(storage_index as usize).cloned() {
+                self.record_function_diagnostic(&function, &message);
+            }
+            return Err(CompileError::Frontend(message));
+        }
+        Ok(())
+    }
+
+    fn refresh_resolved_dependency_graph(&mut self) -> CompileResult<()> {
+        let mut resolved_calls = BTreeSet::new();
+        for function in &self.functions {
+            let mut lexical_targets_by_span = BTreeMap::<(u32, u32), BTreeSet<FunctionId>>::new();
+            for site in &function.call_sites {
+                lexical_targets_by_span
+                    .entry((site.source_range.start, site.source_range.end))
+                    .or_default()
+                    .insert(site.callee);
+            }
+            for targets in lexical_targets_by_span.values() {
+                if let Some(callee) = targets
+                    .iter()
+                    .copied()
+                    .next()
+                    .filter(|_| targets.len() == 1)
+                {
+                    resolved_calls.insert((function.id, callee));
+                }
+            }
+        }
+        for summary in self.data_flow_summaries.iter() {
+            let caller = self
+                .functions
+                .get(summary.internal_function_id as usize)
+                .ok_or_else(|| {
+                    CompileError::Invariant(
+                        "data-flow summary references missing caller".to_string(),
+                    )
+                })?
+                .id;
+            for callee_index in summary.resolved_callee_storage_indices() {
+                let callee = self
+                    .functions
+                    .get(callee_index as usize)
+                    .ok_or_else(|| {
+                        CompileError::Invariant(
+                            "data-flow summary references missing callee".to_string(),
+                        )
+                    })?
+                    .id;
+                resolved_calls.insert((caller, callee));
+            }
+        }
+
+        for function in &mut self.functions {
+            function.dependencies.clear();
+            function.dependents.clear();
+        }
+        for function in &mut self.functions {
+            let caller = function.id;
+            function
+                .call_sites
+                .retain(|site| resolved_calls.contains(&(caller, site.callee)));
+        }
+        for (caller, callee) in resolved_calls
+            .into_iter()
+            .filter(|(caller, callee)| caller != callee)
+        {
+            let caller_index = self.function_index(caller)?;
+            let callee_index = self.function_index(callee)?;
+            self.functions[caller_index].dependencies.push(callee);
+            self.functions[callee_index].dependents.push(caller);
         }
         Ok(())
     }
@@ -1005,6 +1099,10 @@ impl Compiler {
         self.last_source_diagnostic.as_ref()
     }
 
+    pub(crate) fn set_external_source_diagnostic(&mut self, diagnostic: crate::SourceDiagnostic) {
+        self.last_source_diagnostic = Some(diagnostic);
+    }
+
     fn record_function_diagnostic(&mut self, function: &FunctionMeta, message: &str) {
         let Some(file) = self.files.get(function.file_id as usize) else {
             return;
@@ -1059,13 +1157,6 @@ impl Compiler {
         let file = self.files.get(function.file_id as usize).ok_or_else(|| {
             CompileError::Invariant("function references missing file".to_string())
         })?;
-        let body = file
-            .content
-            .get(function.source_range.start as usize..function.source_range.end as usize)
-            .ok_or_else(|| {
-                CompileError::Invariant("function body range out of bounds".to_string())
-            })?
-            .to_string();
         let mut statements = self
             .parsed_statements
             .get(function.storage_index as usize)
@@ -1083,6 +1174,7 @@ impl Compiler {
             &self.files,
             &self.functions,
             &self.module_resolution,
+            true,
         )
         .map_err(CompileError::Frontend)?;
         let mut inline_candidates = Vec::new();
@@ -1109,6 +1201,7 @@ impl Compiler {
                 &self.files,
                 &self.functions,
                 &self.module_resolution,
+                true,
             )
             .map_err(CompileError::Frontend)?;
             let SimpleStmt::Return(expression) = qualified_body.remove(0) else {
@@ -1131,7 +1224,6 @@ impl Compiler {
         }
         inline_expression_calls(&mut statements, &inline_candidates, function.id);
         Ok(FunctionHIR {
-            blocks: vec![Block { source: body }],
             statements,
             debug_statements: self
                 .parsed_debug_statements
@@ -1247,6 +1339,7 @@ fn qualify_module_calls(
     files: &[SourceFile],
     functions: &[FunctionMeta],
     resolution: &ModuleResolutionIndex,
+    qualify_bare_calls: bool,
 ) -> Result<(), String> {
     fn expression(
         value: &mut SimpleExpr,
@@ -1255,17 +1348,38 @@ fn qualify_module_calls(
         files: &[SourceFile],
         functions: &[FunctionMeta],
         resolution: &ModuleResolutionIndex,
+        qualify_bare_calls: bool,
     ) -> Result<(), String> {
         match value {
-            SimpleExpr::Condition(condition) => {
-                condition_value(condition, caller_path, graph, files, functions, resolution)
-            }
-            SimpleExpr::IndexedPath { index, .. } => {
-                expression(index, caller_path, graph, files, functions, resolution)
-            }
+            SimpleExpr::Condition(condition) => condition_value(
+                condition,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
+            SimpleExpr::IndexedPath { index, .. } => expression(
+                index,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
             SimpleExpr::Call { target, args } => {
                 for argument in args.iter_mut() {
-                    expression(argument, caller_path, graph, files, functions, resolution)?;
+                    expression(
+                        argument,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
                 }
                 let qualifier = args.first().and_then(|argument| match argument {
                     SimpleExpr::Identifier(alias) => Some(alias.as_str()),
@@ -1281,7 +1395,10 @@ fn qualify_module_calls(
                     resolution,
                 ) {
                     Ok(resolution) => {
-                        if let Some(alias) = resolution.module_alias {
+                        if let Some(alias) = resolution
+                            .module_alias
+                            .filter(|_| qualify_bare_calls || resolution.consume_qualifier)
+                        {
                             *target = format!("{alias}.{target}");
                         }
                         if resolution.consume_qualifier {
@@ -1293,10 +1410,27 @@ fn qualify_module_calls(
                 }
             }
             SimpleExpr::Binary { lhs, rhs, .. } => {
-                expression(lhs, caller_path, graph, files, functions, resolution)?;
-                expression(rhs, caller_path, graph, files, functions, resolution)
+                expression(
+                    lhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                expression(
+                    rhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )
             }
-            SimpleExpr::Int(_)
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
@@ -1311,22 +1445,67 @@ fn qualify_module_calls(
         files: &[SourceFile],
         functions: &[FunctionMeta],
         resolution: &ModuleResolutionIndex,
+        qualify_bare_calls: bool,
     ) -> Result<(), String> {
         match condition {
             SimpleCondition::Comparison { lhs, rhs, .. } => {
-                expression(lhs, caller_path, graph, files, functions, resolution)?;
-                expression(rhs, caller_path, graph, files, functions, resolution)
+                expression(
+                    lhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                expression(
+                    rhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )
             }
-            SimpleCondition::Expr(value) => {
-                expression(value, caller_path, graph, files, functions, resolution)
-            }
+            SimpleCondition::Expr(value) => expression(
+                value,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
             SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-                condition_value(lhs, caller_path, graph, files, functions, resolution)?;
-                condition_value(rhs, caller_path, graph, files, functions, resolution)
+                condition_value(
+                    lhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                condition_value(
+                    rhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )
             }
-            SimpleCondition::Not(inner) => {
-                condition_value(inner, caller_path, graph, files, functions, resolution)
-            }
+            SimpleCondition::Not(inner) => condition_value(
+                inner,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
         }
     }
 
@@ -1337,6 +1516,7 @@ fn qualify_module_calls(
         files: &[SourceFile],
         functions: &[FunctionMeta],
         resolution: &ModuleResolutionIndex,
+        qualify_bare_calls: bool,
     ) -> Result<(), String> {
         match value {
             SimpleStmt::Let {
@@ -1346,20 +1526,48 @@ fn qualify_module_calls(
                 expression: value, ..
             }
             | SimpleStmt::Expr(value)
-            | SimpleStmt::Return(value) => {
-                expression(value, caller_path, graph, files, functions, resolution)
-            }
-            SimpleStmt::Convert { source, .. } => {
-                expression(source, caller_path, graph, files, functions, resolution)
-            }
+            | SimpleStmt::Return(value) => expression(
+                value,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
+            SimpleStmt::Convert { source, .. } => expression(
+                source,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
             SimpleStmt::If {
                 condition,
                 then_statements,
                 else_statements,
             } => {
-                condition_value(condition, caller_path, graph, files, functions, resolution)?;
+                condition_value(
+                    condition,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
                 for nested in then_statements {
-                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                    statement(
+                        nested,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
                 }
                 if let Some(nested) = else_statements {
                     for statement_value in nested {
@@ -1370,6 +1578,7 @@ fn qualify_module_calls(
                             files,
                             functions,
                             resolution,
+                            qualify_bare_calls,
                         )?;
                     }
                 }
@@ -1381,11 +1590,43 @@ fn qualify_module_calls(
                 step,
                 body_statements,
             } => {
-                statement(init, caller_path, graph, files, functions, resolution)?;
-                condition_value(condition, caller_path, graph, files, functions, resolution)?;
-                statement(step, caller_path, graph, files, functions, resolution)?;
+                statement(
+                    init,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                condition_value(
+                    condition,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                statement(
+                    step,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
                 for nested in body_statements {
-                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                    statement(
+                        nested,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
                 }
                 Ok(())
             }
@@ -1393,7 +1634,15 @@ fn qualify_module_calls(
                 body_statements, ..
             } => {
                 for nested in body_statements {
-                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                    statement(
+                        nested,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
                 }
                 Ok(())
             }
@@ -1409,6 +1658,7 @@ fn qualify_module_calls(
             files,
             functions,
             resolution,
+            qualify_bare_calls,
         )?;
     }
     Ok(())
@@ -1475,7 +1725,8 @@ fn inline_expression_calls(
 
     fn is_safe_argument(expression: &SimpleExpr) -> bool {
         match expression {
-            SimpleExpr::Int(_)
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
@@ -1595,7 +1846,8 @@ fn inline_expression_calls(
             SimpleExpr::Condition(value) => {
                 condition(value, candidates, caller_id, arguments, stack)
             }
-            SimpleExpr::Int(_)
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_) => {}
@@ -1694,7 +1946,9 @@ mod tests {
         let hir = compiler
             .lower_function_to_hir(&function)
             .expect("lower function");
-        let body = &hir.blocks[0].source;
+        let file = &compiler.files()[function.file_id as usize];
+        let body =
+            &file.content[function.source_range.start as usize..function.source_range.end as usize];
         let mut offsets = Vec::new();
         flatten_debug_offsets(&hir.debug_statements, &mut offsets);
         let starts = offsets
@@ -2613,30 +2867,6 @@ function @effects(allowed) tick(): void { clear(forbidden); }
     }
 
     #[test]
-    fn data_flow_skips_unreachable_unsupported_bodies() {
-        let mut compiler = Compiler::new();
-        compiler.upsert_file(
-            "dead.stasis",
-            r#"
-function main(): i32 { return 0; }
-function unreachable(): i32 { while (true) { return 1; } }
-"#,
-        );
-
-        compiler
-            .index_pass()
-            .expect("unreachable body stays deferred");
-        assert_eq!(
-            compiler
-                .function_data_flow_summaries()
-                .iter()
-                .map(|summary| summary.function.as_str())
-                .collect::<Vec<_>>(),
-            vec!["main"]
-        );
-    }
-
-    #[test]
     fn check_reports_errors_in_functions_unreachable_from_runtime_roots() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
@@ -2656,6 +2886,97 @@ function unreachable(): i32 { while (true) { return 1; } }
         assert_eq!(diagnostic.path, "dead.stasis");
         assert_eq!(diagnostic.symbol, "unreachable");
         assert!(diagnostic.message.contains("while"));
+    }
+
+    #[test]
+    fn check_type_checks_functions_unreachable_from_runtime_roots() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unfinished(): i32 { let value: i32 = true; return value; }
+"#,
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("unreachable body must be type checked");
+        assert!(format!("{error:?}").contains("expected i32 expression but found bool"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured unreachable-function diagnostic");
+        assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
+    fn check_validates_control_flow_in_functions_unreachable_from_runtime_roots() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unfinished(): void { continue; }
+"#,
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("unreachable body must validate loop control");
+        assert!(format!("{error:?}").contains("only valid inside loops"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured unreachable-function diagnostic");
+        assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
+    fn body_parse_failure_is_typed_parse_diagnostic_with_function_context() {
+        let mut compiler = Compiler::new();
+        let source = "function main(): void { let broken = ; }\n";
+        compiler.upsert_file("body_parse.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("malformed body statement must fail parsing");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("body parse diagnostic");
+        assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
+        assert_eq!(diagnostic.path, "body_parse.stasis");
+        assert_eq!(diagnostic.symbol, "main");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "{ let broken = ; }"
+        );
+        assert!(diagnostic.message.contains("expression"));
+    }
+
+    #[test]
+    fn check_distinguishes_typed_defaults_from_explicit_initializers() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "defaults.stasis",
+            r#"
+struct Enemy { hp: i32; }
+function main(): i32 { return 0; }
+function create_enemy(): Enemy { let enemy: Enemy; return enemy; }
+"#,
+        );
+        compiler.check().expect("typed default should be valid");
+
+        compiler.upsert_file(
+            "defaults.stasis",
+            r#"
+struct Enemy { hp: i32; }
+function main(): i32 { return 0; }
+function create_enemy(): Enemy { let enemy: Enemy = 0.0; return enemy; }
+"#,
+        );
+        let error = compiler
+            .check()
+            .expect_err("explicit float initializer should remain invalid");
+        assert!(format!("{error:?}").contains("expected Enemy expression but found f32"));
     }
 
     #[test]
@@ -2713,6 +3034,41 @@ function @effects(state) tick(): i32 { left(state); return 0; }
             .find(|summary| summary.function == "tick")
             .expect("tick summary");
         assert_eq!(tick.aggregate.writes, vec!["state.left", "state.right"]);
+    }
+
+    #[test]
+    fn local_and_parameter_types_shadow_same_named_globals_in_data_flow_validation() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "shadowing.stasis",
+            r#"
+global value: i32[2];
+global float_values: f32[2];
+
+function parameter_value(value: f32[2]): f32 {
+    value[0] = 1.0;
+    return value[0] + 1.0;
+}
+
+function local_value(): f32 {
+    let value: f32[2];
+    value[0] = 1.0;
+    return value[0];
+}
+
+function global_value(): i32 {
+    return value[0];
+}
+
+function main(): i32 {
+    return global_value() + f32_to_i32(parameter_value(float_values) + local_value());
+}
+"#,
+        );
+
+        compiler
+            .check()
+            .expect("locals and parameters must shadow same-named globals");
     }
 
     #[test]
@@ -2885,7 +3241,7 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
 
         compiler.upsert_file(
             "api.stasis",
-            "function value(input: i32): f32 { return to_f32(input); }",
+            "function value(input: i32): f32 { return i32_to_f32(input); }",
         );
         compiler.index_pass().expect("return edit index");
         let return_edit = compiler.functions()[0].clone();
@@ -3178,6 +3534,40 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
     }
 
     #[test]
+    fn resolved_overload_identity_drives_reachability() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "function value(input: i32): i32 { return input; } function value(input: f32): i32 { return 2; } function main(): i32 { return value(1); }",
+        );
+        compiler.check().expect("resolve overload graph");
+
+        let main = function_by_name(&compiler, "main");
+        let selected = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "value"
+                    && function.params[0] == crate::frontend::types::TYPE_ID_I32
+            })
+            .expect("selected i32 overload");
+        let rejected = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "value"
+                    && function.params[0] == crate::frontend::types::TYPE_ID_F32
+            })
+            .expect("unselected f32 overload");
+
+        assert_eq!(main.dependencies, vec![selected.id]);
+        let reachable =
+            crate::backend::reachability::compute_reachable_function_ids(compiler.functions(), &[]);
+        assert!(reachable.contains(&selected.id));
+        assert!(!reachable.contains(&rejected.id));
+    }
+
+    #[test]
     fn graph_refresh_removes_modules_that_leave_the_entry_closure() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
@@ -3284,7 +3674,7 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
         compiler.index_pass().expect("initial index");
         assert_eq!(compiler.statement_parse_count, 2);
 
-        compiler.upsert_file("helper.stasis", "function helper(): f32 { return 1.0; }");
+        compiler.upsert_file("helper.stasis", "function helper(): u32 { return 1; }");
         compiler.index_pass().expect("signature edit index");
         assert_eq!(compiler.statement_parse_count, 4);
     }

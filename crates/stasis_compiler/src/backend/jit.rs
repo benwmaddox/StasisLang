@@ -1,6 +1,6 @@
 use crate::backend::emit::{
-    debug_variable_slot, AssignTarget, CompileAnalysisCache, DirectStorageBinding,
-    DirectStorageBindings, RuntimeHelperLinkage, SimpleCondition, SimpleExpr, SimpleStmt,
+    debug_variable_slot, resolve_extern_call_signatures_with_index, CompileAnalysisCache,
+    DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage,
 };
 use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReason,
@@ -18,6 +18,7 @@ use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
     TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
+use crate::ir::hir::{AssignTarget, SimpleCondition, SimpleExpr, SimpleStmt};
 use crate::ir::hir::{DebugStatement, FunctionHIR};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -123,7 +124,8 @@ fn collect_expression_references(
         SimpleExpr::Condition(condition) => {
             collect_condition_references(condition, references, scopes)
         }
-        SimpleExpr::Int(_)
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_) => {}
@@ -475,7 +477,6 @@ pub struct JitGenerationMetadata {
     pub retained_dependencies: Vec<FunctionKey>,
     pub host_export_signatures: BTreeMap<String, String>,
     pub host_export_code_ptrs: BTreeMap<String, u64>,
-    pub diagnostics: Vec<String>,
     pub code_owner_revision: u64,
     pub data_owner_layout_hash: u64,
     pub codegen_micros: u64,
@@ -777,7 +778,9 @@ impl JitProcess {
     }
 
     fn compile_internal(&mut self) -> CompileResult<CompileReport> {
-        let index = self.compiler.index_pass()?;
+        // Program validity is a whole-program contract. Reachability may gate backend work, but
+        // it must never hide invalid source that can become live after a later edit.
+        let index = self.compiler.check()?;
         self.validate_host_aliases()
             .map_err(crate::compiler::CompileError::Backend)?;
         self.compiler
@@ -807,7 +810,21 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
             let (resolved_extern_signatures, extern_symbol_addresses) = self
                 .resolve_extern_call_signatures(&extern_signatures)
-                .map_err(crate::compiler::CompileError::Backend)?;
+                .map_err(|(index, error)| {
+                    if let Some(signature) = extern_signatures.get(index) {
+                        self.compiler.set_external_source_diagnostic(
+                            crate::SourceDiagnostic::new(
+                                signature.source_path.clone(),
+                                signature.source_start,
+                                signature.source_end,
+                                signature.name.clone(),
+                                error.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::UnresolvedExtern),
+                        );
+                    }
+                    crate::compiler::CompileError::Backend(error)
+                })?;
             let next_cache = build_compile_analysis_cache_from_resolved_externs(
                 self.compiler.files(),
                 self.compiler.functions(),
@@ -1188,7 +1205,6 @@ impl JitProcess {
             retained_dependencies: patch_plan.retained_dependencies.clone(),
             host_export_signatures,
             host_export_code_ptrs,
-            diagnostics: Vec::new(),
             code_owner_revision: files_fingerprint,
             data_owner_layout_hash: layout_hash,
             codegen_micros,
@@ -2296,8 +2312,8 @@ impl JitProcess {
     fn resolve_extern_call_signatures(
         &mut self,
         extern_signatures: &[ExternCallSignature],
-    ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
-        resolve_extern_call_signatures_with(extern_signatures, |_signature, candidate| {
+    ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), (usize, String)> {
+        resolve_extern_call_signatures_with_index(extern_signatures, |_signature, candidate| {
             self.resolve_host_symbol_address(candidate)
         })
     }
@@ -2896,6 +2912,119 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "storage_load_ascii" | "stasis_storage_load_ascii" | "stasis_jit_storage_load_ascii" => {
             function_address(stasis_dynload::stasis_jit_storage_load_ascii as *const ())
         }
+        "network_supported" | "stasis_network_supported" | "stasis_jit_network_supported" => {
+            function_address(stasis_dynload::stasis_jit_network_supported as *const ())
+        }
+        "network_host_random_seed"
+        | "stasis_network_host_random_seed"
+        | "stasis_jit_network_host_random_seed" => {
+            function_address(stasis_dynload::stasis_jit_network_host_random_seed as *const ())
+        }
+        "network_host_start" | "stasis_network_host_start" | "stasis_jit_network_host_start" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start as *const ())
+        }
+        "network_host_start_text"
+        | "stasis_network_host_start_text"
+        | "stasis_jit_network_host_start_text" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_text as *const ())
+        }
+        "network_host_start_bind"
+        | "stasis_network_host_start_bind"
+        | "stasis_jit_network_host_start_bind" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_bind as *const ())
+        }
+        "network_host_start_bind_text"
+        | "stasis_network_host_start_bind_text"
+        | "stasis_jit_network_host_start_bind_text" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_bind_text as *const ())
+        }
+        "network_host_poll" | "stasis_network_host_poll" | "stasis_jit_network_host_poll" => {
+            function_address(stasis_dynload::stasis_jit_network_host_poll as *const ())
+        }
+        "network_host_send" | "stasis_network_host_send" | "stasis_jit_network_host_send" => {
+            function_address(stasis_dynload::stasis_jit_network_host_send as *const ())
+        }
+        "network_host_status" | "stasis_network_host_status" | "stasis_jit_network_host_status" => {
+            function_address(stasis_dynload::stasis_jit_network_host_status as *const ())
+        }
+        "network_host_overflow_count"
+        | "stasis_network_host_overflow_count"
+        | "stasis_jit_network_host_overflow_count" => {
+            function_address(stasis_dynload::stasis_jit_network_host_overflow_count as *const ())
+        }
+        "network_host_port" | "stasis_network_host_port" | "stasis_jit_network_host_port" => {
+            function_address(stasis_dynload::stasis_jit_network_host_port as *const ())
+        }
+        "network_host_stop" | "stasis_network_host_stop" | "stasis_jit_network_host_stop" => {
+            function_address(stasis_dynload::stasis_jit_network_host_stop as *const ())
+        }
+        "realtime_start" | "stasis_realtime_start" | "stasis_jit_realtime_start" => {
+            function_address(stasis_dynload::stasis_jit_realtime_start as *const ())
+        }
+        "realtime_stop" | "stasis_realtime_stop" | "stasis_jit_realtime_stop" => {
+            function_address(stasis_dynload::stasis_jit_realtime_stop as *const ())
+        }
+        "realtime_submit_payload"
+        | "stasis_realtime_submit_payload"
+        | "stasis_jit_realtime_submit_payload" => {
+            function_address(stasis_dynload::stasis_jit_realtime_submit_payload as *const ())
+        }
+        "realtime_build_payload"
+        | "stasis_realtime_build_payload"
+        | "stasis_jit_realtime_build_payload" => {
+            function_address(stasis_dynload::stasis_jit_realtime_build_payload as *const ())
+        }
+        "realtime_resync_required"
+        | "stasis_realtime_resync_required"
+        | "stasis_jit_realtime_resync_required" => {
+            function_address(stasis_dynload::stasis_jit_realtime_resync_required as *const ())
+        }
+        "realtime_record_hash"
+        | "stasis_realtime_record_hash"
+        | "stasis_jit_realtime_record_hash" => {
+            function_address(stasis_dynload::stasis_jit_realtime_record_hash as *const ())
+        }
+        "realtime_apply_snapshot"
+        | "stasis_realtime_apply_snapshot"
+        | "stasis_jit_realtime_apply_snapshot" => {
+            function_address(stasis_dynload::stasis_jit_realtime_apply_snapshot as *const ())
+        }
+        "realtime_current_tick"
+        | "stasis_realtime_current_tick"
+        | "stasis_jit_realtime_current_tick" => {
+            function_address(stasis_dynload::stasis_jit_realtime_current_tick as *const ())
+        }
+        "realtime_current_epoch"
+        | "stasis_realtime_current_epoch"
+        | "stasis_jit_realtime_current_epoch" => {
+            function_address(stasis_dynload::stasis_jit_realtime_current_epoch as *const ())
+        }
+        "realtime_schedule" | "stasis_realtime_schedule" | "stasis_jit_realtime_schedule" => {
+            function_address(stasis_dynload::stasis_jit_realtime_schedule as *const ())
+        }
+        "realtime_advance" | "stasis_realtime_advance" | "stasis_jit_realtime_advance" => {
+            function_address(stasis_dynload::stasis_jit_realtime_advance as *const ())
+        }
+        "realtime_read_control"
+        | "stasis_realtime_read_control"
+        | "stasis_jit_realtime_read_control" => {
+            function_address(stasis_dynload::stasis_jit_realtime_read_control as *const ())
+        }
+        "realtime_disconnect" | "stasis_realtime_disconnect" | "stasis_jit_realtime_disconnect" => {
+            function_address(stasis_dynload::stasis_jit_realtime_disconnect as *const ())
+        }
+        "realtime_reconnect" | "stasis_realtime_reconnect" | "stasis_jit_realtime_reconnect" => {
+            function_address(stasis_dynload::stasis_jit_realtime_reconnect as *const ())
+        }
+        "realtime_pause" | "stasis_realtime_pause" | "stasis_jit_realtime_pause" => {
+            function_address(stasis_dynload::stasis_jit_realtime_pause as *const ())
+        }
+        "realtime_focus_lost" | "stasis_realtime_focus_lost" | "stasis_jit_realtime_focus_lost" => {
+            function_address(stasis_dynload::stasis_jit_realtime_focus_lost as *const ())
+        }
+        "realtime_rematch" | "stasis_realtime_rematch" | "stasis_jit_realtime_rematch" => {
+            function_address(stasis_dynload::stasis_jit_realtime_rematch as *const ())
+        }
         "storage_load_i32" | "stasis_storage_load_i32" | "stasis_jit_storage_load_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_load_i32 as *const ())
         }
@@ -3243,6 +3372,25 @@ fn compile_function_into_jit_module(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jit_rejects_invalid_unreachable_function_body() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "dead.stasis",
+            "function main(): i32 { return 0; }\nfunction unfinished(): i32 { while (true) { return 1; } }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject invalid dead code");
+        assert!(
+            format!("{error:?}").contains("while"),
+            "unexpected diagnostic: {error:?}"
+        );
+        assert!(process.program_snapshot().is_none());
+        assert!(process.artifacts().is_empty());
+    }
 
     #[test]
     fn async_asset_task_externs_resolve_to_builtin_bridges() {
@@ -3759,7 +3907,7 @@ mod tests {
         process.set_local_runtime_helper_trampolines(true);
         process.upsert_file(
             "sample.stasis",
-            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let width: f32 = gfx_measure_text_cached(0); if (gfx_poll_reload(0) || audio_is_available() || width != 0.0) { return 2; } if (ms == 0 && us == 0) { return 0; } return 1; }\n",
+            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let reloaded: bool = gfx_poll_reload(0); let width: f32 = gfx_measure_text_cached(0); let audio: bool = audio_is_available(); return 1; }\n",
         );
         process
             .compile()
@@ -3808,14 +3956,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target 'helper'")
-                        || message.contains("unsupported call arity 3"),
+                    message.contains("cannot resolve call 'helper'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -3836,8 +3983,8 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::compiler::CompileError::Backend(ref message)
-                    if message.contains("unknown call target 'leaf'")
+                crate::compiler::CompileError::Frontend(ref message)
+                    if message.contains("cannot resolve call 'leaf'")
             ),
             "unexpected error: {error:?}"
         );
@@ -4430,6 +4577,25 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 90);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_indexes_ascii_string_literal_view_bytes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let view: ascii[] = \"%\"; return view[0]; }\n",
+        );
+        process
+            .compile()
+            .expect("compile string literal view fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute string literal view fixture"),
+            37
+        );
     }
 
     #[cfg(windows)]
@@ -6449,7 +6615,7 @@ mod tests {
                     "return mid() + 12;",
                     "return shared() + 22;",
                     3,
-                    "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return missing(); }",
+                    "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return 6; }",
                 ),
                 47,
                 0,
@@ -6509,18 +6675,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_skips_unreachable_invalid_function_body() {
+    fn jit_process_rejects_unreachable_unresolved_call() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
             "function bad(): i32 { return missing(); }\nfunction tick(): i32 { return 1; }\n",
         );
-        let report = process.compile().expect("compile");
-        assert_eq!(report.emit.emitted_functions, 1);
-        let value = process
-            .execute_i32_noarg_by_name("tick")
-            .expect("execute tick");
-        assert_eq!(value, 1);
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject unreachable unresolved calls");
+        assert!(format!("{error:?}").contains("cannot resolve call 'missing'"));
+        assert!(process.artifacts().is_empty());
     }
 
     #[test]
@@ -6879,13 +7044,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6898,13 +7063,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected return type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("return expression expected bool but found i32"),
+                    message.contains("return expression expected bool expression but found i32"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6919,13 +7084,13 @@ mod tests {
             .compile()
             .expect_err("expected assignment type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'ready' expected bool expression but found i32"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6940,13 +7105,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6961,13 +7126,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6980,13 +7145,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'value' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6999,13 +7164,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'i' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -7019,13 +7184,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("foreach item binding 'value' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -7039,13 +7204,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("foreach index binding 'v' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -7838,13 +8003,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile failure");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target 'missing'"),
+                    message.contains("cannot resolve call 'missing'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
 
         let second_main_ptr = process

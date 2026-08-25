@@ -5,6 +5,7 @@ use super::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use stasis::simulation_state_hash;
 use stasis_compiler::backend::jit::{JitProcess, JitScalarValue};
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use std::collections::BTreeMap;
@@ -519,90 +520,6 @@ fn state_value_json(value: &JitScalarValue) -> Result<Value, String> {
         .ok_or_else(|| "encoded state value did not contain a value".to_string())
 }
 
-fn simulation_state_hash(jit: &JitProcess) -> Result<String, String> {
-    let layout = jit.state_layout();
-    let mut hasher = Sha256::new();
-    hasher.update(b"stasis.simulation-state.v1\0");
-    let mut scalars = layout.scalars;
-    scalars.sort_by(|left, right| left.path.cmp(&right.path));
-    for scalar in scalars {
-        if is_host_or_presentation_path(&scalar.path) {
-            continue;
-        }
-        hash_value(
-            &mut hasher,
-            &scalar.path,
-            jit.read_global_scalar(&scalar.path)?,
-        );
-    }
-    let mut collections = layout.collections;
-    collections.sort_by(|left, right| left.path.cmp(&right.path));
-    for collection in collections {
-        if is_host_or_presentation_path(&collection.path) {
-            continue;
-        }
-        let mut fields = collection.fields;
-        fields.sort_by(|left, right| left.field.cmp(&right.field));
-        for field in fields {
-            for index in 0..collection.capacity {
-                let label = format!("{}[{index}].{}", collection.path, field.field);
-                let value =
-                    jit.read_global_collection_scalar(&collection.path, &field.field, index)?;
-                hash_value(&mut hasher, &label, value);
-            }
-        }
-    }
-    let unsupported = layout
-        .opaque
-        .into_iter()
-        .filter(|value| !is_host_or_presentation_path(&value.path))
-        .map(|value| value.path)
-        .collect::<Vec<_>>();
-    if !unsupported.is_empty() {
-        return Err(format!(
-            "simulation state hash does not support opaque state: {}",
-            unsupported.join(", ")
-        ));
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn hash_value(hasher: &mut Sha256, path: &str, value: JitScalarValue) {
-    hasher.update((path.len() as u64).to_le_bytes());
-    hasher.update(path.as_bytes());
-    match value {
-        JitScalarValue::I32(value) => {
-            hasher.update([1]);
-            hasher.update(value.to_le_bytes());
-        }
-        JitScalarValue::F32(value) => {
-            hasher.update([2]);
-            hasher.update(value.to_bits().to_le_bytes());
-        }
-        JitScalarValue::F64(value) => {
-            hasher.update([3]);
-            hasher.update(value.to_bits().to_le_bytes());
-        }
-        JitScalarValue::Bool(value) => hasher.update([4, u8::from(value)]),
-        JitScalarValue::U8(value) => hasher.update([5, value]),
-        JitScalarValue::U16(value) => {
-            hasher.update([6]);
-            hasher.update(value.to_le_bytes());
-        }
-        JitScalarValue::U32(value) => {
-            hasher.update([7]);
-            hasher.update(value.to_le_bytes());
-        }
-    }
-}
-
-fn is_host_or_presentation_path(path: &str) -> bool {
-    path == "host_i32"
-        || path == "host_f32"
-        || path.starts_with("host_req_")
-        || stasis_compiler::backend::state_layout::is_command_buffer_path(path)
-}
-
 fn collect_scenario_files(workspace: &Workspace, root: &Path) -> Result<Vec<PathBuf>, String> {
     if !root.exists() {
         return Ok(Vec::new());
@@ -867,24 +784,6 @@ mod tests {
             })
         ));
         assert!(parse_state_path("items[nope]").is_err());
-    }
-
-    #[test]
-    fn presentation_and_host_paths_are_excluded_from_simulation_hashes() {
-        for path in [
-            "host_i32",
-            "host_f32",
-            "host_req_flags",
-            "gfx_cmd_i32",
-            "render_cmd_i32",
-            "audio_cmd_i32",
-            "cmd_i32",
-            "world.render_cmd_i32",
-            "world.cmd_i32",
-        ] {
-            assert!(is_host_or_presentation_path(path), "{path}");
-        }
-        assert!(!is_host_or_presentation_path("world.score"));
     }
 
     #[test]

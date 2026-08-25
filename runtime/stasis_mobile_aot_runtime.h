@@ -129,6 +129,27 @@ int stasis_jit_storage_load_ascii(int32_t scope, int32_t key, int32_t out, int32
 int stasis_jit_storage_load_i32(int32_t scope, int32_t key, int32_t fallback);
 int stasis_jit_storage_save_ascii(int32_t scope, int32_t key, int32_t value, int32_t length);
 int stasis_jit_storage_save_i32(int32_t scope, int32_t key, int32_t value);
+int32_t stasis_jit_network_supported(void);
+int32_t stasis_jit_network_host_random_seed(void);
+int32_t stasis_jit_network_host_start(int32_t content_id, int32_t content_length);
+int32_t stasis_jit_network_host_start_text(int32_t content_id);
+int32_t stasis_jit_network_host_start_bind(int32_t content_id, int32_t content_length, int32_t bind_ipv4);
+int32_t stasis_jit_network_host_start_bind_text(int32_t content_id, int32_t bind_ipv4);
+int32_t stasis_jit_network_host_status(void);
+int32_t stasis_jit_network_host_overflow_count(void);
+int32_t stasis_jit_network_host_port(void);
+int32_t stasis_jit_network_host_poll(int32_t fields_id, int32_t field_capacity, int32_t payload_id, int32_t payload_capacity);
+int32_t stasis_jit_network_host_send(int32_t connection, int32_t payload_id, int32_t payload_length);
+void stasis_jit_network_host_stop(void);
+int32_t stasis_mobile_network_copy_i32_payload(
+    int32_t payload_id,
+    int32_t payload_length,
+    uint8_t *out,
+    int32_t out_capacity
+);
+int32_t stasis_mobile_network_start_from_asset_root(void);
+int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity);
+void stasis_mobile_network_stop(void);
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity);
 void stasis_mobile_aot_reset(void);
 

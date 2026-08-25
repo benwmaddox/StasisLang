@@ -1,37 +1,20 @@
-# AOT Brickout Quality Gate (Windows)
+# AOT Brickout Quality Gate
 
-This quality gate ensures the Rust-native AOT engine bundle for Brickout Revenge v1 can be
-compiled, linked into a DLL, and executed headlessly for more than one tick.
+Brickout Revenge v1 is the representative production-AOT compiler gate. It is a default Rust test,
+not an opt-in environment-variable check.
 
 ## Command
 
 ```powershell
-$repoRoot = (git rev-parse --show-toplevel).Trim()
-Set-Location $repoRoot
-$env:STASIS_AOT_QUALITY_GATE = "1"
-cargo test -p stasis aot_brickout_revenge_v1_engine_bundle_executes_two_ticks -- --nocapture
+python tools/cargo_cache.py run -- cargo test -p stasis --lib aot_brickout_revenge_v1_ -- --test-threads=1
 ```
 
-## Prerequisites
+The test compiles `samples/brickout_revenge/brickout_revenge_v1.stasis` with the production AOT
+profile and verifies the engine bundle, lifecycle objects, string-literal table, and collection
+metadata. On Windows, the same default test group also compiles the production runtime bridge,
+links the complete engine bundle, loads it, initializes a deterministic headless host frame, and
+executes `main` followed by two `tick` calls. The execution test is not hidden behind an environment
+variable; a missing linker, unresolved symbol, load failure, or bad return value fails the gate.
 
-- Windows
-- Rust toolchain (`cargo`)
-- `lld-link.exe` (Visual Studio 2022 Build Tools / Community is fine)
-
-## What It Does
-
-- Builds `stasis_dynload` as a Rust `staticlib` for AOT runtime shims
-- Compiles `samples/brickout_revenge/brickout_revenge_v1.stasis` in `TargetMode::AotProd`
-- Links emitted AOT objects into a temporary `brickout_aot_bundle.dll` via `lld-link`
-- Loads the DLL, calls exported `main()`, then calls `tick()` twice (expects return `0`)
-
-## Output Artifacts
-
-Artifacts are written to a temp directory:
-
-- `%TEMP%\\stasis_aot_brickout_exec_<stamp>\\`
-
-Notable files:
-
-- `brickout_aot_bundle.dll` (linked image)
-- `aot_artifacts\\engine_bundle\\...\\manifest.json` (engine bundle manifest)
+Other platform packaging workflows additionally link and execute their release images against the
+installed platform SDK/toolchain; they do not weaken or replace the default compiler gate.

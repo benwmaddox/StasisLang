@@ -62,12 +62,16 @@ jobs:
           python -m unittest tools.ci.test_verify_android_native_library
           python -m unittest tools.ci.test_sdl3_migration
           python -m unittest tools.ci.test_windows_vs_generator
+          python -m unittest tools.ci.test_nightly_network_support
 
       - name: Test AI efficiency matrix
         run: python -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 
       - name: Test release provenance
         run: python -m unittest tools.ci.test_release_provenance
+
+      - name: Test Android verified asset cache
+        run: python tools/ci/test_android_asset_cache.py
 
       - name: Test render parity fixture and capture gate
         run: |

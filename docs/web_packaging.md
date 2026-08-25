@@ -11,6 +11,9 @@ Release toolchains omit `--development-build`. The default output is
 
 - `index.html`, `game.js`, and `game.wasm`: an inspectable static-hosting bundle;
 - `assets/`: the same reachable, prepared release assets selected for Android/desktop packaging;
+- network-enabled packages additionally contain `network_guest.bundle`, a bounded archive of the
+  three core web files plus every reachable prepared asset (including nested font/audio/image
+  paths) used by the native LAN host;
 - `stasis_provenance.json`: the normal package provenance receipt.
 
 Release packaging runs Binaryen's `wasm-opt -Oz` when `wasm-opt` is on `PATH` and also accepts the
@@ -41,9 +44,39 @@ Self-contained single-file HTML output is intentionally deferred; web packages k
 assets external so hosted output remains compact and follows the same asset preparation path as
 Android and desktop packages.
 
+The browser shell owns page fitting and the guest owns its logical canvas. The shared `index.html`
+shell opts into `viewport-fit=cover`, reserves the CSS safe-area insets, and uses `svh`/`dvh`
+fallbacks. Its inline fitter uses `visualViewport.width`/`height` when available (with the layout
+viewport as a fallback), refitting on window resize, orientation changes, and visual-viewport
+resize/scroll. The shell keeps the canvas aspect ratio centered inside the currently visible safe
+area; the body clip box moves with a nonzero visual-viewport origin so its overflow clip and canvas
+remain together. It changes CSS dimensions only and never rewrites the canvas `width`/`height`
+backing resolution. A `MutationObserver` refits after an intentional intrinsic backing-size change without
+observing the fitter's own style writes, so it cannot form a resize loop. Pointer coordinates remain
+guest-logical through `getBoundingClientRect()` in the runtime, including after a toolbar or
+orientation change. The runtime's private synchronous refit hook runs before an intentional
+backing resize is reported in HostFrame; extent events are coalesced into one generation, while
+origin-only scroll remains quiet. Consumers should not add post-processing resize or fullscreen controls.
+
 Web packages do not render an audio-enable control. The runtime requests audio immediately and
 automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts
 the audio context suspended.
+
+## Loading shell font
+
+The optional `web.loading_font` manifest field selects a project font for the static loading title:
+
+```json
+{
+  "web": { "loading_font": "/assets/fonts/display.ttf" }
+}
+```
+
+The value may be rooted (`/assets/...`) or project-relative (`assets/...`), but must name an
+existing `.ttf`, `.otf`, `.woff`, or `.woff2` file under `assets/`. `stasis check` and packaging
+validate the path before producing output. Web packages retain the configured font even when the
+game does not load it through Stasis code, preload it in the HTML shell, and use it for the loading
+title. Projects without this field keep the Georgia fallback and the same loading DOM contract.
 
 ## Runtime contract
 

@@ -1,6 +1,6 @@
 # Spec Implementation Status (Rust Compiler)
 
-Last updated: 2026-08-11
+Last updated: 2026-08-22
 
 This document tracks how much of `docs/spec.md` is implemented in the Rust compiler/runtime pipeline.
 It is intended to be concrete and release-oriented (JIT + AOT).
@@ -25,13 +25,13 @@ Status legend:
 | 4.3 Numeric Conversion Semantics | Implemented (bounded profile) | `from_*`/`to_*` conversions cover `i32`/`f32`/`f64`; unsigned arithmetic is modular and uses unsigned division/comparison. Strict replay math is Q16.16 through compiler-lowered `fixed32_*` intrinsics with wrapping overflow and toward-zero rounding. Ordinary floats remain explicitly outside cross-architecture bit-determinism guarantees. |
 | 4.4 Local Type Inference | Implemented | Local inference for `let name = <expr>` is supported; typed `let name: Type = ...` is supported. |
 | 5. Operators and Expressions | Partial | Implemented for `i32`/`f32`/`f64`/`bool` forms required by current samples/tests. |
-| 6. Declarations and Statements | Partial | `let`, `global`, assignment, `if/else`, `for`, `foreach`, `return`, `continue` are supported in the Rust pipeline. Some shapes are still covered by "stub fallback" in AOT mode until parity hardening lands. |
+| 6. Declarations and Statements | Partial | `let`, `global`, assignment, `if/else`, `for`, `foreach`, `return`, `continue` are supported in the Rust pipeline. Unsupported shapes fail deterministically; no target substitutes or fallback bodies are emitted. |
 | 6.5.1 `for` loop (required init/condition/step) | Implemented | Omitting any of the three `for` header segments is rejected (init is required, condition is required, step is required). |
 | 6.5.5 `continue` | Implemented | Supported and enforced as loop-only. |
-| 7. Functions and Calls | Partial | Function declarations and calls are stable; receiver-form call resolution is supported. Some AOT paths still rely on "stub fallback" for not-yet-supported lowering shapes. |
+| 7. Functions and Calls | Partial | Function declarations and calls are stable; receiver-form and overload resolution produce exact function-identity graph edges shared by reachability and patch planning. |
 | 8. Enums | Implemented | Enums are used by samples and supported by Rust lowering. |
 | 9. Modules and Imports | Implemented | `import` and project-local module resolution are implemented. |
-| 10. Testing Construct | Implemented (JIT test profile) | `.test.stasis` discovery/execution and schema-v1 saved-state headless scenarios run through the normal JIT compiler. Scenarios provide bounded ticks, per-tick invariants, deterministic seed isolation, simulation-only hashes, and reproducible failure receipts. General recorded-input replay remains a separate planned runtime slice; AOT test execution parity is not a current priority. |
+| 10. Testing Construct | Implemented (JIT test/replay profile) | `.test.stasis` discovery/execution and schema-v1 saved-state headless scenarios run through the normal JIT compiler. Runtime replay stores a sparse non-default initial simulation snapshot, exact-bit HostFrame diffs, and post-render state hashes, then rebuilds input and verifies normal tick/render execution. AOT test execution parity is not a current priority. |
 | 11. Memory Model | Partial | Static globals and deterministic layout are central. Remaining gaps are mostly around richer compile-time enforcement and diagnostics, not basic execution. |
 | 12. Runtime Boundary and Extern | Partial | Host-set profile/registry plumbing exists. Required-host extraction/diagnostics are tracked separately (not complete). |
 | 12.2 Optional Plugin Libraries | Deferred (Out of Scope) | Plugin libraries are explicitly out of scope for the current release approach; do not plan features around them right now. |
@@ -46,5 +46,5 @@ Status legend:
 
 - **Release approach**: Cranelift AOT is the production/release backend; JIT is for development/watch/hot-swap.
 - **AOT parity requirement**: AOT must run the same sample games as JIT (notably `samples/brickout_revenge/brickout_revenge_v1.stasis`).
-- **Quality gate**: AOT should reject shipping builds that still rely on "stub fallback" lowering in emitted artifacts.
+- **Quality gate**: Brickout Revenge v1 compiles through the production AOT engine-bundle path in the default test suite; unsupported lowering is a compile error.
 - **Not in scope**: optional plugin libraries and alternate compiler tracks outside the Rust pipeline.

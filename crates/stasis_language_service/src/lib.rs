@@ -576,11 +576,18 @@ pub struct RenamePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageDiagnosticOrigin {
+    pub path: String,
+    pub range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageCodeAction {
     pub title: String,
     pub kind: String,
     pub preferred: bool,
     pub diagnostic_code: Option<String>,
+    pub diagnostic_origin: Option<LanguageDiagnosticOrigin>,
     pub edits: Vec<RenameEdit>,
 }
 
@@ -1522,6 +1529,7 @@ impl LanguageService {
             kind: "source.organizeImports".to_string(),
             preferred: true,
             diagnostic_code: None,
+            diagnostic_origin: None,
             edits: vec![RenameEdit {
                 path: absolute_source_path(&project_root, &change.file),
                 range: 0..change.before_source.len(),
@@ -1767,6 +1775,10 @@ impl LanguageService {
                 kind: "quickfix".to_string(),
                 preferred: true,
                 diagnostic_code: Some(diagnostic.code.as_str().to_string()),
+                diagnostic_origin: Some(LanguageDiagnosticOrigin {
+                    path: published.path.clone(),
+                    range: diagnostic.start..diagnostic.end,
+                }),
                 edits: fix
                     .edits
                     .into_iter()
@@ -3140,7 +3152,6 @@ impl std::error::Error for PositionError {}
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
     use std::time::Instant;
 
     #[test]
@@ -3324,10 +3335,37 @@ mod tests {
         ));
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(root.join("src")).expect("fixture source directory");
+        fs::write(
+            root.join("stasis.json"),
+            r#"{
+  "manifest_version": 1,
+  "name": "vscode_e2e",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain"
+}"#,
+        )
+        .expect("fixture manifest");
         let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
         let source = include_str!("../../../vscode-stasis/test/fixture/src/main.stasis");
         fs::write(&path, source).expect("fixture source");
+        let helper_path = root.join("src/helper.stasis");
+        let helper_source = include_str!("../../../vscode-stasis/test/fixture/src/helper.stasis");
+        fs::write(&helper_path, helper_source).expect("fixture helper source");
+        let unused_path = root.join("src/unused.stasis");
+        let unused_source = include_str!("../../../vscode-stasis/test/fixture/src/unused.stasis");
+        fs::write(&unused_path, unused_source).expect("fixture unused source");
+        // The VS Code formatter opens a workspace-root document before asking
+        // for the import quick fix.  Keep the same unrelated global here: it
+        // must not shadow the f32 locals/parameters in the materialized stdlib.
+        let format_path = root.join(format!("format-input-{}.stasis", std::process::id()));
+        let format_path_text = format_path.to_string_lossy().replace('\\', "/");
+        let format_source = "global value: i32;\n";
+        fs::write(&format_path, format_source).expect("fixture formatter source");
         let toolchain_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
+        let mut toolchain_documents = Vec::new();
         for directory in ["", "internal", "testing"] {
             let source_directory = toolchain_source.join("stdlib").join(directory);
             let cached_directory = root
@@ -3339,12 +3377,32 @@ mod tests {
                 if entry.path().extension().and_then(|value| value.to_str()) != Some("stasis") {
                     continue;
                 }
-                fs::copy(entry.path(), cached_directory.join(entry.file_name()))
-                    .expect("cached toolchain source");
+                let cached_path = cached_directory.join(entry.file_name());
+                fs::copy(entry.path(), &cached_path).expect("cached toolchain source");
+                toolchain_documents.push((
+                    cached_path.to_string_lossy().replace('\\', "/"),
+                    fs::read_to_string(entry.path()).expect("toolchain source text"),
+                ));
             }
         }
+        assert!(toolchain_documents.iter().any(|(path, source)| {
+            path.ends_with("/stdlib/memory.stasis")
+                && source.contains("mem_set_f32(dst, dst_cap, dst_index, 0.0, count)")
+        }));
         let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
-        service.set_disk_document(path.to_string_lossy(), source);
+        service.set_disk_document(path_text.clone(), source);
+        service.set_disk_document(
+            helper_path.to_string_lossy().replace('\\', "/"),
+            helper_source,
+        );
+        service.set_disk_document(
+            unused_path.to_string_lossy().replace('\\', "/"),
+            unused_source,
+        );
+        service.set_disk_document(format_path_text, format_source);
+        for (path, source) in toolchain_documents {
+            service.set_disk_document(path, source);
+        }
 
         let report = service.diagnostics();
         assert!(
@@ -3354,7 +3412,7 @@ mod tests {
         );
 
         service.open_document(
-            path.to_string_lossy(),
+            path_text.clone(),
             1,
             format!(
                 "{source}\nfunction lsp_diagnostic_probe(): i32 {{ while (true) {{ return 1; }} }}\n"
@@ -3368,6 +3426,45 @@ mod tests {
                 .any(|diagnostic| diagnostic.message.contains("while")),
             "dirty fixture diagnostics: {:?}",
             dirty.diagnostics
+        );
+
+        service.open_document(
+            path_text.clone(),
+            2,
+            format!("import \"missing.stasis\";\n{source}"),
+        );
+        let missing = service.diagnostics();
+        assert_eq!(missing.diagnostics.len(), 1);
+        assert_eq!(missing.diagnostics[0].code, "stasis.missingModule");
+        let actions = service
+            .code_actions(&path_text, &["quickfix".to_string()])
+            .expect("fixture missing-import quick fix");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Remove unresolved import 'missing'");
+        assert_eq!(
+            actions[0]
+                .diagnostic_origin
+                .as_ref()
+                .map(|origin| origin.path.as_str()),
+            Some(path_text.as_str())
+        );
+        assert_eq!(actions[0].edits[0].path, path_text);
+
+        let memory_source = "import \"../.stasis_cache/toolchain/src/stdlib/memory.stasis\";\n\
+import \"missing.stasis\";\n\
+global memory_probe: f32[1];\n\
+function main(): i32 { return mem_zero_f32(memory_probe, 1, 0, 1); }\n";
+        service.open_document(path_text.clone(), 3, memory_source);
+        let memory_missing = service.diagnostics();
+        assert_eq!(memory_missing.diagnostics.len(), 1);
+        assert_eq!(memory_missing.diagnostics[0].code, "stasis.missingModule");
+        let memory_actions = service
+            .code_actions(&path_text, &["quickfix".to_string()])
+            .expect("memory-backed missing-import quick fix");
+        assert_eq!(memory_actions.len(), 1);
+        assert_eq!(
+            memory_actions[0].title,
+            "Remove unresolved import 'missing'"
         );
         fs::remove_dir_all(root).ok();
     }
@@ -3638,6 +3735,7 @@ function main(): i32 {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "source.organizeImports");
         assert!(actions[0].preferred);
+        assert!(actions[0].diagnostic_origin.is_none());
         assert_eq!(actions[0].edits[0].range, 0..source.len());
         assert_eq!(
             actions[0].edits[0].new_text,
@@ -3675,6 +3773,13 @@ function main(): i32 {
         assert_eq!(
             actions[0].diagnostic_code.as_deref(),
             Some("stasis.missingModule")
+        );
+        assert_eq!(
+            actions[0].diagnostic_origin,
+            Some(LanguageDiagnosticOrigin {
+                path: main_text.clone(),
+                range: 7..23,
+            })
         );
         assert_eq!(
             &source[actions[0].edits[0].range.clone()],
@@ -4215,88 +4320,6 @@ function main(): i32 {
             definition_p95 < 100_000,
             "definition p95 {definition_p95}us"
         );
-    }
-
-    #[test]
-    #[ignore = "requires STASIS_CHESSTD_ROOT"]
-    fn chess_td_warm_definition_reports_service_component_latency() {
-        fn collect_stasis_files(root: &Path, files: &mut Vec<PathBuf>) {
-            for entry in std::fs::read_dir(root).expect("read ChessTD source directory") {
-                let path = entry.expect("ChessTD directory entry").path();
-                if path.is_dir() {
-                    collect_stasis_files(&path, files);
-                } else if path
-                    .extension()
-                    .is_some_and(|extension| extension == "stasis")
-                {
-                    files.push(path);
-                }
-            }
-        }
-
-        let root = PathBuf::from(
-            std::env::var("STASIS_CHESSTD_ROOT").expect("STASIS_CHESSTD_ROOT must name ChessTD"),
-        );
-        let mut paths = Vec::new();
-        collect_stasis_files(&root.join("src"), &mut paths);
-        collect_stasis_files(&root.join("tests"), &mut paths);
-        paths.sort();
-        let root_text = root.to_string_lossy().replace('\\', "/");
-        let mut service = LanguageService::new(&root_text).expect("ChessTD service");
-        let mut files = Vec::new();
-        for path in paths {
-            let source = std::fs::read_to_string(&path).expect("read ChessTD source");
-            let path_text = path.to_string_lossy().replace('\\', "/");
-            service.set_disk_document(path_text.clone(), source.clone());
-            files.push(WorkshopSourceFile {
-                path: canonical_source_path(Some(&root_text), &path_text)
-                    .expect("canonical ChessTD path"),
-                source,
-            });
-        }
-        let main_path = root.join("src/main.stasis");
-        let main_path = main_path.to_string_lossy().replace('\\', "/");
-        let main_source = service
-            .snapshot()
-            .document(&main_path)
-            .expect("ChessTD main source")
-            .text
-            .clone();
-        let symbol = "game.progression_dirty";
-        let offset = main_source.find(symbol).expect("ChessTD field use") + "game.".len() + 2;
-
-        let diagnostics_started = Instant::now();
-        let diagnostics = service.diagnostics();
-        let diagnostics_millis = diagnostics_started.elapsed().as_millis();
-        let diagnostic_count = diagnostics.diagnostics.len();
-        let warm_started = Instant::now();
-        service
-            .workspace_symbols("", 256)
-            .expect("warm ChessTD index");
-        let warm_millis = warm_started.elapsed().as_millis();
-        let legacy_started = Instant::now();
-        let legacy = find_workshop_references(&files, symbol, 256).expect("legacy definition scan");
-        let legacy_millis = legacy_started.elapsed().as_millis();
-        assert!(legacy
-            .iter()
-            .any(|reference| reference.kind == WorkshopReferenceKind::Definition));
-
-        let mut micros = Vec::new();
-        for _ in 0..50 {
-            let started = Instant::now();
-            let definitions = service
-                .definition(&main_path, offset)
-                .expect("cached ChessTD definition");
-            micros.push(started.elapsed().as_micros());
-            assert_eq!(definitions.len(), 1);
-            assert!(definitions[0].path.ends_with("src/game/model.stasis"));
-        }
-        micros.sort_unstable();
-        let p95 = micros[47];
-        eprintln!(
-            "ChessTD definition: diagnostics={diagnostics_millis}ms/{diagnostic_count} warm_index={warm_millis}ms legacy_scan={legacy_millis}ms cached_p95={p95}us"
-        );
-        assert!(p95 < 100_000, "ChessTD cached definition p95 {p95}us");
     }
 
     #[test]

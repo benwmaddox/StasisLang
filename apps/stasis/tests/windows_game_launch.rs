@@ -524,6 +524,7 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
     ];
 
     let baseline = test_tree.0.join("baseline");
+    let replay_session = test_tree.0.join("baseline.replay.json");
     let baseline_run = launch(
         {
             let mut command = stasis_command(&project);
@@ -540,6 +541,8 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
                 "60",
                 "--frames",
                 "3",
+                "--record-replay",
+                replay_session.to_str().unwrap(),
             ]);
             command
         },
@@ -562,6 +565,52 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
     );
     let baseline_files = recording_frames(&baseline);
     assert_eq!(baseline_files.len(), 3);
+    let replay_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&replay_session).expect("read replay session"))
+            .expect("parse replay session");
+    assert_eq!(replay_json["schema_version"], 1);
+    assert_eq!(replay_json["frames"].as_array().map(Vec::len), Some(3));
+    assert!(replay_json["identity"].get("host_i32").is_none());
+
+    let replayed = test_tree.0.join("replayed");
+    let replay_run = launch(
+        {
+            let mut command = stasis_command(&project);
+            command.args([
+                "record",
+                "main.stasis",
+                "--output",
+                replayed.to_str().unwrap(),
+                "--width",
+                "640",
+                "--height",
+                "400",
+                "--fps",
+                "60",
+                "--frames",
+                "3",
+                "--replay",
+                replay_session.to_str().unwrap(),
+            ]);
+            command
+        },
+        "headless replay recording",
+    );
+    assert!(
+        replay_run.status.success(),
+        "headless replay recording failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&replay_run.stdout),
+        String::from_utf8_lossy(&replay_run.stderr)
+    );
+    let replayed_files = recording_frames(&replayed);
+    assert_eq!(replayed_files.len(), baseline_files.len());
+    for (baseline, replayed) in baseline_files.iter().zip(&replayed_files) {
+        assert_eq!(
+            fs::read(baseline).expect("read baseline frame"),
+            fs::read(replayed).expect("read replayed frame"),
+            "replayed PNG must exactly match its recorded source frame"
+        );
+    }
     let baseline_first = image::open(&baseline_files[0])
         .expect("baseline first frame")
         .to_rgba8();

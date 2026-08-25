@@ -20,10 +20,12 @@ python3 -m unittest tools.ci.test_unsafe_boundaries
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
 python3 -m unittest tools.ci.test_sdl3_migration
+python3 -m unittest tools.ci.test_windows_sign_runner
 python3 -m unittest tools.ci.test_verify_android_render_performance
 python3 -m unittest tools.ci.test_verify_render_parity
 python3 tools/ci/verify_render_parity.py
 node --test runtime/web/tests/orientation_host_frame.test.mjs
+node --test runtime/web/tests/viewport_fit.test.mjs
 node --test runtime/web/tests/sys_memcpy_u8.test.mjs
 node --test runtime/web/tests/sys_memcpy_typed.test.mjs
 node --test runtime/web/tests/asset_paths.test.mjs

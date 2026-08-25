@@ -49,6 +49,7 @@ def verify_mobile_shells(
         parser.error(f"unsupported mobile package target: {target!r}")
     platform = target.split("-", 1)[0]
     package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
+    network_enabled = receipt.get("network") is True
     replacements = {
         "@STASIS_APP_NAME@": receipt.get("app_name") or receipt["name"],
         "@STASIS_PACKAGE_ID@": package_id,
@@ -61,6 +62,17 @@ def verify_mobile_shells(
         ),
         "@STASIS_ANDROID_VERSION_NAME@": receipt.get("android_version_name") or "1.0",
         "@STASIS_ANDROID_ABI@": "arm64-v8a" if target == "android-arm64" else "",
+        "@STASIS_NETWORK_ENABLED@": "1" if network_enabled else "0",
+        "@STASIS_NETWORK_PERMISSION@": (
+            '    <uses-permission android:name="android.permission.INTERNET" />\n'
+            if network_enabled and platform == "android"
+            else ""
+        ),
+        "@STASIS_LOCAL_NETWORK_USAGE@": (
+            f"    <key>NSLocalNetworkUsageDescription</key><string>{receipt.get('app_name') or receipt['name']} uses your local network so nearby friends can join games hosted on this device.</string>\n"
+            if network_enabled and target == "ios-arm64"
+            else ""
+        ),
     }
     expected_paths = set()
     for source_group in ("common", platform):
@@ -86,6 +98,21 @@ def verify_mobile_shells(
     expected_paths.add(("common", "stasis_package_provenance.h"))
     if target == "ios-arm64":
         expected_paths.add(("ios", "StasisMobile.xcconfig"))
+    if network_enabled:
+        if target == "ios-arm64":
+            expected_paths.update(
+                {
+                    ("ios", "network/libstasis_network.a"),
+                    ("ios", "network/include/stasis_network.h"),
+                }
+            )
+        else:
+            expected_paths.update(
+                {
+                    ("android", "app/src/main/cpp/network/libstasis_network.a"),
+                    ("android", "app/src/main/cpp/network/include/stasis_network.h"),
+                }
+            )
     asset_prefix = (
         "app/src/main/assets/stasis_game/"
         if target == "android-arm64"

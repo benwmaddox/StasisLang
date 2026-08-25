@@ -18,6 +18,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.nightly_workflow = read(".github/workflows/nightly-release.yml")
         cls.pr_workflow = read(".github/workflows/pr-ci.yml")
         cls.release_script = read("mobile/android/test_release_shell.ps1")
+        cls.release_runner = read("tools/ci/run_android_release_shell_seam.py")
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
         cls.touch_expectations = json.loads(
@@ -135,12 +136,17 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.assertIn("ndk: 27.0.12077973", body)
             self.assertIn("cmake: 3.22.1", body)
             self.assertIn("api-level: 35", body)
+            self.assertIn("target: google_apis", body)
             self.assertIn("arch: x86_64", body)
+            self.assertIn('CARGO_BUILD_JOBS: "2"', body)
+            self.assertIn("cores: 2", body)
             self.assertIn("8e37db5e797b6167f3a00d697d816a684bd259c7", body)
             self.assertIn("bec9134a26c7d0f31b36d6083c25296e04cabff5", body)
             self.assertIn(
                 "rustup target add aarch64-linux-android x86_64-linux-android", body
             )
+        self.assertEqual(2, self.workflow.count('CARGO_BUILD_JOBS: "2"'))
+        self.assertEqual(2, self.workflow.count("cores: 2"))
         release_body = job_bodies["release-shell-seams"]
         workshop_body = job_bodies["workshop-seams"]
         release_script = "pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1"
@@ -161,13 +167,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
                     "android-resource-restore-seam",
                     "android-touch-roundtrip-seam",
                     "android-orientation-metrics-seam",
+                    "android-packaged-assets-seam",
                 )
             ),
             sorted(release_artifacts),
         )
         self.assertEqual(["android-workshop-it025-seam"], workshop_artifacts)
-        self.assertEqual(5, self.workflow.count("          name: android-"))
-        self.assertEqual(5, self.workflow.count("        if: always()"))
+        self.assertEqual(6, self.workflow.count("          name: android-"))
+        self.assertEqual(6, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
@@ -191,15 +198,66 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "samples/android_aot_seam",
             "samples/android_touch_seam",
             "samples/android_orientation_seam",
+            "samples/android_packaged_assets_seam",
         ):
             self.assertEqual(1, self.emulator_script.count(project))
+        self.assertIn("[int]$PerSeamTimeoutSeconds = 660", self.emulator_script)
+        self.assertLess(5 * 660, 75 * 60)
+
+    def test_release_wrapper_defaults_to_all_seams_in_stable_order(self):
+        self.assertIn('[string]$TestId = ""', self.emulator_script)
+        self.assertIn('$selectedSeams = if ($TestId)', self.emulator_script)
+        ordered_ids = [
+            self.emulator_script.index(f'TestId = "{test_id}"')
+            for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021")
+        ]
+        self.assertEqual(sorted(ordered_ids), ordered_ids)
+        self.assertIn('} else {\n    $seams\n}', self.emulator_script)
+
+    def test_workflow_dispatch_can_scope_it021_without_changing_workflow_call(self):
+        self.assertIn("workflow_call:\n  workflow_dispatch:\n    inputs:", self.workflow)
+        self.assertIn("release_shell_test_id:", self.workflow)
+        self.assertIn('type: string', self.workflow)
+        self.assertIn(
+            'STASIS_RELEASE_SHELL_TEST_ID: ${{ inputs.release_shell_test_id }}',
+            self.workflow,
+        )
+        self.assertIn(
+            'test_release_shell_emulator.ps1 -TestId "$STASIS_RELEASE_SHELL_TEST_ID"',
+            self.workflow,
+        )
+        self.assertNotIn(
+            'test_release_shell_emulator.ps1 -TestId "$env:STASIS_RELEASE_SHELL_TEST_ID"',
+            self.workflow,
+        )
+        self.assertNotIn(
+            'test_release_shell_emulator.ps1 -TestId "${{ inputs.release_shell_test_id }}"',
+            self.workflow,
+        )
+        self.assertIn('Where-Object { $_.TestId -eq $TestId }', self.emulator_script)
+        self.assertIn('TestId = "IT-021"', self.emulator_script)
+
+    def test_release_wrapper_rejects_unknown_test_ids_before_execution(self):
+        self.assertIn('$TestId -notin $validTestIds', self.emulator_script)
+        self.assertIn('Unknown Android release-shell seam test ID', self.emulator_script)
+        validation = self.emulator_script.index('$validTestIds =')
+        first_execution = self.emulator_script.index('test_release_shell.ps1')
+        self.assertLess(validation, first_execution)
+
+    def test_packaged_assets_use_the_non_lifecycle_resource_pixel_oracle(self):
+        self.assertIn('if expectations.get("resource_regions"):', self.release_runner)
+        expectations = json.loads(
+            read("samples/android_packaged_assets_seam/android_seam_expectations.json")
+        )
+        self.assertNotIn("lifecycle", expectations)
+        self.assertGreater(len(expectations["resource_regions"]), 0)
 
     def test_strategy_makes_emulator_the_readiness_gate(self):
         self.assertIn("hosted x86_64 emulator is the CI and readiness", self.strategy)
         self.assertRegex(
             self.strategy, r"Production Android\s+packaging remains ARM64"
         )
-        for test_id in ("IT-017", "IT-018", "IT-019"):
+        for test_id in ("IT-017", "IT-018", "IT-019", "IT-021"):
             row = next(line for line in self.strategy.splitlines() if f"| {test_id} |" in line)
             self.assertTrue(row.endswith("| Emulator |"), row)
 
@@ -213,6 +271,25 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
 
     def test_workshop_it025_isolated_from_release_shells(self):
         self.assertIn("[int]$StepTimeoutSeconds = 300", self.workshop_script)
+
+    def test_workshop_fatal_scan_delegates_only_valid_it031_case_records(self):
+        self.assertIn("ConvertFrom-Json -ErrorAction Stop", self.workshop_script)
+        self.assertIn('$case.test_id -eq "IT-031"', self.workshop_script)
+        self.assertIn("$null -ne $case.native", self.workshop_script)
+        self.assertIn("$null -ne $case.ui", self.workshop_script)
+        self.assertIn("$markerIndex = $line.IndexOf($markerText)", self.workshop_script)
+        self.assertIn("$line = $line.Remove($markerIndex, $markerText.Length)", self.workshop_script)
+        self.assertIn("$fatalScanLog | Select-String -SimpleMatch $fatalPatterns", self.workshop_script)
+        self.assertIn("Leave malformed case lines in the fatal scan", self.workshop_script)
+
+    def test_workshop_fatal_scan_retains_ambient_prefix_before_case_record(self):
+        self.assertIn('"Render resource error"', self.workshop_script)
+        self.assertIn('"resource restore failed"', self.workshop_script)
+        self.assertIn("Stasis Workshop IT-031 case:\\s+(\\{.*\\})\\s*$", self.workshop_script)
+        self.assertIn("$line = $_", self.workshop_script)
+        self.assertIn("$markerIndex = $line.IndexOf($markerText)", self.workshop_script)
+        self.assertIn("$line = $line.Remove($markerIndex, $markerText.Length)", self.workshop_script)
+        self.assertIn("$line\n    })", self.workshop_script)
         self.assertIn("[math]::Min($StepTimeoutSeconds, $remainingSeconds)", self.workshop_script)
         self.assertIn("verify_android_workshop_seam.py", self.workshop_script)
         self.assertIn('Join-Path (Join-Path (Join-Path $repoRoot "artifacts") "android_workshop_seam") "e"', self.workshop_script)

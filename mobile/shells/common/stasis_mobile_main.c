@@ -5,15 +5,25 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "published_aot_symbols.h"
 #include "stasis_package_provenance.h"
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 #include "stasis_mobile_aot_runtime.h"
+int stasis_set_recording_audio_config(int enabled);
+int stasis_audio_get_queued_frames(void);
+int stasis_recording_audio_pull_f32_interleaved(float *output_stereo, int frame_count);
+int stasis_audio_play(int asset_handle, int loop, float volume, float pan);
+void stasis_audio_stop(int voice_handle);
+int stasis_audio_voice_is_playing(int voice_handle);
 #endif
 #include "stasis_mobile_runtime.h"
 
 void stasis_host_report_runtime_error(const char *message);
+#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
+void stasis_mobile_network_present_join_url(void);
+#endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 int stasis_test_get_render_submission_state(int32_t *out_i32, int32_t capacity);
 int stasis_gfx_get_resource_lifecycle(int32_t *out_i32, int count);
@@ -33,6 +43,71 @@ static int32_t seam_i32(const char *path) {
 
 static float seam_f32(const char *path) {
     return stasis_jit_global_f32_load(hash_global_path(path));
+}
+
+static int seam_it021_audio = 0;
+static int seam_audio_queued_before = 0;
+static int seam_audio_queued_after = 0;
+static int seam_audio_frames_mixed = 0;
+static int seam_audio_nonzero_after_prefix = 0;
+static int seam_audio_voice_state = 0;
+static uint32_t seam_audio_sample_checksum = 0;
+static uint32_t seam_audio_replay_checksum = 0;
+static int seam_audio_replay_matches = 0;
+
+static uint32_t checksum_audio(
+    const float *output,
+    int first_frame,
+    int frame_count,
+    int *nonzero_samples
+) {
+    uint32_t checksum = 2166136261U;
+    *nonzero_samples = 0;
+    for (int frame = first_frame; frame < frame_count; frame++) {
+        for (int channel = 0; channel < 2; channel++) {
+            float sample = output[frame * 2 + channel];
+            if (sample > 0.0001f || sample < -0.0001f) (*nonzero_samples)++;
+            int32_t quantized = (int32_t)(sample * 100000.0f);
+            checksum ^= (uint32_t)quantized;
+            checksum *= 16777619U;
+        }
+    }
+    return checksum;
+}
+
+static void collect_it021_audio_telemetry(void) {
+    float output[64] = {0};
+    float replay_output[64] = {0};
+    const int frame_count = 32;
+    int asset_handle = seam_i32("seam_audio_handle");
+    int voice_handle = seam_i32("seam_voice_handle");
+    seam_audio_queued_before = stasis_audio_get_queued_frames();
+    seam_audio_frames_mixed = stasis_recording_audio_pull_f32_interleaved(output, frame_count);
+    seam_audio_queued_after = stasis_audio_get_queued_frames();
+    int direct_prefix = seam_audio_queued_before;
+    if (direct_prefix < 0) direct_prefix = 0;
+    if (direct_prefix > seam_audio_frames_mixed) direct_prefix = seam_audio_frames_mixed;
+    seam_audio_sample_checksum = checksum_audio(
+        output,
+        direct_prefix,
+        seam_audio_frames_mixed,
+        &seam_audio_nonzero_after_prefix
+    );
+    seam_audio_voice_state = stasis_audio_voice_is_playing(voice_handle);
+    stasis_audio_stop(voice_handle);
+    int replay_voice = stasis_audio_play(asset_handle, 0, 0.5f, 0.0f);
+    int replay_frames = stasis_recording_audio_pull_f32_interleaved(replay_output, frame_count);
+    int replay_nonzero = 0;
+    seam_audio_replay_checksum = checksum_audio(
+        replay_output,
+        direct_prefix,
+        replay_frames,
+        &replay_nonzero
+    );
+    seam_audio_replay_matches = replay_voice > 0 && replay_frames == seam_audio_frames_mixed &&
+        replay_nonzero == seam_audio_nonzero_after_prefix &&
+        seam_audio_replay_checksum == seam_audio_sample_checksum;
+    stasis_audio_stop(replay_voice);
 }
 
 static void log_seam_marker(const char *test_id, const char *event, int32_t frame) {
@@ -61,7 +136,15 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         "\"content_scale\":%.4f,\"raster_scale\":%.4f,"
         "\"resource_state\":%d,\"surface_generation\":%d,"
         "\"renderer_generation\":%d,\"restore_attempts\":%d,"
-        "\"restore_failures\":%d,\"restore_reason\":%d}",
+        "\"restore_failures\":%d,\"restore_reason\":%d,"
+        "\"asset_root\":\"%s\",\"asset_manifest_sha256\":\"%s\","
+        "\"sprite_handle\":%d,\"font_handle\":%d,\"cached_text_handle\":%d,"
+        "\"audio_handle\":%d,\"voice_handle\":%d,"
+        "\"direct_text_width\":%.3f,\"cached_text_width\":%.3f,"
+        "\"audio_queued_before\":%d,\"audio_queued_after\":%d,"
+        "\"audio_frames_mixed\":%d,\"audio_nonzero_after_prefix\":%d,"
+        "\"audio_voice_state\":%d,\"audio_sample_checksum\":%u,"
+        "\"audio_replay_checksum\":%u,\"audio_replay_matches\":%d}",
         test_id,
         event,
         frame,
@@ -111,7 +194,24 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         has_lifecycle ? lifecycle[2] : 0,
         has_lifecycle ? lifecycle[3] : 0,
         has_lifecycle ? lifecycle[4] : 0,
-        has_lifecycle ? lifecycle[5] : 0
+        has_lifecycle ? lifecycle[5] : 0,
+        SDL_getenv("STASIS_ASSET_ROOT") ? SDL_getenv("STASIS_ASSET_ROOT") : "",
+        SDL_getenv("STASIS_ASSET_MANIFEST_SHA256") ? SDL_getenv("STASIS_ASSET_MANIFEST_SHA256") : "",
+        seam_i32("seam_sprite_handle"),
+        seam_i32("seam_font_handle"),
+        seam_i32("seam_cached_text_handle"),
+        seam_i32("seam_audio_handle"),
+        seam_i32("seam_voice_handle"),
+        seam_f32("seam_direct_text_width"),
+        seam_f32("seam_cached_text_width"),
+        seam_audio_queued_before,
+        seam_audio_queued_after,
+        seam_audio_frames_mixed,
+        seam_audio_nonzero_after_prefix,
+        seam_audio_voice_state,
+        seam_audio_sample_checksum,
+        seam_audio_replay_checksum,
+        seam_audio_replay_matches
     );
 }
 #endif
@@ -167,17 +267,26 @@ int SDL_main(int argc, char **argv) {
     StasisMobileRuntimeConfig config = {1280, 720, "@STASIS_APP_NAME@"};
 #if defined(STASIS_ENABLE_SEAM_TESTS)
     const char *seam_test_id = SDL_getenv("STASIS_SEAM_TEST_ID");
+    seam_it021_audio = seam_test_id != NULL && strcmp(seam_test_id, "IT-021") == 0;
+    if (seam_it021_audio && !stasis_set_recording_audio_config(1)) {
+        SDL_Log("Stasis IT-021 failed to enable recording audio configuration");
+    }
 #endif
     int status = stasis_mobile_runtime_initialize(&config, &game);
     if (status != STASIS_MOBILE_RUNTIME_OK) {
         report_runtime_status("Stasis mobile initialization", status);
         SDL_Log("Stasis mobile initialization stopped with status %d", status);
-    }
-#if defined(STASIS_ENABLE_SEAM_TESTS)
-    else if (seam_test_id != NULL && seam_test_id[0] != '\0') {
-        log_seam_marker(seam_test_id, "initialized", 0);
-    }
+    } else {
+#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
+        stasis_mobile_network_present_join_url();
 #endif
+#if defined(STASIS_ENABLE_SEAM_TESTS)
+        if (seam_it021_audio) collect_it021_audio_telemetry();
+        if (seam_test_id != NULL && seam_test_id[0] != '\0') {
+            log_seam_marker(seam_test_id, "initialized", 0);
+        }
+#endif
+    }
     StasisMobileFramePacer frame_pacer;
 #if defined(STASIS_ENABLE_SEAM_TESTS)
     int32_t frame = 0;

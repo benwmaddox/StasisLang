@@ -18,9 +18,9 @@ use stasis::escape_mobile_c_string_literal;
 use stasis::{
     mobile_aot_function_for, run_jit_tests_in_directory_with_session,
     run_play_in_process_with_input_script_window_title_and_profile,
-    run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
-    write_mobile_aot_bindings_source_with_profile, PlayProfileConfig, RunnerConfig,
-    StasisTestRunSession,
+    run_play_in_process_with_replay, run_self_host_aot_cli_with_options, run_with_default_backend,
+    run_with_real_backend, write_mobile_aot_bindings_source_with_profile, PlayProfileConfig,
+    PlayReplayConfig, RunnerConfig, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
@@ -121,6 +121,8 @@ struct PlayCliArgs {
     data_bind_json: Option<PathBuf>,
     data_bind_struct_meta: Option<PathBuf>,
     input_script: Option<PathBuf>,
+    replay_record: Option<PathBuf>,
+    replay: Option<PathBuf>,
     tick_sleep_micros: u64,
     ticks: Option<u64>,
     screenshot: Option<PathBuf>,
@@ -514,6 +516,8 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut data_bind_json: Option<PathBuf> = None;
     let mut data_bind_struct_meta: Option<PathBuf> = None;
     let mut input_script: Option<PathBuf> = None;
+    let mut replay_record: Option<PathBuf> = None;
+    let mut replay: Option<PathBuf> = None;
     let mut tick_sleep_micros: u64 = 16000;
     let mut ticks: Option<u64> = None;
     let mut screenshot: Option<PathBuf> = None;
@@ -565,6 +569,22 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
                 return Err("missing value for --input-script".to_string());
             }
             input_script = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--record-replay" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --record-replay".to_string());
+            }
+            replay_record = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--replay" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --replay".to_string());
+            }
+            replay = Some(PathBuf::from(args[i + 1].clone()));
             i += 2;
             continue;
         }
@@ -666,6 +686,12 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
             "--profile-warmup and --profile-output require --profile-functions".to_string(),
         );
     }
+    if replay_record.is_some() && replay.is_some() {
+        return Err("--record-replay cannot be combined with --replay".to_string());
+    }
+    if replay.is_some() && input_script.is_some() {
+        return Err("--replay cannot be combined with --input-script".to_string());
+    }
     if !profile_functions.is_empty() && ticks.is_some_and(|count| count <= profile_warmup_ticks) {
         return Err(
             "--ticks must exceed --profile-warmup so at least one frame is measured".to_string(),
@@ -677,6 +703,8 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         data_bind_json,
         data_bind_struct_meta,
         input_script,
+        replay_record,
+        replay,
         tick_sleep_micros,
         ticks,
         screenshot,
@@ -944,17 +972,38 @@ fn try_run_play_subcommand() -> Option<i32> {
         warmup_ticks: parsed.profile_warmup_ticks,
         output_path: parsed.profile_output.clone(),
     });
-    let play_result = run_play_in_process_with_input_script_window_title_and_profile(
-        &launch.watch_file,
-        Some(&launch.watch_dir),
-        parsed.data_bind_json.as_deref(),
-        parsed.data_bind_struct_meta.as_deref(),
-        parsed.input_script.as_deref(),
-        parsed.tick_sleep_micros,
-        parsed.ticks,
-        launch.window_title.as_deref(),
-        profile,
-    );
+    let replay = parsed
+        .replay_record
+        .clone()
+        .map(PlayReplayConfig::Record)
+        .or_else(|| parsed.replay.clone().map(PlayReplayConfig::Replay));
+    let play_result = if let Some(replay) = replay {
+        run_play_in_process_with_replay(
+            &launch.watch_file,
+            Some(&launch.watch_dir),
+            parsed.data_bind_json.as_deref(),
+            parsed.data_bind_struct_meta.as_deref(),
+            parsed.input_script.as_deref(),
+            parsed.tick_sleep_micros,
+            parsed.ticks,
+            launch.window_title.as_deref(),
+            profile,
+            None,
+            replay,
+        )
+    } else {
+        run_play_in_process_with_input_script_window_title_and_profile(
+            &launch.watch_file,
+            Some(&launch.watch_dir),
+            parsed.data_bind_json.as_deref(),
+            parsed.data_bind_struct_meta.as_deref(),
+            parsed.input_script.as_deref(),
+            parsed.tick_sleep_micros,
+            parsed.ticks,
+            launch.window_title.as_deref(),
+            profile,
+        )
+    };
     match play_result {
         Ok(()) => {
             if let Some(path) = screenshot_environment.output_path.as_ref() {
@@ -2528,6 +2577,51 @@ mod tests {
         ];
         let error = parse_play_cli_args(&args).expect_err("parse should fail");
         assert!(error.contains("missing value for --input-script"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_record_and_replay_modes() {
+        let record = parse_play_cli_args(&[
+            "game.stasis".to_string(),
+            "--record-replay".to_string(),
+            "runs/game.replay.json".to_string(),
+        ])
+        .expect("record arguments");
+        assert_eq!(
+            record.replay_record,
+            Some(PathBuf::from("runs/game.replay.json"))
+        );
+
+        let replay = parse_play_cli_args(&[
+            "game.stasis".to_string(),
+            "--replay".to_string(),
+            "runs/game.replay.json".to_string(),
+        ])
+        .expect("replay arguments");
+        assert_eq!(replay.replay, Some(PathBuf::from("runs/game.replay.json")));
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_ambiguous_replay_inputs() {
+        let error = parse_play_cli_args(&[
+            "game.stasis".to_string(),
+            "--record-replay".to_string(),
+            "one.json".to_string(),
+            "--replay".to_string(),
+            "two.json".to_string(),
+        ])
+        .expect_err("record and replay conflict");
+        assert!(error.contains("cannot be combined"));
+
+        let error = parse_play_cli_args(&[
+            "game.stasis".to_string(),
+            "--replay".to_string(),
+            "one.json".to_string(),
+            "--input-script".to_string(),
+            "input.json".to_string(),
+        ])
+        .expect_err("replay and input script conflict");
+        assert!(error.contains("--input-script"));
     }
 
     #[test]

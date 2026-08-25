@@ -383,7 +383,29 @@ function Assert-RenderedVariant(
         "resource restore failed",
         "FATAL EXCEPTION"
     )
-    $fatal = $log | Select-String -SimpleMatch $fatalPatterns
+    # IT-031 intentionally records the real missing-resource diagnostic as a
+    # bounded case line. Let the strict seam verifier validate that JSON while
+    # keeping malformed/ambient matching text fatal here.
+    $fatalScanLog = @($log | ForEach-Object {
+        $line = $_
+        if ($line -match 'Stasis Workshop IT-031 case:\s+(\{.*\})\s*$') {
+            $markerText = $Matches[0]
+            try {
+                $case = $Matches[1] | ConvertFrom-Json -ErrorAction Stop
+                if (($case.test_id -eq "IT-031") -and $case.name -and ($case.equal -eq $true) `
+                        -and ($null -ne $case.native) -and ($null -ne $case.ui)) {
+                    $markerIndex = $line.IndexOf($markerText)
+                    if ($markerIndex -ge 0) {
+                        $line = $line.Remove($markerIndex, $markerText.Length)
+                    }
+                }
+            } catch {
+                # Leave malformed case lines in the fatal scan.
+            }
+        }
+        $line
+    })
+    $fatal = $fatalScanLog | Select-String -SimpleMatch $fatalPatterns
     if ($fatal) { throw "$Name logged a rendering/runtime failure; see $logFile" }
     $frameCounts = [regex]::Matches(($log -join "`n"), 'RenderAcceptanceFrame: count=(\d+)') |
         ForEach-Object { [int]$_.Groups[1].Value }
