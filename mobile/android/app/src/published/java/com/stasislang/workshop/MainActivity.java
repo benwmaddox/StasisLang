@@ -53,9 +53,15 @@ public final class MainActivity extends Activity {
     private boolean compileAttempted;
     private boolean compileReady;
     private long lastHudUpdateNanos;
+    private AndroidAudioFocus audioFocus;
 
     private static native String nativeCompileProject(String projectRoot);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
+    private static native void nativeAudioSetPaused(boolean paused);
+    private static native void nativeAudioSetFocus(boolean focused);
+    private static native void nativeAudioShutdown();
+    private static native boolean nativeAudioRequested();
+    private static native int[] nativeAudioMetrics();
     static native int[] nativeDecodeSvgSpriteBytes(byte[] bytes, int width, int height);
 
     @Override
@@ -89,7 +95,21 @@ public final class MainActivity extends Activity {
         root.addView(hud, hudParams);
 
         setContentView(root);
+        audioFocus = new AndroidAudioFocus(this, MainActivity::nativeAudioSetFocus);
         startFrameLoop();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        nativeAudioSetPaused(false);
+    }
+
+    @Override
+    protected void onPause() {
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioSetPaused(true);
+        super.onPause();
     }
 
     @Override
@@ -97,6 +117,8 @@ public final class MainActivity extends Activity {
         if (frameLoop != null) {
             frameHandler.removeCallbacks(frameLoop);
         }
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioShutdown();
         super.onDestroy();
     }
 
@@ -145,6 +167,7 @@ public final class MainActivity extends Activity {
                 width,
                 height,
                 frameValues);
+        if (audioFocus != null && nativeAudioRequested()) audioFocus.resume();
         tickMetric.add(System.nanoTime(), System.nanoTime() - start);
         if (status == 0 && frameValues[0] == 0 && gameSurface != null) {
             gameSurface.setRenderFrameValues(frameValues);
@@ -170,6 +193,13 @@ public final class MainActivity extends Activity {
         hudText.append(" ms  render=");
         appendMillis(hudText, renderMillis);
         hudText.append(" ms  budget=").append(budgetPercent).append('%');
+        int[] audio = nativeAudioMetrics();
+        if (audio != null && audio.length >= 6) {
+            hudText.append("  audio=").append(audio[0] != 0 ? "on" : "off")
+                    .append(" q=").append(audio[3])
+                    .append(" u=").append(audio[4]);
+            if (audio[5] != 0) hudText.append(" err=").append(audio[5]);
+        }
         hud.setTextColor(debugColorForBudget(budgetPercent));
         hud.setText(hudText.toString());
     }

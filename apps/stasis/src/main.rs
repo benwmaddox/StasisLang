@@ -1459,7 +1459,7 @@ fn write_mobile_aot_engine_bundle(
     write_mobile_aot_bindings_source(&manifest_json, &bindings_source)?;
     let cmake_file = if target == MobileAotTarget::AndroidArm64 {
         let path = output_dir.join("published_aot_objects.cmake");
-        write_android_aot_cmake_file(&bundle.object_paths_by_function, &path)?;
+        write_android_aot_cmake_file(&bundle.object_paths_by_function, &bindings_source, &path)?;
         Some(path)
     } else {
         None
@@ -1869,6 +1869,7 @@ fn write_mobile_aot_package_manifest(
 
 fn write_android_aot_cmake_file(
     object_paths_by_function: &std::collections::BTreeMap<String, PathBuf>,
+    bindings_source: &Path,
     output_path: &Path,
 ) -> Result<(), String> {
     let mut out = String::new();
@@ -1879,6 +1880,10 @@ fn write_android_aot_cmake_file(
             path.to_string_lossy().replace('\\', "/")
         ));
     }
+    out.push_str(&format!(
+        "  \"{}\"\n",
+        bindings_source.to_string_lossy().replace('\\', "/")
+    ));
     out.push_str(")\n");
     fs::write(output_path, out).map_err(|error| {
         format!(
@@ -2368,7 +2373,7 @@ mod tests {
         assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
         let cmake = fs::read_to_string(&summary.cmake_file).expect("read cmake file");
         assert!(cmake.contains("set(STASIS_PUBLISHED_AOT_OBJECTS"));
-        assert!(!cmake.contains("published_aot_bindings.c"));
+        assert!(cmake.contains("published_aot_bindings.c"));
 
         let mut defined = BTreeSet::new();
         let mut undefined = BTreeSet::new();

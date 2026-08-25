@@ -156,6 +156,13 @@ endif()
 if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     enable_testing()
     add_executable(
+        stasis_audio_ring_test
+        tests/stasis_audio_ring_test.c
+        stasis_audio_ring.c
+    )
+    target_include_directories(stasis_audio_ring_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_audio_ring_contract COMMAND stasis_audio_ring_test)
+    add_executable(
         stasis_mobile_runtime_test
         tests/stasis_mobile_runtime_test.c
         stasis_mobile_runtime.c

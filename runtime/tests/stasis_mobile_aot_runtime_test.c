@@ -17,6 +17,8 @@ static int32_t add_two(int32_t left, int32_t right) {
 }
 
 static char last_sprite_path[64];
+static float last_audio_samples[4];
+static int last_audio_frames;
 
 int stasis_audio_init(int rate, int channels, int latency) {
     return rate > 0 && channels == 2 && latency > 0;
@@ -28,7 +30,13 @@ int stasis_audio_get_channels(void) { return 2; }
 int stasis_audio_get_queued_frames(void) { return 0; }
 int stasis_audio_get_underruns(void) { return 0; }
 int stasis_audio_push_f32_interleaved(const float *samples, int frames) {
-    return samples == NULL ? 0 : frames;
+    int index;
+    if (samples == NULL || frames <= 0) return 0;
+    last_audio_frames = frames;
+    for (index = 0; index < 4 && index < frames * 2; index += 1) {
+        last_audio_samples[index] = samples[index];
+    }
+    return frames;
 }
 int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) {
     if (path != NULL) {
@@ -51,6 +59,7 @@ void stasis_sleep_ms(int ms) { (void)ms; }
 int main(void) {
     int32_t external = 4;
     int32_t external_array[3] = {7, 8, 9};
+    float external_audio[4] = {0.1f, -0.1f, 0.2f, -0.2f};
     uint8_t external_u8[4] = {1, 2, 3, 4};
     uint8_t dynamic_path[] = "sprite.bmp";
     int32_t *owned;
@@ -67,6 +76,13 @@ int main(void) {
     CHECK(stasis_jit_global_i32_array_load(20, 0, 1) == 8);
     stasis_jit_global_i32_array_store(20, 0, 2, 12);
     CHECK(external_array[2] == 12);
+
+    stasis_jit_register_global_f32_array(24, 0, external_audio, 4);
+    CHECK(stasis_jit_global_f32_array_ptr(24, 0, 4) == external_audio);
+    CHECK(stasis_jit_audio_push_f32_interleaved(24, 2) == 2);
+    CHECK(last_audio_frames == 2);
+    CHECK(last_audio_samples[0] == 0.1f && last_audio_samples[1] == -0.1f);
+    CHECK(last_audio_samples[2] == 0.2f && last_audio_samples[3] == -0.2f);
 
     stasis_jit_register_global_u8_array(22, 0, external_u8, 4);
     stasis_jit_global_i32_array_store(22, 0, 1, 258);

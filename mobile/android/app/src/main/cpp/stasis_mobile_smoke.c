@@ -7,8 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include "stasis_android_audio.h"
 #if STASIS_ANDROID_PUBLISHED_AOT
 #include "published_aot_symbols.h"
+#include "stasis_mobile_aot_runtime.h"
 #endif
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
@@ -31,6 +33,17 @@ typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_roo
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *project_root, int handle);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
+typedef struct StasisAudioHostApi {
+    int (*init)(int, int, int);
+    void (*shutdown)(void);
+    int (*is_available)(void);
+    int (*get_sample_rate)(void);
+    int (*get_channels)(void);
+    int (*get_queued_frames)(void);
+    int (*get_underruns)(void);
+    int (*push_f32_interleaved)(const float *, int);
+} StasisAudioHostApi;
+typedef int (*stasis_android_bridge_install_audio_api_fn)(const StasisAudioHostApi *api);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
 typedef void (*stasis_codex_android_cancel_response_fn)(void);
@@ -67,6 +80,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_get_i32_global_fn get_i32_global;
     stasis_android_bridge_resolve_sprite_asset_fn resolve_sprite_asset;
     stasis_android_bridge_free_string_fn free_string;
+    stasis_android_bridge_install_audio_api_fn install_audio_api;
     int attempted;
 } RustBridgeApi;
 
@@ -86,100 +100,9 @@ typedef struct CodexBridgeApi {
 
 static CodexBridgeApi codex_bridge_api = {0};
 #if STASIS_ANDROID_PUBLISHED_AOT
-typedef struct PublishedRenderCommand {
-    int32_t kind;
-    int32_t x;
-    int32_t y;
-    int32_t w;
-    int32_t h;
-    int32_t color;
-    int32_t asset;
-    int32_t rotation_degrees;
-    int32_t alpha;
-    int32_t clip_x;
-    int32_t clip_y;
-    int32_t clip_w;
-    int32_t clip_h;
-} PublishedRenderCommand;
-
-typedef struct PublishedI32Global {
-    const char *path;
-    int32_t *value;
-    int32_t hash;
-} PublishedI32Global;
-
-static int32_t published_input_touch_x;
-static int32_t published_input_touch_y;
-static int32_t published_input_touch_active;
-static int32_t published_input_screen_w;
-static int32_t published_input_screen_h;
-static int32_t published_game_tick_count;
-static int32_t published_game_screen_w;
-static int32_t published_game_screen_h;
-static int32_t published_game_player_y;
-static int32_t published_game_ai_y;
-static int32_t published_game_ball_x;
-static int32_t published_game_ball_y;
-static int32_t published_game_ball_vx;
-static int32_t published_game_ball_vy;
-static int32_t published_game_ball_age_ticks;
-static int32_t published_game_enemy_paddle_speed_x100;
-static int32_t published_game_player_score;
-static int32_t published_game_ai_score;
-static int32_t published_render_command_count;
-static int32_t published_render_command_schema_version;
-static PublishedRenderCommand published_render_commands[STASIS_RENDER_COMMAND_CAPACITY];
-static int published_aot_globals_initialized;
+static int published_aot_runtime_bound;
 static int published_aot_main_ran;
 static int32_t published_runtime_tick_count;
-
-#define RENDER_GLOBALS(index) \
-    {"Render.command" #index "_kind", &published_render_commands[index].kind, 0}, \
-    {"Render.command" #index "_x", &published_render_commands[index].x, 0}, \
-    {"Render.command" #index "_y", &published_render_commands[index].y, 0}, \
-    {"Render.command" #index "_w", &published_render_commands[index].w, 0}, \
-    {"Render.command" #index "_h", &published_render_commands[index].h, 0}, \
-    {"Render.command" #index "_color", &published_render_commands[index].color, 0}, \
-    {"Render.command" #index "_asset", &published_render_commands[index].asset, 0}, \
-    {"Render.command" #index "_rotation_degrees", &published_render_commands[index].rotation_degrees, 0}, \
-    {"Render.command" #index "_alpha", &published_render_commands[index].alpha, 0}, \
-    {"Render.command" #index "_clip_x", &published_render_commands[index].clip_x, 0}, \
-    {"Render.command" #index "_clip_y", &published_render_commands[index].clip_y, 0}, \
-    {"Render.command" #index "_clip_w", &published_render_commands[index].clip_w, 0}, \
-    {"Render.command" #index "_clip_h", &published_render_commands[index].clip_h, 0}
-
-static PublishedI32Global published_i32_globals[] = {
-    {"Input.touch_x", &published_input_touch_x, 0},
-    {"Input.touch_y", &published_input_touch_y, 0},
-    {"Input.touch_active", &published_input_touch_active, 0},
-    {"Input.screen_w", &published_input_screen_w, 0},
-    {"Input.screen_h", &published_input_screen_h, 0},
-    {"GameState.tick_count", &published_game_tick_count, 0},
-    {"GameState.screen_w", &published_game_screen_w, 0},
-    {"GameState.screen_h", &published_game_screen_h, 0},
-    {"GameState.player_y", &published_game_player_y, 0},
-    {"GameState.ai_y", &published_game_ai_y, 0},
-    {"GameState.ball_x", &published_game_ball_x, 0},
-    {"GameState.ball_y", &published_game_ball_y, 0},
-    {"GameState.ball_vx", &published_game_ball_vx, 0},
-    {"GameState.ball_vy", &published_game_ball_vy, 0},
-    {"GameState.ball_age_ticks", &published_game_ball_age_ticks, 0},
-    {"GameState.enemy_paddle_speed_x100", &published_game_enemy_paddle_speed_x100, 0},
-    {"GameState.player_score", &published_game_player_score, 0},
-    {"GameState.ai_score", &published_game_ai_score, 0},
-    {"Render.command_count", &published_render_command_count, 0},
-    {"Render.command_schema_version", &published_render_command_schema_version, 0},
-    RENDER_GLOBALS(0),
-    RENDER_GLOBALS(1),
-    RENDER_GLOBALS(2),
-    RENDER_GLOBALS(3),
-    RENDER_GLOBALS(4),
-    RENDER_GLOBALS(5),
-    RENDER_GLOBALS(6),
-    RENDER_GLOBALS(7)
-};
-
-#undef RENDER_GLOBALS
 
 static int32_t stasis_published_hash_path(const char *path) {
     uint32_t hash = 2166136261U;
@@ -192,43 +115,14 @@ static int32_t stasis_published_hash_path(const char *path) {
     return (int32_t)hash;
 }
 
-static void stasis_published_init_globals(void) {
-    if (published_aot_globals_initialized) {
-        return;
-    }
-    size_t count = sizeof(published_i32_globals) / sizeof(published_i32_globals[0]);
-    for (size_t index = 0; index < count; index += 1) {
-        published_i32_globals[index].hash = stasis_published_hash_path(published_i32_globals[index].path);
-    }
-    published_aot_globals_initialized = 1;
+static int32_t stasis_published_load_i32(const char *path) {
+    return stasis_jit_global_i32_load(stasis_published_hash_path(path));
 }
 
-static int32_t *stasis_published_find_i32_global(int32_t path_hash) {
-    stasis_published_init_globals();
-    size_t count = sizeof(published_i32_globals) / sizeof(published_i32_globals[0]);
-    for (size_t index = 0; index < count; index += 1) {
-        if (published_i32_globals[index].hash == path_hash) {
-            return published_i32_globals[index].value;
-        }
-    }
-    return NULL;
-}
-
-int32_t stasis_jit_global_i32_load(int32_t path_hash) {
-    int32_t *value = stasis_published_find_i32_global(path_hash);
-    return value == NULL ? 0 : *value;
-}
-
-void stasis_jit_global_i32_store(int32_t path_hash, int32_t value) {
-    int32_t *target = stasis_published_find_i32_global(path_hash);
-    if (target != NULL) {
-        *target = value;
-    }
-}
-
-int64_t stasis_jit_lookup_code_ptr(int32_t fn_id_raw) {
-    (void)fn_id_raw;
-    return 0;
+static int32_t stasis_published_load_render_i32(int32_t index, const char *field) {
+    char path[80];
+    snprintf(path, sizeof(path), "Render.command%d_%s", index, field);
+    return stasis_published_load_i32(path);
 }
 
 static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
@@ -236,7 +130,8 @@ static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
         return;
     }
     memset(out, 0, sizeof(int32_t) * STASIS_RENDER_FRAME_I32_CAPACITY);
-    int32_t command_count = published_render_command_count;
+    int32_t command_count = stasis_published_load_i32("Render.command_count");
+    int32_t schema = stasis_published_load_i32("Render.command_schema_version");
     if (command_count < 0) {
         command_count = 0;
     }
@@ -245,27 +140,27 @@ static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
     }
     out[0] = 0;
     out[1] = published_runtime_tick_count;
-    out[2] = published_game_tick_count;
+    out[2] = stasis_published_load_i32("GameState.tick_count");
     out[3] = 0;
     out[4] = published_aot_main_ran ? 1 : 0;
     out[5] = command_count;
     for (int32_t index = 0; index < command_count; index += 1) {
         int base = STASIS_RENDER_FRAME_HEADER_SIZE + index * STASIS_RENDER_COMMAND_STRIDE;
-        out[base] = published_render_commands[index].kind;
-        out[base + 1] = published_render_commands[index].x;
-        out[base + 2] = published_render_commands[index].y;
-        out[base + 3] = published_render_commands[index].w;
-        out[base + 4] = published_render_commands[index].h;
-        out[base + 5] = published_render_commands[index].color;
-        out[base + 6] = published_render_commands[index].asset;
-        out[base + 7] = published_render_commands[index].rotation_degrees;
-        out[base + 8] = published_render_command_schema_version >= 2
-                ? published_render_commands[index].alpha : 255;
-        if (published_render_command_schema_version >= 3) {
-            out[base + 9] = published_render_commands[index].clip_x;
-            out[base + 10] = published_render_commands[index].clip_y;
-            out[base + 11] = published_render_commands[index].clip_w;
-            out[base + 12] = published_render_commands[index].clip_h;
+        out[base] = stasis_published_load_render_i32(index, "kind");
+        out[base + 1] = stasis_published_load_render_i32(index, "x");
+        out[base + 2] = stasis_published_load_render_i32(index, "y");
+        out[base + 3] = stasis_published_load_render_i32(index, "w");
+        out[base + 4] = stasis_published_load_render_i32(index, "h");
+        out[base + 5] = stasis_published_load_render_i32(index, "color");
+        out[base + 6] = stasis_published_load_render_i32(index, "asset");
+        out[base + 7] = stasis_published_load_render_i32(index, "rotation_degrees");
+        out[base + 8] = schema >= 2
+                ? stasis_published_load_render_i32(index, "alpha") : 255;
+        if (schema >= 3) {
+            out[base + 9] = stasis_published_load_render_i32(index, "clip_x");
+            out[base + 10] = stasis_published_load_render_i32(index, "clip_y");
+            out[base + 11] = stasis_published_load_render_i32(index, "clip_w");
+            out[base + 12] = stasis_published_load_render_i32(index, "clip_h");
         }
     }
 }
@@ -274,12 +169,16 @@ static int stasis_published_run_tick_frame(int touch_x, int touch_y, int touch_a
     if (out_values == NULL || out_len < STASIS_RENDER_FRAME_I32_CAPACITY) {
         return -1;
     }
-    stasis_published_init_globals();
-    published_input_touch_x = touch_x;
-    published_input_touch_y = touch_y;
-    published_input_touch_active = touch_active;
-    published_input_screen_w = screen_w;
-    published_input_screen_h = screen_h;
+    if (!published_aot_runtime_bound) {
+        stasis_mobile_aot_reset();
+        STASIS_AOT_BIND_RUNTIME_GLOBALS();
+        published_aot_runtime_bound = 1;
+    }
+    stasis_jit_global_i32_store(stasis_published_hash_path("Input.touch_x"), touch_x);
+    stasis_jit_global_i32_store(stasis_published_hash_path("Input.touch_y"), touch_y);
+    stasis_jit_global_i32_store(stasis_published_hash_path("Input.touch_active"), touch_active);
+    stasis_jit_global_i32_store(stasis_published_hash_path("Input.screen_w"), screen_w);
+    stasis_jit_global_i32_store(stasis_published_hash_path("Input.screen_h"), screen_h);
     if (!published_aot_main_ran) {
         STASIS_AOT_MAIN();
         published_aot_main_ran = 1;
@@ -945,11 +844,27 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_resolve_sprite_asset_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_sprite_asset");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
+    rust_bridge_api.install_audio_api =
+            (stasis_android_bridge_install_audio_api_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_install_audio_api");
     if (rust_bridge_api.compile_project == NULL ||
         rust_bridge_api.run_tick == NULL ||
         rust_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG, "Rust Android bridge missing required symbols");
         return NULL;
+    }
+    if (rust_bridge_api.install_audio_api != NULL) {
+        StasisAudioHostApi audio_api = {
+            stasis_audio_init,
+            stasis_audio_shutdown,
+            stasis_audio_is_available,
+            stasis_audio_get_sample_rate,
+            stasis_audio_get_channels,
+            stasis_audio_get_queued_frames,
+            stasis_audio_get_underruns,
+            stasis_audio_push_f32_interleaved
+        };
+        rust_bridge_api.install_audio_api(&audio_api);
     }
 
     return &rust_bridge_api;
@@ -1225,6 +1140,55 @@ Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activ
     return (*env)->NewStringUTF(env, "Stasis Android native smoke loaded");
 }
 
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioSetPaused(
+        JNIEnv *env, jclass activity_class, jboolean paused) {
+    (void)env;
+    (void)activity_class;
+    stasis_android_audio_set_paused(paused ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioSetFocus(
+        JNIEnv *env, jclass activity_class, jboolean focused) {
+    (void)env;
+    (void)activity_class;
+    stasis_android_audio_set_focus(focused ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioShutdown(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    stasis_audio_shutdown();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioRequested(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    return stasis_android_audio_is_requested() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioMetrics(
+        JNIEnv *env, jclass activity_class) {
+    jint values[6];
+    jintArray result;
+    (void)activity_class;
+    values[0] = stasis_android_audio_is_running();
+    values[1] = values[0] ? stasis_audio_get_sample_rate() : 0;
+    values[2] = values[0] ? stasis_audio_get_channels() : 0;
+    values[3] = stasis_audio_get_queued_frames();
+    values[4] = stasis_audio_get_underruns();
+    values[5] = stasis_android_audio_last_error();
+    result = (*env)->NewIntArray(env, 6);
+    if (result != NULL) (*env)->SetIntArrayRegion(env, result, 0, 6, values);
+    return result;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeResolveSpriteAsset(
         JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
@@ -1311,7 +1275,6 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
     (void)activity_class;
 #if STASIS_ANDROID_PUBLISHED_AOT
     (void)project_root;
-    stasis_published_init_globals();
     return (*env)->NewStringUTF(env, "CompilePlanned: reload=PublishedAot files=0 functions=0 hash=0000000000000000 manifest=published_aot state=compiled status=0");
 #else
 

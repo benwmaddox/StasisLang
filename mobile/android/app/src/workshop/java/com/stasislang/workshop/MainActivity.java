@@ -294,6 +294,7 @@ public final class MainActivity extends Activity {
     private final StringBuilder debugTextBuilder = new StringBuilder(64);
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
+    private AndroidAudioFocus audioFocus;
     private boolean compileReady;
     private boolean compileAttempted;
     private String lastCompileResult = "CompileNotRun";
@@ -318,6 +319,10 @@ public final class MainActivity extends Activity {
 
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
+    private static native void nativeAudioSetPaused(boolean paused);
+    private static native void nativeAudioSetFocus(boolean focused);
+    private static native void nativeAudioShutdown();
+    private static native boolean nativeAudioRequested();
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
@@ -337,6 +342,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        audioFocus = new AndroidAudioFocus(this, MainActivity::nativeAudioSetFocus);
         AndroidCrashStore.install(this);
         JSONObject crashState = AndroidCrashStore.noteLaunch(this);
         restartLoopRecoveryActive = crashState.optBoolean("restart_loop_detected", false);
@@ -392,6 +398,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        nativeAudioSetPaused(false);
         codexLoginLifecycle.onResume();
         refreshPhoneNativeCodexStatus();
         startNextQueuedAiIfIdle();
@@ -399,6 +406,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioSetPaused(true);
         codexLoginLifecycle.onPause();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         persistPendingDraft();
@@ -437,6 +446,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         activityDestroyed = true;
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioShutdown();
         stopVoiceRecognition();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         if (codexLoginDialog != null) codexLoginDialog.dismiss();
@@ -4407,6 +4418,7 @@ public final class MainActivity extends Activity {
                 screenWidth,
                 screenHeight,
                 nativeFrameValues);
+        if (audioFocus != null && nativeAudioRequested()) audioFocus.resume();
         long tickEndNanos = System.nanoTime();
         tickMetric.add(tickEndNanos, tickEndNanos - tickStartNanos);
         if (frameStatus != 0 || nativeFrameValues[0] != 0) {

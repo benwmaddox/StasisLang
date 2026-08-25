@@ -14,12 +14,23 @@ use stasis_compiler::frontend::workshop::{
     WorkshopCompilePlan, WorkshopReload, WorkshopSourceFile,
 };
 use stasis_compiler::IncrementalCompilerHost;
+use stasis_dynload::StasisAudioHostApi;
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
 pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 13;
 pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER_SIZE
     + ANDROID_RENDER_COMMAND_CAPACITY * ANDROID_RENDER_COMMAND_STRIDE;
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_install_audio_api(api: *const StasisAudioHostApi) -> i32 {
+    if api.is_null() {
+        stasis_dynload::install_audio_host_api(None);
+        return 1;
+    }
+    stasis_dynload::install_audio_host_api(Some(unsafe { *api }));
+    1
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AndroidBridgeTickInput {

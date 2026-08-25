@@ -29,6 +29,11 @@ jobs:
       - name: Check Stasis src layout
         run: python tools/ci/check_stasis_src_layout.py
 
+      - name: Test bounded audio ring
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Iruntime runtime/stasis_audio_ring.c runtime/tests/stasis_audio_ring_test.c -o /tmp/stasis_audio_ring_test
+          /tmp/stasis_audio_ring_test
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

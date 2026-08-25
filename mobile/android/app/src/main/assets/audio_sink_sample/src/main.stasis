@@ -1,0 +1,87 @@
+// Device acceptance fixture extracted from Brickout's generated f32 stereo tone path.
+extern function audio_is_available(): bool;
+extern function audio_get_sample_rate(): i32;
+extern function audio_get_queued_frames(): i32;
+extern function audio_get_underruns(): i32;
+extern function audio_push_f32_interleaved(samples: f32[], frame_count: i32): i32;
+extern function sin_fast(value: f32): f32;
+
+const AUDIO_FRAMES_PER_PUSH: i32 = 256;
+const PI2: f32 = 6.2831855;
+
+global audio_buf: f32[512];
+global audio_ready: bool;
+global audio_sr: i32;
+global audio_phase: f32;
+
+global GameState {
+    tick_count: i32;
+}
+
+global Render {
+    command_schema_version: i32;
+    command_count: i32;
+    command0_kind: i32;
+    command0_x: i32;
+    command0_y: i32;
+    command0_w: i32;
+    command0_h: i32;
+    command0_color: i32;
+    command0_asset: i32;
+    command0_rotation_degrees: i32;
+    command0_alpha: i32;
+    command0_clip_x: i32;
+    command0_clip_y: i32;
+    command0_clip_w: i32;
+    command0_clip_h: i32;
+}
+
+function fill_audio_chunk(sample_rate: i32): void {
+    let sr_f: f32;
+    sr_f.from_i32(sample_rate);
+    let frame: i32 = 0;
+    for (frame = 0; frame < AUDIO_FRAMES_PER_PUSH; frame = frame + 1) {
+        let sample: f32 = sin_fast(audio_phase) * 0.08;
+        audio_phase = audio_phase + (440.0 / sr_f) * PI2;
+        if (audio_phase > PI2) { audio_phase = audio_phase - PI2; }
+        let index: i32 = frame * 2;
+        audio_buf[index] = sample;
+        audio_buf[index + 1] = sample;
+    }
+}
+
+function audio_update(): void {
+    if (!audio_ready) { return; }
+    let queued: i32 = audio_get_queued_frames();
+    let target: i32 = audio_sr / 5;
+    let batch: i32 = 0;
+    for (batch = 0; batch < 8 && queued < target; batch = batch + 1) {
+        fill_audio_chunk(audio_sr);
+        let pushed: i32 = audio_push_f32_interleaved(audio_buf, AUDIO_FRAMES_PER_PUSH);
+        if (pushed < 1) { return; }
+        queued = queued + pushed;
+    }
+}
+
+function main(): void {
+    audio_ready = audio_is_available();
+    if (audio_ready) { audio_sr = audio_get_sample_rate(); }
+    audio_phase = 0.0;
+}
+
+function tick(): void {
+    GameState.tick_count += 1;
+    audio_update();
+}
+
+function render(): void {
+    Render.command_schema_version = 2;
+    Render.command_count = 1;
+    Render.command0_kind = 1;
+    Render.command0_x = 40;
+    Render.command0_y = 40;
+    Render.command0_w = 280;
+    Render.command0_h = 80;
+    Render.command0_color = 3385958;
+    Render.command0_alpha = 255;
+}

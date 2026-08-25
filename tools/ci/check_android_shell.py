@@ -235,7 +235,31 @@ def main() -> int:
     host_agent = read("tools/android_ai_agent_host.py")
     host_comparison = read("tools/run_android_ai_model_comparison.py")
     host_compile = read("crates/stasis_android_bridge/src/android_workshop_compile.rs")
+    android_cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
+    android_audio = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
+    audio_ring = read("runtime/stasis_audio_ring.c")
+    published_activity = read("mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
+    assert "find_library(aaudio_lib aaudio)" in android_cmake
+    assert "stasis_mobile_aot_runtime.c" in android_cmake
+    assert "AAudioStreamBuilder_setDataCallback" in android_audio
+    assert "AAUDIO_FORMAT_PCM_FLOAT" in android_audio
+    assert '"AAudioStreamBuilder_setUsage"' in android_audio
+    assert '"AAudioStreamBuilder_setContentType"' in android_audio
+    assert "AAUDIO_USAGE_GAME" in android_audio
+    assert "AAUDIO_CONTENT_TYPE_MUSIC" in android_audio
+    assert "stasis_audio_ring_push" in android_audio
+    assert "stasis_audio_ring_consume" in android_audio
+    assert "atomic_exchange_explicit(&audio_context, NULL" in android_audio
+    assert "audio_callback_enter(context)" in android_audio
+    assert "memory_order_release" in audio_ring
+    assert "nativeAudioSetPaused(true)" in published_activity
+    assert "nativeAudioSetFocus" in published_activity
+    assert "nativeAudioRequested()" in published_activity
+    assert "nativeAudioShutdown" in published_activity
+    assert 'append(" q=").append(audio[3])' in published_activity
+    assert "new AndroidAudioFocus(this, MainActivity::nativeAudioSetFocus)" in activity
+    assert "nativeAudioRequested()" in activity
     assert "protected void onPause()" in activity
     assert "protected void onSaveInstanceState(Bundle outState)" in activity
     assert 'outState.putString("ai_prompt"' in activity
@@ -1207,8 +1231,8 @@ def main() -> int:
     assert "const int frame_len = STASIS_RENDER_FRAME_I32_CAPACITY" in native
     assert "#define STASIS_RENDER_COMMAND_STRIDE 13" in native
     assert '"Render.command_schema_version"' in native
-    assert '"Render.command" #index "_rotation_degrees"' in native
-    assert '"Render.command" #index "_alpha"' in native
+    assert 'stasis_published_load_render_i32(index, "rotation_degrees")' in native
+    assert 'stasis_published_load_render_i32(index, "alpha")' in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
@@ -1244,8 +1268,8 @@ def main() -> int:
     assert "PreviousManifest" in native
     assert "read_previous_compile_manifest" in native
     assert "classify_reload" in native
-    assert '"GameState.ball_age_ticks", &published_game_ball_age_ticks' in native
-    assert '"GameState.enemy_paddle_speed_x100", &published_game_enemy_paddle_speed_x100' in native
+    assert "STASIS_AOT_BIND_RUNTIME_GLOBALS()" in native
+    assert 'stasis_published_load_i32("GameState.tick_count")' in native
     assert "reload=%s" in native
     assert "InitialCompile" in native
     assert "NoChange" in native
@@ -1255,7 +1279,10 @@ def main() -> int:
     assert "Stasis Android native smoke loaded" in native
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
-    assert "add_library(stasis_mobile_smoke SHARED stasis_mobile_smoke.c stasis_android_sprite.c)" in cmake
+    assert "stasis_android_audio.c" in cmake
+    assert "stasis_audio_ring.c" in cmake
+    assert "stasis_mobile_aot_runtime.c" in cmake
+    assert "stasis_android_runtime_platform.c" in cmake
     assert "../../../../../../runtime" in cmake
     assert "find_library(math_lib m)" in cmake
     assert "STASIS_ANDROID_PUBLISHED_AOT" in cmake

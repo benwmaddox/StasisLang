@@ -2117,50 +2117,123 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Audio host API (JIT extern call bridge)
 // ============================================================
 
-// Current dev runner doesn't model audio as a command buffer yet.
-// Brickout uses `audio_is_available()` as a gate; return false so the game runs without calling
-// pointer-typed audio externs (e.g. `audio_push_f32_interleaved`).
-#[no_mangle]
-pub extern "C" fn stasis_jit_audio_init(
-    _sample_rate: i32,
-    _channels: i32,
-    _target_latency_frames: i32,
-) -> i32 {
-    0
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StasisAudioHostApi {
+    pub init: Option<extern "C" fn(i32, i32, i32) -> i32>,
+    pub shutdown: Option<extern "C" fn()>,
+    pub is_available: Option<extern "C" fn() -> i32>,
+    pub get_sample_rate: Option<extern "C" fn() -> i32>,
+    pub get_channels: Option<extern "C" fn() -> i32>,
+    pub get_queued_frames: Option<extern "C" fn() -> i32>,
+    pub get_underruns: Option<extern "C" fn() -> i32>,
+    pub push_f32_interleaved: Option<extern "C" fn(*const f32, i32) -> i32>,
+}
+
+static AUDIO_HOST_API: OnceLock<Mutex<Option<StasisAudioHostApi>>> = OnceLock::new();
+
+fn audio_host_api() -> &'static Mutex<Option<StasisAudioHostApi>> {
+    AUDIO_HOST_API.get_or_init(|| Mutex::new(None))
+}
+
+pub fn install_audio_host_api(api: Option<StasisAudioHostApi>) {
+    *audio_host_api()
+        .lock()
+        .expect("audio host API mutex poisoned") = api;
+}
+
+fn current_audio_host_api() -> Option<StasisAudioHostApi> {
+    *audio_host_api()
+        .lock()
+        .expect("audio host API mutex poisoned")
 }
 
 #[no_mangle]
-pub extern "C" fn stasis_jit_audio_shutdown() {}
+pub extern "C" fn stasis_jit_audio_init(
+    sample_rate: i32,
+    channels: i32,
+    target_latency_frames: i32,
+) -> i32 {
+    current_audio_host_api()
+        .and_then(|api| api.init)
+        .map(|init| init(sample_rate, channels, target_latency_frames))
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_shutdown() {
+    if let Some(shutdown) = current_audio_host_api().and_then(|api| api.shutdown) {
+        shutdown();
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
-    0
+    current_audio_host_api()
+        .and_then(|api| api.is_available)
+        .map(|available| available())
+        .unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_sample_rate() -> i32 {
-    // Sensible default for callers that don't guard on `audio_is_available`.
-    48_000
+    current_audio_host_api()
+        .and_then(|api| api.get_sample_rate)
+        .map(|get| get())
+        .unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_channels() -> i32 {
-    2
+    current_audio_host_api()
+        .and_then(|api| api.get_channels)
+        .map(|get| get())
+        .unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_queued_frames() -> i32 {
-    0
+    current_audio_host_api()
+        .and_then(|api| api.get_queued_frames)
+        .map(|get| get())
+        .unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_underruns() -> i32 {
-    0
+    current_audio_host_api()
+        .and_then(|api| api.get_underruns)
+        .map(|get| get())
+        .unwrap_or(0)
 }
 
 #[no_mangle]
-pub extern "C" fn stasis_jit_audio_push_f32_interleaved(_samples: i32, _frame_count: i32) -> i32 {
-    0
+pub extern "C" fn stasis_jit_audio_push_f32_interleaved(samples: i32, frame_count: i32) -> i32 {
+    let Some(api) = current_audio_host_api() else {
+        return 0;
+    };
+    let Some(push) = api.push_f32_interleaved else {
+        return 0;
+    };
+    let channels = api.get_channels.map(|get| get()).unwrap_or(0);
+    let Some(sample_count) = frame_count.checked_mul(channels) else {
+        return 0;
+    };
+    if frame_count <= 0 || channels <= 0 || sample_count <= 0 {
+        return 0;
+    }
+    let pointer = {
+        let table = registered_f32_arrays();
+        let guard = table
+            .lock()
+            .expect("registered f32 array table mutex poisoned");
+        guard
+            .get(&(samples, 0))
+            .copied()
+            .filter(|(_, len)| *len >= sample_count as usize)
+            .map(|(pointer, _)| pointer as *const f32)
+    };
+    pointer.map(|values| push(values, frame_count)).unwrap_or(0)
 }
 
 fn dispatch_i32_call0(fn_id_raw: i32) -> Result<i32, String> {
@@ -2665,7 +2738,39 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicI32, Ordering};
     use std::sync::MutexGuard;
+
+    static AUDIO_PUSHED_FRAMES: AtomicI32 = AtomicI32::new(0);
+    static AUDIO_FIRST_SAMPLE_BITS: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn test_audio_init(rate: i32, channels: i32, latency: i32) -> i32 {
+        i32::from(rate == 48_000 && channels == 2 && latency == 512)
+    }
+    extern "C" fn test_audio_shutdown() {}
+    extern "C" fn test_audio_available() -> i32 {
+        1
+    }
+    extern "C" fn test_audio_rate() -> i32 {
+        48_000
+    }
+    extern "C" fn test_audio_channels() -> i32 {
+        2
+    }
+    extern "C" fn test_audio_queued() -> i32 {
+        7
+    }
+    extern "C" fn test_audio_underruns() -> i32 {
+        3
+    }
+    extern "C" fn test_audio_push(samples: *const f32, frames: i32) -> i32 {
+        if samples.is_null() || frames <= 0 {
+            return 0;
+        }
+        AUDIO_PUSHED_FRAMES.store(frames, Ordering::SeqCst);
+        AUDIO_FIRST_SAMPLE_BITS.store(unsafe { *samples }.to_bits() as i32, Ordering::SeqCst);
+        frames
+    }
 
     fn test_lock() -> MutexGuard<'static, ()> {
         jit_dispatch_lock()
@@ -2788,5 +2893,39 @@ mod tests {
         stasis_jit_global_i32_array_store(shared_id, 0, 5, i32::from(b'r'));
 
         assert_eq!(jit_text_arg_bytes(shared_id), Some(b"buffer".to_vec()));
+    }
+
+    #[test]
+    fn installed_audio_host_receives_registered_f32_frames() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        install_audio_host_api(Some(StasisAudioHostApi {
+            init: Some(test_audio_init),
+            shutdown: Some(test_audio_shutdown),
+            is_available: Some(test_audio_available),
+            get_sample_rate: Some(test_audio_rate),
+            get_channels: Some(test_audio_channels),
+            get_queued_frames: Some(test_audio_queued),
+            get_underruns: Some(test_audio_underruns),
+            push_f32_interleaved: Some(test_audio_push),
+        }));
+        let mut samples = [-0.5f32, 0.5, 0.25, -0.25];
+        register_global_f32_array(0x1234, 0, samples.as_mut_ptr(), samples.len());
+
+        assert_eq!(stasis_jit_audio_init(48_000, 2, 512), 1);
+        assert_eq!(stasis_jit_audio_is_available(), 1);
+        assert_eq!(stasis_jit_audio_get_sample_rate(), 48_000);
+        assert_eq!(stasis_jit_audio_get_channels(), 2);
+        assert_eq!(stasis_jit_audio_get_queued_frames(), 7);
+        assert_eq!(stasis_jit_audio_get_underruns(), 3);
+        assert_eq!(stasis_jit_audio_push_f32_interleaved(0x1234, 2), 2);
+        assert_eq!(AUDIO_PUSHED_FRAMES.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            AUDIO_FIRST_SAMPLE_BITS.load(Ordering::SeqCst),
+            (-0.5f32).to_bits() as i32
+        );
+        assert_eq!(stasis_jit_audio_push_f32_interleaved(0x5678, 2), 0);
+        install_audio_host_api(None);
+        assert_eq!(stasis_jit_audio_is_available(), 0);
     }
 }
