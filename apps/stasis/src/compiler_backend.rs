@@ -16,6 +16,8 @@ use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 
 pub(crate) struct PreparedJitSwap {
@@ -3188,6 +3190,320 @@ fn resolve_engine_bundle_symbol(
         .ok_or_else(|| format!("engine bundle manifest is missing required symbol {name}"))
 }
 
+#[cfg(windows)]
+fn cmake_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(windows)]
+static MONOLITH_CMAKE_INSTANCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+struct MonolithCmakeBuildDir {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for MonolithCmakeBuildDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(windows)]
+fn create_monolith_cmake_build_dir(
+    aot_root: &Path,
+    output_exe: &Path,
+) -> Result<MonolithCmakeBuildDir, String> {
+    let identity = format!(
+        "{}|{}",
+        stable_absolute_path(aot_root).display(),
+        stable_absolute_path(output_exe).display()
+    );
+    let identity_hash = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let parent = std::env::temp_dir().join("stasis-monolith-cmake");
+    std::fs::create_dir_all(&parent).map_err(|error| {
+        format!(
+            "failed to create monolith CMake temp directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    for _ in 0..32 {
+        let instance = MONOLITH_CMAKE_INSTANCE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            "{}-{:016x}-{}",
+            std::process::id(),
+            instance,
+            &identity_hash[..12]
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(MonolithCmakeBuildDir { path }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to create isolated monolith CMake build directory {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Err("could not allocate a unique isolated monolith CMake build directory".to_string())
+}
+
+#[cfg(windows)]
+fn resolve_vcvars64() -> Result<PathBuf, String> {
+    let mut installation_roots = Vec::new();
+    let mut vswhere_paths = vec![
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+    ];
+    if let Ok(output) = std::process::Command::new("vswhere.exe")
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            installation_roots.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(PathBuf::from),
+            );
+        }
+    }
+    for path in vswhere_paths.drain(..) {
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(output) = std::process::Command::new(&path)
+            .args([
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                installation_roots.extend(
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .map(PathBuf::from),
+                );
+            }
+        }
+    }
+    for root in [
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools",
+        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Professional",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise",
+    ] {
+        installation_roots.push(PathBuf::from(root));
+    }
+    for root in installation_roots {
+        let candidate = root.join(r"VC\Auxiliary\Build\vcvars64.bat");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err("Visual Studio vcvars64.bat was not found. Install the C++ desktop workload (including MSVC x64/x86 build tools) or add vswhere.exe to PATH".to_string())
+}
+
+#[cfg(windows)]
+fn run_cmake_in_msvc_environment(arguments: &[String]) -> Result<std::process::Output, String> {
+    let vcvars = resolve_vcvars64()?;
+    let quoted_arguments = arguments
+        .iter()
+        .map(|argument| format!("\"{}\"", argument.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock failed while staging CMake: {error}"))?
+        .as_nanos();
+    let script_path = std::env::temp_dir().join(format!(
+        "stasis_monolith_cmake_{}_{}.cmd",
+        std::process::id(),
+        stamp
+    ));
+    let script = format!(
+        "@echo off\r\ncall \"{}\" >nul\r\nif errorlevel 1 exit /b %errorlevel%\r\ncmake {quoted_arguments}\r\n",
+        vcvars.display()
+    );
+    std::fs::write(&script_path, script)
+        .map_err(|error| format!("failed to stage {}: {error}", script_path.display()))?;
+    let output = std::process::Command::new("cmd.exe")
+        .arg("/d")
+        .arg("/c")
+        .arg(&script_path)
+        .output()
+        .map_err(|error| format!("failed to launch CMake in the MSVC environment: {error}"));
+    let _ = std::fs::remove_file(&script_path);
+    output
+}
+
+#[cfg(windows)]
+fn package_engine_bundle_monolithic_windows(
+    backend: &IncrementalCompilerBackend,
+    bundle: &AotEngineBundle,
+    output_exe: &Path,
+    project_dir: &Path,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let repo_root = self_host_repo_root();
+    let aot_root = backend.aot_artifact_root.join("windows_monolith");
+    std::fs::create_dir_all(&aot_root).map_err(|error| {
+        format!(
+            "failed to create Windows monolith directory {}: {error}",
+            aot_root.display()
+        )
+    })?;
+    let manifest_text = std::fs::read_to_string(&bundle.manifest_path).map_err(|error| {
+        format!(
+            "failed to read AOT engine manifest {}: {error}",
+            bundle.manifest_path.display()
+        )
+    })?;
+    let manifest_json: serde_json::Value = serde_json::from_str(&manifest_text)
+        .map_err(|error| format!("failed to parse AOT engine manifest: {error}"))?;
+    let state_layout = backend
+        .last_program_snapshot
+        .as_ref()
+        .map(ProgramSnapshot::state_layout)
+        .ok_or_else(|| "AOT program snapshot missing during monolithic packaging".to_string())?;
+    let bindings_source = aot_root.join("published_aot_bindings.c");
+    crate::write_mobile_aot_bindings_source(
+        &manifest_json,
+        state_layout,
+        project_dir,
+        &bindings_source,
+    )?;
+    let symbols_header = aot_root.join("published_aot_symbols.h");
+    std::fs::write(
+        &symbols_header,
+        "#ifndef STASIS_PUBLISHED_AOT_SYMBOLS_H\n#define STASIS_PUBLISHED_AOT_SYMBOLS_H\n"
+            .to_string()
+            + "#include <stdint.h>\n"
+            + "int32_t stasis_mobile_main_entry(void);\n"
+            + "int32_t stasis_mobile_tick_entry(void);\n"
+            + "int32_t stasis_mobile_render_entry(void);\n"
+            + "void stasis_aot_bind_runtime_globals(void);\n"
+            + "#define STASIS_AOT_MAIN stasis_mobile_main_entry\n"
+            + "#define STASIS_AOT_TICK stasis_mobile_tick_entry\n"
+            + "#define STASIS_AOT_RENDER stasis_mobile_render_entry\n"
+            + "#define STASIS_AOT_BIND_RUNTIME_GLOBALS stasis_aot_bind_runtime_globals\n"
+            + "#endif\n",
+    )
+    .map_err(|error| format!("failed to write {}: {error}", symbols_header.display()))?;
+
+    let mut object_list = String::from("set(STASIS_PUBLISHED_AOT_OBJECTS\n");
+    for path in bundle.object_paths() {
+        object_list.push_str(&format!("  \"{}\"\n", cmake_path(path)));
+    }
+    object_list.push_str(")\n");
+    let object_list_path = aot_root.join("published_aot_objects.cmake");
+    std::fs::write(&object_list_path, object_list)
+        .map_err(|error| format!("failed to write {}: {error}", object_list_path.display()))?;
+
+    let shell_template =
+        std::fs::read_to_string(repo_root.join("mobile/shells/common/stasis_mobile_main.c"))
+            .map_err(|error| format!("failed to read production host template: {error}"))?;
+    let app_name = output_exe
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Stasis");
+    let shell_source = shell_template
+        .replace(
+            "@STASIS_APP_NAME@",
+            &crate::escape_mobile_c_string_literal(app_name),
+        )
+        .replace("@STASIS_ASSET_BASE@", ".");
+    let shell_source_path = aot_root.join("stasis_windows_main.c");
+    std::fs::write(&shell_source_path, shell_source)
+        .map_err(|error| format!("failed to write {}: {error}", shell_source_path.display()))?;
+
+    let output_dir = output_exe.parent().unwrap_or_else(|| Path::new("."));
+    let output_name = output_exe
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("invalid monolith output name {}", output_exe.display()))?;
+    let build_dir = create_monolith_cmake_build_dir(&aot_root, output_exe)?;
+    let configure_arguments = vec![
+        "-S".to_string(),
+        cmake_path(&repo_root.join("runtime")),
+        "-B".to_string(),
+        cmake_path(&build_dir.path),
+        "-DSTASIS_BUILD_MONOLITH=ON".to_string(),
+        format!("-DSTASIS_MONOLITH_AOT_DIR={}", cmake_path(&aot_root)),
+        format!(
+            "-DSTASIS_MONOLITH_MAIN_SOURCE={}",
+            cmake_path(&shell_source_path)
+        ),
+        format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
+        format!("-DSTASIS_MONOLITH_OUTPUT_NAME={output_name}"),
+    ];
+    let configure = run_cmake_in_msvc_environment(&configure_arguments)?;
+    if !configure.status.success() {
+        return Err(format!(
+            "Windows monolith configure failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&configure.stdout),
+            String::from_utf8_lossy(&configure.stderr)
+        ));
+    }
+    let build = run_cmake_in_msvc_environment(&[
+        "--build".to_string(),
+        cmake_path(&build_dir.path),
+        "--config".to_string(),
+        "Release".to_string(),
+        "--target".to_string(),
+        "stasis_monolith".to_string(),
+    ])?;
+    if !build.status.success() {
+        return Err(format!(
+            "Windows monolith build failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        ));
+    }
+    if !output_exe.is_file() {
+        return Err(format!(
+            "Windows monolith build did not produce {}",
+            output_exe.display()
+        ));
+    }
+    sign_output_artifact_if_configured(output_exe)?;
+    Ok(SelfHostedAotCliSummary {
+        source_file_count: bundle.object_paths().count() + 1,
+        linked_image_path: output_exe.to_path_buf(),
+        entry_symbol: "main".to_string(),
+        ir_bundle_path: PathBuf::new(),
+        object_bundle_path: bundle.manifest_path.clone(),
+        object_file_names: bundle
+            .object_paths()
+            .filter_map(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect(),
+        program_snapshot: None,
+    })
+}
+
 fn packaged_launch_sidecar_path(output_exe: &Path) -> Result<PathBuf, String> {
     let file_name = output_exe
         .file_name()
@@ -3346,6 +3662,18 @@ fn package_engine_bundle_release(
         .map(ProgramSnapshot::state_layout)
         .ok_or_else(|| "AOT program snapshot missing during packaging".to_string())?;
     let runtime_fields = merge_runtime_fields(state_layout, &support.runtime_fields)?;
+    #[cfg(windows)]
+    if matches!(
+        backend.aot_compile_config.target,
+        stasis_jit::AotTarget::Native
+    ) {
+        return package_engine_bundle_monolithic_windows(
+            backend,
+            bundle,
+            packaged_output_exe,
+            project_dir,
+        );
+    }
     let mut function_aliases = vec![PackagedFunctionAlias {
         alias: "main",
         target_symbol: entry_symbol.clone(),

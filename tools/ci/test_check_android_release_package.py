@@ -66,6 +66,15 @@ class AndroidReleasePackageTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "development files"):
                 validate(apk)
 
+    def test_rejects_separate_sdl_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            apk = Path(directory) / "game.apk"
+            self.write_package(apk, "arm64-v8a", "assets/ball.svg")
+            with zipfile.ZipFile(apk, "a") as archive:
+                archive.writestr("lib/arm64-v8a/libSDL3.so", b"runtime")
+            with self.assertRaisesRegex(ValueError, "non-monolithic native libraries"):
+                validate(apk)
+
     def test_rejects_asset_hash_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:
             apk = Path(directory) / "game.apk"

@@ -92,20 +92,24 @@ fn finish_child(mut child: Child, description: &str, timeout: Duration) -> Compl
     }
 }
 
-fn launch(mut command: Command, description: &str) -> CompletedProcess {
+fn launch_with_timeout(
+    mut command: Command,
+    description: &str,
+    timeout: Duration,
+) -> CompletedProcess {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = command
         .spawn()
         .unwrap_or_else(|error| panic!("start {description}: {error}"));
-    finish_child(child, description, TIMEOUT)
+    finish_child(child, description, timeout)
 }
 
-fn launch_release_build(mut command: Command) -> CompletedProcess {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = command
-        .spawn()
-        .unwrap_or_else(|error| panic!("start release build: {error}"));
-    finish_child(child, "release build", RELEASE_BUILD_TIMEOUT)
+fn launch(command: Command, description: &str) -> CompletedProcess {
+    launch_with_timeout(command, description, TIMEOUT)
+}
+
+fn launch_release_build(command: Command) -> CompletedProcess {
+    launch_with_timeout(command, "release build", RELEASE_BUILD_TIMEOUT)
 }
 
 fn configure_capture(command: &mut Command, screenshot: &Path, exit_after: bool) {
@@ -188,6 +192,31 @@ fn assert_launch(description: &str, completed: CompletedProcess, screenshot: &Pa
         "{description} PNG pixel {png_pixel:?}"
     );
     assert!(svg_pixel[1] > 150, "{description} SVG pixel {svg_pixel:?}");
+
+    // The launch fixture deliberately uses a rooted virtual font path.  A
+    // successful load log is not enough: an old graphics DLL can report a
+    // nonzero handle while the command buffer still renders no glyphs.  Keep
+    // this region around the cached label and count its warm, high-contrast
+    // pixels so every launch path proves the font reached the compositor.
+    let glyph_pixels = rgba
+        .pixels()
+        .enumerate()
+        .filter(|(index, pixel)| {
+            let x = (*index as u32) % image.width();
+            let y = (*index as u32) / image.width();
+            x >= 48
+                && x < 280
+                && y >= 108
+                && y < 168
+                && pixel[0] > 120
+                && pixel[1] > 70
+                && pixel[0] > pixel[2].saturating_add(35)
+        })
+        .count();
+    assert!(
+        glyph_pixels >= 20,
+        "{description} cached label did not render visible glyph pixels: {glyph_pixels}"
+    );
 }
 
 fn parse_dimensions(log: &str, key: &str) -> (u32, u32) {
@@ -423,13 +452,14 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
         assert_launch("release executable", release_run, &release_screenshot);
     }
 
-    let package = launch(
+    let package = launch_with_timeout(
         {
             let mut command = stasis_command(&project);
             command.args(["package", "--target", "desktop", "--development-build"]);
             command
         },
         "desktop package",
+        RELEASE_BUILD_TIMEOUT,
     );
     assert!(
         package.status.success(),
@@ -443,15 +473,22 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
     for relative in [
         "assets/manifest.json",
         "stasis.json",
-        "stasis_dynload.dll",
         "stasis_provenance.json",
+    ] {
+        assert!(
+            package_payload.join(relative).exists(),
+            "Windows package payload should contain {relative}"
+        );
+    }
+    for obsolete in [
+        "stasis_dynload.dll",
         "stasis_graphics.dll",
         "windows_launch_smoke.dll",
         "windows_launch_smoke.exe.launch",
     ] {
         assert!(
-            package_payload.join(relative).exists(),
-            "Windows package payload should contain {relative}"
+            !package_payload.join(obsolete).exists(),
+            "Windows production package should not contain {obsolete}"
         );
     }
     assert!(!package_root.join("stasis_graphics.dll").exists());

@@ -6,9 +6,22 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <io.h>
+#endif
 
 #include "published_aot_symbols.h"
+#if defined(__has_include)
+#if __has_include("stasis_package_provenance.h")
 #include "stasis_package_provenance.h"
+#else
+#define STASIS_PACKAGE_BUILD_LABEL "production-monolith"
+#define STASIS_PACKAGE_RELEASE_TAG "direct-bound"
+#define STASIS_PACKAGE_SOURCE_COMMIT "unknown"
+#endif
+#else
+#include "stasis_package_provenance.h"
+#endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 #include "stasis_mobile_aot_runtime.h"
 int stasis_set_recording_audio_config(int enabled);
@@ -239,6 +252,18 @@ static int configure_asset_root(void) {
         return -1;
     }
     return setenv("STASIS_ASSET_ROOT", path, 1);
+#elif defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH)
+    const char *base = SDL_GetBasePath();
+    char path[1024];
+    int written;
+    if (base == NULL) {
+        return -1;
+    }
+    written = snprintf(path, sizeof(path), "%sapp", base);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        return -1;
+    }
+    return _putenv_s("STASIS_ASSET_ROOT", _access(path, 0) == 0 ? path : ".");
 #else
     return 0;
 #endif
@@ -345,3 +370,9 @@ int SDL_main(int argc, char **argv) {
     }
     return status == STASIS_MOBILE_RUNTIME_STOP_REQUESTED ? 0 : status;
 }
+
+#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH)
+int main(int argc, char **argv) {
+    return SDL_main(argc, argv);
+}
+#endif
