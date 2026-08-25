@@ -3,8 +3,9 @@
 Official Stasis archives contain `stasis_release_provenance.json`. The schema-v1
 manifest identifies the release tag and source commit, records the clean build
 state, hashes the exact compiler executable, every packaged renderer/mobile
-runtime source, and every mobile shell/template file, identifies `gfx_cmd` v1
-and enabled backends/features, and records the full Cargo package/version/source
+runtime source, and every mobile shell/template file, identifies the stable
+`gfx_cmd` command-buffer family with current schema v5 and enabled
+backends/features, and records the full Cargo package/version/source
 set, `Cargo.lock` SHA-256, Rust compiler version, and resolved SDL versions when
 SDL is linked into the release.
 
@@ -18,7 +19,9 @@ Every generated desktop, Android, and iOS package contains
 `app/` payload beside the runtime. Mobile packages also place the manifest in the game
 asset root and compile a small generated header into the lifecycle adapter. At
 startup, the adapter logs the build label, release tag, source commit, and
-`gfx_cmd_v1` renderer contract. The desktop graphics runtime logs the bounded
+`gfx_cmd` renderer family with schema 5. Official archives may retain an explicitly
+marked legacy schema-v4 manifest for compatibility; validation never relabels it.
+The desktop graphics runtime logs the bounded
 sidecar manifest from the resolved runtime payload directory during initialization.
 `stasis_mobile_package.json` points to the
 embedded manifest and exposes the release/development classification to build

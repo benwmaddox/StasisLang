@@ -244,9 +244,55 @@
   let performanceBackend = "Canvas2D";
   let gpuBatcher;
   const RECT_BATCH_MIN = 64;
-  const RECT_CAP = 10000;
+  // Keep the production gfx_cmd decoder values named and mechanically checked
+  // against runtime/stasis_render_contract.h by the ABI gate.
+  const GFX_CMD_MAGIC = 0x47584631;
+  const GFX_CMD_V2_VERSION = 2;
+  const GFX_CMD_V3_VERSION = 3;
+  const GFX_CMD_V4_VERSION = 4;
+  const GFX_CMD_V5_VERSION = 5;
+  const GFX_CMD_CURRENT_VERSION = GFX_CMD_V5_VERSION;
+  const GFX_FLAG_CLEAR = 1;
+  const GFX_FLAG_PRESENT = 2;
+  const GFX_I_MAGIC = 0;
+  const GFX_I_VERSION = 1;
+  const GFX_I_FLAGS = 2;
+  const GFX_I_LINE_COUNT = 3;
+  const GFX_I_SPRITE_COUNT = 4;
+  const GFX_I_TEXT_COUNT = 7;
+  const GFX_I_TEXT_BYTES_USED = 9;
+  const GFX_I_ORDER_COUNT = 22;
+  const GFX_I_RECT_COUNT = 24;
+  const GFX_I_SPRITE_BASE = 32;
+  const GFX_I_TEXT_BASE = 12320;
+  const GFX_I_ORDER_BASE = 18464;
+  const GFX_F_CLEAR_BASE = 0;
+  const GFX_F_LINE_BASE = 4;
+  const GFX_F_SPRITE_BASE = 80004;
+  const GFX_F_RECT_REVERSE_BASE = 79996;
+  const GFX_F_TEXT_BASE = 112772;
+  const GFX_F_LEGACY_TEXT_BASE = 96388;
+  const GFX_MAX_GEOMETRY = 10000;
+  const GFX_GEOMETRY_STRIDE_F32 = 8;
+  const GFX_MAX_LINES = GFX_MAX_GEOMETRY;
+  const GFX_LINE_STRIDE_F32 = GFX_GEOMETRY_STRIDE_F32;
+  const GFX_MAX_SPRITES = 4096;
+  const GFX_SPRITE_STRIDE_I32 = 3;
+  const GFX_LEGACY_SPRITE_STRIDE_F32 = 4;
+  const GFX_SPRITE_STRIDE_F32 = 8;
+  const GFX_MAX_TEXT = 2048;
+  const GFX_TEXT_STRIDE_I32 = 3;
+  const GFX_TEXT_STRIDE_F32 = 6;
+  const GFX_TEXT_MAX_BYTES = 65536;
+  const GFX_MAX_ORDER = GFX_MAX_LINES + GFX_MAX_SPRITES + GFX_MAX_TEXT;
+  const GFX_ORDER_KIND_SCALE = 16384;
+  const GFX_ORDER_LINE = 1;
+  const GFX_ORDER_SPRITE = 2;
+  const GFX_ORDER_TEXT = 3;
+  const GFX_ORDER_RECT = 4;
+  const RECT_CAP = GFX_MAX_GEOMETRY;
   const rectScratch = new Float32Array(RECT_CAP * 8);
-  const SPRITE_CAP = 4096;
+  const SPRITE_CAP = GFX_MAX_SPRITES;
   const spriteScratch = new Float32Array(SPRITE_CAP * 16);
   const ATLAS_PAGE_SIZE = 512;
   const ATLAS_PAGE_MAX = 2048;
@@ -1424,23 +1470,25 @@
     if (!iLayout || !fLayout || !instance.exports.memory) return;
     const i32 = new Int32Array(instance.exports.memory.buffer, iLayout.offset, iLayout.length);
     const f32 = new Float32Array(instance.exports.memory.buffer, fLayout.offset, fLayout.length);
-    if (i32[0] !== 1196967473) return;
-    const version = i32[1];
-    if (version < 2 || version > 5) return;
-    const spriteStride = version >= 5 ? 8 : 4;
-    const textBase = version >= 5 ? 112772 : 96388;
-    const flags = i32[2];
-    if (flags & 1) {
+    if (i32[GFX_I_MAGIC] !== GFX_CMD_MAGIC) return;
+    const version = i32[GFX_I_VERSION];
+    if (version < GFX_CMD_V2_VERSION || version > GFX_CMD_CURRENT_VERSION) return;
+    const spriteStride = version >= GFX_CMD_V5_VERSION
+      ? GFX_SPRITE_STRIDE_F32 : GFX_LEGACY_SPRITE_STRIDE_F32;
+    const textBase = version >= GFX_CMD_V5_VERSION
+      ? GFX_F_TEXT_BASE : GFX_F_LEGACY_TEXT_BASE;
+    const flags = i32[GFX_I_FLAGS];
+    if (flags & GFX_FLAG_CLEAR) {
       context.save();
-      context.globalAlpha = Math.max(0, Math.min(1, f32[3]));
-      context.fillStyle = `rgb(${Math.round(f32[0] * 255)} ${Math.round(f32[1] * 255)} ${Math.round(f32[2] * 255)})`;
+      context.globalAlpha = Math.max(0, Math.min(1, f32[GFX_F_CLEAR_BASE + 3]));
+      context.fillStyle = `rgb(${Math.round(f32[GFX_F_CLEAR_BASE] * 255)} ${Math.round(f32[GFX_F_CLEAR_BASE + 1] * 255)} ${Math.round(f32[GFX_F_CLEAR_BASE + 2] * 255)})`;
       context.fillRect(0, 0, canvas.width, canvas.height);
       context.restore();
     }
     const drawLine = index => {
       performanceWorkload.lines += 1;
       performanceWorkload.drawCalls += 1;
-      const base = 4 + index * 8;
+      const base = GFX_F_LINE_BASE + index * GFX_LINE_STRIDE_F32;
       context.save();
       context.globalAlpha = f32[base + 7];
       context.strokeStyle = `rgb(${Math.round(f32[base + 4] * 255)} ${Math.round(f32[base + 5] * 255)} ${Math.round(f32[base + 6] * 255)})`;
@@ -1451,7 +1499,7 @@
       context.restore();
     };
     const drawRect = index => {
-      const base = 79996 - index * 8;
+      const base = GFX_F_RECT_REVERSE_BASE - index * GFX_GEOMETRY_STRIDE_F32;
       context.globalAlpha = f32[base + 7];
       context.fillStyle = unitColor(f32[base + 4], f32[base + 5], f32[base + 6]);
       context.fillRect(f32[base], f32[base + 1], f32[base + 2], f32[base + 3]);
@@ -1461,7 +1509,9 @@
       if (count < RECT_BATCH_MIN) {
         performanceWorkload.drawCalls += count;
         for (let offset = 0; offset < count; offset += 1) {
-          const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+          const index = ordered
+            ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
+            : start + offset;
           drawRect(index);
         }
         return;
@@ -1470,16 +1520,20 @@
       if (!batcher) {
         performanceWorkload.drawCalls += count;
         for (let offset = 0; offset < count; offset += 1) {
-          const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+          const index = ordered
+            ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
+            : start + offset;
           drawRect(index);
         }
         return;
       }
       for (let offset = 0; offset < count; offset += 1) {
-        const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
-        const source = 79996 - index * 8;
-        const target = offset * 8;
-        for (let field = 0; field < 8; field += 1) rectScratch[target + field] = f32[source + field];
+        const index = ordered
+          ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
+          : start + offset;
+        const source = GFX_F_RECT_REVERSE_BASE - index * GFX_GEOMETRY_STRIDE_F32;
+        const target = offset * GFX_GEOMETRY_STRIDE_F32;
+        for (let field = 0; field < GFX_GEOMETRY_STRIDE_F32; field += 1) rectScratch[target + field] = f32[source + field];
       }
       try {
         batcher.drawRect(rectScratch, count);
@@ -1493,24 +1547,26 @@
         gpuBatcher = null;
         performanceWorkload.drawCalls += count;
         for (let offset = 0; offset < count; offset += 1) {
-          const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+          const index = ordered
+            ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
+            : start + offset;
           drawRect(index);
         }
       }
     };
     const spriteInfo = index => {
-      const baseI = 32 + index * 3;
-      const baseF = 80004 + index * spriteStride;
+      const baseI = GFX_I_SPRITE_BASE + index * GFX_SPRITE_STRIDE_I32;
+      const baseF = GFX_F_SPRITE_BASE + index * spriteStride;
       const resource = sprites.get(i32[baseI]);
       if (!resource?.ready || !resource.drawable || !resource.width || !resource.height) return null;
       const x = f32[baseF];
       const y = f32[baseF + 1];
       const width = f32[baseF + 2];
       const height = f32[baseF + 3];
-      const u0 = version >= 5 ? f32[baseF + 4] : 0;
-      const v0 = version >= 5 ? f32[baseF + 5] : 0;
-      const u1 = version >= 5 ? f32[baseF + 6] : 1;
-      const v1 = version >= 5 ? f32[baseF + 7] : 1;
+      const u0 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 4] : 0;
+      const v0 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 5] : 0;
+      const u1 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 6] : 1;
+      const v1 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 7] : 1;
       if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return null;
       return { handle: i32[baseI], resource, x, y, width, height, u0, v0, u1, v1,
         alpha: Math.max(0, Math.min(1, i32[baseI + 2] / 255)),
@@ -1539,7 +1595,9 @@
       context.restore();
     };
     const drawSpriteRun = (start, count, ordered) => {
-      const indexAt = offset => ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+      const indexAt = offset => ordered
+        ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
+        : start + offset;
       let offset = 0;
       while (offset < count) {
         const firstIndex = indexAt(offset);
@@ -1551,8 +1609,8 @@
         }
         let runCount = 1;
         while (offset + runCount < count) {
-          const next = i32[18464 + start + offset + runCount];
-          if (ordered && Math.floor(next / 16384) !== 2) break;
+          const next = i32[GFX_I_ORDER_BASE + start + offset + runCount];
+          if (ordered && Math.floor(next / GFX_ORDER_KIND_SCALE) !== GFX_ORDER_SPRITE) break;
           if (!ordered && !spriteInfo(indexAt(offset + runCount))) break;
           runCount += 1;
         }
@@ -1639,8 +1697,8 @@
     const drawText = index => {
       performanceWorkload.text += 1;
       performanceWorkload.drawCalls += 1;
-      const baseI = 12320 + index * 3;
-      const baseF = textBase + index * 6;
+      const baseI = GFX_I_TEXT_BASE + index * GFX_TEXT_STRIDE_I32;
+      const baseF = textBase + index * GFX_TEXT_STRIDE_F32;
       const offset = i32[baseI + 1];
       const cached = offset < 0 ? cachedText.get(-offset) : null;
       const fontHandle = cached ? cached.font : i32[baseI];
@@ -1660,38 +1718,42 @@
       context.fillText(text, f32[baseF], f32[baseF + 1] + font.baseline);
       context.restore();
     };
-    const lineCount = Math.max(0, Math.min(i32[3], 10000));
-    const spriteCount = Math.max(0, Math.min(i32[4], 4096));
-    const textCount = Math.max(0, Math.min(i32[7], 2048));
-    const rectCount = version >= 4 ? Math.max(0, Math.min(i32[24], 10000 - lineCount)) : 0;
-    const orderCount = version >= 3 ? Math.max(0, Math.min(i32[22], 16144)) : 0;
+    const lineCount = Math.max(0, Math.min(i32[GFX_I_LINE_COUNT], GFX_MAX_LINES));
+    const spriteCount = Math.max(0, Math.min(i32[GFX_I_SPRITE_COUNT], GFX_MAX_SPRITES));
+    const textCount = Math.max(0, Math.min(i32[GFX_I_TEXT_COUNT], GFX_MAX_TEXT));
+    const rectCount = version >= GFX_CMD_V4_VERSION
+      ? Math.max(0, Math.min(i32[GFX_I_RECT_COUNT], GFX_MAX_GEOMETRY - lineCount)) : 0;
+    const orderCount = version >= GFX_CMD_V3_VERSION
+      ? Math.max(0, Math.min(i32[GFX_I_ORDER_COUNT], GFX_MAX_ORDER)) : 0;
     performanceWorkload.commands += lineCount + rectCount + spriteCount + textCount;
     if (orderCount > 0) {
       for (let order = 0; order < orderCount; order += 1) {
-        const encoded = i32[18464 + order];
-        const kind = Math.floor(encoded / 16384);
-        const index = encoded % 16384;
-        if (kind === 1 && index < lineCount) drawLine(index);
-        else if (kind === 2 && index < spriteCount) {
+        const encoded = i32[GFX_I_ORDER_BASE + order];
+        const kind = Math.floor(encoded / GFX_ORDER_KIND_SCALE);
+        const index = encoded % GFX_ORDER_KIND_SCALE;
+        if (kind === GFX_ORDER_LINE && index < lineCount) drawLine(index);
+        else if (kind === GFX_ORDER_SPRITE && index < spriteCount) {
           let runCount = 1;
           while (order + runCount < orderCount) {
-            const next = i32[18464 + order + runCount];
-            if (Math.floor(next / 16384) !== 2 || next % 16384 >= spriteCount) break;
+            const next = i32[GFX_I_ORDER_BASE + order + runCount];
+            if (Math.floor(next / GFX_ORDER_KIND_SCALE) !== GFX_ORDER_SPRITE
+                || next % GFX_ORDER_KIND_SCALE >= spriteCount) break;
             runCount += 1;
           }
           if (runCount < RECT_BATCH_MIN) {
             for (let item = 0; item < runCount; item += 1) {
-              drawSprite(i32[18464 + order + item] % 16384);
+              drawSprite(i32[GFX_I_ORDER_BASE + order + item] % GFX_ORDER_KIND_SCALE);
             }
           } else drawSpriteRun(order, runCount, true);
           order += runCount - 1;
         }
-        else if (kind === 3 && index < textCount) drawText(index);
-        else if (kind === 4 && index < rectCount) {
+        else if (kind === GFX_ORDER_TEXT && index < textCount) drawText(index);
+        else if (kind === GFX_ORDER_RECT && index < rectCount) {
           let runCount = 1;
           while (order + runCount < orderCount) {
-            const next = i32[18464 + order + runCount];
-            if (Math.floor(next / 16384) !== 4 || next % 16384 >= rectCount) break;
+            const next = i32[GFX_I_ORDER_BASE + order + runCount];
+            if (Math.floor(next / GFX_ORDER_KIND_SCALE) !== GFX_ORDER_RECT
+                || next % GFX_ORDER_KIND_SCALE >= rectCount) break;
             runCount += 1;
           }
           drawRectRun(order, runCount, true);

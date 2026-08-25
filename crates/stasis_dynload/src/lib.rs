@@ -3581,19 +3581,25 @@ const STASIS_RENDER_V2_VERSION: i32 = 2;
 const STASIS_RENDER_V3_VERSION: i32 = 3;
 const STASIS_RENDER_V4_VERSION: i32 = 4;
 const STASIS_RENDER_VERSION: i32 = 5;
+const STASIS_RENDER_V5_VERSION: i32 = STASIS_RENDER_VERSION;
 const STASIS_RENDER_HEADER_I32_COUNT: usize = 10;
 const STASIS_RENDER_ORDER_COUNT_INDEX: usize = 22;
 const STASIS_RENDER_ORDER_HEADER_END: usize = 24;
 const STASIS_RENDER_RECT_COUNT_INDEX: usize = 24;
 const STASIS_RENDER_RECT_HEADER_END: usize = 26;
+const STASIS_RENDER_F_CLEAR_BASE: usize = 0;
+const STASIS_RENDER_F_LINE_BASE: usize = 4;
 const STASIS_RENDER_ORDER_BASE: usize = 18_464;
 const STASIS_RENDER_MAX_ORDER: usize = 16_144;
 const STASIS_RENDER_SPRITE_BASE: usize = 32;
+const STASIS_RENDER_MAX_GEOMETRY: usize = 10_000;
 const STASIS_RENDER_MAX_LINES: usize = 10_000;
+const STASIS_RENDER_GEOMETRY_STRIDE_F32: usize = 8;
 const STASIS_RENDER_LINE_STRIDE: usize = 8;
 const STASIS_RENDER_MAX_SPRITES: usize = 4_096;
 const STASIS_RENDER_SPRITE_STRIDE_I32: usize = 3;
 const STASIS_RENDER_SPRITE_BASE_F32: usize = 80_004;
+const STASIS_RENDER_RECT_REVERSE_BASE_F32: usize = 79_996;
 const STASIS_RENDER_LEGACY_SPRITE_STRIDE_F32: usize = 4;
 const STASIS_RENDER_SPRITE_STRIDE_F32: usize = 8;
 const STASIS_RENDER_TEXT_BASE_I32: usize = 12_320;
@@ -3646,12 +3652,12 @@ pub fn copy_jit_render_active(
     let version = unsafe { *i32_header_ptr.add(1) };
     let source_i32_count = match version {
         STASIS_RENDER_V2_VERSION => STASIS_RENDER_V2_I32_COUNT,
-        STASIS_RENDER_V3_VERSION | STASIS_RENDER_V4_VERSION | STASIS_RENDER_VERSION => {
+        STASIS_RENDER_V3_VERSION | STASIS_RENDER_V4_VERSION | STASIS_RENDER_V5_VERSION => {
             STASIS_RENDER_I32_COUNT
         }
         _ => return Err("JIT frame is not a supported production gfx_cmd frame".to_string()),
     };
-    let source_f32_count = if version >= STASIS_RENDER_VERSION {
+    let source_f32_count = if version >= STASIS_RENDER_V5_VERSION {
         STASIS_RENDER_F32_COUNT
     } else {
         STASIS_RENDER_LEGACY_TEXT_BASE_F32 + STASIS_RENDER_MAX_TEXT * STASIS_RENDER_TEXT_STRIDE_F32
@@ -3679,7 +3685,7 @@ pub fn copy_jit_render_active(
             STASIS_RENDER_V2_VERSION
                 | STASIS_RENDER_V3_VERSION
                 | STASIS_RENDER_V4_VERSION
-                | STASIS_RENDER_VERSION
+                | STASIS_RENDER_V5_VERSION
         )
     {
         return Err("JIT frame is not a supported production gfx_cmd frame".to_string());
@@ -3690,7 +3696,7 @@ pub fn copy_jit_render_active(
         lines,
         rects: if source_i32[1] >= STASIS_RENDER_V4_VERSION {
             source_i32[STASIS_RENDER_RECT_COUNT_INDEX]
-                .clamp(0, (STASIS_RENDER_MAX_LINES - lines) as i32) as usize
+                .clamp(0, (STASIS_RENDER_MAX_GEOMETRY - lines) as i32) as usize
         } else {
             0
         },
@@ -3725,13 +3731,19 @@ pub fn copy_jit_render_active(
     out_i32[STASIS_RENDER_ORDER_BASE..order_end]
         .copy_from_slice(&source_i32[STASIS_RENDER_ORDER_BASE..order_end]);
 
-    out_f32[..4].copy_from_slice(&source_f32[..4]);
-    let line_end = 4 + counts.lines * STASIS_RENDER_LINE_STRIDE;
-    out_f32[4..line_end].copy_from_slice(&source_f32[4..line_end]);
-    let rect_start = STASIS_RENDER_SPRITE_BASE_F32 - counts.rects * STASIS_RENDER_LINE_STRIDE;
+    out_f32[STASIS_RENDER_F_CLEAR_BASE..STASIS_RENDER_F_LINE_BASE]
+        .copy_from_slice(&source_f32[STASIS_RENDER_F_CLEAR_BASE..STASIS_RENDER_F_LINE_BASE]);
+    let line_end = STASIS_RENDER_F_LINE_BASE + counts.lines * STASIS_RENDER_LINE_STRIDE;
+    out_f32[STASIS_RENDER_F_LINE_BASE..line_end]
+        .copy_from_slice(&source_f32[STASIS_RENDER_F_LINE_BASE..line_end]);
+    let rect_start = if counts.rects == 0 {
+        STASIS_RENDER_SPRITE_BASE_F32
+    } else {
+        STASIS_RENDER_RECT_REVERSE_BASE_F32 - (counts.rects - 1) * STASIS_RENDER_GEOMETRY_STRIDE_F32
+    };
     out_f32[rect_start..STASIS_RENDER_SPRITE_BASE_F32]
         .copy_from_slice(&source_f32[rect_start..STASIS_RENDER_SPRITE_BASE_F32]);
-    if version >= STASIS_RENDER_VERSION {
+    if version >= STASIS_RENDER_V5_VERSION {
         let sprite_f32_end =
             STASIS_RENDER_SPRITE_BASE_F32 + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_F32;
         out_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]
@@ -3747,7 +3759,7 @@ pub fn copy_jit_render_active(
         }
         out_i32[1] = STASIS_RENDER_VERSION;
     }
-    let source_text_base = if version >= STASIS_RENDER_VERSION {
+    let source_text_base = if version >= STASIS_RENDER_V5_VERSION {
         STASIS_RENDER_TEXT_BASE_F32
     } else {
         STASIS_RENDER_LEGACY_TEXT_BASE_F32
@@ -3796,12 +3808,12 @@ pub unsafe extern "C" fn stasis_jit_render_v2_trace(
     let version = *cmd_i32_header.add(1);
     let i32_len_matches = match version {
         STASIS_RENDER_V2_VERSION => cmd_i32_len as usize == STASIS_RENDER_V2_I32_COUNT,
-        STASIS_RENDER_V3_VERSION | STASIS_RENDER_V4_VERSION | STASIS_RENDER_VERSION => {
+        STASIS_RENDER_V3_VERSION | STASIS_RENDER_V4_VERSION | STASIS_RENDER_V5_VERSION => {
             cmd_i32_len as usize == STASIS_RENDER_I32_COUNT
         }
         _ => false,
     };
-    let f32_len_matches = if version >= STASIS_RENDER_VERSION {
+    let f32_len_matches = if version >= STASIS_RENDER_V5_VERSION {
         cmd_f32_len as usize == STASIS_RENDER_F32_COUNT
     } else {
         matches!(

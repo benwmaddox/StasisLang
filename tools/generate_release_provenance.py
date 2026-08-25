@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import tomllib
 
@@ -15,6 +16,7 @@ PINNED_SDL_DEPENDENCIES = {
     "sdl3": "3.4.10-static",
     "sdl3_image": "3.4.4-static",
 }
+COMMAND_BUFFER_NAME = "gfx_cmd"
 
 
 RUNTIME_FILES = (
@@ -52,6 +54,38 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def render_contract_version(root: pathlib.Path) -> int:
+    header = (root / "runtime" / "stasis_render_contract.h").read_text(encoding="utf-8")
+    definitions = dict(
+        re.findall(
+            r"^#define\s+(STASIS_RENDER_[A-Z0-9_]+)\s+([^/\r\n]+)",
+            header,
+            re.MULTILINE,
+        )
+    )
+    current = "STASIS_RENDER_CURRENT_VERSION"
+    resolving: set[str] = set()
+
+    def resolve(name: str) -> int:
+        if name in resolving:
+            raise ValueError(f"cyclic render contract alias: {name}")
+        expression = definitions.get(name)
+        if expression is None:
+            raise ValueError(f"render contract is missing {name}")
+        expression = expression.strip()
+        if re.fullmatch(r"[0-9]+", expression):
+            return int(expression)
+        if not re.fullmatch(r"STASIS_RENDER_[A-Z0-9_]+", expression):
+            raise ValueError(f"render contract {name} is not a numeric alias: {expression}")
+        resolving.add(name)
+        try:
+            return resolve(expression)
+        finally:
+            resolving.remove(name)
+
+    return resolve(current)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive-root", required=True, type=pathlib.Path)
@@ -63,6 +97,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = args.archive_root.resolve()
+    command_buffer_version = render_contract_version(root)
     if args.compiler.is_absolute() or ".." in args.compiler.parts:
         parser.error("compiler must be a confined archive-relative path")
     compiler_relative = pathlib.Path(*args.compiler.parts)
@@ -140,7 +175,10 @@ def main() -> int:
         },
         "runtime_sources": runtime_sources,
         "mobile_shell_sources": mobile_shell_sources,
-        "command_buffer": {"name": "gfx_cmd", "version": 4},
+        "command_buffer": {
+            "name": COMMAND_BUFFER_NAME,
+            "version": command_buffer_version,
+        },
         "backends": ["sdl3"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
         "dependencies": dependencies,
