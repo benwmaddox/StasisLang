@@ -16,6 +16,10 @@ Release toolchains omit `--development-build`. The default output is
   paths) used by the native LAN host;
 - `stasis_provenance.json`: the normal package provenance receipt.
 
+For the current renderer mapping, measured Web baseline, and staged design for
+larger rectangle and sprite workloads, see
+[GPU instancing for large Stasis scenes](gpu_instancing_report.md).
+
 Release packaging runs Binaryen's `wasm-opt -Oz` when `wasm-opt` is on `PATH` and also accepts the
 unhyphenated `wasmopt` executable name used by some Windows tool layouts. Set
 `STASIS_WASM_OPT` to an explicit executable path for pinned toolchains or CI. A configured
