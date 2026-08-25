@@ -4,6 +4,7 @@ This document is the language-level specification for Stasis.
 It is aligned with:
 - `docs/live-compilation-prd.md`
 - `docs/build_checklist.md`
+- [`docs/deterministic_live_simulation_roadmap.md`](deterministic_live_simulation_roadmap.md) for the cross-cutting deterministic live simulation product promise and capability gates
 - `docs/spec_implementation_status.md` (spec section -> Rust implementation status table)
 - `docs/android_workshop_prd.md` for Android workshop product/editor requirements
 
