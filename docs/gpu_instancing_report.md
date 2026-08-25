@@ -35,7 +35,7 @@ The current implementations map as follows:
 
 | Path | Current batching and ordering | Instancing status | Fallback/resource boundary |
 | --- | --- | --- | --- |
-| Web (`runtime/web/game.js`) | Consecutive rectangle entries become one run; a non-rectangle flushes it. Ordered runs use order indices. | WebGL2 rectangle batcher only; one `drawArraysInstanced` call per eligible run. | Canvas 2D for short runs, no WebGL2, or shader/context/resize failure. Sprites and text replay individually in Canvas 2D. |
+| Web (`runtime/web/game.js`) | Consecutive rectangle entries become one run; a non-rectangle flushes it. Ordered runs use order indices. | WebGL2 rectangle batcher only; one `drawArraysInstanced` call plus one Canvas `drawImage` composite per eligible run. | Canvas 2D for short runs, unavailable WebGL2, initialization failure, or a thrown draw error. Context loss is not detected today and is a recovery gap. Sprites and text replay individually in Canvas 2D. |
 | Android GLES (`StasisPreviewRenderer.java`) | Adjacent same-kind entries with consecutive source indices are grouped. Rectangles expand to triangles in chunks; sprites group while texture and filter match. | No hardware instancing; expanded vertex batches and ordinary GLES draws. | Texture provider owns decoded textures and atlas-independent handles; invalid UV data follows existing append/flush behavior and is not described as a clean skip here. |
 | Native GL (`runtime/stasis_graphics.c`) | Ordered rectangles call `stasis_fill_rect` individually. Lines flush category-local geometry. Sprites append six vertices and flush on atlas page or capacity changes. | No hardware instancing. Sprite atlas pages are already a useful material boundary. | GL uses atlas pages; SDL uses SDL texture calls and does not use the GL atlas path. |
 | SDL/native fallback | Category-local calls remain in command order; no reorder or global sort. | No instancing assumption. | Preserve existing SDL renderer behavior and per-texture state changes. |
@@ -78,7 +78,7 @@ atlas scene.
 | Total frame work | 0.3 ms | 0.4 ms | 0.6 ms |
 | Instances | 8,196 | 8,196 | 8,196 |
 | Batches | 1 | 1 | 1 |
-| Draw calls | 1 | 1 | 1 |
+| Instrumented instanced draws | 1 | 1 | 1 |
 | Uploaded bytes | 262,272 B | 262,272 B | 262,272 B |
 | Backend | Canvas2D + WebGL2 | Canvas2D + WebGL2 | Canvas2D + WebGL2 |
 
@@ -88,6 +88,10 @@ draws a four-vertex triangle strip. It clears a transparent offscreen WebGL2
 canvas and composites that canvas once at the run position. `renderPrepMs`,
 `gpuSubmitMs`, and `gpuExecutionMs` were unavailable; browser replay is
 host-side work and does not mean the GPU completed within that time.
+The runtime's `drawCalls` counter records the one instanced WebGL draw but not
+the following Canvas `drawImage`, so the physical work is one GPU draw plus one
+composite for this run. This counter is not directly comparable to the Canvas
+sprite count without reporting the composite separately.
 
 ### Sprite and mixed-order measurements
 
@@ -223,13 +227,17 @@ and one instanced draw. Reuse capacity across frames; do not allocate a GPU
 buffer per command. Count bytes copied, bytes uploaded, batches, and draws in
 existing development metrics.
 
-Flush on key changes, order interruptions, target/context loss, or buffer
-capacity. A failed upload, shader compile, context loss, or resize must discard
-the attempted run and replay it using the existing path. Fallback is
-transactional: use per-run fallback only when failure is detected before
-framebuffer mutation; after a potentially partial draw, abandon/rebuild the
-offscreen target or fail the frame rather than replaying and double-blending
-translucent content. A fallback cannot silently reorder commands. WebGL2 requires `drawArraysInstanced` and
+Flush on key changes, order interruptions, detected target/context loss, or
+buffer capacity. The current Web path does not listen for
+`webglcontextlost`, call `isContextLost`, or inspect GL errors, so it cannot
+promise Canvas replay after a silent context loss; detection and recovery are
+required implementation work. A failed upload, shader compile, detected
+context loss, or resize must discard the attempted run and replay it using the
+existing path. Fallback is transactional: use per-run fallback only when
+failure is detected before framebuffer mutation; after a potentially partial
+draw, abandon/rebuild the offscreen target or fail the frame rather than
+replaying and double-blending translucent content. A fallback cannot silently
+reorder commands. WebGL2 requires `drawArraysInstanced` and
 `vertexAttribDivisor`; WebGL1/WebGL without those features uses Canvas 2D.
 Android GLES2 and SDL use their existing expanded-geometry/per-call paths until
 an independently validated instanced backend is available.
@@ -247,8 +255,9 @@ continue to render identically.
 No guest-to-GPU direct ownership is allowed. Wasm linear memory remains guest
 owned; the host copies validated values into transient GPU memory. Resource
 handles remain generation-checked and atlas/material replacement is published
-only after successful creation. This avoids stale texture pointers and makes
-context loss recoverable.
+only after successful creation. This avoids stale texture pointers and leaves
+an ownership model in which explicit context-loss recovery can be added; it is
+not evidence that the current Web rectangle batcher already recovers.
 
 ## Benchmark matrix and acceptance gates
 
@@ -259,14 +268,14 @@ host replay, total frame work, and GPU timestamp availability.
 
 | Gate | Fixture | Required evidence | Initial quantitative target |
 | --- | --- | --- | --- |
-| Baseline | Swarm Field, 8,192 rectangles | Real browser sample and current fallback sample | WebGL2 remains one batch; no >10% upper-p95 total-frame-work regression. |
+| Baseline | Swarm Field, 8,192 rectangles | Real browser sample and current fallback sample | WebGL2 remains one batch, with one instanced draw plus one reported composite; no >10% upper-p95 total-frame-work regression. |
 | Data parity | Rotated/UV/alpha sprites; future tint extension separately | Pixel/hash comparison against v5 replay | 100% sampled pixel/hash parity for source-over order; no dropped/invalid increase. |
 | Split correctness | Interleaved rectangle/sprite/text and four atlas pages | Trace of flushes plus visual comparison | Every key/order transition creates expected boundary; zero cross-material merges. |
-| Sprite scale | 1k and 4k sprites (v5 max 4,096) | WebGL2, Canvas, Android GLES, native GL/SDL measurements | Instanced path has <= ceil(runs) draw calls and >=25% lower host replay upper p95 than per-call fallback at 4k compatible sprites. |
+| Sprite scale | 1k and 4k sprites (v5 max 4,096) | WebGL2, Canvas, Android GLES, native GL/SDL measurements | Instanced GPU draws are <= compatible runs; offscreen composites and total render submissions are reported separately; host replay upper p95 is >=25% lower than per-call fallback at 4k compatible sprites. |
 | Geometry scale | 1k, 4k, and 8k rectangles/lines with shared total <=10,000 | Same backend matrix | No >10% upper-p95 total-work regression; upload/copy bytes and draw reduction are reported. |
 | Order scale | Mixed primitives up to 16,144 order entries | Same backend matrix | Every source-order boundary is retained; no cross-key merge. |
 | Future synthetic scale | 16k single-primitive sprites or rectangles only after a versioned capacity/ABI extension | Explicitly not a v5 fixture; 16k mixed order entries remain a valid v5 order-scale case | Must be labeled synthetic and cannot gate v5 shipping. |
-| Recovery | Context/shader/resize/resource failure injection | Fallback render and next-frame recovery | No crash, stale texture, or order change; recovery within one frame after resource availability. |
+| Recovery | Context/shader/resize/resource failure injection | Explicit loss/error detection, fallback render, and next-frame recovery | No crash, blank batch, stale texture, or order change; recovery within one frame after resource availability. |
 | Shipping | Development and release packages | Package tests and static inspection | v5 ABI unchanged; no generated artifacts; existing exports/assets behavior retained. |
 
 The 25% and 10% thresholds are acceptance targets, not measured results. GPU
@@ -274,12 +283,13 @@ time becomes a gate only when delayed timestamp queries are available without a
 per-frame fence; otherwise use host replay and total frame work.
 
 Current metrics cover commands, primitive counts, WebGL2 instances/batches,
-draw calls, uploaded bytes, and phase timings. Every future benchmark must also
+instrumented instanced draws, uploaded bytes, and phase timings; they omit the
+Canvas composite after each WebGL2 run. Every future benchmark must also
 record host allocation count/bytes, peak CPU staging-buffer bytes, peak GPU
 instance-buffer bytes, CPU copy time and upload time when separable, upper
 p50/upper p95 guest and host phases, small-scene (<64 instance)
-total-work regression, and
-draw reduction against the per-call fallback. Atlas experiments additionally
+total-work regression, composites, total render submissions, and draw
+reduction against the per-call fallback. Atlas experiments additionally
 record page count, material-key runs, texture allocation/replacement events,
 and peak decoded/atlas memory. Missing metrics are unavailable, never zero.
 
@@ -291,8 +301,9 @@ and peak decoded/atlas memory. Missing metrics are unavailable, never zero.
    fallback. Stop if
    the metric path changes v5 output or adds allocations per command.
 2. **Web rectangles.** Generalize the existing WebGL2 rectangle buffer to the
-   candidate key and keep Canvas 2D fallback. Ship only if parity and the
-   baseline gate pass on WebGL2 and no-WebGL2 environments.
+   candidate key, add explicit context-loss/error detection with transactional
+   recovery, and keep Canvas 2D fallback. Ship only if parity, recovery, and
+   baseline gates pass on WebGL2 and no-WebGL2 environments.
 3. **Web sprites/atlas.** Add a private atlas/material cache and 64 B sprite
    records. Keep per-image Canvas 2D fallback and invalidate cache entries on
    resource/context generation changes. Stop if atlas seams, color-space,
