@@ -18,6 +18,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.nightly_workflow = read(".github/workflows/nightly-release.yml")
         cls.pr_workflow = read(".github/workflows/pr-ci.yml")
         cls.release_script = read("mobile/android/test_release_shell.ps1")
+        cls.release_runner = read("tools/ci/run_android_release_shell_seam.py")
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
         cls.touch_expectations = json.loads(
@@ -166,13 +167,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
                     "android-resource-restore-seam",
                     "android-touch-roundtrip-seam",
                     "android-orientation-metrics-seam",
+                    "android-packaged-assets-seam",
                 )
             ),
             sorted(release_artifacts),
         )
         self.assertEqual(["android-workshop-it025-seam"], workshop_artifacts)
-        self.assertEqual(5, self.workflow.count("          name: android-"))
-        self.assertEqual(5, self.workflow.count("        if: always()"))
+        self.assertEqual(6, self.workflow.count("          name: android-"))
+        self.assertEqual(6, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
@@ -196,15 +198,66 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "samples/android_aot_seam",
             "samples/android_touch_seam",
             "samples/android_orientation_seam",
+            "samples/android_packaged_assets_seam",
         ):
             self.assertEqual(1, self.emulator_script.count(project))
+        self.assertIn("[int]$PerSeamTimeoutSeconds = 660", self.emulator_script)
+        self.assertLess(5 * 660, 75 * 60)
+
+    def test_release_wrapper_defaults_to_all_seams_in_stable_order(self):
+        self.assertIn('[string]$TestId = ""', self.emulator_script)
+        self.assertIn('$selectedSeams = if ($TestId)', self.emulator_script)
+        ordered_ids = [
+            self.emulator_script.index(f'TestId = "{test_id}"')
+            for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021")
+        ]
+        self.assertEqual(sorted(ordered_ids), ordered_ids)
+        self.assertIn('} else {\n    $seams\n}', self.emulator_script)
+
+    def test_workflow_dispatch_can_scope_it021_without_changing_workflow_call(self):
+        self.assertIn("workflow_call:\n  workflow_dispatch:\n    inputs:", self.workflow)
+        self.assertIn("release_shell_test_id:", self.workflow)
+        self.assertIn('type: string', self.workflow)
+        self.assertIn(
+            'STASIS_RELEASE_SHELL_TEST_ID: ${{ inputs.release_shell_test_id }}',
+            self.workflow,
+        )
+        self.assertIn(
+            'test_release_shell_emulator.ps1 -TestId "$STASIS_RELEASE_SHELL_TEST_ID"',
+            self.workflow,
+        )
+        self.assertNotIn(
+            'test_release_shell_emulator.ps1 -TestId "$env:STASIS_RELEASE_SHELL_TEST_ID"',
+            self.workflow,
+        )
+        self.assertNotIn(
+            'test_release_shell_emulator.ps1 -TestId "${{ inputs.release_shell_test_id }}"',
+            self.workflow,
+        )
+        self.assertIn('Where-Object { $_.TestId -eq $TestId }', self.emulator_script)
+        self.assertIn('TestId = "IT-021"', self.emulator_script)
+
+    def test_release_wrapper_rejects_unknown_test_ids_before_execution(self):
+        self.assertIn('$TestId -notin $validTestIds', self.emulator_script)
+        self.assertIn('Unknown Android release-shell seam test ID', self.emulator_script)
+        validation = self.emulator_script.index('$validTestIds =')
+        first_execution = self.emulator_script.index('test_release_shell.ps1')
+        self.assertLess(validation, first_execution)
+
+    def test_packaged_assets_use_the_non_lifecycle_resource_pixel_oracle(self):
+        self.assertIn('if expectations.get("resource_regions"):', self.release_runner)
+        expectations = json.loads(
+            read("samples/android_packaged_assets_seam/android_seam_expectations.json")
+        )
+        self.assertNotIn("lifecycle", expectations)
+        self.assertGreater(len(expectations["resource_regions"]), 0)
 
     def test_strategy_makes_emulator_the_readiness_gate(self):
         self.assertIn("hosted x86_64 emulator is the CI and readiness", self.strategy)
         self.assertRegex(
             self.strategy, r"Production Android\s+packaging remains ARM64"
         )
-        for test_id in ("IT-017", "IT-018", "IT-019"):
+        for test_id in ("IT-017", "IT-018", "IT-019", "IT-021"):
             row = next(line for line in self.strategy.splitlines() if f"| {test_id} |" in line)
             self.assertTrue(row.endswith("| Emulator |"), row)
 

@@ -1,0 +1,90 @@
+import "/vendor/stasis/src/stdlib/audio.stasis";
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global ticks: i32;
+global seam_state_checksum: i32;
+global seam_sprite_handle: i32;
+global seam_font_handle: i32;
+global seam_cached_text_handle: i32;
+global seam_audio_handle: i32;
+global seam_voice_handle: i32;
+global seam_direct_text_width: f32;
+global seam_cached_text_width: f32;
+global seam_sprite: Sprite;
+global seam_cached_text: TextRun;
+global seam_audio_samples: f32[8];
+
+function main(): i32 {
+    init_window(640, 360, "Stasis Android Packaged Assets");
+    if (!audio_init(48000, 2, 512)) {
+        return 11;
+    }
+    seam_sprite_handle = 0;
+    if (!seam_sprite.load_sprite_from("assets/asset_sprite.svg", 128, 128)) {
+        return 12;
+    }
+    seam_sprite_handle = seam_sprite.handle;
+    seam_font_handle = load_font("assets/asset_font.ttf", 28);
+    if (seam_font_handle == 0) {
+        return 13;
+    }
+    seam_direct_text_width = measure_text(seam_font_handle, "DIRECT ASSET");
+    if (seam_direct_text_width <= 0.0) {
+        return 14;
+    }
+    if (!seam_cached_text.load_text_from(seam_font_handle, "CACHED ASSET")) {
+        return 15;
+    }
+    seam_cached_text_handle = seam_cached_text.handle;
+    seam_cached_text_width = seam_cached_text.width;
+    if (seam_cached_text_width <= 0.0) {
+        return 16;
+    }
+    seam_audio_handle = audio_load_wav("assets/asset_tone.wav");
+    if (seam_audio_handle == 0) {
+        return 17;
+    }
+    seam_voice_handle = audio_play(seam_audio_handle, false, 0.5, 0.0);
+    if (seam_voice_handle == 0) {
+        return 18;
+    }
+    seam_audio_samples[0] = 0.25;
+    seam_audio_samples[1] = 0.25;
+    seam_audio_samples[2] = -0.25;
+    seam_audio_samples[3] = -0.25;
+    seam_audio_samples[4] = 0.125;
+    seam_audio_samples[5] = 0.125;
+    seam_audio_samples[6] = -0.125;
+    seam_audio_samples[7] = -0.125;
+    if (audio_push_f32_interleaved(seam_audio_samples, 4) != 4) {
+        return 19;
+    }
+    ticks = 0;
+    seam_state_checksum = 2100;
+    return 0;
+}
+
+function tick(): i32 {
+    ticks = ticks + 1;
+    seam_state_checksum = 2100 + ticks * 7;
+    return 0;
+}
+
+function render(): i32 {
+    if (seam_sprite_handle <= 0 || seam_cached_text_handle <= 0 || seam_direct_text_width <= 0.0 || seam_cached_text_width <= 0.0) {
+        return 20;
+    }
+    begin_frame();
+    clear(0.03, 0.06, 0.11, 1.0);
+    fill_rect(24.0, 32.0, 184.0, 296.0, 0.08, 0.12, 0.18, 1.0);
+    fill_rect(232.0, 32.0, 384.0, 296.0, 0.10, 0.13, 0.20, 1.0);
+    seam_sprite.draw(52.0, 116.0, 255, 0);
+    gfx_cmd_text(seam_font_handle, "DIRECT ASSET", 238.0, 92.0, 0.98, 0.82, 0.25, 1.0);
+    seam_cached_text.draw(238.0, 164.0, 0.18, 0.92, 0.82, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

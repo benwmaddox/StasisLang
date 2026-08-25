@@ -8152,6 +8152,11 @@ mod tests {
         ));
         assert!(mobile_main.contains("stasis_mobile_network_present_join_url();"));
         assert!(mobile_main.contains("if (seam_test_id != NULL && seam_test_id[0] != '\\0')"));
+        assert!(mobile_main.contains("STASIS_ASSET_MANIFEST_SHA256"));
+        assert!(mobile_main.contains("audio_queued_before"));
+        assert!(mobile_main.contains("audio_nonzero_after_prefix"));
+        assert!(mobile_main.contains("audio_replay_matches"));
+        assert!(mobile_main.contains("stasis_set_recording_audio_config(1)"));
         assert!(!mobile_main.contains("}\n#if defined(STASIS_ENABLE_SEAM_TESTS)\n    else if"));
         let android_activity = fs::read_to_string(
             android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
@@ -8160,6 +8165,8 @@ mod tests {
         assert!(android_activity.contains("stasis.seam_test_id"));
         assert!(android_activity.contains("BuildConfig.STASIS_SEAM_TESTS"));
         assert!(android_activity.contains("nativeSetSeamTestId"));
+        assert!(android_activity.contains("nativeSetAssetManifestSha256"));
+        assert!(android_activity.contains("getManifestSha256"));
         assert!(android_activity
             .contains("private static final String STASIS_ANDROID_ORIENTATION = \"fullSensor\";"));
         assert!(!android_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
@@ -8215,6 +8222,8 @@ mod tests {
                 .expect("read Android CMake project");
         assert!(android_cmake.contains("STASIS_ENABLE_SEAM_TESTS"));
         assert!(android_jni.contains("STASIS_SEAM_TEST_ID"));
+        assert!(android_jni.contains("nativeSetAssetManifestSha256"));
+        assert!(android_jni.contains("STASIS_ASSET_MANIFEST_SHA256"));
         let runtime_header = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.h"))
             .expect("read shared mobile runtime header");
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));

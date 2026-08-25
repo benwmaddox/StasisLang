@@ -1,0 +1,27 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "IT-021",
+  "stable_frame": 30,
+  "state_checksum": 2310,
+  "logical_size": [640, 360],
+  "regions": [],
+  "resource_regions": [
+    {"name": "sprite", "rect": [24, 32, 184, 296], "target_rgb": [49, 209, 124], "tolerance": 28, "minimum_target_pixels": 900},
+    {"name": "direct_text", "rect": [232, 72, 384, 64], "target_rgb": [250, 209, 64], "tolerance": 30, "minimum_target_pixels": 10},
+    {"name": "cached_text", "rect": [232, 144, 384, 72], "target_rgb": [46, 235, 209], "tolerance": 22, "minimum_target_pixels": 10}
+  ],
+  "assets": {
+    "manifest_sha256": "computed_from_packaged_manifest",
+    "handles": {"sprite": "sprite_handle", "font": "font_handle", "cached_text": "cached_text_handle", "audio": "audio_handle", "voice": "voice_handle"},
+    "minimum_text_width": 1.0,
+    "audio": {
+      "queued_frames_before": 4,
+      "queued_frames_after": 0,
+      "minimum_frames_mixed": 32,
+      "minimum_nonzero_samples_after_prefix": 2,
+      "voice_state": 1,
+      "sample_checksum": "nonzero",
+      "replay_matches": 1
+    }
+  }
+}

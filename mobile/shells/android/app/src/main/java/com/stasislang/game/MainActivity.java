@@ -30,6 +30,7 @@ public final class MainActivity extends SDLActivity {
     private static final boolean STASIS_NETWORK_ENABLED = @STASIS_NETWORK_ENABLED@ != 0;
 
     private static native void nativeSetAssetRoot(String path);
+    private static native void nativeSetAssetManifestSha256(String sha256);
     private static native void nativeSetSeamTestId(String testId);
     private static native boolean nativeReadPerformanceMetrics(float[] output);
     private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
@@ -109,7 +110,13 @@ public final class MainActivity extends SDLActivity {
             File root = result.getRoot();
             File assetBase = new File(root, "@STASIS_ASSET_BASE@");
             if (!assetBase.isDirectory()) throw new IOException("validated asset base is unavailable");
-            nativeSetAssetRoot(assetBase.getAbsolutePath());
+            if (BuildConfig.STASIS_SEAM_TESTS && "IT-021".equals(seamTestId)) {
+                assetBase = assetBase.getCanonicalFile();
+            }
+            nativeSetAssetRoot(assetBase.getPath());
+            if (BuildConfig.STASIS_SEAM_TESTS && "IT-021".equals(seamTestId)) {
+                nativeSetAssetManifestSha256(result.getManifestSha256());
+            }
         } catch (Exception error) {
             Log.e("Stasis", "Asset cache preparation failed before runtime startup", error);
             startupError = "Asset verification failed: " + error.getMessage();

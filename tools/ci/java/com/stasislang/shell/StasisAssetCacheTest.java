@@ -27,6 +27,8 @@ public final class StasisAssetCacheTest {
 
             StasisAssetCache.Result cold = cache(source, files.toFile(), RELEASE).prepare();
             check(!cold.isReused(), "first install is cold");
+            check(cold.getManifestSha256().matches("[0-9a-f]{64}"),
+                    "cold result exposes verified manifest identity");
             check(cold.getMetrics().getCacheWriteBytes() > 0, "cold path writes bytes");
             Path root = files.resolve("stasis_game");
             Path marker = root.resolve(".stasis_asset_cache.v1");
@@ -37,6 +39,8 @@ public final class StasisAssetCacheTest {
             CountingSource restartedSource = new CountingSource(packaged.toFile());
             StasisAssetCache.Result recreation = cache(restartedSource, files.toFile(), RELEASE).prepare();
             check(recreation.isReused(), "ordinary recreation reuses");
+            check(cold.getManifestSha256().equals(recreation.getManifestSha256()),
+                    "reuse keeps the verified manifest identity");
             check(restartedSource.openCount == 1, "fresh source reads only packaged manifest");
             check(recreation.getMetrics().getPackagedReadBytes()
                     == Files.size(packaged.resolve("stasis_game/assets/manifest.json")),

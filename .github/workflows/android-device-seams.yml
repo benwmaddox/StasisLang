@@ -3,6 +3,12 @@ name: Android Emulator Seams
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      release_shell_test_id:
+        description: "Optional release-shell seam test ID (for example IT-021)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: android-emulator-seams-nightly
@@ -60,6 +66,8 @@ jobs:
 
       - name: Run generated Android AOT release-shell seams
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STASIS_RELEASE_SHELL_TEST_ID: ${{ inputs.release_shell_test_id }}
         with:
           api-level: 35
           target: google_apis
@@ -74,7 +82,7 @@ jobs:
             -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
             -no-boot-anim -camera-back none
           script: |
-            pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1
+            pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1 -TestId "$STASIS_RELEASE_SHELL_TEST_ID"
 
       - name: Upload Android release-shell evidence
         if: always()
@@ -106,6 +114,14 @@ jobs:
         with:
           name: android-orientation-metrics-seam
           path: artifacts/android_orientation_metrics/e
+          if-no-files-found: warn
+
+      - name: Upload Android packaged-assets evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-packaged-assets-seam
+          path: artifacts/android_packaged_assets/e
           if-no-files-found: warn
 
   workshop-seams:

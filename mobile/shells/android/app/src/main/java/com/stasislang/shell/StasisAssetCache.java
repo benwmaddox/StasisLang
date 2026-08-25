@@ -105,11 +105,13 @@ public final class StasisAssetCache {
         private final File root;
         private final boolean reused;
         private final Metrics metrics;
+        private final String manifestSha256;
 
-        private Result(File root, boolean reused, Metrics metrics) {
+        private Result(File root, boolean reused, Metrics metrics, String manifestSha256) {
             this.root = root;
             this.reused = reused;
             this.metrics = metrics;
+            this.manifestSha256 = manifestSha256;
         }
 
         public File getRoot() {
@@ -122,6 +124,11 @@ public final class StasisAssetCache {
 
         public Metrics getMetrics() {
             return metrics;
+        }
+
+        /** SHA-256 already verified against the packaged and extracted manifests. */
+        public String getManifestSha256() {
+            return manifestSha256;
         }
     }
 
@@ -172,7 +179,7 @@ public final class StasisAssetCache {
         Manifest manifest = Manifest.parse(packagedManifest);
         String manifestHash = sha256(packagedManifest);
         if (recoverPublication(root, backups, packagedManifest, manifestHash, metrics)) {
-            return new Result(root, true, metrics);
+            return new Result(root, true, metrics, manifestHash);
         }
 
         try {
@@ -180,7 +187,7 @@ public final class StasisAssetCache {
             verifyExtractedTree(staging, manifest, packagedManifest, metrics);
             writeMarker(staging, manifestHash, metrics);
             publish(staging, root, backups);
-            return new Result(root, false, metrics);
+            return new Result(root, false, metrics, manifestHash);
         } catch (IOException error) {
             deleteTree(staging);
             throw error;

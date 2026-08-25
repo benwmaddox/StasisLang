@@ -100,6 +100,130 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 {"stable_frame": 30, "state_checksum": 1210, "command_trace": 77},
             )
 
+    def test_it021_validates_packaged_identity_and_offline_audio(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "assets/manifest.json"
+            manifest.parent.mkdir()
+            manifest.write_text('{"schema":"stasis-assets","version":1,"assets":[]}', encoding="utf-8")
+            package_manifest = root / "stasis_mobile_package.json"
+            package_manifest.write_text("{}", encoding="utf-8")
+            manifest_hash = __import__("hashlib").sha256(manifest.read_bytes()).hexdigest()
+            stable = {
+                "event": "stable", "frame": 30, "state_checksum": 2310,
+                "accepted": 30, "presented": 30, "rejected": 0, "validation": 0,
+                "asset_root": "/data/user/0/com.example.seam/files/stasis_game",
+                "asset_manifest_sha256": manifest_hash,
+                "sprite_handle": 1, "font_handle": 2, "cached_text_handle": 3,
+                "audio_handle": 4, "voice_handle": 5,
+                "direct_text_width": 90.0, "cached_text_width": 88.0,
+                "audio_queued_before": 4, "audio_queued_after": 0,
+                "audio_frames_mixed": 32, "audio_nonzero_after_prefix": 12,
+                "audio_voice_state": 1, "audio_sample_checksum": 17,
+                "audio_replay_checksum": 17, "audio_replay_matches": 1,
+            }
+            markers = [
+                {"event": "initialized", "frame": 0},
+                {"event": "frame", "frame": 1},
+                stable,
+            ]
+            result = seam.validate_asset_audio_markers(
+                markers,
+                {
+                    "stable_frame": 30,
+                    "state_checksum": 2310,
+                    "assets": {
+                        "manifest_sha256": "computed_from_packaged_manifest",
+                        "handles": {"sprite": "sprite_handle", "font": "font_handle"},
+                        "minimum_text_width": 1,
+                        "audio": {
+                            "queued_frames_before": 4,
+                            "queued_frames_after": 0,
+                            "minimum_frames_mixed": 32,
+                            "minimum_nonzero_samples_after_prefix": 2,
+                            "voice_state": 1,
+                            "sample_checksum": "nonzero",
+                            "replay_matches": 1,
+                        },
+                    },
+                },
+                {"package_id": "com.example.seam", "assets": "."},
+                package_manifest,
+            )
+            self.assertEqual(manifest_hash, result["manifest_sha256"])
+            self.assertEqual("/data/user/0/com.example.seam/files/stasis_game", result["asset_root"])
+            self.assertEqual(1, result["identities"]["sprite"]["handle"])
+            stable["asset_root"] = "/data/data/com.example.seam/files/stasis_game"
+            alias_result = seam.validate_asset_audio_markers(
+                markers,
+                {"stable_frame": 30, "state_checksum": 2310, "assets": {}},
+                {"package_id": "com.example.seam", "assets": "."},
+                package_manifest,
+            )
+            self.assertEqual(stable["asset_root"], alias_result["asset_root"])
+            for malicious_root in (
+                "/data/data/com.other.seam/files/stasis_game",
+                "/data/user/0/com.example.seam/files/stasis_game/extra",
+                "/data/user/0/com.example.seam/files/../other",
+                "",
+            ):
+                stable["asset_root"] = malicious_root
+                with self.assertRaisesRegex(
+                    seam.SeamError, "asset_root expected one of.*actual"
+                ):
+                    seam.validate_asset_audio_markers(
+                        markers,
+                        {"stable_frame": 30, "state_checksum": 2310, "assets": {}},
+                        {"package_id": "com.example.seam", "assets": "."},
+                        package_manifest,
+                    )
+            stable["asset_root"] = "/data/user/0/com.example.seam/files/stasis_game"
+            stable["audio_replay_matches"] = 0
+            with self.assertRaisesRegex(seam.SeamError, "field audio_replay_matches"):
+                seam.validate_asset_audio_markers(
+                    markers,
+                    {
+                        "stable_frame": 30,
+                        "state_checksum": 2310,
+                        "assets": {
+                            "handles": {"sprite": "sprite_handle"},
+                            "minimum_text_width": 1,
+                            "audio": {
+                                "queued_frames_before": 4,
+                                "queued_frames_after": 0,
+                                "minimum_frames_mixed": 32,
+                                "minimum_nonzero_samples_after_prefix": 2,
+                                "voice_state": 1,
+                                "sample_checksum": "nonzero",
+                                "replay_matches": 1,
+                            },
+                        },
+                    },
+                    {"package_id": "com.example.seam", "assets": "."},
+                    package_manifest,
+                )
+
+    def test_it021_failure_names_field_and_evidence_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "assets/manifest.json"
+            manifest.parent.mkdir()
+            manifest.write_text('{"schema":"stasis-assets","version":1,"assets":[]}', encoding="utf-8")
+            package_manifest = root / "stasis_mobile_package.json"
+            package_manifest.write_text("{}", encoding="utf-8")
+            stable = {
+                "event": "stable", "frame": 30, "state_checksum": 2310,
+                "accepted": 30, "presented": 30, "rejected": 0, "validation": 0,
+                "asset_root": "/tmp/escape", "asset_manifest_sha256": "bad",
+            }
+            with self.assertRaisesRegex(seam.SeamError, "IT-021 field asset_manifest_sha256.*evidence path"):
+                seam.validate_asset_audio_markers(
+                    [{"event": "initialized", "frame": 0}, {"event": "frame", "frame": 1}, stable],
+                    {"stable_frame": 30, "state_checksum": 2310, "assets": {}},
+                    {"package_id": "com.example.seam", "assets": "."},
+                    package_manifest,
+                )
+
     def test_resource_lifecycle_requires_ready_generations_and_zero_failures(self):
         marker = {
             "event": "lifecycle",

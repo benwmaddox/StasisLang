@@ -56,6 +56,28 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetAssetRoot(
     (*env)->ReleaseStringUTFChars(env, path, root);
 }
 
+#if defined(STASIS_ENABLE_SEAM_TESTS)
+JNIEXPORT void JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetAssetManifestSha256(
+    JNIEnv *env,
+    jclass activity,
+    jstring value
+) {
+    (void)activity;
+    if (value == NULL) return;
+    const char *hash = (*env)->GetStringUTFChars(env, value, NULL);
+    if (hash == NULL) return;
+    size_t length = strlen(hash);
+    int valid = length == 64;
+    for (size_t index = 0; valid && index < length; index++) {
+        char byte = hash[index];
+        valid = (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+    }
+    if (valid) setenv("STASIS_ASSET_MANIFEST_SHA256", hash, 1);
+    (*env)->ReleaseStringUTFChars(env, value, hash);
+}
+#endif
+
 /* The join URL is deliberately a native-shell-only read.  It contains the
  * pairing secret and must never enter Stasis globals, deterministic frames,
  * logs, or the packaged guest. */
