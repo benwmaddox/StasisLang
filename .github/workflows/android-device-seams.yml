@@ -108,6 +108,14 @@ jobs:
           path: artifacts/android_orientation_metrics/e
           if-no-files-found: warn
 
+      - name: Upload Android packaged-assets evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-packaged-assets-seam
+          path: artifacts/android_packaged_assets/e
+          if-no-files-found: warn
+
   workshop-seams:
     runs-on: ubuntu-latest
     timeout-minutes: 75

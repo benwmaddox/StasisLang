@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import struct
@@ -85,6 +86,145 @@ def validate_markers(markers: list[dict], expectations: dict) -> dict:
     if mismatches:
         raise SeamError(f"Android stable-frame marker mismatch: {mismatches}")
     return stable
+
+
+def packaged_asset_manifest(package_manifest: Path, package: dict) -> tuple[Path, str]:
+    """Resolve and hash the manifest that was copied into the generated package."""
+    candidates = []
+    asset_root = package.get("assets")
+    if isinstance(asset_root, str):
+        candidates.append(package_manifest.parent / asset_root / "assets/manifest.json")
+    candidates.extend(
+        (
+            package_manifest.parent / "android/app/src/main/assets/stasis_game/assets/manifest.json",
+            package_manifest.parent / "aot/apk_assets/stasis_game/assets/manifest.json",
+        )
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            data = candidate.read_bytes()
+            return candidate, hashlib.sha256(data).hexdigest()
+    rendered = ", ".join(str(path) for path in candidates)
+    raise SeamError(f"IT-021 packaged manifest missing; checked {rendered}")
+
+
+def validate_asset_audio_markers(
+    markers: list[dict], expectations: dict, package: dict, package_manifest: Path
+) -> dict:
+    """Validate IT-021 identities and offline mixer evidence from the stable marker."""
+    assets = expectations.get("assets")
+    if not isinstance(assets, dict):
+        return {}
+    stable = validate_markers(markers, expectations)
+    manifest_path, manifest_hash = packaged_asset_manifest(package_manifest, package)
+    expected_hash = assets.get("manifest_sha256")
+    if expected_hash not in (None, "computed_from_packaged_manifest", manifest_hash):
+        raise SeamError(
+            f"IT-021 field manifest_sha256 expected {expected_hash} actual {manifest_hash}; "
+            f"evidence path {manifest_path}"
+        )
+    actual_hash = stable.get("asset_manifest_sha256")
+    if actual_hash != manifest_hash:
+        raise SeamError(
+            f"IT-021 field asset_manifest_sha256 expected {manifest_hash} actual {actual_hash}; "
+            f"evidence path {manifest_path}"
+        )
+    expected_root = f"/data/user/0/{package['package_id']}/files/stasis_game"
+    actual_root = stable.get("asset_root")
+    if actual_root != expected_root:
+        raise SeamError(
+            f"IT-021 field asset_root expected {expected_root} actual {actual_root}; "
+            f"evidence path {package_manifest}"
+        )
+    handles = assets.get("handles", {})
+    for marker_field in handles.values():
+        actual = stable.get(marker_field)
+        if not isinstance(actual, int) or actual <= 0:
+            raise SeamError(
+                f"IT-021 field {marker_field} expected positive identity actual {actual}; "
+                f"evidence path {package_manifest}"
+            )
+    minimum_width = float(assets.get("minimum_text_width", 0.0))
+    for field in ("direct_text_width", "cached_text_width"):
+        actual = stable.get(field)
+        if not isinstance(actual, (int, float)) or actual < minimum_width:
+            raise SeamError(
+                f"IT-021 field {field} expected >= {minimum_width} actual {actual}; "
+                f"evidence path {package_manifest}"
+            )
+    audio = assets.get("audio", {})
+    exact = {
+        "audio_queued_before": audio.get("queued_frames_before"),
+        "audio_queued_after": audio.get("queued_frames_after"),
+    }
+    for field, expected in exact.items():
+        if expected is not None and stable.get(field) != expected:
+            raise SeamError(
+                f"IT-021 field {field} expected {expected} actual {stable.get(field)}; "
+                f"evidence path {package_manifest}"
+            )
+    minimums = {
+        "audio_frames_mixed": audio.get("minimum_frames_mixed", 1),
+        "audio_nonzero_after_prefix": audio.get("minimum_nonzero_samples_after_prefix", 1),
+    }
+    for field, minimum in minimums.items():
+        actual = stable.get(field)
+        if not isinstance(actual, int) or actual < minimum:
+            raise SeamError(
+                f"IT-021 field {field} expected >= {minimum} actual {actual}; "
+                f"evidence path {package_manifest}"
+            )
+    expected_voice = audio.get("voice_state", 1)
+    if stable.get("audio_voice_state") != expected_voice:
+        raise SeamError(
+            f"IT-021 field audio_voice_state expected {expected_voice} actual "
+            f"{stable.get('audio_voice_state')}; evidence path {package_manifest}"
+        )
+    checksum = stable.get("audio_sample_checksum")
+    if audio.get("sample_checksum") == "nonzero" and (not isinstance(checksum, int) or checksum == 0):
+        raise SeamError(
+            f"IT-021 field audio_sample_checksum expected nonzero actual {checksum}; "
+            f"evidence path {package_manifest}"
+        )
+    if stable.get("audio_replay_matches") != audio.get("replay_matches", 1):
+        raise SeamError(
+            f"IT-021 field audio_replay_matches expected {audio.get('replay_matches', 1)} "
+            f"actual {stable.get('audio_replay_matches')}; evidence path {package_manifest}"
+        )
+    if stable.get("audio_replay_checksum") != checksum:
+        raise SeamError(
+            f"IT-021 field audio_replay_checksum expected {checksum} actual "
+            f"{stable.get('audio_replay_checksum')}; evidence path {package_manifest}"
+        )
+    checksum_values = {
+        marker.get("audio_sample_checksum")
+        for marker in markers
+        if "audio_sample_checksum" in marker
+    }
+    if len(checksum_values) > 1:
+        raise SeamError(
+            f"IT-021 field audio_sample_checksum expected stable value actual {sorted(checksum_values, key=str)}; "
+            f"evidence path {package_manifest}"
+        )
+    return {
+        "manifest": str(manifest_path),
+        "manifest_sha256": manifest_hash,
+        "asset_root": actual_root,
+        "identities": {
+            name: {"marker_field": marker_field, "handle": stable.get(marker_field)}
+            for name, marker_field in handles.items()
+        },
+        "marker": {
+            key: stable.get(key)
+            for key in (
+                "sprite_handle", "font_handle", "cached_text_handle", "audio_handle",
+                "voice_handle", "direct_text_width", "cached_text_width",
+                "audio_queued_before", "audio_queued_after", "audio_frames_mixed",
+                "audio_nonzero_after_prefix", "audio_voice_state", "audio_sample_checksum",
+                "audio_replay_checksum", "audio_replay_matches",
+            )
+        },
+    }
 
 
 def forbidden_resource_diagnostics(expectations: dict) -> tuple[str, ...]:
@@ -1133,6 +1273,10 @@ def main() -> int:
                 break
             time.sleep(1)
         stable = validate_markers(markers, expectations)
+        if test_id == "IT-021" or "assets" in expectations:
+            evidence["assets"] = validate_asset_audio_markers(
+                markers, expectations, package, args.package_manifest
+            )
         log_history = [log]
         initial_log_path = args.output / "initial-logcat.txt"
         initial_log_path.write_text(log, encoding="utf-8")
@@ -1449,7 +1593,7 @@ def main() -> int:
             log = "\n".join(log_history)
         log_path.write_text(log, encoding="utf-8")
         validate_resource_diagnostics(log, expectations)
-        if lifecycle:
+        if expectations.get("resource_regions"):
             regions, resource_regions = capture_until_resource_regions_match(
                 args.adb,
                 args.serial,

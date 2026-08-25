@@ -235,7 +235,7 @@ in Maddox Tasks as Backlog children of the integration-test program.
 | IT-018 | 1 | Send touch down/move/up through Android/SDL and prove HostFrame-to-Stasis state-to-frame behavior. | Pointer fields, state transition, frame trace | Emulator |
 | IT-019 | 1 | Rotate and resize the release shell and prove native/drawable/logical metrics and generations reach Stasis before the restored frame. | Metric/generation record and named pixel regions | Emulator |
 | IT-020 | 1 | Background/resume and recreate the release Activity after resources load; verify the first accepted frame restores sprite, fallback, and cached text. | Restore events, same-process counter advance, per-epoch generations, Android compositor capture | Emulator |
-| IT-021 | 2 | Package and load real sprite/font/text/audio assets in the release shell. | Manifest identity, render regions, offline/queued audio evidence | Device |
+| IT-021 | 2 | Package and load real sprite/font/text/audio assets in the release shell. | Manifest identity, render regions, offline/queued audio evidence | Emulator |
 | IT-022 | 2 | Build controlled packages with a missing, tampered, traversal, and oversized asset and verify deterministic startup rejection. | Structured user-visible/runtime diagnostic | Emulator |
 | IT-023 | 2 | Write a Stasis preference through the Android platform store, kill/relaunch the process, and read it through AOT. | Persisted value and scoped storage path | Device |
 | IT-024 | 2 | Return non-zero from each mobile lifecycle entry and verify the shell stops cleanly and surfaces the exact entry/result. | Runtime error and absence of crash loop | Emulator |

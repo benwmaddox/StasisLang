@@ -1,7 +1,7 @@
 param(
     [string]$Serial = $env:ANDROID_SERIAL,
     [string]$ArtifactRoot = "artifacts",
-    [int]$PerSeamTimeoutSeconds = 840
+    [int]$PerSeamTimeoutSeconds = 660
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +60,10 @@ $seams = @(
     @{
         Project = "samples/android_orientation_seam"
         Output = "android_orientation_metrics"
+    },
+    @{
+        Project = "samples/android_packaged_assets_seam"
+        Output = "android_packaged_assets"
     }
 )
 
