@@ -236,13 +236,22 @@
   };
   const performanceWorkload = {
     commands: 0, lines: 0, rectangles: 0, sprites: 0, text: 0,
-    instances: 0, batches: 0, drawCalls: 0, uploadedBytes: 0
+    instances: 0, batches: 0, drawCalls: 0, composites: 0,
+    renderSubmissions: 0, uploadedBytes: 0,
+    atlasPages: -1, atlasLiveEntries: -1, atlasAllocatedBytes: -1,
+    atlasUploadCount: -1, atlasUploadBytes: -1
   };
   let performanceBackend = "Canvas2D";
-  let rectBatcher;
+  let gpuBatcher;
   const RECT_BATCH_MIN = 64;
   const RECT_CAP = 10000;
   const rectScratch = new Float32Array(RECT_CAP * 8);
+  const SPRITE_CAP = 4096;
+  const spriteScratch = new Float32Array(SPRITE_CAP * 16);
+  const ATLAS_PAGE_SIZE = 512;
+  const ATLAS_PAGE_MAX = 2048;
+  const ATLAS_MAX_PAGES = 8;
+  const ATLAS_PADDING = 2;
   const startedAt = performance.now();
 
   const colorCache = new Map();
@@ -441,11 +450,74 @@
     else view.setInt32(offset, value, true);
     return true;
   };
-  const loadSprite = pathId => {
-    const handle = nextHandle++;
+  const spriteDimensions = (width, height) => {
+    const valid = value => Number.isFinite(value) && value > 0 && value <= 8192;
+    if (!valid(width) || !valid(height)) return null;
+    return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+  };
+  const prepareSprite = resource => {
+    const image = resource.image;
+    if (!image.complete || !image.naturalWidth || !image.naturalHeight) throw new Error("sprite image is unavailable");
+    const dimensions = resource.requested;
+    if (!dimensions) {
+      resource.drawable = image;
+      resource.width = image.naturalWidth;
+      resource.height = image.naturalHeight;
+      return;
+    }
+    const raster = document.createElement?.("canvas");
+    const rasterContext = raster?.getContext?.("2d");
+    if (!raster || !rasterContext) throw new Error("sprite raster canvas unavailable");
+    raster.width = dimensions.width;
+    raster.height = dimensions.height;
+    rasterContext.save?.();
+    rasterContext.clearRect?.(0, 0, dimensions.width, dimensions.height);
+    rasterContext.imageSmoothingEnabled = true;
+    if ("imageSmoothingQuality" in rasterContext) rasterContext.imageSmoothingQuality = "high";
+    const scale = Math.min(dimensions.width / image.naturalWidth, dimensions.height / image.naturalHeight);
+    const drawWidth = image.naturalWidth * scale;
+    const drawHeight = image.naturalHeight * scale;
+    rasterContext.drawImage(image, (dimensions.width - drawWidth) / 2, (dimensions.height - drawHeight) / 2,
+      drawWidth, drawHeight);
+    rasterContext.restore?.();
+    resource.drawable = raster;
+    resource.width = dimensions.width;
+    resource.height = dimensions.height;
+  };
+  const createSpriteResource = (pathId, width, height, onReady) => {
     const image = new Image();
+    const resource = {
+      image, drawable: null, requested: spriteDimensions(width, height),
+      width: 0, height: 0, ready: false, error: null, generation: 1,
+      readyPromise: null
+    };
+    const decoded = typeof image.decode === "function"
+      ? () => image.decode()
+      : () => new Promise((resolve, reject) => {
+        image.addEventListener?.("load", resolve, { once: true });
+        image.addEventListener?.("error", () => reject(new Error("sprite image failed to load")), { once: true });
+        if (image.complete && image.naturalWidth) resolve();
+      });
+    resource.readyPromise = Promise.resolve()
+      .then(decoded)
+      .then(() => prepareSprite(resource))
+      .then(() => {
+        resource.ready = true;
+        onReady?.(resource, true);
+        return resource;
+      })
+      .catch(error => {
+        resource.error = error;
+        resource.ready = false;
+        onReady?.(resource, false);
+        return resource;
+      });
     image.src = assetValue(pathId);
-    sprites.set(handle, image);
+    return resource;
+  };
+  const loadSprite = (pathId, width, height) => {
+    const handle = nextHandle++;
+    sprites.set(handle, createSpriteResource(pathId, width, height));
     return handle;
   };
   const setCanvasFont = (font, size = font.renderSize) => {
@@ -515,18 +587,22 @@
     context.restore();
     return width;
   };
-  const releaseSprite = handle => { sprites.delete(handle); };
-  const requestSprite = pathId => {
+  const releaseSprite = handle => {
+    const resource = sprites.get(handle);
+    if (resource) {
+      resource.generation += 1;
+      sprites.delete(handle);
+      gpuBatcher?.releaseResource(resource);
+    }
+  };
+  const requestSprite = (pathId, width, height) => {
     const task = nextAssetTask++;
     const handle = nextHandle++;
-    const image = new Image();
     const entry = { state: 1, handle, kind: "sprite" };
     assetTasks.set(task, entry);
-    image.addEventListener("load", () => { if (entry.state < 3) entry.state = 3; });
-    image.addEventListener("error", () => { if (entry.state < 3) entry.state = 4; });
     entry.state = 2;
-    image.src = assetValue(pathId);
-    sprites.set(handle, image);
+    sprites.set(handle, createSpriteResource(pathId, width, height,
+      (_resource, ready) => { if (entry.state < 3) entry.state = ready ? 3 : 4; }));
     return task;
   };
   // @stasis-feature audio begin
@@ -862,12 +938,12 @@
       document.body.dataset.audioEvents = String(audioEvents);
     },
     // @stasis-feature audio end
-    gfx_load_sprite: pathId => loadSprite(pathId),
-    stasis_gfx_load_sprite: pathId => loadSprite(pathId),
+    gfx_load_sprite: (pathId, width, height) => loadSprite(pathId, width, height),
+    stasis_gfx_load_sprite: (pathId, width, height) => loadSprite(pathId, width, height),
     gfx_release_sprite: handle => releaseSprite(handle),
     stasis_gfx_release_sprite: handle => releaseSprite(handle),
     stasis_jit_gfx_release_sprite: handle => releaseSprite(handle),
-    stasis_jit_asset_request_sprite: pathId => requestSprite(pathId),
+    stasis_jit_asset_request_sprite: (pathId, width, height) => requestSprite(pathId, width, height),
     // @stasis-feature audio begin
     stasis_jit_asset_request_audio: pathId => requestAudio(pathId),
     // @stasis-feature audio end
@@ -885,7 +961,7 @@
     stasis_measure_text: (font, textId) => measureText(font, textId),
     stasis_jit_measure_text: (font, textId) => measureText(font, textId),
     stasis_jit_sprite_load_from: (base, index, _len, pathId, width, height) => {
-      const handle = loadSprite(pathId);
+      const handle = loadSprite(pathId, width, height);
       return setViewField(base, index, "handle", handle)
         && setViewField(base, index, "width", width)
         && setViewField(base, index, "height", height) ? 1 : 0;
@@ -983,18 +1059,39 @@
   });
   // @stasis-feature audio end
 
-  function getRectBatcher() {
-    if (rectBatcher !== undefined) return rectBatcher;
+  // This helper owns all WebGL state for one private, host-created context.
+  // Guest memory is copied into the two reusable staging arrays before upload.
+  function getGpuBatcher() {
+    if (gpuBatcher !== undefined) return gpuBatcher;
     try {
-      if (!document.createElement) return (rectBatcher = null);
+      if (!document.createElement) return (gpuBatcher = null);
       const target = document.createElement("canvas");
       const gl = target.getContext("webgl2", { alpha: true, premultipliedAlpha: true });
-      if (!gl) return (rectBatcher = null);
-      const vertex = gl.createShader(gl.VERTEX_SHADER);
-      const fragment = gl.createShader(gl.FRAGMENT_SHADER);
-      const program = gl.createProgram();
-      if (!vertex || !fragment || !program) throw new Error("rectangle WebGL allocation failed");
-      gl.shaderSource(vertex, `#version 300 es
+      if (!gl) return (gpuBatcher = null);
+      const makeProgram = (name, vertexSource, fragmentSource) => {
+        const vertex = gl.createShader(gl.VERTEX_SHADER);
+        const fragment = gl.createShader(gl.FRAGMENT_SHADER);
+        const program = gl.createProgram();
+        if (!vertex || !fragment || !program) throw new Error(`${name} WebGL allocation failed`);
+        gl.shaderSource(vertex, vertexSource);
+        gl.compileShader(vertex);
+        if (!gl.getShaderParameter(vertex, gl.COMPILE_STATUS)) {
+          throw new Error(`${name} vertex shader failed: ${gl.getShaderInfoLog?.(vertex) || "unknown compile error"}`);
+        }
+        gl.shaderSource(fragment, fragmentSource);
+        gl.compileShader(fragment);
+        if (!gl.getShaderParameter(fragment, gl.COMPILE_STATUS)) {
+          throw new Error(`${name} fragment shader failed: ${gl.getShaderInfoLog?.(fragment) || "unknown compile error"}`);
+        }
+        gl.attachShader(program, vertex);
+        gl.attachShader(program, fragment);
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          throw new Error(`${name} program failed: ${gl.getProgramInfoLog?.(program) || "unknown link error"}`);
+        }
+        return { program, vertex, fragment };
+      };
+      const rectangle = makeProgram("rectangle", `#version 300 es
         layout(location = 0) in vec2 p;
         layout(location = 1) in vec4 r;
         layout(location = 2) in vec4 c;
@@ -1005,65 +1102,299 @@
           gl_Position = vec4(q.x / size.x * 2.0 - 1.0,
             1.0 - q.y / size.y * 2.0, 0.0, 1.0);
           color = c;
-        }`);
-      gl.compileShader(vertex);
-      if (!gl.getShaderParameter(vertex, gl.COMPILE_STATUS)) throw new Error("rectangle vertex shader failed");
-      gl.shaderSource(fragment, `#version 300 es
+        }`, `#version 300 es
         precision mediump float;
         in vec4 color;
         out vec4 outputColor;
         void main() { outputColor = color; }`);
-      gl.compileShader(fragment);
-      if (!gl.getShaderParameter(fragment, gl.COMPILE_STATUS)) throw new Error("rectangle fragment shader failed");
-      gl.attachShader(program, vertex);
-      gl.attachShader(program, fragment);
-      gl.linkProgram(program);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error("rectangle program failed");
-      const vao = gl.createVertexArray();
+      const spriteProgram = makeProgram("sprite", `#version 300 es
+        layout(location = 0) in vec2 p;
+        layout(location = 1) in vec4 rect;
+        layout(location = 2) in vec4 uv;
+        layout(location = 3) in vec4 color;
+        layout(location = 4) in vec4 rotation;
+        uniform vec2 size;
+        out vec2 textureUv;
+        out vec4 vertexColor;
+        void main() {
+          vec2 centered = (p - vec2(0.5)) * rect.zw;
+          vec2 rotated = vec2(centered.x * rotation.y - centered.y * rotation.x,
+            centered.x * rotation.x + centered.y * rotation.y);
+          vec2 q = rect.xy + rect.zw * 0.5 + rotated;
+          gl_Position = vec4(q.x / size.x * 2.0 - 1.0,
+            1.0 - q.y / size.y * 2.0, 0.0, 1.0);
+          textureUv = mix(uv.xy, uv.zw, p);
+          vertexColor = color;
+        }`, `#version 300 es
+        precision mediump float;
+        uniform sampler2D sprite;
+        in vec2 textureUv;
+        in vec4 vertexColor;
+        out vec4 outputColor;
+        void main() { outputColor = texture(sprite, textureUv) * vertexColor; }`);
+      const rectVao = gl.createVertexArray();
+      const spriteVao = gl.createVertexArray();
       const unitBuffer = gl.createBuffer();
       const instanceBuffer = gl.createBuffer();
-      if (!vao || !unitBuffer || !instanceBuffer) throw new Error("rectangle buffers failed");
-      gl.bindVertexArray(vao);
+      if (!rectVao || !spriteVao || !unitBuffer || !instanceBuffer) throw new Error("WebGL buffers failed");
       gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+      gl.bindVertexArray(rectVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, rectScratch.byteLength, gl.DYNAMIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, Math.max(rectScratch.byteLength, spriteScratch.byteLength), gl.DYNAMIC_DRAW);
       for (const [attribute, offset] of [[1, 0], [2, 16]]) {
         gl.enableVertexAttribArray(attribute);
         gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 32, offset);
         gl.vertexAttribDivisor(attribute, 1);
       }
+      gl.bindVertexArray(spriteVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+      for (const [attribute, offset] of [[1, 0], [2, 16], [3, 32], [4, 48]]) {
+        gl.enableVertexAttribArray(attribute);
+        gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 64, offset);
+        gl.vertexAttribDivisor(attribute, 1);
+      }
       gl.bindVertexArray(null);
-      const size = gl.getUniformLocation(program, "size");
-      return (rectBatcher = {
-        draw(values, count) {
-          const width = Math.max(1, canvas.width | 0);
-          const height = Math.max(1, canvas.height | 0);
-          if (target.width !== width || target.height !== height) {
-            target.width = width;
-            target.height = height;
+      const rectSize = gl.getUniformLocation(rectangle.program, "size");
+      const spriteSize = gl.getUniformLocation(spriteProgram.program, "size");
+      const spriteSampler = gl.getUniformLocation(spriteProgram.program, "sprite");
+      const atlasPages = [];
+      const atlasByResource = new WeakMap();
+      // Upload counters are cumulative for this helper/context lifetime;
+      // page and live-entry counts describe the current bounded atlas.
+      let atlasUploadCount = 0;
+      let atlasUploadBytes = 0;
+      let stagingCanvas;
+      let stagingContext;
+      let lost = false;
+      const failIfLost = () => {
+        if (lost || (typeof gl.isContextLost === "function" && gl.isContextLost())) throw new Error("WebGL context lost");
+      };
+      const failIfBad = () => {
+        failIfLost();
+        if (typeof gl.getError === "function" && gl.getError() !== (gl.NO_ERROR ?? 0)) throw new Error("WebGL error");
+      };
+      const dispose = () => {
+        for (const page of atlasPages) gl.deleteTexture?.(page.texture);
+        atlasPages.length = 0;
+        gl.deleteBuffer?.(instanceBuffer);
+        gl.deleteBuffer?.(unitBuffer);
+        gl.deleteVertexArray?.(rectVao);
+        gl.deleteVertexArray?.(spriteVao);
+        gl.deleteProgram?.(rectangle.program);
+        gl.deleteProgram?.(spriteProgram.program);
+      };
+      const fail = () => {
+        lost = true;
+        dispose();
+        if (gpuBatcher?.target === target) gpuBatcher = undefined;
+      };
+      target.addEventListener?.("webglcontextlost", event => { event.preventDefault?.(); fail(); });
+      target.addEventListener?.("webglcontextrestored", () => {
+        // A draw attempted while the context was lost records a null helper;
+        // restoration must make that helper lazy-recreatable as well.
+        if (gpuBatcher === null || gpuBatcher?.target === target) gpuBatcher = undefined;
+      });
+      const createAtlasPage = size => {
+        if (atlasPages.length >= ATLAS_MAX_PAGES) return null;
+        const texture = gl.createTexture();
+        if (!texture) throw new Error("WebGL atlas texture allocation failed");
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0,
+          gl.RGBA, gl.UNSIGNED_BYTE, null);
+        failIfBad();
+        const page = {
+          texture, size, cursorX: 0, cursorY: 0, rowHeight: 0,
+          entries: new Set()
+        };
+        atlasPages.push(page);
+        return page;
+      };
+      const uploadAtlasEntry = (page, resource, entry) => {
+        stagingCanvas ||= document.createElement?.("canvas");
+        stagingContext ||= stagingCanvas?.getContext?.("2d");
+        if (!stagingCanvas || !stagingContext) throw new Error("sprite atlas staging unavailable");
+        const width = resource.width;
+        const height = resource.height;
+        const paddedWidth = width + ATLAS_PADDING * 2;
+        const paddedHeight = height + ATLAS_PADDING * 2;
+        stagingCanvas.width = paddedWidth;
+        stagingCanvas.height = paddedHeight;
+        stagingContext.clearRect?.(0, 0, paddedWidth, paddedHeight);
+        stagingContext.imageSmoothingEnabled = false;
+        stagingContext.drawImage(resource.drawable, ATLAS_PADDING, ATLAS_PADDING, width, height);
+        // Extrude each edge into the padding to keep LINEAR samples away from
+        // neighboring material. Released allocations are not reused in-place;
+        // the bounded page is discarded when its last live entry is released.
+        stagingContext.drawImage(resource.drawable, 0, 0, 1, height, 0, ATLAS_PADDING, ATLAS_PADDING, height);
+        stagingContext.drawImage(resource.drawable, width - 1, 0, 1, height,
+          ATLAS_PADDING + width, ATLAS_PADDING, ATLAS_PADDING, height);
+        stagingContext.drawImage(resource.drawable, 0, 0, width, 1, ATLAS_PADDING, 0, width, ATLAS_PADDING);
+        stagingContext.drawImage(resource.drawable, 0, height - 1, width, 1,
+          ATLAS_PADDING, ATLAS_PADDING + height, width, ATLAS_PADDING);
+        stagingContext.drawImage(resource.drawable, 0, 0, 1, 1,
+          0, 0, ATLAS_PADDING, ATLAS_PADDING);
+        stagingContext.drawImage(resource.drawable, width - 1, 0, 1, 1,
+          ATLAS_PADDING + width, 0, ATLAS_PADDING, ATLAS_PADDING);
+        stagingContext.drawImage(resource.drawable, 0, height - 1, 1, 1,
+          0, ATLAS_PADDING + height, ATLAS_PADDING, ATLAS_PADDING);
+        stagingContext.drawImage(resource.drawable, width - 1, height - 1, 1, 1,
+          ATLAS_PADDING + width, ATLAS_PADDING + height, ATLAS_PADDING, ATLAS_PADDING);
+        gl.bindTexture(gl.TEXTURE_2D, page.texture);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, entry.x - ATLAS_PADDING, entry.y - ATLAS_PADDING,
+          gl.RGBA, gl.UNSIGNED_BYTE, stagingCanvas);
+        failIfBad();
+        atlasUploadCount += 1;
+        atlasUploadBytes += paddedWidth * paddedHeight * 4;
+      };
+      const atlasFor = resource => {
+        const old = atlasByResource.get(resource);
+        if (old?.generation === resource.generation) return old;
+        if (!resource.ready || !resource.drawable || !resource.width || !resource.height) return null;
+        const paddedWidth = resource.width + ATLAS_PADDING * 2;
+        const paddedHeight = resource.height + ATLAS_PADDING * 2;
+        if (paddedWidth > ATLAS_PAGE_MAX || paddedHeight > ATLAS_PAGE_MAX) return null;
+        let pageSize = ATLAS_PAGE_SIZE;
+        while (pageSize < paddedWidth || pageSize < paddedHeight) pageSize *= 2;
+        let page = null;
+        let boxX = 0;
+        let boxY = 0;
+        let previousCursor = null;
+        for (const candidate of atlasPages) {
+          if (paddedWidth > candidate.size || paddedHeight > candidate.size) continue;
+          let x = candidate.cursorX;
+          let y = candidate.cursorY;
+          if (x + paddedWidth > candidate.size) {
+            x = 0;
+            y += candidate.rowHeight;
           }
+          if (y + paddedHeight <= candidate.size) {
+            page = candidate;
+            boxX = x;
+            boxY = y;
+            previousCursor = {
+              x: candidate.cursorX, y: candidate.cursorY, rowHeight: candidate.rowHeight
+            };
+            break;
+          }
+        }
+        let createdPage = false;
+        if (!page) {
+          page = createAtlasPage(pageSize);
+          if (!page) return null;
+          createdPage = true;
+          boxX = 0;
+          boxY = 0;
+          previousCursor = { x: 0, y: 0, rowHeight: 0 };
+        }
+        const entry = {
+          page, x: boxX + ATLAS_PADDING, y: boxY + ATLAS_PADDING,
+          width: resource.width, height: resource.height,
+          generation: resource.generation
+        };
+        page.cursorX = boxX + paddedWidth;
+        page.cursorY = boxY;
+        page.rowHeight = boxY === previousCursor.y
+          ? Math.max(previousCursor.rowHeight, paddedHeight) : paddedHeight;
+        try {
+          uploadAtlasEntry(page, resource, entry);
+        } catch (error) {
+          page.cursorX = previousCursor.x;
+          page.cursorY = previousCursor.y;
+          page.rowHeight = previousCursor.rowHeight;
+          if (createdPage) {
+            atlasPages.splice(atlasPages.indexOf(page), 1);
+            gl.deleteTexture?.(page.texture);
+          }
+          throw error;
+        }
+        page.entries.add(resource);
+        atlasByResource.set(resource, entry);
+        return entry;
+      };
+      const draw = (values, count, stride, texture) => {
+        const width = Math.max(1, canvas.width | 0);
+        const height = Math.max(1, canvas.height | 0);
+        if (target.width !== width || target.height !== height) {
+          target.width = width;
+          target.height = height;
+        }
+        if (!texture) {
+          // Keep this hot path equivalent to the original rectangle helper.
           gl.viewport(0, 0, width, height);
           gl.clearColor(0, 0, 0, 0);
           gl.clear(gl.COLOR_BUFFER_BIT);
-          gl.useProgram(program);
-          gl.uniform2f(size, width, height);
-          gl.bindVertexArray(vao);
+          gl.useProgram(rectangle.program);
+          gl.uniform2f(rectSize, width, height);
+          gl.bindVertexArray(rectVao);
           gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-          gl.bufferSubData(gl.ARRAY_BUFFER, 0, values, 0, count * 8);
+          gl.bufferSubData(gl.ARRAY_BUFFER, 0, values, 0, count * stride);
           gl.enable(gl.BLEND);
           gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
           gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
           gl.bindVertexArray(null);
-          context.globalAlpha = 1;
-          context.globalCompositeOperation = "source-over";
-          context.drawImage(target, 0, 0);
+        } else {
+          failIfBad();
+          gl.viewport(0, 0, width, height);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.useProgram(spriteProgram.program);
+          gl.uniform2f(spriteSize, width, height);
+          gl.uniform1i?.(spriteSampler, 0);
+          gl.bindVertexArray(spriteVao);
+          gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+          gl.bufferSubData(gl.ARRAY_BUFFER, 0, values, 0, count * stride);
+          gl.enable(gl.BLEND);
+          gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+          gl.activeTexture?.(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          failIfBad();
+          gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+          gl.bindVertexArray(null);
+          failIfBad();
         }
+        context.globalAlpha = 1;
+        context.globalCompositeOperation = "source-over";
+        context.drawImage(target, 0, 0);
+        performanceWorkload.composites += 1;
+      };
+      return (gpuBatcher = {
+        target,
+        drawRect: (values, count) => draw(values, count, 8, null),
+        atlasFor,
+        drawSprites: (values, count, page) => draw(values, count, 16, page.texture),
+        releaseResource: resource => {
+          const entry = atlasByResource.get(resource);
+          if (!entry) return;
+          atlasByResource.delete(resource);
+          entry.page.entries.delete(resource);
+          if (entry.page.entries.size === 0) {
+            const index = atlasPages.indexOf(entry.page);
+            if (index >= 0) atlasPages.splice(index, 1);
+            gl.deleteTexture?.(entry.page.texture);
+          }
+        },
+        metrics: () => ({
+          pages: atlasPages.length,
+          liveEntries: atlasPages.reduce((total, page) => total + page.entries.size, 0),
+          allocatedBytes: atlasPages.reduce((total, page) => total + page.size * page.size * 4, 0),
+          uploadCount: atlasUploadCount,
+          uploadBytes: atlasUploadBytes
+        })
       });
-    } catch (_) {
-      return (rectBatcher = null);
+    } catch (error) {
+      document.body.dataset.gpuError = String(error);
+      return (gpuBatcher = null);
     }
   }
   function executeCommands() {
@@ -1135,7 +1466,7 @@
         }
         return;
       }
-      const batcher = getRectBatcher();
+      const batcher = getGpuBatcher();
       if (!batcher) {
         performanceWorkload.drawCalls += count;
         for (let offset = 0; offset < count; offset += 1) {
@@ -1151,14 +1482,15 @@
         for (let field = 0; field < 8; field += 1) rectScratch[target + field] = f32[source + field];
       }
       try {
-        batcher.draw(rectScratch, count);
+        batcher.drawRect(rectScratch, count);
         performanceWorkload.instances += count;
         performanceWorkload.batches += 1;
         performanceWorkload.drawCalls += 1;
         performanceWorkload.uploadedBytes += count * 8 * Float32Array.BYTES_PER_ELEMENT;
         performanceBackend = "Canvas2D + WebGL2";
-      } catch (_) {
-        rectBatcher = null;
+      } catch (error) {
+        document.body.dataset.gpuError = String(error);
+        gpuBatcher = null;
         performanceWorkload.drawCalls += count;
         for (let offset = 0; offset < count; offset += 1) {
           const index = ordered ? i32[18464 + start + offset] % 16384 : start + offset;
@@ -1166,13 +1498,11 @@
         }
       }
     };
-    const drawSprite = index => {
-      performanceWorkload.sprites += 1;
-      performanceWorkload.drawCalls += 1;
+    const spriteInfo = index => {
       const baseI = 32 + index * 3;
       const baseF = 80004 + index * spriteStride;
-      const image = sprites.get(i32[baseI]);
-      if (!image || !image.complete || !image.naturalWidth) return;
+      const resource = sprites.get(i32[baseI]);
+      if (!resource?.ready || !resource.drawable || !resource.width || !resource.height) return null;
       const x = f32[baseF];
       const y = f32[baseF + 1];
       const width = f32[baseF + 2];
@@ -1181,21 +1511,130 @@
       const v0 = version >= 5 ? f32[baseF + 5] : 0;
       const u1 = version >= 5 ? f32[baseF + 6] : 1;
       const v1 = version >= 5 ? f32[baseF + 7] : 1;
-      if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return;
-      const sourceX = u0 * image.naturalWidth;
-      const sourceY = v0 * image.naturalHeight;
-      const sourceWidth = (u1 - u0) * image.naturalWidth;
-      const sourceHeight = (v1 - v0) * image.naturalHeight;
+      if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return null;
+      return { handle: i32[baseI], resource, x, y, width, height, u0, v0, u1, v1,
+        alpha: Math.max(0, Math.min(1, i32[baseI + 2] / 255)),
+        radians: i32[baseI + 1] * Math.PI / 180 };
+    };
+    const drawSprite = index => {
+      performanceWorkload.sprites += 1;
+      performanceWorkload.drawCalls += 1;
+      const info = spriteInfo(index);
+      if (!info) return;
+      const { resource, x, y, width, height, u0, v0, u1, v1, alpha, radians } = info;
+      const image = resource.drawable;
+      const sourceX = u0 * resource.width;
+      const sourceY = v0 * resource.height;
+      const sourceWidth = (u1 - u0) * resource.width;
+      const sourceHeight = (v1 - v0) * resource.height;
       context.save();
-      context.globalAlpha = Math.max(0, Math.min(1, i32[baseI + 2] / 255));
+      context.globalAlpha = alpha;
       context.translate(x + width / 2, y + height / 2);
-      context.rotate(i32[baseI + 1] * Math.PI / 180);
+      context.rotate(radians);
       if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1) {
         context.drawImage(image, -width / 2, -height / 2, width, height);
       } else {
         context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, -width / 2, -height / 2, width, height);
       }
       context.restore();
+    };
+    const drawSpriteRun = (start, count, ordered) => {
+      const indexAt = offset => ordered ? i32[18464 + start + offset] % 16384 : start + offset;
+      let offset = 0;
+      while (offset < count) {
+        const firstIndex = indexAt(offset);
+        const firstValue = spriteInfo(firstIndex);
+        if (!firstValue) {
+          drawSprite(firstIndex);
+          offset += 1;
+          continue;
+        }
+        let runCount = 1;
+        while (offset + runCount < count) {
+          const next = i32[18464 + start + offset + runCount];
+          if (ordered && Math.floor(next / 16384) !== 2) break;
+          if (!ordered && !spriteInfo(indexAt(offset + runCount))) break;
+          runCount += 1;
+        }
+        if (runCount < RECT_BATCH_MIN) {
+          for (let item = 0; item < runCount; item += 1) drawSprite(indexAt(offset + item));
+          offset += runCount;
+          continue;
+        }
+        const batcher = getGpuBatcher();
+        if (!batcher) {
+          for (let item = 0; item < runCount; item += 1) drawSprite(indexAt(offset + item));
+          offset += runCount;
+          continue;
+        }
+        let batchCount = 0;
+        let page = null;
+        while (batchCount < runCount) {
+          const item = batchCount;
+          const value = spriteInfo(indexAt(offset + item));
+          if (!value) break;
+          let atlas;
+          try {
+            atlas = batcher.atlasFor(value.resource);
+          } catch (error) {
+            document.body.dataset.gpuError = String(error);
+            gpuBatcher = null;
+            break;
+          }
+          if (!atlas || (page && atlas.page !== page)) break;
+          page ||= atlas.page;
+          const target = item * 16;
+          spriteScratch[target] = value.x;
+          spriteScratch[target + 1] = value.y;
+          spriteScratch[target + 2] = value.width;
+          spriteScratch[target + 3] = value.height;
+          spriteScratch[target + 4] = (atlas.x + value.u0 * atlas.width) / atlas.page.size;
+          spriteScratch[target + 5] = (atlas.y + value.v0 * atlas.height) / atlas.page.size;
+          spriteScratch[target + 6] = (atlas.x + value.u1 * atlas.width) / atlas.page.size;
+          spriteScratch[target + 7] = (atlas.y + value.v1 * atlas.height) / atlas.page.size;
+          spriteScratch[target + 8] = 1;
+          spriteScratch[target + 9] = 1;
+          spriteScratch[target + 10] = 1;
+          spriteScratch[target + 11] = value.alpha;
+          spriteScratch[target + 12] = Math.sin(value.radians);
+          spriteScratch[target + 13] = Math.cos(value.radians);
+          spriteScratch[target + 14] = 0;
+          spriteScratch[target + 15] = 0;
+          batchCount += 1;
+        }
+        if (gpuBatcher === null) {
+          for (let item = 0; item < runCount; item += 1) drawSprite(indexAt(offset + item));
+          offset += runCount;
+          continue;
+        }
+        if (batchCount === 0) {
+          // An ineligible first resource (oversize or a full bounded atlas)
+          // cannot start a GPU batch. Replay the rest of this adjacent run on
+          // Canvas so a long fallback run is scanned only once.
+          for (let item = 0; item < runCount; item += 1) drawSprite(indexAt(offset + item));
+          offset += runCount;
+          continue;
+        }
+        if (batchCount < RECT_BATCH_MIN) {
+          for (let item = 0; item < batchCount; item += 1) drawSprite(indexAt(offset + item));
+          offset += batchCount;
+          continue;
+        }
+        try {
+          batcher.drawSprites(spriteScratch, batchCount, page);
+          performanceWorkload.instances += batchCount;
+          performanceWorkload.batches += 1;
+          performanceWorkload.drawCalls += 1;
+          performanceWorkload.sprites += batchCount;
+          performanceWorkload.uploadedBytes += batchCount * 16 * Float32Array.BYTES_PER_ELEMENT;
+          performanceBackend = "Canvas2D + WebGL2";
+        } catch (error) {
+          document.body.dataset.gpuError = String(error);
+          gpuBatcher = null;
+          for (let item = 0; item < batchCount; item += 1) drawSprite(indexAt(offset + item));
+        }
+        offset += batchCount;
+      }
     };
     const drawText = index => {
       performanceWorkload.text += 1;
@@ -1233,7 +1672,20 @@
         const kind = Math.floor(encoded / 16384);
         const index = encoded % 16384;
         if (kind === 1 && index < lineCount) drawLine(index);
-        else if (kind === 2 && index < spriteCount) drawSprite(index);
+        else if (kind === 2 && index < spriteCount) {
+          let runCount = 1;
+          while (order + runCount < orderCount) {
+            const next = i32[18464 + order + runCount];
+            if (Math.floor(next / 16384) !== 2 || next % 16384 >= spriteCount) break;
+            runCount += 1;
+          }
+          if (runCount < RECT_BATCH_MIN) {
+            for (let item = 0; item < runCount; item += 1) {
+              drawSprite(i32[18464 + order + item] % 16384);
+            }
+          } else drawSpriteRun(order, runCount, true);
+          order += runCount - 1;
+        }
         else if (kind === 3 && index < textCount) drawText(index);
         else if (kind === 4 && index < rectCount) {
           let runCount = 1;
@@ -1249,7 +1701,7 @@
     } else {
       for (let index = 0; index < lineCount; index += 1) drawLine(index);
       drawRectRun(0, rectCount, false);
-      for (let index = 0; index < spriteCount; index += 1) drawSprite(index);
+      drawSpriteRun(0, spriteCount, false);
       for (let index = 0; index < textCount; index += 1) drawText(index);
     }
   }
@@ -1424,11 +1876,19 @@
     performanceWorkload.instances = 0;
     performanceWorkload.batches = 0;
     performanceWorkload.drawCalls = 0;
+    performanceWorkload.composites = 0;
+    performanceWorkload.renderSubmissions = 0;
     performanceWorkload.uploadedBytes = 0;
-    performanceBackend = rectBatcher ? "Canvas2D + WebGL2" : "Canvas2D";
+    performanceBackend = gpuBatcher ? "Canvas2D + WebGL2" : "Canvas2D";
     const replayStart = performance.now();
     executeCommands();
     const browserReplayMs = performance.now() - replayStart;
+    const atlasMetrics = gpuBatcher?.metrics?.();
+    performanceWorkload.atlasPages = atlasMetrics?.pages ?? -1;
+    performanceWorkload.atlasLiveEntries = atlasMetrics?.liveEntries ?? -1;
+    performanceWorkload.atlasAllocatedBytes = atlasMetrics?.allocatedBytes ?? -1;
+    performanceWorkload.atlasUploadCount = atlasMetrics?.uploadCount ?? -1;
+    performanceWorkload.atlasUploadBytes = atlasMetrics?.uploadBytes ?? -1;
     const renderMs = wasmRenderMs + browserReplayMs;
     const frameWorkMs = tickMs + renderMs;
     const renderPrepMs = -1;
@@ -1439,12 +1899,15 @@
     if (hud) {
       recordPerformanceWorst(timestamp, tickMs, renderMs, wasmRenderMs, browserReplayMs, frameWorkMs);
     }
+    performanceWorkload.renderSubmissions = performanceWorkload.drawCalls + performanceWorkload.composites;
     const underBudget = frameWorkMs <= 16.67;
     if (hud) {
       const uploadText = performanceWorkload.uploadedBytes > 0 ? ` · uploaded ${performanceWorkload.uploadedBytes} B` : "";
       const instanceText = performanceBackend.includes("WebGL2")
         ? ` · instances ${performanceWorkload.instances} · batches ${performanceWorkload.batches}` : "";
-      hud.textContent = `${performanceBackend} · frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)}) · guest render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nhost replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)}) · ${underBudget ? "UNDER 16.67 ms" : "OVER 16.67 ms"}\ncommands ${performanceWorkload.commands} · lines ${performanceWorkload.lines} · rects ${performanceWorkload.rectangles} · sprites ${performanceWorkload.sprites} · text ${performanceWorkload.text}\ndraws ${performanceWorkload.drawCalls}${instanceText}${uploadText}`;
+      const atlasText = performanceWorkload.atlasPages >= 0
+        ? ` · atlas ${performanceWorkload.atlasPages} pages/${performanceWorkload.atlasLiveEntries} live · ${performanceWorkload.atlasAllocatedBytes} B · uploads total ${performanceWorkload.atlasUploadCount}` : "";
+      hud.textContent = `${performanceBackend} · frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)}) · guest render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nhost replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)}) · ${underBudget ? "UNDER 16.67 ms" : "OVER 16.67 ms"}\ncommands ${performanceWorkload.commands} · lines ${performanceWorkload.lines} · rects ${performanceWorkload.rectangles} · sprites ${performanceWorkload.sprites} · text ${performanceWorkload.text}\ndraws ${performanceWorkload.drawCalls} · composites ${performanceWorkload.composites} · submissions ${performanceWorkload.renderSubmissions}${instanceText}${uploadText}${atlasText}`;
     }
     document.body.dataset.frames = String(frames);
     document.body.dataset.tickMs = tickMs.toFixed(3);
@@ -1466,7 +1929,14 @@
     document.body.dataset.instances = performanceBackend.includes("WebGL2") ? String(performanceWorkload.instances) : "-1";
     document.body.dataset.batches = performanceBackend.includes("WebGL2") ? String(performanceWorkload.batches) : "-1";
     document.body.dataset.drawCalls = String(performanceWorkload.drawCalls);
+    document.body.dataset.composites = String(performanceWorkload.composites);
+    document.body.dataset.renderSubmissions = String(performanceWorkload.renderSubmissions);
     document.body.dataset.uploadedBytes = String(performanceWorkload.uploadedBytes);
+    document.body.dataset.atlasPages = String(performanceWorkload.atlasPages);
+    document.body.dataset.atlasLiveEntries = String(performanceWorkload.atlasLiveEntries);
+    document.body.dataset.atlasAllocatedBytes = String(performanceWorkload.atlasAllocatedBytes);
+    document.body.dataset.atlasUploadCount = String(performanceWorkload.atlasUploadCount);
+    document.body.dataset.atlasUploadBytes = String(performanceWorkload.atlasUploadBytes);
     document.body.dataset.worstTickMs = worstTick.toFixed(3);
     document.body.dataset.worstRenderMs = worstRender.toFixed(3);
     document.body.dataset.worstWasmRenderMs = worstWasmRender.toFixed(3);
@@ -1544,7 +2014,7 @@
       finishHostFrame();
       applyWindowRequest();
       await Promise.all([
-        ...Array.from(sprites.values(), image => image.decode().catch(() => undefined)),
+        ...Array.from(sprites.values(), resource => resource.readyPromise),
         ...fontLoads.values()
       ]);
       await document.fonts.ready;

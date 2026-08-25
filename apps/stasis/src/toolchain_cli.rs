@@ -6733,7 +6733,7 @@ mod tests {
     fn sprite_asset_tasks_survive_audio_feature_stripping() {
         let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", false);
         assert!(runtime.contains("const assetTasks = new Map()"));
-        assert!(runtime.contains("const requestSprite = pathId =>"));
+        assert!(runtime.contains("const requestSprite = (pathId, width, height) =>"));
         assert!(runtime.contains("const releaseSprite = handle =>"));
         assert!(runtime.contains("stasis_jit_asset_request_sprite"));
         assert!(runtime.contains("stasis_jit_asset_task_poll"));
