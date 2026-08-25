@@ -1358,9 +1358,10 @@ def main() -> int:
     release_activity = read("mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java")
     release_cache = read("mobile/shells/android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java")
     release_bridge = read("mobile/shells/android/app/src/main/cpp/stasis_android_assets.c")
-    assert "System.loadLibrary(\"SDL3\")" in release_activity
-    assert "System.loadLibrary(\"SDL3_image\")" in release_activity
+    assert "System.loadLibrary(\"SDL3\")" not in release_activity
+    assert "System.loadLibrary(\"SDL3_image\")" not in release_activity
     assert "System.loadLibrary(\"main\")" in release_activity
+    assert 'return new String[] {"main"}' in release_activity
     assert "https://api.openai.com" not in release_activity
     assert "SharedPreferences" not in release_activity
     assert "event.getPointerCount() >= 3" in release_activity

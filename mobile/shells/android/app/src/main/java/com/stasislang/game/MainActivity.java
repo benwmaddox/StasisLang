@@ -75,8 +75,6 @@ public final class MainActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle state) {
-        System.loadLibrary("SDL3");
-        System.loadLibrary("SDL3_image");
         System.loadLibrary("main");
         String seamTestId = getIntent().getStringExtra("stasis.seam_test_id");
         if (BuildConfig.STASIS_SEAM_TESTS && seamTestId != null) {
@@ -377,7 +375,7 @@ public final class MainActivity extends SDLActivity {
 
     @Override
     protected String[] getLibraries() {
-        return new String[] {"SDL3", "SDL3_image", "main"};
+        return new String[] {"main"};
     }
 
     private static final class RollingMetric {

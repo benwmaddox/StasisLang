@@ -30,12 +30,26 @@ option(
 )
 option(STASIS_BUILD_RUNNER "Build the stasis DLL runner executable" ${STASIS_DESKTOP_TARGET_DEFAULT})
 option(STASIS_BUILD_SYS "Build the sys runtime (file/argv/exec)" ${STASIS_DESKTOP_TARGET_DEFAULT})
+option(STASIS_BUILD_MONOLITH "Build one direct-bound production AOT executable" OFF)
+set(STASIS_MONOLITH_AOT_DIR "" CACHE PATH "Generated direct-bound AOT bundle")
+set(STASIS_MONOLITH_MAIN_SOURCE "" CACHE FILEPATH "Generated production host source")
+set(STASIS_MONOLITH_OUTPUT_DIR "" CACHE PATH "Production executable output directory")
+set(STASIS_MONOLITH_OUTPUT_NAME "stasis_game" CACHE STRING "Production executable file name")
 option(
     STASIS_BUILD_MOBILE_RUNTIME
     "Build the shared SDL-only mobile runtime core"
     ${STASIS_MOBILE_PLATFORM}
 )
 option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" OFF)
+
+if(STASIS_BUILD_MONOLITH)
+    set(STASIS_GRAPHICS_BUNDLE_SDL ON CACHE BOOL "" FORCE)
+    set(STASIS_GRAPHICS_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(STASIS_GRAPHICS_BUILD_STATIC OFF CACHE BOOL "" FORCE)
+    set(STASIS_BUILD_RUNNER OFF CACHE BOOL "" FORCE)
+    set(STASIS_BUILD_SYS OFF CACHE BOOL "" FORCE)
+    set(STASIS_BUILD_MOBILE_RUNTIME ON CACHE BOOL "" FORCE)
+endif()
 
 # Android and other restricted platforms do not support the OpenGL 2.1 + GLEW path.
 option(
@@ -56,6 +70,18 @@ if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_
         set(CMAKE_POSITION_INDEPENDENT_CODE ON)
         set(SDL_SHARED OFF CACHE BOOL "" FORCE)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
+        set(SDL_GPU OFF CACHE BOOL "" FORCE)
+        set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
+        set(SDL_JOYSTICK OFF CACHE BOOL "" FORCE)
+        set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
+        set(SDL_HIDAPI OFF CACHE BOOL "" FORCE)
+        set(SDL_POWER OFF CACHE BOOL "" FORCE)
+        set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
+        set(SDL_DIALOG OFF CACHE BOOL "" FORCE)
+        set(SDL_TRAY OFF CACHE BOOL "" FORCE)
+        set(SDL_VULKAN OFF CACHE BOOL "" FORCE)
+        set(SDL_RENDER_VULKAN OFF CACHE BOOL "" FORCE)
+        set(SDL_RENDER_GPU OFF CACHE BOOL "" FORCE)
         set(SDL_TEST OFF CACHE BOOL "" FORCE)
         set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
         set(SDL_TESTS OFF CACHE BOOL "" FORCE)
@@ -75,10 +101,24 @@ if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_
         set(SDLIMAGE_VENDORED OFF CACHE BOOL "" FORCE)
         set(SDLIMAGE_BACKEND_STB ON CACHE BOOL "" FORCE)
         set(SDLIMAGE_BACKEND_IMAGEIO OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_ANI OFF CACHE BOOL "" FORCE)
         set(SDLIMAGE_AVIF OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_BMP OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_GIF OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_JPG OFF CACHE BOOL "" FORCE)
         set(SDLIMAGE_JXL OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_LBM OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_PCX OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_PNG ON CACHE BOOL "" FORCE)
+        set(SDLIMAGE_PNM OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_QOI OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_SVG OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_TGA OFF CACHE BOOL "" FORCE)
         set(SDLIMAGE_TIF OFF CACHE BOOL "" FORCE)
         set(SDLIMAGE_WEBP OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_XCF OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_XPM OFF CACHE BOOL "" FORCE)
+        set(SDLIMAGE_XV OFF CACHE BOOL "" FORCE)
         set(SDLIMAGE_PNG_LIBPNG OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
             stasis_sdl3_image
@@ -184,6 +224,8 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_aot_runtime.c
     )
     configure_stasis_target(stasis_mobile_runtime ON TRUE)
+    set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD 11)
+    set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD_REQUIRED ON)
     if(MSVC)
         target_compile_options(stasis_mobile_runtime PRIVATE /experimental:c11atomics)
     endif()
@@ -197,6 +239,45 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
               stasis_performance_metrics.h
         DESTINATION include
+    )
+endif()
+
+if(STASIS_BUILD_MONOLITH)
+    if(NOT WIN32)
+        message(FATAL_ERROR "The desktop production monolith currently targets Windows")
+    endif()
+    if(NOT STASIS_MONOLITH_AOT_DIR OR NOT EXISTS "${STASIS_MONOLITH_AOT_DIR}/published_aot_objects.cmake")
+        message(FATAL_ERROR "STASIS_MONOLITH_AOT_DIR must contain published_aot_objects.cmake")
+    endif()
+    if(NOT STASIS_MONOLITH_MAIN_SOURCE OR NOT EXISTS "${STASIS_MONOLITH_MAIN_SOURCE}")
+        message(FATAL_ERROR "STASIS_MONOLITH_MAIN_SOURCE must name the generated production host")
+    endif()
+    include("${STASIS_MONOLITH_AOT_DIR}/published_aot_objects.cmake")
+    add_executable(
+        stasis_monolith
+        "${STASIS_MONOLITH_MAIN_SOURCE}"
+        "${STASIS_MONOLITH_AOT_DIR}/published_aot_bindings.c"
+        ${STASIS_PUBLISHED_AOT_OBJECTS}
+        stasis_runner.manifest
+    )
+    target_compile_definitions(stasis_monolith PRIVATE STASIS_WINDOWS_MONOLITH=1)
+    target_include_directories(
+        stasis_monolith
+        PRIVATE "${STASIS_MONOLITH_AOT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(
+        stasis_monolith
+        PRIVATE
+            stasis_mobile_runtime
+            SDL3::SDL3-static
+            SDL3_image::SDL3_image-static
+    )
+    set_property(TARGET stasis_monolith PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    target_compile_options(stasis_monolith PRIVATE /O1 /Gy /Gw)
+    target_link_options(stasis_monolith PRIVATE /OPT:REF /OPT:ICF)
+    set_target_properties(stasis_monolith PROPERTIES
+        OUTPUT_NAME "${STASIS_MONOLITH_OUTPUT_NAME}"
+        RUNTIME_OUTPUT_DIRECTORY "${STASIS_MONOLITH_OUTPUT_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${STASIS_MONOLITH_OUTPUT_DIR}"
     )
 endif()
 

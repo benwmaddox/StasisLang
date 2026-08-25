@@ -164,6 +164,7 @@ int main(void) {
     int32_t overlapping_i32[5] = {1, 2, 3, 4, 5};
     float overlapping_f32[5] = {1, 2, 3, 4, 5};
     uint8_t external_u8[4] = {1, 2, 3, 4};
+    uint8_t aot_text_out[16] = {0};
     uint8_t dynamic_path[] = "sprite.bmp";
     uint8_t ascii_value[] = "GG1-test";
     uint8_t ascii_out[32] = {0};
@@ -212,6 +213,14 @@ int main(void) {
     stasis_jit_register_global_u8_array(54, 0, raw_out, sizeof(raw_out));
     stasis_jit_sys_memcpy_u8(54, 0, 22, 0, 4);
     CHECK(memcmp(raw_out, external_u8, sizeof(raw_out)) == 0);
+
+    stasis_jit_register_global_u8_array(26, 0, aot_text_out, sizeof(aot_text_out));
+    stasis_jit_upsert_string_literal(27, "AOT text");
+    CHECK(stasis_jit_collection_i32_load(27, 1) == 8);
+    CHECK(stasis_jit_collection_i32_load(27, 2) == 8);
+    CHECK(stasis_jit_collection_i32_load(27, 3) == 8);
+    stasis_jit_sys_memcpy_u8(26, 0, 27, 0, 8);
+    CHECK(memcmp(aot_text_out, "AOT text", 8) == 0);
 
     stasis_jit_register_global_i32_array(24, 0, overlapping_i32, 5);
     stasis_jit_upsert_string_literal(24, "i32-array-must-win");

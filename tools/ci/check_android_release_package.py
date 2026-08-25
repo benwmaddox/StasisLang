@@ -14,7 +14,7 @@ from pathlib import Path
 MAX_PACKAGE_BYTES = 150 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_MANIFEST_ASSETS = 4096
-REQUIRED_NATIVE_LIBRARIES = {"libSDL3.so", "libSDL3_image.so", "libmain.so"}
+REQUIRED_NATIVE_LIBRARIES = {"libmain.so"}
 FORBIDDEN_SUFFIXES = {
     "libstasis_android_bridge.so",
     "libstasis_codex_android.so",
@@ -120,6 +120,15 @@ def validate(
         ]
         if wrong_abis:
             raise ValueError(f"release package contains unsupported ABIs: {wrong_abis}")
+        unexpected_libraries = sorted(
+            entry
+            for entry in native_libraries
+            if entry != f"{native_prefix}{abi}/libmain.so"
+        )
+        if unexpected_libraries:
+            raise ValueError(
+                f"release package contains non-monolithic native libraries: {unexpected_libraries}"
+            )
         verified_asset_count = _verify_asset_hashes(archive, entries, prefix)
     return {
         "package": str(package.resolve()),

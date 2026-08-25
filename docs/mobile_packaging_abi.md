@@ -140,7 +140,11 @@ Rules:
 
 ## Runtime Contract
 
-Mobile shells link one shared SDL-only Stasis runtime core.
+Mobile shells link one SDL-only Stasis runtime core. Android production folds
+that core, SDL3, SDL3_image's PNG-only decoder, and the generated AOT objects
+into one `arm64-v8a/libmain.so`. Release delivery is an AAB; generated release
+APKs are useful for direct size and device acceptance checks. The x86-64 target
+remains available only with `--development-build` for emulator workflows.
 
 Rules:
 

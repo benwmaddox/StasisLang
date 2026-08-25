@@ -23,19 +23,19 @@ PINNED = {
         "SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED",
     ),
     "mobile/shells/android/app/src/main/cpp/CMakeLists.txt": (
-        "SDL3::SDL3",
-        "SDL3_image::SDL3_image",
+        "SDL3::SDL3-static",
+        "SDL3_image::SDL3_image-static",
     ),
     "mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java": (
-        'System.loadLibrary("SDL3")',
-        'System.loadLibrary("SDL3_image")',
+        'System.loadLibrary("main")',
+        'return new String[] {"main"}',
     ),
     "mobile/shells/ios/StasisMobile/main.m": (
         "#include <SDL3/SDL_main.h>",
     ),
     "tools/ci/check_android_release_package.py": (
-        '"libSDL3.so"',
-        '"libSDL3_image.so"',
+        'REQUIRED_NATIVE_LIBRARIES = {"libmain.so"}',
+        "non-monolithic native libraries",
     ),
     ".github/workflows/pr-ci.yml": (
         "STASIS_GRAPHICS_BUNDLE_SDL=ON",

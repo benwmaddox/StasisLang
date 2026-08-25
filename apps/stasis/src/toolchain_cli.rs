@@ -3777,11 +3777,13 @@ fn package_workspace(
             &workspace.root.join(MANIFEST_NAME),
             &payload_root.join(MANIFEST_NAME),
         )?;
-        if let Some(runtime) = installed_runtime_library() {
-            copy_file(
-                &runtime,
-                &payload_root.join(runtime.file_name().unwrap_or_default()),
-            )?;
+        if !cfg!(windows) {
+            if let Some(runtime) = installed_runtime_library() {
+                copy_file(
+                    &runtime,
+                    &payload_root.join(runtime.file_name().unwrap_or_default()),
+                )?;
+            }
         }
         write_json_file(&payload_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
         Ok(())
@@ -8117,6 +8119,10 @@ mod tests {
         assert!(android_cmake.contains("STASIS_PUBLISHED_AOT_OBJECTS"));
         assert!(!android_cmake.contains("file(GLOB STASIS_AOT_OBJECTS"));
         assert!(android_cmake.contains("libmain.map"));
+        assert!(android_cmake.contains("SDL3::SDL3-static"));
+        assert!(android_cmake.contains("SDL3_image::SDL3_image-static"));
+        assert!(android_cmake.contains("-Wl,--gc-sections"));
+        assert!(android_cmake.contains("-flto"));
         assert!(!android_cmake.contains("stasis_dynload"));
         let android_gradle = fs::read_to_string(android.join("android/app/build.gradle"))
             .expect("read Android Gradle");
@@ -8162,6 +8168,8 @@ mod tests {
             android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
         )
         .expect("read Android activity");
+        assert_eq!(android_activity.matches("System.loadLibrary").count(), 1);
+        assert!(android_activity.contains("System.loadLibrary(\"main\")"));
         assert!(android_activity.contains("stasis.seam_test_id"));
         assert!(android_activity.contains("BuildConfig.STASIS_SEAM_TESTS"));
         assert!(android_activity.contains("nativeSetSeamTestId"));

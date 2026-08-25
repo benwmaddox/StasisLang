@@ -13,8 +13,6 @@ HEADER = """ELF Header:
   Machine:                           AArch64
 """
 DYNAMIC = """Dynamic section:
-  (NEEDED) Shared library: [libSDL3.so]
-  (NEEDED) Shared library: [libSDL3_image.so]
   (NEEDED) Shared library: [liblog.so]
   (NEEDED) Shared library: [libandroid.so]
   (NEEDED) Shared library: [libc.so]

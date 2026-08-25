@@ -27,7 +27,7 @@ function main(): i32 {
 
     png_sprite = gfx_load_sprite("assets/smoke.png", 64, 64);
     svg_sprite = gfx_load_sprite("assets/smoke.svg", 64, 64);
-    smoke_font = load_font("assets/smoke.ttf", 24);
+    smoke_font = load_font("/assets/smoke.ttf", 24);
     if (png_sprite == 0) {
         return 21;
     }
