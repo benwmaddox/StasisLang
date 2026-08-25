@@ -2,6 +2,9 @@
 
 Concise guidance for AI-assisted edits to Stasis game code, informed by Handmade Hero-style explicit runtime ownership, Age of Empires II-style deterministic simulation, and the current Stasis hot-reload workflow.
 
+For the project-neutral input, tick, state, and render model behind these concise
+recommendations, see [Stasis project architecture](project_architecture.md).
+
 1. Keep host assumptions out of Stasis game edits. Stasis code should own simulation state, game rules, and render commands; the host supplies input, timing, storage, and a surface.
 2. Treat `tick()` as the deterministic simulation step. It should orchestrate systems in a stable order, not hide gameplay in render or host callbacks.
 3. Keep `render()` as a projection of current state into render commands. Do not mutate gameplay state from render except temporary render buffers.

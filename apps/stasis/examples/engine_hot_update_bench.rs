@@ -27,6 +27,7 @@ struct SampleMetrics {
     compile_ms: f64,
     package_ms: f64,
     hook_ms: f64,
+    publication_ms: f64,
     tick_render_ms: f64,
 }
 
@@ -40,6 +41,8 @@ struct AggregatedMetrics {
     package_ms_p95: f64,
     hook_ms_p50: f64,
     hook_ms_p95: f64,
+    publication_ms_p50: f64,
+    publication_ms_p95: f64,
     tick_render_ms_p50: f64,
     tick_render_ms_p95: f64,
 }
@@ -124,6 +127,7 @@ fn fixture_source(version: i32) -> String {
         "global State {{ tick_version: i32; render_version: i32; }}\n\
          function tick(): i32 {{ State.tick_version = {version}; return 0; }}\n\
          function render(): i32 {{ State.render_version = {version}; return 0; }}\n\
+         function main(): i32 {{ return 0; }}\n\
          function on_code_swap(): void {{ return; }}\n"
     )
 }
@@ -208,7 +212,7 @@ fn percentile_ms(samples: &[f64], percentile: usize) -> f64 {
     }
     let mut sorted = samples.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
-    let rank = ((percentile as f64 / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+    let rank = (percentile * sorted.len()).div_ceil(100).saturating_sub(1);
     sorted[rank.min(sorted.len() - 1)]
 }
 
@@ -217,6 +221,7 @@ fn aggregate(samples: &[SampleMetrics]) -> AggregatedMetrics {
     let compile: Vec<f64> = samples.iter().map(|s| s.compile_ms).collect();
     let package: Vec<f64> = samples.iter().map(|s| s.package_ms).collect();
     let hook: Vec<f64> = samples.iter().map(|s| s.hook_ms).collect();
+    let publication: Vec<f64> = samples.iter().map(|s| s.publication_ms).collect();
     let tick_render: Vec<f64> = samples.iter().map(|s| s.tick_render_ms).collect();
 
     AggregatedMetrics {
@@ -228,6 +233,8 @@ fn aggregate(samples: &[SampleMetrics]) -> AggregatedMetrics {
         package_ms_p95: percentile_ms(&package, 95),
         hook_ms_p50: percentile_ms(&hook, 50),
         hook_ms_p95: percentile_ms(&hook, 95),
+        publication_ms_p50: percentile_ms(&publication, 50),
+        publication_ms_p95: percentile_ms(&publication, 95),
         tick_render_ms_p50: percentile_ms(&tick_render, 50),
         tick_render_ms_p95: percentile_ms(&tick_render, 95),
     }
@@ -238,9 +245,7 @@ fn run_one_warm_update_sample(
     root_path_str: &str,
     watcher: &mut WatchService,
     jit: &mut JitProcess,
-    tick_code_ptr: &mut u64,
-    render_code_ptr: &mut u64,
-    on_code_swap_code_ptr: Option<u64>,
+    publication_revision: u64,
     tick_sleep: Duration,
     expected_version: i32,
     timeout: Duration,
@@ -283,22 +288,25 @@ fn run_one_warm_update_sample(
             let package_ms = t_package.elapsed().as_secs_f64() * 1000.0;
 
             let t_hook = Instant::now();
-            if let Some(hook) = on_code_swap_code_ptr {
+            if let Some(hook) = package.on_code_swap_code_ptr {
                 stasis_dynload::invoke_noarg_void(hook as usize)
                     .map_err(|error| format!("on_code_swap hook failed: {error}"))?;
             }
             let hook_ms = t_hook.elapsed().as_secs_f64() * 1000.0;
 
-            // Commit pointer swap.
-            *tick_code_ptr = package.tick_code_ptr;
-            *render_code_ptr = package.render_code_ptr;
+            let targets = package.host_entry_targets(publication_revision)?;
+            let t_publication = Instant::now();
+            stasis_dynload::publish_jit_host_entry_targets(targets)?;
+            let publication_ms = t_publication.elapsed().as_secs_f64() * 1000.0;
 
             // First tick/render with updated code.
             let t_tick_render = Instant::now();
-            let tick_rc = stasis_dynload::invoke_noarg_i32(*tick_code_ptr as usize)
-                .map_err(|error| format!("tick invocation failed: {error}"))?;
-            let render_rc = stasis_dynload::invoke_noarg_i32(*render_code_ptr as usize)
-                .map_err(|error| format!("render invocation failed: {error}"))?;
+            let tick_rc =
+                stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_tick_trampoline_ptr())
+                    .map_err(|error| format!("tick invocation failed: {error}"))?;
+            let render_rc =
+                stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr())
+                    .map_err(|error| format!("render invocation failed: {error}"))?;
             if tick_rc != 0 || render_rc != 0 {
                 return Err(format!(
                     "expected tick/render to return 0 (got tick_rc={tick_rc} render_rc={render_rc})"
@@ -319,15 +327,18 @@ fn run_one_warm_update_sample(
                 compile_ms,
                 package_ms,
                 hook_ms,
+                publication_ms,
                 tick_render_ms,
             });
         }
 
         // Simulate steady-state tick/render loop work while waiting for the watcher to observe the edit.
-        let tick_rc = stasis_dynload::invoke_noarg_i32(*tick_code_ptr as usize)
-            .map_err(|error| format!("tick invocation failed: {error}"))?;
-        let render_rc = stasis_dynload::invoke_noarg_i32(*render_code_ptr as usize)
-            .map_err(|error| format!("render invocation failed: {error}"))?;
+        let tick_rc =
+            stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_tick_trampoline_ptr())
+                .map_err(|error| format!("tick invocation failed: {error}"))?;
+        let render_rc =
+            stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr())
+                .map_err(|error| format!("render invocation failed: {error}"))?;
         if tick_rc != 0 || render_rc != 0 {
             return Err(format!(
                 "expected tick/render to return 0 during steady-state (got tick_rc={tick_rc} render_rc={render_rc})"
@@ -380,6 +391,7 @@ fn main() -> Result<(), String> {
     );
 
     let mut jit = JitProcess::new();
+    jit.set_project_root(temp_root.to_string_lossy())?;
     let root_path_str = source_path.to_string_lossy().to_string();
     let root_source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
@@ -389,16 +401,16 @@ fn main() -> Result<(), String> {
     let package = jit
         .build_engine_package(&EngineEntrypoints::runtime_default())
         .map_err(|error| format!("failed to build engine package: {error}"))?;
-    let mut tick_code_ptr = package.tick_code_ptr;
-    let mut render_code_ptr = package.render_code_ptr;
-    let on_code_swap_code_ptr = package.on_code_swap_code_ptr;
+    stasis_dynload::begin_jit_host_entry_session(package.host_entry_targets(1)?)?;
 
     // Warmup: execute a few frames so the steady-state tick/render loop is representative.
     for _ in 0..config.warmup_ticks {
-        let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)
-            .map_err(|error| format!("warmup tick failed: {error}"))?;
-        let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)
-            .map_err(|error| format!("warmup render failed: {error}"))?;
+        let tick_rc =
+            stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_tick_trampoline_ptr())
+                .map_err(|error| format!("warmup tick failed: {error}"))?;
+        let render_rc =
+            stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr())
+                .map_err(|error| format!("warmup render failed: {error}"))?;
         if tick_rc != 0 || render_rc != 0 {
             return Err(format!(
                 "expected warmup tick/render to return 0 (got tick_rc={tick_rc} render_rc={render_rc})"
@@ -417,9 +429,7 @@ fn main() -> Result<(), String> {
             &root_path_str,
             &mut watcher,
             &mut jit,
-            &mut tick_code_ptr,
-            &mut render_code_ptr,
-            on_code_swap_code_ptr,
+            (sample_index + 2) as u64,
             Duration::from_micros(config.tick_sleep_us),
             expected_version,
             Duration::from_millis(config.timeout_ms),
@@ -430,7 +440,7 @@ fn main() -> Result<(), String> {
 
     let aggregated = aggregate(&samples);
     println!(
-        "result warm_update_total_ms_p50={:.3} warm_update_total_ms_p95={:.3} compile_ms_p50={:.3} compile_ms_p95={:.3} package_ms_p50={:.3} package_ms_p95={:.3} hook_ms_p50={:.3} hook_ms_p95={:.3} tick_render_ms_p50={:.3} tick_render_ms_p95={:.3}",
+        "result warm_update_total_ms_p50={:.3} warm_update_total_ms_p95={:.3} compile_ms_p50={:.3} compile_ms_p95={:.3} package_ms_p50={:.3} package_ms_p95={:.3} hook_ms_p50={:.3} hook_ms_p95={:.3} publication_ms_p50={:.3} publication_ms_p95={:.3} tick_render_ms_p50={:.3} tick_render_ms_p95={:.3}",
         aggregated.warm_update_total_ms_p50,
         aggregated.warm_update_total_ms_p95,
         aggregated.compile_ms_p50,
@@ -439,6 +449,8 @@ fn main() -> Result<(), String> {
         aggregated.package_ms_p95,
         aggregated.hook_ms_p50,
         aggregated.hook_ms_p95,
+        aggregated.publication_ms_p50,
+        aggregated.publication_ms_p95,
         aggregated.tick_render_ms_p50,
         aggregated.tick_render_ms_p95,
     );

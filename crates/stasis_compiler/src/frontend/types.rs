@@ -6,6 +6,9 @@ pub const TYPE_ID_I32: TypeId = 1;
 pub const TYPE_ID_F32: TypeId = 2;
 pub const TYPE_ID_BOOL: TypeId = 3;
 pub const TYPE_ID_F64: TypeId = 4;
+pub const TYPE_ID_U8: TypeId = 5;
+pub const TYPE_ID_U16: TypeId = 6;
+pub const TYPE_ID_U32: TypeId = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuiltinType {
@@ -14,6 +17,9 @@ enum BuiltinType {
     F32,
     Bool,
     F64,
+    U8,
+    U16,
+    U32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -74,6 +80,9 @@ impl TypeTable {
         table.intern_builtin("bool", BuiltinType::Bool, 1);
         // Keep existing builtin ids stable; append new builtins at the end.
         table.intern_builtin("f64", BuiltinType::F64, 8);
+        table.intern_builtin("u8", BuiltinType::U8, 1);
+        table.intern_builtin("u16", BuiltinType::U16, 2);
+        table.intern_builtin("u32", BuiltinType::U32, 4);
         table
     }
 
@@ -322,6 +331,15 @@ impl TypeTable {
         if type_name == "f64" {
             return Some(TYPE_ID_F64);
         }
+        if type_name == "u8" {
+            return Some(TYPE_ID_U8);
+        }
+        if type_name == "u16" {
+            return Some(TYPE_ID_U16);
+        }
+        if type_name == "u32" {
+            return Some(TYPE_ID_U32);
+        }
         if type_name == "string" {
             return self.by_key.get(&TypeKey::Utf8View).copied();
         }
@@ -412,9 +430,66 @@ impl TypeTable {
             .position(|type_info| type_info.category == category)
             .and_then(|index| TypeId::try_from(index).ok())
     }
+
+    pub fn unsigned_integer_bits(&self, type_id: TypeId) -> Option<u8> {
+        match self.type_key(type_id)? {
+            TypeKey::Builtin(BuiltinType::U8) => Some(8),
+            TypeKey::Builtin(BuiltinType::U16) => Some(16),
+            TypeKey::Builtin(BuiltinType::U32) => Some(32),
+            _ => None,
+        }
+    }
+
+    pub fn is_integer(&self, type_id: TypeId) -> bool {
+        matches!(
+            self.type_key(type_id),
+            Some(TypeKey::Builtin(
+                BuiltinType::I32 | BuiltinType::U8 | BuiltinType::U16 | BuiltinType::U32
+            ))
+        )
+    }
+
+    pub(crate) fn is_i32_abi_compatible(&self, type_id: TypeId) -> bool {
+        if type_id == TYPE_ID_I32
+            || type_id == TYPE_ID_BOOL
+            || self.unsigned_integer_bits(type_id).is_some()
+        {
+            return true;
+        }
+        self.type_info(type_id).is_some_and(|info| {
+            matches!(
+                info.category,
+                TypeCategory::Named
+                    | TypeCategory::ArrayFixed
+                    | TypeCategory::ArrayView
+                    | TypeCategory::AsciiFixed
+                    | TypeCategory::AsciiView
+                    | TypeCategory::Utf8Fixed
+                    | TypeCategory::Utf8View
+            )
+        })
+    }
+
+    pub(crate) fn assignment_types_are_compatible(
+        &self,
+        target_type: TypeId,
+        expression_type: TypeId,
+    ) -> bool {
+        if target_type == expression_type {
+            return true;
+        }
+        if target_type == TYPE_ID_BOOL || expression_type == TYPE_ID_BOOL {
+            return false;
+        }
+        self.is_i32_abi_compatible(target_type) && self.is_i32_abi_compatible(expression_type)
+    }
 }
 
 fn are_i32_scalar_abi_compatible(argument: &TypeKey, parameter: &TypeKey) -> bool {
+    if is_i32_lane_builtin(argument) && is_i32_lane_builtin(parameter) {
+        return true;
+    }
+
     matches!(
         (argument, parameter),
         (
@@ -429,10 +504,20 @@ fn are_i32_scalar_abi_compatible(argument: &TypeKey, parameter: &TypeKey) -> boo
         ) | (
             TypeKey::Builtin(BuiltinType::Bool),
             TypeKey::Builtin(BuiltinType::I32)
-        ) | (TypeKey::Builtin(BuiltinType::I32), TypeKey::Named(_))
-            | (TypeKey::Builtin(BuiltinType::Bool), TypeKey::Named(_))
-            | (TypeKey::Named(_), TypeKey::Builtin(BuiltinType::I32))
-            | (TypeKey::Named(_), TypeKey::Builtin(BuiltinType::Bool))
+        )
+    )
+}
+
+fn is_i32_lane_builtin(key: &TypeKey) -> bool {
+    matches!(
+        key,
+        TypeKey::Builtin(
+            BuiltinType::I32
+                | BuiltinType::Bool
+                | BuiltinType::U8
+                | BuiltinType::U16
+                | BuiltinType::U32
+        )
     )
 }
 
@@ -453,7 +538,7 @@ fn is_byte_array_key(key: &TypeKey, table: &TypeTable) -> bool {
     };
     matches!(
         table.type_key(element),
-        Some(TypeKey::Named(name)) if name == "u8"
+        Some(TypeKey::Builtin(BuiltinType::U8))
     )
 }
 
@@ -572,6 +657,24 @@ mod tests {
     }
 
     #[test]
+    fn narrow_unsigned_builtins_have_true_static_layouts_and_stable_ids() {
+        let table = TypeTable::new();
+        for (name, expected_id, expected_size) in [
+            ("u8", TYPE_ID_U8, 1),
+            ("u16", TYPE_ID_U16, 2),
+            ("u32", TYPE_ID_U32, 4),
+        ] {
+            assert_eq!(table.resolve(name), Some(expected_id));
+            assert_eq!(
+                table
+                    .type_info(expected_id)
+                    .and_then(|info| info.layout.static_size_bytes),
+                Some(expected_size)
+            );
+        }
+    }
+
+    #[test]
     fn string_alias_resolves_to_utf8_types() {
         let mut table = TypeTable::new();
         let string_view = table.resolve_or_intern("string").expect("string");
@@ -667,7 +770,7 @@ mod tests {
         let utf8_view = table.resolve_or_intern("utf8[]").expect("utf8[]");
 
         assert_eq!(table.indexed_element_type_id(i32_view), Some(TYPE_ID_I32));
-        assert_eq!(table.indexed_element_type_id(utf8_view), Some(TYPE_ID_I32));
+        assert_eq!(table.indexed_element_type_id(utf8_view), Some(TYPE_ID_U8));
         assert_eq!(table.fixed_collection_len(i32_view), None);
         assert_eq!(table.fixed_collection_len(i32_fixed), Some(64));
     }

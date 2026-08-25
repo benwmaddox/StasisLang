@@ -1,0 +1,24 @@
+global score: i32;
+global values: i32[4];
+
+function main(): i32 {
+    score = 7;
+    values[0] = 11;
+    values[1] = 22;
+    values[2] = 33;
+    values[3] = 44;
+    return 0;
+}
+
+function tick(): i32 {
+    score += 1;
+    return score + values[0];
+}
+
+function render(): i32 {
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

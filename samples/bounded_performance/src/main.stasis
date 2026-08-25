@@ -1,0 +1,47 @@
+struct Particle {
+    active: u8;
+    score: i32;
+    weight: f64;
+}
+
+global particles: Particle[32];
+global values: i32[5];
+global checksum: i32;
+
+extern function print_i32(value: i32): void;
+
+function expensive_scan(): i32 {
+    let total: i32 = 0;
+    foreach (let value in values) {
+        total += value;
+    }
+    foreach (let particle in particles) {
+        for (let pass: i32 = 0; pass < 16; pass += 1) {
+            if (particle.active != 0) {
+                total += particle.score;
+            }
+        }
+    }
+    return total;
+}
+
+function @tick_budget_us(1) tick(): i32 {
+    checksum = expensive_scan();
+    print_i32(checksum);
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}
+
+function main(): i32 {
+    particles[0].active = 1;
+    particles[0].score = 3;
+    checksum = expensive_scan();
+    return checksum - 48;
+}

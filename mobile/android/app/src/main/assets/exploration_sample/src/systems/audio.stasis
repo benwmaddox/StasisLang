@@ -1,0 +1,23 @@
+global ExplorationAudio {
+    event_serial: i32;
+    cue_kind: i32;
+    cue_ticks_remaining: i32;
+}
+
+function exploration_audio_init(): void {
+    ExplorationAudio.event_serial = 0;
+    ExplorationAudio.cue_kind = 0;
+    ExplorationAudio.cue_ticks_remaining = 0;
+}
+
+function exploration_audio_collect(kind: i32): void {
+    ExplorationAudio.event_serial += 1;
+    ExplorationAudio.cue_kind = kind;
+    ExplorationAudio.cue_ticks_remaining = 6;
+}
+
+function exploration_audio_system(): void {
+    if (ExplorationAudio.cue_ticks_remaining > 0) {
+        ExplorationAudio.cue_ticks_remaining -= 1;
+    }
+}

@@ -18,10 +18,16 @@
 - `cargo build`
 - `cargo test`
 - `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`
+- Codex and automation Cargo commands must run through `python tools/cargo_cache.py run -- cargo ...` so linked worktrees share one repository-owned target and disable Rust incremental artifacts. Human interactive Cargo commands keep their normal target and incremental settings.
+- Inspect cache ownership with `python tools/cargo_cache.py measure`; cleanup is dry-run unless `--apply` is explicit.
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
 - Validation entrypoint:
 - `tools/validate_repo.sh`
+- Android Workshop emulator testing uses the `Stasis_API_35` AVD. From the repository root, run the full headless build/install/acceptance flow with:
+- `powershell -NoProfile -ExecutionPolicy Bypass -File mobile/android/test_emulator.ps1 -Headless`
+- Reuse an already installed Workshop build with `-Headless -SkipBuild`. The `-Headless` option only affects a newly started emulator; when a truly headless run is required, stop an existing GUI AVD with `C:\Android\Sdk\platform-tools\adb.exe -s emulator-5554 emu kill` and wait until it disappears from `adb devices` before starting the headless run.
+- `mobile/android/validate_device.ps1` prefers an emulator for Workshop checks; pass `-Serial emulator-5554` to select it explicitly.
 
 ## Coding Style & Naming Conventions
 - Keep files ASCII unless a file already uses non-ASCII and there is a clear reason.
@@ -42,8 +48,10 @@
 - Prefer deterministic, isolated tests with explicit expected output/state.
 - If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
 - Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
-- Keep each test command bounded to 5 minutes max (300 seconds); split/shard runs when needed, and treat overruns as stability regressions.
+- Keep each test command bounded to 15 minutes max (900 seconds); split/shard runs when needed, and treat overruns as stability regressions.
 - After each edit/test step, check for lingering test processes (for example `target/debug/deps/*.exe`) and clean them up before the next step.
+- Validate user-visible graphical work with reviewable media in addition to automated assertions: use PNG for a representative still state and MP4 when motion, timing, input, animation, or a multi-step interaction matters. Inspect the captured artifact itself; a successful capture command is not proof that the pixels or sequence are correct. These artifacts are especially useful for independent AI review.
+- Every AI-authored work summary must include a `Visual evidence:` line. List the inspected PNG and/or MP4 paths and what each proves, or state `not applicable` for work with no user-visible behavior. If relevant media could not be captured, state that limitation rather than implying visual validation passed.
 - For incremental compilation:
 - Validate file-level invalidation correctness.
 - Validate per-function gating behavior.
@@ -100,7 +108,7 @@
 - Keep diagnostic/instrumented behavior on the same pipeline (extra checks/tracing only), not a second compilation path.
 - Keep commits narrow and slice-scoped: avoid mixing reachability/lowering changes with unrelated backend/runtime work in the same commit.
 - End each slice with a cruft pass on touched files and aggressively remove code paths that no longer conform to the active reachability-first approach.
-- Keep test runs bounded and deterministic: each command must stay within 5 minutes (300 seconds), and lingering test/compiler processes must be checked/cleaned after each step.
+- Keep test runs bounded and deterministic: each command must stay within 15 minutes (900 seconds), and lingering test/compiler processes must be checked/cleaned after each step.
 - Compiler feature-slice completion gate: each slice must include at least one representative sample program that goes end-to-end through the compiler pipeline to Cranelift IR, is built into an executable, is run, and has its behavior verified by test assertions.
 - If a slice cannot yet pass that end-to-end executable verification path, the slice is not complete.
 - After each code change, run a quick simplicity review on the touched code and simplify again if a more direct version is possible.
@@ -115,6 +123,18 @@
 - Branch setup, fetch/fast-forward, and executor launch are owned by the central Ned inbox runner rather than a repo-local wrapper script.
 - If a repo does not yet have a strict validation entrypoint, create or tighten one before relying on automation there. Prefer one deterministic script that runs the strongest real bounded checks already supported by the repo.
 - If the task came from PR review feedback, reply on GitHub when appropriate after fixing or clarifying the issue.
+
+## Theory-Building Practice
+- Treat programming as building and maintaining an explainable theory of how real-world behavior maps through Stasis source, compiler, JIT/AOT, runtime, and user experience. Code, tests, and documentation are evidence and memory cues; they are not substitutes for understanding.
+- Before a nontrivial change, observe one representative path end to end and be able to explain:
+- Mapping: what real-world behavior is represented, where it is represented, and what is deliberately outside the model.
+- Rationale: why the present structure and invariants were chosen, including the nearest tempting alternative that would violate them.
+- Extension: where one plausible adjacent requirement should fit naturally.
+- Predict the result of a focused test, trace, or sample before running it. Treat a different result as evidence that the working theory is incomplete.
+- When a change creates pressure for a detector, fake fallback, duplicated path, or special case, pause and determine whether the requirement fits the existing theory or requires an explicit theory revision.
+- For surprising or consequential work, use a critical-incident review: reconstruct the decision, cues noticed, alternatives considered, observed result, and a counterfactual that would have changed the decision.
+- A handoff is complete when the next contributor can teach back the mapping, rationale, and extension point and can diagnose or implement one representative case.
+- End each slice with `Theory gained:` stating the learned invariant or mapping, the observation supporting it, and one adjacent prediction it makes. Promote repeated durable lessons into the relevant canonical document; leave isolated hypotheses in the work summary.
 
 ## Self-Reflection Loop (Required)
 - At the end of each compiler slice, record one `Good`, one `Bad`, and one `Adjustment` entry in the work summary, then update this file if a process rule should change.
@@ -138,3 +158,7 @@
 - Good: adding host-required roots as explicit hashes injected into `.stasis` kept ownership clear and avoided parser/keyword surface expansion.
 - Bad: host compiler API had no compile-options channel, so root wiring currently rides through harness generation rather than a structured config object.
 - Adjustment: introduce a small explicit compile-config object in Rust host next, so required roots and future compile flags are passed through one typed path.
+- Current reflection (2026-07-16, semantic-edit protocol slice):
+- Good: one Rust parser-owned edit plan gave CLI and Android identical identity, import, validation, hash, and rollback behavior without duplicating scanners.
+- Bad: the first pass missed same-line declaration boundaries, import-only lifecycle roots, and the mismatch between Android display owners and Rust semantic owners.
+- Adjustment: semantic-edit slices must test non-textual reachability roots, multiple declarations on one line, cross-surface identity translation, and every failure point after source mutation but before receipt publication.

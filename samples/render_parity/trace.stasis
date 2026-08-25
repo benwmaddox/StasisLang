@@ -1,0 +1,40 @@
+function @extern("stasis_jit_render_v2_trace") native_render_trace(
+    cmd_i32: i32[],
+    cmd_i32_len: i32,
+    cmd_f32: f32[],
+    cmd_f32_len: i32,
+    cmd_u8: u8[],
+    cmd_u8_len: i32
+): i32;
+
+global cmd_i32: i32[34608];
+global cmd_f32: f32[108676];
+global cmd_u8: u8[65536];
+
+function main(): i32 {
+    // Display metadata deliberately differs by host and is excluded from the command trace.
+    cmd_i32[10] = 640;
+    cmd_i32[11] = 360;
+    cmd_i32[12] = 1280;
+    cmd_i32[13] = 720;
+    cmd_i32[14] = 1280;
+    cmd_i32[15] = 720;
+    cmd_i32[16] = 0;
+    cmd_i32[17] = 0;
+    cmd_i32[18] = 1280;
+    cmd_i32[19] = 720;
+    cmd_i32[20] = 3;
+    cmd_i32[21] = 5;
+
+    build_parity_frame(cmd_i32, cmd_f32, cmd_u8, 3, 1, 2, 1, 1);
+    append_parity_touch_marker(cmd_i32, cmd_f32, 0, 0, 0);
+
+    let historical_order: i32 = native_render_trace(cmd_i32, 34608, cmd_f32, 108676, cmd_u8, 65536);
+    cmd_i32[18464] = 16384;
+    cmd_i32[18466] = 32768;
+    let sprite_first_order: i32 = native_render_trace(cmd_i32, 34608, cmd_f32, 108676, cmd_u8, 65536);
+    if (historical_order == sprite_first_order) {
+        return 0;
+    }
+    return historical_order;
+}

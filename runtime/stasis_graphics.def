@@ -1,12 +1,22 @@
 LIBRARY stasis_graphics
 EXPORTS
+    stasis_graphics_runtime_abi_version
+    stasis_graphics_release_id
+    stasis_set_asset_root
     stasis_host_bulk_init
     stasis_host_bulk_apply_requests
     stasis_host_bulk_step
+    stasis_host_copy_runtime_error
+    stasis_host_performance_metrics_enabled
+    stasis_host_set_performance_metrics_enabled
+    stasis_host_get_latest_performance_metrics
+    stasis_host_get_latest_performance_metrics_v1
     stasis_init_window
     stasis_get_window_size
+    stasis_get_display_metrics
     stasis_get_desktop_size
     stasis_set_window_size
+    stasis_set_maximized
     stasis_set_fullscreen
     stasis_should_quit
     stasis_begin_frame
@@ -18,6 +28,12 @@ EXPORTS
     stasis_get_time_ms
     stasis_get_time_us
     stasis_sleep_ms
+    stasis_clipboard_load_ascii
+    stasis_clipboard_save_ascii
+    stasis_storage_load_ascii
+    stasis_storage_load_i32
+    stasis_storage_save_ascii
+    stasis_storage_save_i32
     stasis_audio_init
     stasis_audio_shutdown
     stasis_audio_is_available
@@ -26,6 +42,22 @@ EXPORTS
     stasis_audio_get_queued_frames
     stasis_audio_get_underruns
     stasis_audio_push_f32_interleaved
+    stasis_set_recording_audio_config
+    stasis_recording_audio_pull_f32_interleaved
+    stasis_audio_load_wav
+    stasis_audio_release
+    stasis_audio_play
+    stasis_audio_stop
+    stasis_audio_voice_is_playing
+    stasis_audio_voice_set_paused
+    stasis_audio_voice_set_volume_pan
+    stasis_audio_load_music
+    stasis_audio_load_effect
+    stasis_audio_play_music
+    stasis_audio_stop_music
+    stasis_audio_pause_music
+    stasis_audio_set_music_volume
+    stasis_audio_play_effect
     stasis_get_startup_test_error
     stasis_get_startup_test_success
     stasis_set_postfx
@@ -34,36 +66,44 @@ EXPORTS
     stasis_input_pointer_is_down
     stasis_input_pointer_went_down
     stasis_input_pointer_went_up
-    stasis_input_pointer_x_px
-    stasis_input_pointer_y_px
-    stasis_input_pointer_dx_px
-    stasis_input_pointer_dy_px
+    stasis_input_pointer_x_logical
+    stasis_input_pointer_y_logical
+    stasis_input_pointer_dx_logical
+    stasis_input_pointer_dy_logical
     stasis_input_pointer_x_n
     stasis_input_pointer_y_n
     stasis_input_dropped_pointers
-    stasis_input_viewport_x_px
-    stasis_input_viewport_y_px
-    stasis_input_viewport_w_px
-    stasis_input_viewport_h_px
     stasis_host_get_frame
+    stasis_test_push_input_event
+    stasis_test_push_display_event
+    stasis_test_get_render_submission_state
+    stasis_test_get_sprite_state
     stasis_gfx_notify_file_changed
     stasis_gfx_load_sprite
+    stasis_asset_request_sprite
+    stasis_asset_request_audio
+    stasis_asset_task_poll
+    stasis_asset_task_take_handle
+    stasis_asset_task_cancel
     stasis_gfx_release_sprite
     stasis_gfx_draw_sprite
     stasis_gfx_submit
     stasis_gfx_submit_u8
     stasis_gfx_poll_reload
-    stasis_gfx_draw_sprites_i32
+    stasis_gfx_draw_sprites
     stasis_gfx_debug_bake_hash
     stasis_gfx_debug_enable_hash
     stasis_gfx_debug_get_frame_hash
     stasis_gfx_dump_bmp
+    stasis_gfx_dump_png
+    stasis_host_schedule_screenshot
     stasis_load_font
     stasis_draw_text
     stasis_measure_text
     stasis_gfx_cache_text
     stasis_gfx_draw_text_cached
     stasis_gfx_measure_text_cached
+    stasis_gfx_get_resource_lifecycle
     stasis_list_directory
     stasis_list_directory_struct
     stasis_copy_dir_entry_name

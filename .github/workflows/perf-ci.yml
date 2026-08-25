@@ -1,5 +1,8 @@
 name: Perf CI
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 on:
   pull_request:
     types:
@@ -26,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -35,7 +38,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo run -p stasis_compiler --example rust_native_jit_bench -- \
+          cargo run -p stasis_compiler --release --example rust_native_jit_bench -- \
             --functions 1000 \
             --cold-samples 3 \
             --incremental-samples 5 \
@@ -74,22 +77,27 @@ jobs:
               return float(value)
 
           cold_p95_ms = f64("cold_ms_p95")
-          incremental_p95_ms = f64("incremental_one_fn_ms_p95")
+          selective_update_p95_ms = f64("selective_update_ms_p95")
+          emitted_functions = int(kv["emitted_functions"])
+          reachable_functions = int(kv["reachable_functions"])
 
           # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
           max_cold_p95_ms = 1800.0
-          max_incremental_p95_ms = 35.0
+          max_selective_update_p95_ms = 100.0
 
           print(f"cold_ms_p95={cold_p95_ms:.3f}ms (max {max_cold_p95_ms:.3f}ms)")
           print(
-              f"incremental_one_fn_ms_p95={incremental_p95_ms:.3f}ms (max {max_incremental_p95_ms:.3f}ms)"
+              f"selective_update_ms_p95={selective_update_p95_ms:.3f}ms (max {max_selective_update_p95_ms:.3f}ms) emitted={emitted_functions}/{reachable_functions}"
           )
 
           if cold_p95_ms > max_cold_p95_ms:
               print("cold compile regression: p95 exceeded stop condition", file=sys.stderr)
               sys.exit(1)
-          if incremental_p95_ms > max_incremental_p95_ms:
-              print("incremental compile regression: p95 exceeded stop condition", file=sys.stderr)
+          if emitted_functions != 2 or reachable_functions != 1001:
+              print("selective emission regression: chain-root edit did not emit exactly 2/1001 functions", file=sys.stderr)
+              sys.exit(1)
+          if selective_update_p95_ms > max_selective_update_p95_ms:
+              print("selective update regression: p95 exceeded stop condition", file=sys.stderr)
               sys.exit(1)
           PY
 
@@ -98,7 +106,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -174,7 +182,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

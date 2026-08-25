@@ -3,6 +3,7 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_get_time_us",
     "stasis_gfx_cache_text",
     "stasis_gfx_measure_text_cached",
+    "stasis_gfx_measure_text_cached_height",
     "stasis_gfx_poll_reload",
     "stasis_jit_audio_get_channels",
     "stasis_jit_audio_get_queued_frames",
@@ -11,15 +12,40 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_audio_init",
     "stasis_jit_audio_is_available",
     "stasis_jit_audio_push_f32_interleaved",
+    "stasis_jit_audio_load_wav",
+    "stasis_jit_audio_release",
+    "stasis_jit_audio_play",
+    "stasis_jit_audio_stop",
+    "stasis_jit_audio_voice_is_playing",
+    "stasis_jit_audio_voice_set_paused",
+    "stasis_jit_audio_voice_set_volume_pan",
+    "stasis_jit_audio_load_music",
+    "stasis_jit_audio_load_effect",
+    "stasis_jit_audio_play_music",
+    "stasis_jit_audio_stop_music",
+    "stasis_jit_audio_pause_music",
+    "stasis_jit_audio_set_music_volume",
+    "stasis_jit_audio_play_effect",
     "stasis_jit_audio_shutdown",
+    "stasis_jit_asset_request_sprite",
+    "stasis_jit_asset_request_audio",
+    "stasis_jit_asset_task_poll",
+    "stasis_jit_asset_task_take_handle",
+    "stasis_jit_asset_task_cancel",
     "stasis_jit_collection_i32_load",
     "stasis_jit_collection_i32_store",
+    "stasis_jit_clear_string_literal_table",
     "stasis_jit_cos_fast",
     "stasis_jit_gfx_cache_text",
     "stasis_jit_gfx_dump_bmp",
+    "stasis_jit_gfx_dump_png",
     "stasis_jit_gfx_load_sprite",
     "stasis_jit_gfx_release_sprite",
     "stasis_jit_gfx_measure_text_cached",
+    "stasis_jit_gfx_measure_text_cached_height",
+    "stasis_jit_sprite_load_from",
+    "stasis_jit_text_run_load_from",
+    "stasis_jit_upsert_string_literal",
     "stasis_jit_gfx_poll_reload",
     "stasis_jit_global_f32_array_load",
     "stasis_jit_global_f32_array_ptr",
@@ -40,14 +66,33 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_measure_text",
     "stasis_jit_print_i32",
     "stasis_jit_print_string",
+    "stasis_jit_reject_code_swap",
     "stasis_jit_sin_fast",
     "stasis_jit_sleep_ms",
+    "stasis_jit_clipboard_load_ascii",
+    "stasis_jit_clipboard_save_ascii",
+    "stasis_jit_storage_load_ascii",
+    "stasis_jit_storage_load_i32",
+    "stasis_jit_storage_save_ascii",
+    "stasis_jit_storage_save_i32",
     "stasis_jit_sys_memcpy_f32",
     "stasis_jit_sys_memcpy_i32",
     "stasis_jit_sys_memcpy_u8",
     "stasis_jit_sys_memmove_f32",
     "stasis_jit_sys_memmove_i32",
     "stasis_jit_sys_memmove_u8",
+    "stasis_jit_network_supported",
+    "stasis_jit_network_host_random_seed",
+    "stasis_jit_network_host_start",
+    "stasis_jit_network_host_start_text",
+    "stasis_jit_network_host_start_bind",
+    "stasis_jit_network_host_start_bind_text",
+    "stasis_jit_network_host_poll",
+    "stasis_jit_network_host_send",
+    "stasis_jit_network_host_status",
+    "stasis_jit_network_host_overflow_count",
+    "stasis_jit_network_host_port",
+    "stasis_jit_network_host_stop",
 ];
 
 pub(crate) fn is_aot_runtime_export_symbol(symbol: &str) -> bool {
@@ -61,7 +106,20 @@ mod tests {
     #[test]
     fn aot_runtime_export_contract_requires_exact_symbol_matches() {
         assert!(is_aot_runtime_export_symbol("stasis_jit_gfx_load_sprite"));
-        assert!(is_aot_runtime_export_symbol("stasis_jit_gfx_release_sprite"));
+        assert!(is_aot_runtime_export_symbol("stasis_jit_storage_load_i32"));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_clipboard_load_ascii"
+        ));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_gfx_release_sprite"
+        ));
+        assert!(is_aot_runtime_export_symbol("stasis_jit_audio_load_music"));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_network_host_random_seed"
+        ));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_audio_set_music_volume"
+        ));
         assert!(!is_aot_runtime_export_symbol(
             "stasis_jit_gfx_totally_missing"
         ));

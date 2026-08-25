@@ -1,0 +1,21 @@
+import "math.stasis";
+
+function tick(): i32 {
+    return mid(3) + even(6);
+}
+
+function render(): i32 {
+    return shared(1);
+}
+
+function on_code_swap(): void {
+    return;
+}
+
+function main(): i32 {
+    return tick() + render();
+}
+
+function unreachable(): i32 {
+    return 0;
+}

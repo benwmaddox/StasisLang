@@ -4,16 +4,27 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 stasis_runner = { path = "../../crates/stasis_runner" }
 stasis_jit = { path = "../../crates/stasis_jit" }
+stasis_lsp = { path = "../../crates/stasis_lsp" }
+stasis_language_service = { path = "../../crates/stasis_language_service" }
 stasis_compiler = { path = "../../crates/stasis_compiler" }
 notify.workspace = true
+clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-stasis_dynload = { path = "../../crates/stasis_dynload" }
+crossterm = "0.28"
+stasis_dynload = { path = "../../crates/stasis_dynload", features = ["network"] }
 stasis_assets = { path = "../../crates/stasis_assets" }
+stasis_network = { path = "../../crates/stasis_network" }
+stasis_ai = { path = "../../crates/stasis_ai" }
+image.workspace = true
+atomic-write-file.workspace = true
 
 [dev-dependencies]
 object = "0.36"

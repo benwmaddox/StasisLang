@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "name": "asset_breakout",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "vendor": {
+    "stasis": {
+      "release_id": "development",
+      "sha256": "f2c2ec98515477c382ec55234905e5f629d9d55ef01752288f7b1429a11a6afc"
+    }
+  },
+  "android": {
+    "application_id": "com.stasislang.sample.assetbreakout",
+    "label": "Neon Breakout",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  }
+}

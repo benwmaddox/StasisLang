@@ -5,10 +5,7 @@ test `comparison ball renders centered at twenty pixels`(): bool {
     GameState.ball_x = 180;
     GameState.ball_y = 320;
     render();
-    return Render.command3_x == 170
-        && Render.command3_y == 310
-        && Render.command3_w == 20
-        && Render.command3_h == 20;
+    return Render.command3_x == 170 && Render.command3_y == 310 && Render.command3_w == 20 && Render.command3_h == 20;
 }
 
 test `comparison ball uses ten pixel wall bounds`(): bool {
@@ -16,7 +13,9 @@ test `comparison ball uses ten pixel wall bounds`(): bool {
     GameState.ball_y = 8;
     GameState.ball_vy = -3;
     update_ball();
-    if (GameState.ball_y != 10 || GameState.ball_vy != 3) { return false; }
+    if (GameState.ball_y != 10 || GameState.ball_vy != 3) {
+        return false;
+    }
 
     GameState.ball_y = GameState.screen_h - 8;
     GameState.ball_vy = 3;
@@ -40,7 +39,9 @@ test `comparison scoring waits for full ball exit`(): bool {
     GameState.ball_vx = 0;
     GameState.ball_vy = 0;
     update_ball();
-    if (GameState.player_score != 0) { return false; }
+    if (GameState.player_score != 0) {
+        return false;
+    }
 
     GameState.ball_x = GameState.screen_w + 11;
     update_ball();

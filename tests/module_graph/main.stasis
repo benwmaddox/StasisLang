@@ -1,0 +1,6 @@
+import "one.stasis";
+import "two.stasis";
+
+function main(): i32 {
+    return one.value() + two.value();
+}

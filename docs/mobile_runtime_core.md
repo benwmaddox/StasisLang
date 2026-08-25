@@ -23,14 +23,32 @@ StasisMobileGameEntries game = {
 StasisMobileRuntimeConfig config = {1280, 720, "My Stasis Game"};
 
 int status = stasis_mobile_runtime_initialize(&config, &game);
+StasisMobileFramePacer frame_pacer;
+stasis_mobile_frame_pacer_reset(&frame_pacer, SDL_GetTicksNS());
 while (status == STASIS_MOBILE_RUNTIME_OK) {
     status = stasis_mobile_runtime_step();
+    if (status == STASIS_MOBILE_RUNTIME_OK) {
+        uint64_t wait_ns = stasis_mobile_frame_pacer_wait_ns(
+            &frame_pacer, SDL_GetTicksNS());
+        if (wait_ns > 0) {
+            SDL_DelayPrecise(wait_ns);
+        }
+    }
 }
 stasis_mobile_runtime_shutdown();
 ```
 
-The generated AOT symbol header declares each entry as `void(void)` and is the
-source of the actual symbol names. The generated `published_aot_bindings.c`
+The shared shell targets 60 deterministic steps per second independently of
+the display refresh rate. Vsync time counts toward the frame interval, so a
+60 Hz display does not receive an unconditional extra delay while 90 Hz and
+120 Hz displays cannot accelerate game time. If suspension or overload misses
+a complete interval, the pacer resets its absolute deadline and never runs a
+burst of catch-up ticks.
+
+The generated AOT symbol header declares `main`, `tick`, and `render` as
+`int32_t(void)` and is the source of the actual symbol names. The runtime turns
+any non-zero entry result into a stop request and retains the exact result for
+the platform shell to log or return. The generated `published_aot_bindings.c`
 registers linked function pointers and string literals with the shared AOT
 state/dispatch layer; shells compile it as an ordinary source file and do not
 discover symbols dynamically.
@@ -54,7 +72,7 @@ add_subdirectory(path/to/stasis/runtime stasis-runtime)
 target_link_libraries(my_mobile_shell PRIVATE stasis_mobile_runtime)
 ```
 
-The parent project may provide `SDL2::SDL2` and `SDL2_image::SDL2_image`
+The parent project may provide `SDL3::SDL3` and `SDL3_image::SDL3_image`
 targets directly. Otherwise the runtime resolves their CMake packages.
 
 Android's generated `published_aot_objects.cmake` includes the bindings source.

@@ -1,11 +1,18 @@
 use crate::backend::emit::*;
+use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
+use crate::backend::state_layout::{is_named_scalar_state_path, StateLayout};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
-use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32};
-use crate::ir::hir::FunctionHIR;
+use crate::frontend::types::{
+    TypeCategory, TypeId, TypeTable, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+};
+use crate::identity::SymbolId;
+use crate::ir::hir::{AssignTarget, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
-use cranelift_module::{default_libcall_names, Module};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::{default_libcall_names, DataDescription, DataId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -18,13 +25,14 @@ use target_lexicon::Triple;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AotArtifact {
     pub function_id: FunctionId,
+    pub symbol_id: SymbolId,
     pub object_index: u32,
     pub body_hash: u64,
     pub symbol_name: String,
     pub object_bytes_len: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AotProcess {
     compiler: Compiler,
     optimization_profile: AotOptimizationProfile,
@@ -33,9 +41,12 @@ pub struct AotProcess {
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
     string_literals: BTreeMap<i32, String>,
+    referenced_string_literals: BTreeMap<FunctionId, BTreeSet<i32>>,
     collection_max_lengths: BTreeMap<String, i32>,
-    compile_analysis_cache: Option<CompileAnalysisCache>,
+    program_snapshot: Option<ProgramSnapshot>,
+    last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
     required_emit_roots: Vec<String>,
+    profile_function_names: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,12 +54,28 @@ pub struct AotEngineBundle {
     pub output_dir: PathBuf,
     pub manifest_path: PathBuf,
     pub object_paths_by_function: BTreeMap<String, PathBuf>,
+    pub object_paths_by_function_id: BTreeMap<FunctionId, PathBuf>,
     pub optimization_profile: AotOptimizationProfile,
+}
+
+impl AotEngineBundle {
+    /// Enumerates every emitted object by its canonical function identity.
+    ///
+    /// `object_paths_by_function` is only a convenience lookup for unique source
+    /// names. Ambiguous overload names are intentionally absent from that map, so
+    /// whole-bundle link and package paths must enumerate this FnId-backed map.
+    pub fn object_paths(&self) -> impl ExactSizeIterator<Item = &PathBuf> {
+        self.object_paths_by_function_id.values()
+    }
 }
 
 impl AotProcess {
     pub fn new() -> Self {
         Self::with_optimization_profile(AotOptimizationProfile::Speed)
+    }
+
+    pub fn set_project_root(&mut self, root: impl Into<String>) -> Result<(), String> {
+        self.compiler.set_project_root(root)
     }
 
     pub fn with_optimization_profile(optimization_profile: AotOptimizationProfile) -> Self {
@@ -60,14 +87,25 @@ impl AotProcess {
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
             string_literals: BTreeMap::new(),
+            referenced_string_literals: BTreeMap::new(),
             collection_max_lengths: BTreeMap::new(),
-            compile_analysis_cache: None,
+            program_snapshot: None,
+            last_failed_source_diagnostic: None,
             required_emit_roots: Vec::new(),
+            profile_function_names: BTreeSet::new(),
         }
     }
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn set_import_base_dir(&mut self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        let path = fs::canonicalize(&path).unwrap_or(path);
+        let _ = self
+            .compiler
+            .set_project_root(path.to_string_lossy().to_string());
     }
 
     pub fn set_target(&mut self, target: stasis_jit::AotTarget) {
@@ -77,12 +115,65 @@ impl AotProcess {
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
         self.required_emit_roots.clear();
         self.required_emit_roots.extend_from_slice(roots);
+        self.compiler.set_analysis_required_roots(roots);
+    }
+
+    pub fn set_profile_functions(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+    ) -> Result<(), String> {
+        if self.program_snapshot.is_some() || !self.artifacts.is_empty() {
+            return Err(
+                "AOT function profiling must be configured before the first compilation"
+                    .to_string(),
+            );
+        }
+        self.profile_function_names = names
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        Ok(())
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
-        self.load_import_graph_sources()
+        // Keep accepted object buffers in place.  A full `self.clone()` duplicates every
+        // object blob before we know whether a candidate will be rejected.
+        let accepted_compiler = self.compiler.clone();
+        let accepted_next_object_index = self.next_object_index;
+        let accepted_artifacts = self.artifacts.clone();
+        let accepted_object_bytes_len = self.object_bytes.len();
+        let accepted_string_literals = self.string_literals.clone();
+        let accepted_referenced_string_literals = self.referenced_string_literals.clone();
+        let accepted_collection_max_lengths = self.collection_max_lengths.clone();
+        let accepted_program_snapshot = self.program_snapshot.clone();
+        match self.compile_internal() {
+            Ok(report) => {
+                self.last_failed_source_diagnostic = None;
+                Ok(report)
+            }
+            Err(error) => {
+                let diagnostic = self.compiler.last_source_diagnostic().cloned();
+                self.compiler = accepted_compiler;
+                self.next_object_index = accepted_next_object_index;
+                self.artifacts = accepted_artifacts;
+                self.object_bytes.truncate(accepted_object_bytes_len);
+                self.string_literals = accepted_string_literals;
+                self.referenced_string_literals = accepted_referenced_string_literals;
+                self.collection_max_lengths = accepted_collection_max_lengths;
+                self.program_snapshot = accepted_program_snapshot;
+                self.last_failed_source_diagnostic = diagnostic;
+                Err(error)
+            }
+        }
+    }
+
+    fn compile_internal(&mut self) -> CompileResult<CompileReport> {
+        // Keep release compilation on the same whole-program validity contract as JIT, tooling,
+        // and the language service. Reachability controls emission only.
+        let index = self.compiler.check()?;
+        self.validate_host_aliases()
             .map_err(crate::compiler::CompileError::Backend)?;
-        let index = self.compiler.index_pass()?;
         self.compiler
             .types_mut()
             .ensure_utf8_view_id()
@@ -93,42 +184,61 @@ impl AotProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
-        let cache_miss = self
-            .compile_analysis_cache
+        let snapshot_revision =
+            crate::backend::program_snapshot::semantic_revision_with_required_roots(
+                files_fingerprint,
+                &self.required_emit_roots,
+            );
+        let snapshot_miss = self
+            .program_snapshot
             .as_ref()
-            .is_none_or(|cache| cache.files_fingerprint != files_fingerprint);
+            .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         let mut force_reemit_reachable = false;
-        if cache_miss {
+        if snapshot_miss {
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
                 &mut analysis_type_table,
-                files_fingerprint,
+                snapshot_revision,
                 resolve_preferred_extern_call_signatures,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
-            if let Some(previous_cache) = self.compile_analysis_cache.as_ref() {
+            if let Some(previous_snapshot) = self.program_snapshot.as_ref() {
                 force_reemit_reachable =
-                    compile_analysis_requires_reemit(previous_cache, &next_cache);
+                    compile_analysis_requires_reemit(&previous_snapshot.analysis, &next_cache);
             }
-            self.compile_analysis_cache = Some(next_cache);
+            self.program_snapshot = Some(
+                ProgramSnapshot::build(
+                    snapshot_revision,
+                    self.compiler.files(),
+                    self.compiler.module_graph(),
+                    self.compiler.functions(),
+                    &analysis_type_table,
+                    self.compiler.data_flow_summaries_shared(),
+                    &self.required_emit_roots,
+                    next_cache,
+                )
+                .map_err(crate::compiler::CompileError::Backend)?,
+            );
         }
         *self.compiler.types_mut() = analysis_type_table.clone();
-        let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
+        let snapshot = self.program_snapshot.as_ref().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
-                "aot compile analysis cache missing after refresh".to_string(),
+                "aot program snapshot missing after refresh".to_string(),
             )
         })?;
-        self.string_literals.clear();
-        for constant in analysis.constant_values.values() {
-            if let ConstantValue::String { value, .. } = constant {
-                record_string_literal(&mut self.string_literals, value)
-                    .map_err(crate::compiler::CompileError::Backend)?;
-            }
-        }
+        let analysis = &snapshot.analysis;
+        let data_flow_summaries = snapshot.data_flow_summaries();
+        self.string_literals = snapshot.literal_table().clone();
         self.collection_max_lengths =
             collect_fixed_collection_max_lengths(&analysis.global_path_types, &analysis_type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
+        let direct_storage = build_aot_direct_storage_bindings(
+            &analysis.global_path_types,
+            &analysis.collection_infos,
+            &analysis_type_table,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
         let compiled_body_hashes: HashMap<FunctionId, u64> = self
             .artifacts
             .iter()
@@ -147,16 +257,18 @@ impl AotProcess {
             artifacts,
             object_bytes,
             optimization_profile,
-            string_literals,
+            referenced_string_literals,
             target,
+            profile_function_names,
         ) = (
             &mut self.compiler,
             &mut self.next_object_index,
             &mut self.artifacts,
             &mut self.object_bytes,
             self.optimization_profile,
-            &mut self.string_literals,
+            &mut self.referenced_string_literals,
             self.target.clone(),
+            self.profile_function_names.clone(),
         );
         let emit = compiler.emit_pass_for_ids_with(
             &emit_function_ids,
@@ -167,6 +279,11 @@ impl AotProcess {
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
+                let mut function_string_literals = BTreeMap::new();
+                let profile_instrumentation = profile_function_names.contains(&meta.name);
+                let data_flow_summary = data_flow_summaries
+                    .iter()
+                    .find(|summary| summary.internal_function_id == meta.storage_index);
                 let bytes = compile_function_to_object_bytes(
                     meta,
                     hir,
@@ -176,11 +293,16 @@ impl AotProcess {
                     &mut type_table,
                     &analysis.global_path_types,
                     &analysis.constant_values,
-                    string_literals,
+                    &mut function_string_literals,
                     &target,
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
+                    data_flow_summary,
+                    &direct_storage,
+                    profile_instrumentation,
                 )?;
+                referenced_string_literals
+                    .insert(meta.id, function_string_literals.keys().copied().collect());
                 let object_index = *next_object_index;
                 *next_object_index = next_object_index.saturating_add(1);
                 object_bytes.push(bytes);
@@ -188,6 +310,7 @@ impl AotProcess {
                 artifacts.retain(|artifact| artifact.function_id != meta.id);
                 artifacts.push(AotArtifact {
                     function_id: meta.id,
+                    symbol_id: meta.symbol_id.clone(),
                     object_index,
                     body_hash: meta.body_hash,
                     symbol_name: symbol,
@@ -197,60 +320,43 @@ impl AotProcess {
             },
         )?;
 
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
-            self.compiler.functions(),
-            &self.required_emit_roots,
-        );
+        let reachable = snapshot.reachable_function_ids().clone();
         artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
+        referenced_string_literals.retain(|function_id, _| reachable.contains(function_id));
         compact_active_artifact_storage(artifacts, object_bytes);
         self.next_object_index = u32::try_from(self.object_bytes.len()).unwrap_or(u32::MAX);
+        if let Some(snapshot) = self.program_snapshot.as_mut() {
+            snapshot
+                .set_artifact_mappings(self.artifacts.iter().map(|artifact| {
+                    ProgramArtifactMapping {
+                        function_id: artifact.function_id,
+                        symbol_id: artifact.symbol_id.clone(),
+                        symbol: artifact.symbol_name.clone(),
+                        target_path: None,
+                        code_pointer: None,
+                    }
+                }))
+                .map_err(crate::compiler::CompileError::Invariant)?;
+        }
         Ok(CompileReport { index, emit })
     }
 
-    fn load_import_graph_sources(&mut self) -> Result<(), String> {
-        let mut known_paths: BTreeSet<String> = self
-            .compiler
-            .files()
-            .iter()
-            .map(|file| file.path.clone())
-            .collect();
-        let mut queue: Vec<String> = self
-            .compiler
-            .files()
-            .iter()
-            .map(|file| file.path.clone())
-            .collect();
+    pub fn state_layout(&self) -> StateLayout {
+        self.program_snapshot
+            .as_ref()
+            .map_or_else(StateLayout::default, |snapshot| {
+                snapshot.state_layout().clone()
+            })
+    }
 
-        while let Some(path) = queue.pop() {
-            let Some(source) = self
-                .compiler
-                .files()
-                .iter()
-                .find(|file| file.path == path)
-                .map(|file| file.content.clone())
-            else {
-                continue;
-            };
-            let imports = parse_import_paths(&source);
-            for import_path in imports {
-                let resolved = resolve_import_path(&path, &import_path);
-                let normalized = normalize_path_for_compiler_key(&resolved);
-                if known_paths.contains(&normalized) {
-                    continue;
-                }
-                let content = std::fs::read_to_string(&resolved).map_err(|error| {
-                    format!(
-                        "failed to load import '{}' referenced by '{}': {}",
-                        import_path, path, error
-                    )
-                })?;
-                self.compiler.upsert_file(normalized.clone(), content);
-                known_paths.insert(normalized.clone());
-                queue.push(normalized);
-            }
-        }
+    pub fn program_snapshot(&self) -> Option<&ProgramSnapshot> {
+        self.program_snapshot.as_ref()
+    }
 
-        Ok(())
+    pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
+        self.last_failed_source_diagnostic
+            .as_ref()
+            .or_else(|| self.compiler.last_source_diagnostic())
     }
 
     pub fn artifacts(&self) -> &[AotArtifact] {
@@ -275,12 +381,7 @@ impl AotProcess {
         output_executable: &Path,
         link_config: &stasis_jit::AotLinkConfig,
     ) -> Result<PathBuf, String> {
-        let function = self
-            .compiler
-            .functions()
-            .iter()
-            .find(|function| function.name == name)
-            .ok_or_else(|| format!("function '{name}' not found"))?;
+        let function = self.unique_function_by_name(name)?;
         if function.return_type != TYPE_ID_I32 {
             return Err(format!(
                 "function '{name}' is not i32-returning (type id {})",
@@ -337,12 +438,12 @@ impl AotProcess {
                         artifact_function.name, artifact.object_index
                     )
                 })?;
-            let object_file_name = format!(
-                "{}_{}.obj",
+            let object_path = object_dir.join(format!(
+                "{}_fn{}_{}.obj",
                 sanitize_file_token(&artifact_function.name),
+                artifact_function.id,
                 artifact.object_index
-            );
-            let object_path = object_dir.join(object_file_name);
+            ));
             fs::write(&object_path, object_bytes).map_err(|error| {
                 format!(
                     "failed to write object file {}: {error}",
@@ -357,17 +458,381 @@ impl AotProcess {
         let entry_object_path = entry_object_path
             .ok_or_else(|| format!("entry object path missing for function '{name}'"))?;
 
+        let mut link_entry = entry_artifact.symbol_name.clone();
+        if let Some((storage_bytes, wrapper_symbol)) =
+            self.compile_standalone_storage_object(&entry_artifact.symbol_name)?
+        {
+            let storage_path = object_dir.join("direct_storage.obj");
+            fs::write(&storage_path, storage_bytes).map_err(|error| {
+                format!(
+                    "failed to write direct storage object {}: {error}",
+                    storage_path.display()
+                )
+            })?;
+            object_paths.push(storage_path);
+            link_entry = wrapper_symbol;
+        }
+
         stasis_jit::link_objects_to_executable(
             &object_paths,
             output_executable,
-            &entry_artifact.symbol_name,
+            &link_entry,
             link_config,
         )?;
         Ok(entry_object_path)
     }
 
-    pub fn write_engine_bundle(
+    fn validate_host_aliases(&self) -> Result<(), String> {
+        let required: BTreeSet<&str> = ["main", "tick", "render", "on_code_swap"]
+            .into_iter()
+            .chain(self.required_emit_roots.iter().map(String::as_str))
+            .collect();
+        for name in required {
+            let count = self
+                .compiler
+                .functions()
+                .iter()
+                .filter(|function| function.name == name)
+                .count();
+            if count > 1 {
+                return Err(format!(
+                    "host ABI alias '{name}' requires exactly one canonical identity (found {count})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn unique_function_by_name(&self, name: &str) -> Result<&ProgramFunction, String> {
+        let mut matches = self
+            .program_snapshot
+            .as_ref()
+            .ok_or_else(|| "program has not compiled successfully".to_string())?
+            .functions()
+            .iter()
+            .filter(|function| function.name == name);
+        let function = matches
+            .next()
+            .ok_or_else(|| format!("function '{name}' not found"))?;
+        if matches.next().is_some() {
+            return Err(format!("function alias '{name}' is ambiguous"));
+        }
+        Ok(function)
+    }
+
+    /// Builds the storage definitions and entry wrapper required when a
+    /// standalone executable references program globals directly. Native
+    /// Windows executables always use the wrapper so their Stasis result is
+    /// passed to ExitProcess instead of returning from the raw PE entry point.
+    pub fn compile_standalone_storage_object(
         &self,
+        entry_symbol: &str,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        fn storage_width(type_name: &str) -> Result<usize, String> {
+            match type_name {
+                "u8" => Ok(1),
+                "u16" => Ok(2),
+                "bool" | "u32" | "i32" | "f32" => Ok(4),
+                "f64" => Ok(8),
+                other => Err(format!("unsupported standalone AOT storage type '{other}'")),
+            }
+        }
+
+        let standalone_literal_ids: BTreeSet<i32> = self
+            .referenced_string_literals
+            .values()
+            .flat_map(|ids| ids.iter().copied())
+            .collect();
+        let layout = self.state_layout();
+        let exits_windows_process =
+            cfg!(windows) && matches!(self.target, stasis_jit::AotTarget::Native);
+        if layout.scalars.is_empty()
+            && layout.collections.is_empty()
+            && standalone_literal_ids.is_empty()
+            && !exits_windows_process
+        {
+            return Ok(None);
+        }
+        let mut flag_builder = settings::builder();
+        flag_builder
+            .set(
+                "opt_level",
+                self.optimization_profile.as_cranelift_opt_level(),
+            )
+            .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
+        if self.target.requires_position_independent_code() {
+            flag_builder.set("is_pic", "true").map_err(|error| {
+                format!("failed to configure position-independent AOT: {error}")
+            })?;
+        }
+        let flags = settings::Flags::new(flag_builder);
+        let isa_builder = match self.target.object_triple() {
+            Some(triple_text) => {
+                let triple = Triple::from_str(triple_text).map_err(|error| {
+                    format!("failed to parse AOT target triple {triple_text}: {error}")
+                })?;
+                let triple_display = triple.to_string();
+                cranelift_codegen::isa::lookup(triple).map_err(|error| {
+                    format!("failed to construct ISA builder for {triple_display}: {error}")
+                })?
+            }
+            None => cranelift_native::builder()
+                .map_err(|error| format!("failed to construct native ISA builder: {error}"))?,
+        };
+        let isa = isa_builder
+            .finish(flags)
+            .map_err(|error| format!("failed to finalize native ISA: {error}"))?;
+        let builder = ObjectBuilder::new(
+            isa,
+            "stasis_aot_standalone_storage".to_string(),
+            default_libcall_names(),
+        )
+        .map_err(|error| format!("failed to construct storage object builder: {error}"))?;
+        let mut module = ObjectModule::new(builder);
+        let pointer_type = module.target_config().pointer_type();
+        let mut registrations = Vec::new();
+        let mut literal_registrations = Vec::new();
+
+        for id in standalone_literal_ids {
+            let value = self.string_literals.get(&id).ok_or_else(|| {
+                format!("standalone AOT string literal {id} is missing from the program table")
+            })?;
+            let mut bytes = value.as_bytes().to_vec();
+            bytes.push(0);
+            let symbol = format!("__stasis_string_literal_{:08x}", id as u32);
+            let data_id = define_standalone_storage_data(&mut module, &symbol, bytes, 1)?;
+            literal_registrations.push((data_id, id));
+        }
+
+        for scalar in &layout.scalars {
+            let storage_type_name = scalar.storage_type_name();
+            let width = storage_width(storage_type_name)?;
+            let mut bytes = vec![0; width];
+            if let Some(collection_path) = scalar.path.strip_suffix(".max_length") {
+                if let Some(collection) = layout
+                    .collections
+                    .iter()
+                    .find(|collection| collection.path == collection_path)
+                {
+                    bytes[..4].copy_from_slice(&collection.capacity.to_ne_bytes());
+                }
+            }
+            let symbol = aot_storage_symbol(&scalar.path, "");
+            let data_id =
+                define_standalone_storage_data(&mut module, &symbol, bytes, width as u64)?;
+            registrations.push((
+                data_id,
+                storage_type_name.to_string(),
+                hash_global_path(&scalar.path),
+                0,
+                matches!(storage_type_name, "u8" | "u16").then_some(1),
+            ));
+        }
+        for collection in &layout.collections {
+            let len = usize::try_from(collection.capacity).map_err(|_| {
+                format!(
+                    "negative standalone AOT collection capacity for '{}'",
+                    collection.path
+                )
+            })?;
+            for field in &collection.fields {
+                let storage_type_name = field.storage_type_name();
+                let width = storage_width(storage_type_name)?;
+                let size = len.checked_mul(width).ok_or_else(|| {
+                    format!(
+                        "standalone AOT storage size overflow for '{}.{}'",
+                        collection.path, field.field
+                    )
+                })?;
+                let symbol = aot_storage_symbol(&collection.path, &field.field);
+                let data_id = define_standalone_storage_data(
+                    &mut module,
+                    &symbol,
+                    vec![0; size],
+                    width as u64,
+                )?;
+                registrations.push((
+                    data_id,
+                    storage_type_name.to_string(),
+                    hash_global_path(&collection.path),
+                    hash_foreach_field_suffix(&field.field),
+                    Some(collection.capacity),
+                ));
+            }
+        }
+
+        let mut entry_signature = module.make_signature();
+        entry_signature.returns.push(AbiParam::new(types::I32));
+        let entry_id = module
+            .declare_function(entry_symbol, Linkage::Import, &entry_signature)
+            .map_err(|error| format!("failed to declare standalone entry: {error}"))?;
+        let exit_process_id = if exits_windows_process {
+            let mut signature = module.make_signature();
+            signature.params.push(AbiParam::new(types::I32));
+            Some(
+                module
+                    .declare_function("ExitProcess", Linkage::Import, &signature)
+                    .map_err(|error| format!("failed to declare ExitProcess: {error}"))?,
+            )
+        } else {
+            None
+        };
+        let (clear_literals_id, upsert_literal_id) = if literal_registrations.is_empty() {
+            (None, None)
+        } else {
+            let clear_signature = module.make_signature();
+            let clear_id = module
+                .declare_function(
+                    "stasis_jit_clear_string_literal_table",
+                    Linkage::Import,
+                    &clear_signature,
+                )
+                .map_err(|error| format!("failed to declare literal-table reset: {error}"))?;
+            let mut upsert_signature = module.make_signature();
+            upsert_signature.params.push(AbiParam::new(types::I32));
+            upsert_signature.params.push(AbiParam::new(pointer_type));
+            let upsert_id = module
+                .declare_function(
+                    "stasis_jit_upsert_string_literal",
+                    Linkage::Import,
+                    &upsert_signature,
+                )
+                .map_err(|error| {
+                    format!("failed to declare literal-table registration: {error}")
+                })?;
+            (Some(clear_id), Some(upsert_id))
+        };
+        let wrapper_symbol = "stasis_aot_standalone_entry".to_string();
+        let wrapper_id = module
+            .declare_function(&wrapper_symbol, Linkage::Export, &entry_signature)
+            .map_err(|error| format!("failed to declare standalone wrapper: {error}"))?;
+
+        let mut register_functions = BTreeMap::new();
+        for (_, type_name, _, _, len) in &registrations {
+            let lane = if type_name == "f32" {
+                "f32"
+            } else if type_name == "f64" {
+                "f64"
+            } else if type_name == "u8" {
+                "u8"
+            } else if type_name == "u16" {
+                "u16"
+            } else {
+                "i32"
+            };
+            let key = (lane, len.is_some());
+            if register_functions.contains_key(&key) {
+                continue;
+            }
+            let symbol = if len.is_some() {
+                format!("stasis_jit_register_global_{lane}_array")
+            } else {
+                format!("stasis_jit_register_global_{lane}_ptr")
+            };
+            let mut signature = module.make_signature();
+            signature.params.push(AbiParam::new(types::I32));
+            if len.is_some() {
+                signature.params.push(AbiParam::new(types::I32));
+            }
+            signature.params.push(AbiParam::new(pointer_type));
+            if len.is_some() {
+                signature.params.push(AbiParam::new(types::I32));
+            }
+            let function_id = module
+                .declare_function(&symbol, Linkage::Import, &signature)
+                .map_err(|error| format!("failed to declare '{symbol}': {error}"))?;
+            register_functions.insert(key, function_id);
+        }
+
+        let mut context = module.make_context();
+        context.func.signature = entry_signature;
+        let entry_ref = module.declare_func_in_func(entry_id, &mut context.func);
+        let exit_process_ref =
+            exit_process_id.map(|id| module.declare_func_in_func(id, &mut context.func));
+        let clear_literals_ref =
+            clear_literals_id.map(|id| module.declare_func_in_func(id, &mut context.func));
+        let upsert_literal_ref =
+            upsert_literal_id.map(|id| module.declare_func_in_func(id, &mut context.func));
+        let register_refs: BTreeMap<_, _> = register_functions
+            .into_iter()
+            .map(|(key, id)| (key, module.declare_func_in_func(id, &mut context.func)))
+            .collect();
+        let registration_refs: Vec<_> = registrations
+            .into_iter()
+            .map(|(data_id, type_name, path_hash, field_hash, len)| {
+                (
+                    module.declare_data_in_func(data_id, &mut context.func),
+                    type_name,
+                    path_hash,
+                    field_hash,
+                    len,
+                )
+            })
+            .collect();
+        let literal_registration_refs: Vec<_> = literal_registrations
+            .into_iter()
+            .map(|(data_id, id)| (module.declare_data_in_func(data_id, &mut context.func), id))
+            .collect();
+        let mut builder_context = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let block = builder.create_block();
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            if let (Some(clear_ref), Some(upsert_ref)) = (clear_literals_ref, upsert_literal_ref) {
+                builder.ins().call(clear_ref, &[]);
+                for (data, id) in literal_registration_refs {
+                    let literal_id = builder.ins().iconst(types::I32, i64::from(id));
+                    let pointer = builder.ins().global_value(pointer_type, data);
+                    builder.ins().call(upsert_ref, &[literal_id, pointer]);
+                }
+            }
+            for (data, type_name, path_hash, field_hash, len) in registration_refs {
+                let lane = if type_name == "f32" {
+                    "f32"
+                } else if type_name == "f64" {
+                    "f64"
+                } else if type_name == "u8" {
+                    "u8"
+                } else if type_name == "u16" {
+                    "u16"
+                } else {
+                    "i32"
+                };
+                let function_ref = register_refs[&(lane, len.is_some())];
+                let path = builder.ins().iconst(types::I32, i64::from(path_hash));
+                let pointer = builder.ins().global_value(pointer_type, data);
+                if let Some(len) = len {
+                    let field = builder.ins().iconst(types::I32, i64::from(field_hash));
+                    let length = builder.ins().iconst(types::I32, i64::from(len));
+                    builder
+                        .ins()
+                        .call(function_ref, &[path, field, pointer, length]);
+                } else {
+                    builder.ins().call(function_ref, &[path, pointer]);
+                }
+            }
+            let call = builder.ins().call(entry_ref, &[]);
+            let result = builder.inst_results(call)[0];
+            if let Some(exit_process_ref) = exit_process_ref {
+                builder.ins().call(exit_process_ref, &[result]);
+            }
+            builder.ins().return_(&[result]);
+            builder.finalize();
+        }
+        module
+            .define_function(wrapper_id, &mut context)
+            .map_err(|error| format!("failed to define standalone wrapper: {error}"))?;
+        module.clear_context(&mut context);
+        let bytes = module
+            .finish()
+            .emit()
+            .map_err(|error| format!("failed to emit standalone AOT storage object: {error}"))?;
+        Ok(Some((bytes, wrapper_symbol)))
+    }
+
+    pub fn write_engine_bundle(
+        &mut self,
         entrypoints: &EngineEntrypoints,
         output_dir: &Path,
     ) -> Result<AotEngineBundle, String> {
@@ -379,7 +844,9 @@ impl AotProcess {
         })?;
 
         let mut object_paths_by_function: BTreeMap<String, PathBuf> = BTreeMap::new();
-        let mut manifest_rows: Vec<(String, String, String)> = Vec::new();
+        let mut ambiguous_aliases = BTreeSet::new();
+        let mut object_paths_by_function_id = BTreeMap::new();
+        let mut manifest_rows: Vec<(FunctionId, String, String, String, String, u16)> = Vec::new();
         for artifact in &self.artifacts {
             let function = self
                 .compiler
@@ -402,8 +869,9 @@ impl AotProcess {
                     )
                 })?;
             let object_file_name = format!(
-                "{}_{}.{}",
+                "{}_fn{}_{}.{}",
                 sanitize_file_token(&function.name),
+                function.id,
                 artifact.object_index,
                 object_file_extension(&self.target)
             );
@@ -414,11 +882,20 @@ impl AotProcess {
                     object_path.display()
                 )
             })?;
-            object_paths_by_function.insert(function.name.clone(), object_path);
+            object_paths_by_function_id.insert(function.id, object_path.clone());
+            if object_paths_by_function.contains_key(&function.name) {
+                object_paths_by_function.remove(&function.name);
+                ambiguous_aliases.insert(function.name.clone());
+            } else if !ambiguous_aliases.contains(&function.name) {
+                object_paths_by_function.insert(function.name.clone(), object_path);
+            }
             manifest_rows.push((
+                function.id,
+                function.symbol_id.to_string(),
                 function.name.clone(),
                 artifact.symbol_name.clone(),
                 object_file_name,
+                function.return_type,
             ));
         }
 
@@ -444,18 +921,58 @@ impl AotProcess {
             )
         })?;
 
+        if let Some(snapshot) = self.program_snapshot.as_mut() {
+            let paths = self
+                .artifacts
+                .iter()
+                .filter_map(|artifact| {
+                    let function = self
+                        .compiler
+                        .functions()
+                        .iter()
+                        .find(|function| function.id == artifact.function_id)?;
+                    let path = object_paths_by_function_id.get(&function.id)?;
+                    Some((artifact.function_id, path.display().to_string()))
+                })
+                .collect();
+            snapshot.set_artifact_paths(&paths);
+        }
         Ok(AotEngineBundle {
             output_dir: output_dir.to_path_buf(),
             manifest_path,
             object_paths_by_function,
+            object_paths_by_function_id,
             optimization_profile: self.optimization_profile,
         })
     }
 
     pub fn write_object_files(
-        &self,
+        &mut self,
         output_dir: &Path,
     ) -> Result<BTreeMap<String, (String, PathBuf)>, String> {
+        let canonical = self.write_object_files_by_id(output_dir)?;
+        let mut aliases = BTreeMap::new();
+        for function in self.compiler.functions() {
+            let Some(artifact) = canonical.get(&function.id) else {
+                continue;
+            };
+            if aliases
+                .insert(function.name.clone(), artifact.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "AOT name alias '{}' is ambiguous; use canonical FnId",
+                    function.name
+                ));
+            }
+        }
+        Ok(aliases)
+    }
+
+    pub fn write_object_files_by_id(
+        &mut self,
+        output_dir: &Path,
+    ) -> Result<BTreeMap<FunctionId, (String, PathBuf)>, String> {
         fs::create_dir_all(output_dir).map_err(|error| {
             format!(
                 "failed to create AOT object output directory {}: {error}",
@@ -487,8 +1004,9 @@ impl AotProcess {
                 })?;
 
             let object_file_name = format!(
-                "{}_{}.{}",
+                "{}_fn{}_{}.{}",
                 sanitize_file_token(&function.name),
+                function.id,
                 artifact.object_index,
                 object_file_extension(&self.target)
             );
@@ -499,10 +1017,23 @@ impl AotProcess {
                     object_path.display()
                 )
             })?;
-            out.insert(
-                function.name.clone(),
-                (artifact.symbol_name.clone(), object_path),
-            );
+            out.insert(function.id, (artifact.symbol_name.clone(), object_path));
+        }
+        if let Some(snapshot) = self.program_snapshot.as_mut() {
+            let paths = self
+                .artifacts
+                .iter()
+                .filter_map(|artifact| {
+                    let function = self
+                        .compiler
+                        .functions()
+                        .iter()
+                        .find(|function| function.id == artifact.function_id)?;
+                    let (_, path) = out.get(&function.id)?;
+                    Some((artifact.function_id, path.display().to_string()))
+                })
+                .collect();
+            snapshot.set_artifact_paths(&paths);
         }
         Ok(out)
     }
@@ -537,6 +1068,138 @@ fn object_file_extension(target: &stasis_jit::AotTarget) -> &'static str {
     }
 }
 
+fn aot_scalar_lane(type_id: TypeId, type_table: &TypeTable) -> Option<&'static str> {
+    if type_table.unsigned_integer_bits(type_id) == Some(8) {
+        Some("u8")
+    } else if type_table.unsigned_integer_bits(type_id) == Some(16) {
+        Some("u16")
+    } else if is_i32_abi_compatible_type(type_id, type_table) {
+        Some("i32")
+    } else if type_id == TYPE_ID_F32 {
+        Some("f32")
+    } else if type_id == TYPE_ID_F64 {
+        Some("f64")
+    } else {
+        None
+    }
+}
+
+fn aot_array_lane(
+    path: &str,
+    type_id: TypeId,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Option<&'static str> {
+    let text_storage = global_path_types
+        .get(path)
+        .and_then(|global_type| type_table.type_info(*global_type))
+        .is_some_and(|info| {
+            matches!(
+                info.category,
+                TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed
+            )
+        });
+    if text_storage || path == "gfx_cmd_u8" {
+        Some("u8")
+    } else {
+        aot_scalar_lane(type_id, type_table)
+    }
+}
+
+fn aot_storage_symbol(path: &str, field: &str) -> String {
+    if field.is_empty() {
+        path.replace('.', "__")
+    } else {
+        format!("{}__{}", path.replace('.', "__"), field.replace('.', "__"))
+    }
+}
+
+fn define_standalone_storage_data(
+    module: &mut ObjectModule,
+    symbol: &str,
+    bytes: Vec<u8>,
+    alignment: u64,
+) -> Result<DataId, String> {
+    let data_id = module
+        .declare_data(symbol, Linkage::Export, true, false)
+        .map_err(|error| format!("failed to declare standalone storage '{symbol}': {error}"))?;
+    let mut description = DataDescription::new();
+    description.define(bytes.into_boxed_slice());
+    description.set_align(alignment);
+    module
+        .define_data(data_id, &description)
+        .map_err(|error| format!("failed to define standalone storage '{symbol}': {error}"))?;
+    Ok(data_id)
+}
+
+fn build_aot_direct_storage_bindings(
+    global_path_types: &GlobalPathTypeMap,
+    collection_infos: &CollectionInfoMap,
+    type_table: &TypeTable,
+) -> Result<DirectStorageBindings, String> {
+    let mut bindings = DirectStorageBindings::default();
+    for (path, type_id) in global_path_types {
+        if collection_infos.contains_key(path) {
+            continue;
+        }
+        if type_table
+            .type_info(*type_id)
+            .is_some_and(|info| info.category == TypeCategory::Named)
+            && !is_named_scalar_state_path(path, *type_id, global_path_types, type_table)
+        {
+            continue;
+        }
+        if aot_scalar_lane(*type_id, type_table).is_some() {
+            bindings.scalars.insert(
+                path.clone(),
+                DirectStorageBinding::Symbol(aot_storage_symbol(path, "")),
+            );
+        }
+    }
+    for (path, info) in collection_infos {
+        if let Some(type_id) = info.element_type {
+            let lane =
+                aot_array_lane(path, type_id, global_path_types, type_table).ok_or_else(|| {
+                    format!("unsupported AOT direct storage element type {type_id} for '{path}'")
+                })?;
+            bindings.arrays.insert(
+                (path.clone(), String::new()),
+                crate::backend::emit::DirectArrayStorageBinding {
+                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(path, "")),
+                    storage_bytes: aot_lane_bytes(lane),
+                    static_len: Some(info.len as usize),
+                },
+            );
+        }
+        for (field, type_id) in &info.field_types {
+            let lane =
+                aot_array_lane(path, *type_id, global_path_types, type_table).ok_or_else(|| {
+                    format!(
+                        "unsupported AOT direct storage field type {type_id} for '{path}.{field}'"
+                    )
+                })?;
+            bindings.arrays.insert(
+                (path.clone(), field.clone()),
+                crate::backend::emit::DirectArrayStorageBinding {
+                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(path, field)),
+                    storage_bytes: aot_lane_bytes(lane),
+                    static_len: Some(info.len as usize),
+                },
+            );
+        }
+    }
+    Ok(bindings)
+}
+
+fn aot_lane_bytes(lane: &str) -> u8 {
+    match lane {
+        "u8" => 1,
+        "u16" => 2,
+        "f64" => 8,
+        _ => 4,
+    }
+}
+
 fn compile_function_to_object_bytes(
     meta: &FunctionMeta,
     hir: &FunctionHIR,
@@ -546,10 +1209,13 @@ fn compile_function_to_object_bytes(
     type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
-    string_literals: &mut BTreeMap<i32, String>,
+    referenced_string_literals: &mut BTreeMap<i32, String>,
     target: &stasis_jit::AotTarget,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    data_flow_summary: Option<&crate::data_flow::FunctionDataFlowSummary>,
+    direct_storage: &DirectStorageBindings,
+    profile_instrumentation: bool,
 ) -> Result<Vec<u8>, String> {
     let mut flag_builder = settings::builder();
     flag_builder
@@ -597,7 +1263,12 @@ fn compile_function_to_object_bytes(
         constant_values,
         collection_infos,
         named_struct_field_types,
-        |statement| record_string_literals_in_stmt(statement, string_literals),
+        data_flow_summary,
+        Some(direct_storage),
+        None,
+        false,
+        profile_instrumentation,
+        |statement| record_string_literals_in_stmt(statement, referenced_string_literals),
         |_meta, _func| {
             #[cfg(test)]
             maybe_invoke_clif_dump_hook(_meta, _func);
@@ -605,7 +1276,12 @@ fn compile_function_to_object_bytes(
         |mut module, function_id, mut context| {
             module
                 .define_function(function_id, &mut context)
-                .map_err(|error| format!("failed to define AOT function {symbol}: {error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "failed to define AOT function {symbol} ({name}): {error:?}",
+                        name = meta.name
+                    )
+                })?;
             module.clear_context(&mut context);
             module
                 .finish()
@@ -724,7 +1400,8 @@ fn record_string_literals_in_expr(
     out: &mut BTreeMap<i32, String>,
 ) -> Result<(), String> {
     match expression {
-        SimpleExpr::Int(_)
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::Identifier(_) => Ok(()),
@@ -848,7 +1525,7 @@ fn json_escape(value: &str) -> String {
 fn build_engine_bundle_manifest(
     optimization_profile: AotOptimizationProfile,
     entrypoints: &EngineEntrypoints,
-    rows: &[(String, String, String)],
+    rows: &[(FunctionId, String, String, String, String, u16)],
     string_literals: &BTreeMap<i32, String>,
     collection_max_lengths: &BTreeMap<String, i32>,
 ) -> String {
@@ -877,13 +1554,18 @@ fn build_engine_bundle_manifest(
     }
     out.push_str("  },\n");
     out.push_str("  \"functions\": [\n");
-    for (index, (name, symbol, object_file)) in rows.iter().enumerate() {
+    for (index, (function_id, symbol_id, name, symbol, object_file, return_type)) in
+        rows.iter().enumerate()
+    {
         let comma = if index + 1 < rows.len() { "," } else { "" };
         out.push_str(&format!(
-            "    {{\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\"}}{}\n",
+            "    {{\"function_id\":{},\"symbol_id\":\"{}\",\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\",\"return_type\":{}}}{}\n",
+            function_id,
+            json_escape(symbol_id),
             json_escape(name),
             json_escape(symbol),
             json_escape(object_file),
+            return_type,
             comma
         ));
     }
@@ -919,13 +1601,476 @@ fn build_engine_bundle_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aot_rejects_invalid_unreachable_function_body() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "dead.stasis",
+            "function main(): i32 { return 0; }\nfunction unfinished(): i32 { while (true) { return 1; } }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject invalid dead code");
+        assert!(
+            format!("{error:?}").contains("while"),
+            "unexpected diagnostic: {error:?}"
+        );
+        assert!(process.program_snapshot().is_none());
+        assert!(process.artifacts().is_empty());
+    }
+
+    #[test]
+    fn aot_enforces_the_same_effect_contracts_as_jit() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function helper(value: State): void { value.value += 1; } function @effects(state) tick(): i32 { helper(state); return state.value; } function main(): i32 { state.value = 4; return tick(); }",
+        );
+        process.compile().expect("compliant AOT contract");
+
+        process.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; global other: i32; function helper(): void { other += 1; } function @effects(state) tick(): i32 { helper(); return state.value; } function main(): i32 { return tick(); }",
+        );
+        let error = process.compile().expect_err("AOT contract violation");
+        assert!(format!("{error:?}").contains("tick -> helper"));
+    }
     use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
-    use object::{Architecture, BinaryFormat, File, Object, ObjectSection, RelocationKind};
+    use object::{
+        Architecture, BinaryFormat, File, Object, ObjectSection, ObjectSymbol, RelocationKind,
+    };
     #[cfg(windows)]
     use std::process::Command;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static CLIF_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(windows)]
+    fn sign_test_executable(path: &Path) {
+        sign_test_artifact(path, false);
+    }
+
+    #[cfg(windows)]
+    fn sign_page_hashed_test_executable(path: &Path) {
+        sign_test_artifact(path, true);
+    }
+
+    #[cfg(windows)]
+    fn sign_test_artifact(path: &Path, page_hashes: bool) {
+        let Some(sign_tool) =
+            std::env::var_os("STASIS_AOT_SIGN_TOOL").filter(|tool| !tool.is_empty())
+        else {
+            assert_ne!(
+                std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").as_deref(),
+                Some(std::ffi::OsStr::new("1")),
+                "signed execution is required but STASIS_AOT_SIGN_TOOL is not set"
+            );
+            return;
+        };
+        let mut command = Command::new(&sign_tool);
+        command.arg(path);
+        if page_hashes {
+            command.env("STASIS_SIGN_PAGE_HASHES", "1");
+        } else {
+            command.env_remove("STASIS_SIGN_PAGE_HASHES");
+        }
+        let status = command.status().unwrap_or_else(|error| {
+            panic!(
+                "failed to launch signer {:?} for {}: {error}",
+                sign_tool,
+                path.display()
+            )
+        });
+        assert!(
+            status.success(),
+            "signer {:?} failed for {} with status {:?}",
+            sign_tool,
+            path.display(),
+            status.code()
+        );
+    }
+
+    #[cfg(windows)]
+    fn run_signed_test_executable(
+        path: &Path,
+        environment: &[(&str, &Path)],
+    ) -> std::process::ExitStatus {
+        let launch = || {
+            Command::new(path)
+                .envs(environment.iter().map(|(name, value)| (*name, *value)))
+                .status()
+        };
+        sign_test_executable(path);
+        match launch() {
+            Ok(status) => status,
+            Err(error) if error.raw_os_error() == Some(4551) => {
+                sign_page_hashed_test_executable(path);
+                launch().unwrap_or_else(|retry_error| {
+                    panic!(
+                        "failed to run {} after page-hash signing retry: {retry_error}",
+                        path.display()
+                    )
+                })
+            }
+            Err(error) => panic!("failed to run {}: {error}", path.display()),
+        }
+    }
+
+    const GFX_CAPACITY_FIXTURE: &str =
+        include_str!("../../../../tests/stasis/seams/gfx_cmd_capacity_probe.stasis");
+    const ASSET_EXTERN_FIXTURE: &str =
+        include_str!("../../../../tests/stasis/seams/asset_extern_abi_probe.stasis");
+    const GFX_CMD_SOURCE: &str = include_str!("../../../../src/stdlib/internal/gfx_cmd.stasis");
+    const GFX_CAPACITY_TRACE_ROOTS: [&str; 10] = [
+        "trace_geometry_capacity",
+        "trace_sprite_capacity",
+        "trace_cached_text_capacity",
+        "probe_raw_text_source",
+        "probe_direct_memcpy_destination",
+        "probe_parameter_memcpy_destination",
+        "probe_raw_text_metadata",
+        "probe_raw_text_destination",
+        "trace_raw_text_capacity",
+        "trace_text_capacity",
+    ];
+
+    struct GfxCapacityResult {
+        trace: i32,
+        i32s: Vec<i32>,
+        f32s: Vec<f32>,
+        u8s: Vec<u8>,
+        canaries_intact: bool,
+        stage_traces: Vec<i32>,
+    }
+
+    fn run_gfx_capacity_jit(gfx_source: &str) -> GfxCapacityResult {
+        const I32_COUNT: usize = 34_608;
+        const F32_COUNT: usize = 125_060;
+        const U8_COUNT: usize = 65_536;
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&GFX_CAPACITY_TRACE_ROOTS.map(str::to_string));
+        jit.set_project_root(project_root.to_string_lossy())
+            .expect("set project root");
+        jit.upsert_file(
+            "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
+            GFX_CAPACITY_FIXTURE,
+        );
+        jit.upsert_file("src/stdlib/internal/gfx_cmd.stasis", gfx_source);
+        jit.compile().expect("compile gfx capacity JIT fixture");
+
+        let mut i32_storage = vec![0; I32_COUNT + 2];
+        i32_storage[0] = 0x1357_2468;
+        i32_storage[I32_COUNT + 1] = 0x1357_2468;
+        let i32s = Box::leak(i32_storage.into_boxed_slice());
+        let mut f32_storage = vec![0.0; F32_COUNT + 2];
+        f32_storage[0] = f32::from_bits(0x4a55_aa55);
+        f32_storage[F32_COUNT + 1] = f32::from_bits(0x4a55_aa55);
+        let f32s = Box::leak(f32_storage.into_boxed_slice());
+        let mut u8_storage = vec![0; U8_COUNT + 2];
+        u8_storage[0] = 0xa5;
+        u8_storage[U8_COUNT + 1] = 0xa5;
+        let u8s = Box::leak(u8_storage.into_boxed_slice());
+        stasis_dynload::register_global_i32_array(
+            stasis_dynload::global_path_hash("gfx_cmd_i32"),
+            0,
+            i32s[1..=I32_COUNT].as_mut_ptr(),
+            I32_COUNT,
+        );
+        stasis_dynload::register_global_f32_array(
+            stasis_dynload::global_path_hash("gfx_cmd_f32"),
+            0,
+            f32s[1..=F32_COUNT].as_mut_ptr(),
+            F32_COUNT,
+        );
+        stasis_dynload::register_global_u8_array(
+            stasis_dynload::global_path_hash("gfx_cmd_u8"),
+            0,
+            u8s[1..=U8_COUNT].as_mut_ptr(),
+            U8_COUNT,
+        );
+        let trace = jit
+            .execute_i32_noarg_by_name("main")
+            .expect("execute gfx capacity JIT fixture");
+        let result_i32s = i32s[1..=I32_COUNT].to_vec();
+        let result_f32s = f32s[1..=F32_COUNT].to_vec();
+        let result_u8s = u8s[1..=U8_COUNT].to_vec();
+        let stage_traces = GFX_CAPACITY_TRACE_ROOTS
+            .iter()
+            .map(|name| {
+                jit.execute_i32_noarg_by_name(name)
+                    .unwrap_or_else(|error| panic!("execute {name}: {error}"))
+            })
+            .collect();
+        let canaries_intact = i32s[0] == 0x1357_2468
+            && i32s[I32_COUNT + 1] == 0x1357_2468
+            && f32s[0].to_bits() == 0x4a55_aa55
+            && f32s[F32_COUNT + 1].to_bits() == 0x4a55_aa55
+            && u8s[0] == 0xa5
+            && u8s[U8_COUNT + 1] == 0xa5;
+        GfxCapacityResult {
+            trace,
+            i32s: result_i32s,
+            f32s: result_f32s,
+            u8s: result_u8s,
+            canaries_intact,
+            stage_traces,
+        }
+    }
+
+    fn verify_gfx_capacity(result: &GfxCapacityResult) -> Result<(), String> {
+        let checks = [
+            ("line_count", 3, 5_000),
+            ("dropped_lines", 5, 1),
+            ("sprite_count", 4, 4_096),
+            ("dropped_sprites", 6, 1),
+            ("text_count", 7, 2_048),
+            ("dropped_text", 8, 2),
+            ("text_bytes_used", 9, 65_536),
+            ("order_count", 22, 16_144),
+            ("dropped_order", 23, 1),
+            ("rect_count", 24, 5_000),
+            ("dropped_rects", 25, 1),
+        ];
+        for (field, index, expected) in checks {
+            let actual = result.i32s[index];
+            if actual != expected {
+                return Err(format!("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field={field} expected={expected} actual={actual}"));
+            }
+        }
+        if !result.canaries_intact {
+            return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=host_buffers field=canaries expected=intact actual=modified".to_string());
+        }
+        if result.f32s[40_003].to_bits() != 1.0f32.to_bits()
+            || result.f32s[40_004].to_bits() != 5.0f32.to_bits()
+        {
+            return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=geometry_arena_boundary expected=adjacent actual=overlap".to_string());
+        }
+        if result.i32s[34_607] != 51_199 || result.u8s[65_535] != 0 {
+            return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=terminal_entries expected=written actual=missing".to_string());
+        }
+        if result.trace == 0 {
+            return Err(format!("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=trace expected=nonzero actual=0 stages={:?}", result.stage_traces));
+        }
+        Ok(())
+    }
+
+    fn gfx_capacity_evidence_path() -> PathBuf {
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target")
+            })
+            .join("seam-tests/it-003-gfx-capacity.json")
+    }
+
+    #[test]
+    fn gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace() {
+        use sha2::{Digest, Sha256};
+
+        let jit_result = run_gfx_capacity_jit(GFX_CMD_SOURCE);
+        verify_gfx_capacity(&jit_result).expect("canonical gfx capacity probe");
+
+        let mutated = GFX_CMD_SOURCE.replacen(
+            "const GFX_MAX_SPRITES: i32 = 4096;",
+            "const GFX_MAX_SPRITES: i32 = 4095;",
+            1,
+        );
+        assert_ne!(mutated, GFX_CMD_SOURCE, "capacity mutation must apply");
+        let mutation_error = verify_gfx_capacity(&run_gfx_capacity_jit(&mutated))
+            .expect_err("capacity drift must fail");
+        assert_eq!(
+            mutation_error,
+            "gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=sprite_count expected=4096 actual=4095"
+        );
+
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut aot = AotProcess::new();
+        aot.set_required_emit_roots(&GFX_CAPACITY_TRACE_ROOTS.map(str::to_string));
+        aot.set_project_root(project_root.to_string_lossy())
+            .expect("set AOT project root");
+        aot.upsert_file(
+            "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
+            GFX_CAPACITY_FIXTURE,
+        );
+        aot.upsert_file("src/stdlib/internal/gfx_cmd.stasis", GFX_CMD_SOURCE);
+        aot.compile().expect("compile gfx capacity AOT fixture");
+        let state_layout = aot.state_layout();
+        for (path, expected) in [("full_text", 1_024), ("tail_text", 960)] {
+            let collection = state_layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == path)
+                .unwrap_or_else(|| panic!("missing fixed-text storage layout for {path}"));
+            assert_eq!(
+                collection.capacity, expected,
+                "fixed-text storage capacity drift for {path}"
+            );
+            assert_eq!(
+                collection.fields[0].storage_type_name, "u8",
+                "fixed-text standalone storage lane drift for {path}"
+            );
+        }
+
+        #[allow(unused_mut)]
+        let mut linked_aot_checks = 0usize;
+        #[cfg(windows)]
+        if let Some(link_config) = resolve_link_config_for_smoke() {
+            for (index, name) in GFX_CAPACITY_TRACE_ROOTS.iter().enumerate() {
+                if let Some(aot_trace) =
+                    run_linked_i32_noarg_fixture(&aot, name, name, &link_config)
+                {
+                    assert_eq!(
+                        aot_trace, jit_result.stage_traces[index],
+                        "JIT/AOT native trace drift in {name}"
+                    );
+                    linked_aot_checks += 1;
+                }
+            }
+            if let Some(aot_trace) =
+                run_linked_i32_noarg_fixture(&aot, "main", "gfx_capacity", &link_config)
+            {
+                assert_eq!(aot_trace, jit_result.trace, "JIT/AOT native trace drift");
+                linked_aot_checks += 1;
+            }
+        }
+
+        let stage_traces: BTreeMap<_, _> = GFX_CAPACITY_TRACE_ROOTS
+            .iter()
+            .copied()
+            .zip(jit_result.stage_traces.iter().copied())
+            .collect();
+        let fixture_revision = format!(
+            "{:x}",
+            Sha256::digest([GFX_CMD_SOURCE, GFX_CAPACITY_FIXTURE].concat())
+        );
+        let evidence = serde_json::json!({
+            "schema": "stasis.seam_test.v1",
+            "test_id": "IT-003",
+            "status": "passed",
+            "target": "jit+aot+native-trace",
+            "fixture_revision": fixture_revision,
+            "checks": 20 + linked_aot_checks,
+            "linked_aot_checks": linked_aot_checks,
+            "oracle": {
+                "line_count": 5000,
+                "rect_count": 5000,
+                "sprite_count": 4096,
+                "text_count": 2048,
+                "text_bytes_used": 65536,
+                "order_count": 16144,
+                "dropped": {
+                    "lines": 1,
+                    "rects": 1,
+                    "sprites": 1,
+                    "text": 2,
+                    "order": 1
+                },
+                "native_trace": jit_result.trace,
+                "stage_traces": stage_traces,
+                "canaries": "intact",
+                "mutation_diagnostic": mutation_error
+            }
+        });
+        let path = gfx_capacity_evidence_path();
+        fs::create_dir_all(path.parent().expect("evidence directory"))
+            .expect("create evidence directory");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+        )
+        .expect("write evidence");
+    }
+
+    #[test]
+    fn aot_failed_candidate_preserves_accepted_snapshot_and_artifacts() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "global score: i32; function main(): i32 { return score; }",
+        );
+        process.compile().expect("initial compile");
+        let snapshot = process
+            .program_snapshot()
+            .expect("accepted snapshot")
+            .clone();
+        let artifacts = process.artifacts.clone();
+        let object_bytes = process.object_bytes.clone();
+
+        process.upsert_file(
+            "main.stasis",
+            "global score: i32; function main(): i32 { return missing(); }",
+        );
+        process.compile().expect_err("candidate must fail");
+
+        let accepted = process.program_snapshot().expect("preserved snapshot");
+        assert_eq!(accepted.source_revision(), snapshot.source_revision());
+        assert_eq!(accepted.functions(), snapshot.functions());
+        assert_eq!(accepted.layout_digest(), snapshot.layout_digest());
+        assert_eq!(accepted.artifact_mappings(), snapshot.artifact_mappings());
+        assert_eq!(process.artifacts, artifacts);
+        assert_eq!(process.object_bytes, object_bytes);
+    }
+
+    #[test]
+    fn duplicate_host_alias_rejects_candidate_and_preserves_active_aot_identity() {
+        let mut process = AotProcess::new();
+        process.upsert_file("src/main.stasis", "function main(): i32 { return 17; }\n");
+        process.compile().expect("compile accepted generation");
+        let accepted_snapshot = process.program_snapshot().expect("snapshot").clone();
+        let accepted_artifacts = process.artifacts().to_vec();
+
+        process.upsert_file(
+            "src/duplicate.stasis",
+            "function main(): i32 { return 99; }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("duplicate host alias must fail");
+
+        assert!(matches!(
+            error,
+            crate::compiler::CompileError::Backend(message)
+                if message.contains("host ABI alias 'main' requires exactly one canonical identity")
+        ));
+        assert_eq!(
+            process
+                .program_snapshot()
+                .expect("active snapshot")
+                .functions(),
+            accepted_snapshot.functions()
+        );
+        assert_eq!(process.artifacts(), accepted_artifacts);
+    }
+
+    #[test]
+    fn aot_transaction_restores_accepted_object_buffers_without_cloning() {
+        let mut process = AotProcess::new();
+        process.upsert_file("main.stasis", "function main(): i32 { return 1; }");
+        process.compile().expect("initial compile");
+        let addresses = process
+            .object_bytes
+            .iter()
+            .map(|bytes| bytes.as_ptr())
+            .collect::<Vec<_>>();
+        process.upsert_file("main.stasis", "function main(): i32 { return missing(); }");
+        process.compile().expect_err("reject candidate");
+        assert_eq!(
+            process
+                .object_bytes
+                .iter()
+                .map(|bytes| bytes.as_ptr())
+                .collect::<Vec<_>>(),
+            addresses,
+            "rejected AOT candidates must restore the original object buffers by move, not clone"
+        );
+    }
 
     struct ParityCorpusCase {
         label: &'static str,
@@ -937,12 +2082,262 @@ mod tests {
         expected_clif_markers: &'static [(&'static str, &'static [&'static str])],
     }
 
+    const RENDER_TRACE_FIXTURE: &str = concat!(
+        include_str!("../../../../samples/render_parity/frame.stasis"),
+        include_str!("../../../../samples/render_parity/trace.stasis")
+    );
+
+    #[cfg(windows)]
+    fn ensure_test_dynload_artifacts(deps_dir: &Path) -> (PathBuf, PathBuf) {
+        let find_artifacts = || {
+            [
+                deps_dir,
+                deps_dir.parent().expect("Cargo profile directory"),
+            ]
+            .into_iter()
+            .find_map(|directory| {
+                let import_library = directory.join("stasis_dynload.dll.lib");
+                let runtime_dll = directory.join("stasis_dynload.dll");
+                (import_library.is_file() && runtime_dll.is_file())
+                    .then_some((import_library, runtime_dll))
+            })
+        };
+        if let Some(artifacts) = find_artifacts() {
+            return artifacts;
+        }
+
+        let profile_dir = deps_dir.parent().expect("Cargo profile directory");
+        let target_dir = profile_dir.parent().expect("Cargo target directory");
+        let mut command = Command::new("cargo");
+        command.arg("build").arg("-p").arg("stasis_dynload");
+        if profile_dir.file_name().and_then(|name| name.to_str()) == Some("release") {
+            command.arg("--release");
+        }
+        let output = command
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .env("CARGO_TARGET_DIR", target_dir)
+            .output()
+            .expect("build stasis_dynload test runtime");
+        assert!(
+            output.status.success(),
+            "failed to build stasis_dynload test runtime\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        find_artifacts().expect("stasis_dynload build did not produce DLL and import library")
+    }
+
     #[cfg(windows)]
     fn run_linked_i32_noarg_fixture(
         process: &AotProcess,
         function_name: &str,
         label: &str,
         link_config: &stasis_jit::AotLinkConfig,
+    ) -> Option<i32> {
+        run_linked_i32_noarg_fixture_with_env(process, function_name, label, link_config, &[])
+    }
+
+    struct AssetExternRecorderReset;
+
+    impl Drop for AssetExternRecorderReset {
+        fn drop(&mut self) {
+            std::env::remove_var(stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV);
+        }
+    }
+
+    fn text_hex(text: &str) -> String {
+        text.as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn expected_asset_extern_calls() -> Vec<String> {
+        vec![
+            format!(
+                "stasis.asset_extern.v1\tload_sprite\t{}\t47\t29\t101",
+                text_hex("assets/球.png")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tload_font\t{}\t19\t202",
+                text_hex("fonts/Ångström.ttf")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text\t202\t{}\t{}",
+                text_hex("héllo 世界"),
+                18.75_f32.to_bits()
+            ),
+            format!(
+                "stasis.asset_extern.v1\tcache_text\t202\t{}\t303",
+                text_hex("cached ✓")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text_cached\t303\t{}",
+                44.5_f32.to_bits()
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text_cached_height\t303\t{}",
+                12.25_f32.to_bits()
+            ),
+            "stasis.asset_extern.v1\tpoll_reload\t101\t1".to_string(),
+            format!(
+                "stasis.asset_extern.v1\tdump_bmp\t{}\t11",
+                text_hex("captures/帧.bmp")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tdump_png\t{}\t12",
+                text_hex("captures/帧.png")
+            ),
+        ]
+    }
+
+    fn read_asset_extern_calls(path: &Path) -> Vec<String> {
+        fs::read_to_string(path)
+            .unwrap_or_else(|error| {
+                panic!("read asset extern evidence {}: {error}", path.display())
+            })
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn seam_evidence_path(name: &str) -> PathBuf {
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target")
+            })
+            .join("seam-tests")
+            .join(name)
+    }
+
+    fn assert_asset_extern_diagnostic(source: &str, expected_fragment: &str) {
+        let mut jit = JitProcess::new();
+        jit.upsert_file("asset_extern_diagnostic.stasis", source);
+        let jit_error = jit.compile().expect_err("invalid JIT extern must fail");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("asset_extern_diagnostic.stasis", source);
+        let aot_error = aot.compile().expect_err("invalid AOT extern must fail");
+
+        assert_eq!(jit_error, aot_error, "JIT/AOT extern diagnostic parity");
+        let diagnostic = format!("{jit_error:?}");
+        assert!(
+            diagnostic.contains(expected_fragment),
+            "diagnostic {diagnostic:?} must contain {expected_fragment:?}"
+        );
+    }
+
+    #[test]
+    fn startup_asset_externs_match_jit_and_linked_aot_recording_host() {
+        let evidence_root = seam_evidence_path("it-004-asset-extern.json")
+            .parent()
+            .expect("evidence directory")
+            .to_path_buf();
+        fs::create_dir_all(&evidence_root).expect("create seam evidence directory");
+        let jit_calls_path = evidence_root.join("it-004-jit.calls");
+        let aot_calls_path = evidence_root.join("it-004-aot.calls");
+        let _ = fs::remove_file(&jit_calls_path);
+        let _ = fs::remove_file(&aot_calls_path);
+
+        let _reset = AssetExternRecorderReset;
+        std::env::set_var(
+            stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV,
+            &jit_calls_path,
+        );
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "tests/stasis/seams/asset_extern_abi_probe.stasis",
+            ASSET_EXTERN_FIXTURE,
+        );
+        jit.compile().expect("compile asset extern JIT fixture");
+        let jit_exit = jit
+            .execute_i32_noarg_by_name("main")
+            .expect("execute asset extern JIT fixture");
+        std::env::remove_var(stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV);
+        assert_eq!(jit_exit, 79, "JIT asset extern fixture result");
+        let expected_calls = expected_asset_extern_calls();
+        assert_eq!(read_asset_extern_calls(&jit_calls_path), expected_calls);
+        drop(jit);
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file(
+            "tests/stasis/seams/asset_extern_abi_probe.stasis",
+            ASSET_EXTERN_FIXTURE,
+        );
+        aot.compile().expect("compile asset extern AOT fixture");
+        let resolved: BTreeMap<_, _> = aot
+            .program_snapshot()
+            .expect("asset extern AOT snapshot")
+            .analysis
+            .resolved_extern_signatures
+            .iter()
+            .map(|signature| (signature.name.as_str(), signature.symbol.as_str()))
+            .collect();
+        for (name, symbol) in [
+            ("gfx_poll_reload", "stasis_gfx_poll_reload"),
+            ("gfx_dump_bmp", "stasis_jit_gfx_dump_bmp"),
+            ("gfx_dump_png", "stasis_jit_gfx_dump_png"),
+            ("load_font", "stasis_jit_load_font"),
+            ("measure_text", "stasis_jit_measure_text"),
+            ("load_sprite_from", "stasis_jit_sprite_load_from"),
+            ("load_text_from", "stasis_jit_text_run_load_from"),
+        ] {
+            assert_eq!(resolved.get(name).copied(), Some(symbol));
+        }
+
+        #[allow(unused_mut)]
+        let mut linked_aot = false;
+        #[cfg(windows)]
+        if let Some(link_config) = resolve_link_config_for_smoke() {
+            let aot_exit = run_linked_i32_noarg_fixture_with_env(
+                &aot,
+                "main",
+                "asset_extern_abi",
+                &link_config,
+                &[(
+                    stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV,
+                    aot_calls_path.as_path(),
+                )],
+            )
+            .expect("linked asset extern AOT fixture");
+            assert_eq!(aot_exit, jit_exit, "asset extern JIT/AOT result parity");
+            assert_eq!(read_asset_extern_calls(&aot_calls_path), expected_calls);
+            linked_aot = true;
+        }
+
+        let evidence_path = seam_evidence_path("it-004-asset-extern.json");
+        fs::write(
+            &evidence_path,
+            format!(
+                "{{\"schema\":\"stasis.seam_test.v1\",\"test\":\"IT-004\",\"jit_exit\":{jit_exit},\"recorded_calls\":{},\"linked_aot\":{linked_aot}}}\n",
+                expected_calls.len()
+            ),
+        )
+        .expect("write asset extern seam evidence");
+
+        let missing_declaration = ASSET_EXTERN_FIXTURE.replace(
+            "extern function load_font(path: string, size: i32): i32;",
+            "",
+        );
+        assert_ne!(missing_declaration, ASSET_EXTERN_FIXTURE);
+        assert_asset_extern_diagnostic(&missing_declaration, "load_font");
+        let wrong_signature = ASSET_EXTERN_FIXTURE.replace(
+            "extern function load_font(path: string, size: i32): i32;",
+            "extern function load_font(path: string, size: f32): i32;",
+        );
+        assert_asset_extern_diagnostic(&wrong_signature, "load_font");
+    }
+
+    #[cfg(windows)]
+    fn run_linked_i32_noarg_fixture_with_env(
+        process: &AotProcess,
+        function_name: &str,
+        label: &str,
+        link_config: &stasis_jit::AotLinkConfig,
+        environment: &[(&str, &Path)],
     ) -> Option<i32> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -951,8 +2346,22 @@ mod tests {
         let temp_root = std::env::temp_dir().join(format!("stasis_aot_fixture_{label}_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let exe_path = temp_root.join(format!("{function_name}_{label}.exe"));
-        let link_result =
-            process.link_executable_for_i32_noarg_function(function_name, &exe_path, link_config);
+        let mut effective_config = link_config.clone();
+        let deps_dir = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("Cargo deps directory")
+            .to_path_buf();
+        let (import_library, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
+        effective_config.runtime_lib_paths.push(import_library);
+        let copied_runtime_dll = temp_root.join("stasis_dynload.dll");
+        fs::copy(&runtime_dll, &copied_runtime_dll).expect("copy AOT test runtime");
+        sign_test_executable(&copied_runtime_dll);
+        let link_result = process.link_executable_for_i32_noarg_function(
+            function_name,
+            &exe_path,
+            &effective_config,
+        );
         if let Err(ref message) = link_result {
             if message.contains("undefined symbol") {
                 eprintln!(
@@ -964,15 +2373,14 @@ mod tests {
         }
         link_result.expect("link executable");
 
-        let status = Command::new(&exe_path)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, environment);
         let code = status.code().expect("expected process exit code");
         let _ = fs::remove_dir_all(&temp_root);
         Some(code)
     }
 
     fn capture_aot_clif_by_function(process: &mut AotProcess) -> BTreeMap<String, String> {
+        let _capture_lock = CLIF_CAPTURE_LOCK.lock().expect("lock CLIF capture");
         let captured: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(BTreeMap::new()));
         let captured_hook = Arc::clone(&captured);
         set_clif_dump_hook(Some(Box::new(move |meta, func| {
@@ -1006,7 +2414,23 @@ mod tests {
                 expected_extern_symbols: &[],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[("nums", 3)],
-                expected_clif_markers: &[("main", &["call", "iadd"])],
+                expected_clif_markers: &[("main", &["load.i32", "store", "iadd"])],
+            },
+            ParityCorpusCase {
+                label: "renderer_command_trace",
+                source: RENDER_TRACE_FIXTURE,
+                expected_exit: 1_390_729_377,
+                expected_extern_symbols: &[(
+                    "native_render_trace",
+                    "stasis_jit_render_v2_trace",
+                )],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[
+                    ("cmd_i32", 34_608),
+                    ("cmd_f32", 108_676),
+                    ("cmd_u8", 65_536),
+                ],
+                expected_clif_markers: &[("main", &["call"])],
             },
             ParityCorpusCase {
                 label: "control_flow_branching",
@@ -1018,6 +2442,15 @@ mod tests {
                 expected_clif_markers: &[("main", &["brif", "jump"])],
             },
             ParityCorpusCase {
+                label: "deterministic_numerics",
+                source: include_str!("../../../../samples/deterministic_numerics/main.stasis"),
+                expected_exit: 0,
+                expected_extern_symbols: &[],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[],
+                expected_clif_markers: &[("main", &["icmp", "sdiv"])],
+            },
+            ParityCorpusCase {
                 label: "struct_view_abi",
                 source: "const COUNT: i32 = 3;\nstruct Enemy { hp: i32; }\nglobal enemies: Enemy[COUNT];\nfunction mutate(arr: Enemy[], idx: i32): i32 {\n    arr[idx].hp = 10;\n    arr[idx + 1].hp = arr[idx].hp + 4;\n    return arr[idx + 1].hp;\n}\nfunction main(): i32 { return mutate(enemies, 0); }\n",
                 expected_exit: 14,
@@ -1026,10 +2459,36 @@ mod tests {
                 expected_collection_max_lengths: &[("enemies", 3)],
                 expected_clif_markers: &[
                     ("main", &["call"]),
-                    ("mutate", &["call fn39", "call fn38", "iadd"]),
+                    ("mutate", &["call", "iadd"]),
                 ],
             },
+            ParityCorpusCase {
+                label: "known_soa_struct_helper_chain",
+                source: "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { items[0].value = 7; return middle(items[0]); }\n",
+                expected_exit: 7,
+                expected_extern_symbols: &[],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[("items", 1)],
+                expected_clif_markers: &[("main", &["call"]), ("leaf", &["call"])],
+            },
         ]
+    }
+
+    #[test]
+    fn aot_eliminates_storage_dispatch_through_known_soa_helper_chain() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { items[0].value = 7; return middle(items[0]); }\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        for function in ["leaf", "middle"] {
+            let clif = captured.get(function).expect("helper CLIF");
+            assert!(
+                !clif.contains("brif"),
+                "known SoA provenance retained storage dispatch in {function}:\n{clif}"
+            );
+        }
     }
 
     fn run_parity_corpus_case(case: &ParityCorpusCase) {
@@ -1050,10 +2509,11 @@ mod tests {
         aot.upsert_file("sample.stasis", case.source);
         let captured_clif = capture_aot_clif_by_function(&mut aot);
 
-        let analysis = aot
-            .compile_analysis_cache
+        let analysis = &aot
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         let resolved_externs: BTreeMap<_, _> = analysis
             .resolved_extern_signatures
             .iter()
@@ -1123,6 +2583,211 @@ mod tests {
     }
 
     #[test]
+    fn aot_lowers_core_global_storage_without_runtime_calls() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "direct_storage.stasis",
+            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction write_globals(): void {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    foreach (let byte in bytes) { byte += 1; }\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n}\nfunction read_globals(): i32 {\n    if (enemies[0].speed < 6.4) { return 2; }\n    return count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n}\nfunction main(): i32 { write_globals(); return read_globals(); }\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        let writer = captured.get("write_globals").expect("writer CLIF");
+        let reader = captured.get("read_globals").expect("reader CLIF");
+        assert!(
+            reader.contains("load.i32"),
+            "expected direct loads:\n{reader}"
+        );
+        assert!(
+            reader.contains("load.i8"),
+            "expected direct byte loads:\n{reader}"
+        );
+        assert!(
+            writer.contains("store"),
+            "expected direct stores:\n{writer}"
+        );
+        assert!(
+            writer.contains("ireduce.i8"),
+            "expected byte-width direct stores:\n{writer}"
+        );
+        for (name, clif) in [("writer", writer), ("reader", reader)] {
+            let has_call_instruction = clif.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("call ") || line.contains(" = call ")
+            });
+            assert!(
+                !has_call_instruction,
+                "core AOT global storage emitted a runtime call in {name}:\n{clif}"
+            );
+        }
+    }
+
+    #[test]
+    fn aot_elides_static_array_checks_only_for_in_bounds_literals() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "literal_bounds.stasis",
+            "global values: i32[4];\nfunction valid(): i32 { values[0] = 3; return values[1 + 2]; }\nfunction invalid(): i32 { return values[2 * 2]; }\nfunction main(): i32 { if (valid() < 0) { return invalid(); } return 0; }\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        let valid = captured.get("valid").expect("valid CLIF");
+        let invalid = captured.get("invalid").expect("invalid CLIF");
+        assert!(
+            !valid.contains("trapz"),
+            "in-bounds AOT literal retained bounds trap:\n{valid}"
+        );
+        assert!(
+            invalid.contains("trapz"),
+            "out-of-bounds AOT literal omitted fatal check:\n{invalid}"
+        );
+    }
+
+    #[test]
+    fn aot_dynamic_global_array_fallback_uses_runtime_helper_signature() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "dynamic_global_array.stasis",
+            "global values: i32[2];\nfunction read(index: i32, a: i32, b: i32, c: i32): i32 { return values[index]; }\nfunction main(): i32 { values[1] = 9; return read(1, 0, 0, 0); }\n",
+        );
+
+        process
+            .compile()
+            .expect("compile dynamic global array AOT fixture");
+        assert!(
+            undefined_runtime_symbols(&process).contains("stasis_jit_global_i32_array_load"),
+            "dynamic bounds fallback should reference the array-load runtime helper"
+        );
+    }
+
+    fn undefined_runtime_symbols(process: &AotProcess) -> BTreeSet<String> {
+        process
+            .object_bytes
+            .iter()
+            .flat_map(|bytes| {
+                let object = File::parse(bytes.as_slice()).expect("parse AOT object");
+                object
+                    .symbols()
+                    .filter(|symbol| symbol.is_undefined())
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .filter(|name| name.starts_with("stasis_jit_"))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pure_aot_function_exposes_no_runtime_helper_symbols() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "pure.stasis",
+            "function main(): i32 { let x: f32 = 10.0 + 2.5; if (x == 12.5) { return 0; } return 1; }\n",
+        );
+        process.compile().expect("compile pure AOT fixture");
+
+        assert_eq!(undefined_runtime_symbols(&process), BTreeSet::new());
+    }
+
+    #[test]
+    fn print_aot_function_exposes_only_referenced_runtime_helper_symbol() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "print.stasis",
+            "function main(): i32 { print_int(7); return 0; }\n",
+        );
+        process.compile().expect("compile print AOT fixture");
+
+        assert_eq!(
+            undefined_runtime_symbols(&process),
+            BTreeSet::from(["stasis_jit_print_i32".to_string()])
+        );
+    }
+
+    #[test]
+    fn selectively_profiled_aot_exposes_hooks_only_for_named_function() {
+        let mut process = AotProcess::new();
+        process
+            .set_profile_functions(["helper".to_string()])
+            .expect("configure AOT profiler");
+        process.upsert_file(
+            "profile.stasis",
+            "function helper(): i32 { return 7; }\nfunction main(): i32 { return helper(); }\n",
+        );
+        process.compile().expect("compile profiled AOT fixture");
+
+        assert_eq!(
+            undefined_runtime_symbols(&process),
+            BTreeSet::from([
+                "stasis_jit_profile_frame_enter".to_string(),
+                "stasis_jit_profile_frame_leave".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn standalone_aot_storage_defines_and_registers_direct_symbols() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "storage.stasis",
+            "global count: i32;\nglobal ints: i32[2];\nglobal bytes: u8[3];\nfunction main(): i32 { count = 1; ints[0] = 2; bytes[0] = 3; return 0; }\n",
+        );
+        process.compile().expect("compile");
+        let (bytes, wrapper) = process
+            .compile_standalone_storage_object("aot_fn_0")
+            .expect("storage object")
+            .expect("storage required");
+        let object = File::parse(bytes.as_slice()).expect("parse storage object");
+        let symbols: BTreeSet<String> = object
+            .symbols()
+            .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+            .collect();
+
+        assert_eq!(wrapper, "stasis_aot_standalone_entry");
+        for expected in [
+            "count",
+            "ints",
+            "bytes",
+            "stasis_aot_standalone_entry",
+            "stasis_jit_register_global_i32_ptr",
+            "stasis_jit_register_global_i32_array",
+            "stasis_jit_register_global_u8_array",
+            "aot_fn_0",
+        ] {
+            assert!(
+                symbols.contains(expected),
+                "standalone storage object missing symbol '{expected}': {symbols:?}"
+            );
+        }
+        #[cfg(windows)]
+        assert!(
+            symbols.contains("ExitProcess"),
+            "native Windows wrapper must terminate with the Stasis result: {symbols:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standalone_windows_entry_wraps_stateless_programs() {
+        let mut process = AotProcess::new();
+        process.upsert_file("main.stasis", "function main(): i32 { return 14; }\n");
+        process.compile().expect("compile stateless program");
+
+        let (bytes, wrapper) = process
+            .compile_standalone_storage_object("aot_fn_0")
+            .expect("standalone entry object")
+            .expect("native Windows entry wrapper required");
+        let object = File::parse(bytes.as_slice()).expect("parse entry object");
+        let symbols: BTreeSet<String> = object
+            .symbols()
+            .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+            .collect();
+
+        assert_eq!(wrapper, "stasis_aot_standalone_entry");
+        assert!(symbols.contains("aot_fn_0"), "missing Stasis entry import");
+        assert!(
+            symbols.contains("ExitProcess"),
+            "missing deterministic Windows process termination import"
+        );
+    }
+
+    #[test]
     fn aot_process_runs_full_compile_and_records_objects() {
         let mut process = AotProcess::new();
         process.upsert_file("sample.stasis", "function main(): i32 { return 7; }\n");
@@ -1154,13 +2819,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target"),
+                    message.contains("cannot resolve call 'helper'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -1231,10 +2896,11 @@ mod tests {
         );
 
         process.compile().expect("compile");
-        let analysis = process
-            .compile_analysis_cache
+        let analysis = &process
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         assert_eq!(analysis.resolved_extern_signatures.len(), 1);
         assert_eq!(
             analysis.resolved_extern_signatures[0].symbol,
@@ -1251,10 +2917,11 @@ mod tests {
         );
 
         process.compile().expect("compile");
-        let analysis = process
-            .compile_analysis_cache
+        let analysis = &process
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         assert_eq!(analysis.resolved_extern_signatures.len(), 1);
         assert_eq!(
             analysis.resolved_extern_signatures[0].symbol,
@@ -1271,10 +2938,11 @@ mod tests {
         );
 
         process.compile().expect("compile");
-        let analysis = process
-            .compile_analysis_cache
+        let analysis = &process
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         assert_eq!(analysis.resolved_extern_signatures.len(), 2);
         assert_eq!(
             analysis.resolved_extern_signatures[0].symbol,
@@ -1284,6 +2952,68 @@ mod tests {
             analysis.resolved_extern_signatures[1].symbol,
             "stasis_jit_audio_init"
         );
+    }
+
+    #[test]
+    fn aot_process_accepts_brickout_compatible_audio_asset_api() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "audio_asset_api.stasis",
+            "function @extern(\"stasis_jit_audio_load_music\") audio_load_music(path: string): i32;\nfunction @extern(\"stasis_jit_audio_load_effect\") audio_load_effect(path: string): i32;\nfunction @extern(\"stasis_jit_audio_play_music\") audio_play_music(handle: i32, loop: bool, volume: f32): bool;\nfunction @extern(\"stasis_jit_audio_pause_music\") audio_pause_music(handle: i32, paused: bool): void;\nfunction @extern(\"stasis_jit_audio_set_music_volume\") audio_set_music_volume(handle: i32, volume: f32): void;\nfunction @extern(\"stasis_jit_audio_stop_music\") audio_stop_music(handle: i32): void;\nfunction @extern(\"stasis_jit_audio_play_effect\") audio_play_effect(handle: i32, volume: f32): bool;\nfunction main(): i32 { let music: i32 = audio_load_music(\"music.wav\"); let effect: i32 = audio_load_effect(\"effect.wav\"); audio_play_music(music, true, 0.4); audio_pause_music(music, true); audio_set_music_volume(music, 0.2); audio_stop_music(music); audio_play_effect(effect, 0.5); return music + effect; }\n",
+        );
+        process.compile().expect("aot compile audio asset API");
+        let signatures = &process
+            .program_snapshot
+            .as_ref()
+            .expect("program snapshot")
+            .analysis
+            .resolved_extern_signatures;
+        assert_eq!(signatures.len(), 7);
+        for symbol in [
+            "stasis_jit_audio_load_music",
+            "stasis_jit_audio_load_effect",
+            "stasis_jit_audio_play_music",
+            "stasis_jit_audio_pause_music",
+            "stasis_jit_audio_set_music_volume",
+            "stasis_jit_audio_stop_music",
+            "stasis_jit_audio_play_effect",
+        ] {
+            assert!(signatures
+                .iter()
+                .any(|signature| signature.symbol == symbol));
+        }
+    }
+
+    #[test]
+    fn aot_process_compiles_audio_asset_playback_sample() {
+        let sample = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/audio_asset_playback/audio_asset_playback.stasis"
+        ));
+        let source = sample
+            .replace("import \"/vendor/stasis/src/stdlib/audio.stasis\";", "")
+            .replace("import \"/vendor/stasis/src/stdlib/graphics.stasis\";", "");
+        let asset_tasks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/asset_tasks.stasis"
+        ));
+        let audio = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/audio.stasis"
+        ))
+        .replace("import \"graphics.stasis\";", "");
+        let declarations = r#"
+function init_window(width: i32, height: i32, title: string): bool { return true; }
+function begin_frame(): void { return; }
+function clear(r: f32, g: f32, b: f32, a: f32): void { return; }
+function end_frame(): void { return; }
+"#;
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "samples/audio_asset_playback/audio_asset_playback.stasis",
+            format!("{declarations}\n{asset_tasks}\n{audio}\n{source}"),
+        );
+        process.compile().expect("aot compile playback sample");
     }
 
     #[test]
@@ -1349,16 +3079,17 @@ mod tests {
     }
 
     #[test]
-    fn aot_process_skips_unreachable_invalid_function_body() {
+    fn aot_process_rejects_unreachable_unresolved_call() {
         let mut process = AotProcess::new();
         process.upsert_file(
             "sample.stasis",
             "function bad(): i32 { return missing(); }\nfunction tick(): i32 { return 1; }\n",
         );
-        let report = process.compile().expect("compile");
-        assert_eq!(report.index.parsed_functions, 2);
-        assert_eq!(report.emit.emitted_functions, 1);
-        assert_eq!(process.artifacts().len(), 1);
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject unreachable unresolved calls");
+        assert!(format!("{error:?}").contains("cannot resolve call 'missing'"));
+        assert!(process.artifacts().is_empty());
     }
 
     #[test]
@@ -1507,6 +3238,103 @@ mod tests {
     }
 
     #[test]
+    fn aot_engine_bundle_preserves_objects_for_overloaded_function_names() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sprite { handle: i32; }\nstruct TextRun { handle: i32; }\nglobal sprite: Sprite;\nglobal text: TextRun;\nfunction draw(self: Sprite, value: i32): void { self.handle = value; }\nfunction draw(self: TextRun, value: i32): void { self.handle = value + 7; }\nfunction main(): i32 { sprite.draw(30); text.draw(5); return sprite.handle + text.handle; }\nfunction tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile overload bundle");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_overloads_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write overload bundle");
+        assert_eq!(
+            bundle.object_paths_by_function_id.len(),
+            process.artifacts().len(),
+            "both draw overload objects must remain in the bundle"
+        );
+        assert!(!bundle.object_paths_by_function.contains_key("draw"));
+        assert_eq!(bundle.object_paths().len(), process.artifacts().len());
+        let draw_objects = bundle
+            .object_paths()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .filter(|name| name.starts_with("draw_fn"))
+            .collect::<Vec<_>>();
+        assert_eq!(draw_objects.len(), 2);
+        assert_ne!(draw_objects[0], draw_objects[1]);
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_engine_bundle_links_and_executes_same_named_receiver_methods() {
+        let Some(mut link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let source = "function draw(self: i32, value: i32): i32 { return value; }\nfunction draw(self: f32, value: i32): i32 { return value + 7; }\nfunction main(): i32 { let sprite: i32 = 1; let text: f32 = 1.0; return sprite.draw(30) + text.draw(5); }\nfunction tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n";
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", source);
+        process.compile().expect("compile receiver overload bundle");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_receiver_bundle_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &temp_root)
+            .expect("write receiver overload bundle");
+        let main_id = process
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function")
+            .id;
+        let main_symbol = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_id == main_id)
+            .expect("main artifact")
+            .symbol_name
+            .clone();
+
+        let deps_dir = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("Cargo deps directory")
+            .to_path_buf();
+        let (import_library, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
+        link_config.runtime_lib_paths.push(import_library);
+        let copied_runtime_dll = temp_root.join("stasis_dynload.dll");
+        fs::copy(&runtime_dll, &copied_runtime_dll).expect("copy AOT test runtime");
+        sign_test_executable(&copied_runtime_dll);
+        let executable = temp_root.join("receiver_bundle.exe");
+        let object_paths = bundle.object_paths().cloned().collect::<Vec<_>>();
+        stasis_jit::link_objects_to_executable(
+            &object_paths,
+            &executable,
+            &main_symbol,
+            &link_config,
+        )
+        .expect("link every receiver overload object");
+        sign_page_hashed_test_executable(&executable);
+        let status = Command::new(&executable)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", executable.display()));
+        assert_eq!(status.code(), Some(42));
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
     fn aot_engine_bundle_manifest_includes_string_literals() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -1543,18 +3371,19 @@ mod tests {
     }
 
     #[test]
-    fn aot_process_prefers_runtime_string_shims_for_asset_externs() {
+    fn aot_process_prefers_runtime_string_shims_for_host_string_externs() {
         let mut process = AotProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nextern function gfx_release_sprite(handle: i32): void;\nextern function load_font(path: string, size: i32): i32;\nextern function measure_text(font: i32, text: string): f32;\nfunction @extern(\"stasis_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\nfunction main(): i32 { gfx_release_sprite(0); return 0; }\n",
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nextern function gfx_release_sprite(handle: i32): void;\nextern function load_font(path: string, size: i32): i32;\nextern function measure_text(font: i32, text: string): f32;\nfunction @extern(\"stasis_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\nextern function storage_load_i32(scope: string, key: string, fallback: i32): i32;\nextern function storage_save_i32(scope: string, key: string, value: i32): bool;\nfunction @extern(\"stasis_jit_storage_load_ascii\") storage_load_ascii(scope: string, key: string, out: ascii[], capacity: i32): i32;\nfunction @extern(\"stasis_jit_storage_save_ascii\") storage_save_ascii(scope: string, key: string, value: ascii[], length: i32): i32;\nfunction @extern(\"stasis_jit_clipboard_load_ascii\") clipboard_load_ascii(out: ascii[], capacity: i32): i32;\nfunction @extern(\"stasis_jit_clipboard_save_ascii\") clipboard_save_ascii(value: ascii[], length: i32): i32;\nfunction main(): i32 { gfx_release_sprite(0); return 0; }\n",
         );
         process.compile().expect("compile");
 
-        let analysis = process
-            .compile_analysis_cache
+        let analysis = &process
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         let resolved: BTreeMap<_, _> = analysis
             .resolved_extern_signatures
             .iter()
@@ -1579,7 +3408,31 @@ mod tests {
         );
         assert_eq!(
             resolved.get("gfx_cache_text").copied(),
-            Some("stasis_gfx_cache_text")
+            Some("stasis_jit_gfx_cache_text")
+        );
+        assert_eq!(
+            resolved.get("storage_load_i32").copied(),
+            Some("stasis_jit_storage_load_i32")
+        );
+        assert_eq!(
+            resolved.get("storage_save_i32").copied(),
+            Some("stasis_jit_storage_save_i32")
+        );
+        assert_eq!(
+            resolved.get("storage_load_ascii").copied(),
+            Some("stasis_jit_storage_load_ascii")
+        );
+        assert_eq!(
+            resolved.get("storage_save_ascii").copied(),
+            Some("stasis_jit_storage_save_ascii")
+        );
+        assert_eq!(
+            resolved.get("clipboard_load_ascii").copied(),
+            Some("stasis_jit_clipboard_load_ascii")
+        );
+        assert_eq!(
+            resolved.get("clipboard_save_ascii").copied(),
+            Some("stasis_jit_clipboard_save_ascii")
         );
     }
 
@@ -1638,6 +3491,160 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn program_snapshot_multifile_jit_and_aot_executable_parity() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let main = include_str!("../../../../tests/program_snapshot_parity_main.stasis");
+        let helper = include_str!("../../../../tests/program_snapshot_parity_helper.stasis");
+        let mut jit = crate::backend::jit::JitProcess::new();
+        jit.upsert_file("main.stasis", main);
+        jit.upsert_file("helper.stasis", helper);
+        jit.compile().expect("compile JIT fixture");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(7));
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", main);
+        aot.upsert_file("helper.stasis", helper);
+        aot.compile().expect("compile AOT fixture");
+        assert_eq!(
+            jit.program_snapshot().expect("JIT snapshot").functions(),
+            aot.program_snapshot().expect("AOT snapshot").functions()
+        );
+        assert_eq!(
+            jit.program_snapshot()
+                .expect("JIT snapshot")
+                .layout_digest(),
+            aot.program_snapshot()
+                .expect("AOT snapshot")
+                .layout_digest()
+        );
+        if let Some(exit_code) =
+            run_linked_i32_noarg_fixture(&aot, "main", "snapshot_parity", &link_config)
+        {
+            assert_eq!(exit_code, 7);
+        }
+    }
+
+    #[test]
+    fn qualified_same_name_calls_use_identical_jit_and_aot_module_graphs() {
+        let main = include_str!("../../../../tests/module_graph/main.stasis");
+        let one = include_str!("../../../../tests/module_graph/one.stasis");
+        let two = include_str!("../../../../tests/module_graph/two.stasis");
+        let files = [
+            ("tests/module_graph/main.stasis", main),
+            ("tests/module_graph/one.stasis", one),
+            ("tests/module_graph/two.stasis", two),
+        ];
+
+        let mut jit = crate::backend::jit::JitProcess::new();
+        for (path, source) in files {
+            jit.upsert_file(path, source);
+        }
+        jit.compile().expect("qualified JIT compile");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(18));
+
+        let mut aot = AotProcess::new();
+        for (path, source) in files {
+            aot.upsert_file(path, source);
+        }
+        aot.compile().expect("qualified AOT compile");
+        assert_eq!(
+            jit.program_snapshot().unwrap().module_graph(),
+            aot.program_snapshot().unwrap().module_graph()
+        );
+
+        #[cfg(windows)]
+        {
+            let link_config = resolve_link_config_for_smoke()
+                .expect("qualified module graph acceptance requires a Windows linker");
+            let result =
+                run_linked_i32_noarg_fixture(&aot, "main", "qualified_module_graph", &link_config)
+                    .expect("qualified module graph acceptance requires a linked executable");
+            assert_eq!(result, 18);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symbol_identity_multifile_jit_aot_is_root_relative_stable_and_executable() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let main = include_str!("../../../../tests/symbol_identity_main.stasis");
+        let helper = include_str!("../../../../tests/symbol_identity_helper.stasis");
+
+        let mut jit = JitProcess::new();
+        jit.set_project_root("C:/workspace/game")
+            .expect("set JIT project root");
+        jit.upsert_file("C:/workspace/game/src/main.stasis", main);
+        jit.upsert_file("C:/workspace/game/src/helper.stasis", helper);
+        jit.compile().expect("compile rooted JIT fixture");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(11));
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("src/helper.stasis", helper);
+        aot.upsert_file("src/main.stasis", main);
+        aot.compile().expect("compile relative AOT fixture");
+        let jit_ids = jit
+            .program_snapshot()
+            .expect("JIT snapshot")
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    function.id,
+                    function.symbol_id.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let aot_ids = aot
+            .program_snapshot()
+            .expect("AOT snapshot")
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    function.id,
+                    function.symbol_id.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(jit_ids, aot_ids);
+
+        let before_edit = jit_ids;
+        jit.upsert_file(
+            "C:/workspace/game/src/helper.stasis",
+            "function helper(): i32 { return 8; }\n",
+        );
+        jit.compile().expect("compile helper body edit");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(13));
+        let after_edit = jit
+            .program_snapshot()
+            .expect("edited JIT snapshot")
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    function.id,
+                    function.symbol_id.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(before_edit, after_edit);
+
+        if let Some(exit_code) =
+            run_linked_i32_noarg_fixture(&aot, "main", "symbol_identity", &link_config)
+        {
+            assert_eq!(exit_code, 11);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn aot_process_links_and_executes_executable_smoke() {
         let Some(link_config) = resolve_link_config_for_smoke() else {
             return;
@@ -1664,13 +3671,138 @@ mod tests {
         }
         link_result.expect("link executable");
 
-        let status = Command::new(&exe_path)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, &[]);
         assert_eq!(
             status.code(),
             Some(27),
             "expected executable to return exit code 27"
+        );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_fixed_and_view_max_length_link_and_execute() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let source = "global storage: i32[4];\nfunction capacity(values: i32[]): i32 { return values.max_length; }\nfunction main(): i32 { return storage.max_length * 10 + capacity(storage); }\n";
+        let mut process = AotProcess::new();
+        process.upsert_file("max_length.stasis", source);
+        process.compile().expect("compile max_length fixture");
+        if let Some(exit_code) =
+            run_linked_i32_noarg_fixture(&process, "main", "max_length", &link_config)
+        {
+            assert_eq!(exit_code, 44);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_and_jit_execute_receiver_overloads_with_different_arities() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let source = "function draw(self: i32, x: f32, alpha: i32): i32 { return self + alpha; }\nfunction draw(self: f32, x: f32, r: f32, g: f32, b: f32, a: f32): i32 { return 7; }\nfunction main(): i32 { let sprite: i32 = 5; let text: f32 = 2.0; return sprite.draw(1.0, 30) + text.draw(2.0, 1.0, 1.0, 1.0, 1.0); }\n";
+
+        let mut jit = JitProcess::new();
+        jit.upsert_file("sample.stasis", source);
+        jit.compile().expect("JIT compile");
+        let jit_result = jit.execute_i32_noarg_by_name("main").expect("JIT execute");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("sample.stasis", source);
+        aot.compile().expect("AOT compile");
+        let Some(aot_result) = run_linked_i32_noarg_fixture(
+            &aot,
+            "main",
+            "receiver_overloads_different_arities",
+            &link_config,
+        ) else {
+            return;
+        };
+
+        assert_eq!(jit_result, 42);
+        assert_eq!(aot_result, jit_result);
+    }
+
+    #[test]
+    fn aot_process_compiles_nested_struct_receiver_call() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sprite { handle: i32; }\nstruct GameState { aura: Sprite; sprites: Sprite[2]; }\nglobal state: GameState;\nfunction set_handle(self: Sprite, value: i32): void { self.handle = value; }\nfunction main(): i32 { state.aura.set_handle(37); state.sprites[1].set_handle(5); return state.aura.handle + state.sprites[1].handle; }\n",
+        );
+        let report = process.compile().expect("AOT compile nested receiver");
+        assert!(report.emit.emitted_functions >= 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_process_links_and_executes_nested_struct_receiver_call() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let source = "struct Sprite { handle: i32; }\nstruct GameState { aura: Sprite; sprites: Sprite[2]; }\nglobal state: GameState;\nfunction set_handle(self: Sprite, value: i32): void { self.handle = value; }\nfunction main(): i32 { state.aura.set_handle(37); state.sprites[1].set_handle(5); return state.aura.handle + state.sprites[1].handle; }\n";
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", source);
+        process.compile().expect("AOT compile nested receiver");
+        let result =
+            run_linked_i32_noarg_fixture(&process, "main", "nested_struct_receiver", &link_config)
+                .expect("nested receiver fixture must link and execute");
+        assert_eq!(result, 42);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_process_links_and_executes_immediate_axis_layout_sample() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let mut process = AotProcess::new();
+        process.set_import_base_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        process.upsert_file(
+            "src/stdlib/ui_axis_layout.stasis",
+            include_str!("../../../../src/stdlib/ui_axis_layout.stasis"),
+        );
+        process.upsert_file(
+            "src/stdlib/ui_layout_audit.stasis",
+            include_str!("../../../../src/stdlib/ui_layout_audit.stasis"),
+        );
+        process.upsert_file(
+            "samples/immediate_axis_layout/placement.stasis",
+            include_str!("../../../../samples/immediate_axis_layout/placement.stasis"),
+        );
+        process.upsert_file(
+            "samples/immediate_axis_layout/verify.stasis",
+            include_str!("../../../../samples/immediate_axis_layout/verify.stasis"),
+        );
+        process
+            .compile()
+            .expect("compile immediate axis layout sample");
+        assert!(
+            process.state_layout().scalars.is_empty(),
+            "pure AOT placement fixture must not require runtime storage registration"
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_immediate_axis_layout_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let exe_path = temp_root.join("immediate_axis_layout.exe");
+        process
+            .link_executable_for_i32_noarg_function("main", &exe_path, &link_config)
+            .expect("link immediate axis layout without runtime library");
+
+        let status = run_signed_test_executable(&exe_path, &[]);
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "axis layout sample assertions failed"
         );
         let _ = fs::remove_dir_all(&temp_root);
     }
@@ -1714,15 +3846,34 @@ mod tests {
         }
         link_result.expect("link executable");
 
-        let status = Command::new(&exe_path)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, &[]);
         assert_eq!(
             status.code(),
             Some(10),
             "expected executable to return exit code 10"
         );
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn aot_inlines_eligible_expression_and_keeps_real_function_object() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function @inline helper(value: i32): i32 { return value + 1; }\nfunction main(): i32 { return helper(9); }\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        let main = captured.get("main").expect("main CLIF");
+        assert!(
+            !main.lines().any(|line| line.contains("call fn")),
+            "eligible @inline call remained in AOT CLIF:\n{main}"
+        );
+        assert!(captured.contains_key("helper"));
+        assert_eq!(
+            process.artifacts().len(),
+            2,
+            "AOT must retain a real object for an inline function"
+        );
     }
 
     #[cfg(windows)]
@@ -1766,10 +3917,155 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn direct_call_generation_sample_matches_jit_and_linked_aot() {
+        let main_source = include_str!("../../../../samples/direct_call_generation/main.stasis");
+        let math_source = include_str!("../../../../samples/direct_call_generation/math.stasis");
+        let fixture_root = Path::new("direct_call_generation_fixture");
+
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            fixture_root.join("main.stasis").to_string_lossy(),
+            main_source,
+        );
+        jit.upsert_file(
+            fixture_root.join("math.stasis").to_string_lossy(),
+            math_source,
+        );
+        jit.compile().expect("JIT sample compile");
+        let jit_result = jit
+            .execute_i32_noarg_by_name("main")
+            .expect("JIT sample run");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file(
+            fixture_root.join("main.stasis").to_string_lossy(),
+            main_source,
+        );
+        aot.upsert_file(
+            fixture_root.join("math.stasis").to_string_lossy(),
+            math_source,
+        );
+        aot.compile().expect("AOT sample compile");
+        assert_eq!(aot.artifacts().len(), 9);
+        assert_eq!(jit_result, 17);
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            eprintln!("skipping linked AOT execution: no Windows linker found");
+            return;
+        };
+        let Some(aot_result) =
+            run_linked_i32_noarg_fixture(&aot, "main", "direct_call_generation", &link_config)
+        else {
+            return;
+        };
+
+        assert_eq!(aot_result, jit_result);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selective_jit_revision_sequence_matches_full_aot_builds() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let revisions = [
+            "function helper(): i32 { return 1; } function main(): i32 { return helper() + 1; }",
+            "function helper(): i32 { return 2; } function main(): i32 { return helper() + 1; }",
+        ];
+        let mut jit = JitProcess::new();
+        for (index, source) in revisions.iter().enumerate() {
+            if index == 0 {
+                jit.upsert_file("revision.stasis", *source);
+                jit.compile().expect("initial JIT revision");
+            } else {
+                let mut candidate = jit.staged_candidate();
+                candidate.upsert_file("revision.stasis", *source);
+                candidate.compile_staged().expect("selective JIT revision");
+                assert_eq!(
+                    candidate
+                        .generation_metadata()
+                        .expect("selective metadata")
+                        .emitted_function_ids
+                        .len(),
+                    2
+                );
+                jit = candidate;
+            }
+            let jit_result = jit
+                .execute_i32_noarg_by_name("main")
+                .expect("execute JIT revision");
+
+            let mut aot = AotProcess::new();
+            aot.upsert_file("revision.stasis", *source);
+            aot.compile().expect("full AOT revision");
+            let Some(aot_result) = run_linked_i32_noarg_fixture(
+                &aot,
+                "main",
+                &format!("selective_revision_{index}"),
+                &link_config,
+            ) else {
+                return;
+            };
+            assert_eq!(jit_result, (index as i32) + 2);
+            assert_eq!(aot_result, jit_result);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_and_jit_execute_deterministic_numeric_sample() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let source = include_str!("../../../../samples/deterministic_numerics/main.stasis");
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile().expect("JIT compile");
+        let jit_result = jit.execute_i32_noarg_by_name("main").expect("JIT execute");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", source);
+        aot.compile().expect("AOT compile");
+        let Some(aot_result) =
+            run_linked_i32_noarg_fixture(&aot, "main", "deterministic_numerics", &link_config)
+        else {
+            return;
+        };
+
+        assert_eq!(jit_result, 0);
+        assert_eq!(aot_result, jit_result);
+    }
+
     #[test]
     fn parity_corpus_covers_shared_lowering_shapes() {
         for case in parity_corpus_cases() {
             run_parity_corpus_case(case);
+        }
+    }
+
+    #[test]
+    fn deterministic_numeric_lowering_is_width_explicit_on_arm64_targets() {
+        let source =
+            include_str!("../../../../samples/deterministic_numerics/main.stasis").replacen(
+                "function main(): i32",
+                "function deterministic_numeric_probe(): i32",
+                1,
+            ) + "\nfunction main(): i32 { return deterministic_numeric_probe(); }\n";
+        for target in [
+            stasis_jit::AotTarget::android_arm64_default(),
+            stasis_jit::AotTarget::ios_arm64_default(),
+        ] {
+            let mut process = AotProcess::new();
+            process.set_target(target);
+            process.upsert_file("main.stasis", source.clone());
+            let clif = capture_aot_clif_by_function(&mut process);
+            let main = clif
+                .get("deterministic_numeric_probe")
+                .expect("deterministic numeric probe CLIF");
+            for marker in ["load.i8", "load.i16", "ireduce.i8", "ireduce.i16", "sdiv"] {
+                assert!(main.contains(marker), "missing {marker} in:\n{main}");
+            }
         }
     }
 
@@ -1812,9 +4108,7 @@ mod tests {
         }
         link_result.expect("link executable");
 
-        let status = Command::new(&exe_path)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let status = run_signed_test_executable(&exe_path, &[]);
         assert_eq!(
             status.code(),
             Some(7),
@@ -1854,9 +4148,7 @@ mod tests {
             }
         }
         link_result.expect("link first executable");
-        let first_status = Command::new(&exe_first)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_first.display()));
+        let first_status = run_signed_test_executable(&exe_first, &[]);
         assert_eq!(first_status.code(), Some(5));
 
         process.upsert_file("sample.stasis", "function main(): i32 { return 9; }\n");
@@ -1865,96 +4157,28 @@ mod tests {
         process
             .link_executable_for_i32_noarg_function("main", &exe_second, &link_config)
             .expect("link second executable");
-        let second_status = Command::new(&exe_second)
-            .status()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_second.display()));
+        let second_status = run_signed_test_executable(&exe_second, &[]);
         assert_eq!(second_status.code(), Some(9));
 
         let _ = fs::remove_dir_all(&temp_root);
-    }
-
-    #[test]
-    #[ignore]
-    fn dump_perf_balls_bricks_tick_clif_summary() {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let source_path = repo_root.join("samples").join("perf_balls_bricks.stasis");
-        assert!(
-            source_path.exists(),
-            "expected perf sample at {}",
-            source_path.display()
-        );
-
-        let source_text = fs::read_to_string(&source_path).expect("read perf sample");
-        let mut process = AotProcess::new();
-        process.upsert_file(source_path.display().to_string(), source_text);
-
-        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let captured_hook = Arc::clone(&captured);
-        set_clif_dump_hook(Some(Box::new(move |meta, func| {
-            if meta.name == "tick" {
-                *captured_hook.lock().expect("lock clif capture") =
-                    Some(format!("{}", func.display()));
-            }
-        })));
-
-        let report = process.compile().expect("compile perf sample");
-        assert!(
-            report.emit.emitted_functions > 0,
-            "expected functions emitted"
-        );
-
-        set_clif_dump_hook(None);
-        let clif = captured
-            .lock()
-            .expect("lock clif capture")
-            .take()
-            .expect("expected tick clif capture");
-
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_millis();
-        let out_path =
-            std::env::temp_dir().join(format!("stasis_perf_balls_bricks_tick_{stamp}.clif"));
-        fs::write(&out_path, &clif).expect("write clif dump");
-
-        let call_lines = clif.lines().filter(|line| line.contains("call ")).count();
-        let call_value_lines = clif.lines().filter(|line| line.contains("= call ")).count();
-        let call_void_lines = clif
-            .lines()
-            .filter(|line| line.trim_start().starts_with("call "))
-            .count();
-        let load_lines = clif.lines().filter(|line| line.contains("load")).count();
-        let store_lines = clif.lines().filter(|line| line.contains("store")).count();
-
-        println!(
-            "clif_dump=perf_balls_bricks tick_clif_path={} bytes={} lines={} call_lines={} call_value_lines={} call_void_lines={} load_lines={} store_lines={}",
-            out_path.display(),
-            clif.len(),
-            clif.lines().count(),
-            call_lines,
-            call_value_lines,
-            call_void_lines,
-            load_lines,
-            store_lines
-        );
     }
 
     #[cfg(windows)]
     fn resolve_link_config_for_smoke() -> Option<stasis_jit::AotLinkConfig> {
         if let Some(explicit) = std::env::var_os("STASIS_AOT_LINKER") {
             let explicit = PathBuf::from(explicit);
+            eprintln!("AOT smoke linker: {}", explicit.display());
             return Some(stasis_jit::AotLinkConfig {
                 linker_path: Some(explicit),
                 runtime_lib_paths: vec![],
                 target: stasis_jit::AotTarget::default(),
             });
         }
-        for candidate in ["lld-link.exe", "link.exe"] {
-            let output = Command::new("where").arg(candidate).output().ok()?;
-            if output.status.success() {
+        for candidate in ["link.exe", "lld-link.exe"] {
+            if let Some(linker_path) = resolve_windows_linker_path(candidate) {
+                eprintln!("AOT smoke linker: {}", linker_path.display());
                 return Some(stasis_jit::AotLinkConfig {
-                    linker_path: Some(PathBuf::from(candidate)),
+                    linker_path: Some(linker_path),
                     runtime_lib_paths: vec![],
                     target: stasis_jit::AotTarget::default(),
                 });
@@ -1962,5 +4186,33 @@ mod tests {
         }
         eprintln!("skipping AOT executable smoke test: no Windows linker found");
         None
+    }
+
+    #[cfg(windows)]
+    fn resolve_windows_linker_path(candidate: &str) -> Option<PathBuf> {
+        let output = Command::new("where").arg(candidate).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .find(|path| path.is_absolute() && path.is_file())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_smoke_linker_prefers_absolute_msvc_path() {
+        if std::env::var_os("STASIS_AOT_LINKER").is_some() {
+            return;
+        }
+        let Some(expected_msvc) = resolve_windows_linker_path("link.exe") else {
+            return;
+        };
+        let config = resolve_link_config_for_smoke().expect("MSVC linker config");
+        assert_eq!(config.linker_path.as_deref(), Some(expected_msvc.as_path()));
+        assert!(expected_msvc.is_absolute());
     }
 }

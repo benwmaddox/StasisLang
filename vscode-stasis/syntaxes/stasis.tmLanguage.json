@@ -1,0 +1,128 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Stasis",
+  "scopeName": "source.stasis",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#tests" },
+    { "include": "#annotations" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#numbers" },
+    { "include": "#types" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.stasis", "match": "//.*$" },
+        { "name": "comment.block.stasis", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.stasis",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.stasis", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "tests": {
+      "patterns": [
+        {
+          "name": "meta.declaration.test.stasis",
+          "match": "\\b(test)\\b\\s+(`[^`]*`)",
+          "captures": {
+            "1": { "name": "keyword.declaration.stasis" },
+            "2": { "name": "string.quoted.other.backtick.stasis" }
+          }
+        },
+        {
+          "name": "string.quoted.other.backtick.stasis",
+          "begin": "`",
+          "end": "`",
+          "patterns": [
+            { "name": "constant.character.escape.stasis", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "annotations": {
+      "patterns": [
+        { "name": "storage.modifier.annotation.stasis", "match": "@[A-Za-z_][A-Za-z0-9_]*\\b" }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "meta.declaration.import.stasis",
+          "match": "\\b(import)\\b\\s+(\"(?:\\\\.|[^\"])*\")",
+          "captures": {
+            "1": { "name": "keyword.control.import.stasis" },
+            "2": { "name": "string.quoted.double.stasis" }
+          }
+        },
+        {
+          "name": "meta.declaration.type.stasis",
+          "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.declaration.stasis" },
+            "2": { "name": "entity.name.type.stasis" }
+          }
+        },
+        {
+          "name": "meta.declaration.function.stasis",
+          "match": "\\b(function)\\b\\s*(?:@[A-Za-z_][A-Za-z0-9_]*\\s*)*([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.stasis" },
+            "2": { "name": "entity.name.function.stasis" }
+          }
+        },
+        {
+          "name": "meta.declaration.variable.stasis",
+          "match": "\\b(global|const|let)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.declaration.stasis" },
+            "2": { "name": "variable.other.readwrite.stasis" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.stasis", "match": "\\b(if|else|for|foreach|in|continue|return)\\b" },
+        { "name": "keyword.declaration.stasis", "match": "\\b(struct|enum|global|const|function|extern|test|let|import)\\b" },
+        { "name": "constant.language.stasis", "match": "\\b(true|false)\\b" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.float.stasis", "match": "\\b[0-9]+\\.[0-9]+\\b" },
+        { "name": "constant.numeric.integer.stasis", "match": "\\b[0-9]+\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "storage.type.builtin.stasis", "match": "\\b(void|bool|u8|u16|u32|i32|f32|f64|string|ascii|utf8)\\b" },
+        {
+          "name": "meta.type.annotation.stasis",
+          "match": "(:)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "punctuation.separator.type.stasis" },
+            "2": { "name": "entity.name.type.stasis" }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.stasis", "match": "(\\+=|-=|\\*=|/=|%=|==|!=|<=|>=|&&|\\|\\||=|\\+|-|\\*|/|%|<|>|!|\\.)" }
+      ]
+    }
+  }
+}

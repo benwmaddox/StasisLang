@@ -1,3 +1,14 @@
+import "preview_adapter.stasis";
+
+enum GamePhase {
+    Playing,
+    Finished,
+}
+
+struct PhaseSample {
+    phase: GamePhase;
+}
+
 global Input {
     touch_x: i32;
     touch_y: i32;
@@ -7,6 +18,7 @@ global Input {
 }
 
 global GameState {
+    phase: GamePhase;
     tick_count: i32;
     screen_w: i32;
     screen_h: i32;
@@ -22,6 +34,8 @@ global GameState {
     ai_score: i32;
 }
 
+global phase_samples: PhaseSample[2];
+
 global Render {
     command_schema_version: i32;
     command_count: i32;
@@ -34,7 +48,10 @@ global Render {
     command0_asset: i32;
     command0_rotation_degrees: i32;
     command0_alpha: i32;
-    command0_clip_x: i32; command0_clip_y: i32; command0_clip_w: i32; command0_clip_h: i32;
+    command0_clip_x: i32;
+    command0_clip_y: i32;
+    command0_clip_w: i32;
+    command0_clip_h: i32;
     command1_kind: i32;
     command1_x: i32;
     command1_y: i32;
@@ -44,7 +61,10 @@ global Render {
     command1_asset: i32;
     command1_rotation_degrees: i32;
     command1_alpha: i32;
-    command1_clip_x: i32; command1_clip_y: i32; command1_clip_w: i32; command1_clip_h: i32;
+    command1_clip_x: i32;
+    command1_clip_y: i32;
+    command1_clip_w: i32;
+    command1_clip_h: i32;
     command2_kind: i32;
     command2_x: i32;
     command2_y: i32;
@@ -54,7 +74,10 @@ global Render {
     command2_asset: i32;
     command2_rotation_degrees: i32;
     command2_alpha: i32;
-    command2_clip_x: i32; command2_clip_y: i32; command2_clip_w: i32; command2_clip_h: i32;
+    command2_clip_x: i32;
+    command2_clip_y: i32;
+    command2_clip_w: i32;
+    command2_clip_h: i32;
     command3_kind: i32;
     command3_x: i32;
     command3_y: i32;
@@ -64,7 +87,10 @@ global Render {
     command3_asset: i32;
     command3_rotation_degrees: i32;
     command3_alpha: i32;
-    command3_clip_x: i32; command3_clip_y: i32; command3_clip_w: i32; command3_clip_h: i32;
+    command3_clip_x: i32;
+    command3_clip_y: i32;
+    command3_clip_w: i32;
+    command3_clip_h: i32;
     command4_kind: i32;
     command4_x: i32;
     command4_y: i32;
@@ -74,14 +100,20 @@ global Render {
     command4_asset: i32;
     command4_rotation_degrees: i32;
     command4_alpha: i32;
-    command4_clip_x: i32; command4_clip_y: i32; command4_clip_w: i32; command4_clip_h: i32;
+    command4_clip_x: i32;
+    command4_clip_y: i32;
+    command4_clip_w: i32;
+    command4_clip_h: i32;
 }
 
-function main(): void {
+function pong_game_main(): void {
     init();
 }
 
 function init(): void {
+    GameState.phase = GamePhase.Playing;
+    phase_samples[0].phase = GamePhase.Playing;
+    phase_samples[1].phase = GamePhase.Finished;
     GameState.tick_count = 0;
     GameState.screen_w = 360;
     GameState.screen_h = 640;
@@ -97,7 +129,10 @@ function init(): void {
     GameState.ai_score = 0;
 }
 
-function tick(): void {
+function pong_game_tick(): void {
+    if (GameState.phase == phase_samples[1].phase) {
+        GameState.phase = GamePhase.Playing;
+    }
     GameState.tick_count += 1;
 
     update_input();
@@ -136,7 +171,7 @@ function update_enemy_paddle(): void {
     } else if (GameState.ball_age_ticks >= 3600) {
         GameState.enemy_paddle_speed_x100 = 250;
     } else {
-        GameState.enemy_paddle_speed_x100 = 1500 - ((GameState.ball_age_ticks * 1250) / 3600);
+        GameState.enemy_paddle_speed_x100 = 1500 -((GameState.ball_age_ticks * 1250) / 3600);
     }
 
     if (GameState.enemy_paddle_speed_x100 < 250) {
@@ -146,11 +181,21 @@ function update_enemy_paddle(): void {
     let enemy_speed = GameState.enemy_paddle_speed_x100 / 100;
 
     if (GameState.ai_y < GameState.ball_y) {
-        GameState.ai_y += enemy_speed;
+        let remaining_distance = GameState.ball_y - GameState.ai_y;
+        if (enemy_speed >= remaining_distance) {
+            GameState.ai_y = GameState.ball_y;
+        } else {
+            GameState.ai_y += enemy_speed;
+        }
     }
 
     if (GameState.ai_y > GameState.ball_y) {
-        GameState.ai_y -= enemy_speed;
+        let remaining_distance = GameState.ai_y - GameState.ball_y;
+        if (enemy_speed >= remaining_distance) {
+            GameState.ai_y = GameState.ball_y;
+        } else {
+            GameState.ai_y -= enemy_speed;
+        }
     }
 
     if (GameState.ai_y < 36) {
@@ -212,7 +257,7 @@ function reset_ball(): void {
     GameState.enemy_paddle_speed_x100 = 1500;
 }
 
-function render(): void {
+function pong_game_render(): void {
     Render.command_schema_version = 3;
     Render.command_count = 5;
 
@@ -253,11 +298,11 @@ function render(): void {
     Render.command3_h = 14;
     Render.command3_asset = -1520461853;
     Render.command3_color = 16777215;
-    Render.command3_rotation_degrees = (GameState.tick_count * 3) % 360;
+    Render.command3_rotation_degrees =(GameState.tick_count * 3) % 360;
     Render.command3_alpha = 255;
 
     Render.command4_kind = 1;
-    Render.command4_x = (GameState.screen_w / 2) - 1;
+    Render.command4_x =(GameState.screen_w / 2) - 1;
     Render.command4_y = 0;
     Render.command4_w = 2;
     Render.command4_h = GameState.screen_h;
@@ -266,13 +311,63 @@ function render(): void {
     Render.command4_rotation_degrees = 0;
     Render.command4_alpha = 255;
 
-    Render.command0_clip_x = 0; Render.command0_clip_y = 0; Render.command0_clip_w = GameState.screen_w; Render.command0_clip_h = GameState.screen_h;
-    Render.command1_clip_x = 0; Render.command1_clip_y = 0; Render.command1_clip_w = GameState.screen_w; Render.command1_clip_h = GameState.screen_h;
-    Render.command2_clip_x = 0; Render.command2_clip_y = 0; Render.command2_clip_w = GameState.screen_w; Render.command2_clip_h = GameState.screen_h;
-    Render.command3_clip_x = 0; Render.command3_clip_y = 0; Render.command3_clip_w = GameState.screen_w; Render.command3_clip_h = GameState.screen_h;
-    Render.command4_clip_x = 0; Render.command4_clip_y = 0; Render.command4_clip_w = GameState.screen_w; Render.command4_clip_h = GameState.screen_h;
+    Render.command0_clip_x = 0;
+    Render.command0_clip_y = 0;
+    Render.command0_clip_w = GameState.screen_w;
+    Render.command0_clip_h = GameState.screen_h;
+    Render.command1_clip_x = 0;
+    Render.command1_clip_y = 0;
+    Render.command1_clip_w = GameState.screen_w;
+    Render.command1_clip_h = GameState.screen_h;
+    Render.command2_clip_x = 0;
+    Render.command2_clip_y = 0;
+    Render.command2_clip_w = GameState.screen_w;
+    Render.command2_clip_h = GameState.screen_h;
+    Render.command3_clip_x = 0;
+    Render.command3_clip_y = 0;
+    Render.command3_clip_w = GameState.screen_w;
+    Render.command3_clip_h = GameState.screen_h;
+    Render.command4_clip_x = 0;
+    Render.command4_clip_y = 0;
+    Render.command4_clip_w = GameState.screen_w;
+    Render.command4_clip_h = GameState.screen_h;
+}
+
+function pong_game_on_code_swap(): void {
+    pong_game_render();
+}
+
+function main(): i32 {
+    pong_game_main();
+    load_sprite_from(PongHost.ball_sprite, "assets/ball.svg", 32, 32);
+    load_sprite_from(PongHost.paddle_sprite, "assets/paddle.svg", 1, 1);
+    load_sprite_from(PongHost.center_sprite, "assets/center_line.svg", 1, 1);
+    pong_game_render();
+    pong_host_render();
+    return 0;
+}
+
+function tick(): i32 {
+    Input.screen_w.from_f32(host_f32[50]);
+    Input.screen_h.from_f32(host_f32[51]);
+    Input.touch_active = host_i32[545];
+    let touch_x: i32;
+    touch_x.from_f32(host_f32[0]);
+    Input.touch_x = touch_x;
+    let touch_y: i32;
+    touch_y.from_f32(host_f32[1]);
+    Input.touch_y = touch_y;
+    pong_game_tick();
+    return 0;
+}
+
+function render(): i32 {
+    pong_game_render();
+    pong_host_render();
+    return 0;
 }
 
 function on_code_swap(): void {
-    render();
+    pong_game_on_code_swap();
+    pong_host_render();
 }

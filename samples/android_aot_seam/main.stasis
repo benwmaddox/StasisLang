@@ -1,0 +1,31 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global ticks: i32;
+global seam_state_checksum: i32;
+
+function main(): i32 {
+    init_window(640, 360, "Stasis Android Seam");
+    ticks = 0;
+    seam_state_checksum = 1000;
+    return 0;
+}
+
+function tick(): i32 {
+    ticks = ticks + 1;
+    seam_state_checksum = 1000 + ticks * 7;
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.04, 0.07, 0.12, 1.0);
+    fill_rect(64.0, 72.0, 192.0, 216.0, 0.90, 0.12, 0.16, 1.0);
+    fill_rect(384.0, 72.0, 192.0, 216.0, 0.10, 0.78, 0.72, 1.0);
+    fill_rect(296.0, 156.0, 48.0, 48.0, 0.95, 0.90, 0.30, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

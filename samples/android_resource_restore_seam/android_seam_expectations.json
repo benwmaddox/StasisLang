@@ -1,0 +1,30 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "IT-020",
+  "stable_frame": 30,
+  "state_checksum": 2210,
+  "logical_size": [640, 360],
+  "regions": [],
+  "resource_regions": [
+    {"name": "sprite", "rect": [32, 48, 176, 264], "target_rgb": [49, 209, 124], "tolerance": 28, "minimum_target_pixels": 500},
+    {"name": "procedural_fallback", "rect": [232, 48, 176, 264], "target_rgb": [255, 0, 255], "tolerance": 28, "minimum_target_pixels": 100},
+    {"name": "direct_text", "rect": [250, 58, 145, 52], "target_rgb": [255, 255, 255], "tolerance": 12, "minimum_target_pixels": 10},
+    {"name": "cached_text", "rect": [448, 156, 150, 64], "target_rgb": [48, 226, 196], "tolerance": 12, "minimum_target_pixels": 10}
+  ],
+  "lifecycle": {
+    "stages": [
+      {"name": "initial", "action": "launch", "same_pid": false, "min_renderer_generation": 1},
+      {"name": "resume", "action": "background_resume", "same_pid": true, "min_renderer_generation": 1},
+      {"name": "recreated", "action": "force_activity_restart", "same_pid": false, "min_renderer_generation": 1}
+    ],
+    "diagnostic_forbidden": [
+      "rejected stale sprite",
+      "stasis renderer rejected stale sprite",
+      "renderer restore failed",
+      "resource restore failed",
+      "resource_restore_failed",
+      "rejected frame",
+      "frame rejected"
+    ]
+  }
+}

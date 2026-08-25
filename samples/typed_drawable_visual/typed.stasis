@@ -1,0 +1,47 @@
+import "../../src/stdlib/graphics.stasis";
+
+struct VisualState {
+    sprite: Sprite;
+    font: i32;
+    text: TextRun;
+}
+
+global state: VisualState;
+
+function main(): i32 {
+    init_window(360, 240, "Typed Drawable Visual");
+    if (!state.sprite.load_sprite_from("../render_parity/assets/opaque.svg", 160, 96)) {
+        return 1;
+    }
+    state.font = load_font("../render_parity/assets/parity.ttf", 28);
+    if (state.font <= 0) {
+        return 2;
+    }
+    if (!state.text.load_text_from(state.font, "TYPED DRAW")) {
+        return 3;
+    }
+    if (state.sprite.width != 160 || state.sprite.height != 96) {
+        return 4;
+    }
+    if (state.text.width <= 0.0 || state.text.height <= 0.0) {
+        return 5;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.04, 0.06, 0.10, 1.0);
+    state.sprite.draw(100.0, 50.0, 255, 0);
+    state.text.draw(103.0, 168.0, 1.0, 0.85, 0.25, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

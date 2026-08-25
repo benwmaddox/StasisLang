@@ -29,6 +29,13 @@ Each bundle contains:
 - `apk_assets/stasis_game/...` for Android assets or `ios_assets/stasis_game/...`
   for iOS assets.
 
+All paths in `mobile_aot_bundle_manifest.json` are relative to its containing
+directory, so the bundle remains valid when atomic staging is renamed to the
+final package path.
+
 The older `android-aot-bundle` command remains as an Android compatibility
 wrapper and writes `published_aot_objects.cmake` for the Android shell. Android
 published builds pass the descriptor-owned `entrySource` as `--entry-file`.
+
+Ordinary users should use `stasis package-mobile`; the raw bundle subcommands
+are compiler/shell integration seams. See `docs/mobile_packaging.md`.

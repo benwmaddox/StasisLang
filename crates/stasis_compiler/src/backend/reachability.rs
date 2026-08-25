@@ -34,24 +34,11 @@ pub(crate) fn compute_reachable_function_ids(
         if !reachable.insert(function_id) {
             continue;
         }
-        let Some(function) = functions.get(function_id as usize) else {
+        let Some(function) = functions.iter().find(|function| function.id == function_id) else {
             continue;
         };
         for dependency in &function.dependencies {
             stack.push(*dependency);
-        }
-    }
-
-    // If any overload of a name is reachable, treat the entire name-family as reachable so call
-    // resolution can remain deterministic.
-    let reachable_names: BTreeSet<String> = functions
-        .iter()
-        .filter(|function| reachable.contains(&function.id))
-        .map(|function| function.name.clone())
-        .collect();
-    for function in functions {
-        if reachable_names.contains(&function.name) {
-            reachable.insert(function.id);
         }
     }
 

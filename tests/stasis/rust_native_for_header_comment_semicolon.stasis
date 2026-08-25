@@ -3,7 +3,7 @@ function main(): i32 {
     for (let i: i32 = 0 /* ; in comment */; i < 4; i += 1) {
         sum += i;
     }
-    if ((sum > 0 /* || hidden */) && (sum < 7 /* && hidden */)) {
+    if ((sum > 0 /* || hidden */) &&(sum < 7 /* && hidden */)) {
         return 1;
     }
     return 0;

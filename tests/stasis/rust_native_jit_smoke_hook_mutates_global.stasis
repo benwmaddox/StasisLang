@@ -1,4 +1,6 @@
-global State { hook_runs: i32; }
+global State {
+    hook_runs: i32;
+}
 
 function on_code_swap(): void {
     State.hook_runs += 1;
@@ -8,4 +10,3 @@ function on_code_swap(): void {
 function main(): i32 {
     return 0;
 }
-

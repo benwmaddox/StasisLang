@@ -1,0 +1,31 @@
+import "layout.stasis";
+import "../../src/stdlib/ui_layout_audit.stasis";
+
+function main(): i32 {
+    menu_layout(0.0, 0.0, 360.0, 720.0, 180.0, 64.0);
+    if (menu_title_x != 90.0 || menu_title_y != 24.0) {
+        return 1;
+    }
+    if (menu_button_x != 20.0 || menu_button_y != 140.0) {
+        return 2;
+    }
+    if (menu_label_x != 78.0 || menu_label_y != 155.0) {
+        return 3;
+    }
+    if (!menu_button_contains(20.0, 140.0)) {
+        return 4;
+    }
+    if (!menu_button_contains(199.999, 195.999)) {
+        return 5;
+    }
+    if (menu_button_contains(200.0, 196.0)) {
+        return 6;
+    }
+    if (!ui_audit_centered_x(menu_button_x, menu_button_w, menu_label_x, 64.0, 0.01)) {
+        return 7;
+    }
+    if (!ui_audit_centered_y(menu_button_y, menu_button_h, menu_label_y, 26.0, 0.01)) {
+        return 8;
+    }
+    return 0;
+}

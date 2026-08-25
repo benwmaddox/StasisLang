@@ -1,0 +1,154 @@
+import "../../../src/stdlib/internal/gfx_cmd.stasis";
+
+function @extern("stasis_jit_render_v2_trace") native_render_trace(
+    cmd_i32: i32[],
+    cmd_i32_len: i32,
+    cmd_f32: f32[],
+    cmd_f32_len: i32,
+    cmd_u8: u8[],
+    cmd_u8_len: i32
+): i32;
+
+global full_text: utf8[1024];
+global tail_text: utf8[960];
+
+function prepare_text(): void {
+    for (let i: i32 = 0; i < 1024; i += 1) {
+        full_text[i] = 65;
+    }
+    utf8_set_len_ascii(full_text, 1024);
+    for (let i: i32 = 0; i < 960; i += 1) {
+        tail_text[i] = 66;
+    }
+    utf8_set_len_ascii(tail_text, 960);
+}
+
+function fill_geometry(): void {
+    for (let i: i32 = 0; i < 5000; i += 1) {
+        gfx_cmd_line(1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 1.0);
+    }
+    for (let i: i32 = 0; i < 5000; i += 1) {
+        gfx_cmd_rect(5.0, 6.0, 7.0, 8.0, 0.4, 0.5, 0.6, 1.0);
+    }
+}
+
+function fill_sprites(): void {
+    for (let i: i32 = 0; i < 4096; i += 1) {
+        gfx_cmd_sprite(i + 1, 9.0, 10.0, 11.0, 12.0, i, 255);
+    }
+}
+
+function fill_raw_text(): void {
+    for (let i: i32 = 0; i < 63; i += 1) {
+        gfx_cmd_text(1, full_text, 13.0, 14.0, 0.7, 0.8, 0.9, 1.0);
+    }
+    gfx_cmd_text(1, tail_text, 13.0, 14.0, 0.7, 0.8, 0.9, 1.0);
+    gfx_cmd_text(1, tail_text, 13.0, 14.0, 0.7, 0.8, 0.9, 1.0);
+}
+
+function fill_cached_text(): void {
+    for (let i: i32 = 64; i < 2048; i += 1) {
+        gfx_cmd_text_cached(1, i + 1, 15.0, 16.0, 1.0, 1.0, 1.0, 1.0);
+    }
+}
+
+function fill_text(): void {
+    fill_raw_text();
+    fill_cached_text();
+}
+
+function trace_commands(): i32 {
+    return native_render_trace(
+        gfx_cmd_i32,
+        34608,
+        gfx_cmd_f32,
+        125060,
+        gfx_cmd_u8,
+        65536
+    );
+}
+
+function trace_geometry_capacity(): i32 {
+    gfx_cmd_begin();
+    fill_geometry();
+    return trace_commands();
+}
+
+function trace_sprite_capacity(): i32 {
+    gfx_cmd_begin();
+    fill_sprites();
+    return trace_commands();
+}
+
+function trace_text_capacity(): i32 {
+    prepare_text();
+    gfx_cmd_begin();
+    fill_text();
+    return trace_commands();
+}
+
+function trace_raw_text_capacity(): i32 {
+    prepare_text();
+    gfx_cmd_begin();
+    fill_raw_text();
+    return trace_commands();
+}
+
+function trace_cached_text_capacity(): i32 {
+    gfx_cmd_begin();
+    fill_cached_text();
+    return trace_commands();
+}
+
+function probe_raw_text_source(): i32 {
+    prepare_text();
+    return full_text[0] * 1000000 + full_text[1023] * 10000 + full_text.byte_length;
+}
+
+function probe_direct_memcpy_destination(): i32 {
+    prepare_text();
+    gfx_cmd_begin();
+    sys_memcpy_u8(gfx_cmd_u8, 0, full_text, 0, 1024);
+    return gfx_cmd_u8[0] * 1000 + gfx_cmd_u8[1023];
+}
+
+function copy_text_probe(text: utf8[]): void {
+    sys_memcpy_u8(gfx_cmd_u8, 0, text, 0, 1024);
+}
+
+function probe_parameter_memcpy_destination(): i32 {
+    prepare_text();
+    gfx_cmd_begin();
+    copy_text_probe(full_text);
+    return gfx_cmd_u8[0] * 1000 + gfx_cmd_u8[1023];
+}
+
+function probe_raw_text_destination(): i32 {
+    prepare_text();
+    gfx_cmd_begin();
+    fill_raw_text();
+    return gfx_cmd_u8[0] * 1000000 + gfx_cmd_u8[1023] * 10000 + gfx_cmd_u8[64575] * 100 + gfx_cmd_u8[65534];
+}
+
+function probe_raw_text_metadata(): i32 {
+    prepare_text();
+    gfx_cmd_begin();
+    fill_raw_text();
+    return gfx_cmd_i32[7] * 1000000 + gfx_cmd_i32[9] * 100 + gfx_cmd_i32[12322] + gfx_cmd_i32[12511];
+}
+
+function main(): i32 {
+    prepare_text();
+    gfx_cmd_begin();
+    fill_geometry();
+    fill_sprites();
+    fill_text();
+
+    gfx_cmd_append_order(GFX_ORDER_LINE, 0);
+    gfx_cmd_line(1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 1.0);
+    gfx_cmd_rect(5.0, 6.0, 7.0, 8.0, 0.4, 0.5, 0.6, 1.0);
+    gfx_cmd_sprite(1, 9.0, 10.0, 11.0, 12.0, 0, 255);
+    gfx_cmd_text_cached(1, 1, 15.0, 16.0, 1.0, 1.0, 1.0, 1.0);
+
+    return trace_commands();
+}

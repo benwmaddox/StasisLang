@@ -1,0 +1,50 @@
+plugins {
+    id 'com.android.application'
+}
+
+def sdl3Source = providers.gradleProperty('stasisSdl3Source')
+        .orElse(providers.environmentVariable('STASIS_SDL3_SOURCE'))
+def sdl3ImageSource = providers.gradleProperty('stasisSdl3ImageSource')
+        .orElse(providers.environmentVariable('STASIS_SDL3_IMAGE_SOURCE'))
+def seamTests = providers.gradleProperty('stasisSeamTests')
+        .orElse('false')
+        .map { it.toBoolean() }
+if (!sdl3Source.isPresent() || !sdl3ImageSource.isPresent()) {
+    throw new GradleException('Set STASIS_SDL3_SOURCE and STASIS_SDL3_IMAGE_SOURCE to SDL3 and SDL3_image source trees')
+}
+
+android {
+    namespace '@STASIS_PACKAGE_ID@'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId '@STASIS_PACKAGE_ID@'
+        minSdk 26
+        targetSdk 35
+        versionCode @STASIS_ANDROID_VERSION_CODE@
+        versionName '@STASIS_ANDROID_VERSION_NAME@'
+        ndk {
+            abiFilters '@STASIS_ANDROID_ABI@'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments '-DSTASIS_SDL3_SOURCE=' + sdl3Source.get(),
+                        '-DSTASIS_SDL3_IMAGE_SOURCE=' + sdl3ImageSource.get(),
+                        '-DSTASIS_ENABLE_SEAM_TESTS=' + (seamTests.get() ? 'ON' : 'OFF')
+            }
+        }
+        buildConfigField 'boolean', 'STASIS_SEAM_TESTS', seamTests.get().toString()
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    sourceSets.main.java.srcDir(new File(sdl3Source.get(), 'android-project/app/src/main/java'))
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+}

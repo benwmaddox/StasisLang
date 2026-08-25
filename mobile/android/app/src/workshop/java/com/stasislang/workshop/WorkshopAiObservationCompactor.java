@@ -1,18 +1,13 @@
 package com.stasislang.workshop;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-
 import org.json.JSONObject;
 
 final class WorkshopAiObservationCompactor {
     static final class SourceMetadata {
         final int characters;
-        final String sha256;
 
-        SourceMetadata(int characters, String sha256) {
+        SourceMetadata(int characters) {
             this.characters = characters;
-            this.sha256 = sha256;
         }
     }
 
@@ -33,19 +28,10 @@ final class WorkshopAiObservationCompactor {
         SourceMetadata metadata = describe(source);
         args.remove(key);
         args.put(key + "_chars", metadata.characters);
-        args.put(key + "_sha256", metadata.sha256);
     }
 
     static SourceMetadata describe(String source) throws Exception {
         String value = source == null ? "" : source;
-        return new SourceMetadata(value.length(), sha256(value));
-    }
-
-    private static String sha256(String source) throws Exception {
-        byte[] digest = MessageDigest.getInstance("SHA-256")
-                .digest(source.getBytes(StandardCharsets.UTF_8));
-        StringBuilder hex = new StringBuilder(digest.length * 2);
-        for (byte value : digest) hex.append(String.format("%02x", value & 0xff));
-        return hex.toString();
+        return new SourceMetadata(value.length());
     }
 }

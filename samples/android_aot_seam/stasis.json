@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "name": "android_aot_seam",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "android": {
+    "application_id": "com.stasislang.seam.it017",
+    "label": "Stasis Android Seam",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  }
+}

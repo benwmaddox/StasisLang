@@ -1,0 +1,32 @@
+function exploration_approach(current: i32, target: i32, step: i32): i32 {
+    if (current < target) {
+        if (target - current <= step) {
+            return target;
+        }
+        return current + step;
+    }
+    if (current > target) {
+        if (current - target <= step) {
+            return target;
+        }
+        return current - step;
+    }
+    return current;
+}
+
+function exploration_camera_follow_system(): void {
+    let max_x: i32 = WORLD_WIDTH - GameState.screen_w;
+    let max_y: i32 = WORLD_HEIGHT - GameState.screen_h;
+    if (max_x < 0) {
+        max_x = 0;
+    }
+    if (max_y < 0) {
+        max_y = 0;
+    }
+    let target_x: i32 = exploration_clamp(World.position_x[0] -(GameState.screen_w / 2), 0, max_x);
+    let target_y: i32 = exploration_clamp(World.position_y[0] -(GameState.screen_h / 2), 0, max_y);
+    GameState.camera_x = exploration_approach(GameState.camera_x, target_x, CAMERA_FOLLOW_STEP);
+    GameState.camera_y = exploration_approach(GameState.camera_y, target_y, CAMERA_FOLLOW_STEP);
+}
+
+import "../input.stasis";

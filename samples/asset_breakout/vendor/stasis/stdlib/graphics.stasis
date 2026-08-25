@@ -1,0 +1,391 @@
+@link("stasis_graphics");
+
+// Graphics/runtime bindings.
+//
+// Policy: Stasis does not call into the host on hot paths.
+// - Inputs/state are read from private HostFrame globals written by the host once per tick.
+// - Rendering is written into private command buffers read by the host after `tick()`.
+//
+// The remaining `extern` functions are intended for startup/asset loading (not per-tick).
+
+import "internal/host_frame.stasis";
+import "internal/gfx_cmd.stasis";
+import "internal/host_window_request.stasis";
+import "asset_tasks.stasis";
+
+extern function @effects(nondeterministic) sleep_ms(ms: i32): void;
+
+// Hot-path reads are HostFrame snapshot-only (no host calls).
+function get_time_ms(): i32 {
+    return host_time_ms();
+}
+
+function get_time_us(): i32 {
+    return host_time_us();
+}
+
+// Startup / assets (host calls; avoid in hot paths)
+extern function @effects(graphics) gfx_poll_reload(handle: i32): bool;
+extern function @effects(graphics, storage) gfx_dump_bmp(path: string): i32;
+extern function @effects(graphics, storage) gfx_dump_png(path: string): i32;
+extern function @effects(graphics)@asset_path(path) load_font(path: string, size: i32): i32;
+extern function @effects(graphics) measure_text(font: i32, text: string): f32;
+
+struct TextRun {
+    font: i32;
+    handle: i32;
+    width: f32;
+    height: f32;
+}
+
+const ANIMATION_PLAYBACK_ONCE: i32 = 0;
+const ANIMATION_PLAYBACK_LOOP: i32 = 1;
+const ANIMATION_PLAYBACK_PING_PONG: i32 = 2;
+
+struct AnimationClip {
+    first_frame: i32;
+    frame_count: i32;
+    ticks_per_frame: i32;
+    playback_mode: i32;
+}
+
+struct SpriteSheet {
+    handle: i32;
+    width: i32;
+    height: i32;
+    columns: i32;
+    rows: i32;
+    cell_width: i32;
+    cell_height: i32;
+}
+
+function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(
+    self: Sprite,
+    path: string,
+    width: i32,
+    height: i32
+): bool;
+function @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
+    self: SpriteSheet,
+    path: string,
+    width: i32,
+    height: i32
+): bool;
+
+function publish(self: ImageAsset, target: Sprite): bool {
+    if (!self.ready()) {
+        return false;
+    }
+    if (target.handle != 0) {
+        gfx_release_sprite(target.handle);
+    }
+    target.handle = self.handle;
+    target.width = self.width;
+    target.height = self.height;
+    self.handle = 0;
+    self.width = 0;
+    self.height = 0;
+    self.state = AssetState.None;
+    return true;
+}
+
+function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
+    if (self.handle == 0 || self.width <= 0 || self.height <= 0) {
+        return;
+    }
+    let width: f32 = 0.0;
+    let height: f32 = 0.0;
+    width.from_i32(self.width);
+    height.from_i32(self.height);
+    gfx_cmd_sprite(self.handle, x, y, width, height, rotation, alpha);
+}
+
+function load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool {
+    if (columns <= 0 || rows <= 0 || cell_width <= 0 || cell_height <= 0) {
+        return false;
+    }
+    if (columns > 2147483647 / rows || columns > 2147483647 / cell_width || rows > 2147483647 / cell_height) {
+        return false;
+    }
+    let total_width: i32 = columns * cell_width;
+    let total_height: i32 = rows * cell_height;
+    if (total_width <= 0 || total_height <= 0) {
+        return false;
+    }
+    if (!self.load_sprite_sheet_asset_from(path, total_width, total_height)) {
+        return false;
+    }
+    self.columns = columns;
+    self.rows = rows;
+    self.cell_width = cell_width;
+    self.cell_height = cell_height;
+    return true;
+}
+
+function draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void {
+    if (self.handle == 0 || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
+        return;
+    }
+    if (self.columns > 2147483647 / self.rows) {
+        return;
+    }
+    let frame_total: i32 = self.columns * self.rows;
+    if (frame < 0 || frame >= frame_total) {
+        return;
+    }
+    let column: i32 = frame % self.columns;
+    let row: i32 = frame / self.columns;
+    let inv_columns: f32 = 1.0;
+    let inv_rows: f32 = 1.0;
+    inv_columns = inv_columns / self.columns;
+    inv_rows = inv_rows / self.rows;
+    let u0: f32 = 0.0;
+    let v0: f32 = 0.0;
+    let u1: f32 = 0.0;
+    let v1: f32 = 0.0;
+    u0 = i32_to_f32(column) * inv_columns;
+    v0 = i32_to_f32(row) * inv_rows;
+    u1 = i32_to_f32(column + 1) * inv_columns;
+    v1 = i32_to_f32(row + 1) * inv_rows;
+    let width: f32 = 0.0;
+    let height: f32 = 0.0;
+    width.from_i32(self.cell_width);
+    height.from_i32(self.cell_height);
+    gfx_cmd_sprite(self.handle, x, y, width, height, rotation, alpha);
+    gfx_cmd_set_last_sprite_uv(u0, v0, u1, v1);
+}
+
+function animation_frame_at(first_frame: i32, frame_count: i32, ticks_per_frame: i32, playback_mode: i32, elapsed_ticks: i32): i32 {
+    let frame: i32 = first_frame;
+    if (first_frame < 0 || frame_count <= 0 || ticks_per_frame <= 0) {
+        return frame;
+    }
+    if (first_frame > 2147483647 -(frame_count - 1)) {
+        return frame;
+    }
+    let elapsed: i32 = elapsed_ticks;
+    if (elapsed < 0) {
+        elapsed = 0;
+    }
+    let step: i32 = elapsed / ticks_per_frame;
+    if (playback_mode == 0) {
+        if (step >= frame_count) {
+            step = frame_count - 1;
+        }
+    } else if (playback_mode == 1) {
+        step = step % frame_count;
+    } else if (frame_count <= 1) {
+        step = 0;
+    } else {
+        if (frame_count > 1073741824) {
+            return first_frame;
+        }
+        let period: i32 = frame_count * 2 - 2;
+        let phase: i32 = step % period;
+        if (phase >= frame_count) {
+            step = period - phase;
+        } else {
+            step = phase;
+        }
+    }
+    return first_frame + step;
+}
+
+function animation_finished(frame_count: i32, ticks_per_frame: i32, playback_mode: i32, elapsed_ticks: i32): bool {
+    if (frame_count <= 0 || ticks_per_frame <= 0) {
+        return true;
+    }
+    return playback_mode == 0 && elapsed_ticks >= 0 && elapsed_ticks / ticks_per_frame >= frame_count;
+}
+
+function frame_at(self: AnimationClip, elapsed_ticks: i32): i32 {
+    return animation_frame_at(self.first_frame, self.frame_count, self.ticks_per_frame, self.playback_mode, elapsed_ticks);
+}
+
+function finished(self: AnimationClip, elapsed_ticks: i32): bool {
+    return animation_finished(self.frame_count, self.ticks_per_frame, self.playback_mode, elapsed_ticks);
+}
+
+function @effects(graphics)@extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
+
+function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    if (self.font <= 0 || self.handle <= 0) {
+        return;
+    }
+    gfx_cmd_text_cached(self.font, self.handle, x, y, r, g, b, a);
+}
+
+function get_desktop_size(out_w: i32[], out_h: i32[]): void {
+    out_w[0] = host_screen_w_px();
+    out_h[0] = host_screen_h_px();
+}
+
+function init_window(width: i32, height: i32, title: string): bool {
+    host_request_windowed(width, height);
+    return true;
+}
+
+function set_window_size(width: i32, height: i32): void {
+    host_request_windowed(width, height);
+}
+
+function set_fullscreen(enabled: i32): i32 {
+    host_request_fullscreen(enabled);
+    return 0;
+}
+
+function set_maximized(enabled: i32): i32 {
+    host_request_maximized(enabled);
+    return 0;
+}
+
+function set_maximized_canvas(width: i32, height: i32): i32 {
+    host_request_maximized_canvas(width, height);
+    return 0;
+}
+
+// Legacy-ish names retained as pure wrappers (no host calls).
+function begin_frame(): void {
+    gfx_cmd_begin();
+}
+
+function end_frame(): void {
+    gfx_cmd_mark_present();
+}
+
+function clear(r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_clear(r, g, b, a);
+}
+
+function draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_line(x1, y1, x2, y2, r, g, b, a);
+}
+
+function fill_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_rect(x, y, w, h, r, g, b, a);
+}
+
+function draw_lines(lines: f32[], count: i32): void {
+    gfx_cmd_lines_from(lines, count);
+}
+
+function gfx_draw_sprites(cmd_i32: i32[], cmd_f32: f32[], count: i32): void {
+    gfx_cmd_sprites_from(cmd_i32, cmd_f32, count);
+}
+
+function gfx_window_resized(): bool {
+    return host_resized();
+}
+
+function gfx_logical_width(): f32 {
+    return host_logical_width();
+}
+
+function gfx_logical_height(): f32 {
+    return host_logical_height();
+}
+
+function gfx_native_width_px(): i32 {
+    return host_native_w_px();
+}
+
+function gfx_native_height_px(): i32 {
+    return host_native_h_px();
+}
+
+function gfx_drawable_width_px(): i32 {
+    return host_drawable_w_px();
+}
+
+function gfx_drawable_height_px(): i32 {
+    return host_drawable_h_px();
+}
+
+function gfx_safe_viewport_x(): f32 {
+    return host_safe_x();
+}
+
+function gfx_safe_viewport_y(): f32 {
+    return host_safe_y();
+}
+
+function gfx_safe_viewport_width(): f32 {
+    return host_safe_width();
+}
+
+function gfx_safe_viewport_height(): f32 {
+    return host_safe_height();
+}
+
+function gfx_content_scale(): f32 {
+    return host_content_scale();
+}
+
+function gfx_raster_scale(): f32 {
+    return host_raster_scale();
+}
+
+function gfx_display_generation(): i32 {
+    return host_display_generation();
+}
+
+function gfx_density_generation(): i32 {
+    return host_density_generation();
+}
+
+function is_key_down(scancode: i32): bool {
+    return host_key_down(scancode);
+}
+
+function should_quit(): bool {
+    return host_quit_requested();
+}
+
+// Pointer/query wrappers over HostFrame
+function input_pointer_count(): i32 {
+    return host_pointer_count();
+}
+
+function input_pointer_id(index: i32): i32 {
+    return host_pointer_id(index);
+}
+
+function input_pointer_is_down(index: i32): bool {
+    return host_pointer_is_down(index);
+}
+
+function input_pointer_went_down(index: i32): bool {
+    return host_pointer_went_down(index);
+}
+
+function input_pointer_went_up(index: i32): bool {
+    return host_pointer_went_up(index);
+}
+
+function input_pointer_x_logical(index: i32): f32 {
+    return host_pointer_x_logical(index);
+}
+
+function input_pointer_y_logical(index: i32): f32 {
+    return host_pointer_y_logical(index);
+}
+
+function input_pointer_dx_logical(index: i32): f32 {
+    return host_pointer_dx_logical(index);
+}
+
+function input_pointer_dy_logical(index: i32): f32 {
+    return host_pointer_dy_logical(index);
+}
+
+function input_pointer_x_n(index: i32): f32 {
+    return host_pointer_x_n(index);
+}
+
+function input_pointer_y_n(index: i32): f32 {
+    return host_pointer_y_n(index);
+}
+
+function input_dropped_pointers(): i32 {
+    return host_dropped_pointers();
+}

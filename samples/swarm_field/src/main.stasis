@@ -1,0 +1,213 @@
+import "/vendor/stasis/stdlib/graphics.stasis";
+
+const SCREEN_W: f32 = 640.0;
+const SCREEN_H: f32 = 360.0;
+const AGENT_COUNT: i32 = 8192;
+const AGENT_SIZE: f32 = 1.8;
+const MAX_SPEED: f32 = 2.8;
+
+struct Agent {
+    x: f32;
+    y: f32;
+    vx: f32;
+    vy: f32;
+    band: i32;
+}
+
+// Fixed-size state: no entity allocation or iteration-count changes at runtime.
+global agents: Agent[8192];
+global field_x: f32;
+global field_y: f32;
+global field_mode: i32;
+global presentation_variant: i32;
+
+function abs_f32(value: f32): f32 {
+    if (value < 0.0) {
+        return 0.0 - value;
+    }
+    return value;
+}
+
+function clamp_speed(value: f32): f32 {
+    if (value < 0.0 - MAX_SPEED) {
+        return 0.0 - MAX_SPEED;
+    }
+    if (value > MAX_SPEED) {
+        return MAX_SPEED;
+    }
+    return value;
+}
+
+function wrap_x(value: f32): f32 {
+    if (value < 0.0) {
+        return value + SCREEN_W;
+    }
+    if (value >= SCREEN_W) {
+        return value - SCREEN_W;
+    }
+    return value;
+}
+
+function wrap_y(value: f32): f32 {
+    if (value < 0.0) {
+        return value + SCREEN_H;
+    }
+    if (value >= SCREEN_H) {
+        return value - SCREEN_H;
+    }
+    return value;
+}
+
+function initialize_agents(): void {
+    // 128 columns x 64 rows gives a stable, dense starting lattice.
+    foreach (let agent, i in agents) {
+        let column: i32 = i % 128;
+        let row: i32 = i / 128;
+        agent.x = i32_to_f32(column) * 5.0 + 2.0;
+        agent.y = i32_to_f32(row) * 5.0 + 2.0;
+        agent.vx = i32_to_f32((i % 5) - 2) * 0.22;
+        agent.vy = i32_to_f32(((i / 5) % 5) - 2) * 0.18;
+        agent.band = i % 6;
+    }
+}
+
+function toggle_field_mode(): void {
+    if (field_mode == 0) {
+        field_mode = 1;
+    } else {
+        field_mode = 0;
+    }
+}
+
+function update_field_from_pointer(): void {
+    if (input_pointer_count() <= 0) {
+        return;
+    }
+    field_x = input_pointer_x_logical(0);
+    field_y = input_pointer_y_logical(0);
+    if (input_pointer_went_down(0)) {
+        toggle_field_mode();
+    }
+}
+
+function update_agent(index: i32): void {
+    let column: i32 = index % 128;
+    let row: i32 = index / 128;
+    let home_x: f32 = i32_to_f32(column) * 5.0 + 2.0;
+    let home_y: f32 = i32_to_f32(row) * 5.0 + 2.0;
+    let dx: f32 = field_x - agents[index].x;
+    let dy: f32 = field_y - agents[index].y;
+    let home_dx: f32 = home_x - agents[index].x;
+    let home_dy: f32 = home_y - agents[index].y;
+
+    // A spring keeps the lattice distributed while the pointer adds a local orbit.
+    let in_core: bool = abs_f32(dx) < 70.0 && abs_f32(dy) < 70.0;
+    let radial_sign: f32 = 1.0;
+    if (field_mode == 1 || in_core) {
+        radial_sign = -1.0;
+    }
+    let ax: f32 = home_dx * 0.004 + dx * 0.00055 * radial_sign - dy * 0.00035;
+    let ay: f32 = home_dy * 0.004 + dy * 0.00055 * radial_sign + dx * 0.00035;
+    if (ax > 0.18) {
+        ax = 0.18;
+    }
+    if (ax < -0.18) {
+        ax = -0.18;
+    }
+    if (ay > 0.18) {
+        ay = 0.18;
+    }
+    if (ay < -0.18) {
+        ay = -0.18;
+    }
+    agents[index].vx = clamp_speed(agents[index].vx * 0.992 + ax);
+    agents[index].vy = clamp_speed(agents[index].vy * 0.992 + ay);
+    agents[index].x = wrap_x(agents[index].x + agents[index].vx);
+    agents[index].y = wrap_y(agents[index].y + agents[index].vy);
+}
+
+function update_agents(): void {
+    foreach (let agent, i in agents) {
+        update_agent(i);
+    }
+}
+
+function main(): i32 {
+    init_window(640, 360, "Stasis Swarm Field");
+    field_x = SCREEN_W / 2.0;
+    field_y = SCREEN_H / 2.0;
+    field_mode = 0;
+    presentation_variant = 0;
+    initialize_agents();
+    return 0;
+}
+
+function tick(): i32 {
+    if (should_quit()) {
+        return 1;
+    }
+    update_field_from_pointer();
+    update_agents();
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.015, 0.025, 0.055, 1.0);
+    fill_rect(0.0, 0.0, SCREEN_W, 1.0, 0.16, 0.28, 0.42, 1.0);
+    fill_rect(0.0, SCREEN_H - 1.0, SCREEN_W, 1.0, 0.16, 0.28, 0.42, 1.0);
+
+    // One rectangle per agent: 8,192 commands, below the 10,000 command cap.
+    foreach (let agent, i in agents) {
+        let red: f32 = 0.22;
+        let green: f32 = 0.78;
+        let blue: f32 = 0.98;
+        if (agent.band == 1) {
+            red = 0.98;
+            green = 0.72;
+            blue = 0.28;
+        } else if (agent.band == 2) {
+            red = 0.42;
+            green = 0.96;
+            blue = 0.54;
+        } else if (agent.band == 3) {
+            red = 0.92;
+            green = 0.38;
+            blue = 0.76;
+        } else if (agent.band == 4) {
+            red = 0.98;
+            green = 0.42;
+            blue = 0.30;
+        } else if (agent.band == 5) {
+            red = 0.64;
+            green = 0.50;
+            blue = 0.98;
+        }
+        if (presentation_variant == 1) {
+            let swap: f32 = red;
+            red = blue;
+            blue = swap;
+        }
+        fill_rect(agent.x, agent.y, AGENT_SIZE, AGENT_SIZE, red, green, blue, 0.94);
+    }
+
+    let field_red: f32 = 0.30;
+    let field_blue: f32 = 0.96;
+    if (field_mode == 1) {
+        field_red = 0.98;
+        field_blue = 0.32;
+    }
+    fill_rect(field_x - 8.0, field_y - 1.0, 16.0, 2.0, field_red, 0.92, field_blue, 1.0);
+    fill_rect(field_x - 1.0, field_y - 8.0, 2.0, 16.0, field_red, 0.92, field_blue, 1.0);
+    end_frame();
+    return 0;
+}
+
+// Compatible swaps keep agents moving and only change the color presentation.
+function on_code_swap(): void {
+    if (presentation_variant == 0) {
+        presentation_variant = 1;
+    } else {
+        presentation_variant = 0;
+    }
+}

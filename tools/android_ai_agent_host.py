@@ -26,11 +26,11 @@ DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
-MAX_TURNS = 25
+MAX_TURNS = 15
 MAX_WORKING_NOTES_CHARS = 2_000
-MAX_INITIAL_SYMBOLS = 256
+MAX_INITIAL_SYMBOLS = 40
 MAX_INITIAL_SYMBOL_INDEX_CHARS = 16 * 1024
-MAX_TOOL_CALLS_PER_BATCH = 12
+MAX_TOOL_CALLS_PER_BATCH = 50
 MAX_READ_ONLY_BATCHES = 2
 MAX_RETAINED_OBSERVATIONS = 16
 MAX_RETAINED_OBSERVATION_CHARS = 96 * 1024
@@ -172,6 +172,87 @@ def parse_symbols(project: Path) -> list[Symbol]:
                 symbols.append(Symbol("function", func_name, owner, rel, signature, full_source, start, end))
             cursor = end
     return symbols
+
+
+def direct_import_files(project: Path, file: str) -> list[str]:
+    source_path = source_file_path(project, file)
+    imports = re.findall(r'^\s*import\s+"([^"]+)"\s*;', read_text(source_path), re.MULTILINE)
+    resolved: set[str] = set()
+    for imported in imports:
+        path = (Path(file).parent / imported).as_posix()
+        parts: list[str] = []
+        for part in path.split("/"):
+            if not part or part == ".":
+                continue
+            if part == "..":
+                if parts:
+                    parts.pop()
+                continue
+            parts.append(part)
+        resolved.add("/".join(parts))
+    return sorted(resolved)
+
+
+def default_symbol_scope(project: Path) -> list[str]:
+    return sorted({"src/main.stasis", *direct_import_files(project, "src/main.stasis")})
+
+
+def compact_symbol_listing(project: Path, args: dict[str, Any]) -> dict[str, Any]:
+    requested_files = args.get("files") or default_symbol_scope(project)
+    if not isinstance(requested_files, list) or len(requested_files) > 16:
+        return {"status": "validation_error", "error": "list_symbols accepts at most 16 starting files"}
+    files = sorted({str(file).replace("\\", "/") for file in requested_files})
+    for file in files:
+        source_file_path(project, file)
+    query = str(args.get("query") or "").strip().lower()
+    kind = str(args.get("kind") or "").strip()
+    owner = str(args.get("owner") or "").strip()
+    page = max(int(args.get("page") or 0), 0)
+    limit = min(max(int(args.get("limit") or 32), 1), 200)
+    matches = [
+        symbol for symbol in parse_symbols(project)
+        if symbol.file in files
+        and (not query or query in symbol.name.lower() or query in symbol.signature.lower())
+        and (not kind or symbol.kind == kind)
+        and (not owner or symbol.owner == owner)
+    ]
+    offset = page * limit
+    return {
+        "schema_version": 1,
+        "files": files,
+        "imports": {file: direct_import_files(project, file) for file in files},
+        "page": page,
+        "limit": limit,
+        "total": len(matches),
+        "items": [symbol_json(symbol, False) for symbol in matches[offset:offset + limit]],
+    }
+
+
+def find_symbol_references(project: Path, symbol: str, limit: int = 128) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0,7}", symbol):
+        return {"status": "validation_error", "error": "reference symbol must be 1..=8 dot-separated identifiers"}
+    references: list[dict[str, Any]] = []
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])")
+    for item in parse_symbols(project):
+        for match in pattern.finditer(item.source):
+            tail = item.source[match.end():]
+            kind = "read"
+            if match.start() < item.source.find("{") and item.name == symbol:
+                kind = "definition"
+            elif re.match(r"\s*\(", tail):
+                kind = "call"
+            elif re.match(r"\s*(?:=|\+=|-=|\*=|/=|%=)", tail):
+                kind = "write"
+            references.append({
+                "kind": kind,
+                "file": item.file,
+                "containing_kind": item.kind,
+                "containing_name": item.name,
+                "containing_signature": item.signature,
+            })
+            if len(references) >= min(max(limit, 1), 200):
+                return {"schema_version": 1, "symbol": symbol, "references": references}
+    return {"schema_version": 1, "symbol": symbol, "references": references}
 
 
 def symbol_json(symbol: Symbol, include_source: bool) -> dict[str, Any]:
@@ -564,9 +645,10 @@ def tool_specs() -> list[dict[str, Any]]:
     def spec(tool: str, purpose: str, required: list[str], optional: list[str], args: dict[str, Any]) -> dict[str, Any]:
         return {"tool": tool, "purpose": purpose, "required_args": required, "optional_args": optional, "example": {"tool": tool, "args": args}}
     return [
-        spec("list_symbols", "List editable symbols compactly.", [], [], {}),
+        spec("list_symbols", "Search compact symbols in explicit starting files. Without files, search src/main.stasis and its direct imports and return their direct-import map.", [], ["files", "query", "kind", "owner", "page", "limit"], {"query": "paddle"}),
         spec("list_owner_symbols", "List symbols and preferred receiver calls for one owner/type.", ["owner"], [], {"owner": "GameState"}),
-        spec("read_symbol", "Read one symbol source.", ["name"], ["kind", "file", "owner"], {"name": "update_enemy_paddle"}),
+        spec("read_symbol", "Read one symbol source; up to 50 deliberate reads may be batched in one turn.", ["name"], ["kind", "file", "owner"], {"name": "update_enemy_paddle"}),
+        spec("find_references", "Find compact definitions, reads, writes, and calls for a function, global, or dot-qualified field.", ["symbol"], ["limit"], {"symbol": "GameState.paddle_y", "limit": 128}),
         spec("write_symbol", "Create or replace exactly one Stasis function/global/struct. Writes in one tool-call batch compile together after all batch tools run and roll back together on compile failure. The new_source must not contain additional top-level or nested declarations.", ["file", "name", "new_source"], ["kind", "owner"], {"file": "src/main.stasis", "name": "tick", "new_source": "function tick(): void {\n}"}),
         spec("delete_symbol", "Delete exactly one Stasis function/global/struct by name, with optional file/owner/kind disambiguation. Source deletes batch-compile and roll back on compile failure.", ["name"], ["file", "owner", "kind"], {"name": "unused_helper", "file": "src/main.stasis", "kind": "function"}),
         spec("list_tests", "List test files under tests/.", [], [], {}),
@@ -606,14 +688,15 @@ def response_contract() -> dict[str, Any]:
 
 def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
     symbols = parse_symbols(project)
+    scope_files = default_symbol_scope(project)
+    scoped_symbols = [symbol for symbol in symbols if symbol.file in scope_files]
     globals_payload = []
-    for symbol in symbols:
+    for symbol in scoped_symbols:
         if symbol.kind == "global":
-            body = symbol.source[symbol.source.find("{"):]
-            globals_payload.append({"kind": "global", "name": symbol.name, "file": symbol.file, "backing_struct_type": symbol.name, "backing_struct_source": f"struct {symbol.name} {body}"})
+            globals_payload.append({"kind": "global", "name": symbol.name, "file": symbol.file, "backing_struct_type": symbol.name})
     compact_symbols: list[dict[str, Any]] = []
     serialized_chars = 2
-    for symbol in symbols:
+    for symbol in scoped_symbols:
         compact = symbol_json(symbol, False)
         candidate_chars = len(json.dumps(compact, separators=(",", ":")))
         separator_chars = 0 if not compact_symbols else 1
@@ -666,10 +749,13 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
         "project_context": {
             "project_globals": globals_payload,
             "project_symbol_index": {
+                "files": scope_files,
+                "imports": {file: direct_import_files(project, file) for file in scope_files},
                 "symbols": compact_symbols,
                 "included_count": len(compact_symbols),
-                "available_count": len(symbols),
-                "truncated": len(compact_symbols) < len(symbols),
+                "available_count": len(scoped_symbols),
+                "project_symbol_count": len(symbols),
+                "truncated": len(compact_symbols) < len(scoped_symbols),
             },
             "selected_symbols": [],
             "selected_symbols_are_context_only": True,
@@ -809,8 +895,9 @@ def build_openai_payload(model: str, request: dict[str, Any], service_tier: str 
         "Return only one JSON object matching request.shared_context.protocol.response_contract exactly. "
         "Follow request.shared_context.stasis_basics as the authoritative language/runtime orientation. "
         "Every response must include working_notes of at most 2000 characters with concise Intent, Observed, Next, and Blocker facts. These are user-visible state notes, not private chain-of-thought. "
-        "The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when it already identifies the target. "
-        "Use mode=tool_calls to inspect/write with the provided fine-grained symbol and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/list_tests/read_test_file instead. "
+        "The initial project_symbol_index is the completed compact list for src/main.stasis and its direct imports; use it to choose direct read_symbol targets and use its import map to expand deliberately. Do not call list_symbols when it already identifies the targets. "
+        "Batch read_symbol and find_references for every initially listed function whose name directly contains the requested behavior noun; do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. "
+        "Use mode=tool_calls to inspect/write with the provided fine-grained symbol and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/find_references/list_tests/read_test_file instead. "
         "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
         "Do not use aliases such as calls, name, function, arguments, type, or source. "
         "After a tool-call batch with writes, compile runs locally once and failed compiles roll back the whole batch. Use run_tests to verify the behavior. "
@@ -1026,11 +1113,24 @@ def tool_call_batch_key(tool_calls: list[dict[str, Any]]) -> str:
     return json.dumps(tool_calls, sort_keys=True, separators=(",", ":"))
 
 
+def compact_observation_for_provider(observation: dict[str, Any]) -> dict[str, Any]:
+    retained = json.loads(json.dumps(observation))
+    if retained.get("tool") in {"write_symbol", "write_file", "write_test_file"}:
+        result = retained.get("result") or {}
+        if result.get("status") in {"written", "created"}:
+            args = retained.get("args") or {}
+            for field in ("new_source", "source"):
+                if field in args:
+                    args[field + "_chars"] = len(str(args.pop(field)))
+    return retained
+
+
 def remember_observations(memory: dict[str, dict[str, Any]], observations: list[dict[str, Any]]) -> None:
     for observation in observations:
-        key = f"{observation.get('tool', 'observation')}|{json.dumps(observation.get('args', {}), sort_keys=True, separators=(',', ':'))}"
+        retained = compact_observation_for_provider(observation)
+        key = f"{retained.get('tool', 'observation')}|{json.dumps(retained.get('args', {}), sort_keys=True, separators=(',', ':'))}"
         memory.pop(key, None)
-        memory[key] = observation
+        memory[key] = retained
         while len(memory) > MAX_RETAINED_OBSERVATIONS:
             memory.pop(next(iter(memory)))
 
@@ -1150,7 +1250,7 @@ def execute_tool_batch(project: Path, tool_calls: list[dict[str, Any]], last_dia
 def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostics: dict[str, Any]) -> dict[str, Any]:
     symbols = parse_symbols(project)
     if tool == "list_symbols":
-        return {"symbols": [symbol_json(s, False) for s in symbols]}
+        return compact_symbol_listing(project, args)
     if tool == "list_owner_symbols":
         owner = args.get("owner", "")
         owned = [s for s in symbols if s.owner == owner or s.name == owner]
@@ -1166,6 +1266,8 @@ def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostic
         if len(candidates) > 1:
             return {"status": "ambiguous", "matches": [symbol_json(s, False) for s in candidates]}
         return symbol_json(candidates[0], True)
+    if tool == "find_references":
+        return find_symbol_references(project, str(args.get("symbol") or ""), int(args.get("limit") or 128))
     if tool == "list_tests":
         return {"test_count": len(list_test_files(project)), "files": list_test_files(project)}
     if tool == "read_test_file":
@@ -1308,6 +1410,7 @@ def main() -> int:
         previous_tool_call_batch = current_tool_call_batch
         batch_has_writes = any(call.get("tool") in {"write_symbol", "delete_symbol", "write_file", "write_test_file", "delete_test_file"} for call in tool_calls)
         blocked_read_only_batch = not batch_has_writes and read_only_batches >= MAX_READ_ONLY_BATCHES
+        prior_observations = retained_observations(observation_memory)
         tool_started_at = time.perf_counter()
         if blocked_read_only_batch:
             observations = [{"tool": "progress_policy", "args": {}, "result": {"status": "read_only_batch_not_executed", "error": "Inspection is complete; the next response must write the intended change or return done.", "retained_observation_count": len(observation_memory)}}]
@@ -1339,7 +1442,7 @@ def main() -> int:
         instruction = "Use retained tool_observations and working_notes as cumulative memory; update Intent, Observed, Next, and Blocker. Do not reread targets already present in retained observations. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."
         if read_only_batches >= MAX_READ_ONLY_BATCHES:
             instruction += " You have completed the maximum read-only inspection batches. Your next response must contain at least one write tool call or mode=done."
-        request = build_followup_request(shared_context, retain_working_notes({"phase": "tool_observations", "tool_observations": retained_observations(observation_memory), "latest_tool_observations": observations, "instruction": instruction}, working_notes))
+        request = build_followup_request(shared_context, retain_working_notes({"phase": "tool_observations", "tool_observations": prior_observations, "latest_tool_observations": [compact_observation_for_provider(observation) for observation in observations], "instruction": instruction}, working_notes))
         trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
     print(json.dumps({"error": "turn_limit", "turns": MAX_TURNS, "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
     trace_events.append({"kind": "turn_limit", "turns": MAX_TURNS, "actions": total_actions, "last_diagnostics": last_diagnostics})

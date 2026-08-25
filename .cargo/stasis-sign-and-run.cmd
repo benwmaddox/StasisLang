@@ -18,11 +18,20 @@ goto collect_args
 
 set "SIGN_TOOL=%STASIS_AOT_SIGN_TOOL%"
 if not "%SIGN_TOOL%"=="" (
+  where "%SIGN_TOOL%" >nul 2>nul
+  if errorlevel 1 if not exist "%SIGN_TOOL%" (
+    if "%STASIS_REQUIRE_SIGNED_EXECUTION%"=="1" (
+      echo [stasis-sign-runner] configured signer does not exist: %SIGN_TOOL%>&2
+      exit /b 5
+    )
+    echo [stasis-sign-runner] ignoring unavailable optional signer: %SIGN_TOOL%>&2
+    goto run_unsigned
+  )
   if not exist "%TARGET%" (
     echo [stasis-sign-runner] target does not exist: %TARGET%>&2
     exit /b 3
   )
-  "%SIGN_TOOL%" "%TARGET%"
+  call "%SIGN_TOOL%" "%TARGET%"
   if errorlevel 1 (
     echo [stasis-sign-runner] signer failed for: %TARGET%>&2
     exit /b 4
@@ -34,5 +43,6 @@ if not "%SIGN_TOOL%"=="" (
   )
 )
 
+:run_unsigned
 "%TARGET%" %FORWARD_ARGS%
 exit /b %ERRORLEVEL%

@@ -151,7 +151,7 @@ fn print_help() {
 }
 
 fn render_fixture_source() -> &'static str {
-    "function tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n"
+    "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n"
 }
 
 fn write_fixture(path: &Path) -> Result<(), String> {

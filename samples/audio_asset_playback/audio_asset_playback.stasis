@@ -1,0 +1,66 @@
+import "/vendor/stasis/src/stdlib/audio.stasis";
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global music: AudioAsset;
+global effect: AudioAsset;
+global ticks: i32;
+global playback_started: bool;
+
+function main(): i32 {
+    init_window(480, 270, "Stasis Compressed Audio Playback");
+    if (!audio_init(48000, 2, 1024)) {
+        return 1;
+    }
+    if (!audio_is_available() || audio_get_sample_rate() != 48000 || audio_get_channels() != 2) {
+        return 4;
+    }
+    if (!music.load_audio("assets/tone.mp3") || !effect.load_audio("assets/tone.wav")) {
+        return 2;
+    }
+    ticks = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    if (!playback_started) {
+        if (music.failed() || effect.failed()) {
+            return 2;
+        }
+        if (!music.ready() || !effect.ready()) {
+            return 0;
+        }
+        if (!music.play_music(true, 0.18)) {
+            return 3;
+        }
+        playback_started = true;
+    }
+    ticks += 1;
+    if (ticks == 120) {
+        music.pause_music(true);
+    }
+    if (ticks == 180) {
+        music.set_music_volume(0.08);
+        music.pause_music(false);
+    }
+    if (ticks == 240) {
+        effect.play_effect(0.25);
+    }
+    if (ticks == 300) {
+        music.stop_music();
+    }
+    if (ticks == 360) {
+        music.play_music(true, 0.12);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.03, 0.04, 0.08, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

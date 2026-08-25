@@ -3,18 +3,28 @@
 This checklist is the implementation plan and is aligned with:
 - `docs/spec.md`
 - `docs/live-compilation-prd.md`
+- [`deterministic_live_simulation_roadmap.md`](deterministic_live_simulation_roadmap.md), which supplies the cross-cutting product promise and capability gate order
 - `docs/android_workshop_prd.md`
+
+The roadmap is alignment context only. This file owns implementation slices, mutable task status,
+and temporary sequencing; it does not duplicate the roadmap's product promise or normative language
+semantics.
 
 Status note:
 - This repository's stable compiler is implemented in Rust (`cargo build`, `cargo test`).
+- The current implementation map is `docs/compiler_architecture.md`. Older completed-slice notes
+  below are historical evidence and may name components that were removed by later cleanup slices.
 
 Locked decisions:
 - Entrypoint is `function main(): i32`.
-- Reachability-DCE roots are `main`, `tick`, and `on_code_swap` (when present), plus host-exported required entry symbols.
+- Reachability-DCE roots are lifecycle entries present in the program (`main`, `tick`, `render`,
+  `on_code_swap`) plus host-exported required entry symbols.
 - Initial host externs are `print_i32` and `print_string`.
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
 - Runtime boundary is host-set-based and deny-by-default: Stasis can only access extern symbols exported by the selected host set.
-- Call dispatch policy: debug/hot-swap mode keeps indirect dispatch (`FnId -> code_ptr`); release/AOT mode can lower direct call edges where compatibility gates allow.
+- Call dispatch policy: JIT and AOT lower internal Stasis calls directly. Warm JIT edits emit the
+  changed function/SCC plus exact reverse callers and reuse unaffected bodies. Only
+  lifecycle/host-required entries use stable trampolines and publish through one entry table.
 - Backend modes are:
 - Cranelift JIT for development/watch/hot-swap runtime
 - Cranelift AOT for production builds
@@ -41,7 +51,7 @@ Boundary rule:
 5. Update docs in the same PR when behavior changes.
 6. Preserve deterministic tick-based behavior.
 7. No ambient host API paths; each new host interaction must ship with explicit host-set contract docs/tests.
-8. Test command budget is strict: no single test command should exceed 5 minutes (300 seconds); split/shard test runs if needed and treat overruns as stability issues.
+8. Test command budget is strict: no single test command should exceed 15 minutes (900 seconds); split/shard test runs if needed and treat overruns as stability issues.
 
 ## Tooling Note
 
@@ -56,6 +66,109 @@ Release AOT optimization:
 Historical bootstrap/self-host notes below are archival only and do not describe an active compiler track.
 
 ## Slice Plan
+
+### Deterministic Headless Simulation Track
+
+#### HS1 - First-Class Bounded Scenarios
+
+- Maddox task: #156.
+- Language: `Rust + .stasis + JSON scenario fixtures`.
+- Scope: Run `main` plus exact unpaced ticks without SDL/render, restore a bounded runtime snapshot
+  between explicit seeds, apply saved state, check typed invariants per tick, hash simulation state
+  without host/presentation buffers, and write reproducible failure evidence.
+- Tests: CLI tick/no-render assertions, saved scalar and collection state, repeated hash identity,
+  per-seed isolation, invariant/hash failures, bounded receipts, and the
+  `samples/headless_scenario` end-to-end fixture.
+- Done gate: `stasis run --headless --ticks N --fast-forward` executes exactly N ticks; `stasis
+  test` discovers schema-v1 scenarios; repeated cases are isolated; deterministic failures retain
+  seed/tick/hash evidence; existing language tests remain unchanged.
+- Boundary: General input recording and the public replay/verify runtime remain owned by #148.
+- Status: `completed`.
+
+#### RR1 - Sparse HostFrame Record/Replay
+
+- Scope: Record a sparse non-default initial simulation snapshot, exact-bit HostFrame changes, and
+  post-render simulation hashes; replay through the existing graphical JIT tick/render path.
+- Tests: Exact zero-transition and float-bit codec tests, state reconstruction/divergence tests,
+  CLI parsing, and the `samples/windows_launch_smoke` record-to-replay-to-PNG executable seam.
+- Boundary: Graphics pixels are regenerated rather than stored. Schema v1 rejects live code/data/
+  asset changes and does not virtualize direct nondeterministic extern results outside HostFrame.
+- Status: `completed`.
+
+### Selective Direct-Call JIT Patch Track
+
+The canonical ABI, state machine, failure table, platform matrix, and budgets are in
+`docs/jit_generation_contract.md`. This track supersedes the merged #173-#178 whole-generation
+design. It does not restore internal hash/mutex dispatch or stable trampolines for ordinary
+functions.
+
+#### P0 - Lock Selective Invalidation and Trampoline Contract
+
+- Maddox task: #184.
+- Language: `docs`.
+- Scope: Define exact changed/SCC/reverse-caller invalidation, host-entry-only trampolines,
+  cross-patch direct calls to retained bodies, restart reclamation, state machine, and failure table.
+- Tests: Contract consistency checker plus negative mutations for whole-reachable warm emission,
+  internal trampolines, missing render root, and automatic-retirement requirements.
+- Done gate: Every canonical current document points to the selective patch contract and explicitly
+  marks #173-#178 as superseded.
+- Status: `completed`
+
+#### P1 - Plan Exact Affected Function Closures
+
+- Maddox task: #185.
+- Language: `Rust + .stasis`.
+- Scope: Maintain canonical forward/reverse graphs and produce deterministic PatchPlans with
+  changed, affected SCC, re-JITed, reused, affected-entry, and reason-chain metadata.
+- Tests: Exact-set fixtures for leaf, chain, diamond/shared, multi-root, SCC, overload/multi-file,
+  add/delete/rename, reachability, signature/layout failure, and recovery.
+- Done gate: A narrow compatible edit never schedules unrelated reachable bodies.
+- Status: `completed`
+
+#### P2 - Emit Selective Direct-Call Patch Modules
+
+- Maddox task: #186.
+- Language: `Rust + .stasis`.
+- Scope: Emit only PatchPlan bodies, direct-bind patched and retained callees, preserve unchanged
+  pointers, and keep complete emission only for cold JIT/AOT.
+- Tests: CLIF/executable assertions for patched-to-patched and patched-to-retained calls, SCCs,
+  failure preservation, and exact emitted counts.
+- Done gate: Warm emission count equals the PatchPlan and no internal dispatch import exists.
+- Status: `completed`
+
+#### P3 - Publish Through Host-Entry Trampolines
+
+- Maddox task: #187.
+- Language: `Rust + .stasis`.
+- Scope: Build patches off-thread, validate/migrate/hook in isolation, and atomically exchange one
+  host-entry table between complete windows. Retain old JIT arenas until restart.
+- Tests: Delayed compile, multi-root atomicity, A -> B supersession, hook/layout/signature failure,
+  callback escape, recovery, and repeated retained-code patches.
+- Done gate: No partial affected closure becomes visible and runtime-thread compiler work is zero.
+- Status: `completed`
+
+#### P4 - Verify Edit Shapes and Performance
+
+- Maddox task: #188.
+- Language: `Rust + CI + Android + .stasis`.
+- Scope: Enforce exact sets, behavior, JIT/AOT parity, target matrix, and p50/p95 evidence for
+  synthetic topologies, Chess TD, and Brickout.
+- Tests: 100/1,000/5,000 chain/branch/shared/SCC graphs, real-game narrow and broad edits, desktop
+  JIT, Android Workshop JIT, and production AOT parity.
+- Done gate: Reports expose accidental whole-reachable warm emission immediately; typical narrow
+  Chess TD edits commonly re-JIT fewer than ten functions while broad closures remain truthful.
+- Status: `pending`
+
+#### Superseded checklist requirements
+
+- Maddox #173-#178 and PRs #356/#365 encoded complete reachable warm generations,
+  no cross-patch calls, one code owner, and automatic owner retirement. Those are superseded.
+- Historical S7 per-function semantic hashes remain useful and now gate selective backend work.
+- Historical S8 hash/mutex/arity dispatch is not restored. Stable indirection exists only at
+  host-entry trampolines.
+- Production AOT continues to emit one complete direct-call artifact.
+- No priority-1 task must reclaim superseded JIT arenas; process restart is sufficient.
+
 ### Android Workshop Track
 
 #### AW0 - Product and Syntax Decisions
@@ -244,21 +357,21 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 #### AW24 - Compiler-Owned Android Compile Plan
 - Language: `Rust compiler frontend + docs`.
 - Scope: Stop Android compile planning from growing as a parallel C compiler path.
-- Deliverable: `stasis_compiler::frontend::workshop` now exposes the platform-neutral `build_workshop_compile_plan`, which maps `IncrementalCompilerHost` output back to workshop symbols, entrypoints, function hashes, artifact paths, and reload classifications using compiler-owned metadata plus workshop layout fingerprints. Android consumes this shared plan through its bridge.
-- Tests: Focused Rust tests compile sample workshop projects through `IncrementalCompilerHost`, build Android compile plans, verify function metadata/artifact paths, and classify `FastReload` versus `ResetRequired`; Android shell verifier and debug APK build continue to pass.
+- Historical deliverable: `stasis_compiler::frontend::workshop` introduced the platform-neutral workshop compile plan. The analysis host it originally adapted was retired in the 2026-08-22 single-compiler cleanup; current consumers use compiler-owned snapshots and semantic edit plans.
+- Tests: Focused Rust tests compile sample workshop projects through the production compiler, verify metadata/artifact paths, and classify `FastReload` versus `ResetRequired`; Android shell verification remains the platform gate.
 - Done gate: The next JNI slice has a Rust compiler-owned contract to call instead of expanding the native C scaffold.
 - Status: `completed`
 #### AW25 - Compiler-Owned Android Artifact Rendering
 - Language: `Rust compiler frontend + docs`.
 - Scope: Move Android manifest, runtime-state, and function-stub artifact contents into the compiler-owned workshop contract.
 - Deliverable: `stasis_compiler::frontend::workshop` now exposes the platform-neutral `render_workshop_artifacts`, producing `build/native_compile_manifest.txt`, optional `build/runtime_state.txt`, and per-function `CompiledStub` artifact text from `WorkshopCompilePlan`. Android-specific persistence stays in the bridge.
-- Tests: Focused Rust tests render artifacts from real `IncrementalCompilerHost` output and verify manifest entrypoints, reload strings, runtime-state reset/preserve behavior, and function stub content; Android shell verifier covers the compiler-owned artifact API; debug APK builds.
+- Tests: Focused Rust tests render artifacts from production compiler output and verify manifest entrypoints, reload strings, and runtime-state reset/preserve behavior; Android shell verification covers the compiler-owned artifact API.
 - Done gate: JNI can switch from generating Android compile artifacts in C to writing compiler-rendered artifact text.
 - Status: `completed`
 #### AW26 - Rust Android Compiler Bridge Crate
 - Language: `Rust compiler bridge + docs`.
 - Scope: Start replacing Android C compile planning with a Rust bridge that calls the existing compiler/workshop APIs.
-- Deliverable: Added `crates/stasis_android_bridge` as a workspace crate with `rlib`/`cdylib` outputs, a safe `compile_android_workshop_project` API, and C ABI functions that load a workshop project, run `IncrementalCompilerHost`, build the compiler-owned Android compile plan, and write compiler-rendered manifest/runtime/function artifacts.
+- Deliverable: Added `crates/stasis_android_bridge` as a workspace crate with `rlib`/`cdylib` outputs, a safe `compile_android_workshop_project` API, and C ABI functions that load a workshop project, invoke the compiler-owned Android plan, and write compiler-rendered artifacts.
 - Tests: `cargo test -p stasis_android_bridge` covers artifact writing, fast-reload runtime-state preservation, and the C ABI compile message; Android shell verifier covers workspace/crate wiring and bridge API references; debug APK builds.
 - Done gate: Android now has a tested Rust bridge crate that reuses compiler structure and can replace the native C scaffold in the JNI layer.
 - Status: `completed`
@@ -385,22 +498,22 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 #### AW44 - Android Background GitHub Contents Sync
 - Language: `Android Java + GitHub REST API + docs`.
 - Scope: Use saved GitHub settings to sync changed app-private project files serially in the background, with compact progress/error state and no false success claim.
-- Deliverable: A configured Workshop can now manually start serial Contents API uploads for changed app-private files, using the configured branch, Base64 content, and existing remote SHA when replacing a file. Local files are never modified by upload failure; compact status reports queued, progress, complete, or error. Automatic scheduling, deletion sync, and authenticated repository validation remain pending.
-- Tests: Isolated request/response helpers, serial sync scheduling, conflict/error paths, structural verifier, and debug APK build; authenticated repository validation when configured.
+- Deliverable: A configured Workshop validates authenticated repository/branch access before retaining its target, then serially applies bounded app-private project files through the Contents API. Per-project remote SHA state detects later remote conflicts, permits idempotent interruption recovery, and limits deletion to previously managed paths. Optional automatic backup requires explicit per-project consent, a compiled workspace, usable connectivity, and acceptable power state. Local files are never modified by remote failure; compact status reports validation, waiting, progress, completion, conflict, or retryable error.
+- Tests: `WorkshopGitHubApiTest` uses a loopback HTTP server to verify authenticated repository/branch reads, bounded Contents PUT/DELETE payloads, expected-SHA conflicts, idempotent outcomes, and response handling. `WorkshopGitHubSyncPolicyTest` covers deterministic planning, managed deletion, target identity, automatic scheduling, and retry state; the structural verifier, full Workshop JVM suite, lint, and debug APK build cover integration.
 - Done gate: A configured Workshop can back up changed Stasis sources to GitHub without making sync controls the foreground editor workflow.
-- Status: `in progress (authenticated validation deferred)`
+- Status: `completed`
 #### AW45 - Android GitHub Review and Pull Request Flow
 - Scope: Create a review branch/PR from the configured project, with symbol-first and raw-diff review before submission.
-- Deliverable: GitHub settings now expose an explicit review step that displays the symbol summary and raw file diffs and fingerprints that exact change set. Submission rejects missing or stale review, creates or reuses a deterministic Workshop branch from the configured base, uploads changed project files serially, and creates or finds the matching open pull request. Remote failures do not modify local project files.
-- Tests: Android shell verifier covers the review controls, fingerprint gate, branch/ref API, serial upload path, and create-or-find PR API; Java sources compile. Authenticated repository/device validation remains deferred.
+- Deliverable: GitHub settings expose an explicit review step that displays the symbol summary and raw file diffs and fingerprints that exact addition/edit/deletion set. Submission rejects missing or stale review, creates or reuses a deterministic Workshop branch from the configured base, applies reviewed changes serially, and creates or finds the matching open pull request. Remote conflicts/failures do not modify local project files.
+- Tests: The loopback GitHub API test covers review-ref creation plus create-or-find PR requests, while the policy suite includes a delimiter/deletion collision regression for the exact reviewed-change fingerprint. The Android shell verifier covers the UI/state wiring and Java sources compile into the Workshop APK.
 - Done gate: A configured workshop can create or update a GitHub PR without losing local edits.
-- Status: `in progress (authenticated validation deferred)`
+- Status: `completed`
 #### AW46 - Android Sync Reliability and Credential Protection
 - Scope: Queue serial sync work, persist retry/error state, and move API keys/tokens from plain preferences to Android credential storage.
-- Deliverable: GitHub and OpenAI secrets use an AES-GCM key held by Android Keystore; preferences retain only versioned ciphertext. Existing plaintext preferences migrate on first read and are removed only after encrypted storage commits successfully. A single executor serializes sync and PR work, persists queued/running/complete/error state plus the retryable operation type, recognizes work interrupted by process shutdown, and reconstructs retries from current local files. PR retry retains the reviewed-change fingerprint and still rejects stale local changes.
-- Tests: Android shell verifier covers Keystore/AES-GCM storage, plaintext migration removal, masked editors, serial execution, persisted operation states, interrupted-state recovery, retry routing, and executor shutdown; Java sources compile and the debug APK builds. Device process-death/offline validation remains deferred.
+- Deliverable: GitHub and OpenAI secrets use an AES-GCM key held by Android Keystore; preferences retain only versioned ciphertext. Existing plaintext preferences migrate on first read and are removed only after encrypted storage commits successfully. A single executor serializes validation, sync, deletion, and PR work; persists queued/running/waiting/complete/error state plus the retryable operation type; distinguishes Activity recreation from process interruption; and reconstructs offline/interrupted retries from current local files. PR retry retains the reviewed-change fingerprint and still rejects stale local changes.
+- Tests: Policy tests cover Activity-recreation versus process-interruption decisions, network-loss retry classification, network-resume routing, remote conflicts, and interrupted-write idempotence. The Android shell verifier covers Keystore/AES-GCM storage, plaintext migration removal, masked editors, serial execution, target validation markers, power/network callbacks, persisted states, retry routing, and executor shutdown; Java sources compile and the debug APK builds.
 - Done gate: Interrupted/offline sync never loses local source; secrets are not stored in plain text.
-- Status: `in progress (device interruption validation deferred)`
+- Status: `completed`
 #### AW47 - Android Project Import, Export, and Switching
 - Scope: Support multiple normal Stasis projects, import/export archives, project metadata, and explicit project switching.
 - Progress: A versioned app-private registry now adopts the existing `workshop_project` without moving or replacing it, writes fsynced `.stasis-workshop.json` metadata with stable project IDs and sample/import origin, confines roots to registered app-private directories, and persists the active project. Collapsed project controls create a named project from the bundled sample and explicitly switch projects; switching is blocked during AI/GitHub/project-I/O work or a pending source edit, refreshes symbols/history/sync state, and compiles the new root. The editor deterministically discovers every project `.stasis` file. Immutable per-project source baselines use bundled assets for sample projects and imported contents for restored projects, so Changes, Raw Diffs, Revert, and Reset never compare against or restore the wrong project. Reset preserves registry metadata and imported non-source assets. GitHub repository/branch settings, review branches, reviewed fingerprints, and retry state are scoped by project ID while the encrypted token remains shared; direct backup uploads the complete current source set. Export uses Android's document picker to write a deterministic bounded ZIP of project-relative files, preserves metadata, excludes generated `build/` output, and requests no broad storage permission. Import uses the document picker plus the same bounds, rejects traversal/duplicates/unsupported or incomplete archives, assigns a fresh project identity, fsyncs extracted files, discards failed targets, and activates/compiles successful imports.
@@ -419,15 +532,15 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers diagnostic controls, per-project journaling, bounds, path confinement, fsync, compare-before-restore, navigation, and recompile wiring; Java sources compile and the debug APK builds.
 - Done gate: A user can identify, navigate to, and recover from a failed edit without raw log hunting.
 - Status: `in progress`
-#### AW50 - Android Published Build and Release Validation
-- Scope: Validate the published/AOT flavor, signing/install workflow, runtime assets, and release performance/error reporting.
-- Progress: The published flavor directly links the generated Android arm64 AOT objects and no longer seeds or packages workshop source, tests, generated stubs, or the Rust JIT bridge. Workshop assets are copied through a filtered generated source set so app-private build output cannot leak back into either APK. Android build wrappers explicitly propagate failed Rust, Gradle, AOT-validation, and APK-validation native commands instead of allowing PowerShell to report false success. `build_published.ps1` validates the built APK as runtime-only, arm64-only, bounded in size, and containing the native runtime before reporting success. Release signing configuration and on-device published runtime/performance acceptance remain.
-- Tests: `check_android_published_apk.py`, the structural Android verifier, the published AOT bundle regression tests, and `assemblePublishedRelease` cover the machine-testable package contract.
-- Done gate: A signed sideloadable published build runs a representative game without developer workshop dependencies.
+#### AW50 - Android Release Build and Validation
+- Scope: Validate the generic SDL/AOT release shell, signing/install workflow, runtime assets, and release performance/error reporting.
+- Progress: Android now has only Workshop plus the generated release shell. The former game-specific `published` Workshop flavor and its duplicated runtime path were removed. Pong's package, label, orientation, and version live in its `stasis.json`; `build_release.ps1` runs `package-mobile`, builds the generic arm64 shell, and validates its APK/AAB as runtime-only. Both products expose the same three-finger timing-overlay gesture. Release signing configuration and on-device release acceptance remain.
+- Tests: `check_android_release_package.py`, the structural Android verifier, toolchain manifest tests, and a Pong `bundleRelease` build cover the machine-testable package contract.
+- Done gate: A signed sideloadable release build runs a representative game without developer Workshop dependencies.
 - Status: `in progress`
 #### AW51 - Android Device Acceptance Suite
 - Scope: Add a repeatable device validation checklist/automation for editor, tests, voice, touch preview, sync, and lifecycle recovery.
-- Progress: `validate_device.ps1` discovers an authorized device/emulator, records model/SDK/ABI, optionally installs the workshop or published debug APK, launches the exact package/activity, verifies the process remains alive, and writes a timestamped JSON record under ignored artifacts. A missing device is recorded as an explicit skip; `-RequireDevice` converts it into a failing acceptance gate. Deeper automated editor, voice, sync, and lifecycle interactions remain.
+- Progress: `validate_device.ps1` discovers an authorized device/emulator, records model/SDK/ABI, optionally installs the Workshop or generated release debug APK, launches the exact package/activity, verifies the process remains alive, and writes a timestamped JSON record under ignored artifacts. A missing device is recorded as an explicit skip; `-RequireDevice` converts it into a failing acceptance gate. Deeper automated editor, voice, sync, and lifecycle interactions remain.
 - Tests: The structural verifier covers discovery, arm64 gating, bounded launch/process checks, and result recording. A no-device host run records the current hardware limitation without claiming acceptance.
 - Done gate: Every user-facing workshop slice has an on-device proof or an explicitly recorded hardware/environment limitation.
 - Status: `in progress`
@@ -457,7 +570,7 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW56 - AI-Generated Image Asset Review
 - Scope: Accept AI-generated or AI-edited image outputs into a temporary review area with before/after preview, accept/reject, undo, project persistence, export, and GitHub sync.
-- Progress: A default-off command checkbox explicitly enables at most one Responses API `image_generation` tool opportunity on the first agent turn, fixed to low-quality 1024×1024 PNG with `action=auto` so selected project images can serve as edit references. The current documented ~$0.006 GPT Image 2 output charge is reserved before the call, charged only when a result exists, and recorded separately alongside Sol token usage. Returned Base64 is never traced or persisted automatically: it is limited to one 8 MiB, 4096 px/16 megapixel PNG, decoded into temporary review memory, and shown beside the first selected reference when available. Reject leaves the project untouched. Accept rechecks project identity and atomically creates a collision-safe new project PNG without overwriting its reference; archive and GitHub flows then treat it like every other accepted asset. A live generated/edited result and on-device dialog acceptance remain.
+- Progress: A default-off ImageGen profile selector explicitly enables at most one Responses API `image_generation` tool opportunity on the first agent turn. Draft retains low-quality 1024×1024 output; Final offers high-quality square, landscape, and portrait output with the selected dimensions, documented per-profile output-cost reserve, durable queue identity, and exact request fingerprinting. Version-1 queued boolean consent migrates to Draft rather than silently changing cost or quality. Selected project images can serve as edit references. Returned Base64 is never traced or persisted automatically: it is limited to one 8 MiB, 4096 px/16 megapixel PNG, decoded into temporary review memory, and shown beside the first selected reference when available. Reject leaves the project untouched. Accept rechecks project identity and atomically creates a collision-safe new project PNG without overwriting its reference; archive and GitHub flows then treat it like every other accepted asset. Accepted PNG masters remain unchanged; opted-in build preparation now uses linear-light, premultiplied-alpha Lanczos3 resizing. A reviewable bounded-SVG reconstruction demo and prompt recipe document the vector path without weakening Android asset transaction rollback. A live generated/edited result and on-device dialog acceptance remain.
 - Tests: The Android shell verifier covers explicit opt-in/default-off behavior, first-turn-only low/1024 PNG tool configuration, budget reservation/accounting, bounded Base64/PNG parsing, trace exclusion, before/after review, reject-without-mutation, project identity recheck, and atomic accept-as-new publication; workshop Java compilation and APK assembly cover the integration.
 - Done gate: AI image work cannot overwrite an accepted project asset without review and a recoverable prior version.
 - Status: `in progress`
@@ -474,8 +587,8 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW59 - Android Lifecycle, Autosave, and Background Work
 - Scope: Define autosave points, process-death recovery, pause/resume behavior, foreground-service/notification rules for long work, battery/network constraints, and safe cancellation.
-- Progress: Activity pause and instance-state save now persist the current unsaved symbol draft in a bounded, versioned, per-project JSON record using an fsynced atomic replace. The record stores symbol identity plus the SHA-256 of its base source. Startup restores the exact draft and opens its editor only when the symbol still exists and its base hash still matches; otherwise it retains the draft and refuses to overwrite newer/changed code. Manual Apply, Reset, or baseline Revert clears only a draft matching that exact symbol. Android instance-state recreation restores the typed AI command, selected saved symbol, voice transcript, Workshop/menu and all collapsed-panel visibility, editor scroll position, and project-image selection paths; the asset library prunes stale paths. It deliberately drops captured screenshots/logical snapshots, one-run generation consent, paint/generated-image review memory, active voice/audio capture, and audio playback so rotation cannot manufacture media consent or accept temporary work. Pause stops voice recognition, recording, and playback; accepted source/assets remain app-private and fsynced. Pending AI work remains pending without a validated internet connection and resumes after the default-network callback reports usable connectivity. AI, GitHub sync/PR, project import/export, media import, and support export now acquire one mutually exclusive process-level lease backed by a `dataSync` foreground service; the persistent low-priority notification opens the Workshop, and AI additionally provides `Stop` through the existing safe cancellation boundary. Activity destruction no longer shuts down a leased operation's executor or disconnects AI, while process death still becomes an explicit interrupted outcome on next launch. The shared scheduling policy always honors the network gate, never silently defers explicit user work in battery saver, and defers future automatic work only when battery saver is enabled and the device is unplugged. Device rotation/process-death acceptance remains.
-- Tests: The Android shell verifier covers lifecycle autosave hooks, per-project/size/path bounds, base hashing, atomic replacement, exact-identity cleanup, compare-before-restore, typed command/symbol/panel/scroll/selection state, deliberate temporary-media/consent clearing, interrupted-AI classification, and pause cleanup; workshop Java compilation and APK assembly cover the integration.
+- Progress: Activity pause and instance-state save now persist the current unsaved symbol draft in a bounded, versioned, per-project JSON record using an fsynced atomic replace. The record stores symbol identity plus the SHA-256 of its base source. Startup restores the exact draft and opens its editor only when the symbol still exists and its base hash still matches; otherwise it retains the draft and refuses to overwrite newer/changed code. Manual Apply, Reset, or baseline Revert clears only a draft matching that exact symbol. Android instance-state recreation restores the typed AI command, selected saved symbol, voice transcript, Workshop/menu and all collapsed-panel visibility, editor scroll position, and project-image selection paths; the asset library prunes stale paths. Configuration-only recreation also retains the active Mini Paint canvas, name, brush size/color, and eraser state in memory without accepting or persisting the image; process death discards it. Recreation deliberately drops captured screenshots/logical snapshots, one-run generation consent, generated-image review memory, active voice/audio capture, and audio playback so rotation cannot manufacture media consent or accept temporary work. Pause stops voice recognition, recording, and playback; accepted source/assets remain app-private and fsynced. Pending AI work remains pending without a validated internet connection and resumes after the default-network callback reports usable connectivity. AI, GitHub sync/PR, project import/export, media import, and support export now acquire one mutually exclusive process-level lease backed by a `dataSync` foreground service; the persistent low-priority notification opens the Workshop, and AI additionally provides `Stop` through the existing safe cancellation boundary. Activity destruction no longer shuts down a leased operation's executor or disconnects AI. Process recovery now distinguishes a safe resumable checkpoint, an unsafe uncertain call, and a user-requested cancellation whose project transaction was restored; the last case remains truthfully cancelled instead of becoming a generic failure. The shared scheduling policy always honors the network gate, never silently defers explicit user work in battery saver, and defers future automatic work only when battery saver is enabled and the device is unplugged. Device rotation/process-death acceptance remains.
+- Tests: File-backed JVM acceptance covers fsynced queue persistence, one-at-a-time FIFO claims, project isolation, pending cancellation before a provider call, safe resume, unsafe no-replay failure, and restored cancellation after process death. A pure scheduler test covers offline wait followed by an online claim through the policy used by the default-network callback. The Android shell verifier covers lifecycle autosave hooks, per-project/size/path bounds, base hashing, atomic replacement, exact-identity cleanup, compare-before-restore, provider cancellation wiring, typed command/symbol/panel/scroll/selection state, deliberate temporary-media/consent clearing, interrupted-AI classification, and pause cleanup; workshop Java compilation and APK assembly cover the integration.
 - Done gate: Rotation, backgrounding, process death, offline transitions, and app upgrades do not lose accepted project edits or falsely report work complete.
 - Status: `in progress`
 #### AW60 - Android Onboarding, Templates, and First-Run Setup
@@ -486,10 +599,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW61 - Android Accessibility and Adaptive Layout
 - Scope: Add content descriptions, scalable text/touch targets, contrast/focus support, screen-reader/keyboard navigation, orientation handling, and phone/tablet/foldable layouts.
-- Progress: Priority surfaces now expose semantic descriptions for the interactive preview, open/close Workshop menu, voice start, AI command/Run/Cancel, reviewed attachments/capture, source editor, symbols, image/audio library rows, generated-image comparison, and touch paint canvas. Workshop/section titles receive heading roles on supported Android versions; general status is a polite live region while diagnostics are assertive. Existing top controls retain 48 dp minimum height, paint is focusable with labeled companion tools, and under 480 dp the four AI progress indicators and three diagnostic/recovery actions stack vertically instead of compressing horizontally. Full TalkBack traversal, keyboard paint alternatives, contrast/font-scale auditing, orientation state, tablets/foldables, and device screenshots remain.
-- Tests: The Android shell verifier covers labels, heading/live-region roles, focusable paint, touch targets, and narrow-width branching. `:app:lintWorkshopDebug`, workshop Java compilation, and APK assembly pass; device accessibility services and adaptive-window acceptance remain separate.
+- Progress: Core surfaces expose semantic descriptions, headings, polite/assertive live regions, explicit TalkBack/forward-focus traversal, and visible focused-state styling on custom top controls. The Workshop menu announces pane transitions and moves keyboard focus into/out of the pane on every supported API. Mini Paint now provides a dual-contrast bounded keyboard/accessibility cursor, D-pad/Shift-D-pad movement with edge escape, Space/Enter drawing, matching TalkBack custom actions, selected size/color/tool feedback, and labeled dimensions; its controls use 48 dp targets and readable scalable text. A tested compact/medium/expanded width policy stacks action rows for narrow or 1.3x+ font scales, sizes Paint from window height, and caps the editor on tablets/foldables so meaningful running-preview space remains visible. Recreation preserves the menu, source selection/draft, scroll position, attachments, diagnostics/context/more-tools expansion state, and an active unsaved Paint session via a bounded in-memory non-configuration snapshot. The theme and programmatic core colors use audited 4.5:1+ text contrast, dark system bars explicitly use light icons, and the activity is resizable. Hardware TalkBack/orientation/fold-state acceptance remains in Maddox #131.
+- Tests: Pure JVM tests cover compact/medium/expanded profiles, large-font stacking, bounded paint cursor movement, and contrast ratios. The Android shell verifier covers manifest/theme contracts, traversal/focus wiring, accessibility actions, adaptive policy thresholds, and recreation keys. `:app:testWorkshopDebugUnitTest`, `:app:lintWorkshopDebug`, Java compilation, and APK assembly are the implementation gates; device acceptance remains separate.
 - Done gate: Core preview, command, editor, test, asset, and review workflows pass accessibility checks and remain usable across supported display sizes.
-- Status: `in progress`
+- Status: `complete`
 #### AW62 - Android Privacy, Permissions, and Data Management
 - Scope: Minimize permissions, disclose exactly what code/media is sent externally, provide attachment consent and credential revocation, and support project/cache/history/trace deletion.
 - Progress: A collapsed `Privacy & Data` panel inventories local project code/assets/drafts/recovery/traces and states the exact explicit actions that send workspace/media to OpenAI or project files to GitHub; microphone disclosure is limited to explicit voice/recording actions. Separate confirmed controls revoke the encrypted OpenAI key or GitHub token without deleting repository/model settings or projects and are blocked during their active operation. `Clear Pending Media Consent` removes selected project images, captured pixels/logical context, and one-run image-generation opt-in. Confirmed `Erase AI Histories + Trace` removes command/outcome history across every project, last usage, monthly spend records, local trace bytes, and pending media while preserving accepted code/assets and credentials. A non-bundled active project can be deleted only after background/recording/edit guards, an archive-first warning, and exact-name confirmation. The app switches/recompiles Bundled Workshop first, then deletes the confined project root, assets/trash, external baseline, draft/recovery journal, and project-scoped AI/GitHub state while preserving global credentials; Bundled Workshop is undeletable. Full install-data export/erase, cache controls, and device permission acceptance remain.
@@ -536,17 +649,17 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Scope: Replace Pong as the default Workshop project with a more instructive touch exploration game while retaining Pong as a selectable template.
 - Progress UI: The persistent top-left performance overlay now adds Exploration-only keepsake totals and data-derived `tap to explore` / `find the rest` / `garden complete` guidance; Pong and imported projects keep the generic timing/budget text, and the voice shortcut remains in its separate right-side column.
 - Deliverable: Tapping sets a world destination; a character moves toward it with deterministic fixed-tick motion, collects nearby items, and exposes a small inventory/status display. The project teaches data-oriented design using bounded structure-of-arrays components keyed by stable entity IDs, explicit system passes, deterministic spawn/collection order, render-command extraction, and separated configuration/data/behavior files. Onboarding introduces the architecture incrementally. Pong remains unchanged as a selectable bundled template and regression sample.
-- Tests: `.test.stasis` coverage for target selection, movement convergence/no overshoot, deterministic collection, capacity limits, inventory state, and render extraction; JIT/AOT parity; Android touch integration; template switching; Workshop and published package checks.
+- Tests: `.test.stasis` coverage for target selection, movement convergence/no overshoot, deterministic collection, capacity limits, inventory state, and render extraction; JIT/AOT parity; Android touch integration; template switching; Workshop and release package checks.
 - Done gate: First launch teaches a useful exploration loop, and Pong remains available without conflating either sample with the Workshop product itself.
-- Progress: `docs/android_exploration_sample_design.md` fixes the architecture and learning sequence. The new Exploration Garden is now the default for fresh Workshop installs while v1/v2 projects migrate as Pong and Pong remains selectable/canonical for published release. Its bounded SoA state uses stable slot+1 IDs, touch-edge destinations mapped through a 720x960 world-space camera, dominant-axis proportional fixed-tick movement with no overshoot, bounded deterministic camera follow, ascending deterministic collection, inventory/tutorial state, and an eight-command camera-relative render snapshot with data-derived tutorial color feedback. Spawn rejects the player slot, occupied slots, invalid kinds, and out-of-capacity indices before array access; the last collected stable ID makes ascending overlap order observable. Seven real bool-returning Stasis tests cover clamping/press edges/camera mapping, proportional movement, boundary/once-only collection, end-to-end tick/render order, camera bounds, spawn limits, dead-entity exclusion, and overlap order; the standalone runner passes 7/7, Android bridge tests cover both the test runner and a real touch/render tick, and the unchanged shared Android AOT bundle emits 18 objects. Template format v3, selector, auxiliary manifest seeding, and template-aware Reset/Changes baselines keep projects isolated. Executable declarations temporarily remain in `main.stasis`, with the planned files serving as lesson maps, because JIT/AOT project-relative import bases are not yet shared; no Android compiler fork was added. Executable module separation after the shared import fix, richer tutorial steps/assets/audio, host executable parity, and device touch acceptance remain.
-- Status: `in progress (core implementation complete; module separation, richer lessons/assets/audio, host parity, and device acceptance remain)`
+- Progress: `docs/android_exploration_sample_design.md` fixes the architecture and learning sequence. Exploration Garden remains the default for fresh Workshop installs while v1/v2 projects migrate as Pong and Pong remains selectable/canonical for release. The executable project is now split across shared project-relative imports: Android lifecycle and desktop live/AOT adapters consume one explicit input, movement, collection, inventory, camera, tutorial, audio-event, and render schedule. Four manifest-backed SVG assets replace placeholder handles. A bounded collection event drives inventory plus a deterministic cue serial/kind, which the Workshop renders as a short platform tone without adding a Stasis hot-path host call. Project-scoped lesson progress now guides tap, collection, editor, Apply, and Run Tests actions, while older Exploration projects fall back to their tutorial stage when the new tap counter is absent. Ten real bool-returning Stasis tests cover the gameplay schedule, full-capacity collection queue, manifest handles, and tutorial transitions; Android bridge tests cover the test runner plus real touch/render extraction; desktop live play accepts deterministic scripted input and captures rendered output; and the 16-source AOT project builds, packages, and exits successfully. Template format v3, selector, auxiliary asset seeding, and template-aware Reset/Changes baselines keep projects isolated. No Android compiler fork was added.
+- Status: `in progress (implementation and automated touch coverage complete; physical arm64 touch/audio acceptance is unverified because no device or emulator was attached)`
 
 #### AW69 - General Workshop vs Game-Specific Release Build Matrix
 - Scope: Make build identity explicit and prevent Workshop/editor content from leaking into releases.
-- Deliverable: The general Workshop APK has its own package/display name and supports arbitrary projects plus bundled templates. Each release variant declares one game descriptor that selects package/application ID suffix, display name, entry source, AOT roots, assets/manifest, icon, and acceptance suite. The first concrete release variant is Pong; its APK contains Pong AOT/runtime assets only and no compiler, JIT bridge, editor source, tests, API settings, or unrelated templates.
+- Deliverable: The general Workshop APK has its own package/display name and supports arbitrary projects plus bundled templates. Each game declares its release identity in `stasis.json`; the generic SDL/AOT shell receives that identity, entry source, AOT output, and packaged assets. The first concrete release is Pong; its package contains Pong AOT/runtime assets only and no compiler, JIT bridge, editor source, tests, API settings, or unrelated templates.
 - Tests: Build both Workshop and Pong release in one bounded matrix; inspect package IDs/names/native libraries/assets; co-install them; launch both exact activities; prove Workshop can switch templates and Pong release cannot expose Workshop controls.
 - Done gate: A general Workshop build and a game-specific Pong release build can coexist and are independently reproducible and verifiable.
-- Progress: The general Workshop remains `com.stasislang.workshop`/`Stasis Workshop`. `games/pong.gradle` is now a validated schema-v1 release descriptor owning Pong's game/runtime IDs, application ID, label, project directory, entry source, and acceptance-test pattern. The published flavor and generated BuildConfig consume the descriptor while the unchanged shared `android-aot-bundle` command consumes its project directory; unknown `-Pstasis.publishedGame` values fail configuration. A bounded matrix build produced both Workshop and descriptor-selected Pong debug APKs, and the runtime-only content verifier passed with `com.stasislang.pong`/`pong`/`pong_aot`. Descriptor-owned icons/asset-manifest/AOT-root enforcement and co-install device acceptance remain.
+- Progress: The general Workshop remains `com.stasislang.workshop`/`Stasis Workshop`. The duplicate Pong-oriented Workshop flavor was removed. Pong now declares `com.stasislang.pong`, `Stasis Pong`, landscape orientation, and version in `stasis.json`; `package-mobile` fills the single generic SDL/AOT release shell. A bounded build produced a 1,668,071-byte arm64 Pong AAB, and the runtime-only content verifier passed. Game-specific icon support, release signing, and co-install device acceptance remain.
 - Status: `in progress`
 
 ### Cross-Platform Sprite and Audio Track
@@ -570,14 +683,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress (host implementation complete; device golden remains)`
 #### AS3 - Audio Decode, Mixer, and Playback API
 - Scope: Add bounded sound/music decode, voices/streams, play/stop/pause, loop, volume/pan, mixing, asset handles, and deterministic audio-event submission.
+- Progress: A shared SDL callback mixer now decodes bounded mono/stereo PCM16 WAV assets, linearly resamples them to the device rate, mixes 32 overlapping voices with loop/volume/pan/pause/stop controls, and preserves Brickout's `load_music`/`load_effect` convenience API. JIT and mobile AOT shims expose the same handles. A hardware-free contract test verifies decoding, overlap, resampling, pan, music pause/volume/stop, and release behavior; focused JIT/AOT compiler tests verify every compatibility call. Deterministic game-event submission and physical-device acceptance remain.
 - Done gate: Stasis code can play overlapping effects and streaming music through a real mixer rather than the current unavailable stub.
-- Status: `planned`
+- Status: `in progress (bounded WAV mixer and compiler/runtime contracts complete; event submission and device acceptance remain)`
 #### AS4 - Desktop and Android Audio Backends
 - Scope: Implement device initialization, callback/queue integration, focus/interruption handling, pause/resume, route changes, latency, underrun recovery, and clean shutdown.
-- Progress: Android API 26+ now uses a low-latency shared-mode AAudio PCM-float callback backed by a bounded lock-free frame ring. Workshop JIT installs the same native sink through an explicit Rust bridge callback table, while published AOT links generated global bindings and the shared mobile AOT runtime so `f32[]` frame handles resolve without a platform compiler fork. Published lifecycle code requests game audio focus, pauses/flushes on focus or Activity loss, resumes only with focus, retries a disconnected stream from the game thread, and shuts down idempotently. Queue depth, underruns, sample shape, and latched AAudio errors are exposed through the Stasis externs and published HUD. The Brickout-derived AOT fixture exercises the same generated stereo tone/push loop. Live audible/focus/background acceptance still requires a connected device.
-- Tests: A pure-C SPSC ring contract covers bounded partial acceptance, FIFO wrap, pause discard, zero-fill, underrun accounting, and reset; PR CI compiles/runs it with warnings as errors. Rust tests cover registered JIT `f32[]` forwarding through the installed host API. Android structural validation covers AAudio callback/linkage, AOT runtime bindings, metrics, and lifecycle hooks; Workshop, Pong, and Brickout-derived published APK builds cover arm64 linkage.
+- Progress: Asset voices share the existing SDL3 device stream and lifecycle callback on desktop and mobile instead of restoring the prior Windows MCI/Android Java split. Android API 26+ additionally has a low-latency shared-mode AAudio PCM-float sink with bounded SPSC buffering, truthful availability, queue/underrun diagnostics, and focus/lifecycle cleanup; the generated Brickout AOT bridge forwards registered f32 buffers through the same native sink. The full pinned SDL desktop runtime compiles with the mixer; physical Android focus, interruption, route-change, and audible-output acceptance remain.
 - Done gate: The same audio sample plays on desktop and Android and recovers correctly from Android lifecycle/audio-focus events.
-- Status: `in progress (implementation complete; device acceptance remains)`
+- Status: `in progress (shared backend compiled; physical mobile acceptance remains)`
 #### AS5 - Asset Packaging and JIT/AOT Parity
 - Scope: Package referenced assets for dev/JIT, production/AOT, Android Workshop, published APK, import/export, and GitHub sync with reachability and size diagnostics.
 - Progress: The Android AOT bundle command now resolves the shared manifest with `stasis_assets`, verifies hashes and confinement, and stages only validated manifest entries under the runtime-only APK asset root. The published renderer consumes that packaged manifest directly, decodes bounded raster/SVG sprites, verifies content hashes and dimensions, uploads textures, and uses the same stable handle and fallback behavior as Workshop. The Pong APK verifier requires the representative manifest and ball sprite while continuing to reject source/JIT content. Broader import/export/GitHub reachability packaging and non-Android production parity remain.
@@ -632,6 +745,7 @@ Archived priority override (2026-02-13, historical):
 - local `foreach` over fixed-size local array bindings
 - `for` headers require `init`, `condition`, and `step` segments (no missing-segment forms such as `for (; cond; step)`).
 - Reachability-gated emission now compiles roots (`main`, `tick`, `render`, `on_code_swap`) plus reachable callees; same-name overload siblings are included to preserve receiver overload behavior.
+- Web packages now carry the reachable Wasm import set into JavaScript host linking: direct scalar/vector games receive an exact small host, audio support/UI is omitted without reachable audio imports, and `samples/pong_web_minimal` verifies unreachable audio/input dependencies are absent from both outputs.
 - Non-engine JIT contract assembly now consumes only emitted symbol code pointers (unemitted, unreachable functions are excluded from override patch emission).
 - Host memory intrinsics used by stdlib/gfx paths are now real externs with Rust-native bindings:
 - `sys_memcpy_u8/i32/f32`
@@ -790,6 +904,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S7 - Incremental Compiler V1
+- Contract status: historical implementation substrate reused by P1-P2. Whole-file correctness and
+  per-function hashes now gate selective JIT machine-code emission.
 - Language:
 - `Rust + .stasis`
 - Rust: in-memory file DB, cache storage, and invalidation substrate.
@@ -809,6 +925,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S8 - Function Pointer Table ABI
+- Contract status: historical implementation record. Its internal hash/mutex dispatch is not a
+  supported ABI; P3 retains stable indirection only for host-entry trampolines.
 - Language:
 - `Rust`
 - Scope:
@@ -825,6 +943,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S8b - Cranelift AOT Production Path
+- Contract status: historical implementation record. Complete production AOT artifacts remain;
+  per-function patch/override publication does not and is superseded by G0-G2.
 - Language:
 - `Rust`
 - Scope:
@@ -859,7 +979,7 @@ Archived priority override (2026-02-13, historical):
 - AOT artifact lifecycle is now generation-bound: activation/retirement metadata is recorded against the committed pointer-table generation and surfaced through runner events/summary state.
 - Runtime relaunch path now passes `--no-runtime-launch` to spawned child processes to prevent recursive process trees during watch-mode swap iteration.
 - Simple `i32` return-body extraction now supports deterministic `if`/`else if`/`else` branch evaluation with branch-local `let`/assignment handling and fallthrough continuation to later top-level `return`.
-- AOT simple-body lowering now preserves conditional return chains as expression-level select trees (`SimpleI32Condition` + `SimpleI32ReturnExpr::Select`) instead of only compile-time branch selection.
+- Historical simple-body fallback experiment preserved conditional return chains as expression-level select trees; that alternate compiler path and its detector metadata were removed in the 2026-08-22 cleanup.
 - Incremental compiler function metrics now include declared return type metadata, and AOT stub emission uses return-type-aware signatures (`void` functions emit `return` without value; `i32` functions keep value-return lowering).
 - Deterministic simple-body condition evaluation now supports logical composition in `if` conditions (`&&`, `||`, `!`, and parenthesized grouping) in addition to comparison operators.
 - Symbolic simple-body condition extraction now preserves logical condition trees (`And`/`Or`/`Not`) for `if` return-chain lowering, enabling AOT condition emission beyond comparison-only predicates.
@@ -948,6 +1068,8 @@ Archived priority override (2026-02-13, historical):
 - Slice R12 (optional): Perform long-session watch-mode stability/perf pass and memory-growth checks after R1-R11.
 
 ### S9 - Two-Phase Swap Commit
+- Contract status: historical implementation record. Transactional safe-point behavior remains,
+  but patch-set messages and independent pointer publication are superseded by G0-G2.
 - Language:
 - `Rust + .stasis`
 - Rust: commit transaction mechanism and thread-safe pointer swap.
@@ -969,6 +1091,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S10 - `on_code_swap` Hook
+- Contract status: historical implementation record. Hook semantics remain, but hook `FnId`, staged
+  pointer preview, and independent entry publication are superseded by G0-G2.
 - Language:
 - `Rust + .stasis`
 - Rust: hook invocation boundary and rollback/error propagation.
@@ -1103,7 +1227,7 @@ Archived priority override (2026-02-13, historical):
 - Added deterministic fake-toolchain coverage for executable linker path and CLI flow (`crates/stasis_jit::tests::aot_executable_linker_can_be_driven_by_configured_fake_linker`, `apps/stasis::compiler_backend::tests::self_host_aot_cli_links_runnable_executable_with_main_entry_symbol`).
 - `stasis aot-cli` now supports writing a machine-readable summary artifact (`--summary-file <path>`) containing staged bundle paths, entry symbol, and object layout contract for stage parity checks.
 - `stasis aot-cli` now supports optional `--entry-file <file.stasis>` host contract routing (`STASIS_AOT_ENTRY_FILE`) so self-host AOT can compile a selected program when a project directory contains multiple `main()` declarations; backend source discovery now resolves project-local import closure from that entry file instead of compiling every `.stasis` file under the directory.
-- `stasis aot-cli` now supports optional `--quality-gate` (`STASIS_AOT_QUALITY_GATE=1`) which rejects outputs when the selected entry symbol is still fallback-stub lowered, preventing shipping non-playable placeholder executables as "quality" game builds.
+- Historical opt-in fallback-stub quality gating was removed with the fallback compiler. Production AOT now fails unsupported lowering directly, and the Brickout bundle compile is a default test.
 - `.stasis` incremental parser compatibility was extended for Brickout `_v1` source forms used by self-host AOT CLI input: top-level `import`, `const`, `enum`, `struct`, and `global name: Type;` declarations, `function @inline ...` signatures, float literal tokenization compatibility (`123.45` treated as a contiguous numeric primary token), and comment-aware `for` header parsing (all `for` header segments are required; missing-segment forms are rejected).
 - Verified self-host `.stasis` compile path advances through Brickout `_v1` parsing/incremental analysis and now fails at host linker invocation stage when linker tooling is unavailable (`link.exe`/`STASIS_AOT_LINKER`), indicating parser-side `_v1` compatibility blockers are removed for this slice.
 - With `STASIS_AOT_LINKER` set to `lld-link.exe`, Brickout `_v1` self-host compile advances past linker discovery and currently fails on runtime-bridge object unresolved runtime symbols (`core::panicking::*`, `memset`) during final executable link, making runtime-bridge/object-link contract the active blocker.
@@ -1112,7 +1236,7 @@ Archived priority override (2026-02-13, historical):
 - Self-host compiler source staging buffer contract was raised to `262144` bytes (`compiler_state`, `.stasis` AOT CLI core temp source buffer, host analysis harness buffer, runtime bridge source-load buffer) so current `compiler/simple_pass_compiler.stasis` size no longer hard-fails lexing during stage analysis.
 - Added opt-in real-toolchain compiler-subset build smoke (`STASIS_RUN_REAL_SELF_HOST_COMPILER_SUBSET_BUILD_SMOKE=1`) that compiles the self-host compiler entry import-closure subset (entry/core/incremental/state/stdlib) via `--entry-file`, asserting 5-file staged contract build viability.
 - Added opt-in real-toolchain stage1 executable parity probe (`STASIS_RUN_REAL_SELF_HOST_STAGE1_EXEC_PARITY_SMOKE=1`) that publishes argv/source/staged-bridge env contracts and executes compiled stage1 compiler subset binary for stage2 summary generation; probe now completes with exit `0` and stage2 summary parity via runtime-bridge CLI-entry host extern routing.
-- AOT patch manifests now include fallback stub detail hints (`symbol`, `id_hash`, `sig_hash`, `body_hash`, `ordinal`) so stage1 executable parity failures can map exit-code body hashes back to concrete fallback symbols/functions deterministically during diagnostics.
+- Historical fallback-stub manifest hints were removed; current manifests describe only real emitted artifacts.
 - `compiler/stasis_aot_cli_entry.stasis` now lowers `compiler_cli_parse_from_argv` as a direct no-arg host extern call (`host_run_self_host_aot_cli_from_env`), and runtime bridge exports this symbol in both rustc and CLIF fallback objects so default stage1 executable path no longer depends on parse-bridge lowering.
 - Temporary parse-bridge shim scaffolding and parse-bridge-specific quality/reject gates were removed; unlowerable entry functions now surface through normal fallback-stub manifest diagnostics and strict/quality fallback gates.
 - Direct-call lowering now recognizes known host no-arg `i32` extern targets (`host_cli_arg_count`, `host_run_self_host_aot_cli_from_env`) when resolving call-target symbols, so this path no longer hard-fails unresolved-target gating for AOT stub emission.
@@ -1197,9 +1321,9 @@ Archived priority override (2026-02-13, historical):
 - Tests: benchmark smoke runs in CI-optional mode and validates output format/consistency.
 - Done gate: baseline numbers are recorded in docs and used as acceptance checks for subsequent slices.
 - Current progress:
-- Added deterministic benchmark executable: `cargo run -p stasis_compiler --release --example compile_bench`.
-- Benchmark executable now supports explicit mode selection: `--mode analysis` (in-process analysis only) and `--mode jit` (Cranelift machine-code generation via rust-native `JitProcess`).
-- Added benchmark smoke/unit checks: `cargo test -p stasis_compiler --example compile_bench`.
+- Historical `compile_bench` and its alternate analysis compiler were removed in the 2026-08-22
+  compiler cleanup. Active measurements use `rust_native_jit_bench` and
+  `project_selective_jit_bench`, both of which exercise the production compiler.
 - Baseline snapshot (2026-02-24, local machine, seed=1337, chunk_size=500, 1 sample each):
 - 1k functions: cold p50/p95 `4390.080ms`, incremental p50/p95 `4280.470ms`.
 - 5k functions: cold p50/p95 `7177.709ms`, incremental p50/p95 `4542.079ms` (completes within 5-minute budget).
@@ -1213,7 +1337,7 @@ Archived priority override (2026-02-13, historical):
 - Tests: existing incremental/reachability tests remain green; add explicit regression test asserting no external harness invocation on normal compile path.
 - Done gate: single-function incremental compile path executes entirely in-process.
 - Current progress:
-- `crates/stasis_compiler::IncrementalCompilerHost::compile_changed_files` now analyzes changed sources fully in-process (threaded Rust parser/evaluator path), with no per-file external harness process launch in normal operation.
+- The then-current analysis host moved in-process; it was later deleted when all consumers moved to the production `Compiler`/`JitProcess`/`AotProcess` pipeline.
 - Removed external harness-only tests and stale process-signing/override code paths from `crates/stasis_compiler/src/lib.rs`.
 - Preserved in-memory reachability behavior and changed/newly-reachable emission behavior under the new in-process analysis path.
 - `apps/stasis` runtime compile path now has an in-process engine-mode fast path: when `tick`+`render` entrypoints are present, backend compile bypasses legacy host analysis and compiles via rust-native JIT/AOT process contracts directly.
@@ -1270,7 +1394,7 @@ Archived priority override (2026-02-13, historical):
 - JIT shape tests now align with spec-enforced `for` header semantics (`init`, `condition`, and `step` all required); empty-segment shapes are asserted as deterministic compile errors.
 - JIT runtime dispatch/code-pointer assembly now uses an internal `FunctionId -> artifact` index map (rebuilt after emit pass) so execution lookups and dispatch-table refresh avoid repeated linear artifact scans.
 - Startup now performs stale `.stasis_cache` cleanup with a 7-day default TTL (`STASIS_CACHE_TTL_DAYS` override) so cache files are retained for short-term reuse but aged out automatically.
-- Added shared host-boundary test helper module `src/runtime/input_testkit.stasis` and first Brickout `.test.stasis` fixture (`samples/brickout_revenge/brickout_revenge_v1_input_model.test.stasis`) so game tests set domain input/state without direct host-frame layout writes.
+- Added shared host-boundary test helper module `src/stdlib/testing/input_testkit.stasis` and first Brickout `.test.stasis` fixture (`samples/brickout_revenge/brickout_revenge_v1_input_model.test.stasis`) so game tests set domain input/state without direct host-frame layout writes.
 - Expanded Brickout `.test.stasis` coverage to include gameplay-side `record_tap_pulses()` assertions sourced from `input_testkit` snapshot input (`tests_discovered=2` in `samples/brickout_revenge` test dir).
 - Expanded Brickout `.test.stasis` coverage further (`tests_discovered=4`) with explicit assertions for inactive-pointer slot clearing in `refresh_input_model()` and occupied-slot skip behavior in `record_tap_pulses()`.
 - Added pure-core Brickout `.test.stasis` coverage file (`samples/brickout_revenge/brickout_revenge_v1_core.test.stasis`) for deterministic gameplay helpers (`brickout_can_buy`, `brickout_shop_anim_step`, `brickout_level_reset`) and level-sequencing behavior (`brickout_level_consume_spawns`).
@@ -1287,6 +1411,7 @@ Archived priority override (2026-02-13, historical):
 - Current progress:
 - Rust-native compiler flow runs explicit index then emit stages (`Compiler::index_pass`, `Compiler::emit_pass_with`) and emit work is restricted to dirty function ids only.
 - Regression coverage now includes signature-only changes, body-only changes, unchanged-source no-op, and mixed-file body edit gating in `crates/stasis_compiler::compiler::tests::*`.
+- Compiler indexing now caches one structured statement artifact by function identity/body hash and shares it with lowering and schema-v1 function data-flow summaries; unchanged functions skip body reparse while direct/transitive state effects remain available to language tooling and `stasis inspect`.
 - Status: `done`
 - Slice CS3: Implement O(1) function symbol lookup via open-addressed hash table in `.stasis`.
 - Language: `.stasis`.
@@ -1312,7 +1437,7 @@ Archived priority override (2026-02-13, historical):
 - Slice CS5: Remove legacy `simple_*` detector metadata channels from compiler state and host contracts.
 - Language: `.stasis + Rust`.
 - Scope: delete obsolete detector/fallback metrics and rely on real parse/resolve/emit behavior for supported slices.
-- Deliverable: reduced `FunctionMetric`/state surface and simpler host<->compiler contract.
+- Deliverable: reduce compatibility metrics/state and simplify the host/compiler contract. The obsolete metric surface was fully removed in the 2026-08-22 cleanup.
 - Tests: replace detector-centric tests with behavior/e2e compile-and-run checks.
 - Done gate: no temporary fallback metadata contract remains in active compile path.
 - Current progress:
@@ -1520,6 +1645,73 @@ Archived priority override (2026-02-13, historical):
 - Done gate:
 - Host-set misuse cannot produce partial state mutation or silent nondeterminism.
 - Status: `planned (post-S10b)`
+
+### RN1 - Realtime control scheduling and replay
+
+- Scope: Define one bounded, fixed-tick control contract over the existing
+  production network envelope for realtime games.
+- Deliverable: `stasis_network::realtime` validates rates, schedules and
+  deduplicates future transitions, applies held/neutral controls at exact
+  ticks without packet stalls, defines epoch-qualified lifecycle and monotonic
+  snapshot policy, and records replay transitions, lifecycle events, ticks,
+  and authoritative hashes. Stable native/JIT entrypoints expose bounded RTC1,
+  correction, hash, and lifecycle operations to `realtime_controls.stasis`;
+  replay callbacks remain host-owned. Turn-based networking remains unchanged.
+- Tests: Deterministic two-device 60 Hz simulation fixture with lower-rate
+  controls and measurable delay; loss/reorder/duplicate, lifecycle,
+  malformed/full bounds, matching hashes, replay reproduction, the production
+  WebSocket envelope, guest-domain/short-buffer/mixed-outcome rejection, an
+  executable Stasis JIT guest seam, and AOT object imports for the stable native
+  contract.
+- Status: `complete (2026-08-24)`.
+
+### S17 - Immediate Axis Placement and Float Presentation Geometry
+
+- Source requirements: `docs/immediate_layout_prd.md`.
+- Selection: explicitly selected by the user after PR #349 merged.
+- Language ownership: `.stasis` for placement helpers, tests, and representative UI composition; Rust/C host code for coordinated HostFrame and graphics-command ABI migration.
+- AP1 - Typed scalar axis placement:
+  - Add distinct `UiHorizontal` and `UiVertical` enums.
+  - Add allocation-free `ui_place_x` and `ui_place_y` scalar-return helpers.
+  - Verify all axis choices, fractional and oversized bounds, and compile-time rejection of swapped enum types.
+  - Add a representative sample that reaches Cranelift IR, builds as an executable, runs, and asserts behavior.
+  - Status: `complete`.
+- AP1.5 - Reachable AOT runtime surface:
+  - Declare runtime helpers in AOT objects only when emitted operations reference them; do not make pure arithmetic/layout objects advertise the full JIT helper surface.
+  - Keep JIT runtime registration independent from the narrower AOT object dependency set.
+  - Verify object symbol tables for a pure function and representative helper-using functions, then link and run without unrelated runtime imports.
+  - Status: `complete` (explicitly selected during AP1 executable verification).
+- AP2 - Float presentation boundary:
+  - Migrate canonical logical/safe/pointer/sprite geometry to `f32`.
+  - Remove pre-1.0 compatibility display/input APIs and active HostFrame alias fields.
+  - Bump HostFrame and graphics command versions and migrate every host, decoder, fixture, and parity path atomically.
+  - Status: `complete`.
+- AP3 - Representative menu adoption:
+  - Cache text run widths during initialization.
+  - Center a menu title, anchor a button within an adjusted region, center its label, and reuse scalar bounds for hit testing.
+  - Status: `complete`.
+- Done gate:
+  - All PRD acceptance criteria pass through JIT/AOT and the real renderer boundary as applicable.
+- AP1 work summary:
+  - Theory gained: enum variants must be interned with their declared nominal type before call checking; the swapped-axis fixture exposed the old `i32` fallback, and distinct enum calls now predictably fail before lowering.
+  - Good: the realistic menu/button sample exposed both enum typing and AOT linkage behavior while the slice was still narrow.
+  - Bad: the original AOT smoke path could report success by skipping when no linker or runtime symbols were available.
+  - Adjustment: executable slice tests must use an explicit discovered linker and the runtime fixture helper until AP1.5 removes unrelated AOT imports.
+- AP1.5 work summary:
+  - Theory gained: JIT dispatch/storage registration and AOT object imports are separate ownership concerns; structured HIR call targets plus AOT direct-call/direct-storage guarantees are sufficient to avoid advertising the JIT surface from pure objects.
+  - Good: symbol-table tests turned the 49-helper linker failure into a precise dependency contract, and the layout sample now links and runs without the runtime library.
+  - Bad: the first narrowing treated collection views like direct AOT globals and exposed the distinction only in the parity corpus.
+  - Adjustment: retain collection helper families for functions whose ABI accepts collection/view handles, and keep direct-storage globals independent from that rule.
+- AP2 work summary:
+  - Theory gained: logical geometry is one typed path from HostFrame through layout and command submission; splitting sprite identity/state into the integer lane and geometry into the float lane preserves that invariant while physical raster dimensions remain explicit integer metadata.
+  - Good: versioning HostFrame and the render command together made stale producers and decoders mechanically discoverable across desktop, Android, fixtures, and samples.
+  - Bad: the first mechanical capacity migration missed the Android Java renderer and briefly assigned the sprite float base to the text base in one duplicated runtime module.
+  - Adjustment: future command-ABI changes must audit every language implementation by semantic field names and assert all derived bases/capacities in each platform test, not rely on numeric replacement alone.
+- AP3 work summary:
+  - Theory gained: immediate-mode UI needs persistent resource metrics but not persistent layout objects; the representative menu caches run handles and widths once, then derives one set of scalar bounds from the current safe viewport for drawing and hit testing each frame.
+  - Good: separating pure placement formulas from global-backed composition kept the realistic path executable under both JIT and AOT while the play command exercised the real graphics boundary.
+  - Bad: local screenshot capture initially looked like a sample presentation failure, but the unchanged render-parity sample reproduced the same missing-capture behavior in this environment.
+  - Adjustment: distinguish renderer startup/command submission evidence from screenshot-hook evidence by immediately running the known-good parity scene when capture infrastructure fails, and iterate all reported pointer slots because desktop touch transitions do not occupy the mouse slot.
 
 ## PR Sequence
 

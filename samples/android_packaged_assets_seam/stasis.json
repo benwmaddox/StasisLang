@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "name": "android_packaged_assets_seam",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "android": {
+    "application_id": "com.stasislang.seam.it021",
+    "label": "Stasis Android Assets",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  }
+}

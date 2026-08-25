@@ -1,1 +1,121 @@
-// Lesson map: exploration_render_extract_system writes the bounded render snapshot in main.stasis.
+function exploration_set_render_metadata(): void {
+    Render.command0_rotation_degrees = 0;
+    Render.command0_alpha = 255;
+    Render.command1_rotation_degrees = 0;
+    Render.command1_alpha = 255;
+    Render.command2_rotation_degrees = 0;
+    Render.command2_alpha = 255;
+    Render.command3_rotation_degrees = 0;
+    Render.command3_alpha = 255;
+    Render.command4_rotation_degrees =(GameState.tick_count * 2) % 360;
+    Render.command4_alpha = 255;
+    Render.command5_rotation_degrees = 0;
+    Render.command5_alpha = 210;
+    Render.command6_rotation_degrees = 0;
+    Render.command6_alpha = 255;
+    Render.command7_rotation_degrees = 0;
+    Render.command7_alpha = 255;
+    Render.command0_clip_x = 0;
+    Render.command0_clip_y = 0;
+    Render.command0_clip_w = GameState.screen_w;
+    Render.command0_clip_h = GameState.screen_h;
+    Render.command1_clip_x = 0;
+    Render.command1_clip_y = HUD_HEIGHT;
+    Render.command1_clip_w = GameState.screen_w;
+    Render.command1_clip_h = GameState.screen_h - HUD_HEIGHT;
+    Render.command2_clip_x = 0;
+    Render.command2_clip_y = HUD_HEIGHT;
+    Render.command2_clip_w = GameState.screen_w;
+    Render.command2_clip_h = GameState.screen_h - HUD_HEIGHT;
+    Render.command3_clip_x = 0;
+    Render.command3_clip_y = HUD_HEIGHT;
+    Render.command3_clip_w = GameState.screen_w;
+    Render.command3_clip_h = GameState.screen_h - HUD_HEIGHT;
+    Render.command4_clip_x = 0;
+    Render.command4_clip_y = HUD_HEIGHT;
+    Render.command4_clip_w = GameState.screen_w;
+    Render.command4_clip_h = GameState.screen_h - HUD_HEIGHT;
+    Render.command5_clip_x = 0;
+    Render.command5_clip_y = HUD_HEIGHT;
+    Render.command5_clip_w = GameState.screen_w;
+    Render.command5_clip_h = GameState.screen_h - HUD_HEIGHT;
+    Render.command6_clip_x = 0;
+    Render.command6_clip_y = 0;
+    Render.command6_clip_w = GameState.screen_w;
+    Render.command6_clip_h = HUD_HEIGHT;
+    Render.command7_clip_x = 0;
+    Render.command7_clip_y = 0;
+    Render.command7_clip_w = GameState.screen_w;
+    Render.command7_clip_h = HUD_HEIGHT;
+}
+
+function exploration_render_extract_system(): void {
+    Render.command_schema_version = 3;
+    Render.command_count = 8;
+    Render.command0_kind = 1;
+    Render.command0_x = 0;
+    Render.command0_y = 0;
+    Render.command0_w = GameState.screen_w;
+    Render.command0_h = GameState.screen_h;
+    Render.command0_color = 1007922;
+    Render.command0_asset = 0;
+    if (GameState.tutorial_stage == 1) {
+        Render.command0_color = 1017139;
+    }
+    if (GameState.tutorial_stage == 2) {
+        Render.command0_color = 1585208;
+    }
+    if (GameState.tutorial_stage == 3) {
+        Render.command0_color = 2058809;
+    }
+    Render.command1_kind = World.collectible_active[1] * 2;
+    Render.command1_x = World.position_x[1] - GameState.camera_x - 18;
+    Render.command1_y = World.position_y[1] - GameState.camera_y - 18;
+    Render.command1_w = 36;
+    Render.command1_h = 36;
+    Render.command1_color = 16777215;
+    Render.command1_asset = World.sprite_handle[1];
+    Render.command2_kind = World.collectible_active[2] * 2;
+    Render.command2_x = World.position_x[2] - GameState.camera_x - 18;
+    Render.command2_y = World.position_y[2] - GameState.camera_y - 18;
+    Render.command2_w = 36;
+    Render.command2_h = 36;
+    Render.command2_color = 16777215;
+    Render.command2_asset = World.sprite_handle[2];
+    Render.command3_kind = World.collectible_active[3] * 2;
+    Render.command3_x = World.position_x[3] - GameState.camera_x - 18;
+    Render.command3_y = World.position_y[3] - GameState.camera_y - 18;
+    Render.command3_w = 36;
+    Render.command3_h = 36;
+    Render.command3_color = 16777215;
+    Render.command3_asset = World.sprite_handle[3];
+    Render.command4_kind = 2;
+    Render.command4_x = World.position_x[0] - GameState.camera_x - 16;
+    Render.command4_y = World.position_y[0] - GameState.camera_y - 16;
+    Render.command4_w = 32;
+    Render.command4_h = 32;
+    Render.command4_color = 16777215;
+    Render.command4_asset = World.sprite_handle[0];
+    Render.command5_kind = World.destination_active[0] * 2;
+    Render.command5_x = World.destination_x[0] - GameState.camera_x - 10;
+    Render.command5_y = World.destination_y[0] - GameState.camera_y - 10;
+    Render.command5_w = 20;
+    Render.command5_h = 20;
+    Render.command5_color = 16777215;
+    Render.command5_asset = EXPLORATION_DESTINATION_ASSET;
+    Render.command6_kind = 1;
+    Render.command6_x = 12;
+    Render.command6_y = 14;
+    Render.command6_w = World.inventory_count[1] * 22;
+    Render.command6_h = 12;
+    Render.command6_color = 16763904;
+    Render.command6_asset = 0;
+    Render.command7_kind = 1;
+    Render.command7_x = 12;
+    Render.command7_y = 34;
+    Render.command7_w = World.inventory_count[2] * 22;
+    Render.command7_h = 12;
+    Render.command7_color = 6737151;
+    Render.command7_asset = 0;
+    exploration_set_render_metadata();
+}

@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
-use std::collections::BTreeSet;
+mod release_assets;
+mod toolchain_cli;
+
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -11,17 +13,21 @@ use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(test)]
+use stasis::escape_mobile_c_string_literal;
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_play_in_process,
-    run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
-    RunnerConfig, StasisTestRunSession,
+    mobile_aot_function_for, run_jit_tests_in_directory_with_session,
+    run_play_in_process_with_input_script_window_title_and_profile,
+    run_play_in_process_with_replay, run_self_host_aot_cli_with_options, run_with_default_backend,
+    run_with_real_backend, write_mobile_aot_bindings_source_with_profile, PlayProfileConfig,
+    PlayReplayConfig, RunnerConfig, StasisTestRunSession,
 };
-use stasis_assets::{load_project_asset_manifest, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH};
+use stasis_assets::{
+    load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
+};
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
-use stasis_compiler::frontend::parser::{
-    parse_top_level_functions, parse_top_level_struct_definitions,
-};
+use stasis_compiler::compiler::{source_function_items, source_struct_items};
 use stasis_jit::AotTarget;
 use stasis_runner::swap::contracts::TargetMode;
 
@@ -57,6 +63,7 @@ struct AndroidAotBundleArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MobileAotTarget {
     AndroidArm64,
+    AndroidX86_64,
     IosArm64,
 }
 
@@ -64,9 +71,10 @@ impl MobileAotTarget {
     fn parse(value: &str) -> Result<Self, String> {
         match value.to_ascii_lowercase().as_str() {
             "android-arm64" | "android" => Ok(Self::AndroidArm64),
+            "android-x86_64" => Ok(Self::AndroidX86_64),
             "ios-arm64" | "ios" => Ok(Self::IosArm64),
             _ => Err(format!(
-                "invalid mobile AOT target '{value}'. Use android-arm64 or ios-arm64"
+                "invalid mobile AOT target '{value}'. Use android-arm64, android-x86_64, or ios-arm64"
             )),
         }
     }
@@ -74,6 +82,7 @@ impl MobileAotTarget {
     fn as_str(self) -> &'static str {
         match self {
             Self::AndroidArm64 => "android-arm64",
+            Self::AndroidX86_64 => "android-x86_64",
             Self::IosArm64 => "ios-arm64",
         }
     }
@@ -81,13 +90,14 @@ impl MobileAotTarget {
     fn aot_target(self) -> AotTarget {
         match self {
             Self::AndroidArm64 => AotTarget::android_arm64_default(),
+            Self::AndroidX86_64 => AotTarget::android_x86_64_default(),
             Self::IosArm64 => AotTarget::ios_arm64_default(),
         }
     }
 
     fn asset_root_dir(self) -> &'static str {
         match self {
-            Self::AndroidArm64 => "apk_assets",
+            Self::AndroidArm64 | Self::AndroidX86_64 => "apk_assets",
             Self::IosArm64 => "ios_assets",
         }
     }
@@ -99,16 +109,35 @@ struct MobileAotBundleArgs {
     project_dir: PathBuf,
     entry_file: Option<PathBuf>,
     output_dir: PathBuf,
+    profile_functions: Vec<String>,
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlayCliArgs {
-    watch_file: PathBuf,
+    watch_file: Option<PathBuf>,
     watch_dir: Option<PathBuf>,
     data_bind_json: Option<PathBuf>,
     data_bind_struct_meta: Option<PathBuf>,
+    input_script: Option<PathBuf>,
+    replay_record: Option<PathBuf>,
+    replay: Option<PathBuf>,
     tick_sleep_micros: u64,
     ticks: Option<u64>,
+    screenshot: Option<PathBuf>,
+    screenshot_frame: u64,
+    exit_after_screenshot: bool,
+    profile_functions: Vec<String>,
+    profile_warmup_ticks: u64,
+    profile_output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedPlayLaunch {
+    watch_file: PathBuf,
+    watch_dir: PathBuf,
+    window_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,33 +260,6 @@ fn parse_lookup_cli_args(args: &[String]) -> Result<Option<LookupCliArgs>, Strin
     }))
 }
 
-fn parse_lookup_import_paths(source: &str) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("import ") {
-            continue;
-        }
-        let Some(first_quote) = trimmed.find('"') else {
-            continue;
-        };
-        let rest = &trimmed[first_quote + 1..];
-        let Some(second_quote_rel) = rest.find('"') else {
-            continue;
-        };
-        let candidate = &rest[..second_quote_rel];
-        let path = PathBuf::from(candidate);
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("stasis"))
-        {
-            out.push(path);
-        }
-    }
-    out
-}
-
 fn is_lookup_ignored_dir(name: &str) -> bool {
     matches!(name, ".git" | ".stasis_cache" | "target")
 }
@@ -334,30 +336,16 @@ fn collect_lookup_entry_files(root: &Path, entry_file: &Path) -> Result<Vec<Path
         ));
     }
 
-    let mut queue: Vec<PathBuf> = vec![entry_canonical];
-    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
-    while let Some(path) = queue.pop() {
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        let parent = path.parent().unwrap_or(&root_canonical);
-        for import_path in parse_lookup_import_paths(&source) {
-            let candidate = parent.join(import_path);
-            if !candidate.exists() {
-                continue;
-            }
-            let canonical = candidate.canonicalize().map_err(|error| {
-                format!("failed to canonicalize {}: {error}", candidate.display())
-            })?;
-            if canonical.starts_with(&root_canonical) {
-                queue.push(canonical);
-            }
-        }
-    }
-
-    let mut files: Vec<PathBuf> = visited.into_iter().collect();
+    let (graph, _) = stasis_compiler::frontend::module_graph::load_project_module_graph(
+        &root_canonical,
+        &entry_canonical,
+    )
+    .map_err(|diagnostic| diagnostic.message)?;
+    let mut files: Vec<PathBuf> = graph
+        .modules()
+        .keys()
+        .map(|path| root_canonical.join(path))
+        .collect();
     files.sort();
     Ok(files)
 }
@@ -401,8 +389,8 @@ fn lookup_name_matches(name: &str, query_lower: &str) -> bool {
 fn lookup_display_path(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
-        .display()
-        .to_string()
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn collect_lookup_matches_in_source(
@@ -415,16 +403,18 @@ fn collect_lookup_matches_in_source(
     let display_path = lookup_display_path(path, root);
     let mut matches = Vec::new();
 
-    if let Ok(functions) = parse_top_level_functions(source) {
+    if let Ok(functions) = source_function_items([(display_path.clone(), source.to_string())]) {
         for function in functions {
             if !lookup_name_matches(&function.name, &query_lower) {
                 continue;
             }
             let text = match parsed.mode {
-                LookupMode::Signature => source.get(function.signature_range.clone()),
-                LookupMode::Definition => {
-                    source.get(function.signature_range.start..function.body_range.end)
-                }
+                LookupMode::Signature => source.get(
+                    function.signature_range.start as usize..function.signature_range.end as usize,
+                ),
+                LookupMode::Definition => source.get(
+                    function.signature_range.start as usize..function.source_range.end as usize,
+                ),
             };
             if let Some(text) = text {
                 matches.push(LookupMatch {
@@ -436,12 +426,15 @@ fn collect_lookup_matches_in_source(
     }
 
     if parsed.mode == LookupMode::Definition {
-        if let Ok(structs) = parse_top_level_struct_definitions(source) {
+        if let Ok(structs) = source_struct_items(source, display_path.clone()) {
             for definition in structs {
                 if !lookup_name_matches(&definition.name, &query_lower) {
                     continue;
                 }
-                if let Some(text) = source.get(definition.definition_range.clone()) {
+                if let Some(text) = source.get(
+                    definition.definition_range.start as usize
+                        ..definition.definition_range.end as usize,
+                ) {
                     matches.push(LookupMatch {
                         path: display_path.clone(),
                         text: text.trim().to_string(),
@@ -522,8 +515,19 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut watch_dir: Option<PathBuf> = None;
     let mut data_bind_json: Option<PathBuf> = None;
     let mut data_bind_struct_meta: Option<PathBuf> = None;
+    let mut input_script: Option<PathBuf> = None;
+    let mut replay_record: Option<PathBuf> = None;
+    let mut replay: Option<PathBuf> = None;
     let mut tick_sleep_micros: u64 = 16000;
     let mut ticks: Option<u64> = None;
+    let mut screenshot: Option<PathBuf> = None;
+    let mut screenshot_frame: u64 = 1;
+    let mut screenshot_frame_explicit = false;
+    let mut exit_after_screenshot = false;
+    let mut profile_functions = Vec::new();
+    let mut profile_warmup_ticks = 60_u64;
+    let mut profile_warmup_explicit = false;
+    let mut profile_output: Option<PathBuf> = None;
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -552,12 +556,36 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         if arg == "--data-bind" {
             if i + 2 >= args.len() {
                 return Err(
-                    "missing values for --data-bind <json_path> <struct_meta_path>".to_string(),
+                    "missing values for --data-bind <data_path> <struct_meta_path>".to_string(),
                 );
             }
             data_bind_json = Some(PathBuf::from(args[i + 1].clone()));
             data_bind_struct_meta = Some(PathBuf::from(args[i + 2].clone()));
             i += 3;
+            continue;
+        }
+        if arg == "--input-script" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --input-script".to_string());
+            }
+            input_script = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--record-replay" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --record-replay".to_string());
+            }
+            replay_record = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--replay" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --replay".to_string());
+            }
+            replay = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
             continue;
         }
         if arg == "--ticks" {
@@ -582,22 +610,325 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
             i += 2;
             continue;
         }
+        if arg == "--screenshot" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --screenshot".to_string());
+            }
+            screenshot = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--screenshot-frame" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --screenshot-frame".to_string());
+            }
+            screenshot_frame = args[i + 1]
+                .parse::<u64>()
+                .map_err(|error| format!("invalid value for --screenshot-frame: {error}"))?;
+            if screenshot_frame == 0 || screenshot_frame > i32::MAX as u64 {
+                return Err("--screenshot-frame must be between 1 and 2147483647".to_string());
+            }
+            screenshot_frame_explicit = true;
+            i += 2;
+            continue;
+        }
+        if arg == "--exit-after-screenshot" {
+            exit_after_screenshot = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--profile-functions" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-functions <name[,name...]>".to_string());
+            }
+            profile_functions.extend(
+                args[i + 1]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
+            );
+            i += 2;
+            continue;
+        }
+        if arg == "--profile-warmup" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-warmup <ticks>".to_string());
+            }
+            profile_warmup_ticks = args[i + 1]
+                .parse::<u64>()
+                .map_err(|error| format!("invalid value for --profile-warmup: {error}"))?;
+            profile_warmup_explicit = true;
+            i += 2;
+            continue;
+        }
+        if arg == "--profile-output" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --profile-output <path>".to_string());
+            }
+            profile_output = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
         i += 1;
     }
-    let Some(watch_file) = watch_file else {
+    if screenshot.is_none() && (screenshot_frame_explicit || exit_after_screenshot) {
         return Err(
-            "missing entry file. Use `stasis.exe play <path.stasis>` (or --watch-file <path>)"
+            "--screenshot-frame and --exit-after-screenshot require --screenshot <path>"
                 .to_string(),
         );
-    };
+    }
+    if screenshot.is_some() && ticks.is_some_and(|count| count < screenshot_frame) {
+        return Err("--ticks must be at least --screenshot-frame when capturing".to_string());
+    }
+    if profile_functions.is_empty() && (profile_warmup_explicit || profile_output.is_some()) {
+        return Err(
+            "--profile-warmup and --profile-output require --profile-functions".to_string(),
+        );
+    }
+    if replay_record.is_some() && replay.is_some() {
+        return Err("--record-replay cannot be combined with --replay".to_string());
+    }
+    if replay.is_some() && input_script.is_some() {
+        return Err("--replay cannot be combined with --input-script".to_string());
+    }
+    if !profile_functions.is_empty() && ticks.is_some_and(|count| count <= profile_warmup_ticks) {
+        return Err(
+            "--ticks must exceed --profile-warmup so at least one frame is measured".to_string(),
+        );
+    }
     Ok(PlayCliArgs {
         watch_file,
         watch_dir,
         data_bind_json,
         data_bind_struct_meta,
+        input_script,
+        replay_record,
+        replay,
         tick_sleep_micros,
         ticks,
+        screenshot,
+        screenshot_frame,
+        exit_after_screenshot,
+        profile_functions,
+        profile_warmup_ticks,
+        profile_output,
     })
+}
+
+fn find_play_manifest_root(start: &Path) -> Option<PathBuf> {
+    let start_dir = if start.is_file() {
+        start.parent()?
+    } else {
+        start
+    };
+    start_dir
+        .ancestors()
+        .find(|ancestor| ancestor.join("stasis.json").is_file())
+        .map(Path::to_path_buf)
+}
+
+fn resolve_existing_play_file(path: &Path, launch_dir: &Path) -> Result<PathBuf, String> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        launch_dir.join(path)
+    };
+    let resolved = candidate.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve play entry {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if !resolved.is_file() {
+        return Err(format!("play entry is not a file: {}", resolved.display()));
+    }
+    Ok(resolved)
+}
+
+fn resolve_existing_play_directory(path: &Path, launch_dir: &Path) -> Result<PathBuf, String> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        launch_dir.join(path)
+    };
+    let resolved = candidate.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve play watch directory {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if !resolved.is_dir() {
+        return Err(format!(
+            "play watch directory is not a directory: {}",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+fn load_play_manifest_details(root: &Path) -> Result<(PathBuf, Option<String>), String> {
+    let manifest_path = root.join("stasis.json");
+    let source = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|error| format!("invalid {}: {error}", manifest_path.display()))?;
+    let entry = manifest
+        .get("entry")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{} has no non-empty entry", manifest_path.display()))?;
+    let entry = Path::new(entry);
+    if entry.is_absolute() {
+        return Err(format!(
+            "{} entry must be project-relative",
+            manifest_path.display()
+        ));
+    }
+    let resolved_entry = resolve_existing_play_file(entry, root)?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve project root {}: {error}", root.display()))?;
+    if !resolved_entry.starts_with(&canonical_root) {
+        return Err(format!(
+            "{} entry escapes project root {}",
+            manifest_path.display(),
+            canonical_root.display()
+        ));
+    }
+    let title = manifest
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Ok((resolved_entry, title))
+}
+
+fn resolve_play_launch(
+    parsed: &PlayCliArgs,
+    launch_dir: &Path,
+) -> Result<ResolvedPlayLaunch, String> {
+    let explicit_entry = parsed
+        .watch_file
+        .as_deref()
+        .map(|path| resolve_existing_play_file(path, launch_dir))
+        .transpose()?;
+    let manifest_root = if let Some(entry) = explicit_entry.as_deref() {
+        find_play_manifest_root(entry)
+    } else {
+        find_play_manifest_root(launch_dir)
+    };
+
+    let (watch_file, window_title) = if let Some(entry) = explicit_entry {
+        let title = manifest_root
+            .as_deref()
+            .and_then(|root| load_play_manifest_details(root).ok())
+            .and_then(|(_, title)| title);
+        (entry, title)
+    } else {
+        let root = manifest_root.as_deref().ok_or_else(|| {
+            format!(
+                "missing entry file and no stasis.json found from {}",
+                launch_dir.display()
+            )
+        })?;
+        load_play_manifest_details(root)?
+    };
+
+    let watch_dir = match parsed
+        .watch_dir
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        Some(path) => resolve_existing_play_directory(path, launch_dir)?,
+        None => manifest_root
+            .or_else(|| watch_file.parent().map(Path::to_path_buf))
+            .ok_or_else(|| format!("play entry has no parent: {}", watch_file.display()))?
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve play watch directory: {error}"))?,
+    };
+
+    Ok(ResolvedPlayLaunch {
+        watch_file,
+        watch_dir,
+        window_title,
+    })
+}
+
+struct PlayScreenshotEnvironment {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    output_path: Option<PathBuf>,
+}
+
+impl Drop for PlayScreenshotEnvironment {
+    fn drop(&mut self) {
+        for (name, value) in self.previous.drain(..).rev() {
+            if let Some(value) = value {
+                env::set_var(name, value);
+            } else {
+                env::remove_var(name);
+            }
+        }
+    }
+}
+
+fn configure_play_screenshot_environment(
+    parsed: &PlayCliArgs,
+) -> Result<PlayScreenshotEnvironment, String> {
+    let Some(path) = parsed.screenshot.as_ref() else {
+        return Ok(PlayScreenshotEnvironment {
+            previous: Vec::new(),
+            output_path: None,
+        });
+    };
+    let resolved = if path.is_absolute() {
+        path.clone()
+    } else {
+        env::current_dir()
+            .map_err(|error| format!("failed to resolve --screenshot path: {error}"))?
+            .join(path)
+    };
+    let names = [
+        "STASIS_SCREENSHOT_ONCE",
+        "STASIS_SCREENSHOT_FRAME",
+        "STASIS_EXIT_AFTER_SCREENSHOT",
+    ];
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| "--screenshot path has no parent directory".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create screenshot directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    if resolved.exists() {
+        fs::remove_file(&resolved).map_err(|error| {
+            format!(
+                "failed to replace screenshot output {}: {error}",
+                resolved.display()
+            )
+        })?;
+    }
+    let guard = PlayScreenshotEnvironment {
+        previous: names
+            .into_iter()
+            .map(|name| (name, env::var_os(name)))
+            .collect(),
+        output_path: Some(resolved.clone()),
+    };
+    env::set_var("STASIS_SCREENSHOT_ONCE", resolved);
+    env::set_var(
+        "STASIS_SCREENSHOT_FRAME",
+        parsed.screenshot_frame.to_string(),
+    );
+    if parsed.exit_after_screenshot {
+        env::set_var("STASIS_EXIT_AFTER_SCREENSHOT", "1");
+    } else {
+        env::remove_var("STASIS_EXIT_AFTER_SCREENSHOT");
+    }
+    Ok(guard)
 }
 
 fn try_run_play_subcommand() -> Option<i32> {
@@ -614,16 +945,82 @@ fn try_run_play_subcommand() -> Option<i32> {
             return Some(2);
         }
     };
+    let launch_dir = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read current directory: {error}");
+            return Some(2);
+        }
+    };
+    let launch = match resolve_play_launch(&parsed, &launch_dir) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
+    let screenshot_environment = match configure_play_screenshot_environment(&parsed) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
 
-    match run_play_in_process(
-        &parsed.watch_file,
-        parsed.watch_dir.as_deref(),
-        parsed.data_bind_json.as_deref(),
-        parsed.data_bind_struct_meta.as_deref(),
-        parsed.tick_sleep_micros,
-        parsed.ticks,
-    ) {
-        Ok(()) => Some(0),
+    let profile = (!parsed.profile_functions.is_empty()).then(|| PlayProfileConfig {
+        functions: parsed.profile_functions.clone(),
+        warmup_ticks: parsed.profile_warmup_ticks,
+        output_path: parsed.profile_output.clone(),
+    });
+    let replay = parsed
+        .replay_record
+        .clone()
+        .map(PlayReplayConfig::Record)
+        .or_else(|| parsed.replay.clone().map(PlayReplayConfig::Replay));
+    let play_result = if let Some(replay) = replay {
+        run_play_in_process_with_replay(
+            &launch.watch_file,
+            Some(&launch.watch_dir),
+            parsed.data_bind_json.as_deref(),
+            parsed.data_bind_struct_meta.as_deref(),
+            parsed.input_script.as_deref(),
+            parsed.tick_sleep_micros,
+            parsed.ticks,
+            launch.window_title.as_deref(),
+            profile,
+            None,
+            replay,
+        )
+    } else {
+        run_play_in_process_with_input_script_window_title_and_profile(
+            &launch.watch_file,
+            Some(&launch.watch_dir),
+            parsed.data_bind_json.as_deref(),
+            parsed.data_bind_struct_meta.as_deref(),
+            parsed.input_script.as_deref(),
+            parsed.tick_sleep_micros,
+            parsed.ticks,
+            launch.window_title.as_deref(),
+            profile,
+        )
+    };
+    match play_result {
+        Ok(()) => {
+            if let Some(path) = screenshot_environment.output_path.as_ref() {
+                match fs::metadata(path) {
+                    Ok(metadata) if metadata.len() > 0 => {}
+                    Ok(_) => {
+                        eprintln!("screenshot output is empty: {}", path.display());
+                        return Some(1);
+                    }
+                    Err(error) => {
+                        eprintln!("screenshot was not captured at {}: {error}", path.display());
+                        return Some(1);
+                    }
+                }
+            }
+            Some(0)
+        }
         Err(message) => {
             eprintln!("{message}");
             Some(1)
@@ -636,11 +1033,6 @@ fn try_run_probe_graphics_runtime_subcommand() -> Option<i32> {
     let first = args.next()?;
     if first != "probe-graphics-runtime" {
         return None;
-    }
-
-    if !cfg!(windows) {
-        eprintln!("probe-graphics-runtime is only supported on Windows today");
-        return Some(2);
     }
 
     let candidates = stasis_dynload::runtime_library_candidate_paths();
@@ -843,9 +1235,9 @@ fn maybe_cleanup_stale_stasis_cache() {
     match cleanup_stale_stasis_cache(cache_root, ttl) {
         Ok(summary) => {
             if summary.removed_files > 0 || summary.removed_dirs > 0 {
-                println!("cache_cleanup_removed_files={}", summary.removed_files);
-                println!("cache_cleanup_removed_dirs={}", summary.removed_dirs);
-                println!("cache_cleanup_ttl_days={ttl_days}");
+                eprintln!("cache_cleanup_removed_files={}", summary.removed_files);
+                eprintln!("cache_cleanup_removed_dirs={}", summary.removed_dirs);
+                eprintln!("cache_cleanup_ttl_days={ttl_days}");
             }
         }
         Err(message) => {
@@ -1234,6 +1626,9 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
     let mut project_dir: Option<PathBuf> = None;
     let mut entry_file: Option<PathBuf> = None;
     let mut output_dir: Option<PathBuf> = None;
+    let mut profile_functions = Vec::new();
+    let mut profile_warmup_frames = 120_u32;
+    let mut profile_sample_frames = 300_u32;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1265,6 +1660,37 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
                 output_dir = Some(PathBuf::from(args[i + 1].clone()));
                 i += 2;
             }
+            "--profile-functions" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --profile-functions".to_string());
+                }
+                profile_functions.extend(
+                    args[i + 1]
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string),
+                );
+                i += 2;
+            }
+            "--profile-warmup-frames" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --profile-warmup-frames".to_string());
+                }
+                profile_warmup_frames = args[i + 1]
+                    .parse()
+                    .map_err(|error| format!("invalid --profile-warmup-frames: {error}"))?;
+                i += 2;
+            }
+            "--profile-sample-frames" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --profile-sample-frames".to_string());
+                }
+                profile_sample_frames = args[i + 1]
+                    .parse()
+                    .map_err(|error| format!("invalid --profile-sample-frames: {error}"))?;
+                i += 2;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown mobile AOT bundle flag '{other}'"));
             }
@@ -1274,7 +1700,9 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
         }
     }
     let Some(target) = target else {
-        return Err("missing required --target <android-arm64|ios-arm64>".to_string());
+        return Err(
+            "missing required --target <android-arm64|android-x86_64|ios-arm64>".to_string(),
+        );
     };
     let Some(project_dir) = project_dir else {
         return Err("missing required --project-dir <path>".to_string());
@@ -1287,6 +1715,9 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
         project_dir,
         entry_file,
         output_dir,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
     })
 }
 
@@ -1310,6 +1741,9 @@ fn try_run_mobile_aot_bundle_subcommand() -> Option<i32> {
         &parsed.project_dir,
         parsed.entry_file.as_deref(),
         &parsed.output_dir,
+        &parsed.profile_functions,
+        parsed.profile_warmup_frames,
+        parsed.profile_sample_frames,
     ) {
         Ok(summary) => {
             println!("mobile_aot_target={}", summary.target.as_str());
@@ -1367,6 +1801,10 @@ fn try_run_android_aot_bundle_subcommand() -> Option<i32> {
                 "android_aot_symbols_header={}",
                 summary.symbols_header.display()
             );
+            println!(
+                "android_aot_bindings_source={}",
+                summary.bindings_source.display()
+            );
             println!("android_aot_cmake_file={}", summary.cmake_file.display());
             println!("android_aot_asset_dir={}", summary.asset_dir.display());
             Some(0)
@@ -1416,6 +1854,9 @@ fn write_android_aot_engine_bundle(
         project_dir,
         entry_file,
         output_dir,
+        &[],
+        0,
+        0,
     )?;
     let cmake_file = summary
         .cmake_file
@@ -1435,15 +1876,27 @@ fn write_mobile_aot_engine_bundle(
     project_dir: &Path,
     entry_file: Option<&Path>,
     output_dir: &Path,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
 ) -> Result<MobileAotBundleSummary, String> {
     let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
+    process.set_import_base_dir(project_dir);
     process.set_target(target.aot_target());
-    for (path, source) in collect_mobile_aot_sources(project_dir, entry_file)? {
-        process.upsert_file(path, source);
+    process.set_profile_functions(profile_functions.iter().cloned())?;
+    let sources = collect_mobile_aot_sources(project_dir, entry_file)?;
+    for (path, source) in &sources {
+        process.upsert_file(path.clone(), source.clone());
     }
     process
         .compile()
         .map_err(|error| format!("failed to compile mobile AOT bundle: {error:?}"))?;
+    let resolved = load_project_asset_manifest(project_dir, AssetLimits::default())
+        .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
+    let snapshot = process
+        .program_snapshot()
+        .ok_or_else(|| "mobile AOT compile produced no ProgramSnapshot".to_string())?;
+    let resolved = release_assets::retain_snapshot_assets(project_dir, snapshot, &resolved)?;
     let bundle = process.write_engine_bundle(&mobile_engine_entrypoints(), output_dir)?;
     let manifest = fs::read_to_string(&bundle.manifest_path).map_err(|error| {
         format!(
@@ -1456,20 +1909,32 @@ fn write_mobile_aot_engine_bundle(
     let symbols_header = output_dir.join("published_aot_symbols.h");
     write_mobile_aot_symbols_header(&manifest_json, &symbols_header)?;
     let bindings_source = output_dir.join("published_aot_bindings.c");
-    write_mobile_aot_bindings_source(&manifest_json, &bindings_source)?;
-    let cmake_file = if target == MobileAotTarget::AndroidArm64 {
+    write_mobile_aot_bindings_source_with_profile(
+        &manifest_json,
+        &process.state_layout(),
+        project_dir,
+        &bindings_source,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
+    )?;
+    let cmake_file = if matches!(
+        target,
+        MobileAotTarget::AndroidArm64 | MobileAotTarget::AndroidX86_64
+    ) {
         let path = output_dir.join("published_aot_objects.cmake");
-        write_android_aot_cmake_file(&bundle.object_paths_by_function, &bindings_source, &path)?;
+        write_android_aot_cmake_file(&bundle.object_paths_by_function_id, &bindings_source, &path)?;
         Some(path)
     } else {
         None
     };
-    let asset_dir = write_mobile_asset_bundle(target, project_dir, output_dir)?;
+    let asset_dir = write_mobile_asset_bundle(target, output_dir, &resolved)?;
     let package_manifest = write_mobile_aot_package_manifest(
         target,
         &bundle.manifest_path,
+        &manifest_json,
         &asset_dir,
-        &bundle.object_paths_by_function,
+        &bundle.object_paths_by_function_id,
         &symbols_header,
         &bindings_source,
         cmake_file.as_deref(),
@@ -1478,7 +1943,7 @@ fn write_mobile_aot_engine_bundle(
     Ok(MobileAotBundleSummary {
         target,
         bundle_dir: bundle.output_dir,
-        object_count: bundle.object_paths_by_function.len(),
+        object_count: bundle.object_paths_by_function_id.len(),
         symbols_header,
         bindings_source,
         cmake_file,
@@ -1489,11 +1954,9 @@ fn write_mobile_aot_engine_bundle(
 
 fn write_mobile_asset_bundle(
     target: MobileAotTarget,
-    project_dir: &Path,
     output_dir: &Path,
+    resolved: &stasis_assets::ResolvedAssetManifest,
 ) -> Result<PathBuf, String> {
-    let resolved = load_project_asset_manifest(project_dir, AssetLimits::default())
-        .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
     let asset_root = output_dir.join(target.asset_root_dir());
     if asset_root.exists() {
         fs::remove_dir_all(&asset_root).map_err(|error| {
@@ -1504,22 +1967,12 @@ fn write_mobile_asset_bundle(
         })?;
     }
     let game_root = asset_root.join("stasis_game");
-    let manifest_destination = game_root.join(DEFAULT_ASSET_MANIFEST_PATH);
-    fs::create_dir_all(manifest_destination.parent().expect("manifest parent"))
-        .map_err(|error| format!("failed to create mobile AOT manifest directory: {error}"))?;
-    fs::copy(&resolved.manifest_path, &manifest_destination)
-        .map_err(|error| format!("failed to package mobile AOT asset manifest: {error}"))?;
-    for asset in resolved.assets {
-        let destination = game_root.join(&asset.entry.path);
-        fs::create_dir_all(destination.parent().expect("asset parent"))
-            .map_err(|error| format!("failed to create mobile AOT asset directory: {error}"))?;
-        fs::copy(&asset.absolute_path, &destination).map_err(|error| {
-            format!(
-                "failed to package mobile AOT asset {}: {error}",
-                asset.entry.id
-            )
-        })?;
-    }
+    prepare_asset_bundle(
+        resolved,
+        &game_root,
+        output_dir.join("asset-preparation-cache"),
+    )
+    .map_err(|error| format!("failed to prepare mobile AOT assets: {error}"))?;
     Ok(asset_root)
 }
 
@@ -1553,51 +2006,22 @@ fn collect_mobile_aot_sources_from_entry(
         )
     })?;
     let entry_path = resolve_mobile_aot_project_file(&project_root, entry_file)?;
-    let mut queue = vec![entry_path];
-    let mut visited = BTreeSet::new();
-    while let Some(path) = queue.pop() {
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        let parent = path.parent().unwrap_or(&project_root);
-        for import_path in parse_lookup_import_paths(&source) {
-            let candidate = parent.join(import_path);
-            let imported = candidate.canonicalize().map_err(|error| {
-                format!(
-                    "failed to canonicalize import {}: {error}",
-                    candidate.display()
-                )
-            })?;
-            if !imported.starts_with(&project_root) {
-                return Err(format!(
-                    "mobile AOT import {} must stay under project directory {}",
-                    imported.display(),
-                    project_root.display()
-                ));
-            }
-            queue.push(imported);
-        }
-    }
+    let (graph, sources) = stasis_compiler::frontend::module_graph::load_project_module_graph(
+        &project_root,
+        &entry_path,
+    )
+    .map_err(|diagnostic| diagnostic.message)?;
 
     let mut out = Vec::new();
-    for path in visited {
-        if path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(".test.stasis"))
-        {
+    for relative in graph.modules().keys() {
+        if relative.ends_with(".test.stasis") {
             continue;
         }
-        let relative = path
-            .strip_prefix(&project_root)
-            .map_err(|error| format!("failed to relativize {}: {error}", path.display()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        out.push((relative, source));
+        let source = sources
+            .get(relative)
+            .cloned()
+            .ok_or_else(|| format!("module graph source missing for {relative}"))?;
+        out.push((relative.clone(), source));
     }
     out.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(out)
@@ -1678,24 +2102,24 @@ fn write_mobile_aot_symbols_header(
     manifest: &serde_json::Value,
     output_path: &Path,
 ) -> Result<(), String> {
-    let main = mobile_aot_symbol_for(manifest, "main")?;
-    let tick = mobile_aot_symbol_for(manifest, "tick")?;
-    let render = mobile_aot_symbol_for(manifest, "render")?;
+    mobile_aot_function_for(manifest, "main")?;
+    mobile_aot_function_for(manifest, "tick")?;
+    mobile_aot_function_for(manifest, "render")?;
     let on_code_swap = mobile_aot_symbol_for(manifest, "on_code_swap").ok();
     let mut out = String::new();
-    out.push_str("#pragma once\n\n");
+    out.push_str("#pragma once\n\n#include <stdint.h>\n\n");
     out.push_str("extern void stasis_aot_bind_runtime_globals(void);\n");
-    for symbol in [&main, &tick, &render] {
-        out.push_str(&format!("extern void {symbol}(void);\n"));
-    }
+    out.push_str("extern int32_t stasis_mobile_main_entry(void);\n");
+    out.push_str("extern int32_t stasis_mobile_tick_entry(void);\n");
+    out.push_str("extern int32_t stasis_mobile_render_entry(void);\n");
     if let Some(symbol) = on_code_swap.as_ref() {
         out.push_str(&format!("extern void {symbol}(void);\n"));
     }
     out.push_str("\n");
     out.push_str("#define STASIS_AOT_BIND_RUNTIME_GLOBALS stasis_aot_bind_runtime_globals\n");
-    out.push_str(&format!("#define STASIS_AOT_MAIN {main}\n"));
-    out.push_str(&format!("#define STASIS_AOT_TICK {tick}\n"));
-    out.push_str(&format!("#define STASIS_AOT_RENDER {render}\n"));
+    out.push_str("#define STASIS_AOT_MAIN stasis_mobile_main_entry\n");
+    out.push_str("#define STASIS_AOT_TICK stasis_mobile_tick_entry\n");
+    out.push_str("#define STASIS_AOT_RENDER stasis_mobile_render_entry\n");
     if let Some(symbol) = on_code_swap.as_ref() {
         out.push_str(&format!("#define STASIS_AOT_ON_CODE_SWAP {symbol}\n"));
     }
@@ -1713,91 +2137,6 @@ fn write_mobile_aot_symbols_header(
             output_path.display()
         )
     })
-}
-
-fn write_mobile_aot_bindings_source(
-    manifest: &serde_json::Value,
-    output_path: &Path,
-) -> Result<(), String> {
-    let functions = manifest
-        .get("functions")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "mobile AOT manifest missing functions array".to_string())?;
-    let literals = manifest
-        .get("string_literals")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "mobile AOT manifest missing string_literals array".to_string())?;
-    let mut out = String::from("#include <stdint.h>\n#include \"stasis_mobile_aot_runtime.h\"\n\n");
-    for function in functions {
-        let symbol = function
-            .get("symbol")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
-        out.push_str(&format!("extern void {symbol}(void);\n"));
-    }
-    for literal in literals {
-        let id = literal
-            .get("id")
-            .and_then(serde_json::Value::as_i64)
-            .ok_or_else(|| "mobile AOT string literal missing id".to_string())?;
-        let value = literal
-            .get("value")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "mobile AOT string literal missing value".to_string())?;
-        out.push_str(&format!(
-            "static const char stasis_mobile_literal_{}[] = \"{}\";\n",
-            id.unsigned_abs(),
-            escape_mobile_c_string_literal(value)
-        ));
-    }
-    out.push_str("\nvoid stasis_aot_bind_runtime_globals(void) {\n");
-    for function in functions {
-        let symbol = function
-            .get("symbol")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
-        let fn_id = symbol
-            .strip_prefix("aot_fn_")
-            .and_then(|value| value.parse::<i32>().ok())
-            .ok_or_else(|| format!("mobile AOT function has invalid symbol '{symbol}'"))?;
-        out.push_str(&format!(
-            "    stasis_jit_register_code_ptr({fn_id}, (int64_t)(uintptr_t)&{symbol});\n"
-        ));
-    }
-    out.push_str("    stasis_jit_clear_string_literal_table();\n");
-    for literal in literals {
-        let id = literal
-            .get("id")
-            .and_then(serde_json::Value::as_i64)
-            .ok_or_else(|| "mobile AOT string literal missing id".to_string())?;
-        out.push_str(&format!(
-            "    stasis_jit_upsert_string_literal({id}, stasis_mobile_literal_{});\n",
-            id.unsigned_abs()
-        ));
-    }
-    out.push_str("}\n");
-    fs::write(output_path, out).map_err(|error| {
-        format!(
-            "failed to write mobile AOT bindings source {}: {error}",
-            output_path.display()
-        )
-    })
-}
-
-fn escape_mobile_c_string_literal(value: &str) -> String {
-    let mut escaped = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'\\' => escaped.push_str("\\\\"),
-            b'"' => escaped.push_str("\\\""),
-            b'\n' => escaped.push_str("\\n"),
-            b'\r' => escaped.push_str("\\r"),
-            b'\t' => escaped.push_str("\\t"),
-            b' '..=b'~' => escaped.push(char::from(byte)),
-            _ => escaped.push_str(&format!("\\{byte:03o}")),
-        }
-    }
-    escaped
 }
 
 fn mobile_aot_symbol_for(
@@ -1819,30 +2158,45 @@ fn mobile_aot_symbol_for(
 fn write_mobile_aot_package_manifest(
     target: MobileAotTarget,
     engine_manifest_path: &Path,
+    engine_manifest: &serde_json::Value,
     asset_dir: &Path,
-    object_paths_by_function: &std::collections::BTreeMap<String, PathBuf>,
+    object_paths_by_function_id: &std::collections::BTreeMap<u32, PathBuf>,
     symbols_header: &Path,
     bindings_source: &Path,
     cmake_file: Option<&Path>,
     output_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let objects: Vec<serde_json::Value> = object_paths_by_function
+    let manifest_functions = engine_manifest["functions"]
+        .as_array()
+        .ok_or_else(|| "mobile AOT engine manifest missing functions".to_string())?;
+    let objects = object_paths_by_function_id
         .iter()
-        .map(|(name, path)| {
-            serde_json::json!({
+        .map(|(function_id, path)| {
+            let name = manifest_functions
+                .iter()
+                .find(|function| function["function_id"].as_u64() == Some(u64::from(*function_id)))
+                .and_then(|function| function["name"].as_str())
+                .ok_or_else(|| {
+                    format!("mobile AOT engine manifest missing function id {function_id}")
+                })?;
+            Ok(serde_json::json!({
                 "function": name,
-                "path": path.to_string_lossy().replace('\\', "/")
-            })
+                "function_id": function_id,
+                "path": mobile_aot_relative_path(output_dir, path)?
+            }))
         })
-        .collect();
+        .collect::<Result<Vec<serde_json::Value>, String>>()?;
+    let asset_manifest = asset_dir
+        .join("stasis_game")
+        .join(DEFAULT_ASSET_MANIFEST_PATH);
     let mut manifest = serde_json::json!({
         "schema": "stasis.mobile_aot_bundle.v1",
         "target": target.as_str(),
-        "engine_manifest": engine_manifest_path.to_string_lossy().replace('\\', "/"),
-        "symbols_header": symbols_header.to_string_lossy().replace('\\', "/"),
-        "bindings_source": bindings_source.to_string_lossy().replace('\\', "/"),
-        "asset_root": asset_dir.to_string_lossy().replace('\\', "/"),
-        "asset_manifest": asset_dir.join("stasis_game").join(DEFAULT_ASSET_MANIFEST_PATH).to_string_lossy().replace('\\', "/"),
+        "engine_manifest": mobile_aot_relative_path(output_dir, engine_manifest_path)?,
+        "symbols_header": mobile_aot_relative_path(output_dir, symbols_header)?,
+        "bindings_source": mobile_aot_relative_path(output_dir, bindings_source)?,
+        "asset_root": mobile_aot_relative_path(output_dir, asset_dir)?,
+        "asset_manifest": mobile_aot_relative_path(output_dir, &asset_manifest)?,
         "objects": objects,
         "entrypoints": {
             "main": "main",
@@ -1853,7 +2207,7 @@ fn write_mobile_aot_package_manifest(
     });
     if let Some(cmake_file) = cmake_file {
         manifest["android_cmake_file"] =
-            serde_json::Value::String(cmake_file.to_string_lossy().replace('\\', "/"));
+            serde_json::Value::String(mobile_aot_relative_path(output_dir, cmake_file)?);
     }
     let path = output_dir.join("mobile_aot_bundle_manifest.json");
     let body = serde_json::to_string_pretty(&manifest)
@@ -1867,22 +2221,38 @@ fn write_mobile_aot_package_manifest(
     Ok(path)
 }
 
+fn mobile_aot_relative_path(output_dir: &Path, path: &Path) -> Result<String, String> {
+    path.strip_prefix(output_dir)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .map_err(|_| {
+            format!(
+                "mobile AOT metadata path {} is outside output directory {}",
+                path.display(),
+                output_dir.display()
+            )
+        })
+}
+
 fn write_android_aot_cmake_file(
-    object_paths_by_function: &std::collections::BTreeMap<String, PathBuf>,
+    object_paths_by_function_id: &std::collections::BTreeMap<u32, PathBuf>,
     bindings_source: &Path,
     output_path: &Path,
 ) -> Result<(), String> {
+    let output_dir = output_path.parent().ok_or_else(|| {
+        format!(
+            "Android AOT CMake output has no parent: {}",
+            output_path.display()
+        )
+    })?;
     let mut out = String::new();
     out.push_str("set(STASIS_PUBLISHED_AOT_OBJECTS\n");
-    for path in object_paths_by_function.values() {
-        out.push_str(&format!(
-            "  \"{}\"\n",
-            path.to_string_lossy().replace('\\', "/")
-        ));
+    for path in object_paths_by_function_id.values() {
+        let relative = mobile_aot_relative_path(output_dir, path)?;
+        out.push_str(&format!("  \"${{CMAKE_CURRENT_LIST_DIR}}/{relative}\"\n"));
     }
+    let bindings_relative = mobile_aot_relative_path(output_dir, bindings_source)?;
     out.push_str(&format!(
-        "  \"{}\"\n",
-        bindings_source.to_string_lossy().replace('\\', "/")
+        "  \"${{CMAKE_CURRENT_LIST_DIR}}/{bindings_relative}\"\n"
     ));
     out.push_str(")\n");
     fs::write(output_path, out).map_err(|error| {
@@ -1942,6 +2312,7 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1958,6 +2329,26 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("stasis_lookup_{name}_{stamp}"))
+    }
+
+    fn retained_mobile_assets(
+        project_dir: &Path,
+        sources: &[(String, String)],
+    ) -> stasis_assets::ResolvedAssetManifest {
+        let mut process = AotProcess::new();
+        process.set_import_base_dir(project_dir);
+        for (path, source) in sources {
+            process.upsert_file(path.clone(), source.clone());
+        }
+        process.compile().expect("compile mobile asset fixture");
+        let resolved = load_project_asset_manifest(project_dir, AssetLimits::default())
+            .expect("resolve mobile asset fixture");
+        release_assets::retain_snapshot_assets(
+            project_dir,
+            process.program_snapshot().expect("program snapshot"),
+            &resolved,
+        )
+        .expect("retain source-referenced mobile assets")
     }
 
     #[test]
@@ -1982,7 +2373,7 @@ mod tests {
         let parsed = parse_play_cli_args(&args).expect("parse should succeed");
         assert_eq!(
             parsed.watch_file,
-            PathBuf::from("samples/bucket_catcher.stasis")
+            Some(PathBuf::from("samples/bucket_catcher.stasis"))
         );
         assert_eq!(parsed.watch_dir, Some(PathBuf::from("samples")));
         assert_eq!(
@@ -1998,6 +2389,170 @@ mod tests {
     }
 
     #[test]
+    fn parse_play_cli_args_accepts_selective_function_profiling() {
+        let args = vec![
+            "main.stasis".to_string(),
+            "--ticks".to_string(),
+            "240".to_string(),
+            "--profile-functions".to_string(),
+            "render,draw_board, draw_enemies".to_string(),
+            "--profile-warmup".to_string(),
+            "40".to_string(),
+            "--profile-output".to_string(),
+            "profile.json".to_string(),
+        ];
+        let parsed = parse_play_cli_args(&args).expect("parse profiling arguments");
+        assert_eq!(
+            parsed.profile_functions,
+            vec!["render", "draw_board", "draw_enemies"]
+        );
+        assert_eq!(parsed.profile_warmup_ticks, 40);
+        assert_eq!(parsed.profile_output, Some(PathBuf::from("profile.json")));
+    }
+
+    #[test]
+    fn parse_play_cli_args_requires_a_measured_frame_after_profile_warmup() {
+        let args = vec![
+            "main.stasis".to_string(),
+            "--ticks".to_string(),
+            "60".to_string(),
+            "--profile-functions".to_string(),
+            "render".to_string(),
+        ];
+        assert!(parse_play_cli_args(&args)
+            .expect_err("warmup consumes the bounded run")
+            .contains("must exceed --profile-warmup"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_manifest_inferred_entry() {
+        let parsed = parse_play_cli_args(&[]).expect("parse should succeed");
+        assert_eq!(parsed.watch_file, None);
+        assert_eq!(parsed.watch_dir, None);
+    }
+
+    #[test]
+    fn play_launch_infers_manifest_entry_from_nested_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = env::temp_dir().join(format!("stasis_play_manifest_{stamp}"));
+        let source_dir = project.join("src");
+        let nested_dir = source_dir.join("nested");
+        fs::create_dir_all(&nested_dir).expect("create project directories");
+        fs::write(
+            project.join("stasis.json"),
+            r#"{"manifest_version":1,"name":"Manifest Game","entry":"src/main.stasis"}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            source_dir.join("main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .expect("write entry");
+
+        let parsed = parse_play_cli_args(&[]).expect("parse arguments");
+        let resolved = resolve_play_launch(&parsed, &nested_dir).expect("resolve manifest entry");
+        assert_eq!(
+            resolved.watch_file,
+            source_dir
+                .join("main.stasis")
+                .canonicalize()
+                .expect("canonical entry")
+        );
+        assert_eq!(
+            resolved.watch_dir,
+            project.canonicalize().expect("canonical project")
+        );
+        assert_eq!(resolved.window_title.as_deref(), Some("Manifest Game"));
+        fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn explicit_nested_entry_still_uses_manifest_project_root() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = env::temp_dir().join(format!("stasis_play_explicit_{stamp}"));
+        let source_dir = project.join("src");
+        fs::create_dir_all(&source_dir).expect("create source directory");
+        fs::write(
+            project.join("stasis.json"),
+            r#"{"manifest_version":1,"name":"Explicit Game","entry":"src/main.stasis"}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            source_dir.join("main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .expect("write entry");
+
+        let parsed = parse_play_cli_args(&["main.stasis".to_string()]).expect("parse arguments");
+        let resolved = resolve_play_launch(&parsed, &source_dir).expect("resolve explicit entry");
+        assert_eq!(
+            resolved.watch_dir,
+            project.canonicalize().expect("canonical project")
+        );
+        assert_eq!(resolved.window_title.as_deref(), Some("Explicit Game"));
+        fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn explicit_external_entry_does_not_inherit_callers_manifest() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("stasis_play_external_{stamp}"));
+        let caller = root.join("caller");
+        let external = root.join("external");
+        fs::create_dir_all(&caller).expect("create caller directory");
+        fs::create_dir_all(&external).expect("create external directory");
+        fs::write(
+            caller.join("stasis.json"),
+            r#"{"manifest_version":1,"name":"Caller","entry":"main.stasis"}"#,
+        )
+        .expect("write caller manifest");
+        fs::write(
+            caller.join("main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .expect("write caller entry");
+        let external_entry = external.join("standalone.stasis");
+        fs::write(&external_entry, "function main(): i32 { return 0; }\n")
+            .expect("write external entry");
+
+        let parsed = parse_play_cli_args(&[external_entry.display().to_string()])
+            .expect("parse explicit entry");
+        let resolved = resolve_play_launch(&parsed, &caller).expect("resolve external entry");
+        assert_eq!(
+            resolved.watch_dir,
+            external
+                .canonicalize()
+                .expect("canonical external directory")
+        );
+        assert_eq!(resolved.window_title, None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn play_without_entry_or_manifest_reports_discovery_root() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("stasis_play_no_manifest_{stamp}"));
+        fs::create_dir_all(&directory).expect("create directory");
+        let parsed = parse_play_cli_args(&[]).expect("parse arguments");
+        let error = resolve_play_launch(&parsed, &directory).expect_err("manifest is required");
+        assert!(error.contains("missing entry file and no stasis.json found"));
+        assert!(error.contains(&directory.display().to_string()));
+        fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn parse_play_cli_args_rejects_incomplete_data_bind_flag() {
         let args = vec![
             "samples/bucket_catcher.stasis".to_string(),
@@ -2006,6 +2561,129 @@ mod tests {
         ];
         let error = parse_play_cli_args(&args).expect_err("parse should fail");
         assert!(error.contains("missing values for --data-bind"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_input_script() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--input-script".to_string(),
+            "qa/taps.json".to_string(),
+        ];
+        let parsed = parse_play_cli_args(&args).expect("parse should succeed");
+        assert_eq!(parsed.input_script, Some(PathBuf::from("qa/taps.json")));
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_missing_input_script_path() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--input-script".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("missing value for --input-script"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_record_and_replay_modes() {
+        let record = parse_play_cli_args(&[
+            "game.stasis".to_string(),
+            "--record-replay".to_string(),
+            "runs/game.replay.json".to_string(),
+        ])
+        .expect("record arguments");
+        assert_eq!(
+            record.replay_record,
+            Some(PathBuf::from("runs/game.replay.json"))
+        );
+
+        let replay = parse_play_cli_args(&[
+            "game.stasis".to_string(),
+            "--replay".to_string(),
+            "runs/game.replay.json".to_string(),
+        ])
+        .expect("replay arguments");
+        assert_eq!(replay.replay, Some(PathBuf::from("runs/game.replay.json")));
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_ambiguous_replay_inputs() {
+        let error = parse_play_cli_args(&[
+            "game.stasis".to_string(),
+            "--record-replay".to_string(),
+            "one.json".to_string(),
+            "--replay".to_string(),
+            "two.json".to_string(),
+        ])
+        .expect_err("record and replay conflict");
+        assert!(error.contains("cannot be combined"));
+
+        let error = parse_play_cli_args(&[
+            "game.stasis".to_string(),
+            "--replay".to_string(),
+            "one.json".to_string(),
+            "--input-script".to_string(),
+            "input.json".to_string(),
+        ])
+        .expect_err("replay and input script conflict");
+        assert!(error.contains("--input-script"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_screenshot_configuration() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--screenshot".to_string(),
+            "artifacts/frame-12.png".to_string(),
+            "--screenshot-frame".to_string(),
+            "12".to_string(),
+            "--exit-after-screenshot".to_string(),
+        ];
+        let parsed = parse_play_cli_args(&args).expect("parse should succeed");
+        assert_eq!(
+            parsed.screenshot,
+            Some(PathBuf::from("artifacts/frame-12.png"))
+        );
+        assert_eq!(parsed.screenshot_frame, 12);
+        assert!(parsed.exit_after_screenshot);
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_zero_screenshot_frame() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--screenshot".to_string(),
+            "frame.png".to_string(),
+            "--screenshot-frame".to_string(),
+            "0".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("between 1 and 2147483647"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_requires_screenshot_for_capture_options() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--exit-after-screenshot".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("require --screenshot"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_ticks_before_screenshot_frame() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--ticks".to_string(),
+            "11".to_string(),
+            "--screenshot".to_string(),
+            "frame.png".to_string(),
+            "--screenshot-frame".to_string(),
+            "12".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("--ticks must be at least --screenshot-frame"));
     }
 
     #[test]
@@ -2331,6 +3009,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_mobile_aot_bundle_args_accepts_android_x86_64_target() {
+        let args = vec![
+            "--target".to_string(),
+            "android-x86_64".to_string(),
+            "--project-dir".to_string(),
+            "samples/render_parity".to_string(),
+            "--entry-file".to_string(),
+            "main.stasis".to_string(),
+            "--out-dir".to_string(),
+            "target/android-x86_64-aot".to_string(),
+        ];
+        let parsed = parse_mobile_aot_bundle_args(&args).expect("parse should succeed");
+        assert_eq!(parsed.target, MobileAotTarget::AndroidX86_64);
+        assert_eq!(parsed.target.as_str(), "android-x86_64");
+        assert_eq!(
+            parsed.target.aot_target(),
+            AotTarget::android_x86_64_default()
+        );
+        assert_eq!(parsed.target.asset_root_dir(), "apk_assets");
+    }
+
+    #[test]
+    fn parse_mobile_aot_bundle_args_accepts_bounded_function_profile() {
+        let args = vec![
+            "--target".to_string(),
+            "android-x86_64".to_string(),
+            "--project-dir".to_string(),
+            "samples/render_parity".to_string(),
+            "--out-dir".to_string(),
+            "target/profiled-mobile-aot".to_string(),
+            "--profile-functions".to_string(),
+            "render,draw_board".to_string(),
+            "--profile-warmup-frames".to_string(),
+            "30".to_string(),
+            "--profile-sample-frames".to_string(),
+            "90".to_string(),
+        ];
+        let parsed = parse_mobile_aot_bundle_args(&args).expect("parse profile flags");
+        assert_eq!(parsed.profile_functions, ["render", "draw_board"]);
+        assert_eq!(parsed.profile_warmup_frames, 30);
+        assert_eq!(parsed.profile_sample_frames, 90);
+    }
+
+    #[test]
     fn android_aot_bundle_writes_pong_symbols_header() {
         use object::{Object, ObjectSymbol};
 
@@ -2351,29 +3073,86 @@ mod tests {
 
         assert!(summary.object_count >= 3, "expected lifecycle objects");
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
-        assert!(
-            header
-                .lines()
-                .filter(|line| line.starts_with("extern void aot_fn_") && line.ends_with("(void);"))
-                .count()
-                >= 3,
-            "mobile AOT lifecycle symbols must match StasisMobileEntry void(void) callbacks"
-        );
+        for entry in ["main", "tick", "render"] {
+            assert!(header.contains(&format!(
+                "extern int32_t stasis_mobile_{entry}_entry(void);"
+            )));
+            assert!(header.contains(&format!(
+                "#define STASIS_AOT_{} stasis_mobile_{entry}_entry",
+                entry.to_ascii_uppercase()
+            )));
+        }
         let mobile_runtime_header =
             fs::read_to_string(repo_root.join("runtime/stasis_mobile_runtime.h"))
                 .expect("read mobile runtime header");
-        assert!(mobile_runtime_header.contains("typedef void (*StasisMobileEntry)(void)"));
+        assert!(mobile_runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
         let bindings =
             fs::read_to_string(&summary.bindings_source).expect("read mobile AOT bindings source");
+        assert!(bindings.contains("int32_t stasis_mobile_main_entry(void)"));
         assert!(bindings.contains("void stasis_aot_bind_runtime_globals(void)"));
-        assert!(bindings.contains("stasis_jit_register_code_ptr(0"));
-        assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
+        assert!(!bindings.contains("stasis_jit_register_code_ptr"));
+        assert!(bindings.contains("stasis_published_sprite_handle_for_path"));
+        assert!(bindings.contains("{\"assets/ball.svg\","));
         assert!(header.contains("#define STASIS_AOT_BIND_RUNTIME_GLOBALS"));
-        assert!(header.contains("#define STASIS_AOT_TICK aot_fn_"));
-        assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
+        let engine_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("engine_bundle_manifest.json"))
+                .expect("read engine manifest"),
+        )
+        .expect("parse engine manifest");
+        let (main_symbol, main_return_type) =
+            mobile_aot_function_for(&engine_manifest, "main").expect("canonical main mapping");
+        assert_eq!(main_return_type, 1);
+        assert!(bindings.contains(&format!("extern int32_t {main_symbol}(void);")));
+        assert!(bindings.contains(&format!(
+            "stasis_mobile_main_entry(void) {{ return {main_symbol}(); }}"
+        )));
+        assert!(engine_manifest["functions"]
+            .as_array()
+            .expect("functions")
+            .iter()
+            .filter(|function| matches!(
+                function["name"].as_str(),
+                Some("main" | "tick" | "render")
+            ))
+            .all(|function| function["return_type"] == 1));
         let cmake = fs::read_to_string(&summary.cmake_file).expect("read cmake file");
         assert!(cmake.contains("set(STASIS_PUBLISHED_AOT_OBJECTS"));
+        assert!(cmake.contains("${CMAKE_CURRENT_LIST_DIR}/"));
+        assert!(!cmake.contains(&output_dir.to_string_lossy().replace('\\', "/")));
         assert!(cmake.contains("published_aot_bindings.c"));
+        let package_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("mobile_aot_bundle_manifest.json"))
+                .expect("read package manifest"),
+        )
+        .expect("parse package manifest");
+        assert_eq!(
+            package_manifest["engine_manifest"],
+            "engine_bundle_manifest.json"
+        );
+        assert_eq!(
+            package_manifest["symbols_header"],
+            "published_aot_symbols.h"
+        );
+        assert_eq!(
+            package_manifest["bindings_source"],
+            "published_aot_bindings.c"
+        );
+        assert_eq!(package_manifest["asset_root"], "apk_assets");
+        assert_eq!(
+            package_manifest["asset_manifest"],
+            "apk_assets/stasis_game/assets/manifest.json"
+        );
+        assert_eq!(
+            package_manifest["android_cmake_file"],
+            "published_aot_objects.cmake"
+        );
+        assert!(package_manifest["objects"]
+            .as_array()
+            .expect("objects")
+            .iter()
+            .all(|entry| entry["path"]
+                .as_str()
+                .is_some_and(|path| !Path::new(path).is_absolute())));
 
         let mut defined = BTreeSet::new();
         let mut undefined = BTreeSet::new();
@@ -2401,18 +3180,22 @@ mod tests {
                 .expect("read shared mobile AOT runtime header");
         let graphics_runtime = fs::read_to_string(repo_root.join("runtime/stasis_graphics.c"))
             .expect("read graphics runtime");
+        let generated_bindings =
+            fs::read_to_string(summary.bundle_dir.join("published_aot_bindings.c"))
+                .expect("read generated AOT bindings");
         let missing: Vec<_> = undefined
             .difference(&defined)
             .filter(|symbol| {
                 !mobile_aot_runtime.contains(&format!("{symbol}("))
                     && !mobile_aot_header.contains(&format!("{symbol}("))
                     && !graphics_runtime.contains(&format!("{symbol}("))
+                    && !generated_bindings.contains(symbol.as_str())
             })
             .cloned()
             .collect();
         assert!(
             missing.is_empty(),
-            "shared mobile core must provide AOT imports: {missing:?}"
+            "mobile runtime or generated bindings must provide AOT imports: {missing:?}"
         );
         let runtime_exports = fs::read_to_string(
             repo_root.join("crates/stasis_compiler/src/backend/runtime_exports.rs"),
@@ -2479,6 +3262,185 @@ mod tests {
     }
 
     #[test]
+    fn mobile_asset_bundle_copies_only_source_referenced_project_fonts() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_mobile_fonts_{stamp}"));
+        let project_dir = root.join("project");
+        let src_dir = project_dir.join("src");
+        let font_dir = project_dir.join("assets/fonts");
+        let output_dir = root.join("out");
+        std::fs::create_dir_all(&src_dir).expect("mkdir src");
+        std::fs::create_dir_all(&font_dir).expect("mkdir fonts");
+        std::fs::write(font_dir.join("ui.ttf"), b"referenced font").expect("write font");
+        std::fs::write(font_dir.join("unused.ttf"), b"unused font").expect("write font");
+        std::fs::write(
+            project_dir.join("assets/manifest.json"),
+            format!(
+                r#"{{
+  "schema": "stasis-assets",
+  "version": 2,
+  "assets": [
+    {{"id":"ui","path":"assets/fonts/ui.ttf","content_sha256":"{}","format":{{"kind":"font","encoding":"ttf"}},"dependencies":[]}},
+    {{"id":"unused","path":"assets/fonts/unused.ttf","content_sha256":"{}","format":{{"kind":"font","encoding":"ttf"}},"dependencies":[]}}
+  ]
+}}
+"#,
+                stasis_assets::sha256_bytes(b"referenced font"),
+                stasis_assets::sha256_bytes(b"unused font")
+            ),
+        )
+        .expect("write manifest");
+        let sources = vec![(
+            "src/main.stasis".to_string(),
+            r#"extern function load_font(path: string, size: i32): i32;
+function main(): i32 { load_font("../assets/fonts/ui.ttf", 16); return 0; }
+"#
+            .to_string(),
+        )];
+
+        let resolved = retained_mobile_assets(&project_dir, &sources);
+        let asset_root =
+            write_mobile_asset_bundle(MobileAotTarget::AndroidArm64, &output_dir, &resolved)
+                .expect("package font asset");
+
+        assert!(asset_root.join("stasis_game/assets/fonts/ui.ttf").is_file());
+        assert!(!asset_root
+            .join("stasis_game/assets/fonts/unused.ttf")
+            .exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mobile_asset_bundle_packages_only_reachable_manifest_assets_for_both_targets() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_mobile_asset_closure_{stamp}"));
+        let project_dir = root.join("project");
+        let src_dir = project_dir.join("src");
+        let svg_dir = project_dir.join("assets/svg");
+        std::fs::create_dir_all(&src_dir).expect("mkdir src");
+        std::fs::create_dir_all(&svg_dir).expect("mkdir svg");
+        let used_svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"/>"#;
+        let unused_svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path d="M0 0"/></svg>"#;
+        std::fs::write(svg_dir.join("used.svg"), used_svg).expect("write used svg");
+        std::fs::write(svg_dir.join("unused.svg"), unused_svg).expect("write unused svg");
+        std::fs::write(
+            project_dir.join("assets/manifest.json"),
+            format!(
+                r#"{{
+  "schema": "stasis-assets",
+  "version": 2,
+  "assets": [
+    {{"id":"used","path":"assets/svg/used.svg","content_sha256":"{}","format":{{"kind":"sprite","encoding":"svg","width":32,"height":32}},"dependencies":[]}},
+    {{"id":"unused","path":"assets/svg/unused.svg","content_sha256":"{}","format":{{"kind":"sprite","encoding":"svg","width":32,"height":32}},"dependencies":[]}}
+  ]
+}}
+"#,
+                stasis_assets::sha256_bytes(used_svg),
+                stasis_assets::sha256_bytes(unused_svg)
+            ),
+        )
+        .expect("write manifest");
+        let sources = vec![(
+            "src/main.stasis".to_string(),
+            r#"struct Sprite { handle: i32; width: i32; height: i32; }
+global hero: Sprite;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function main(): void { hero.load_sprite_from("../assets/svg/used.svg", 32, 32); }
+"#
+            .to_string(),
+        )];
+
+        for target in [MobileAotTarget::AndroidArm64, MobileAotTarget::IosArm64] {
+            let output_dir = root.join(target.as_str());
+            let resolved = retained_mobile_assets(&project_dir, &sources);
+            let asset_root = write_mobile_asset_bundle(target, &output_dir, &resolved)
+                .expect("package filtered assets");
+            let game_root = asset_root.join("stasis_game");
+            assert!(game_root.join("assets/svg/used.svg").is_file());
+            assert!(!game_root.join("assets/svg/unused.svg").exists());
+            let packaged: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(game_root.join("assets/manifest.json"))
+                    .expect("read packaged manifest"),
+            )
+            .expect("parse packaged manifest");
+            assert_eq!(packaged["assets"].as_array().expect("assets").len(), 1);
+            assert_eq!(packaged["assets"][0]["id"], "used");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mobile_aot_bundle_rejects_cyclic_import_graph() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project_dir = std::env::temp_dir().join(format!("stasis_mobile_imports_{stamp}"));
+        let src_dir = project_dir.join("src");
+        let asset_dir = project_dir.join("assets");
+        let output_dir = std::env::temp_dir().join(format!("stasis_mobile_imports_out_{stamp}"));
+        std::fs::create_dir_all(&src_dir).expect("mkdir src");
+        std::fs::create_dir_all(&asset_dir).expect("mkdir assets");
+        std::fs::write(
+            src_dir.join("main.stasis"),
+            r#"import "window.stasis";
+function main(): i32 { return 0; }
+function tick(): i32 { return 0; }
+function render(): i32 { return window_width(); }
+"#,
+        )
+        .expect("write main");
+        std::fs::write(
+            src_dir.join("window.stasis"),
+            r#"import "frame.stasis";
+function window_width(): i32 { return frame_width(); }
+"#,
+        )
+        .expect("write window");
+        std::fs::write(
+            src_dir.join("frame.stasis"),
+            r#"import "window.stasis";
+function frame_width(): i32 { return 360; }
+"#,
+        )
+        .expect("write frame");
+        std::fs::write(
+            asset_dir.join("manifest.json"),
+            r#"{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": []
+}
+"#,
+        )
+        .expect("write manifest");
+
+        let error = match write_mobile_aot_engine_bundle(
+            MobileAotTarget::AndroidArm64,
+            &project_dir,
+            Some(Path::new("src/main.stasis")),
+            &output_dir,
+            &[],
+            0,
+            0,
+        ) {
+            Ok(_) => panic!("cyclic imports must be rejected by the compiler graph"),
+            Err(error) => error,
+        };
+        assert!(error
+            .contains("import cycle: src/window.stasis -> src/frame.stasis -> src/window.stasis"));
+
+        std::fs::remove_dir_all(&project_dir).ok();
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
     fn mobile_aot_bundle_allows_missing_on_code_swap() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2506,13 +3468,28 @@ mod tests {
             &project_dir,
             Some(Path::new("src/main.stasis")),
             &output_dir,
+            &[],
+            0,
+            0,
         )
         .expect("missing on_code_swap should be accepted for mobile");
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
+        let bindings = fs::read_to_string(&summary.bindings_source).expect("read bindings source");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("engine_bundle_manifest.json"))
+                .expect("read engine manifest"),
+        )
+        .expect("parse engine manifest");
+        let (main_symbol, main_return_type) =
+            mobile_aot_function_for(&manifest, "main").expect("canonical main mapping");
 
-        assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
-        assert!(header.contains("#define STASIS_AOT_TICK aot_fn_"));
-        assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_MAIN stasis_mobile_main_entry"));
+        assert!(header.contains("#define STASIS_AOT_TICK stasis_mobile_tick_entry"));
+        assert!(header.contains("#define STASIS_AOT_RENDER stasis_mobile_render_entry"));
+        assert_eq!(main_return_type, 1);
+        assert!(bindings.contains(&format!(
+            "stasis_mobile_main_entry(void) {{ return {main_symbol}(); }}"
+        )));
         assert!(!header.contains("STASIS_AOT_ON_CODE_SWAP"));
 
         std::fs::remove_dir_all(&project_dir).ok();
@@ -2534,6 +3511,9 @@ mod tests {
             &project_dir,
             Some(Path::new("src/main.stasis")),
             &output_dir,
+            &[],
+            0,
+            0,
         )
         .expect("write iOS mobile AOT bundle");
 
@@ -2547,15 +3527,30 @@ mod tests {
             .asset_dir
             .join("stasis_game/assets/manifest.json")
             .is_file());
-        let package_manifest =
-            fs::read_to_string(&summary.package_manifest).expect("read package manifest");
-        assert!(package_manifest.contains("\"target\": \"ios-arm64\""));
-        assert!(package_manifest.contains("\"schema\": \"stasis.mobile_aot_bundle.v1\""));
-        assert!(package_manifest.contains("\"asset_manifest\""));
-        assert!(package_manifest.contains("\"function\": \"main\""));
-        assert!(package_manifest.contains(".o\""));
+        let package_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&summary.package_manifest).expect("read package manifest"),
+        )
+        .expect("parse package manifest");
+        assert_eq!(package_manifest["target"], "ios-arm64");
+        assert_eq!(package_manifest["schema"], "stasis.mobile_aot_bundle.v1");
+        assert_eq!(
+            package_manifest["engine_manifest"],
+            "engine_bundle_manifest.json"
+        );
+        assert_eq!(package_manifest["asset_root"], "ios_assets");
+        assert_eq!(
+            package_manifest["asset_manifest"],
+            "ios_assets/stasis_game/assets/manifest.json"
+        );
+        assert!(package_manifest["objects"]
+            .as_array()
+            .expect("objects")
+            .iter()
+            .all(|entry| entry["path"]
+                .as_str()
+                .is_some_and(|path| { path.ends_with(".o") && !Path::new(path).is_absolute() })));
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
-        assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_MAIN stasis_mobile_main_entry"));
 
         std::fs::remove_dir_all(&output_dir).ok();
     }
@@ -2646,6 +3641,10 @@ mod tests {
 
 fn main() {
     maybe_cleanup_stale_stasis_cache();
+
+    if let Some(exit) = toolchain_cli::try_run() {
+        std::process::exit(exit);
+    }
 
     if let Some(exit) = try_run_probe_graphics_runtime_subcommand() {
         std::process::exit(exit);

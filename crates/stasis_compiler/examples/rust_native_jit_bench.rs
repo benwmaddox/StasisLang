@@ -7,6 +7,7 @@ const DEFAULT_FUNCTION_COUNTS: [usize; 2] = [1000, 5000];
 const DEFAULT_SEED: u64 = 1337;
 const DEFAULT_COLD_SAMPLES: usize = 3;
 const DEFAULT_INCREMENTAL_SAMPLES: usize = 5;
+const WARMUP_SAMPLES: usize = 5;
 
 #[derive(Debug, Clone)]
 struct BenchConfig {
@@ -24,6 +25,13 @@ struct ScenarioResult {
     cold_ms_p95: f64,
     incremental_ms_p50: f64,
     incremental_ms_p95: f64,
+    plan_ms_p50: f64,
+    plan_ms_p95: f64,
+    codegen_ms_p50: f64,
+    codegen_ms_p95: f64,
+    finalize_ms_p50: f64,
+    finalize_ms_p95: f64,
+    emitted_functions: usize,
 }
 
 fn default_value(seed: u64, function_index: usize) -> i32 {
@@ -93,9 +101,8 @@ fn percentile_ms(samples: &[Duration], percentile: usize) -> f64 {
     }
     let mut sorted = samples.to_vec();
     sorted.sort();
-    let rank = ((percentile as f64 / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
-    let clamped = std::cmp::min(rank, sorted.len() - 1);
-    sorted[clamped].as_secs_f64() * 1000.0
+    let rank = (percentile * sorted.len()).div_ceil(100).saturating_sub(1);
+    sorted[rank.min(sorted.len() - 1)].as_secs_f64() * 1000.0
 }
 
 fn timed_compile(process: &mut JitProcess) -> Result<Duration, String> {
@@ -128,7 +135,9 @@ fn run_scenario(
         cold_times.push(timed_compile(&mut process)?);
     }
 
-    let target_function = std::cmp::max(1, function_count / 2);
+    // Editing the top of the chain changes only fn_0 and its main caller. Editing the tail is the
+    // intentionally broad counter-case and is covered by the correctness matrix.
+    let target_function = 0;
     let default_target_value = default_value(seed, target_function);
     let mut process = JitProcess::new();
     process.upsert_file("bench.stasis", source);
@@ -138,21 +147,39 @@ fn run_scenario(
     }
 
     let mut incremental_times = Vec::with_capacity(incremental_samples);
-    for sample in 0..incremental_samples {
-        let replacement = non_default_incremental_value(default_target_value, sample);
+    let mut plan_times = Vec::with_capacity(incremental_samples);
+    let mut codegen_times = Vec::with_capacity(incremental_samples);
+    let mut finalize_times = Vec::with_capacity(incremental_samples);
+    let mut edited = false;
+    for sample in 0..(WARMUP_SAMPLES + incremental_samples) {
+        edited = !edited;
+        let replacement = if edited {
+            non_default_incremental_value(default_target_value, 0)
+        } else {
+            default_target_value
+        };
         let updated_source =
             render_source(function_count, seed, Some((target_function, replacement)));
         process.upsert_file("bench.stasis", updated_source);
         let start = Instant::now();
         let report = process.compile().map_err(|error| format!("{error:?}"))?;
         let elapsed = start.elapsed();
-        if report.emit.emitted_functions != 1 {
+        let expected_patch_functions = 2;
+        if report.emit.emitted_functions != expected_patch_functions {
             return Err(format!(
-                "expected one emitted function for incremental update, got {}",
-                report.emit.emitted_functions
+                "expected {expected_patch_functions} emitted functions for selective chain-root update, got {}",
+                report.emit.emitted_functions,
             ));
         }
-        incremental_times.push(elapsed);
+        let metadata = process
+            .generation_metadata()
+            .ok_or_else(|| "selective update metadata missing".to_string())?;
+        if sample >= WARMUP_SAMPLES {
+            plan_times.push(Duration::from_micros(metadata.plan_micros));
+            codegen_times.push(Duration::from_micros(metadata.codegen_micros));
+            finalize_times.push(Duration::from_micros(metadata.finalize_micros));
+            incremental_times.push(elapsed);
+        }
     }
 
     Ok(ScenarioResult {
@@ -162,6 +189,13 @@ fn run_scenario(
         cold_ms_p95: percentile_ms(&cold_times, 95),
         incremental_ms_p50: percentile_ms(&incremental_times, 50),
         incremental_ms_p95: percentile_ms(&incremental_times, 95),
+        plan_ms_p50: percentile_ms(&plan_times, 50),
+        plan_ms_p95: percentile_ms(&plan_times, 95),
+        codegen_ms_p50: percentile_ms(&codegen_times, 50),
+        codegen_ms_p95: percentile_ms(&codegen_times, 95),
+        finalize_ms_p50: percentile_ms(&finalize_times, 50),
+        finalize_ms_p95: percentile_ms(&finalize_times, 95),
+        emitted_functions: 2,
     })
 }
 
@@ -254,8 +288,12 @@ fn print_help() {
 fn main() -> Result<(), String> {
     let config = parse_args()?;
     println!(
-        "bench rust-native jit functions={:?} seed={} cold_samples={} incremental_samples={}",
-        config.function_counts, config.seed, config.cold_samples, config.incremental_samples
+        "bench rust-native jit functions={:?} seed={} cold_samples={} warmups={} incremental_samples={}",
+        config.function_counts,
+        config.seed,
+        config.cold_samples,
+        WARMUP_SAMPLES,
+        config.incremental_samples
     );
 
     for function_count in &config.function_counts {
@@ -266,13 +304,22 @@ fn main() -> Result<(), String> {
             config.incremental_samples,
         )?;
         println!(
-            "result functions={} seed={} cold_ms_p50={:.3} cold_ms_p95={:.3} incremental_one_fn_ms_p50={:.3} incremental_one_fn_ms_p95={:.3}",
+            "result topology=chain_root functions={} seed={} reachable_functions={} emitted_functions={} reused_functions={} cold_ms_p50={:.3} cold_ms_p95={:.3} selective_update_ms_p50={:.3} selective_update_ms_p95={:.3} plan_ms_p50={:.3} plan_ms_p95={:.3} codegen_ms_p50={:.3} codegen_ms_p95={:.3} finalize_ms_p50={:.3} finalize_ms_p95={:.3}",
             result.function_count,
             result.seed,
+            result.function_count + 1,
+            result.emitted_functions,
+            result.function_count + 1 - result.emitted_functions,
             result.cold_ms_p50,
             result.cold_ms_p95,
             result.incremental_ms_p50,
-            result.incremental_ms_p95
+            result.incremental_ms_p95,
+            result.plan_ms_p50,
+            result.plan_ms_p95,
+            result.codegen_ms_p50,
+            result.codegen_ms_p95,
+            result.finalize_ms_p50,
+            result.finalize_ms_p95
         );
     }
 

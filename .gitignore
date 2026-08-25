@@ -29,6 +29,11 @@ logs/nightshift/
 out/
 
 # Build artifacts
+dist/stasis-editor-release-*/
+samples/*/dist/
+samples/*/build-web/
+samples/*/build-desktop/
+samples/*/build-android/
 *.dll
 *.exe
 *.so

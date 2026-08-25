@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 #define STASIS_MOBILE_RUNTIME_ABI_VERSION 1
+#define STASIS_MOBILE_FRAME_INTERVAL_NS 16666667ULL
 
 enum StasisMobileRuntimeResult {
     STASIS_MOBILE_RUNTIME_OK = 0,
@@ -18,13 +19,14 @@ enum StasisMobileRuntimeResult {
     STASIS_MOBILE_RUNTIME_GRAPHICS_UNAVAILABLE = -4
 };
 
-typedef void (*StasisMobileEntry)(void);
+typedef void (*StasisMobileBindEntry)(void);
+typedef int32_t (*StasisMobileI32Entry)(void);
 
 typedef struct StasisMobileGameEntries {
-    StasisMobileEntry bind_runtime_entry;
-    StasisMobileEntry main_entry;
-    StasisMobileEntry tick_entry;
-    StasisMobileEntry render_entry;
+    StasisMobileBindEntry bind_runtime_entry;
+    StasisMobileI32Entry main_entry;
+    StasisMobileI32Entry tick_entry;
+    StasisMobileI32Entry render_entry;
 } StasisMobileGameEntries;
 
 typedef struct StasisMobileRuntimeConfig {
@@ -32,6 +34,40 @@ typedef struct StasisMobileRuntimeConfig {
     int32_t height;
     const char *title;
 } StasisMobileRuntimeConfig;
+
+typedef struct StasisMobileFramePacer {
+    uint64_t next_deadline_ns;
+} StasisMobileFramePacer;
+
+/*
+ * The shell owns wall-clock pacing so a display's refresh rate cannot redefine
+ * the deterministic game tick. Call reset immediately before the loop, then
+ * wait_ns after every successful step and sleep for the returned duration.
+ */
+static inline void stasis_mobile_frame_pacer_reset(
+    StasisMobileFramePacer *pacer,
+    uint64_t now_ns
+) {
+    pacer->next_deadline_ns = now_ns + STASIS_MOBILE_FRAME_INTERVAL_NS;
+}
+
+static inline uint64_t stasis_mobile_frame_pacer_wait_ns(
+    StasisMobileFramePacer *pacer,
+    uint64_t now_ns
+) {
+    uint64_t deadline_ns = pacer->next_deadline_ns;
+    if (now_ns < deadline_ns) {
+        pacer->next_deadline_ns = deadline_ns + STASIS_MOBILE_FRAME_INTERVAL_NS;
+        return deadline_ns - now_ns;
+    }
+    if (now_ns - deadline_ns >= STASIS_MOBILE_FRAME_INTERVAL_NS) {
+        /* A suspended or overloaded app resumes without catch-up ticks. */
+        pacer->next_deadline_ns = now_ns + STASIS_MOBILE_FRAME_INTERVAL_NS;
+    } else {
+        pacer->next_deadline_ns = deadline_ns + STASIS_MOBILE_FRAME_INTERVAL_NS;
+    }
+    return 0;
+}
 
 /* Initializes the SDL-only host APIs and calls the game main entry exactly once. */
 int32_t stasis_mobile_runtime_initialize(
@@ -45,6 +81,8 @@ int32_t stasis_mobile_runtime_step(void);
 /* Paused runtimes remain initialized but do not tick or render. */
 void stasis_mobile_runtime_set_paused(int32_t paused);
 int32_t stasis_mobile_runtime_is_initialized(void);
+/* Exact non-zero main/tick/render result; read before shutdown resets state. */
+int32_t stasis_mobile_runtime_last_entry_result(void);
 
 /* Releases graphics and audio state. Safe to call more than once. */
 void stasis_mobile_runtime_shutdown(void);

@@ -1,0 +1,100 @@
+import "../../src/stdlib/graphics.stasis";
+
+global test_sheet: SpriteSheet;
+
+test `animation once clamps and reports completion`(): bool {
+    if (animation_frame_at(0, 3, 1, 0, 1) != 1) {
+        return false;
+    }
+    if (animation_frame_at(4, 3, 5, 0, -1) != 4) {
+        return false;
+    }
+    if (animation_frame_at(4, 3, 5, 0, 5) != 5) {
+        return false;
+    }
+    if (animation_frame_at(4, 3, 5, 0, 14) != 6) {
+        return false;
+    }
+    return !animation_finished(3, 5, 0, 14) && animation_finished(3, 5, 0, 15);
+}
+
+test `animation loop wraps exact boundaries`(): bool {
+    return animation_frame_at(10, 3, 2, 1, -20) == 10 && animation_frame_at(10, 3, 2, 1, 2) == 11 && animation_frame_at(10, 3, 2, 1, 4) == 12 && animation_frame_at(
+        10,
+        3,
+        2,
+        1,
+        6
+    ) == 10 && !animation_finished(3, 2, 1, 100);
+}
+
+test `animation ping pong reflects endpoints and one frame`(): bool {
+    return animation_frame_at(20, 4, 1, 2, 3) == 23 && animation_frame_at(20, 4, 1, 2, 4) == 22 && animation_frame_at(20, 4, 1, 2, 6) == 20 && animation_frame_at(
+        7,
+        1,
+        3,
+        2,
+        100
+    ) == 7;
+}
+
+test `invalid animation fails safely`(): bool {
+    return animation_frame_at(0, 0, 1, 1, 10) == 0 && animation_finished(0, 1, 1, 10) && animation_frame_at(7, 1073741825, 1, 2, 10) == 7 && animation_frame_at(
+        2147483640,
+        10,
+        1,
+        1,
+        2
+    ) == 2147483640 && !animation_finished(2147483647, 2147483647, 0, 2147483647);
+}
+
+test `sprite commands default to full UV and allow a bounded frame patch`(): bool {
+    gfx_cmd_begin();
+    gfx_cmd_sprite(3, 2.0, 4.0, 8.0, 6.0, 0, 255);
+    if (gfx_cmd_sprite_count() != 1 || gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] != 1.0) {
+        return false;
+    }
+    gfx_cmd_set_last_sprite_uv(0.5, 0.0, 1.0, 0.5);
+    gfx_cmd_set_last_sprite_uv(-0.5, 0.0, 1.0, 0.5);
+    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 1.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 0.5;
+}
+
+test `sprite sheet draw frame selects a row major cell`(): bool {
+    test_sheet.handle = 9;
+    test_sheet.columns = 2;
+    test_sheet.rows = 2;
+    test_sheet.cell_width = 12;
+    test_sheet.cell_height = 10;
+    gfx_cmd_begin();
+    test_sheet.draw_frame(2, 3.0, 5.0, 200, 0);
+    if (gfx_cmd_sprite_count() != 1) {
+        return false;
+    }
+    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] == 12.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] == 10.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 1.0;
+}
+
+test `sprite sheet scaled frame preserves custom geometry and nonfull UV`(): bool {
+    test_sheet.handle = 9;
+    test_sheet.columns = 2;
+    test_sheet.rows = 2;
+    test_sheet.cell_width = 12;
+    test_sheet.cell_height = 10;
+    gfx_cmd_begin();
+    test_sheet.draw_frame_scaled(3, 7.0, 11.0, 37.0, 29.0, 200, 90);
+    if (gfx_cmd_sprite_count() != 1) {
+        return false;
+    }
+    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 0] == 7.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 1] == 11.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] == 37.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] == 29.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 1.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 1.0;
+}
+
+test `sprite sheet scaled frame rejects invalid geometry and frames`(): bool {
+    test_sheet.handle = 9;
+    test_sheet.columns = 2;
+    test_sheet.rows = 2;
+    test_sheet.cell_width = 12;
+    test_sheet.cell_height = 10;
+    gfx_cmd_begin();
+    test_sheet.draw_frame_scaled(4, 0.0, 0.0, 37.0, 29.0, 255, 0);
+    test_sheet.draw_frame_scaled(1, 0.0, 0.0, 0.0, 29.0, 255, 0);
+    return gfx_cmd_sprite_count() == 0;
+}

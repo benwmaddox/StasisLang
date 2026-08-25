@@ -1,0 +1,8 @@
+{
+  "manifest_version": 1,
+  "name": "vscode_e2e",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain"
+}

@@ -1,5 +1,8 @@
 name: PR CI
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 on:
   pull_request:
     types:
@@ -8,6 +11,19 @@ on:
       - synchronize
       - ready_for_review
   workflow_dispatch:
+    inputs:
+      run_slow_seams:
+        description: Run platform integration and packaging seams.
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      run_slow_seams:
+        description: Run platform integration and packaging seams.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -15,7 +31,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: pr-ci-${{ github.event.pull_request.number || github.ref }}
+  group: pr-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -24,10 +40,56 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Check Stasis src layout
-        run: python tools/ci/check_stasis_src_layout.py
+        run: |
+          python tools/ci/check_stasis_src_layout.py
+          python -m unittest tools.ci.test_check_stasis_src_layout
+          python tools/ci/check_deterministic_live_simulation_roadmap.py
+          python -m unittest tools.ci.test_deterministic_live_simulation_roadmap
+          python tools/ci/check_sdl3_migration.py
+          python tools/ci/check_windows_vs_generator.py
+          python tools/ci/check_runtime_abi_contract.py
+          python -m unittest tools.ci.test_cargo_cache
+          python -m unittest tools.ci.test_android_emulator_seams
+          python -m unittest tools.ci.test_generate_asset_load_fixture
+          python -m unittest tools.ci.test_runtime_abi_contract
+          python -m unittest tools.ci.test_run_android_release_shell_seam
+          python -m unittest tools.ci.test_verify_android_native_library
+          python -m unittest tools.ci.test_sdl3_migration
+          python -m unittest tools.ci.test_windows_vs_generator
+          python -m unittest tools.ci.test_nightly_network_support
+
+      - name: Test AI efficiency matrix
+        run: python -m unittest tools.ci.test_stasis_ai_efficiency_matrix
+
+      - name: Test release provenance
+        run: python -m unittest tools.ci.test_release_provenance
+
+      - name: Test Android verified asset cache
+        run: python tools/ci/test_android_asset_cache.py
+
+      - name: Test render parity fixture and capture gate
+        run: |
+          python -m unittest tools.ci.test_verify_android_render_performance
+          python -m unittest tools.ci.test_verify_render_parity
+          python -m unittest tools.ci.test_verify_android_workshop_seam
+          python tools/ci/verify_render_parity.py
+
+      - name: Test web runtime seams
+        run: node --test runtime/web/tests/*.test.mjs
+
+      - name: Test native render contract and lifecycle matrix
+        run: |
+          cmake -S runtime -B target/render-parity-native -DSTASIS_GRAPHICS_BUILD_SHARED=OFF -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON
+          cmake --build target/render-parity-native --config Release
+          ctest --test-dir target/render-parity-native -C Release --output-on-failure
 
       - name: Test bounded audio ring
         run: |
@@ -37,22 +99,325 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Test HostFrame desktop JIT seam
+        run: cargo test -p stasis_compiler --test host_frame_jit_seam -- --test-threads=1
+
+      - name: Test gfx command capacity seam
+        run: cargo test -p stasis_compiler gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace -- --test-threads=1
+
+      - name: Test startup asset extern ABI seam
+        run: cargo test -p stasis_compiler startup_asset_externs_match_jit_and_linked_aot_recording_host -- --test-threads=1
+
+      - name: Test window request mailbox seam
+        run: cargo test -p stasis stasis_window_requests_apply_once_after_pre_main_baseline -- --test-threads=1
+
       - name: Run Cargo Test
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         run: cargo test --workspace --all-targets -- --test-threads=1
 
   bootstrap-smoke-windows:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ inputs.run_slow_seams }}
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@v7
       - name: Check Stasis src layout
         run: python tools/ci/check_stasis_src_layout.py
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Test startup asset extern ABI seam (linked AOT)
+        run: cargo test -p stasis_compiler startup_asset_externs_match_jit_and_linked_aot_recording_host -- --test-threads=1
+
+      - name: Test window request mailbox seam
+        run: cargo test -p stasis stasis_window_requests_apply_once_after_pre_main_baseline -- --test-threads=1
+
+      - name: Capture the real Windows SDL parity fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
+          $env:STASIS_CMAKE_GENERATOR = $generator
+          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build target/render-parity-runtime --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $runner = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe").Path
+          $runnerManifest = Join-Path $PWD "target/render-parity-runtime/stasis_runner.embedded.manifest"
+          & mt.exe -nologo "-inputresource:$runner;#1" "-out:$runnerManifest"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $manifestText = Get-Content -LiteralPath $runnerManifest -Raw
+          if ($manifestText -notmatch '<dpiAware[^>]*>true/pm</dpiAware>' -or
+              $manifestText -notmatch '<dpiAwareness[^>]*>PerMonitorV2, PerMonitor</dpiAwareness>') {
+            throw "stasis_runner.exe is missing its per-monitor-v2 DPI manifest"
+          }
+          New-Item -ItemType Directory -Force target/render-parity-ci | Out-Null
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          $env:STASIS_RUNTIME_RUNNER_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe")
+          $env:STASIS_GFX_LOG_SPRITES = "1"
+          $env:STASIS_PARITY_CAPTURE_STAGE = "second_frame"
+          cargo run -p stasis -- play samples/render_parity/main.stasis --watch-dir samples/render_parity --ticks 2 --screenshot target/render-parity-ci/frame.png --screenshot-frame 2 --exit-after-screenshot 2>&1 | Tee-Object target/render-parity-ci/runtime.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png --runtime-log target/render-parity-ci/runtime.log --evidence target/render-parity-ci/evidence.json --write-evidence --require-load-details --profile portable --stage second_frame
+          cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
+
+      - name: Test desktop SDL input to JIT frame seam
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          cargo test -p stasis --test desktop_input_frame_seam -- --test-threads=1 --nocapture
+
+      - name: Test desktop display metrics round-trip seam
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          cargo test -p stasis --test desktop_display_metrics_seam -- --test-threads=1 --nocapture
+
+      - name: Test desktop manifest asset rendering seam
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          cargo test -p stasis --test desktop_manifest_assets_seam -- --test-threads=1 --nocapture
+
+      - name: Test desktop asset load stress
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          python tools/cargo_cache.py run -- cargo test -p stasis --test desktop_asset_load_stress -- --test-threads=1 --nocapture
+
+      - name: Test malformed render buffer recovery seam
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          cargo test -p stasis --test desktop_render_recovery_seam -- --test-threads=1 --nocapture
+
+      - name: Test desktop hot-swap generation seam
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          cargo test -p stasis --test desktop_hot_swap_generation_seam -- --test-threads=1 --nocapture
+
+      - name: Test JIT and linked-AOT host replay seam
+        shell: pwsh
+        run: |
+          cargo test -p stasis_compiler --test jit_aot_host_replay_seam -- --test-threads=1 --nocapture
+
+      - name: Test generated AOT bindings, lifecycle, and frame order in the C mobile runtime
+        shell: pwsh
+        run: |
+          cargo test -p stasis --test generated_mobile_aot_runtime_seam -- --test-threads=1 --nocapture
+
+      - name: Test packaged mobile assets through linked AOT and shared native hosts
+        shell: pwsh
+        run: |
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          python tools/cargo_cache.py run -- cargo test -p stasis --test mobile_packaged_assets_seam -- --test-threads=1 --nocapture
+
       - name: Bootstrap Compile Smoke (compiler .stasis)
-        run: cargo test -p stasis_compiler -- --nocapture
+        # Compiler/JIT tests share process-global dispatch and runtime registration state.
+        run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture
+
+  vscode-extension-e2e:
+    if: ${{ inputs.run_slow_seams }}
+    name: VS Code E2E (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+            runtime_library: libstasis_graphics.so
+          - name: macOS arm64
+            os: macos-15
+            runtime_library: libstasis_graphics.dylib
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_E2E_VSCODE_VERSION: "1.96.0"
+      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/vscode-e2e-runtime/bin/${{ matrix.runtime_library }}
+      STASIS_TOOLCHAIN_DIR: ${{ github.workspace }}/target/vscode-e2e-toolchain
+      STASIS_TOOLCHAIN_EXECUTABLE: bin/stasis
+      STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/vscode-e2e-toolchain/bin/stasis
+      STASIS_E2E_SCREENSHOT: ${{ github.workspace }}/target/vscode-e2e/frame.png
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: vscode-stasis/package-lock.json
+
+      - name: Install Linux graphics and display dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y xvfb libx11-dev
+          libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
+          libxss-dev libxtst-dev libxkbcommon-dev
+
+      - name: Install macOS graphics dependencies
+        if: runner.os == 'macOS'
+        run: brew install pkg-config
+
+      - name: Build native graphics runtime
+        shell: bash
+        run: |
+          runner_build=OFF
+          build_targets=(stasis_graphics)
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            runner_build=ON
+            build_targets+=(stasis_runner)
+          fi
+          cmake -S runtime -B target/vscode-e2e-runtime \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
+            -DSTASIS_GRAPHICS_SDL_ONLY=ON \
+            -DSTASIS_BUILD_RUNNER="${runner_build}" \
+            -DSTASIS_BUILD_SYS=OFF
+          cmake --build target/vscode-e2e-runtime --config Release --target "${build_targets[@]}"
+          test -f "$STASIS_RUNTIME_LIBRARY_PATH"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            runner="target/vscode-e2e-runtime/bin/Release/stasis_runner.app/Contents/MacOS/stasis_runner"
+            test -x "${runner}"
+            test "$(plutil -extract NSHighResolutionCapable raw target/vscode-e2e-runtime/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
+            echo "STASIS_RUNTIME_RUNNER_PATH=${GITHUB_WORKSPACE}/${runner}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and probe Stasis runtime loading
+        shell: bash
+        run: |
+          cargo test -p stasis_dynload -- --test-threads=1
+          cargo build -p stasis
+          mkdir -p target/vscode-e2e-toolchain/bin
+          cp target/debug/stasis target/vscode-e2e-toolchain/bin/
+          cp "$STASIS_RUNTIME_LIBRARY_PATH" target/vscode-e2e-toolchain/bin/
+          cp -R src target/vscode-e2e-toolchain/
+          "$STASIS_E2E_EXECUTABLE" --json editor-info
+
+      - name: Install extension dependencies
+        working-directory: vscode-stasis
+        run: npm ci
+
+      - name: Test installed VSIX in VS Code
+        working-directory: vscode-stasis
+        shell: bash
+        run: |
+          mkdir -p ../target/vscode-e2e
+          set -o pipefail
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            xvfb-run -a npm run test:e2e 2>&1 | tee ../target/vscode-e2e/extension-host.log
+          else
+            npm run test:e2e 2>&1 | tee ../target/vscode-e2e/extension-host.log
+          fi
+
+      - name: Upload VS Code E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-e2e-${{ runner.os }}-${{ runner.arch }}
+          if-no-files-found: warn
+          path: |
+            target/vscode-e2e/frame.png
+            target/vscode-e2e/extension-host.log
+            vscode-stasis/.vsix/stasislang.stasis.vsix
+
+  android-package-link:
+    if: ${{ inputs.run_slow_seams }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Stasis
+        uses: actions/checkout@v7
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Checkout SDL3
+        uses: actions/checkout@v7
+        with:
+          repository: libsdl-org/SDL
+          ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
+          path: target/android-link-deps/SDL
+
+      - name: Checkout SDL3_image
+        uses: actions/checkout@v7
+        with:
+          repository: libsdl-org/SDL_image
+          ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
+          path: target/android-link-deps/SDL_image
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android native toolchain
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
+      - name: Package and link generated Android game
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+          STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
+          STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
+        run: |
+          cargo run -p stasis -- --workspace samples/mobile_storage_link package-mobile --target android-arm64 --out dist/android --development-build
+          gradle -p samples/mobile_storage_link/dist/android/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain
+          test -f samples/mobile_storage_link/dist/android/android/app/build/outputs/apk/debug/app-debug.apk
+          native_library=$(find samples/mobile_storage_link/dist/android/android/app/build/intermediates/cxx/Debug -path '*/obj/arm64-v8a/libmain.so' -print -quit)
+          link_map=$(find samples/mobile_storage_link/dist/android/android/app/.cxx/Debug -name libmain.map -print -quit)
+          test -n "$native_library"
+          test -n "$link_map"
+          python tools/ci/verify_android_native_library.py \
+            --library "$native_library" \
+            --bundle-manifest samples/mobile_storage_link/dist/android/aot/mobile_aot_bundle_manifest.json \
+            --link-map "$link_map" \
+            --readelf "$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            --evidence target/android-native-link-evidence.json
+
+      - name: Upload Android native-link evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-native-link-evidence
+          path: target/android-native-link-evidence.json
+
+  ios-package-link:
+    if: ${{ inputs.run_slow_seams }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Stasis
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Package and link generated iOS game
+        env:
+          STASIS_IOS_BUILD_ROOT: ${{ github.workspace }}/target/ios-package-link
+        run: bash tools/ci/build_ios_package.sh
+
+      - name: Upload iOS package-link evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-package-link-evidence
+          if-no-files-found: warn
+          path: |
+            target/ios-package-link/evidence.txt
+            target/ios-package-link/xcode-version.txt
+            target/ios-package-link/xcodebuild.log
+            target/ios-package-link/linked-libraries.txt

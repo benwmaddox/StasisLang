@@ -110,3 +110,49 @@
 - Good: keeping the lookup output parser-backed made the new command small and let the whole-directory search ignore invalid fixture files cleanly.
 - Bad: the compiler parser exposed function ranges but not struct ranges, so exact struct-definition output needed a small parser extension before the CLI work could stay clean.
 - Adjustment: when a new tooling feature needs source excerpts, expose precise ranges from the shared parser first instead of duplicating extraction logic in the CLI.
+
+## 2026-07-18
+
+- Completed Maddox #121 by adding deterministic TalkBack/keyboard traversal, visible focus treatment, keyboard and accessibility-action Paint editing, contrast-audited colors, configuration-retained Paint state, and compact/medium/expanded layouts that respond to font scale.
+- Verification: `python tools/ci/check_android_shell.py`, `python tools/ci/check_stasis_src_layout.py`, `gradle :app:testWorkshopDebugUnitTest --no-daemon --max-workers=1`, `gradle :app:lintWorkshopDebug --no-daemon --max-workers=1`, `gradle :app:assembleWorkshopDebug --no-daemon --max-workers=1`, `git diff --check`.
+- Good: pure layout/contrast policies made adaptive and accessibility decisions fast to test without an emulator.
+- Bad: the first broad Cargo validation exhausted the host drive and hit a Windows PDB linker limit even though this slice changes only Android Java/resources.
+- Adjustment: keep Android UI slices on the bounded Android/JVM/APK gates first, then attempt the full Cargo gate only with verified workspace capacity.
+
+## 2026-08-01
+
+- Maddox #180: introduced immutable compiler-owned `ProgramSnapshot` shared by JIT, AOT, runner-facing metadata, and app packaging. The snapshot is the canonical state-layout digest owner; target code pointers/object paths are non-semantic artifact mappings.
+- Verification: ProgramSnapshot 14/14, state layout 5/5, JIT 178/178, compiler library 399/400 runnable plus 1 ignored with the Application Control-blocked case passing on isolated retry, Workshop 32/32, app compiler backend 84/84 plus 6 ignored benchmarks, Android bridge 48/48 plus 1 ignored, repository Python checks 29/29, workspace and release checks, Windows launch acceptance, Android JIT/AOT render acceptance, formatting, and diff checks. The 1,000-function selective-update benchmark improved from 202 ms to 27.560 ms p95 while emitting 2/1001 functions.
+- Theory gained: one accepted semantic snapshot can safely outlive failed candidates because target artifacts are attached metadata, not an alternate source of program truth. Compiler-produced data-flow summaries are already immutable at index completion, so sharing their owner into snapshots preserves completeness while avoiding semantic-vector copies; an adjacent prediction is that other large immutable semantic tables can use the same ownership boundary.
+- Good: moving the existing analysis cache behind the snapshot retained one-pass lowering data while the same compiler-owned records replaced app and Workshop reparsing; CI profiling then exposed and removed an unnecessary full data-flow copy.
+- Bad: initial transaction boundaries missed prepared JIT delivery and AOT buffer rollback, and initial snapshot copies regressed selective compilation above its stop condition; staged candidates also failed to propagate custom analysis roots.
+- Adjustment: every future snapshot consumer must test publication, post-mutation rejection, retained diagnostics, custom-root staged compilation, complete accepted semantic/artifact preservation, and the existing performance stop conditions.
+
+## 2026-08-07
+
+- Maddox #190: added one Git-common-directory-derived Cargo target for Codex/automation, child-scoped `CARGO_INCREMENTAL=0`, worktree/profile/incremental measurement, dry-run-first confined cleanup, and explicit CI/validation routing. The measured baseline was 46.72 GiB across 13 registered worktree targets; two concurrent Cargo checks safely shared the new target.
+- Verification: cache policy 9/9; concurrent `stasis_assets` and `stasis_dynload` checks; toolchain CLI 21/21; JIT 17/17; Android bridge 51/51; portable policy/render tests 47/47; Windows launch 1/1; full workspace/all-target suite passed with one pre-existing ignored external-root test when the installed MSVC linker was explicit; Rust formatting and diff checks passed. Repository validation still reports two unchanged `origin/main` policy findings before Cargo: an unsafe boundary in `crates/stasis_ai/src/lib.rs` and the ignored external-root language-service test.
+- Theory gained: build-cache identity belongs to the repository/toolchain/profile combination rather than a task branch; deriving the cache from Git's common directory preserves that identity across arbitrary linked-worktree locations. This predicts future automation entrypoints can share artifacts safely if they cross the same explicit wrapper boundary and retain Cargo's own locking.
+- Good: real size measurement, two-worktree resolution, concurrent builds, and destructive-path tests made cache ownership and safety observable.
+- Bad: the first implementation documented the wrapper but left the canonical validation script's Cargo phase outside it; cold validation also exposed hidden network and linker prerequisites.
+- Adjustment: whenever automation policy changes an execution boundary, test every canonical entrypoint for that boundary and run one cold plus one concurrent representative build before publication.
+
+- Added one SDL3-backed bounded PCM16 WAV mixer shared by desktop and mobile, with overlapping
+  voice handles and Brickout-compatible music/effect helpers for loop, pause, stop, volume, and pan.
+- Replaced the desktop JIT/AOT lifecycle-query stubs with optional calls into the same graphics
+  runtime, and added release/mobile source inventory coverage so the mixer ships in generated
+  archives and the iOS shell.
+- Verification: focused JIT/AOT audio compiler tests; seven C runtime contract tests; mobile package
+  and release-provenance tests; full pinned SDL runtime build; Windows AOT sample build and launch
+  through SDL's dummy audio backend.
+- Theory gained: audio samples and cursors are nondeterministic host resources while Stasis owns
+  only opaque handles and deterministic decisions to play or adjust them. The successful AOT sample
+  proves that this ownership boundary survives compilation, packaging, dynamic loading, decoding,
+  and callback startup; an adjacent prediction is that a future streaming decoder can replace the
+  asset source behind the same voice mixer without changing game state layouts.
+- Good: the isolated executable test exposed three dev-tree blind spots—escaping imports, an invalid
+  manifest shape, and a lifecycle stub—before the API reached a game.
+- Bad: the first runtime-only contract passed even though the AOT host bridge still returned a fake
+  unavailable result.
+- Adjustment: every new runtime export family must include one packaged AOT executable that crosses
+  the dynamic boundary and asserts real host behavior, not only compiler resolution and C-local tests.

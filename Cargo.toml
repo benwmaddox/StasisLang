@@ -3,17 +3,24 @@ resolver = "2"
 members = [
   "apps/stasis",
   "crates/stasis_assets",
+  "crates/stasis_network",
   "crates/stasis_compiler",
   "crates/stasis_dynload",
   "crates/stasis_android_bridge",
   "crates/stasis_jit",
+  "crates/stasis_language_service",
+  "crates/stasis_lsp",
   "crates/stasis_runner",
+  "crates/stasis_ai",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+
+[workspace.lints.rust]
+warnings = "deny"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -25,8 +32,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
+tungstenite = "0.27"
+getrandom = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+atomic-write-file = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 cranelift-codegen = { version = "0.117", features = ["arm64"] }
 cranelift-frontend = "0.117"

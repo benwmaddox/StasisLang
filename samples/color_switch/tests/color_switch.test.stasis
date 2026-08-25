@@ -1,0 +1,14 @@
+import "../main.stasis";
+
+test `color sequence wraps`(): bool {
+    if (next_color(0) != 1) {
+        return false;
+    }
+    if (next_color(1) != 2) {
+        return false;
+    }
+    if (next_color(2) != 0) {
+        return false;
+    }
+    return true;
+}

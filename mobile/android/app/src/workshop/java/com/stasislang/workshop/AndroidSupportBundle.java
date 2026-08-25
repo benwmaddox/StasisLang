@@ -89,7 +89,7 @@ final class AndroidSupportBundle {
         String value = result == null ? "" : result;
         return new JSONObject()
                 .put("attempted", !value.isEmpty() && !"CompileNotRun".equals(value))
-                .put("runnable", value.startsWith("CompilePlanned") && value.contains("status=0"))
+                .put("runnable", value.startsWith("CompileReady") && value.contains("status=0"))
                 .put("reload", safeReload(value));
     }
 

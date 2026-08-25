@@ -51,12 +51,17 @@ impl Default for AotCompileConfig {
 pub enum AotTarget {
     Native,
     AndroidArm64 { min_sdk: u32 },
+    AndroidX86_64 { min_sdk: u32 },
     IosArm64,
 }
 
 impl AotTarget {
     pub fn android_arm64_default() -> Self {
         Self::AndroidArm64 { min_sdk: 26 }
+    }
+
+    pub fn android_x86_64_default() -> Self {
+        Self::AndroidX86_64 { min_sdk: 26 }
     }
 
     pub fn ios_arm64_default() -> Self {
@@ -67,6 +72,7 @@ impl AotTarget {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { .. } => Some("aarch64-linux-android"),
+            Self::AndroidX86_64 { .. } => Some("x86_64-linux-android"),
             Self::IosArm64 => Some("aarch64-apple-ios"),
         }
     }
@@ -75,12 +81,17 @@ impl AotTarget {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { min_sdk } => Some(format!("aarch64-linux-android{min_sdk}")),
+            Self::AndroidX86_64 { min_sdk } => Some(format!("x86_64-linux-android{min_sdk}")),
             Self::IosArm64 => Some("aarch64-apple-ios".to_string()),
         }
     }
 
+    pub fn is_android(&self) -> bool {
+        matches!(self, Self::AndroidArm64 { .. } | Self::AndroidX86_64 { .. })
+    }
+
     pub fn requires_position_independent_code(&self) -> bool {
-        !matches!(self, Self::Native)
+        !matches!(self, Self::Native) || cfg!(target_os = "macos")
     }
 }
 
@@ -271,6 +282,7 @@ pub fn link_objects_to_dynamic_library(
     if uses_msvc_linker_syntax(config) {
         args.push("/NOLOGO".to_string());
         args.push("/DLL".to_string());
+        args.push("/NOENTRY".to_string());
         args.push(format!("/OUT:{}", output_library.display()));
         for symbol in export_symbols {
             args.push(format!("/EXPORT:{symbol}"));
@@ -279,30 +291,6 @@ pub fn link_objects_to_dynamic_library(
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
-        if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
-            args.push(kernel32.display().to_string());
-        } else {
-            args.push("kernel32.lib".to_string());
-        }
-        // When linking against Rust `staticlib` runtime shims (e.g. `stasis_dynload.lib`),
-        // lld-link does not automatically pull in the CRT/system libraries that those objects
-        // depend on. Add the common MSVC + Windows SDK libraries so AOT bundles link cleanly.
-        args.push("ucrt.lib".to_string());
-        args.push("vcruntime.lib".to_string());
-        args.push("msvcrt.lib".to_string());
-        args.push("legacy_stdio_definitions.lib".to_string());
-        args.push("advapi32.lib".to_string());
-        args.push("bcrypt.lib".to_string());
-        args.push("dbghelp.lib".to_string());
-        args.push("ntdll.lib".to_string());
-        args.push("ole32.lib".to_string());
-        args.push("oleaut32.lib".to_string());
-        args.push("psapi.lib".to_string());
-        args.push("secur32.lib".to_string());
-        args.push("shell32.lib".to_string());
-        args.push("user32.lib".to_string());
-        args.push("userenv.lib".to_string());
-        args.push("ws2_32.lib".to_string());
     } else {
         args.push("-shared".to_string());
         args.push("-o".to_string());
@@ -316,6 +304,9 @@ pub fn link_objects_to_dynamic_library(
     }
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
+    }
+    if matches!(config.target, AotTarget::Native) && !cfg!(windows) {
+        args.push("-lm".to_string());
     }
 
     run_link_command_with_args(
@@ -357,6 +348,7 @@ pub fn link_objects_to_executable(
 
     let linker = resolve_linker_path(config);
     let mut args: Vec<String> = Vec::new();
+    let mut launcher_source = None;
     if uses_msvc_linker_syntax(config) {
         args.push("/NOLOGO".to_string());
         args.push(format!("/OUT:{}", output_executable.display()));
@@ -366,11 +358,28 @@ pub fn link_objects_to_executable(
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
-        if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
-            args.push(kernel32.display().to_string());
-        } else {
-            args.push("kernel32.lib".to_string());
-        }
+        args.push(
+            resolve_windows_system_lib(&windows_lib_paths, "kernel32.lib")
+                .unwrap_or_else(|| PathBuf::from("kernel32.lib"))
+                .display()
+                .to_string(),
+        );
+    } else if matches!(config.target, AotTarget::Native) {
+        let source_path = output_executable.with_extension("entry.c");
+        fs::write(
+            &source_path,
+            native_unix_executable_launcher_source(entry_symbol)?,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to write native executable launcher {}: {error}",
+                source_path.display()
+            )
+        })?;
+        args.push("-o".to_string());
+        args.push(output_executable.display().to_string());
+        args.push(source_path.display().to_string());
+        launcher_source = Some(source_path);
     } else {
         args.push("-o".to_string());
         args.push(output_executable.display().to_string());
@@ -385,13 +394,20 @@ pub fn link_objects_to_executable(
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
     }
+    if matches!(config.target, AotTarget::Native) && !cfg!(windows) {
+        args.push("-lm".to_string());
+    }
 
-    run_link_command_with_args(
+    let link_result = run_link_command_with_args(
         &linker,
         &args,
         "executable link",
         &output_executable.with_extension("link.rsp"),
-    )?;
+    );
+    if let Some(source_path) = launcher_source {
+        let _ = fs::remove_file(source_path);
+    }
+    link_result?;
     if !output_executable.exists() {
         return Err(format!(
             "link step reported success but did not produce {}",
@@ -401,11 +417,63 @@ pub fn link_objects_to_executable(
     Ok(())
 }
 
+fn native_unix_executable_launcher_source(entry_symbol: &str) -> Result<String, String> {
+    if !entry_symbol.bytes().enumerate().all(|(index, byte)| {
+        byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+    }) {
+        return Err(format!(
+            "native executable entry symbol is not a C identifier: {entry_symbol}"
+        ));
+    }
+    Ok(format!(
+        "#include <stdint.h>\n\
+#include <stdio.h>\n\
+#include <string.h>\n\
+#if defined(__APPLE__)\n\
+#include <mach-o/dyld.h>\n\
+#elif defined(__linux__)\n\
+#include <unistd.h>\n\
+#endif\n\
+extern int32_t {entry_symbol}(void);\n\
+static const char *stasis_executable_path(char *buffer, size_t capacity, const char *fallback) {{\n\
+#if defined(__APPLE__)\n\
+    uint32_t size = (uint32_t)capacity;\n\
+    if (_NSGetExecutablePath(buffer, &size) == 0) return buffer;\n\
+#elif defined(__linux__)\n\
+    ssize_t count = readlink(\"/proc/self/exe\", buffer, capacity - 1);\n\
+    if (count > 0 && (size_t)count < capacity) {{ buffer[count] = 0; return buffer; }}\n\
+#endif\n\
+    return fallback ? fallback : \"\";\n\
+}}\n\
+static void stasis_log_package_provenance(const char *program) {{\n\
+    char executable[4096];\n\
+    char path[4096];\n\
+    const char *resolved = stasis_executable_path(executable, sizeof(executable), program);\n\
+    const char *slash = strrchr(resolved, '/');\n\
+    size_t directory = slash ? (size_t)(slash - resolved + 1) : 0;\n\
+    const char *name = \"stasis_provenance.json\";\n\
+    if (directory + strlen(name) >= sizeof(path)) return;\n\
+    if (directory) memcpy(path, resolved, directory);\n\
+    strcpy(path + directory, name);\n\
+    FILE *file = fopen(path, \"rb\");\n\
+    if (!file) return;\n\
+    char manifest[65537];\n\
+    size_t count = fread(manifest, 1, sizeof(manifest) - 1, file);\n\
+    int overflow = fgetc(file) != EOF;\n\
+    fclose(file);\n\
+    if (overflow) {{ fprintf(stderr, \"Stasis package provenance is invalid: manifest exceeds 65536 bytes path=%s\\n\", path); return; }}\n\
+    manifest[count] = 0;\n\
+    fprintf(stderr, \"Stasis package provenance: path=%s manifest=%s\\n\", path, manifest);\n\
+}}\n\
+int main(int argc, char **argv) {{ (void)argc; stasis_log_package_provenance(argv ? argv[0] : 0); return (int){entry_symbol}(); }}\n"
+    ))
+}
+
 fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
     if let Some(path) = config.linker_path.as_ref() {
         return path.clone();
     }
-    if matches!(config.target, AotTarget::AndroidArm64 { .. }) {
+    if config.target.is_android() {
         PathBuf::from("clang")
     } else if cfg!(windows) {
         PathBuf::from("lld-link.exe")
@@ -420,61 +488,35 @@ fn uses_msvc_linker_syntax(config: &AotLinkConfig) -> bool {
 
 #[cfg(windows)]
 fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-
-    if let Ok(lib_env) = std::env::var("LIB") {
-        for raw in lib_env.split(';') {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let path = PathBuf::from(trimmed);
-            if path.exists() && !out.contains(&path) {
-                out.push(path);
-            }
+    let mut paths = Vec::new();
+    if let Some(value) = std::env::var_os("LIB") {
+        for path in std::env::split_paths(&value) {
+            push_existing_unique(&mut paths, path);
         }
     }
-
-    if let Ok(vc_tools) = std::env::var("VCToolsInstallDir") {
-        let vc_lib = PathBuf::from(vc_tools).join("lib").join("x64");
-        if vc_lib.exists() && !out.contains(&vc_lib) {
-            out.push(vc_lib);
-        }
+    if let Some(value) = std::env::var_os("VCToolsInstallDir") {
+        push_existing_unique(&mut paths, PathBuf::from(value).join("lib").join("x64"));
     }
-
-    let msvc_roots = [
+    for root in [
         r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
         r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
         r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
         r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
-    ];
-    for root in msvc_roots {
-        if let Some(version_dir) = latest_child_dir(Path::new(root)) {
-            let vc_lib = version_dir.join("lib").join("x64");
-            if vc_lib.exists() && !out.contains(&vc_lib) {
-                out.push(vc_lib);
-            }
+    ] {
+        if let Some(version) = latest_child_dir(Path::new(root)) {
+            push_existing_unique(&mut paths, version.join("lib").join("x64"));
         }
     }
-
-    let windows_kits_roots = [
+    for root in [
         r"C:\Program Files (x86)\Windows Kits\10\Lib",
         r"C:\Program Files\Windows Kits\10\Lib",
-    ];
-    for root in windows_kits_roots {
-        if let Some(version_dir) = latest_child_dir(Path::new(root)) {
-            let um = version_dir.join("um").join("x64");
-            if um.exists() && !out.contains(&um) {
-                out.push(um);
-            }
-            let ucrt = version_dir.join("ucrt").join("x64");
-            if ucrt.exists() && !out.contains(&ucrt) {
-                out.push(ucrt);
-            }
+    ] {
+        if let Some(version) = latest_child_dir(Path::new(root)) {
+            push_existing_unique(&mut paths, version.join("um").join("x64"));
+            push_existing_unique(&mut paths, version.join("ucrt").join("x64"));
         }
     }
-
-    out
+    paths
 }
 
 #[cfg(not(windows))]
@@ -483,41 +525,35 @@ fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
 }
 
 #[cfg(windows)]
-fn resolve_kernel32_lib_path(lib_paths: &[PathBuf]) -> Option<PathBuf> {
-    for lib_path in lib_paths {
-        let candidate = lib_path.join("kernel32.lib");
-        if candidate.exists() {
-            return Some(candidate);
-        }
+fn push_existing_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.is_dir() && !paths.contains(&path) {
+        paths.push(path);
     }
-    None
-}
-
-#[cfg(not(windows))]
-fn resolve_kernel32_lib_path(_lib_paths: &[PathBuf]) -> Option<PathBuf> {
-    None
 }
 
 #[cfg(windows)]
 fn latest_child_dir(root: &Path) -> Option<PathBuf> {
-    let entries = fs::read_dir(root).ok()?;
-    let mut dirs: Vec<PathBuf> = entries
+    let mut directories = fs::read_dir(root)
+        .ok()?
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
         .map(|entry| entry.path())
-        .collect();
-    dirs.sort_by(|a, b| {
-        let an = a
-            .file_name()
-            .map(|value| value.to_string_lossy())
-            .unwrap_or_default();
-        let bn = b
-            .file_name()
-            .map(|value| value.to_string_lossy())
-            .unwrap_or_default();
-        bn.cmp(&an)
-    });
-    dirs.into_iter().next()
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    directories.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    directories.into_iter().next()
+}
+
+#[cfg(windows)]
+fn resolve_windows_system_lib(paths: &[PathBuf], name: &str) -> Option<PathBuf> {
+    paths
+        .iter()
+        .map(|path| path.join(name))
+        .find(|path| path.is_file())
+}
+
+#[cfg(not(windows))]
+fn resolve_windows_system_lib(_paths: &[PathBuf], _name: &str) -> Option<PathBuf> {
+    None
 }
 
 fn run_link_command(command: &mut Command, mode: &str, linker: &Path) -> Result<(), String> {
@@ -589,6 +625,40 @@ mod tests {
                 .map(|id| FunctionPatch { fn_id: FnId(id) })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn native_unix_launcher_calls_the_requested_entry_symbol() {
+        let source = native_unix_executable_launcher_source("aot_fn_0")
+            .expect("valid AOT symbol should produce launcher source");
+        assert!(source.contains("extern int32_t aot_fn_0(void);"));
+        assert!(source.contains("return (int)aot_fn_0();"));
+        assert!(source.contains("stasis_provenance.json"));
+        assert!(source.contains("manifest exceeds 65536 bytes"));
+        assert!(source.contains("/proc/self/exe"));
+        assert!(source.contains("_NSGetExecutablePath"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_linking_finds_kernel32_without_lib_environment() {
+        let previous = std::env::var_os("LIB");
+        std::env::remove_var("LIB");
+        let paths = resolve_windows_link_lib_paths();
+        if let Some(value) = previous {
+            std::env::set_var("LIB", value);
+        }
+        assert!(
+            resolve_windows_system_lib(&paths, "kernel32.lib").is_some(),
+            "installed Windows SDK must be discoverable without LIB"
+        );
+    }
+
+    #[test]
+    fn native_unix_launcher_rejects_non_identifier_entry_symbol() {
+        let error = native_unix_executable_launcher_source("aot_fn_0; injected")
+            .expect_err("invalid C symbol should be rejected");
+        assert!(error.contains("not a C identifier"));
     }
 
     #[test]
@@ -746,6 +816,7 @@ exit /b 0
         } else {
             let path = temp_dir.join("fake-link.sh");
             let script = r#"#!/usr/bin/env sh
+ALL_ARGS="$*"
 OUT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -760,6 +831,7 @@ if [ -z "$OUT" ]; then
   exit 2
 fi
 echo "fake-shared" > "$OUT"
+printf '%s\n' "$ALL_ARGS" > "$OUT.args"
 "#;
             fs::write(&path, script).expect("write fake unix linker");
             let status = Command::new("chmod")
@@ -794,6 +866,14 @@ echo "fake-shared" > "$OUT"
         )
         .expect("fake linker should succeed");
         assert!(output_library.exists(), "fake linker should create output");
+        if !cfg!(windows) {
+            let args = fs::read_to_string(format!("{}.args", output_library.display()))
+                .expect("read captured Unix linker arguments");
+            assert!(
+                args.split_ascii_whitespace().any(|arg| arg == "-lm"),
+                "native Unix dynamic libraries must link libm: {args}"
+            );
+        }
 
         fs::remove_dir_all(&temp_dir).ok();
     }
@@ -811,9 +891,24 @@ echo "fake-shared" > "$OUT"
 
     #[test]
     fn aot_target_reports_position_independent_code_requirement() {
-        assert!(!AotTarget::Native.requires_position_independent_code());
+        assert_eq!(
+            AotTarget::Native.requires_position_independent_code(),
+            cfg!(target_os = "macos")
+        );
         assert!(AotTarget::android_arm64_default().requires_position_independent_code());
+        assert!(AotTarget::android_x86_64_default().requires_position_independent_code());
         assert!(AotTarget::ios_arm64_default().requires_position_independent_code());
+    }
+
+    #[test]
+    fn android_x86_64_target_reports_emulator_triples() {
+        let target = AotTarget::android_x86_64_default();
+        assert_eq!(target.object_triple(), Some("x86_64-linux-android"));
+        assert_eq!(
+            target.clang_target().as_deref(),
+            Some("x86_64-linux-android26")
+        );
+        assert!(target.is_android());
     }
 
     #[test]

@@ -1,0 +1,45 @@
+import "../main.stasis";
+
+test `paddle target centers on pointer`(): bool {
+    let y: f32 = paddle_from_pointer(180.0);
+    if (y != 144.0) {
+        return false;
+    }
+    return true;
+}
+
+test `pointer movement does not require a press`(): bool {
+    if (!pointer_controls_paddle(1)) {
+        return false;
+    }
+    if (pointer_controls_paddle(0)) {
+        return false;
+    }
+    return true;
+}
+
+test `paddle clamp stays inside screen`(): bool {
+    if (clamp_paddle(-4.0) != 0.0) {
+        return false;
+    }
+    if (clamp_paddle(999.0) != SCREEN_H - PADDLE_H) {
+        return false;
+    }
+    return true;
+}
+
+test `score display wraps after two digits`(): bool {
+    if (score_for_display(0) != 0 || score_for_display(7) != 7) {
+        return false;
+    }
+    if (score_for_display(100) != 0 || score_for_display(234) != 34) {
+        return false;
+    }
+    if (score_for_display(-1) != 0) {
+        return false;
+    }
+    if (score_digit(47, 10) != 4 || score_digit(47, 1) != 7) {
+        return false;
+    }
+    return true;
+}

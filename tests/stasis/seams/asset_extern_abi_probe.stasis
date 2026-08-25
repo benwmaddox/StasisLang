@@ -1,0 +1,63 @@
+struct Sprite {
+    handle: i32;
+    width: i32;
+    height: i32;
+}
+
+struct TextRun {
+    font: i32;
+    handle: i32;
+    width: f32;
+    height: f32;
+}
+
+global ProbeState {
+    sprite: Sprite;
+    text: TextRun;
+}
+
+extern function gfx_poll_reload(handle: i32): bool;
+extern function gfx_dump_bmp(path: string): i32;
+extern function gfx_dump_png(path: string): i32;
+extern function load_font(path: string, size: i32): i32;
+extern function measure_text(font: i32, text: string): f32;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
+
+function main(): i32 {
+    if (!ProbeState.sprite.load_sprite_from("assets/球.png", 47, 29)) {
+        return 1;
+    }
+    if (ProbeState.sprite.handle != 101 || ProbeState.sprite.width != 47 || ProbeState.sprite.height != 29) {
+        return 2;
+    }
+
+    let font: i32 = load_font("fonts/Ångström.ttf", 19);
+    if (font != 202) {
+        return 3;
+    }
+    let width: f32 = measure_text(font, "héllo 世界");
+    if (width != 18.75) {
+        return 4;
+    }
+
+    if (!ProbeState.text.load_text_from(font, "cached ✓")) {
+        return 5;
+    }
+    if (ProbeState.text.font != 202 || ProbeState.text.handle != 303) {
+        return 6;
+    }
+    if (ProbeState.text.width != 44.5 || ProbeState.text.height != 12.25) {
+        return 7;
+    }
+    if (!gfx_poll_reload(ProbeState.sprite.handle)) {
+        return 8;
+    }
+    if (gfx_dump_bmp("captures/帧.bmp") != 11) {
+        return 9;
+    }
+    if (gfx_dump_png("captures/帧.png") != 12) {
+        return 10;
+    }
+    return 79;
+}

@@ -1,12 +1,39 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import sys
 
 
 RE_IMPORT = re.compile(r'^\s*import\s+"([^"]+)"\s*;\s*(?://.*)?$')
+IGNORED_SOURCE_DIRS = {
+    ".git",
+    ".gradle",
+    ".stasis_cache",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+}
+
+
+def discover_stasis_files(scan_roots: list[pathlib.Path]) -> list[pathlib.Path]:
+    """Return application Stasis sources, excluding vendored source trees."""
+    stasis_files: list[pathlib.Path] = []
+    for root in scan_roots:
+        if not root.is_dir():
+            continue
+        for current_root, directories, filenames in os.walk(root):
+            directories[:] = sorted(
+                name for name in directories if name not in IGNORED_SOURCE_DIRS
+            )
+            for filename in sorted(filenames):
+                if filename.endswith(".stasis"):
+                    stasis_files.append(pathlib.Path(current_root) / filename)
+    return sorted(stasis_files, key=lambda path: path.as_posix())
 
 
 def main() -> int:
@@ -25,33 +52,52 @@ def main() -> int:
         )
         for path in root_level_stasis:
             print(f"- {path.relative_to(repo_root).as_posix()}", file=sys.stderr)
-        print("Move them into src/stdlib/ or src/runtime/.", file=sys.stderr)
+        print("Move them into src/stdlib/.", file=sys.stderr)
         return 1
 
-    runtime_dir = src_dir / "runtime"
     stdlib_dir = src_dir / "stdlib"
-    if not runtime_dir.is_dir():
-        print(f"error: missing src/runtime/ directory at {runtime_dir}", file=sys.stderr)
-        return 2
     if not stdlib_dir.is_dir():
         print(f"error: missing src/stdlib/ directory at {stdlib_dir}", file=sys.stderr)
         return 2
 
-    # These runtime support modules were moved out of src/ root. Reject any imports that still
-    # target the old locations (either via ../../src/<file>.stasis or via ../<file>.stasis).
-    runtime_modules = {
-        "gfx_cmd.stasis": "src/runtime/gfx_cmd.stasis",
-        "host_frame.stasis": "src/runtime/host_frame.stasis",
-        "host_window_request.stasis": "src/runtime/host_window_request.stasis",
-        "input_testkit.stasis": "src/runtime/input_testkit.stasis",
+    internal_dir = stdlib_dir / "internal"
+    testing_dir = stdlib_dir / "testing"
+    required_internal = {
+        "gfx_cmd.stasis",
+        "host_frame.stasis",
+        "host_window_request.stasis",
     }
+    missing_internal = sorted(
+        name for name in required_internal if not (internal_dir / name).is_file()
+    )
+    if missing_internal:
+        print("error: missing canonical stdlib internal ABI modules:", file=sys.stderr)
+        for name in missing_internal:
+            print(f"- src/stdlib/internal/{name}", file=sys.stderr)
+        return 2
+    if not (testing_dir / "input_testkit.stasis").is_file():
+        print("error: missing src/stdlib/testing/input_testkit.stasis", file=sys.stderr)
+        return 2
+
+    obsolete_paths = [stdlib_dir / "gfx_cmd.stasis"]
+    for obsolete in obsolete_paths:
+        if obsolete.exists():
+            print(
+                f"error: obsolete duplicate module path still exists: "
+                f"{obsolete.relative_to(repo_root).as_posix()}",
+                file=sys.stderr,
+            )
+            return 1
+    runtime_dir = src_dir / "runtime"
+    obsolete_runtime_modules = sorted(runtime_dir.rglob("*.stasis")) if runtime_dir.is_dir() else []
+    if obsolete_runtime_modules:
+        print("error: obsolete src/runtime Stasis modules still exist:", file=sys.stderr)
+        for path in obsolete_runtime_modules:
+            print(f"- {path.relative_to(repo_root).as_posix()}", file=sys.stderr)
+        return 1
 
     scan_roots = [src_dir, repo_root / "samples", repo_root / "tests"]
-    stasis_files: list[pathlib.Path] = []
-    for root in scan_roots:
-        if not root.is_dir():
-            continue
-        stasis_files.extend(root.rglob("*.stasis"))
+    stasis_files = discover_stasis_files(scan_roots)
 
     errors: list[str] = []
     for file_path in stasis_files:
@@ -60,7 +106,6 @@ def main() -> int:
         except ValueError:
             continue
 
-        in_runtime = rel_path.parts[:2] == ("src", "runtime")
         try:
             text = file_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -72,26 +117,39 @@ def main() -> int:
                 continue
             import_path = match.group(1)
             norm = import_path.replace("\\", "/")
-            base = norm.rsplit("/", 1)[-1]
-            if base not in runtime_modules:
+            if "/runtime/" in norm or norm.startswith("../runtime/"):
+                errors.append(
+                    f'{rel_path.as_posix()}:{line_no}: obsolete runtime import "{import_path}" '
+                    "(host ABI modules live under src/stdlib/internal/)"
+                )
                 continue
 
-            # Allow same-folder imports from within src/runtime (e.g. input_testkit -> host_frame).
-            if in_runtime and norm == base:
-                continue
+            imports_internal = "/internal/" in norm or norm.startswith("internal/")
+            if imports_internal:
+                inside_stdlib = rel_path.parts[:2] == ("src", "stdlib")
+                integration_test = rel_path.as_posix() in {
+                    "tests/stasis/rust_native_tick_input_snapshot.stasis",
+                    "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
+                    "tests/stasis/seams/desktop_input_frame_probe.stasis",
+                    "tests/stasis/seams/desktop_display_metrics_probe.stasis",
+                    "tests/stasis/seams/desktop_manifest_assets_probe.stasis",
+                    "tests/stasis/seams/window_request_mailbox_probe.stasis",
+                }
+                if not inside_stdlib and not integration_test:
+                    errors.append(
+                        f'{rel_path.as_posix()}:{line_no}: private ABI import "{import_path}" '
+                        "(application code must import a public stdlib module)"
+                    )
 
-            # For all other modules, the path must include /runtime/ somewhere.
-            if "/runtime/" in norm:
-                continue
-
-            expected = runtime_modules[base]
-            errors.append(
-                f"{rel_path.as_posix()}:{line_no}: deprecated import \"{import_path}\" "
-                f"(use \"{expected}\" or a relative path containing /runtime/)"
-            )
+            imports_testing = "/testing/" in norm or norm.startswith("testing/")
+            if imports_testing and not rel_path.name.endswith(".test.stasis"):
+                errors.append(
+                    f'{rel_path.as_posix()}:{line_no}: test-only import "{import_path}" '
+                    "is limited to .test.stasis files"
+                )
 
     if errors:
-        print("error: deprecated runtime module imports found:", file=sys.stderr)
+        print("error: invalid Stasis source-layer imports found:", file=sys.stderr)
         for error in errors:
             print(error, file=sys.stderr)
         return 1

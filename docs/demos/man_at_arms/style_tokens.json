@@ -1,0 +1,49 @@
+{
+  "name": "Hearthguard man-at-arms",
+  "version": 1,
+  "palette": {
+    "ink": "#26353A",
+    "deep_ink": "#17272C",
+    "teal": "#17616A",
+    "teal_shadow": "#0E4850",
+    "teal_light": "#2A7880",
+    "cream": "#E7D5AD",
+    "cream_shadow": "#C7AF83",
+    "oxblood": "#743B2D",
+    "oxblood_shadow": "#4E291F",
+    "walnut": "#7A432A",
+    "walnut_light": "#9A5B37",
+    "steel": "#68757A",
+    "steel_shadow": "#465359",
+    "steel_light": "#AAB5B4",
+    "brass": "#C48A32",
+    "skin": "#C98254",
+    "skin_light": "#E4A878",
+    "skin_shadow": "#9F5D3E",
+    "parchment": "#F1E2BF",
+    "grass": "#73864A",
+    "tower": "#E9DFC4"
+  },
+  "stroke": {
+    "review_px": 8,
+    "detail_px": 5,
+    "minimum_runtime_px": 1.5,
+    "join": "round",
+    "cap": "round"
+  },
+  "proportions": {
+    "heads_tall": 3.65,
+    "head_width_to_body": 0.56,
+    "shoulder_width_to_height": 0.46,
+    "shield_diameter_to_height": 0.39,
+    "hand_scale": 1.18
+  },
+  "runtime_sizes_px": [48, 64, 96, 128, 256],
+  "rules": {
+    "shading": "Two tones per material, with one small highlight family.",
+    "outlines": "Use colored ink; never pure black.",
+    "silhouette": "Helmet brim, spear, shield, moustache, and short boots must read at 64 px.",
+    "texture": "Apply grain during raster export, not as unique SVG geometry.",
+    "gradients": "Reserve for steel and presentation backgrounds; keep clothing matte."
+  }
+}

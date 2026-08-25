@@ -22,32 +22,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Check for vcpkg - try common locations
-if not defined VCPKG_ROOT (
-    if exist "C:\code\vcpkg\vcpkg.exe" (
-        set VCPKG_ROOT=C:\code\vcpkg
-    ) else if exist "C:\vcpkg\vcpkg.exe" (
-        set VCPKG_ROOT=C:\vcpkg
-    ) else (
-        echo Error: VCPKG_ROOT environment variable not set and vcpkg not found.
-        echo Please install vcpkg and set VCPKG_ROOT.
-        echo Example: set VCPKG_ROOT=C:\code\vcpkg
-        exit /b 1
-    )
-)
-
-:: Default to static triplet for single-exe bundling; allow override
-if "%VCPKG_TRIPLET%"=="" (
-    set VCPKG_TRIPLET=x64-windows-static
-)
-
-:: Install SDL2 + SDL2_image + GLEW for the chosen triplet
-echo Checking for SDL2/SDL2_image/GLEW with triplet %VCPKG_TRIPLET%...
-%VCPKG_ROOT%\vcpkg install sdl2:%VCPKG_TRIPLET% sdl2-image:%VCPKG_TRIPLET% glew:%VCPKG_TRIPLET% --recurse
-if %ERRORLEVEL% neq 0 (
-    echo Error: vcpkg install failed.
-    exit /b 1
-)
+:: SDL3 and SDL3_image use the SHA-256-pinned sources in CMakeLists.txt.
+echo Using pinned SDL3 3.4.10 and SDL3_image 3.4.4 sources...
 :: Default generator: Visual Studio 2022. Override via STASIS_CMAKE_GENERATOR (e.g. "Ninja").
 if "%STASIS_CMAKE_GENERATOR%"=="" (
     set "STASIS_CMAKE_GENERATOR=Visual Studio 17 2022"
@@ -83,9 +59,9 @@ if exist CMakeCache.txt (
 :: Configure with CMake
 echo Configuring...
 if /I "%STASIS_CMAKE_GENERATOR%"=="Ninja" (
-    cmake .. -G "%STASIS_CMAKE_GENERATOR%" -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=%VCPKG_TRIPLET% -DSTASIS_GRAPHICS_BUILD_STATIC=ON -DSTASIS_GRAPHICS_BUILD_SHARED=ON
+    cmake .. -G "%STASIS_CMAKE_GENERATOR%" -DSTASIS_BUILD_MONOLITH=OFF -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_STATIC=ON -DSTASIS_GRAPHICS_BUILD_SHARED=ON
 ) else (
-    cmake .. -G "%STASIS_CMAKE_GENERATOR%" -A x64 -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=%VCPKG_TRIPLET% -DSTASIS_GRAPHICS_BUILD_STATIC=ON -DSTASIS_GRAPHICS_BUILD_SHARED=ON
+    cmake .. -G "%STASIS_CMAKE_GENERATOR%" -A x64 -DSTASIS_BUILD_MONOLITH=OFF -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_STATIC=ON -DSTASIS_GRAPHICS_BUILD_SHARED=ON
 )
 
 if %ERRORLEVEL% neq 0 (
@@ -126,21 +102,6 @@ if exist "%BUILD_DIR%\\bin\\Release\\stasis_runner.exe" (
 )
 
 echo.
-echo Copying static dependency libs to build\\Release for single-exe links...
-set "STATIC_LIB_DIR=%VCPKG_ROOT%\\installed\\%VCPKG_TRIPLET%\\lib"
-set "MANUAL_LIB_DIR=%STATIC_LIB_DIR%\\manual-link"
-for %%F in (SDL2-static.lib libglew32.lib OpenGL32.Lib GlU32.Lib) do (
-    if exist "%STATIC_LIB_DIR%\\%%F" (
-        copy /Y "%STATIC_LIB_DIR%\\%%F" "%BUILD_DIR%\\Release" >NUL
-    ) else (
-        echo   warning: missing %%F in %STATIC_LIB_DIR%
-    )
-)
-if exist "%MANUAL_LIB_DIR%\\SDL2main.lib" (
-    copy /Y "%MANUAL_LIB_DIR%\\SDL2main.lib" "%BUILD_DIR%\\Release" >NUL
-) else (
-    echo   warning: missing SDL2main.lib in %MANUAL_LIB_DIR%
-)
 echo Copying static graphics lib to repo root and build/ for auto-discovery...
 if /I "%STASIS_OVERWRITE_CHECKED_IN_RUNTIME_LIBS%"=="1" (
     copy /Y "%BUILD_DIR%\\Release\\stasis_graphics_static.lib" "%REPO_ROOT%" >NUL 2>&1

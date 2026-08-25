@@ -37,19 +37,22 @@
 #endif
 
 #include "stasis_data.h"
+#include "stasis_render_contract.h"
 
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
 typedef void (*stasis_aot_bind_runtime_globals_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
-typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
+typedef void (*stasis_gfx_submit_u8_fn)(int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
 typedef void (*stasis_host_bulk_init_fn)(const int32_t *host_req_seq);
 typedef void (*stasis_host_bulk_apply_requests_fn)(
     const int32_t *host_req_seq,
     const int32_t *host_req_flags,
     const int32_t *host_req_window_w_px,
     const int32_t *host_req_window_h_px);
+typedef void (*stasis_host_set_performance_metrics_fn)(uint64_t tick_us, uint64_t render_us);
+typedef int (*stasis_host_performance_metrics_enabled_fn)(void);
 typedef int (*stasis_host_bulk_step_fn)(
     int32_t *host_i32,
     float *host_f32,
@@ -63,7 +66,10 @@ typedef int (*stasis_host_bulk_step_fn)(
     stasis_tick_fn tick_fn);
 typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
 typedef int (*stasis_set_fullscreen_fn)(int enabled);
+typedef int (*stasis_set_maximized_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
+typedef int (*stasis_graphics_runtime_abi_version_fn)(void);
+typedef int (*stasis_graphics_set_asset_root_fn)(const char *path);
 
 static int stasis_env_flag(const char *name, int default_value)
 {
@@ -114,7 +120,8 @@ static int stasis_rebind_bulk_pointers_linux(
     int32_t **gfx_cmd_i32,
     float **gfx_cmd_f32,
     uint8_t **gfx_cmd_u8,
-    int32_t *last_req_seq)
+    int32_t *last_req_seq,
+    int initialize_request_baseline)
 {
     if (!lib)
     {
@@ -159,7 +166,7 @@ static int stasis_rebind_bulk_pointers_linux(
         *gfx_cmd_u8 = (uint8_t *)dlsym(lib, "gfx_cmd_u8");
     }
 
-    if (host_bulk_init && host_req_seq && *host_req_seq)
+    if (initialize_request_baseline && host_bulk_init && host_req_seq && *host_req_seq)
     {
         host_bulk_init(*host_req_seq);
     }
@@ -301,8 +308,19 @@ static int stasis_try_get_self_path(const char *argv0, char *out, size_t out_cap
     {
         return 0;
     }
-    strncpy(out, argv0, out_cap - 1);
-    out[out_cap - 1] = '\0';
+    if (argv0[0] == '/')
+    {
+        strncpy(out, argv0, out_cap - 1);
+        out[out_cap - 1] = '\0';
+        return 1;
+    }
+
+    char current_dir[2048];
+    if (!getcwd(current_dir, sizeof(current_dir)) ||
+        snprintf(out, out_cap, "%s/%s", current_dir, argv0) >= (int)out_cap)
+    {
+        return 0;
+    }
     return 1;
 #endif
 }
@@ -320,6 +338,20 @@ static int stasis_extract_dir(const char *path, char *out, size_t out_cap)
     }
     strncpy(out, path, out_cap - 1);
     out[out_cap - 1] = '\0';
+
+#ifdef _WIN32
+    if (strncmp(out, "\\\\?\\UNC\\", 8) == 0)
+    {
+        size_t remainder = strlen(out + 8);
+        memmove(out + 2, out + 8, remainder + 1);
+        out[0] = '\\';
+        out[1] = '\\';
+    }
+    else if (strncmp(out, "\\\\?\\", 4) == 0)
+    {
+        memmove(out, out + 4, strlen(out + 4) + 1);
+    }
+#endif
 
     char *slash = strrchr(out, '\\');
     char *fslash = strrchr(out, '/');
@@ -345,6 +377,45 @@ static int stasis_set_current_dir(const char *path)
 #endif
 }
 
+static int stasis_set_asset_root(const char *path)
+{
+    if (!path || !path[0])
+    {
+        return 0;
+    }
+#ifdef _WIN32
+    return _putenv_s("STASIS_ASSET_ROOT", path) == 0;
+#else
+    return setenv("STASIS_ASSET_ROOT", path, 1) == 0;
+#endif
+}
+
+static int stasis_set_packaged_graphics_path(const char *exe_dir)
+{
+    char path[2080];
+#ifdef _WIN32
+    if (!exe_dir || !exe_dir[0] ||
+        snprintf(path, sizeof(path), "%s\\stasis_graphics.dll", exe_dir) >= (int)sizeof(path))
+    {
+        return 0;
+    }
+    return SetEnvironmentVariableA("STASIS_RUNTIME_DLL_PATH", path) != 0 &&
+           _putenv_s("STASIS_RUNTIME_DLL_PATH", path) == 0;
+#else
+#if defined(__APPLE__)
+    const char *runtime_name = "libstasis_graphics.dylib";
+#else
+    const char *runtime_name = "libstasis_graphics.so";
+#endif
+    if (!exe_dir || !exe_dir[0] ||
+        snprintf(path, sizeof(path), "%s/%s", exe_dir, runtime_name) >= (int)sizeof(path))
+    {
+        return 0;
+    }
+    return setenv("STASIS_RUNTIME_LIBRARY_PATH", path, 1) == 0;
+#endif
+}
+
 static int stasis_try_load_launch_config(
     const char *argv0,
     char *dll_out,
@@ -364,6 +435,9 @@ static int stasis_try_load_launch_config(
     char self_path[2048];
     char launch_path[2080];
     char exe_dir[2048];
+#ifdef _WIN32
+    char payload_dir[2080];
+#endif
     char line[2048];
 
     if (!stasis_try_get_self_path(argv0, self_path, sizeof(self_path)))
@@ -380,6 +454,31 @@ static int stasis_try_load_launch_config(
     }
 
     FILE *file = fopen(launch_path, "rb");
+#ifdef _WIN32
+    if (!file)
+    {
+        const char *exe_name = strrchr(self_path, '\\');
+        const char *forward_name = strrchr(self_path, '/');
+        if (!exe_name || (forward_name && forward_name > exe_name))
+        {
+            exe_name = forward_name;
+        }
+        exe_name = exe_name ? exe_name + 1 : self_path;
+        int payload_written = snprintf(payload_dir, sizeof(payload_dir), "%s\\app", exe_dir);
+        int launch_written = payload_written > 0 && payload_written < (int)sizeof(payload_dir)
+            ? snprintf(launch_path, sizeof(launch_path), "%s\\%s.launch", payload_dir, exe_name)
+            : -1;
+        if (launch_written > 0 && launch_written < (int)sizeof(launch_path))
+        {
+            file = fopen(launch_path, "rb");
+            if (file)
+            {
+                strncpy(exe_dir, payload_dir, sizeof(exe_dir) - 1);
+                exe_dir[sizeof(exe_dir) - 1] = '\0';
+            }
+        }
+    }
+#endif
     if (!file)
     {
         return 0;
@@ -488,8 +587,43 @@ static int stasis_try_load_launch_config(
         entry_out[entry_out_cap - 1] = '\0';
     }
 
-    /* Make relative asset/data paths stable for packaged game builds. */
-    stasis_set_current_dir(exe_dir);
+#ifdef _WIN32
+    if (dll_out && dll_out[0] && dll_out[0] != '\\' && dll_out[0] != '/' && dll_out[1] != ':')
+    {
+        char resolved_dll[4096];
+        int resolved_written = snprintf(
+            resolved_dll, sizeof(resolved_dll), "%s\\%s", exe_dir, dll_out);
+        if (resolved_written <= 0 || resolved_written >= (int)sizeof(resolved_dll) ||
+            (size_t)resolved_written >= dll_out_cap)
+        {
+            fprintf(stderr, "error: generated launcher DLL path is too long\n");
+            return 0;
+        }
+        memcpy(dll_out, resolved_dll, (size_t)resolved_written + 1);
+    }
+#else
+    /* dlopen does not search the current directory for a bare library name. */
+    if (dll_out[0] != '/')
+    {
+        char absolute_dll[4096];
+        int written = snprintf(absolute_dll, sizeof(absolute_dll), "%s/%s", exe_dir, dll_out);
+        if (written < 0 || (size_t)written >= sizeof(absolute_dll) ||
+            (size_t)written >= dll_out_cap)
+        {
+            return 0;
+        }
+        memcpy(dll_out, absolute_dll, (size_t)written + 1);
+    }
+#endif
+
+    /* Anchor assets to the resolved launch payload, independent of caller CWD. */
+    if (!stasis_set_current_dir(exe_dir) ||
+        !stasis_set_asset_root(exe_dir) ||
+        !stasis_set_packaged_graphics_path(exe_dir))
+    {
+        fprintf(stderr, "error: failed to anchor generated launcher at %s\n", exe_dir);
+        return 0;
+    }
     return 1;
 }
 
@@ -632,6 +766,22 @@ static void stasis_setup_runtime_dirs(const char *exe_path, const char *dll_path
 {
     out_runtime_dir[0] = '\0';
 
+    char program_dir[1024];
+    program_dir[0] = '\0';
+    if (dll_path && stasis_path_dirname(dll_path, program_dir, sizeof(program_dir)) == 0)
+    {
+        char runtime_probe[1024];
+        int probe_written = snprintf(
+            runtime_probe, sizeof(runtime_probe), "%s\\stasis_graphics.dll", program_dir);
+        if (probe_written > 0 && probe_written < (int)sizeof(runtime_probe) &&
+            file_exists(runtime_probe))
+        {
+            strncpy(out_runtime_dir, program_dir, out_cap - 1);
+            out_runtime_dir[out_cap - 1] = '\0';
+            return;
+        }
+    }
+
     char exe_dir[1024];
     exe_dir[0] = '\0';
     if (exe_path && stasis_path_dirname(exe_path, exe_dir, sizeof(exe_dir)) == 0)
@@ -660,8 +810,6 @@ static void stasis_setup_runtime_dirs(const char *exe_path, const char *dll_path
         stasis_try_add_relative_runtime_dir(exe_dir, "runtime\\build\\bin\\Release", out_runtime_dir, out_cap);
         stasis_try_add_relative_runtime_dir(exe_dir, "..\\runtime\\build\\bin\\Release", out_runtime_dir, out_cap);
     }
-
-    (void)dll_path;
 }
 
 static void stasis_enable_dll_search(const char *exe_path, const char *dll_path)
@@ -1857,11 +2005,33 @@ int main(int argc, char **argv)
     HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
     stasis_init_window_fn init_window = NULL;
     stasis_set_fullscreen_fn set_fullscreen = NULL;
+    stasis_set_maximized_fn set_maximized = NULL;
     stasis_set_window_size_fn set_window_size = NULL;
     if (gfx)
     {
+        stasis_graphics_runtime_abi_version_fn graphics_abi =
+            (stasis_graphics_runtime_abi_version_fn)GetProcAddress(gfx, "stasis_graphics_runtime_abi_version");
+        if (!graphics_abi || graphics_abi() != STASIS_GRAPHICS_RUNTIME_ABI_VERSION)
+        {
+            fprintf(stderr,
+                    "error: incompatible stasis_graphics.dll (expected ABI %d)\n",
+                    STASIS_GRAPHICS_RUNTIME_ABI_VERSION);
+            FreeLibrary(lib);
+            return 1;
+        }
+        stasis_graphics_set_asset_root_fn set_graphics_asset_root =
+            (stasis_graphics_set_asset_root_fn)GetProcAddress(gfx, "stasis_set_asset_root");
+        const char *launcher_asset_root = getenv("STASIS_ASSET_ROOT");
+        if (!set_graphics_asset_root || !launcher_asset_root ||
+            !set_graphics_asset_root(launcher_asset_root))
+        {
+            fprintf(stderr, "error: stasis_graphics.dll rejected the launcher asset root\n");
+            FreeLibrary(lib);
+            return 1;
+        }
         init_window = (stasis_init_window_fn)GetProcAddress(gfx, "stasis_init_window");
         set_fullscreen = (stasis_set_fullscreen_fn)GetProcAddress(gfx, "stasis_set_fullscreen");
+        set_maximized = (stasis_set_maximized_fn)GetProcAddress(gfx, "stasis_set_maximized");
         set_window_size = (stasis_set_window_size_fn)GetProcAddress(gfx, "stasis_set_window_size");
         if (init_window)
         {
@@ -2044,6 +2214,8 @@ int main(int argc, char **argv)
         uint8_t *gfx_cmd_u8 = NULL;
 
         stasis_host_get_frame_fn host_get_frame = NULL;
+        stasis_host_set_performance_metrics_fn host_set_performance_metrics = NULL;
+        stasis_host_performance_metrics_enabled_fn host_performance_metrics_enabled = NULL;
         stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
         int32_t last_req_seq = host_req_seq ? *host_req_seq : 0;
 
@@ -2057,6 +2229,13 @@ int main(int argc, char **argv)
         if (gfx)
         {
             host_get_frame = (stasis_host_get_frame_fn)GetProcAddress(gfx, "stasis_host_get_frame");
+            host_set_performance_metrics = (stasis_host_set_performance_metrics_fn)GetProcAddress(
+                gfx,
+                "stasis_host_set_performance_metrics");
+            host_performance_metrics_enabled =
+                (stasis_host_performance_metrics_enabled_fn)GetProcAddress(
+                    gfx,
+                    "stasis_host_performance_metrics_enabled");
             gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
         }
 
@@ -2091,6 +2270,14 @@ int main(int argc, char **argv)
             else if ((flags & 2) != 0)
             {
                 (void)set_fullscreen(1);
+            }
+            else if ((flags & 4) != 0 && set_maximized)
+            {
+                if (set_window_size && host_req_window_w_px && host_req_window_h_px)
+                {
+                    set_window_size(*host_req_window_w_px, *host_req_window_h_px);
+                }
+                (void)set_maximized(1);
             }
         }
 
@@ -2418,12 +2605,32 @@ int main(int argc, char **argv)
                     {
                         (void)set_fullscreen(1);
                     }
+                    else if ((flags & 4) != 0 && set_maximized)
+                    {
+                        if (set_window_size && host_req_window_w_px && host_req_window_h_px)
+                        {
+                            set_window_size(*host_req_window_w_px, *host_req_window_h_px);
+                        }
+                        (void)set_maximized(1);
+                    }
                 }
 
                 int step_result = 0;
+                const int measure_hud = host_performance_metrics_enabled &&
+                    host_performance_metrics_enabled();
+                uint64_t tick_us = 0;
+                uint64_t render_us = 0;
                 if (tick)
                 {
+                    LARGE_INTEGER phase_started;
+                    LARGE_INTEGER phase_finished;
+                    if (measure_hud) QueryPerformanceCounter(&phase_started);
                     step_result = tick();
+                    if (measure_hud)
+                    {
+                        QueryPerformanceCounter(&phase_finished);
+                        tick_us = (uint64_t)((phase_finished.QuadPart - phase_started.QuadPart) * 1000000LL / freq.QuadPart);
+                    }
                     if (step_result != 0)
                     {
                         result = step_result == 1 ? 0 : step_result;
@@ -2433,7 +2640,15 @@ int main(int argc, char **argv)
 
                 if (render)
                 {
+                    LARGE_INTEGER phase_started;
+                    LARGE_INTEGER phase_finished;
+                    if (measure_hud) QueryPerformanceCounter(&phase_started);
                     step_result = render();
+                    if (measure_hud)
+                    {
+                        QueryPerformanceCounter(&phase_finished);
+                        render_us = (uint64_t)((phase_finished.QuadPart - phase_started.QuadPart) * 1000000LL / freq.QuadPart);
+                    }
                     if (step_result != 0)
                     {
                         result = step_result == 1 ? 0 : step_result;
@@ -2450,6 +2665,10 @@ int main(int argc, char **argv)
 
                 if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
                 {
+                    if (measure_hud && host_set_performance_metrics)
+                    {
+                        host_set_performance_metrics(tick_us, render_us);
+                    }
                     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
                 }
             }
@@ -2562,6 +2781,52 @@ int main(int argc, char **argv)
         fflush(stderr);
     }
 
+    const char *graphics_path = getenv("STASIS_RUNTIME_LIBRARY_PATH");
+    void *gfx_lib = NULL;
+    if (graphics_path && graphics_path[0])
+    {
+        gfx_lib = dlopen(graphics_path, RTLD_NOW | RTLD_GLOBAL);
+        if (!gfx_lib)
+        {
+            fprintf(stderr, "error: failed to load packaged graphics runtime %s: %s\n",
+                    graphics_path, dlerror());
+            return 1;
+        }
+        stasis_graphics_runtime_abi_version_fn graphics_abi =
+            (stasis_graphics_runtime_abi_version_fn)dlsym(gfx_lib, "stasis_graphics_runtime_abi_version");
+        if (!graphics_abi || graphics_abi() != STASIS_GRAPHICS_RUNTIME_ABI_VERSION)
+        {
+            fprintf(stderr, "error: incompatible packaged graphics runtime (expected ABI %d)\n",
+                    STASIS_GRAPHICS_RUNTIME_ABI_VERSION);
+            dlclose(gfx_lib);
+            return 1;
+        }
+        stasis_graphics_set_asset_root_fn set_graphics_asset_root =
+            (stasis_graphics_set_asset_root_fn)dlsym(gfx_lib, "stasis_set_asset_root");
+        const char *launcher_asset_root = getenv("STASIS_ASSET_ROOT");
+        if (!set_graphics_asset_root || !launcher_asset_root ||
+            !set_graphics_asset_root(launcher_asset_root))
+        {
+            fprintf(stderr, "error: packaged graphics runtime rejected the launcher asset root\n");
+            dlclose(gfx_lib);
+            return 1;
+        }
+        stasis_init_window_fn init_window =
+            (stasis_init_window_fn)dlsym(gfx_lib, "stasis_init_window");
+        stasis_set_fullscreen_fn set_fullscreen =
+            (stasis_set_fullscreen_fn)dlsym(gfx_lib, "stasis_set_fullscreen");
+        if (init_window)
+        {
+            const char *start_fs = getenv("STASIS_START_FULLSCREEN");
+            int want_fullscreen = (start_fs && strcmp(start_fs, "1") == 0) ? 1 : 0;
+            (void)init_window(640, 360, "Stasis");
+            if (want_fullscreen && set_fullscreen)
+            {
+                (void)set_fullscreen(1);
+            }
+        }
+    }
+
     void *lib = dlopen(dll_path, RTLD_NOW);
     if (!lib)
     {
@@ -2661,6 +2926,16 @@ int main(int argc, char **argv)
     }
     stasis_try_set_sys_args(lib, argc, argv);
 
+    /* Capture the guest request sequence before main(), matching Windows and JIT.
+       The initial pointer rebind below must not replace this baseline after main(). */
+    stasis_host_bulk_init_fn startup_host_bulk_init =
+        (stasis_host_bulk_init_fn)dlsym(gfx_lib, "stasis_host_bulk_init");
+    int32_t *startup_host_req_seq = (int32_t *)dlsym(lib, "host_req_seq");
+    if (startup_host_bulk_init)
+    {
+        startup_host_bulk_init(startup_host_req_seq);
+    }
+
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     if (runner_diag)
     {
@@ -2691,18 +2966,13 @@ int main(int argc, char **argv)
         stasis_host_get_frame_fn host_get_frame = NULL;
         stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
 
-        void *gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
+        if (!gfx_lib)
+        {
+            gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
+        }
         if (!gfx_lib)
         {
             gfx_lib = dlopen("stasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
-        }
-        if (!gfx_lib)
-        {
-            gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_NOLOAD);
-        }
-        if (!gfx_lib)
-        {
-            gfx_lib = dlopen("stasis_graphics.so", RTLD_NOW | RTLD_NOLOAD);
         }
         if (!gfx_lib)
         {
@@ -2743,7 +3013,8 @@ int main(int argc, char **argv)
             &gfx_cmd_i32,
             &gfx_cmd_f32,
             &gfx_cmd_u8,
-            &last_req_seq);
+            &last_req_seq,
+            0);
         if (!bulk_active)
         {
             fprintf(stderr, "error: stasis_runner requires HostFrame bulk globals for tick execution\n");
@@ -2980,7 +3251,8 @@ int main(int argc, char **argv)
                         &gfx_cmd_i32,
                         &gfx_cmd_f32,
                         &gfx_cmd_u8,
-                        &last_req_seq);
+                        &last_req_seq,
+                        1);
 
                     if (next_map_owned)
                     {
@@ -3016,7 +3288,8 @@ int main(int argc, char **argv)
                     &gfx_cmd_i32,
                     &gfx_cmd_f32,
                     &gfx_cmd_u8,
-                    &last_req_seq);
+                    &last_req_seq,
+                    1);
             }
 
             stasis_data_poll_all();

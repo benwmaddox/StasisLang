@@ -8,6 +8,13 @@ This is based on the current `main` codebase, not on a hypothetical redesign.
 
 ## Executive Summary
 
+Implementation status (2026-08-13): `stasis package --target web` emits a real Wasm guest and a
+static browser-host package. The web backend now covers scalar and
+structured-global fields, fixed collection memory, integer/float expressions, stable string
+handles, and the existing graphics command-buffer ABI. The browser host packages PNG/SVG/font and
+WAV/MP3 assets and implements Canvas and WebAudio. See `docs/web_packaging.md` for remaining compiler
+limits and acceptance fixtures.
+
 Stasis game code is already structurally close to a browser-friendly model:
 
 - gameplay state is explicit
@@ -38,11 +45,11 @@ The shortest credible path is not "port the Windows runner to the browser." The 
 These parts are already aligned with a browser-hosted model:
 
 - `README.md` describes the intended game loop as `main()`, then `tick()`, then `render()`.
-- `src/runtime/host_frame.stasis` defines a host-owned frame snapshot for time, window size, pointers, keyboard state, and quit state.
-- `src/runtime/host_window_request.stasis` defines guest-to-host window requests as globals.
-- `src/runtime/gfx_cmd.stasis` defines a fixed graphics command buffer ABI.
+- `src/stdlib/internal/host_frame.stasis` defines a host-owned frame snapshot for time, window size, pointers, keyboard state, and quit state.
+- `src/stdlib/internal/host_window_request.stasis` defines guest-to-host window requests as globals.
+- `src/stdlib/internal/gfx_cmd.stasis` defines the single fixed graphics command buffer ABI.
 - `src/stdlib/graphics.stasis` uses host snapshots for reads and command buffers for render output.
-- `src/runtime/host_input_snapshot.stasis` and `src/stdlib/input_snapshot.stasis` already move games toward a snapshot-based input model.
+- `src/stdlib/testing/input_testkit.stasis` provides test-only mutation of the host snapshot.
 
 This matters because browser-hosted games also want:
 
@@ -58,8 +65,8 @@ The current runtime and execution path are explicitly native:
 
 - `crates/stasis_dynload/src/lib.rs` loads `stasis_graphics.dll` with `LoadLibraryW` and resolves symbols with `GetProcAddress`.
 - many `stasis_dynload` host calls explicitly return "only supported on windows" outside Windows.
-- `runtime/CMakeLists.txt` builds `stasis_graphics` as a native SDL2/OpenGL library.
-- `runtime/README.md` documents a native SDL2/OpenGL runtime.
+- `runtime/CMakeLists.txt` builds `stasis_graphics` as a native SDL3/OpenGL library.
+- `runtime/README.md` documents a native SDL3/OpenGL runtime.
 - `apps/stasis/src/lib.rs` implements `play` as a native loop that:
   - loads the graphics runtime
   - JIT-compiles game code

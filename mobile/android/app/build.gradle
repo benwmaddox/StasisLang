@@ -3,27 +3,13 @@ plugins {
 }
 
 def repoRootDir = rootProject.projectDir.parentFile.parentFile
-def publishedAotDir = layout.buildDirectory.dir('generated/stasisAot/publishedArm64')
 def workshopAssetsDir = layout.buildDirectory.dir('generated/stasisAssets/workshop')
-def publishedGameName = (project.findProperty('stasis.publishedGame') ?: 'pong').toString()
-def publishedGameDescriptorFile = rootProject.file("games/${publishedGameName}.gradle")
-if (!publishedGameDescriptorFile.isFile()) {
-    throw new GradleException("Unknown Stasis published game descriptor: ${publishedGameName}")
-}
-apply from: publishedGameDescriptorFile
-def publishedGame = ext.stasisGameDescriptor
-def requiredGameFields = ['id', 'runtimeId', 'applicationId', 'label', 'projectDirectory', 'entrySource', 'assetManifest', 'testPattern']
-requiredGameFields.each { field ->
-    if (!publishedGame.containsKey(field) || publishedGame[field] == null || publishedGame[field].toString().isBlank()) {
-        throw new GradleException("Stasis published game descriptor is missing ${field}")
-    }
-}
-if (publishedGame.schemaVersion != 1 || !publishedGame.projectDirectory.isDirectory()
-        || !new File(publishedGame.projectDirectory, publishedGame.entrySource).isFile()
-        || !new File(publishedGame.projectDirectory, publishedGame.assetManifest).isFile()) {
-    throw new GradleException("Stasis published game descriptor is invalid: ${publishedGameName}")
-}
-
+def workshopRustBridgeManifestFile = file('src/workshop/jniLibs/stasis-rust-bridge.json')
+def allowDebugWorkshopRustBridge = (project.findProperty('stasis.allowDebugRustBridge') ?: 'false')
+        .toString().toBoolean()
+def renderAcceptance = (project.findProperty('stasis.renderAcceptance') ?: 'false')
+        .toString().toBoolean()
+def powershellExecutable = System.getProperty('os.name').toLowerCase().contains('windows') ? 'powershell' : 'pwsh'
 android {
     namespace 'com.stasislang.workshop'
     compileSdk = (project.findProperty('stasis.compileSdk') ?: '35').toString().toInteger()
@@ -34,14 +20,12 @@ android {
         targetSdk = (project.findProperty('stasis.targetSdk') ?: '35').toString().toInteger()
         versionCode 1
         versionName '0.1.0'
-
-        ndk {
-            abiFilters 'arm64-v8a'
-        }
+        buildConfigField 'boolean', 'STASIS_RENDER_ACCEPTANCE', renderAcceptance.toString()
 
         externalNativeBuild {
             cmake {
                 arguments '-DSTASIS_ANDROID_SMOKE_ONLY=ON'
+                arguments "-DSTASIS_RENDER_ACCEPTANCE=${renderAcceptance ? 'ON' : 'OFF'}"
             }
         }
     }
@@ -55,28 +39,10 @@ android {
         workshop {
             dimension 'mode'
             applicationId 'com.stasislang.workshop'
+            ndk {
+                abiFilters 'arm64-v8a', 'x86_64'
+            }
             manifestPlaceholders = [appLabel: 'Stasis Workshop']
-            buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'false'
-            buildConfigField 'String', 'STASIS_GAME_ID', '""'
-            buildConfigField 'String', 'STASIS_RUNTIME_ID', '""'
-            externalNativeBuild {
-                cmake {
-                    arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=OFF'
-                }
-            }
-        }
-        published {
-            dimension 'mode'
-            applicationId publishedGame.applicationId
-            manifestPlaceholders = [appLabel: publishedGame.label]
-            buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'true'
-            buildConfigField 'String', 'STASIS_GAME_ID', "\"${publishedGame.id}\""
-            buildConfigField 'String', 'STASIS_RUNTIME_ID', "\"${publishedGame.runtimeId}\""
-            externalNativeBuild {
-                cmake {
-                    arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=ON', "-DSTASIS_PUBLISHED_AOT_DIR=${projectDir}/build/generated/stasisAot/publishedArm64"
-                }
-            }
         }
     }
 
@@ -89,7 +55,6 @@ android {
     sourceSets {
         main.assets.setSrcDirs([])
         workshop.assets.setSrcDirs([workshopAssetsDir.get().asFile])
-        published.assets.setSrcDirs([publishedAotDir.map { it.dir('apk_assets') }.get().asFile])
     }
 }
 
@@ -107,26 +72,32 @@ tasks.register('prepareWorkshopAssets', Sync) {
         exclude 'workshop_sample/build/**'
         exclude 'exploration_sample/build/**'
     }
+    if (renderAcceptance) {
+        from(new File(repoRootDir, 'samples/render_parity')) {
+            exclude '*.stasis'
+            into 'render_parity_sample'
+        }
+        from(new File(repoRootDir, 'samples/render_parity')) {
+            include '*.stasis'
+            into 'render_parity_sample/src'
+        }
+    }
     into(workshopAssetsDir)
 }
 
-tasks.register('generatePublishedAotBundle', Exec) {
-    def outputDir = publishedAotDir.get().asFile
-    inputs.file(publishedGameDescriptorFile)
-    inputs.dir(publishedGame.projectDirectory)
-    outputs.dir(outputDir)
-    workingDir repoRootDir
-    commandLine 'cargo', 'run', '-p', 'stasis', '--', 'android-aot-bundle',
-            '--project-dir', publishedGame.projectDirectory.absolutePath,
-            '--entry-file', publishedGame.entrySource,
-            '--out-dir', outputDir.absolutePath
+tasks.register('verifyWorkshopRustBridge', Exec) {
+    inputs.file(workshopRustBridgeManifestFile)
+    inputs.files('src/workshop/jniLibs/arm64-v8a/libstasis_android_bridge.so',
+            'src/workshop/jniLibs/x86_64/libstasis_android_bridge.so')
+    def expectedProfile = allowDebugWorkshopRustBridge ? 'debug' : 'release'
+    commandLine powershellExecutable, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            rootProject.file('rust_bridge_provenance.ps1').absolutePath,
+            '-Mode', 'Verify', '-Profile', expectedProfile
 }
 
 tasks.configureEach { task ->
     if (task.name.startsWith('preWorkshop')) {
         task.dependsOn(tasks.named('prepareWorkshopAssets'))
-    }
-    if (task.name.startsWith('prePublished') || (task.name.startsWith('configureCMake') && task.name.contains('Published'))) {
-        task.dependsOn(tasks.named('generatePublishedAotBundle'))
+        task.dependsOn(tasks.named('verifyWorkshopRustBridge'))
     }
 }

@@ -4,6 +4,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[features]
+default = []
+network = ["dep:stasis_network"]
+
+[dependencies]
+stasis_network = { path = "../stasis_network", optional = true }
+
+[build-dependencies]
+cc = "1.2"
 

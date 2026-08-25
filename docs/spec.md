@@ -4,6 +4,7 @@ This document is the language-level specification for Stasis.
 It is aligned with:
 - `docs/live-compilation-prd.md`
 - `docs/build_checklist.md`
+- [`docs/deterministic_live_simulation_roadmap.md`](deterministic_live_simulation_roadmap.md) for the cross-cutting deterministic live simulation product promise and capability gates
 - `docs/spec_implementation_status.md` (spec section -> Rust implementation status table)
 - `docs/android_workshop_prd.md` for Android workshop product/editor requirements
 
@@ -19,7 +20,8 @@ Core direction:
 - Cranelift AOT for production builds.
 - File-level incremental compilation.
 - Symbol-level reachability pruning before lowering (functions + struct metadata).
-- Reachability roots: `main`, `tick`, `on_code_swap` (when present), and host-required exported entries.
+- Reachability roots: lifecycle entries present in the program (`main`, `tick`, `render`,
+  `on_code_swap`) and host-required exported entries.
 - Hot swap only between ticks.
 - Rust host/runtime with a Rust-implemented compiler pipeline.
 
@@ -87,10 +89,19 @@ String-like storage is fixed-layout and deterministic.
 Header access:
 - Header fields are accessed via built-in properties (e.g. `.max_length`, `.length`, `.char_length`), not by indexing into the header.
 - Negative indices are not allowed in source-level collection indexing.
+- Access outside a fixed array's declared `0..max_length` range is a fatal runtime error. Reads do
+  not synthesize a default value and writes are not silently ignored.
+- JIT host backing may be rebound between guest execution windows only when it remains at least as
+  large as the compiled fixed-array declaration. Layout changes invalidate dependent compiled
+  functions through the normal selective-generation contract before new bounds become active.
+- A compiler-proven index range may omit the runtime check. The fatal semantics remain the fallback
+  whenever the proof is absent.
 
 `Type[]` call-site compatibility:
 - A `Type[]` parameter is a view/reference type and may accept storage values with different fixed capacities (`Type[N]`, `Type[M]`, ...).
 - The storage header still carries `max_length` so bounds metadata remains available at runtime.
+- Reads of `.max_length` through a statically named fixed collection are compile-time constants. Views
+  retain runtime `.max_length` metadata because their capacity belongs to the referenced collection.
 
 `ascii[N]` layout:
 - header `byte_length: i32`
@@ -113,6 +124,12 @@ Rules:
 - Invalid updates that break these invariants are compile-time errors (when statically known) or runtime errors through checked runtime helpers.
 
 ### 4.3 Numeric Conversion Semantics
+
+Unsigned integers use exact fixed-width storage: `u8` is 1 byte, `u16` is 2 bytes, and
+`u32` is 4 bytes. Function parameters and returns use a zero-extended 32-bit ABI lane.
+Arithmetic in a declared unsigned target wraps modulo `2^N`; division, remainder, and
+ordering comparisons are unsigned. Integer literals assigned to an unsigned target must
+fit its range. `i32` remains signed two's-complement with signed division and remainder.
 
 Numeric conversion helpers use receiver-form methods in two categories:
 
@@ -144,6 +161,29 @@ let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
 let alpha: f32 = ticks_i32.to_f32();
 alpha /= 180.0;
 ```
+
+### 4.3.1 Deterministic Fixed-Point Intrinsics
+
+Strict cross-target gameplay math uses signed Q16.16 values carried in `i32`. The
+following compiler intrinsics emit integer Cranelift operations in both JIT and AOT:
+
+- `fixed32_from_i32(value)` converts an integer by shifting left 16 bits.
+- `fixed32_from_ratio(numerator, denominator)` creates a Q16.16 ratio.
+- `fixed32_mul(left, right)` multiplies two Q16.16 values.
+- `fixed32_div(left, right)` divides two Q16.16 values.
+- `fixed32_to_i32(value)` discards the fractional part.
+
+All division and conversion rounding is toward zero. Results wrap to the low 32 bits;
+division by zero traps. The representable range is `-32768.0` through
+`32767.9999847412109375`, in steps of `1 / 65536`. These rules are independent of host
+floating-point modes and are the strict deterministic numeric profile for replayable
+simulation.
+
+Ordinary `f32` and `f64`, including `sin_fast` and `cos_fast`, remain the
+platform-floating profile. JIT and AOT share lowering and are tested for same-target
+parity, but bit-identical results across CPU architectures are not claimed. Code that
+requires cross-architecture replay must keep simulation state transitions on integer or
+Q16.16 operations and may convert to floating point only at the presentation boundary.
 
 ### 4.4 Local Type Inference
 
@@ -445,6 +485,18 @@ Interpretation:
 Field access on a struct view:
 - If `index < 0` (AoS): compute `field_path_hash = hash_combine(base, "." + field_suffix)` and load/store the scalar field at that global path.
 - Otherwise (SoA): compute `field_hash = hash(field_suffix)` and load/store at `(base, field_hash, index)` in the SoA field arrays.
+- Lowering preserves statically known backing provenance through local aliases. A global or nested
+  singleton struct view emits only the AoS field path, while an indexed struct-array element emits
+  only the SoA field path. The runtime `index < 0` dispatch remains for parameters or other views
+  whose callers can supply either backing kind.
+- For indexed elements of a statically named global collection, lowering also preserves the
+  collection identity through local aliases. Field access can then use the collection's direct
+  storage slot instead of re-entering the hash-based runtime registry. Aliases of local collection
+  parameters retain the generic path because their concrete backing is supplied by the caller.
+- Creating an alias to an arbitrarily indexed element of a statically named fixed collection
+  performs the fatal bounds check once. Every field load or store through that unchanged alias
+  reuses the validated `{base, index, len}` provenance instead of repeating the check. A compiler-
+  proven index omits even the alias-creation check.
 
 Rationale:
 - This allows the same function signature to accept either a single global struct or an element view from a struct array.
@@ -477,6 +529,17 @@ enemy.damage(5);
 hero.damage(5);
 ```
 
+The receiver may be any global-backed struct view, including nested fields and
+indexed elements:
+
+```stasis
+state.ui.aura.draw(24.0, 36.0, 255, 0);
+state.enemies[i].damage(5);
+```
+
+Entry files should normally group application-owned mutable state beneath one
+root global. Fixed host ABI globals are an explicit exception.
+
 Function form remains supported indefinitely:
 
 ```stasis
@@ -486,7 +549,9 @@ damage(enemy, 5);
 ### 7.4 Arity Rule
 
 Arity overloading is not supported.
-If declarations share a function name, they must use the same parameter count.
+If declarations share a function name and parameter 0 type, they must use the same parameter count.
+
+Receiver-scoped declarations with different parameter 0 types may use their natural different arities. Resolution selects compatible candidates using the full argument count and types, including the receiver type.
 
 ### 7.5 Struct and Array Returns
 
@@ -496,6 +561,58 @@ Stasis treats these as strongly typed references/views, not implicit by-value co
 - Struct/array returns must reference global-backed storage (for example a global struct field/element path).
 - Struct-typed temporaries are not materialized as standalone local value objects in Stasis.
 
+### 7.6 Compiled Call Generations
+
+Within one compiled JIT or AOT generation, every resolved Stasis-to-Stasis call is a direct call to
+the callee in that generation. This includes recursion and mutually recursive functions. Runtime
+lookup by function ID is not part of Stasis call semantics.
+
+Only lifecycle and host-required exports cross the host boundary. Their signatures are stable ABI
+contracts. Ordinary internal functions may be added, removed, renamed, or change signature during
+a live edit because the compiler rebuilds every reachable caller in the same candidate generation.
+The host must not retain any compiled entry address after the execution window that resolved it.
+
+### 7.7 Opt-in effect contracts
+
+`@effects(...)` is an optional compile-time assertion on a function boundary. It follows the
+existing function-attribute grammar:
+
+```stasis
+function @effects(state) tick(): i32 { update_game(); return 0; }
+function @effects(graphics) render(): i32 { draw_game(); return 0; }
+```
+
+Unannotated functions remain valid. Helpers called from an annotated boundary do not need their own
+annotations: the contract covers the complete resolved call tree, including imported and receiver-
+form calls, overloads, recursion, and mutually recursive groups. Reads and local mutation are always
+allowed. Successful compilation adds no runtime check.
+
+Named regions are literal global paths. `state` permits writes anywhere below the global named
+`state`; `state.enemies` permits assignment of that collection, its length and element storage, and
+nested element fields, while rejecting writes to `state.player` or another global. Multiple regions
+compose. Indexed and wildcard contracts such as `state.enemies[0]` and `state.enemies[*]` are invalid
+because the named collection region already covers every element.
+
+Host capabilities are `graphics`, `audio`, `storage`, `network`, `nondeterministic`, `platform`,
+`memory`, and `code_swap`. Standard-library extern declarations provide authoritative capability
+metadata. An extern without metadata is `unknown` and is rejected beneath every restricted
+boundary. `graphics` includes writes to the compiler-owned graphics command buffers, and `platform`
+includes writes to the compiler-owned window-request mailbox; neither capability permits an
+application global with the same name. Parameter-relative writes are substituted at each resolved call
+site; if the compiler cannot prove their global root, a restricted boundary rejects them.
+
+Diagnostics identify the annotated boundary, rejected path or host capability, originating host
+operation when applicable, and a causal function chain. Contract-only edits revalidate the existing
+summary without changing runtime function identity or forcing code generation. Resolved-call, alias,
+extern-metadata, and reachable-callee changes invalidate the aggregate before validation. JIT
+candidates are checked before publication, so rejection leaves the prior generation active; JIT
+and AOT use the same check.
+
+`on_code_swap` is unannotated by default because migration policy is application-specific. When it
+is annotated, it must explicitly name every state region and the `code_swap` capability needed to
+restore invariants or call `reject_code_swap`. A future read-only refinement may narrow reads, but
+reads require no annotation in this version.
+
 ## 8. Enums
 
 Enums are named types that lower to integer values.
@@ -504,12 +621,13 @@ Enums are named types that lower to integer values.
 enum State {
     Idle,
     Jump,
-    Run
+    Run,
 }
 ```
 
 Rules:
 - Members default to sequential values from `0`.
+- Members are separated by commas. The final comma is optional.
 - Enum members can be explicitly assigned integer constants.
 - Enum comparisons and assignments must be type-correct.
 - Enum underlying type is `i32`.
@@ -531,10 +649,15 @@ Import syntax:
 
 ```stasis
 import "relative/path/to/file.stasis";
+import "/project/root/path/to/file.stasis";
 ```
 
 Rules:
 - Imports are resolved relative to the importing file.
+- Imports beginning with `/` are resolved from the project root. The leading slash is project-root
+  syntax, not an operating-system absolute path.
+- Project-root imports may not contain empty, `.` or `..` path components and remain confined to
+  the project root.
 - Imported files are included once.
 - Import graphs are compilation graph edges, not textual expansion.
 - Import cycles are hard errors.
@@ -563,6 +686,39 @@ Rules:
 - directory mode: discover tests in all `.stasis` files in the target directory (including root)
 - Tests run in deterministic sorted natural path order (numeric path segments compare numerically, not lexicographically).
 - Tests may call extern/runtime functions.
+
+### 10.1 Headless Scenario Tests
+
+Tooling may run schema-versioned scenario files beside language-level tests. A scenario uses the
+normal JIT compiler and lifecycle entries; it is not a second language execution path.
+
+Rules:
+- `main()` establishes fresh state, then an optional saved-state map is applied.
+- A bounded runtime snapshot is restored before each explicit property seed.
+- `tick()` runs an exact bounded count without wall-clock pacing and without calling `render()`.
+- Typed invariants are checked after every tick.
+- Replay hashes cover compiler-owned simulation scalars and collections in deterministic path
+  order with exact numeric bits.
+- Host input snapshots, host request mailboxes, and graphics/audio command buffers are outside the
+  simulation hash and cannot mutate gameplay state through the headless host.
+- Failure evidence records the scenario, seed, tick, reason, and observed hashes.
+- Cross-architecture hash claims require integer or Q16.16 simulation state; ordinary floating
+  point remains the platform-floating profile defined in section 4.3.1.
+
+### 10.2 Runtime Record/Replay
+
+The development runtime supports schema-versioned replay sessions through the normal graphical
+JIT lifecycle. Recording begins after `main()` and captures a sparse initial simulation snapshot:
+only compiler-owned scalar and collection locations whose exact bits differ from the type default
+are stored. Every completed tick records only exact-bit HostFrame changes from the prior full
+snapshot and one simulation-state hash after `tick()` and `render()`.
+
+Playback reconstructs the complete HostFrame by applying those changes in tick order, publishes it
+before `tick()`, then runs `tick()` and `render()` normally. It never applies recorded gameplay
+state per tick. The post-render hash must match or playback fails at the first divergent tick.
+Graphics output and host/presentation buffers are excluded. Source, layout, toolchain release,
+target, and HostFrame identities must match; live code, data, or asset reloads abort the session.
+Ordinary floating-point replay retains the same-target profile from section 4.3.1.
 
 ## 11. Memory Model
 
@@ -656,11 +812,15 @@ function draw_debug_ui(): void {
 
 ## 14. Incremental Compilation and Hot Swap
 
+The compiler/runtime ownership, generation state machine, platform matrix, and performance gates are
+defined in `docs/jit_generation_contract.md`.
+
 ### 14.1 Granularity
 
 - Invalidation unit: file
 - Correctness unit: file
-- Emission unit: function
+- Analysis/cache unit: function
+- Publication unit: one validated selective patch through stable host-entry trampolines
 
 ### 14.2 Hashes
 
@@ -668,35 +828,139 @@ function draw_debug_ui(): void {
 - `fnBodyHash`: behavior
 
 Rules:
-- Unchanged `fnBodyHash` can reuse generated machine code.
-- Layout-affecting changes force conservative rebuild for changed file.
+- Unchanged `fnBodyHash` can reuse target-independent analysis or lowering inputs.
+- Unchanged reachable JIT functions may retain their accepted machine code and addresses.
+- Layout-affecting changes invalidate functions whose lowered storage facts changed and their
+  reverse direct callers.
 
 ### 14.3 Two-Phase Swap
 
 1. Background compile:
 - Re-lex, parse, index, and semantic-check changed file.
 - Compute per-function semantic hashes.
-- Compile changed functions.
+- Resolve the complete lifecycle/host-export root set and canonical call/type graph.
+- Finalize the changed function/SCC plus exact reverse direct callers into a `PendingPatch` off the
+  runtime thread.
 2. Commit between ticks:
-- Run `on_code_swap()` if present.
-- Atomically update function pointer table.
-- Retire previous code generation.
+- Wait until the current generation's `tick()` and following `render()` have both returned.
+- Revalidate that the candidate is the newest requested revision and its host-export ABI is
+  compatible.
+- Create isolated candidate storage and migrate compatible struct/global fields.
+- Run the candidate `on_code_swap()` against candidate storage if present.
+- Complete every fallible preflight, then atomically replace one immutable host-entry table.
+- Retain superseded JIT code until process restart; automatic retirement is not required.
 
 Swap is rejected if:
 - Global layout changes and state-map migration is missing or incompatible.
-- Signature compatibility changes.
+- A required host-export signature changes.
 - `on_code_swap()` fails.
+- The candidate is cancelled or superseded.
+- The target cannot provide atomic host-entry-table publication.
 
 Current policy (pre-1.0):
-- Layout-hash changes are rejected deterministically with a `restart required` error.
-- Automatic blob state migration (`state-map` old->new layout copy) is planned but not yet implemented.
+- Layout-affecting semantic edits produce a versioned preview and require explicit apply.
+- The preview reports the complete candidate patch, state-layout compatibility, struct or
+  whole-state scope, migration steps, capacity-shrink warnings, and estimated commit cost.
+- Apply regenerates the preview; any preview/commit mismatch rejects the swap.
 
 On rejection, old code and old data remain active.
 
 Current migration policy (pre-1.0):
-- Layout hash changes can commit only when both active and incoming builds provide deterministic state-map metadata.
-- Migration compatibility is path-based: overlapping paths must keep compatible type shape; added/removed paths are allowed.
-- Incompatible or missing state-map metadata fails commit deterministically with actionable `restart required` diagnostics.
+- JIT and AOT derive layout identity from the same canonical compiler-owned state-layout model; source text and function bodies are not layout identity inputs.
+- Development JIT compilation produces a selective staged runtime patch and never activates
+  code, literals, collection headers, or state from the compiler thread.
+- Every JIT entry point uses the same migration planner and bounded transactional activation at the runtime safe point. There is no scalar-only runner migration path.
+- Layout-changing commits without a staged JIT candidate, including current AOT runtime swaps, reject with a restart-required diagnostic.
+- Migration compatibility is path-based: overlapping paths must keep compatible scalar or collection-element type shape.
+- Compatible scalar and fixed-collection fields are copied; new fields are initialized to their type default; removed fields are discarded with an explicit preview warning.
+- Fixed-collection growth is storage-ownership preflighted and bounded before allocation, preserves the old prefix, and initializes the expanded tail.
+- Shrink copies the retained prefix, warns about the discarded range, and clamps logical lengths; UTF-8 shrink retains the largest valid code-point prefix and recomputes byte and character counts.
+- Incompatible or missing state metadata fails deterministically with an actionable diagnostic.
+- Migration or `on_code_swap` failure destroys isolated candidate state; the old active entries
+  was never mutated. Partial publication is forbidden.
+
+The migration transaction is a code-swap operation, not a gameplay transaction. Ordinary calls to
+`tick()` do not commit pools, normalize gameplay state, or invoke migration lifecycle functions.
+When a compiled candidate changes a struct or global layout, the host waits until the current
+`tick()` and `render()` have both returned. At that between-ticks safe point it snapshots the active
+state into isolated candidate storage, copies compatible fields, initializes new fields, runs
+`on_code_swap()` if present, and atomically publishes the one complete candidate generation. The
+next `tick()` is the first gameplay call allowed to observe the new generation.
+
+There is one visibility rule: a tick and its following render use one code/layout generation. A
+failed migration or swap hook destroys the isolated candidate while the old active generation
+remains unchanged; no
+candidate field, storage binding, export, or partial value may be visible to the next
+tick. The executable fixtures under `samples/between_tick_layout_migration/` cover accepted and
+rejected struct growth across this boundary.
+
+### 14.3.1 State memory and development inspection
+
+The canonical compiler state layout also owns development memory reporting and live inspection.
+JIT and AOT must describe the same scalar bindings, SoA collection lanes, struct paths, field
+types, capacities, and opaque exclusions. `stasis inspect` derives capacity bytes, scalar/lane
+alignment, zero intra-allocation padding, struct/field rollups, snapshot size, largest pools,
+recognized command buffers, capacity-change projections, and mobile snapshot warnings from that
+metadata. A report must label the direct-binding storage model and must not imply an AoS packed
+layout when runtime storage is SoA.
+
+The development runtime may read those compiler-indexed bindings at between-tick observation
+points. It supports scalar paths, fixed indexes, bounded collection predicates, and scalar
+arithmetic/comparisons. Predicate scans and returned matches are bounded and report truncation.
+Invalid paths, fields, indexes, types, operators, and expressions fail deterministically. This is
+metadata-guided inspection, not general reflection: it exposes no arbitrary memory, lexical stack,
+host object, call expression, or release-runtime evaluator. Change-only watches evaluate the same
+query contract between ticks.
+
+`samples/state_inspection/` is the representative executable fixture for static reporting, state
+tree browsing, indexed/predicate expressions, and change-only watches.
+
+### 14.3.2 Bounded cost, tick budget, and layout reporting
+
+`stasis inspect` exposes schema-versioned structural cost evidence from the same reachable
+statement artifacts and state layout used by lowering. Each function reports bounded loops,
+zero-based nesting depth, the maximum nested iteration product, conservative field visits and bytes
+scanned across enclosing loop boundaries, pools iterated, and reachable host-call names. An unknown loop bound remains explicit and makes the
+function's structural bound incomplete; the compiler must not replace it with a guessed value.
+
+`function @tick_budget_us(N) tick(): i32` declares a positive runtime budget in microseconds.
+The annotation is valid only on `tick`, and duplicates or malformed values fail deterministically.
+The development play loop keeps at most 4096 recent samples, reports whole-run average and overrun
+count, and calculates p99 from the bounded recent window. Measured wall-clock time is diagnostic
+evidence only and is kept separate from compile-time iteration and byte bounds.
+
+Collection layout reports make the compiler's active `soa` choice explicit. They also calculate an
+`aos` choice with stride, per-element padding, total bytes, the active singleton field groups, and
+the corresponding whole-record AoS group. The recommendation and reason fields expose the
+compiler-visible choice without silently changing lowering. `aos_candidate` means the cost model
+found a plausible alternative that still requires an explicit future lowering slice; it never
+claims the current runtime is AoS. This avoids treating SoA as universally optimal while preserving
+the current truthful runtime storage contract.
+
+Mobile estimates report exact Android-arm64 AOT object bytes, exact literal bytes, projected state
+and command-buffer capacity, a peak-state recommendation, and a visibly labeled package estimate.
+The package estimate is game payload plus a 512 KiB SDL runtime-shell allowance; it is not a claim
+about final signed APK/IPA compression or store metadata.
+
+`samples/bounded_performance/` is the representative executable fixture. Its 32 by 16 nested scan,
+mixed-width particle fields, capacity, host call, and tick budget provide deterministic acceptance
+evidence for the report.
+
+### 14.3.3 Inline function hint
+
+`function @inline helper(...): T` asks the shared AOT/JIT lowering path to substitute the helper's
+body at eligible call sites. The annotation is a performance hint rather than a different function
+kind: the compiler still emits the real typed function symbol so ordinary calls, recursive edges,
+exports, and future address-taking remain valid. Current eligibility covers a single returned
+expression whose arguments can be substituted without duplicating or reordering calls. Other body
+shapes retain the ordinary direct call. Calls into a same-name, same-arity overload family also
+retain direct calls until typed overload selection, so an inline hint can never preempt the typed
+callee chosen by the backend.
+
+Inlining never weakens live-update correctness. The annotated bit participates in the lowering
+contract, and an edited inline callee invalidates its reverse caller closure before a JIT patch is
+published. Recursive expansion is rejected at the call site and continues through the real
+function.
 
 ### 14.4 Development File-Change Boundary Contracts
 
@@ -704,22 +968,33 @@ During development, file-change handling uses explicit role ownership and messag
 
 Role ownership:
 - Runtime/main thread owns tick loop, safe-point gating, and final commit.
-- Compiler service thread owns lex/parse/index/semantic/hash and patch assembly.
-- Codegen service owns backend emission (JIT for dev, AOT for prod artifacts).
-- Swap coordinator owns transactional all-or-nothing commit orchestration.
+- Compiler service thread owns an immutable source snapshot, lex/parse/index/semantic/hash,
+  reachability, and complete candidate assembly.
+- Codegen service owns shared direct-call backend emission and complete module finalization (JIT for
+  dev, AOT for prod artifacts).
+- Swap coordinator owns request ordering, supersession, and transactional all-or-nothing commit
+  orchestration.
 
 Required high-level message contracts:
 - `FileChangeEvent(path, revision, text_source, change_kind)`
-- `CompileRequest(request_id, changed_files[], target_mode)`
-- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?, state_map?)`
-- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol, state_map?)`
-- `SwapCommitResult(request_id, status, swapped_fn_ids[], new_generation, error)`
+- `BuildGeneration(request_id, revision, source_snapshot_id, target, host_set, active_contract)`
+- `BuildFinished(request_id, revision, status, diagnostics[], pending_generation?)`
+- `CommitGeneration(request_id, pending_generation)`
+- `CommitFinished(request_id, status, active_generation_number?, diagnostic?)`
+- `CancelBuild(request_id, superseded_by_request_id)`
 
 Rules:
 - Compiler/codegen services must not mutate runtime game state directly.
 - Runtime must not execute parser/semantic/codegen work on tick path.
 - Commit may occur only between ticks and must be all-or-nothing.
 - Any failure at compile or commit stage preserves old code and old data.
+- An execution window owns one immutable generation reference from before `tick()` until after its
+  following `render()` returns.
+- Candidates superseded before hook entry never run `on_code_swap()`. If supersession arrives while
+  a synchronous hook is already running, the hook may finish only to unwind; all isolated effects
+  are discarded and that candidate never publishes.
+- Guest fibers, suspended frames, threads, or retained host callback/code pointers are unsupported
+  and must fail deterministically.
 
 ## 15. Swap Hook
 
@@ -732,10 +1007,14 @@ function on_code_swap(): void {
 ```
 
 Rules:
-- Runs once per successful swap attempt.
+- Runs at most once after a candidate enters hook execution; the attempt may later reject, trap, or
+  become superseded.
+- Runs exactly once for every successfully published candidate that defines the hook.
 - Runs between ticks.
 - Runs before new code executes.
-- May mutate global data.
+- May mutate only isolated candidate global data.
+- May call `reject_code_swap()` to abort; the runtime destroys the candidate, and the old active
+  code/state remain unchanged.
 - Must not invoke gameplay entrypoints.
 
 ## 16. Diagnostics
@@ -766,8 +1045,47 @@ Rules:
 - Language semantics remain spec-driven from this document; compiler behavior must conform to it.
 - Tick-path runtime must remain free of parser/semantic/codegen work.
 
+### 17.2 Realtime Networking Contract
+
+Realtime control networking is a Rust host contract exposed to Stasis guests
+through the `realtime_controls.stasis` wrapper and stable native
+`stasis_realtime_*` ABI. `stasis_network::realtime` validates bounded simulation,
+presentation, control-sampling, and future-delay rates; carries fixed-size
+versioned control transitions through the existing production network message
+envelope; and applies persistent per-seat state at exact authoritative ticks.
+Submission and tick advancement are separate operations. `advance_tick`
+advances one tick without waiting for packets or fails without mutation when
+tick space is exhausted. Held controls persist, neutral
+release is an ordinary transition, and duplicate/reordered/stale/conflicting,
+late, too-far, malformed, and full cases have deterministic outcomes. Pending
+conflicts quarantine the shared seat/sequence identity, making opposite
+arrival orders converge; post-application conflicts are late/stale and never
+rewrite history.
+
+Disconnect, reconnect, pause, focus loss, snapshot recovery, and rematch have
+explicit neutral/reset behavior, per-seat connection epochs, and monotonic
+snapshot revisions. Host-authoritative sessions correct clients from snapshots.
+Deterministic-peer sessions require identical validated
+contracts, stable transition ordering, and matching replay hashes. Replays
+contain accepted scheduled transitions, quarantine decisions, simulation ticks,
+and exactly one caller-supplied authoritative hash per tick. Hashes are
+attached only by tick-qualified immediate completion; overflow makes a log
+incomplete while simulation continues. Rendering/interpolation remains
+presentation-only and cannot mutate simulation state. Deterministic peers must
+recover loss before due; host-authoritative clients use snapshot correction
+after due. Existing turn-based command networking is unchanged and does not
+use this API.
+
+The stable guest ABI exposes bounded RTC1 construction/submission, scalar-array
+snapshot correction, hash attachment, resync inspection, lifecycle operations,
+and completed-control reads. Rust retains replay callbacks and snapshot game
+tokens. Because Stasis integers are signed 32-bit values, guest-driven tick and
+epoch domains stop at `i32::MAX` without partial mutation; the Rust-only contract
+retains its wider internal tick domain. RTC1 buffers and snapshot arrays are
+capacity-checked at the JIT boundary, and authoritative hashes use two unsigned
+32-bit lanes so the guest ABI retains the complete 64-bit value.
+
 ## 18. Status Note
 
 This document defines the current direction.
 Legacy bootstrap/tooling details from prior repository generations are intentionally excluded.
-

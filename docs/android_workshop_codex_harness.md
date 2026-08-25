@@ -86,6 +86,12 @@ The current first slice provides:
 
 ## Workshop tool harness
 
+The provider-neutral agent loop, turn limits, and Workshop tool-name catalog live in the shared
+Rust `stasis_ai` crate. The Android Codex native build copies that crate beside its pinned upstream
+Codex wrapper and exports the versioned contract to Java. Android retains its platform-specific
+tool handlers, queue, foreground-service lifecycle, image tools, and richer descriptions; the
+desktop TUI uses the same Rust contract with the smaller set supported by the live protocol.
+
 The agent turn layer should expose only controlled Workshop operations, not a
 general Android shell:
 
@@ -102,10 +108,17 @@ should adapt those handlers at the tool-call boundary instead of duplicating
 their behavior.
 
 The initial cached request includes a source-free `project_symbol_index` with
-kind, name, owner, file, and signature. It is bounded
-to 256 symbols and 16 KiB, reports truncation, and lets straightforward prompts
-read the likely target directly instead of spending the first turn on
-`list_symbols`. Full source remains opt-in through `read_symbol`.
+kind, name, owner, file, and signature for `src/main.stasis` plus its direct
+imports. It is bounded to 40 symbols and 16 KiB, includes a direct-import map,
+reports truncation, and lets straightforward prompts read the likely targets
+directly instead of spending the first turn on `list_symbols`. Filtered
+`list_symbols` calls can expand to up to 16 explicit files. Full source remains
+opt-in through `read_symbol`.
+
+`find_references` uses the compiler-owned Stasis index to return compact
+definition/read/write/call locations without source bodies or source hashes.
+The agent batches reference lookups and deliberate source reads for related
+update, movement, collision, and render candidates before a behavior edit.
 
 The same cached section includes compact `stasis_basics` covering typed function
 arguments and returns, struct fields, persistent `global instance: StructType`
@@ -173,9 +186,10 @@ embedding values from an earlier task. Game geometry guidance also treats
 stored positions, rendered rectangles, half extents, collision bounds, wall
 bounds, and offscreen transitions as one contract on both host and Android.
 
-Both the Android Workshop and host comparison harness allow up to 25 model
-turns per queued AI request. The separate safety cap remains 12 tool calls in
-one model response.
+Both the Android Workshop and host comparison harness allow up to 15 model
+turns per queued AI request. A response may batch up to 50 deliberate tool
+calls, allowing a related source working set to be read without extra provider
+round trips.
 
 Android Workshop now places a verification gate between tested provisional
 writes and application. Queue phases persist `editing`, `compiling`, `generated
@@ -191,8 +205,9 @@ The project transaction includes all `.stasis` source and test files. It is
 persisted app-private against the active queue item, restored on cancellation
 or failure, and restored before an interrupted queue item is marked failed on
 restart. Successful write observations are reduced to identity, character
-count, SHA-256, and results before a follow-up call; failed attempts retain
-their complete source for repair.
+count, and results before a follow-up call; failed attempts retain their
+complete source for repair. Source hashes remain confined to compiler-owned
+stale-write safety.
 
 The first phone-native acceptance run used the shared 20-pixel Pong ball
 request. The generated-test audit passed, the first independent temporary test

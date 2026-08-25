@@ -1,7 +1,9 @@
 #include "stasis_mobile_runtime.h"
 #include "stasis_mobile_aot_runtime.h"
+#include "stasis_render_contract.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Implemented by the SDL-only stasis_graphics.c linked into the mobile core. */
@@ -9,8 +11,6 @@ int stasis_init_window(int width, int height, const char *title);
 int stasis_should_quit(void);
 int stasis_mobile_poll_events(void);
 void stasis_mobile_set_paused(int paused);
-void stasis_begin_frame(void);
-void stasis_end_frame(void);
 void stasis_host_get_frame(int32_t *out_i32, float *out_f32);
 void stasis_host_bulk_apply_requests(
     const int32_t *seq,
@@ -19,26 +19,27 @@ void stasis_host_bulk_apply_requests(
     const int32_t *height
 );
 void stasis_gfx_submit_u8(
-    const int32_t *cmd_i32,
+    int32_t *cmd_i32,
     const float *cmd_f32,
     const uint8_t *cmd_u8
 );
+uint64_t stasis_host_performance_counter(void);
+uint64_t stasis_host_performance_elapsed_us(uint64_t started, uint64_t finished);
+void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us);
+int stasis_host_performance_metrics_enabled(void);
 void stasis_shutdown(void);
 
-static int32_t host_i32[768];
-static float host_f32[64];
-static int32_t gfx_cmd_i32[34848];
-static float gfx_cmd_f32[92292];
-static uint8_t gfx_cmd_u8[65536];
-static int32_t host_req_seq;
-static int32_t host_req_flags;
-static int32_t host_req_window_w_px;
-static int32_t host_req_window_h_px;
+static int32_t *host_i32;
+static float *host_f32;
+static int32_t *gfx_cmd_i32;
+static float *gfx_cmd_f32;
+static uint8_t *gfx_cmd_u8;
 
 typedef struct StasisMobileRuntimeState {
     StasisMobileGameEntries entries;
     int initialized;
     int paused;
+    int32_t last_entry_result;
 } StasisMobileRuntimeState;
 
 static StasisMobileRuntimeState runtime_state;
@@ -52,27 +53,37 @@ static int32_t hash_global_path(const char *path) {
     return (int32_t)hash;
 }
 
-static void bind_host_globals(void) {
-    memset(host_i32, 0, sizeof(host_i32));
-    memset(host_f32, 0, sizeof(host_f32));
-    memset(gfx_cmd_i32, 0, sizeof(gfx_cmd_i32));
-    memset(gfx_cmd_f32, 0, sizeof(gfx_cmd_f32));
-    memset(gfx_cmd_u8, 0, sizeof(gfx_cmd_u8));
-    host_req_seq = 0;
-    host_req_flags = 0;
-    host_req_window_w_px = 0;
-    host_req_window_h_px = 0;
-    stasis_jit_register_global_i32_array(hash_global_path("host_i32"), 0, host_i32, 768);
-    stasis_jit_register_global_f32_array(hash_global_path("host_f32"), 0, host_f32, 64);
-    stasis_jit_register_global_i32_array(hash_global_path("gfx_cmd_i32"), 0, gfx_cmd_i32, 34848);
-    stasis_jit_register_global_f32_array(hash_global_path("gfx_cmd_f32"), 0, gfx_cmd_f32, 92292);
-    stasis_jit_register_global_u8_array(hash_global_path("gfx_cmd_u8"), 0, gfx_cmd_u8, 65536);
-    stasis_jit_register_global_i32_ptr(hash_global_path("host_req_seq"), &host_req_seq);
-    stasis_jit_register_global_i32_ptr(hash_global_path("host_req_flags"), &host_req_flags);
-    stasis_jit_register_global_i32_ptr(
-        hash_global_path("host_req_window_w_px"), &host_req_window_w_px);
-    stasis_jit_register_global_i32_ptr(
-        hash_global_path("host_req_window_h_px"), &host_req_window_h_px);
+static int bind_guest_globals(void) {
+    host_i32 = stasis_jit_global_i32_array_ptr(hash_global_path("host_i32"), 0, 768);
+    host_f32 = stasis_jit_global_f32_array_ptr(hash_global_path("host_f32"), 0, 64);
+    gfx_cmd_i32 = stasis_jit_global_i32_array_ptr(
+        hash_global_path("gfx_cmd_i32"), 0, STASIS_RENDER_I32_COUNT);
+    gfx_cmd_f32 = stasis_jit_global_f32_array_ptr(
+        hash_global_path("gfx_cmd_f32"), 0, STASIS_RENDER_F32_COUNT);
+    gfx_cmd_u8 = stasis_jit_global_u8_array_ptr(
+        hash_global_path("gfx_cmd_u8"), 0, STASIS_RENDER_U8_COUNT);
+    if (host_i32 == NULL || host_f32 == NULL || gfx_cmd_i32 == NULL ||
+        gfx_cmd_f32 == NULL || gfx_cmd_u8 == NULL) {
+        fprintf(stderr,
+            "Stasis mobile runtime could not bind guest buffers: host_i32=%p host_f32=%p gfx_cmd_i32=%p gfx_cmd_f32=%p gfx_cmd_u8=%p\n",
+            (void *)host_i32, (void *)host_f32, (void *)gfx_cmd_i32,
+            (void *)gfx_cmd_f32, (void *)gfx_cmd_u8);
+        return 0;
+    }
+    memset(host_i32, 0, 768 * sizeof(*host_i32));
+    memset(host_f32, 0, 64 * sizeof(*host_f32));
+    memset(gfx_cmd_i32, 0, STASIS_RENDER_I32_COUNT * sizeof(*gfx_cmd_i32));
+    memset(gfx_cmd_f32, 0, STASIS_RENDER_F32_COUNT * sizeof(*gfx_cmd_f32));
+    memset(gfx_cmd_u8, 0, STASIS_RENDER_U8_COUNT * sizeof(*gfx_cmd_u8));
+    return 1;
+}
+
+static void apply_guest_host_requests(void) {
+    int32_t seq = stasis_jit_global_i32_load(hash_global_path("host_req_seq"));
+    int32_t flags = stasis_jit_global_i32_load(hash_global_path("host_req_flags"));
+    int32_t width = stasis_jit_global_i32_load(hash_global_path("host_req_window_w_px"));
+    int32_t height = stasis_jit_global_i32_load(hash_global_path("host_req_window_h_px"));
+    stasis_host_bulk_apply_requests(&seq, &flags, &width, &height);
 }
 
 static int entries_are_valid(const StasisMobileGameEntries *entries) {
@@ -103,20 +114,29 @@ int32_t stasis_mobile_runtime_initialize(
     runtime_state.initialized = 1;
     runtime_state.paused = 0;
     runtime_state.entries.bind_runtime_entry();
-    bind_host_globals();
-    stasis_host_bulk_apply_requests(
-        &host_req_seq,
-        &host_req_flags,
-        &host_req_window_w_px,
-        &host_req_window_h_px
-    );
-    runtime_state.entries.main_entry();
-    stasis_host_bulk_apply_requests(
-        &host_req_seq,
-        &host_req_flags,
-        &host_req_window_w_px,
-        &host_req_window_h_px
-    );
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_mobile_network_start_from_asset_root() < 0) {
+        stasis_shutdown();
+        stasis_mobile_aot_reset();
+        runtime_state = (StasisMobileRuntimeState){0};
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
+#endif
+    if (!bind_guest_globals()) {
+        stasis_mobile_network_stop();
+        stasis_shutdown();
+        stasis_mobile_aot_reset();
+        runtime_state = (StasisMobileRuntimeState){0};
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
+    apply_guest_host_requests();
+    runtime_state.last_entry_result = runtime_state.entries.main_entry();
+    apply_guest_host_requests();
+    if (runtime_state.last_entry_result != 0) {
+        fprintf(stderr, "Stasis mobile main entry requested stop with code %d\n",
+            runtime_state.last_entry_result);
+        return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
+    }
     return STASIS_MOBILE_RUNTIME_OK;
 }
 
@@ -130,21 +150,38 @@ int32_t stasis_mobile_runtime_step(void) {
             : STASIS_MOBILE_RUNTIME_OK;
     }
     if (stasis_should_quit()) {
+        fprintf(stderr, "Stasis mobile runtime received a quit event before the frame\n");
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
 
     stasis_host_get_frame(host_i32, host_f32);
-    stasis_host_bulk_apply_requests(
-        &host_req_seq,
-        &host_req_flags,
-        &host_req_window_w_px,
-        &host_req_window_h_px
-    );
-    runtime_state.entries.tick_entry();
-    stasis_begin_frame();
-    runtime_state.entries.render_entry();
+    apply_guest_host_requests();
+    stasis_jit_profile_frame_begin();
+    const int measure_frame = stasis_host_performance_metrics_enabled();
+    uint64_t tick_started = measure_frame ? stasis_host_performance_counter() : 0;
+    runtime_state.last_entry_result = runtime_state.entries.tick_entry();
+    uint64_t tick_finished = measure_frame ? stasis_host_performance_counter() : 0;
+    if (runtime_state.last_entry_result != 0) {
+        fprintf(stderr, "Stasis mobile tick entry requested stop with code %d\n",
+            runtime_state.last_entry_result);
+        return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
+    }
+    uint64_t render_started = measure_frame ? stasis_host_performance_counter() : 0;
+    runtime_state.last_entry_result = runtime_state.entries.render_entry();
+    uint64_t render_finished = measure_frame ? stasis_host_performance_counter() : 0;
+    if (runtime_state.last_entry_result != 0) {
+        fprintf(stderr, "Stasis mobile render entry requested stop with code %d\n",
+            runtime_state.last_entry_result);
+        return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
+    }
+    if (measure_frame) {
+        stasis_host_set_performance_metrics(
+            stasis_host_performance_elapsed_us(tick_started, tick_finished),
+            stasis_host_performance_elapsed_us(render_started, render_finished));
+    }
+    /* Submission owns begin/present according to the guest command-buffer flags. */
     stasis_gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
-    stasis_end_frame();
+    stasis_jit_profile_frame_end();
     return STASIS_MOBILE_RUNTIME_OK;
 }
 
@@ -159,10 +196,15 @@ int32_t stasis_mobile_runtime_is_initialized(void) {
     return runtime_state.initialized;
 }
 
+int32_t stasis_mobile_runtime_last_entry_result(void) {
+    return runtime_state.last_entry_result;
+}
+
 void stasis_mobile_runtime_shutdown(void) {
     if (!runtime_state.initialized) {
         return;
     }
+    stasis_mobile_network_stop();
     stasis_shutdown();
     stasis_mobile_aot_reset();
     runtime_state = (StasisMobileRuntimeState){0};

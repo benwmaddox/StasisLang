@@ -1,0 +1,26 @@
+import "placement.stasis";
+
+global menu_title_x: f32;
+global menu_title_y: f32;
+global menu_button_x: f32;
+global menu_button_y: f32;
+global menu_button_w: f32;
+global menu_button_h: f32;
+global menu_label_x: f32;
+global menu_label_y: f32;
+
+function menu_layout(safe_x: f32, safe_y: f32, safe_w: f32, safe_h: f32, title_w: f32, label_w: f32): void {
+    menu_title_x = menu_title_x_for(safe_x, safe_w, title_w);
+    menu_title_y = ui_place_y(safe_y + 24.0, 72.0, 32.0, UiVertical.Top);
+
+    menu_button_w = 180.0;
+    menu_button_h = 56.0;
+    menu_button_x = menu_button_x_for(safe_x, safe_w);
+    menu_button_y = menu_button_y_for(safe_y, safe_h);
+    menu_label_x = menu_label_x_for(menu_button_x, label_w);
+    menu_label_y = menu_label_y_for(menu_button_y);
+}
+
+function menu_button_contains(point_x: f32, point_y: f32): bool {
+    return menu_point_in_button(point_x, point_y, menu_button_x, menu_button_y, menu_button_w, menu_button_h);
+}

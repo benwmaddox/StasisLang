@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "state_inspection",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build"
+}

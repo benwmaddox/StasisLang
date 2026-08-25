@@ -1,0 +1,18 @@
+function exploration_inventory_system(): void {
+    let event: i32 = 0;
+    for (event = 0; event < GameState.collection_event_count; event = event + 1) {
+        let kind: i32 = GameState.collection_event_kind[event];
+        if (kind == 1) {
+            World.inventory_count[1] += 1;
+        }
+        if (kind == 2) {
+            World.inventory_count[2] += 1;
+        }
+        GameState.collected_count += 1;
+        GameState.last_collected_entity_id = GameState.collection_event_entity_id[event];
+        exploration_audio_collect(kind);
+    }
+    GameState.collection_event_count = 0;
+}
+
+import "audio.stasis";

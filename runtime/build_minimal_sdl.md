@@ -1,39 +1,26 @@
-# Building Minimal SDL2 for Stasis
+# Building the pinned SDL3 runtime
 
-To reduce exe size, build SDL2 from source with only required features:
+Stasis ships one native SDL3 family: SDL3 3.4.10 and SDL3_image 3.4.4. The
+runtime requires SDL video, events, timers, the 2D renderer, audio streams, and
+filesystem helpers. Those subsystems must not be disabled in a size-optimized
+build because they are part of the cross-platform runtime contract.
 
-## SDL2 CMake Options to Disable
+`runtime/CMakeLists.txt` disables SDL test programs and optional SDL3_image
+codecs that Stasis does not consume, then statically links the pinned family
+into `stasis_graphics`. Platform adapters may still omit unrelated joystick,
+haptic, sensor, or GPU APIs when the upstream CMake configuration supports it,
+but only after the Windows, Linux, macOS, Android, and iOS acceptance matrix
+continues to pass.
 
-```bash
-cmake ../SDL \
-  -DSDL_AUDIO=OFF \           # No audio system (~30% savings)
-  -DSDL_HAPTIC=OFF \          # No force feedback
-  -DSDL_JOYSTICK=OFF \        # No gamepad support
-  -DSDL_SENSOR=OFF \          # No sensor APIs
-  -DSDL_RENDER=OFF \          # Don't need SDL_Renderer (using OpenGL directly)
-  -DSDL_POWER=OFF \           # Battery status API
-  -DSDL_FILESYSTEM=OFF \      # Filesystem helpers
-  -DSDL_TIMERS=ON \           # Keep timers (needed)
-  -DSDL_VIDEO=ON \            # Keep video (needed)
-  -DSDL_EVENTS=ON \           # Keep events (needed)
-  -DSDL_RENDER_D3D=OFF \      # No Direct3D backend
-  -DSDL_RENDER_METAL=OFF \    # No Metal backend
-  -DSDL_HIDAPI=OFF \          # No HID device support
-  -DBUILD_SHARED_LIBS=OFF     # Static library
+Configure the supported build with:
+
+```text
+cmake -S runtime -B runtime/build \
+  -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
+  -DSTASIS_GRAPHICS_SDL_ONLY=ON
+cmake --build runtime/build --config Release
 ```
 
-## Expected Savings
-
-- Audio subsystem: ~500KB final exe
-- Joystick/Haptic: ~200KB
-- Unused render backends: ~150KB
-- **Total reduction: ~800KB-1MB (final exe would be ~800KB-1MB)**
-
-## Alternative: Windows-only minimal build
-
-For Windows-only distribution, could replace SDL2 entirely with:
-- Win32 API for windowing (~50KB)
-- WGL for OpenGL context (~20KB)
-- Win32 input handling (~10KB)
-
-**Savings: Exe drops to ~400-500KB** but loses Linux/Mac support.
+Replacing SDL with a platform-only windowing layer or `sdl2-compat` is outside
+the supported architecture. It would break the single renderer, input, audio,
+surface-lifecycle, and release-provenance contract.

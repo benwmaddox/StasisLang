@@ -1,0 +1,15 @@
+{
+  "manifest_version": 1,
+  "name": "pointer_pong",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain",
+  "android": {
+    "application_id": "com.stasislang.sample.pointerpong",
+    "label": "Stasis Pointer Pong",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  }
+}

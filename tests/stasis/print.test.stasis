@@ -1,0 +1,14 @@
+import "../../src/stdlib/stdlib.stasis";
+
+global print_ascii_value: ascii[16];
+global print_utf8_value: utf8[16];
+
+test `print resolves by value type`(): bool {
+    ascii_copy(print_ascii_value, "ascii");
+    utf8_from_ascii(print_utf8_value, "utf8", 16);
+    print(42);
+    print("string");
+    print(print_ascii_value);
+    print(print_utf8_value);
+    return true;
+}

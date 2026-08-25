@@ -10,6 +10,8 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 2. If the tree is dirty because a cross-repo inbox synced tracked docs, either commit that sync first or stop if the state is unsafe to modify.
 3. Run the baseline validation command: `tools/validate_repo.sh`.
 4. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
+5. Run `tools/install_git_hooks.ps1` once per clone. This repository's pre-commit hook blocks noncanonical staged Stasis source. Run the Android Workshop JIT render-parity emulator gate explicitly for rendering changes; the arm64 release shell has its own package-content and device gates.
+6. Codex and other automation must invoke Cargo through `python tools/cargo_cache.py run -- cargo ...`. This shares one repository-owned cache across linked worktrees and disables incremental artifacts only for the child Cargo process. See `docs/cargo_cache_policy.md` for measurement and safe cleanup.
 
 ## Choose work
 
@@ -29,6 +31,11 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 1. Write a brief testing plan in working notes or commit history, not for human review.
 2. Add or expand automated checks to capture the desired behavior.
 3. Run the checks and confirm they fail for the expected reason before implementation.
+4. Keep Rust tests runnable by default; `tools/validate_repo.sh` rejects `#[ignore]` under product and test source roots. Put checks that require external credentials or installed tools in explicit examples instead.
+5. Keep unsafe Rust inside the audited platform-boundary crates and follow `docs/unsafe_rust.md`; repository validation rejects unsafe blocks in orchestration and product crates.
+6. Give focused Cargo test commands an owning target (`--lib`, `--bin <name>`, or `--test <name>`). An unexpected `running 0 tests` is a failed test selection, not a successful check; correct the package, target, or full test path before continuing.
+
+To smoke-test the installed Codex provider and shared response schema, run `cargo run -p stasis_ai --example codex_provider_smoke` from a signed-in Codex environment.
 
 ## Reviewer Gate Before Implementation
 
@@ -49,8 +56,10 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 
 1. Update any docs that would prevent repeating the same mistake.
 2. If the task came from PR review feedback, reply on GitHub when appropriate with the fix, clarification, or follow-up question.
-3. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
-4. Append a concise entry to `docs/night_shift_report.md`.
+3. For user-visible graphical work, capture and inspect reviewable evidence in addition to automated checks. Use PNG for a representative still state; use MP4 for motion, timing, animation, input, or multi-step interaction. Keep captures focused on the behavior under review and exclude unrelated windows, notifications, secrets, and personal data.
+4. Every AI-authored work summary must include `Visual evidence:` followed by the inspected PNG/MP4 paths and what they prove. Use `Visual evidence: not applicable` when the change has no user-visible behavior. If capture was relevant but unavailable, say so explicitly and record the remaining validation gap.
+5. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
+6. Append a concise entry to `docs/night_shift_report.md`.
 
 ## Stop Conditions
 

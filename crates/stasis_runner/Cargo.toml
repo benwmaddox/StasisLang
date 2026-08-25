@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 crossbeam-channel.workspace = true
 stasis_assets = { path = "../stasis_assets" }
 

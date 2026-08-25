@@ -1,0 +1,54 @@
+global values: i32[4];
+
+function main(): i32 {
+    let for_count: i32 = 0;
+    let for_guard: i32 = 0;
+    for (let i: i32 = 0; i < 5; i += 1) {
+        for_guard += 1;
+        if (for_guard > 10) {
+            return 91;
+        }
+        if (i == 2) {
+            continue;
+        }
+        for_count += 1;
+    }
+
+    let foreach_count: i32 = 0;
+    let foreach_guard: i32 = 0;
+    foreach (let value, i in values) {
+        foreach_guard += 1;
+        if (foreach_guard > 10) {
+            return 92;
+        }
+        if (i == 2) {
+            continue;
+        }
+        foreach_count += 1;
+    }
+
+    let nested_count: i32 = 0;
+    let nested_guard: i32 = 0;
+    for (let outer: i32 = 0; outer < 2; outer += 1) {
+        for (let inner: i32 = 0; inner < 3; inner += 1) {
+            nested_guard += 1;
+            if (nested_guard > 20) {
+                return 93;
+            }
+            if (inner == 1) {
+                continue;
+            }
+            nested_count += 1;
+        }
+    }
+
+    return for_count * 100 + foreach_count * 10 + nested_count;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}

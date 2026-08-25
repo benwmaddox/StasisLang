@@ -18,6 +18,7 @@ pub struct StasisTestRunSummary {
     pub tests_run: usize,
     pub tests_passed: usize,
     pub tests_failed: usize,
+    pub passed_tests: Vec<String>,
     pub failures: Vec<String>,
     pub timing_discovery_us: u64,
     pub timing_prepare_us: u64,
@@ -37,6 +38,7 @@ pub struct StasisTestRunSession {
 }
 
 struct CachedTestProcess {
+    project_root: PathBuf,
     source_hash: u64,
     process: JitProcess,
 }
@@ -60,10 +62,43 @@ pub fn run_jit_tests_in_directory_with_session(
     root: &Path,
     session: &mut StasisTestRunSession,
 ) -> Result<StasisTestRunSummary, String> {
+    run_jit_tests_in_directory_with_project_root_and_session(root, root, session)
+}
+
+pub fn run_jit_tests_in_directory_with_project_root_and_session(
+    root: &Path,
+    project_root: &Path,
+    session: &mut StasisTestRunSession,
+) -> Result<StasisTestRunSummary, String> {
+    run_jit_tests_in_directory_with_project_root_session_and_validator(
+        root,
+        project_root,
+        session,
+        |_| Ok(()),
+    )
+}
+
+pub fn run_jit_tests_in_directory_with_project_root_session_and_validator(
+    root: &Path,
+    project_root: &Path,
+    session: &mut StasisTestRunSession,
+    mut validate: impl FnMut(&JitProcess) -> Result<(), String>,
+) -> Result<StasisTestRunSummary, String> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("failed to read current directory: {error}"))?;
+    let root = canonical_test_path("test directory", root, &current_dir)?;
+    let project_root = canonical_test_path("test project root", project_root, &current_dir)?;
+    if !root.starts_with(&project_root) {
+        return Err(format!(
+            "test directory {} is outside project root {}",
+            root.display(),
+            project_root.display()
+        ));
+    }
     let total_started = Instant::now();
     let discovery_started = Instant::now();
     let mut files = Vec::new();
-    collect_stasis_files_recursive(root, &mut files)?;
+    collect_stasis_files_recursive(&root, &mut files)?;
     files.sort_by(|left, right| {
         natural_path_cmp(
             &left.to_string_lossy().to_lowercase(),
@@ -78,6 +113,7 @@ pub fn run_jit_tests_in_directory_with_session(
         tests_run: 0,
         tests_passed: 0,
         tests_failed: 0,
+        passed_tests: Vec::new(),
         failures: Vec::new(),
         timing_discovery_us,
         timing_prepare_us: 0,
@@ -108,13 +144,31 @@ pub fn run_jit_tests_in_directory_with_session(
         summary.tests_discovered += tests.len();
 
         let source_hash = hash_text(&source);
-        let entry = session
-            .by_path
-            .entry(file_path.clone())
-            .or_insert_with(|| CachedTestProcess {
-                source_hash: 0,
-                process: JitProcess::new(),
-            });
+        if let Some(existing) = session.by_path.get(&file_path) {
+            if existing.project_root != project_root {
+                return Err(format!(
+                    "test session project root changed for {}",
+                    file_path.display()
+                ));
+            }
+        } else {
+            let mut process = JitProcess::new();
+            process.set_project_root(project_root.to_string_lossy())?;
+            session.by_path.insert(
+                file_path.clone(),
+                CachedTestProcess {
+                    project_root: project_root.clone(),
+                    source_hash: 0,
+                    process,
+                },
+            );
+        }
+        let entry = session.by_path.get_mut(&file_path).ok_or_else(|| {
+            format!(
+                "test process was not initialized for {}",
+                file_path.display()
+            )
+        })?;
         let dependency_changed = entry
             .process
             .refresh_imported_sources_from_disk(&file_path.to_string_lossy());
@@ -155,7 +209,8 @@ pub fn run_jit_tests_in_directory_with_session(
             session.last_active_path = Some(file_path.clone());
         }
 
-        entry.process.activate_runtime_dispatch_table();
+        validate(&entry.process)?;
+        entry.process.activate_runtime_state();
         let execute_started = Instant::now();
         run_discovered_tests(&entry.process, &tests, &file_path, &mut summary);
         session.last_active_path = Some(file_path.clone());
@@ -175,6 +230,17 @@ pub fn run_jit_tests_in_directory_with_session(
     Ok(summary)
 }
 
+fn canonical_test_path(label: &str, path: &Path, current_dir: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_dir.join(path)
+    };
+    absolute
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve {label} {}: {error}", path.display()))
+}
+
 fn elapsed_us_u64(value: u128) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -190,6 +256,11 @@ fn run_discovered_tests(
         match process.execute_bool_noarg_by_name(&test.generated_function_name) {
             Ok(true) => {
                 summary.tests_passed += 1;
+                summary.passed_tests.push(format!(
+                    "{} :: {}",
+                    file_path.display(),
+                    test.display_name
+                ));
             }
             Ok(false) => {
                 summary.tests_failed += 1;
@@ -291,7 +362,7 @@ fn looks_like_test_declaration_source(source: &str) -> bool {
     source.contains("test") && source.contains('`')
 }
 
-fn natural_path_cmp(left: &str, right: &str) -> Ordering {
+pub fn natural_path_cmp(left: &str, right: &str) -> Ordering {
     let left_bytes = left.as_bytes();
     let right_bytes = right.as_bytes();
     let mut i = 0usize;
@@ -393,6 +464,8 @@ mod tests {
         assert_eq!(summary.tests_discovered, 1, "{summary:?}");
         assert_eq!(summary.tests_passed, 1, "{summary:?}");
         assert_eq!(summary.tests_failed, 0, "{summary:?}");
+        assert_eq!(summary.passed_tests.len(), 1, "{summary:?}");
+        assert!(summary.passed_tests[0].ends_with("good.test.stasis :: good"));
 
         fs::remove_dir_all(&root).ok();
     }
@@ -443,6 +516,38 @@ mod tests {
         let summary = run_jit_tests_in_directory(&root).expect("run tests");
         assert_eq!(summary.files_discovered, 1);
         assert_eq!(summary.tests_discovered, 1);
+        assert_eq!(summary.tests_passed, 1, "{summary:?}");
+        assert_eq!(summary.tests_failed, 0, "{summary:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn public_session_api_accepts_relative_test_directory_with_imports() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let relative = PathBuf::from(format!(".stasis_test_runner_relative_{stamp}"));
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join(&relative);
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(
+            root.join("helper.stasis"),
+            "function helper(): i32 { return 7; }\n",
+        )
+        .expect("write helper");
+        fs::write(
+            root.join("relative.test.stasis"),
+            "import \"helper.stasis\";\ntest `relative import`(): bool { return helper() == 7; }\n",
+        )
+        .expect("write test");
+
+        let mut session = StasisTestRunSession::new();
+        let summary = run_jit_tests_in_directory_with_session(&relative, &mut session)
+            .expect("relative test directory");
+        assert_eq!(summary.tests_run, 1, "{summary:?}");
         assert_eq!(summary.tests_passed, 1, "{summary:?}");
         assert_eq!(summary.tests_failed, 0, "{summary:?}");
 

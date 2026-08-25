@@ -31,21 +31,25 @@ function maximize_window_for_desktop(): void {
     min_w.from_f32(VIRTUAL_W);
     let min_h: i32;
     min_h.from_f32(VIRTUAL_H);
-    if (usable_w < min_w) { usable_w = min_w; }
-    if (usable_h < min_h) { usable_h = min_h; }
+    if (usable_w < min_w) {
+        usable_w = min_w;
+    }
+    if (usable_h < min_h) {
+        usable_h = min_h;
+    }
 
     // Candidate A: fit height.
     let fit_h_h: i32 = usable_h;
     let fit_h_h_f: f32;
     fit_h_h_f.from_i32(fit_h_h);
     let fit_h_w: i32;
-    fit_h_w.from_f32(fit_h_h_f * (VIRTUAL_W / VIRTUAL_H));
+    fit_h_w.from_f32(fit_h_h_f *(VIRTUAL_W / VIRTUAL_H));
     // Candidate B: fit width.
     let fit_w_w: i32 = usable_w;
     let fit_w_w_f: f32;
     fit_w_w_f.from_i32(fit_w_w);
     let fit_w_h: i32;
-    fit_w_h.from_f32(fit_w_w_f * (VIRTUAL_H / VIRTUAL_W));
+    fit_w_h.from_f32(fit_w_w_f *(VIRTUAL_H / VIRTUAL_W));
     let a_ok: bool = fit_h_w <= usable_w && fit_h_h <= usable_h;
     let b_ok: bool = fit_w_w <= usable_w && fit_w_h <= usable_h;
 
@@ -75,8 +79,12 @@ function maximize_window_for_desktop(): void {
         }
     }
 
-    if (choose_w < min_w) { choose_w = min_w; }
-    if (choose_h < min_h) { choose_h = min_h; }
+    if (choose_w < min_w) {
+        choose_w = min_w;
+    }
+    if (choose_h < min_h) {
+        choose_h = min_h;
+    }
 
     set_window_size(choose_w, choose_h);
 }
@@ -87,14 +95,20 @@ function main(): i32 {
     let init_h: i32;
     init_h.from_f32(VIRTUAL_H);
     let ok: bool = init_window(init_w, init_h, "Stasis Window Size Probe");
-    if (!ok) { return 1; }
+    if (!ok) {
+        return 1;
+    }
 
     maximize_window_for_desktop();
 
     print_string("WINDOW_SIZE ");
-    print_int(gfx_window_width());
+    let logical_w: i32;
+    logical_w.from_f32(gfx_logical_width());
+    print_int(logical_w);
     print_string(" ");
-    print_int(gfx_window_height());
+    let logical_h: i32;
+    logical_h.from_f32(gfx_logical_height());
+    print_int(logical_h);
     print_string("\n");
     return 0;
 }
@@ -103,6 +117,3 @@ function tick(): i32 {
     // Exit immediately after main(). This is a probe, not an interactive sample.
     return 1;
 }
-
-
-

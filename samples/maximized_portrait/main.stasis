@@ -1,0 +1,42 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global ticks: i32;
+
+function main(): i32 {
+    init_window(360, 720, "Maximized Portrait");
+    set_maximized(1);
+    ticks = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    ticks = ticks + 1;
+    if (ticks == 2) {
+        set_fullscreen(1);
+    }
+    if (ticks == 3) {
+        set_maximized(1);
+    }
+    if (ticks == 4) {
+        set_window_size(360, 720);
+    }
+    if (ticks == 5) {
+        set_maximized(1);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.04, 0.08, 0.16, 1.0);
+    draw_line(0.0, 0.0, 359.0, 0.0, 1.0, 0.2, 0.1, 1.0);
+    draw_line(359.0, 0.0, 359.0, 719.0, 0.2, 1.0, 0.1, 1.0);
+    draw_line(359.0, 719.0, 0.0, 719.0, 0.1, 0.4, 1.0, 1.0);
+    draw_line(0.0, 719.0, 0.0, 0.0, 1.0, 0.9, 0.1, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

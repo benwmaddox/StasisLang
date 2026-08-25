@@ -1,0 +1,130 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global seam_state_checksum: i32;
+global seam_probe_sequence: i32;
+global seam_probe_kind: i32;
+global seam_probe_tick: i32;
+global seam_pointer_id: i32;
+global seam_pointer_count: i32;
+global seam_pointer_is_down: i32;
+global seam_pointer_went_down: i32;
+global seam_pointer_went_up: i32;
+global seam_down_count: i32;
+global seam_move_count: i32;
+global seam_up_count: i32;
+global seam_state_transitions: i32;
+global seam_input_phase: i32;
+global seam_pointer_x: f32;
+global seam_pointer_y: f32;
+global seam_pointer_dx: f32;
+global seam_pointer_dy: f32;
+global seam_pointer_x_n: f32;
+global seam_pointer_y_n: f32;
+global seam_safe_x: f32;
+global seam_safe_y: f32;
+global seam_safe_w: f32;
+global seam_safe_h: f32;
+
+function record_probe(kind: i32, pointer: i32): void {
+    seam_probe_sequence += 1;
+    seam_probe_kind = kind;
+    seam_probe_tick = host_tick_index();
+    seam_pointer_id = input_pointer_id(pointer);
+    seam_pointer_count = input_pointer_count();
+    seam_pointer_is_down = 0;
+    if (input_pointer_is_down(pointer)) {
+        seam_pointer_is_down = 1;
+    }
+    seam_pointer_went_down = 0;
+    if (input_pointer_went_down(pointer)) {
+        seam_pointer_went_down = 1;
+    }
+    seam_pointer_went_up = 0;
+    if (input_pointer_went_up(pointer)) {
+        seam_pointer_went_up = 1;
+    }
+    seam_pointer_x = input_pointer_x_logical(pointer);
+    seam_pointer_y = input_pointer_y_logical(pointer);
+    seam_pointer_dx = input_pointer_dx_logical(pointer);
+    seam_pointer_dy = input_pointer_dy_logical(pointer);
+    seam_pointer_x_n = input_pointer_x_n(pointer);
+    seam_pointer_y_n = input_pointer_y_n(pointer);
+    seam_safe_x = gfx_safe_viewport_x();
+    seam_safe_y = gfx_safe_viewport_y();
+    seam_safe_w = gfx_safe_viewport_width();
+    seam_safe_h = gfx_safe_viewport_height();
+}
+
+function main(): i32 {
+    init_window(360, 720, "Stasis Android Touch Seam");
+    seam_state_checksum = 2000;
+    seam_probe_sequence = 0;
+    seam_down_count = 0;
+    seam_move_count = 0;
+    seam_up_count = 0;
+    seam_state_transitions = 0;
+    seam_input_phase = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    if (input_pointer_count() > 1) {
+        let pointer: i32 = 1;
+        if (input_pointer_went_down(pointer)) {
+            seam_down_count += 1;
+            if (input_pointer_x_n(pointer) <= 0.001 ||
+                input_pointer_y_n(pointer) <= 0.001) {
+                record_probe(1, pointer);
+            } else {
+                if (seam_state_transitions == 0) {
+                    seam_state_transitions = 1;
+                    seam_input_phase = 1;
+                }
+                record_probe(3, pointer);
+            }
+        }
+        if (input_pointer_is_down(pointer) && seam_state_transitions == 1 &&
+            seam_move_count == 0 && input_pointer_x_logical(pointer) >= 240.0 &&
+            input_pointer_y_logical(pointer) >= 480.0) {
+            seam_move_count = 1;
+            seam_input_phase = 2;
+            record_probe(4, pointer);
+        }
+        if (input_pointer_went_up(pointer)) {
+            seam_up_count += 1;
+            if (seam_state_transitions == 0) {
+                record_probe(2, pointer);
+            } else {
+                seam_input_phase = 3;
+                record_probe(5, pointer);
+            }
+        }
+    }
+    seam_state_checksum = 2000 + seam_down_count * 100 + seam_move_count * 10 +
+        seam_up_count + seam_state_transitions * 1000 + seam_input_phase;
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.02, 0.03, 0.05, 1.0);
+    fill_rect(20.0, 20.0, 320.0, 680.0, 0.10, 0.12, 0.16, 1.0);
+    if (seam_input_phase == 0) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.72, 0.16, 0.18, 1.0);
+    } else if (seam_input_phase == 1) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.94, 0.76, 0.18, 1.0);
+    } else if (seam_input_phase == 2) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.14, 0.42, 0.92, 1.0);
+    } else {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.12, 0.84, 0.36, 1.0);
+    }
+    if (seam_state_transitions > 0) {
+        fill_rect(252.0, 522.0, 36.0, 36.0, 0.95, 0.20, 0.80, 1.0);
+    }
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

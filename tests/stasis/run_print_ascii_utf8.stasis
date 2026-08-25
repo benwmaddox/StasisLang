@@ -7,9 +7,9 @@ function main(): i32 {
     ascii_copy(ascii_msg, "ASCII_MSG");
     utf8_from_ascii(utf8_msg, "UTF8_MSG", 32);
 
-    print_ascii(ascii_msg);
-    print_string("|");
-    print_utf8(utf8_msg);
-    print_string("\n");
+    print(ascii_msg);
+    print("|");
+    print(utf8_msg);
+    print("\n");
     return 0;
 }

@@ -1,6 +1,6 @@
 enum Phase {
     Idle = 10,
-    Play = 11
+    Play = 11,
 }
 
 function main(): i32 {

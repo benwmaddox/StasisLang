@@ -1,2 +1,4 @@
-// The first lesson uses colored primitives. Later sprite/audio lessons keep the same stable manifest IDs.
-const EXPLORATION_PLAYER_ASSET: i32 = 0;
+const EXPLORATION_PLAYER_ASSET: i32 = 1921230027;
+const EXPLORATION_SUN_ASSET: i32 = 708036400;
+const EXPLORATION_MOON_ASSET: i32 = -294573411;
+const EXPLORATION_DESTINATION_ASSET: i32 = 476662006;

@@ -1,0 +1,128 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+		100000000000000000000001 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* main.m */; };
+		100000000000000000000009 /* stasis_ios_network.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* stasis_ios_network.m */; };
+		100000000000000000000002 /* stasis_mobile_main.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* stasis_mobile_main.c */; };
+		100000000000000000000003 /* stasis_mobile_runtime.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* stasis_mobile_runtime.c */; };
+		100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* stasis_mobile_aot_runtime.c */; };
+		100000000000000000000005 /* stasis_graphics.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* stasis_graphics.c */; };
+		100000000000000000000008 /* stasis_audio_assets.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* stasis_audio_assets.c */; };
+		100000000000000000000006 /* published_aot_bindings.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* published_aot_bindings.c */; };
+		100000000000000000000007 /* stasis_game in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* stasis_game */; };
+
+		300000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000001 /* main.m in Sources */,
+				100000000000000000000009 /* stasis_ios_network.m in Sources */,
+				100000000000000000000002 /* stasis_mobile_main.c in Sources */,
+				100000000000000000000003 /* stasis_mobile_runtime.c in Sources */,
+				100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */,
+				100000000000000000000005 /* stasis_graphics.c in Sources */,
+				100000000000000000000008 /* stasis_audio_assets.c in Sources */,
+				100000000000000000000006 /* published_aot_bindings.c in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		300000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		300000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (100000000000000000000007 /* stasis_game in Resources */);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		300000000000000000000004 /* Embed SDL frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nfor name in SDL3 SDL3_image; do\n  source=\"${STASIS_SDL_FRAMEWORKS}/${name}.xcframework/ios-arm64/${name}.framework\"\n  test -d \"${source}\" || { echo \"missing ${source}\" >&2; exit 1; }\n  destination=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n  mkdir -p \"${destination}\"\n  ditto \"${source}\" \"${destination}/${name}.framework\"\n  if test -n \"${EXPANDED_CODE_SIGN_IDENTITY:-}\"; then\n    codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \"${destination}/${name}.framework\"\n  fi\ndone\n";
+		};
+
+		200000000000000000000001 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/main.m; sourceTree = "<group>"; };
+		200000000000000000000002 /* stasis_mobile_main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../common/stasis_mobile_main.c; sourceTree = "<group>"; };
+		200000000000000000000003 /* stasis_mobile_runtime.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_mobile_runtime.c; sourceTree = "<group>"; };
+		200000000000000000000004 /* stasis_mobile_aot_runtime.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_mobile_aot_runtime.c; sourceTree = "<group>"; };
+		200000000000000000000005 /* stasis_graphics.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_graphics.c; sourceTree = "<group>"; };
+		200000000000000000000006 /* published_aot_bindings.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../aot/published_aot_bindings.c; sourceTree = "<group>"; };
+		200000000000000000000007 /* stasis_game */ = {isa = PBXFileReference; lastKnownFileType = folder; path = StasisMobile/stasis_game; sourceTree = "<group>"; };
+		200000000000000000000008 /* StasisMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StasisMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000009 /* StasisMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = StasisMobile.xcconfig; sourceTree = "<group>"; };
+		200000000000000000000010 /* stasis_audio_assets.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_audio_assets.c; sourceTree = "<group>"; };
+		200000000000000000000011 /* stasis_ios_network.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_network.m; sourceTree = "<group>"; };
+
+		400000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000001 /* main.m */,
+				200000000000000000000011 /* stasis_ios_network.m */,
+				200000000000000000000002 /* stasis_mobile_main.c */,
+				200000000000000000000003 /* stasis_mobile_runtime.c */,
+				200000000000000000000004 /* stasis_mobile_aot_runtime.c */,
+				200000000000000000000005 /* stasis_graphics.c */,
+				200000000000000000000010 /* stasis_audio_assets.c */,
+				200000000000000000000006 /* published_aot_bindings.c */,
+				200000000000000000000007 /* stasis_game */,
+				200000000000000000000009 /* StasisMobile.xcconfig */,
+				400000000000000000000002 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		400000000000000000000002 /* Products */ = {isa = PBXGroup; children = (200000000000000000000008 /* StasisMobile.app */); name = Products; sourceTree = "<group>"; };
+
+		500000000000000000000001 /* StasisMobile */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 600000000000000000000002 /* Build configuration list for PBXNativeTarget */;
+			buildPhases = (300000000000000000000001 /* Sources */, 300000000000000000000002 /* Frameworks */, 300000000000000000000004 /* Embed SDL frameworks */, 300000000000000000000003 /* Resources */);
+			buildRules = ();
+			dependencies = ();
+			name = StasisMobile;
+			productName = StasisMobile;
+			productReference = 200000000000000000000008 /* StasisMobile.app */;
+			productType = "com.apple.product-type.application";
+		};
+
+		700000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {BuildIndependentTargetsInParallel = 1; LastUpgradeCheck = 1600; TargetAttributes = {500000000000000000000001 = {CreatedOnToolsVersion = 16.0; }; }; };
+			buildConfigurationList = 600000000000000000000001 /* Build configuration list for PBXProject */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = 400000000000000000000001;
+			productRefGroup = 400000000000000000000002 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (500000000000000000000001 /* StasisMobile */);
+		};
+
+		800000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; IPHONEOS_DEPLOYMENT_TARGET = 15.0; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = iphoneos; }; name = Debug; };
+		800000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; IPHONEOS_DEPLOYMENT_TARGET = 15.0; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = iphoneos; }; name = Release; };
+		800000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 200000000000000000000009 /* StasisMobile.xcconfig */;
+			buildSettings = {CLANG_C_LANGUAGE_STANDARD = c11; INFOPLIST_FILE = StasisMobile/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = @STASIS_PACKAGE_ID@; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; };
+			name = Debug;
+		};
+		800000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 200000000000000000000009 /* StasisMobile.xcconfig */;
+			buildSettings = {CLANG_C_LANGUAGE_STANDARD = c11; INFOPLIST_FILE = StasisMobile/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = @STASIS_PACKAGE_ID@; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; };
+			name = Release;
+		};
+
+		600000000000000000000001 /* Build configuration list for PBXProject */ = {isa = XCConfigurationList; buildConfigurations = (800000000000000000000001 /* Debug */, 800000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		600000000000000000000002 /* Build configuration list for PBXNativeTarget */ = {isa = XCConfigurationList; buildConfigurations = (800000000000000000000003 /* Debug */, 800000000000000000000004 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+	};
+	rootObject = 700000000000000000000001 /* Project object */;
+}

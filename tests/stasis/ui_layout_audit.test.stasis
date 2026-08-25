@@ -1,0 +1,65 @@
+import "../../src/stdlib/ui_layout_audit.stasis";
+
+test `ui audit reports exact center deltas and padding`(): bool {
+    if (ui_audit_center_delta_x(10.0, 100.0, 35.0, 50.0) != 0.0) {
+        return false;
+    }
+    if (ui_audit_center_delta_y(20.0, 80.0, 45.0, 30.0) != 0.0) {
+        return false;
+    }
+    if (ui_audit_left_gap(10.0, 35.0) != 25.0 || ui_audit_right_gap(10.0, 100.0, 35.0, 50.0) != 25.0) {
+        return false;
+    }
+    if (ui_audit_top_gap(20.0, 45.0) != 25.0 || ui_audit_bottom_gap(20.0, 80.0, 45.0, 30.0) != 25.0) {
+        return false;
+    }
+    return true;
+}
+
+test `ui audit applies tolerance to alignment and containment`(): bool {
+    if (!ui_audit_centered_x(0.0, 100.0, 25.4, 50.0, 0.5)) {
+        return false;
+    }
+    if (ui_audit_centered_x(0.0, 100.0, 25.6, 50.0, 0.5)) {
+        return false;
+    }
+    if (!ui_audit_contains_axis(0.0, 100.0, -0.25, 50.0, 0.25)) {
+        return false;
+    }
+    if (ui_audit_contains_axis(0.0, 100.0, -0.26, 50.0, 0.25)) {
+        return false;
+    }
+    return true;
+}
+
+test `ui audit distinguishes contact from overlap`(): bool {
+    if (ui_audit_overlap_x(0.0, 20.0, 20.0, 10.0) != 0.0) {
+        return false;
+    }
+    if (ui_audit_rects_overlap(0.0, 0.0, 20.0, 20.0, 20.0, 0.0, 10.0, 20.0)) {
+        return false;
+    }
+    if (!ui_audit_rects_overlap(0.0, 0.0, 20.0, 20.0, 19.0, 1.0, 10.0, 10.0)) {
+        return false;
+    }
+    if (ui_audit_overlap_x(0.0, 20.0, 19.0, 10.0) != 1.0 || ui_audit_overlap_y(0.0, 20.0, 1.0, 10.0) != 10.0) {
+        return false;
+    }
+    return true;
+}
+
+test `ui audit converts logical values to signed milli units`(): bool {
+    return ui_audit_milli(12.3454) == 12345 && ui_audit_milli(12.3456) == 12346 && ui_audit_milli(-1.2344) == -1234 && ui_audit_milli(-1.2346) == -1235;
+}
+
+test `ui audit emitters accept a complete button trace`(): bool {
+    ui_audit_rect("play_button", "button", 90.0, 504.0, 180.0, 56.0);
+    ui_audit_text("play_label", 151.0, 520.0, 58.0, 24.0, 24);
+    ui_audit_center_check("x", "play_label", "play_button", 0.0, 0.5);
+    ui_audit_center_check("y", "play_label", "play_button", 0.0, 1.0);
+    ui_audit_baseline_check("left_value", "right_value", 520.0, 520.25, 0.5);
+    ui_audit_padding_axis("x", "play_label", "play_button", 90.0, 180.0, 151.0, 58.0, 0.5);
+    ui_audit_padding_axis("y", "play_label", "play_button", 504.0, 56.0, 520.0, 24.0, 0.5);
+    ui_audit_overlap_axis("y", "menu_title", "play_button", 120.0, 28.0, 504.0, 56.0, false);
+    return true;
+}

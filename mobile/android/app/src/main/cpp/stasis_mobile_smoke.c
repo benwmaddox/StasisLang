@@ -2,36 +2,43 @@
 #include <android/log.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include "stasis_android_audio.h"
-#if STASIS_ANDROID_PUBLISHED_AOT
-#include "published_aot_symbols.h"
+#include <time.h>
+#include "stasis_display_scale.h"
+#include "stasis_render_contract.h"
 #include "stasis_mobile_aot_runtime.h"
-#endif
+#include "stasis_platform_storage.h"
+#include "stasis_android_audio.h"
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
-#define STASIS_COMPILE_MANIFEST_RELATIVE_PATH "build/native_compile_manifest.txt"
-#define STASIS_FUNCTION_ARTIFACT_DIR "build/functions"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
-#define STASIS_RENDER_COMMAND_CAPACITY 8
-#define STASIS_RENDER_COMMAND_STRIDE 13
-#define STASIS_RENDER_FRAME_HEADER_SIZE 6
-#define STASIS_RENDER_FRAME_I32_CAPACITY \
-    (STASIS_RENDER_FRAME_HEADER_SIZE + STASIS_RENDER_COMMAND_CAPACITY * STASIS_RENDER_COMMAND_STRIDE)
-#define FNV_OFFSET_BASIS 1469598103934665603ULL
-#define FNV_PRIME 1099511628211ULL
-
+#ifndef STASIS_RENDER_ACCEPTANCE
+#define STASIS_RENDER_ACCEPTANCE 0
+#endif
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
+typedef const char *(*stasis_android_bridge_version_fn)(void);
 typedef char *(*stasis_android_bridge_run_tests_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
-typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len);
+typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len);
+typedef char *(*stasis_android_bridge_last_frame_error_fn)(void);
+typedef char *(*stasis_android_bridge_inspect_runtime_state_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *project_root, int handle);
+typedef char *(*stasis_android_bridge_drain_sprite_releases_fn)(void);
+typedef char *(*stasis_android_bridge_poll_sprite_release_cancellations_fn)(void);
+typedef char *(*stasis_android_bridge_resolve_cached_text_fn)(const char *project_root, int handle);
+typedef char *(*stasis_android_bridge_resolve_font_fn)(const char *project_root, int handle);
+typedef char *(*stasis_android_bridge_source_items_fn)(const char *project_root, const char *entry_file);
+typedef char *(*stasis_android_bridge_find_references_fn)(const char *project_root, const char *entry_file, const char *symbol, uintptr_t limit);
+typedef char *(*stasis_android_bridge_semantic_edit_fn)(const char *project_root, const char *entry_file, const char *request_json, int dry_run, int validate, int run_tests);
+typedef int (*stasis_android_bridge_set_storage_root_fn)(const char *storage_root);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef struct StasisAudioHostApi {
     int (*init)(int, int, int);
@@ -48,37 +55,29 @@ typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
 typedef void (*stasis_codex_android_cancel_response_fn)(void);
 typedef char *(*stasis_codex_android_response_fn)(const char *codex_home, const char *request_json, uint64_t generation);
+typedef char *(*stasis_codex_android_ai_contract_fn)(void);
 typedef int (*stasis_codex_android_initialize_fn)(void *env, void *context);
 typedef void (*stasis_codex_android_free_string_fn)(char *value);
-typedef struct CompileStats {
-    int file_count;
-    int function_count;
-    int struct_count;
-    int global_count;
-    int has_main;
-    int has_tick;
-    int has_on_code_swap;
-    long byte_count;
-    uint64_t project_hash;
-    char error[160];
-} CompileStats;
-
-typedef struct PreviousManifest {
-    int found;
-    int functions;
-    int structs;
-    int globals;
-    uint64_t project_hash;
-} PreviousManifest;
 typedef struct RustBridgeApi {
     void *handle;
+    stasis_android_bridge_version_fn version;
     stasis_android_bridge_compile_project_fn compile_project;
     stasis_android_bridge_run_tests_fn run_tests;
     stasis_android_bridge_run_tick_fn run_tick;
     stasis_android_bridge_run_tick_frame_fn run_tick_frame;
+    stasis_android_bridge_last_frame_error_fn last_frame_error;
+    stasis_android_bridge_inspect_runtime_state_fn inspect_runtime_state;
     stasis_android_bridge_set_i32_global_fn set_i32_global;
     stasis_android_bridge_get_i32_global_fn get_i32_global;
     stasis_android_bridge_resolve_sprite_asset_fn resolve_sprite_asset;
+    stasis_android_bridge_drain_sprite_releases_fn drain_sprite_releases;
+    stasis_android_bridge_poll_sprite_release_cancellations_fn poll_sprite_release_cancellations;
+    stasis_android_bridge_resolve_cached_text_fn resolve_cached_text;
+    stasis_android_bridge_resolve_font_fn resolve_font;
+    stasis_android_bridge_source_items_fn source_items;
+    stasis_android_bridge_find_references_fn find_references;
+    stasis_android_bridge_semantic_edit_fn semantic_edit;
+    stasis_android_bridge_set_storage_root_fn set_storage_root;
     stasis_android_bridge_free_string_fn free_string;
     stasis_android_bridge_install_audio_api_fn install_audio_api;
     int attempted;
@@ -94,431 +93,141 @@ typedef struct CodexBridgeApi {
     stasis_codex_android_begin_response_fn begin_response;
     stasis_codex_android_cancel_response_fn cancel_response;
     stasis_codex_android_response_fn response;
+    stasis_codex_android_ai_contract_fn ai_contract;
     stasis_codex_android_free_string_fn free_string;
     int attempted;
 } CodexBridgeApi;
 
 static CodexBridgeApi codex_bridge_api = {0};
-#if STASIS_ANDROID_PUBLISHED_AOT
-static int published_aot_runtime_bound;
-static int published_aot_main_ran;
-static int32_t published_runtime_tick_count;
 
-static int32_t stasis_published_hash_path(const char *path) {
-    uint32_t hash = 2166136261U;
-    const unsigned char *cursor = (const unsigned char *)path;
-    while (*cursor != '\0') {
-        hash ^= (uint32_t)(*cursor);
-        hash *= 16777619U;
-        cursor += 1;
-    }
-    return (int32_t)hash;
+typedef struct StasisJniFrameDescriptor {
+    const char *lane;
+    size_t byte_capacity;
+    size_t alignment;
+} StasisJniFrameDescriptor;
+
+#define STASIS_JNI_FRAME_DESCRIPTOR(kind, name, bytes, alignment) \
+    {name, bytes, alignment},
+static const StasisJniFrameDescriptor stasis_jni_frame_descriptors[] = {
+    STASIS_RENDER_BUFFER_DESCRIPTORS(STASIS_JNI_FRAME_DESCRIPTOR)
+};
+#undef STASIS_JNI_FRAME_DESCRIPTOR
+
+static __thread char stasis_jni_last_frame_error[320];
+static jmethodID stasis_jni_buffer_order_method;
+static jobject stasis_jni_native_order;
+static pthread_mutex_t stasis_jni_order_mutex = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int stasis_jni_order_ready = ATOMIC_VAR_INIT(0);
+
+static void clear_stasis_jni_frame_error(void) {
+    stasis_jni_last_frame_error[0] = '\0';
 }
 
-static int32_t stasis_published_load_i32(const char *path) {
-    return stasis_jit_global_i32_load(stasis_published_hash_path(path));
+static void set_stasis_jni_frame_error(const char *lane, const char *reason,
+        size_t expected, jlong actual) {
+    snprintf(stasis_jni_last_frame_error, sizeof(stasis_jni_last_frame_error),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"error\","
+            "\"lane\":\"%s\",\"reason\":\"%s\","
+            "\"expected\":%zu,\"actual\":%lld}",
+            lane, reason, expected, (long long)actual);
 }
 
-static int32_t stasis_published_load_render_i32(int32_t index, const char *field) {
-    char path[80];
-    snprintf(path, sizeof(path), "Render.command%d_%s", index, field);
-    return stasis_published_load_i32(path);
+static void set_stasis_jni_frame_order_error(const char *lane) {
+    snprintf(stasis_jni_last_frame_error, sizeof(stasis_jni_last_frame_error),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"error\","
+            "\"lane\":\"%s\",\"reason\":\"byte_order\","
+            "\"expected\":\"native\",\"actual\":\"non_native\"}", lane);
 }
 
-static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
-    if (out_len < STASIS_RENDER_FRAME_I32_CAPACITY) {
-        return;
-    }
-    memset(out, 0, sizeof(int32_t) * STASIS_RENDER_FRAME_I32_CAPACITY);
-    int32_t command_count = stasis_published_load_i32("Render.command_count");
-    int32_t schema = stasis_published_load_i32("Render.command_schema_version");
-    if (command_count < 0) {
-        command_count = 0;
-    }
-    if (command_count > STASIS_RENDER_COMMAND_CAPACITY) {
-        command_count = STASIS_RENDER_COMMAND_CAPACITY;
-    }
-    out[0] = 0;
-    out[1] = published_runtime_tick_count;
-    out[2] = stasis_published_load_i32("GameState.tick_count");
-    out[3] = 0;
-    out[4] = published_aot_main_ran ? 1 : 0;
-    out[5] = command_count;
-    for (int32_t index = 0; index < command_count; index += 1) {
-        int base = STASIS_RENDER_FRAME_HEADER_SIZE + index * STASIS_RENDER_COMMAND_STRIDE;
-        out[base] = stasis_published_load_render_i32(index, "kind");
-        out[base + 1] = stasis_published_load_render_i32(index, "x");
-        out[base + 2] = stasis_published_load_render_i32(index, "y");
-        out[base + 3] = stasis_published_load_render_i32(index, "w");
-        out[base + 4] = stasis_published_load_render_i32(index, "h");
-        out[base + 5] = stasis_published_load_render_i32(index, "color");
-        out[base + 6] = stasis_published_load_render_i32(index, "asset");
-        out[base + 7] = stasis_published_load_render_i32(index, "rotation_degrees");
-        out[base + 8] = schema >= 2
-                ? stasis_published_load_render_i32(index, "alpha") : 255;
-        if (schema >= 3) {
-            out[base + 9] = stasis_published_load_render_i32(index, "clip_x");
-            out[base + 10] = stasis_published_load_render_i32(index, "clip_y");
-            out[base + 11] = stasis_published_load_render_i32(index, "clip_w");
-            out[base + 12] = stasis_published_load_render_i32(index, "clip_h");
-        }
-    }
+static int stasis_jni_clear_exception(JNIEnv *env) {
+    if (!(*env)->ExceptionCheck(env)) return 0;
+    (*env)->ExceptionClear(env);
+    return 1;
 }
 
-static int stasis_published_run_tick_frame(int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len) {
-    if (out_values == NULL || out_len < STASIS_RENDER_FRAME_I32_CAPACITY) {
-        return -1;
+static int initialize_stasis_jni_order(JNIEnv *env) {
+    if (atomic_load_explicit(&stasis_jni_order_ready, memory_order_acquire)) return 1;
+    if (pthread_mutex_lock(&stasis_jni_order_mutex) != 0) return 0;
+    if (atomic_load_explicit(&stasis_jni_order_ready, memory_order_relaxed)) {
+        pthread_mutex_unlock(&stasis_jni_order_mutex);
+        return 1;
     }
-    if (!published_aot_runtime_bound) {
-        stasis_mobile_aot_reset();
-        STASIS_AOT_BIND_RUNTIME_GLOBALS();
-        published_aot_runtime_bound = 1;
+    jclass buffer_class = (*env)->FindClass(env, "java/nio/ByteBuffer");
+    if (stasis_jni_clear_exception(env) || buffer_class == NULL) goto failed;
+    jclass order_class = (*env)->FindClass(env, "java/nio/ByteOrder");
+    if (stasis_jni_clear_exception(env) || order_class == NULL) goto failed;
+    jmethodID buffer_order_method = (*env)->GetMethodID(
+            env, buffer_class, "order", "()Ljava/nio/ByteOrder;");
+    if (stasis_jni_clear_exception(env) || buffer_order_method == NULL) goto failed;
+    jmethodID native_order_method = (*env)->GetStaticMethodID(
+            env, order_class, "nativeOrder", "()Ljava/nio/ByteOrder;");
+    if (stasis_jni_clear_exception(env) || native_order_method == NULL) goto failed;
+    jobject native_order = (*env)->CallStaticObjectMethod(env, order_class, native_order_method);
+    if (stasis_jni_clear_exception(env) || native_order == NULL) goto failed;
+    jobject native_order_global = (*env)->NewGlobalRef(env, native_order);
+    if (stasis_jni_clear_exception(env) || native_order_global == NULL) {
+        if (native_order_global != NULL) (*env)->DeleteGlobalRef(env, native_order_global);
+        goto failed;
     }
-    stasis_jit_global_i32_store(stasis_published_hash_path("Input.touch_x"), touch_x);
-    stasis_jit_global_i32_store(stasis_published_hash_path("Input.touch_y"), touch_y);
-    stasis_jit_global_i32_store(stasis_published_hash_path("Input.touch_active"), touch_active);
-    stasis_jit_global_i32_store(stasis_published_hash_path("Input.screen_w"), screen_w);
-    stasis_jit_global_i32_store(stasis_published_hash_path("Input.screen_h"), screen_h);
-    if (!published_aot_main_ran) {
-        STASIS_AOT_MAIN();
-        published_aot_main_ran = 1;
-    }
-    STASIS_AOT_TICK();
-    STASIS_AOT_RENDER();
-    published_runtime_tick_count += 1;
-    stasis_published_pack_frame(out_values, out_len);
+    stasis_jni_buffer_order_method = buffer_order_method;
+    stasis_jni_native_order = native_order_global;
+    atomic_store_explicit(&stasis_jni_order_ready, 1, memory_order_release);
+    pthread_mutex_unlock(&stasis_jni_order_mutex);
+    return 1;
+
+failed:
+    pthread_mutex_unlock(&stasis_jni_order_mutex);
     return 0;
 }
-#endif
-static char *read_file_text(const char *path, long *size_out);
 
-static int has_suffix(const char *value, const char *suffix) {
-    size_t value_len = strlen(value);
-    size_t suffix_len = strlen(suffix);
-    if (value_len < suffix_len) {
+static int validate_stasis_jni_frame_buffers(JNIEnv *env,
+        jobject frame_i32, jobject frame_f32, jobject frame_u8) {
+    const jobject buffers[] = {frame_i32, frame_f32, frame_u8};
+    clear_stasis_jni_frame_error();
+    if (!initialize_stasis_jni_order(env)) {
+        set_stasis_jni_frame_error("all", "jni_exception", 0, -1);
         return 0;
     }
-    return strcmp(value + value_len - suffix_len, suffix) == 0;
+    for (size_t index = 0; index < sizeof(buffers) / sizeof(buffers[0]); index++) {
+        const StasisJniFrameDescriptor *descriptor = &stasis_jni_frame_descriptors[index];
+        if (buffers[index] == NULL) {
+            set_stasis_jni_frame_error(descriptor->lane, "null_buffer",
+                    descriptor->byte_capacity, -1);
+            return 0;
+        }
+        jobject actual_order = (*env)->CallObjectMethod(
+                env, buffers[index], stasis_jni_buffer_order_method);
+        if (stasis_jni_clear_exception(env)) {
+            set_stasis_jni_frame_error(descriptor->lane, "jni_exception", 0, -1);
+            return 0;
+        }
+        if (actual_order == NULL
+                || (*env)->IsSameObject(env, actual_order, stasis_jni_native_order) == JNI_FALSE) {
+            set_stasis_jni_frame_order_error(descriptor->lane);
+            return 0;
+        }
+        void *address = (*env)->GetDirectBufferAddress(env, buffers[index]);
+        jlong capacity = (*env)->GetDirectBufferCapacity(env, buffers[index]);
+        if (address == NULL) {
+            set_stasis_jni_frame_error(descriptor->lane, "not_direct", descriptor->byte_capacity, capacity);
+            return 0;
+        }
+        if (capacity != (jlong)descriptor->byte_capacity) {
+            set_stasis_jni_frame_error(descriptor->lane, "capacity", descriptor->byte_capacity, capacity);
+            return 0;
+        }
+        if (((uintptr_t)address % descriptor->alignment) != 0) {
+            set_stasis_jni_frame_error(descriptor->lane, "alignment", descriptor->alignment,
+                    (jlong)((uintptr_t)address % descriptor->alignment));
+            return 0;
+        }
+    }
+    return 1;
 }
 
-static void hash_bytes(CompileStats *stats, const char *value, size_t length) {
-    for (size_t index = 0; index < length; index += 1) {
-        stats->project_hash ^= (unsigned char)value[index];
-        stats->project_hash *= FNV_PRIME;
-    }
-}
-
-static int count_token(const char *source, const char *token) {
-    int count = 0;
-    const char *cursor = source;
-    while ((cursor = strstr(cursor, token)) != NULL) {
-        count += 1;
-        cursor += strlen(token);
-    }
-    return count;
-}
-static uint64_t hash_slice(const char *source, size_t length) {
-    uint64_t hash = FNV_OFFSET_BASIS;
-    for (size_t index = 0; index < length; index += 1) {
-        hash ^= (unsigned char)source[index];
-        hash *= FNV_PRIME;
-    }
-    return hash;
-}
-
-static const char *find_matching_function_end(const char *body_start) {
-    int depth = 0;
-    int line_comment = 0;
-    int block_comment = 0;
-    int string_literal = 0;
-
-    for (const char *cursor = body_start; *cursor != '\0'; cursor += 1) {
-        char current = *cursor;
-        char next = *(cursor + 1);
-
-        if (line_comment) {
-            if (current == '\n') {
-                line_comment = 0;
-            }
-            continue;
-        }
-        if (block_comment) {
-            if (current == '*' && next == '/') {
-                block_comment = 0;
-                cursor += 1;
-            }
-            continue;
-        }
-        if (string_literal) {
-            if (current == '\\' && next != '\0') {
-                cursor += 1;
-                continue;
-            }
-            if (current == '"') {
-                string_literal = 0;
-            }
-            continue;
-        }
-        if (current == '/' && next == '/') {
-            line_comment = 1;
-            cursor += 1;
-            continue;
-        }
-        if (current == '/' && next == '*') {
-            block_comment = 1;
-            cursor += 1;
-            continue;
-        }
-        if (current == '"') {
-            string_literal = 1;
-            continue;
-        }
-        if (current == '{') {
-            depth += 1;
-        } else if (current == '}') {
-            depth -= 1;
-            if (depth == 0) {
-                return cursor + 1;
-            }
-        }
-    }
-
-    return NULL;
-}
-
-static void write_escaped_manifest_field(FILE *file, const char *start, size_t length) {
-    for (size_t index = 0; index < length; index += 1) {
-        char value = start[index];
-        if (value == '\n' || value == '\r' || value == '|') {
-            fputc(' ', file);
-        } else {
-            fputc(value, file);
-        }
-    }
-}
-
-static int write_function_artifact(
-        const char *artifact_dir,
-        const char *path,
-        const char *signature_start,
-        size_t signature_length,
-        uint64_t signature_hash,
-        uint64_t body_hash) {
-    char artifact_path[1200];
-    snprintf(artifact_path, sizeof(artifact_path), "%s/%016llx.stub", artifact_dir, (unsigned long long)body_hash);
-
-    FILE *artifact = fopen(artifact_path, "wb");
-    if (artifact == NULL) {
-        return -1;
-    }
-
-    fprintf(artifact, "status=CompiledStub\n");
-    fprintf(artifact, "source=");
-    write_escaped_manifest_field(artifact, path, strlen(path));
-    fprintf(artifact, "\n");
-    fprintf(artifact, "signature=");
-    write_escaped_manifest_field(artifact, signature_start, signature_length);
-    fprintf(artifact, "\n");
-    fprintf(artifact, "signature_hash=%016llx\n", (unsigned long long)signature_hash);
-    fprintf(artifact, "body_hash=%016llx\n", (unsigned long long)body_hash);
-    fclose(artifact);
-    return 0;
-}
-static int write_function_manifest_entries(FILE *manifest, const char *artifact_dir, const char *path, const char *source) {
-    const char *cursor = source;
-    while ((cursor = strstr(cursor, "function ")) != NULL) {
-        const char *signature_start = cursor + strlen("function ");
-        const char *body_start = strchr(signature_start, '{');
-        if (body_start == NULL) {
-            break;
-        }
-
-        const char *body_end = find_matching_function_end(body_start);
-        if (body_end == NULL) {
-            break;
-        }
-
-        const char *signature_end = body_start;
-        while (signature_end > signature_start && (*(signature_end - 1) == ' ' || *(signature_end - 1) == '\n' || *(signature_end - 1) == '\r' || *(signature_end - 1) == '\t')) {
-            signature_end -= 1;
-        }
-
-        uint64_t signature_hash = hash_slice(signature_start, (size_t)(signature_end - signature_start));
-        uint64_t body_hash = hash_slice(body_start, (size_t)(body_end - body_start));
-        fprintf(manifest, "function=");
-        write_escaped_manifest_field(manifest, path, strlen(path));
-        fprintf(manifest, "|");
-        write_escaped_manifest_field(manifest, signature_start, (size_t)(signature_end - signature_start));
-        fprintf(
-                manifest,
-                "|signature_hash=%016llx|body_hash=%016llx|artifact=%s/%016llx.stub\n",
-                (unsigned long long)signature_hash,
-                (unsigned long long)body_hash,
-                STASIS_FUNCTION_ARTIFACT_DIR,
-                (unsigned long long)body_hash);
-
-        if (write_function_artifact(
-                artifact_dir,
-                path,
-                signature_start,
-                (size_t)(signature_end - signature_start),
-                signature_hash,
-                body_hash) != 0) {
-            return -1;
-        }
-
-        cursor = body_end;
-    }
-    return 0;
-}
-
-static int append_function_entries_for_project(FILE *manifest, const char *artifact_dir, const char *path) {
-    DIR *dir = opendir(path);
-    if (dir == NULL) {
-        return -1;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-
-        size_t path_len = strlen(path);
-        size_t name_len = strlen(entry->d_name);
-        char *child = (char *)malloc(path_len + 1 + name_len + 1);
-        if (child == NULL) {
-            closedir(dir);
-            return -1;
-        }
-        memcpy(child, path, path_len);
-        child[path_len] = '/';
-        memcpy(child + path_len + 1, entry->d_name, name_len + 1);
-
-        struct stat info;
-        if (stat(child, &info) == 0) {
-            if (S_ISDIR(info.st_mode)) {
-                int result = append_function_entries_for_project(manifest, artifact_dir, child);
-                free(child);
-                if (result != 0) {
-                    closedir(dir);
-                    return result;
-                }
-                continue;
-            }
-            if (S_ISREG(info.st_mode) && has_suffix(entry->d_name, ".stasis")) {
-                long size = 0;
-                char *source = read_file_text(child, &size);
-                (void)size;
-                if (source == NULL) {
-                    free(child);
-                    closedir(dir);
-                    return -1;
-                }
-                if (write_function_manifest_entries(manifest, artifact_dir, child, source) != 0) {
-                    free(source);
-                    free(child);
-                    closedir(dir);
-                    return -1;
-                }
-                free(source);
-            }
-        }
-        free(child);
-    }
-
-    closedir(dir);
-    return 0;
-}
-
-static void set_error(CompileStats *stats, const char *message, const char *path) {
-    if (stats->error[0] != '\0') {
-        return;
-    }
-    snprintf(stats->error, sizeof(stats->error), "%s: %s", message, path);
-}
-
-static int validate_braces(const char *source, const char *path, CompileStats *stats) {
-    int depth = 0;
-    int line_comment = 0;
-    int block_comment = 0;
-    int string_literal = 0;
-
-    for (size_t index = 0; source[index] != '\0'; index += 1) {
-        char current = source[index];
-        char next = source[index + 1];
-
-        if (line_comment) {
-            if (current == '\n') {
-                line_comment = 0;
-            }
-            continue;
-        }
-
-        if (block_comment) {
-            if (current == '*' && next == '/') {
-                block_comment = 0;
-                index += 1;
-            }
-            continue;
-        }
-
-        if (string_literal) {
-            if (current == '\\' && next != '\0') {
-                index += 1;
-                continue;
-            }
-            if (current == '"') {
-                string_literal = 0;
-            }
-            continue;
-        }
-
-        if (current == '/' && next == '/') {
-            line_comment = 1;
-            index += 1;
-            continue;
-        }
-
-        if (current == '/' && next == '*') {
-            block_comment = 1;
-            index += 1;
-            continue;
-        }
-
-        if (current == '"') {
-            string_literal = 1;
-            continue;
-        }
-
-        if (current == '{') {
-            depth += 1;
-        } else if (current == '}') {
-            depth -= 1;
-            if (depth < 0) {
-                set_error(stats, "CompileError: unmatched closing brace", path);
-                return -1;
-            }
-        }
-    }
-
-    if (depth != 0) {
-        set_error(stats, "CompileError: unmatched opening brace", path);
-        return -1;
-    }
-
-    if (block_comment) {
-        set_error(stats, "CompileError: unterminated block comment", path);
-        return -1;
-    }
-
-    if (string_literal) {
-        set_error(stats, "CompileError: unterminated string literal", path);
-        return -1;
-    }
-
-    return 0;
-}
+static char *read_file_text(const char *path, long *size_out);
 
 static char *read_file_text(const char *path, long *size_out) {
     FILE *file = fopen(path, "rb");
@@ -565,226 +274,6 @@ static int parse_manifest_i32(const char *manifest, const char *key, int *out) {
     return 1;
 }
 
-static int parse_manifest_u64(const char *manifest, const char *key, uint64_t *out) {
-    const char *cursor = strstr(manifest, key);
-    if (cursor == NULL) {
-        return 0;
-    }
-    cursor += strlen(key);
-    *out = (uint64_t)strtoull(cursor, NULL, 16);
-    return 1;
-}
-
-static void read_previous_compile_manifest(const char *project_root, PreviousManifest *previous) {
-    memset(previous, 0, sizeof(*previous));
-
-    char manifest_path[1200];
-    snprintf(manifest_path, sizeof(manifest_path), "%s/%s", project_root, STASIS_COMPILE_MANIFEST_RELATIVE_PATH);
-
-    long size = 0;
-    char *manifest = read_file_text(manifest_path, &size);
-    if (manifest == NULL || size == 0) {
-        free(manifest);
-        return;
-    }
-
-    previous->found = 1;
-    parse_manifest_u64(manifest, "project_hash=", &previous->project_hash);
-    parse_manifest_i32(manifest, "functions=", &previous->functions);
-    parse_manifest_i32(manifest, "structs=", &previous->structs);
-    parse_manifest_i32(manifest, "globals=", &previous->globals);
-    free(manifest);
-}
-
-static const char *classify_reload(const CompileStats *stats, const PreviousManifest *previous) {
-    if (!previous->found) {
-        return "InitialCompile";
-    }
-    if (previous->project_hash == stats->project_hash) {
-        return "NoChange";
-    }
-    if (previous->functions != stats->function_count ||
-        previous->structs != stats->struct_count ||
-        previous->globals != stats->global_count) {
-        return "ResetRequired";
-    }
-    return "FastReload";
-}
-static int analyze_stasis_file(const char *path, CompileStats *stats) {
-    long size = 0;
-    char *source = read_file_text(path, &size);
-    if (source == NULL) {
-        set_error(stats, "CompileError: unreadable file", path);
-        return -1;
-    }
-
-    if (validate_braces(source, path, stats) != 0) {
-        free(source);
-        return -1;
-    }
-
-    stats->file_count += 1;
-    stats->byte_count += size;
-    stats->function_count += count_token(source, "function ");
-    stats->struct_count += count_token(source, "struct ");
-    stats->global_count += count_token(source, "global ");
-    hash_bytes(stats, path, strlen(path));
-    hash_bytes(stats, "\n", 1);
-    hash_bytes(stats, source, (size_t)size);
-
-    if (strstr(source, "function main(") != NULL) {
-        stats->has_main = 1;
-    }
-    if (strstr(source, "function tick(") != NULL) {
-        stats->has_tick = 1;
-    }
-    if (strstr(source, "function on_code_swap(") != NULL) {
-        stats->has_on_code_swap = 1;
-    }
-
-    free(source);
-    return 0;
-}
-
-static int scan_stasis_files(const char *path, CompileStats *stats) {
-    DIR *dir = opendir(path);
-    if (dir == NULL) {
-        set_error(stats, "CompileError: unable to open project root", path);
-        return -1;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-
-        size_t path_len = strlen(path);
-        size_t name_len = strlen(entry->d_name);
-        char *child = (char *)malloc(path_len + 1 + name_len + 1);
-        if (child == NULL) {
-            closedir(dir);
-            set_error(stats, "CompileError: out of memory", path);
-            return -1;
-        }
-        memcpy(child, path, path_len);
-        child[path_len] = '/';
-        memcpy(child + path_len + 1, entry->d_name, name_len + 1);
-
-        struct stat info;
-        if (stat(child, &info) == 0) {
-            if (S_ISDIR(info.st_mode)) {
-                int result = scan_stasis_files(child, stats);
-                free(child);
-                if (result != 0) {
-                    closedir(dir);
-                    return result;
-                }
-                continue;
-            }
-
-            if (S_ISREG(info.st_mode) && has_suffix(entry->d_name, ".stasis")) {
-                int result = analyze_stasis_file(child, stats);
-                free(child);
-                if (result != 0) {
-                    closedir(dir);
-                    return result;
-                }
-                continue;
-            }
-        }
-        free(child);
-    }
-
-    closedir(dir);
-    return 0;
-}
-
-static int ensure_directory(const char *path, CompileStats *stats) {
-    struct stat info;
-    if (stat(path, &info) == 0) {
-        if (S_ISDIR(info.st_mode)) {
-            return 0;
-        }
-        set_error(stats, "CompileError: build path is not a directory", path);
-        return -1;
-    }
-
-    if (mkdir(path, 0700) != 0) {
-        set_error(stats, "CompileError: unable to create build directory", path);
-        return -1;
-    }
-    return 0;
-}
-
-static int write_runtime_state(const char *project_root, const CompileStats *stats, const char *reload_classification) {
-    if (strcmp(reload_classification, "NoChange") == 0 || strcmp(reload_classification, "FastReload") == 0) {
-        return 0;
-    }
-
-    char state_path[1200];
-    snprintf(state_path, sizeof(state_path), "%s/%s", project_root, STASIS_RUNTIME_STATE_RELATIVE_PATH);
-
-    FILE *state = fopen(state_path, "wb");
-    if (state == NULL) {
-        return -1;
-    }
-
-    fprintf(state, "status=RuntimeStateReady\n");
-    fprintf(state, "project_hash=%016llx\n", (unsigned long long)stats->project_hash);
-    fprintf(state, "reload=%s\n", reload_classification);
-    fprintf(state, "tick_count=0\n");
-    fprintf(state, "globals=%d\n", stats->global_count);
-    fclose(state);
-    return 0;
-}
-
-static int write_compile_manifest(const char *project_root, const CompileStats *stats, const char *reload_classification) {
-    char build_dir[1024];
-    snprintf(build_dir, sizeof(build_dir), "%s/build", project_root);
-
-    CompileStats mutable_stats = *stats;
-    if (ensure_directory(build_dir, &mutable_stats) != 0) {
-        return -1;
-    }
-
-    char artifact_dir[1024];
-    snprintf(artifact_dir, sizeof(artifact_dir), "%s/%s", project_root, STASIS_FUNCTION_ARTIFACT_DIR);
-    if (ensure_directory(artifact_dir, &mutable_stats) != 0) {
-        return -1;
-    }
-
-    char manifest_path[1200];
-    snprintf(manifest_path, sizeof(manifest_path), "%s/%s", project_root, STASIS_COMPILE_MANIFEST_RELATIVE_PATH);
-
-    FILE *file = fopen(manifest_path, "wb");
-    if (file == NULL) {
-        return -1;
-    }
-
-    fprintf(file, "status=CompilePlanned\n");
-    fprintf(file, "reload=%s\n", reload_classification);
-    fprintf(file, "project_hash=%016llx\n", (unsigned long long)stats->project_hash);
-    fprintf(file, "files=%d\n", stats->file_count);
-    fprintf(file, "bytes=%ld\n", stats->byte_count);
-    fprintf(file, "functions=%d\n", stats->function_count);
-    fprintf(file, "structs=%d\n", stats->struct_count);
-    fprintf(file, "globals=%d\n", stats->global_count);
-    fprintf(file, "roots=main,tick%s\n", stats->has_on_code_swap ? ",on_code_swap" : "");
-    fprintf(file, "entrypoint=main\n");
-    fprintf(file, "entrypoint=tick\n");
-    if (stats->has_on_code_swap) {
-        fprintf(file, "entrypoint=on_code_swap\n");
-    }
-    fprintf(file, "runtime_state=%s\n", STASIS_RUNTIME_STATE_RELATIVE_PATH);
-    fclose(file);
-
-    if (write_runtime_state(project_root, stats, reload_classification) != 0) {
-        return -1;
-    }
-    return 0;
-}
-
 static int read_runtime_tick_count(const char *project_root, int *tick_count) {
     char state_path[1200];
     snprintf(state_path, sizeof(state_path), "%s/%s", project_root, STASIS_RUNTIME_STATE_RELATIVE_PATH);
@@ -828,6 +317,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
         return NULL;
     }
 
+    rust_bridge_api.version =
+            (stasis_android_bridge_version_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_version");
     rust_bridge_api.compile_project =
             (stasis_android_bridge_compile_project_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_compile_project");
     rust_bridge_api.run_tests =
@@ -835,26 +326,49 @@ static RustBridgeApi *load_rust_bridge_api(void) {
     rust_bridge_api.run_tick =
             (stasis_android_bridge_run_tick_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick");
     rust_bridge_api.run_tick_frame =
-            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame");
+            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2");
+    rust_bridge_api.last_frame_error =
+            (stasis_android_bridge_last_frame_error_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_last_frame_error");
+    rust_bridge_api.inspect_runtime_state =
+            (stasis_android_bridge_inspect_runtime_state_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_inspect_runtime_state");
     rust_bridge_api.set_i32_global =
             (stasis_android_bridge_set_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_i32_global");
     rust_bridge_api.get_i32_global =
             (stasis_android_bridge_get_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_get_i32_global");
     rust_bridge_api.resolve_sprite_asset =
             (stasis_android_bridge_resolve_sprite_asset_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_sprite_asset");
+    rust_bridge_api.drain_sprite_releases =
+            (stasis_android_bridge_drain_sprite_releases_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_drain_sprite_releases");
+    rust_bridge_api.poll_sprite_release_cancellations =
+            (stasis_android_bridge_poll_sprite_release_cancellations_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_poll_sprite_release_cancellations");
+    rust_bridge_api.resolve_cached_text =
+            (stasis_android_bridge_resolve_cached_text_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_cached_text");
+    rust_bridge_api.resolve_font =
+            (stasis_android_bridge_resolve_font_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_font");
+    rust_bridge_api.source_items =
+            (stasis_android_bridge_source_items_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_source_items");
+    rust_bridge_api.find_references =
+            (stasis_android_bridge_find_references_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_find_references");
+    rust_bridge_api.semantic_edit =
+            (stasis_android_bridge_semantic_edit_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_semantic_edit");
+    rust_bridge_api.set_storage_root =
+            (stasis_android_bridge_set_storage_root_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_storage_root");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
     rust_bridge_api.install_audio_api =
             (stasis_android_bridge_install_audio_api_fn)dlsym(
                     rust_bridge_api.handle, "stasis_android_bridge_install_audio_api");
-    if (rust_bridge_api.compile_project == NULL ||
+    if (rust_bridge_api.version == NULL ||
+        rust_bridge_api.compile_project == NULL ||
         rust_bridge_api.run_tick == NULL ||
         rust_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG, "Rust Android bridge missing required symbols");
         return NULL;
     }
+
     if (rust_bridge_api.install_audio_api != NULL) {
-        StasisAudioHostApi audio_api = {
+        const StasisAudioHostApi audio_api = {
             stasis_audio_init,
             stasis_audio_shutdown,
             stasis_audio_is_available,
@@ -862,12 +376,30 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             stasis_audio_get_channels,
             stasis_audio_get_queued_frames,
             stasis_audio_get_underruns,
-            stasis_audio_push_f32_interleaved
-        };
+            stasis_audio_push_f32_interleaved};
         rust_bridge_api.install_audio_api(&audio_api);
     }
 
     return &rust_bridge_api;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSetStorageRoot(
+        JNIEnv *env, jclass activity_class, jstring storage_root) {
+    (void)activity_class;
+    if (storage_root == NULL) return 0;
+    const char *root = (*env)->GetStringUTFChars(env, storage_root, NULL);
+    if (root == NULL) return 0;
+    int configured = stasis_storage_set_root(root);
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge != NULL && bridge->set_storage_root != NULL) {
+        configured = bridge->set_storage_root(root) && configured;
+    }
+    else {
+        configured = 0;
+    }
+    (*env)->ReleaseStringUTFChars(env, storage_root, root);
+    return configured;
 }
 
 static CodexBridgeApi *load_codex_bridge_api(void) {
@@ -896,6 +428,8 @@ static CodexBridgeApi *load_codex_bridge_api(void) {
             codex_bridge_api.handle, "stasis_codex_android_cancel_response");
     codex_bridge_api.response = (stasis_codex_android_response_fn)dlsym(
             codex_bridge_api.handle, "stasis_codex_android_response");
+    codex_bridge_api.ai_contract = (stasis_codex_android_ai_contract_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_ai_contract");
     codex_bridge_api.free_string = (stasis_codex_android_free_string_fn)dlsym(
             codex_bridge_api.handle, "stasis_codex_android_free_string");
     if (codex_bridge_api.initialize == NULL ||
@@ -987,23 +521,6 @@ static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring requ
     return result;
 }
 
-static int try_rust_bridge_compile(const char *project_root, char *message, size_t message_size) {
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->compile_project == NULL || bridge->free_string == NULL) {
-        return 0;
-    }
-
-    char *bridge_message = bridge->compile_project(project_root, "src/main.stasis");
-    if (bridge_message == NULL) {
-        snprintf(message, message_size, "CompileError: Rust Android bridge returned null message");
-        return 1;
-    }
-
-    snprintf(message, message_size, "%s", bridge_message);
-    bridge->free_string(bridge_message);
-    return 1;
-}
-
 static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, char *message, size_t message_size) {
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick == NULL || bridge->free_string == NULL) {
@@ -1071,12 +588,33 @@ static int try_rust_bridge_get_i32_global(const char *project_root, const char *
     bridge->free_string(bridge_message);
     return 1;
 }
-static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len) {
+
+static int parse_state_value(const char *message, int *value) {
+    return strstr(message, "StateGet:") != NULL && parse_manifest_i32(message, "value=", value);
+}
+
+#if STASIS_RENDER_ACCEPTANCE
+static void log_workshop_it025_marker(JNIEnv *env, const char *bridge_version,
+        int state_checksum, uint32_t command_trace, int render_version, int frame_token) {
+    __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG,
+            "Stasis Workshop IT-025: {\"schema\":\"stasis.workshop_seam.v1\","
+            "\"test_id\":\"IT-025\",\"event\":\"frame\","
+            "\"jni_version\":%d,\"rust_bridge_version\":\"%s\","
+            "\"render_version\":%d,\"state_checksum\":%d,"
+            "\"command_trace\":%u,\"frame_token\":%d,\"fallback\":0,\"stub\":0}",
+            (*env)->GetVersion(env), bridge_version, render_version,
+            state_checksum, command_trace, frame_token);
+}
+
+#endif
+static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len) {
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick_frame == NULL) {
         return -1;
     }
-    return bridge->run_tick_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active, screen_w, screen_h, out_values, out_len);
+    return bridge->run_tick_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active,
+            screen_w, screen_h, out_i32, out_i32_len, out_f32, out_f32_len,
+            out_u8, out_u8_len);
 }
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeSetRuntimeI32(JNIEnv *env, jclass activity_class, jstring project_root, jstring path, jint value) {
@@ -1172,23 +710,6 @@ Java_com_stasislang_workshop_MainActivity_nativeAudioRequested(
     return stasis_android_audio_is_requested() ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jintArray JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeAudioMetrics(
-        JNIEnv *env, jclass activity_class) {
-    jint values[6];
-    jintArray result;
-    (void)activity_class;
-    values[0] = stasis_android_audio_is_running();
-    values[1] = values[0] ? stasis_audio_get_sample_rate() : 0;
-    values[2] = values[0] ? stasis_audio_get_channels() : 0;
-    values[3] = stasis_audio_get_queued_frames();
-    values[4] = stasis_audio_get_underruns();
-    values[5] = stasis_android_audio_last_error();
-    result = (*env)->NewIntArray(env, 6);
-    if (result != NULL) (*env)->SetIntArrayRegion(env, result, 0, 6, values);
-    return result;
-}
-
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeResolveSpriteAsset(
         JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
@@ -1209,6 +730,93 @@ Java_com_stasislang_workshop_MainActivity_nativeResolveSpriteAsset(
     if (message == NULL) {
         return (*env)->NewStringUTF(env,
                 "{\"status\":\"error\",\"error\":\"shared sprite resolver returned no result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeDrainSpriteReleases(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->drain_sprite_releases == NULL || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    char *message = bridge->drain_sprite_releases();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePollSpriteReleaseCancellations(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->poll_sprite_release_cancellations == NULL
+            || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    char *message = bridge->poll_sprite_release_cancellations();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeResolveCachedText(
+        JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
+    (void)activity_class;
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"unable to read project root\"}");
+    }
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->resolve_cached_text == NULL || bridge->free_string == NULL) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"cached text resolver unavailable\"}");
+    }
+    char *message = bridge->resolve_cached_text(root, (int)handle);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"cached text resolver returned no result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeResolveFont(
+        JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
+    (void)activity_class;
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"unable to read project root\"}");
+    }
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->resolve_font == NULL || bridge->free_string == NULL) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"font resolver unavailable\"}");
+    }
+    char *message = bridge->resolve_font(root, (int)handle);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"font resolver returned no result\"}");
     }
     jstring result = (*env)->NewStringUTF(env, message);
     bridge->free_string(message);
@@ -1246,6 +854,25 @@ Java_com_stasislang_workshop_MainActivity_nativeCodexAccountRateLimits(
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSharedAiContract(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    CodexBridgeApi *bridge = load_codex_bridge_api();
+    if (bridge == NULL || bridge->ai_contract == NULL || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"shared AI contract unavailable\"}");
+    }
+    char *message = bridge->ai_contract();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"shared AI contract returned no result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeCodexResponse(
         JNIEnv *env, jclass activity_class, jstring codex_home, jstring request_json, jlong generation) {
     (void)activity_class;
@@ -1273,88 +900,279 @@ Java_com_stasislang_workshop_MainActivity_nativeCodexCancelResponse(
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jclass activity_class, jstring project_root) {
     (void)activity_class;
-#if STASIS_ANDROID_PUBLISHED_AOT
-    (void)project_root;
-    return (*env)->NewStringUTF(env, "CompilePlanned: reload=PublishedAot files=0 functions=0 hash=0000000000000000 manifest=published_aot state=compiled status=0");
-#else
-
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
         return (*env)->NewStringUTF(env, "CompileError: unable to read project root");
     }
 
-    char message[256];
-    if (try_rust_bridge_compile(root, message, sizeof(message)) != 0) {
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->compile_project == NULL || bridge->free_string == NULL) {
         (*env)->ReleaseStringUTFChars(env, project_root, root);
-        __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
-        return (*env)->NewStringUTF(env, message);
+        return (*env)->NewStringUTF(env,
+                "CompileError: required Rust Android compiler bridge is unavailable");
     }
 
-    CompileStats stats;
-    memset(&stats, 0, sizeof(stats));
-    stats.project_hash = FNV_OFFSET_BASIS;
-    int result = scan_stasis_files(root, &stats);
-    PreviousManifest previous;
-    read_previous_compile_manifest(root, &previous);
-    const char *reload_classification = classify_reload(&stats, &previous);
-
-    if (result != 0 || stats.error[0] != '\0') {
-        snprintf(message, sizeof(message), "%s", stats.error[0] == '\0' ? "CompileError: unknown native check failure" : stats.error);
-    } else if (stats.file_count == 0) {
-        snprintf(message, sizeof(message), "CompileError: no .stasis files found");
-    } else if (!stats.has_main || !stats.has_tick) {
-        snprintf(message, sizeof(message), "CompileError: missing lifecycle root main=%d tick=%d", stats.has_main, stats.has_tick);
-    } else if (write_compile_manifest(root, &stats, reload_classification) != 0) {
-        snprintf(message, sizeof(message), "CompileError: unable to write native compile manifest");
-    } else {
-        snprintf(
-                message,
-                sizeof(message),
-                "CompilePlanned: reload=%s files=%d functions=%d hash=%016llx manifest=%s state=%s",
-                reload_classification,
-                stats.file_count,
-                stats.function_count,
-                (unsigned long long)stats.project_hash,
-                STASIS_COMPILE_MANIFEST_RELATIVE_PATH,
-                STASIS_RUNTIME_STATE_RELATIVE_PATH);
-    }
+    char *message = bridge->compile_project(root, "src/main.stasis");
 
     (*env)->ReleaseStringUTFChars(env, project_root, root);
-    __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
-    return (*env)->NewStringUTF(env, message);
-#endif
-}
-JNIEXPORT jint JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jintArray frame_values) {
-    (void)activity_class;
-    const int frame_len = STASIS_RENDER_FRAME_I32_CAPACITY;
-    int32_t values[STASIS_RENDER_FRAME_I32_CAPACITY];
-    memset(values, 0, sizeof(values));
-
-    if (frame_values == NULL || (*env)->GetArrayLength(env, frame_values) < frame_len) {
-        return -1;
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "CompileError: Rust Android bridge returned null message");
     }
+    __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
 
-#if STASIS_ANDROID_PUBLISHED_AOT
-    (void)project_root;
-    int status = stasis_published_run_tick_frame((int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, values, frame_len);
-#else
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSourceItems(
+        JNIEnv *env, jclass activity_class, jstring project_root) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->source_items == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Rust source item bridge unavailable\"}");
+    }
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
-        values[0] = -1;
-        (*env)->SetIntArrayRegion(env, frame_values, 0, frame_len, (const jint *)values);
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"unable to read project root\"}");
+    }
+    char *result = bridge->source_items(root, "src/main.stasis");
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (result == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"source item bridge returned null\"}");
+    }
+    jstring response = (*env)->NewStringUTF(env, result);
+    bridge->free_string(result);
+    return response;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeFindReferences(
+        JNIEnv *env, jclass activity_class, jstring project_root, jstring symbol, jint limit) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->find_references == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Rust reference bridge unavailable\"}");
+    }
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    const char *reference_symbol = (*env)->GetStringUTFChars(env, symbol, NULL);
+    if (root == NULL || reference_symbol == NULL) {
+        if (root != NULL) (*env)->ReleaseStringUTFChars(env, project_root, root);
+        if (reference_symbol != NULL) (*env)->ReleaseStringUTFChars(env, symbol, reference_symbol);
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"unable to read reference lookup input\"}");
+    }
+    char *result = bridge->find_references(
+            root, "src/main.stasis", reference_symbol, limit < 1 ? 1u : (uintptr_t)limit);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    (*env)->ReleaseStringUTFChars(env, symbol, reference_symbol);
+    if (result == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"reference bridge returned null\"}");
+    }
+    jstring response = (*env)->NewStringUTF(env, result);
+    bridge->free_string(result);
+    return response;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSemanticEdit(
+        JNIEnv *env, jclass activity_class, jstring project_root, jstring request_json,
+        jboolean dry_run, jboolean validate, jboolean run_tests) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->semantic_edit == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Rust semantic edit bridge unavailable\"}");
+    }
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    const char *request = (*env)->GetStringUTFChars(env, request_json, NULL);
+    if (root == NULL || request == NULL) {
+        if (root != NULL) (*env)->ReleaseStringUTFChars(env, project_root, root);
+        if (request != NULL) (*env)->ReleaseStringUTFChars(env, request_json, request);
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"unable to read semantic edit input\"}");
+    }
+    char *result = bridge->semantic_edit(
+            root, "src/main.stasis", request,
+            dry_run ? 1 : 0, validate ? 1 : 0, run_tests ? 1 : 0);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    (*env)->ReleaseStringUTFChars(env, request_json, request);
+    if (result == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"semantic edit bridge returned null\"}");
+    }
+    jstring response = (*env)->NewStringUTF(env, result);
+    bridge->free_string(result);
+    return response;
+}
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jobject frame_i32, jobject frame_f32, jobject frame_u8) {
+    (void)activity_class;
+    if (!validate_stasis_jni_frame_buffers(env, frame_i32, frame_f32, frame_u8)) {
+        return -1;
+    }
+    int32_t *values_i32 = (int32_t *)(*env)->GetDirectBufferAddress(env, frame_i32);
+    float *values_f32 = (float *)(*env)->GetDirectBufferAddress(env, frame_f32);
+    uint8_t *values_u8 = (uint8_t *)(*env)->GetDirectBufferAddress(env, frame_u8);
+
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        values_i32[0] = -1;
         return -1;
     }
 
-    int status = try_rust_bridge_run_tick_frame(root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, values, frame_len);
-    (*env)->ReleaseStringUTFChars(env, project_root, root);
-#endif
+    int status = try_rust_bridge_run_tick_frame(
+            root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h,
+            values_i32, STASIS_RENDER_I32_COUNT, values_f32, STASIS_RENDER_F32_COUNT,
+            values_u8, STASIS_RENDER_U8_COUNT);
     if (status != 0) {
-        values[0] = -1;
+        values_i32[0] = -1;
+    } else {
+        static int32_t *last_traced_frame;
+        static int32_t last_display_generation = -1;
+        static int32_t last_density_generation = -1;
+        if (last_traced_frame != values_i32 ||
+                last_display_generation != values_i32[STASIS_RENDER_I_DISPLAY_GENERATION] ||
+                last_density_generation != values_i32[STASIS_RENDER_I_DENSITY_GENERATION]) {
+            uint32_t trace = stasis_render_trace(values_i32, values_f32, values_u8);
+            __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG,
+                    "Stasis preview gfx_cmd v%d trace=%u flags=%d lines=%d rects=%d sprites=%d text=%d "
+                    "logical=%dx%d native=%dx%d drawable=%dx%d display_gen=%d density_gen=%d",
+                    values_i32[STASIS_RENDER_I_VERSION], trace,
+                    values_i32[STASIS_RENDER_I_FLAGS],
+                    values_i32[STASIS_RENDER_I_LINE_COUNT],
+                    values_i32[STASIS_RENDER_I_RECT_COUNT],
+                    values_i32[STASIS_RENDER_I_SPRITE_COUNT],
+                    values_i32[STASIS_RENDER_I_TEXT_COUNT],
+                    values_i32[STASIS_RENDER_I_LOGICAL_W],
+                    values_i32[STASIS_RENDER_I_LOGICAL_H],
+                    values_i32[STASIS_RENDER_I_NATIVE_W],
+                    values_i32[STASIS_RENDER_I_NATIVE_H],
+                    values_i32[STASIS_RENDER_I_DRAWABLE_W],
+                    values_i32[STASIS_RENDER_I_DRAWABLE_H],
+                    values_i32[STASIS_RENDER_I_DISPLAY_GENERATION],
+                    values_i32[STASIS_RENDER_I_DENSITY_GENERATION]);
+            last_traced_frame = values_i32;
+            last_display_generation = values_i32[STASIS_RENDER_I_DISPLAY_GENERATION];
+            last_density_generation = values_i32[STASIS_RENDER_I_DENSITY_GENERATION];
+        }
+#if STASIS_RENDER_ACCEPTANCE
+        {
+            static int it025_state_ready = 0;
+            static int it025_state_checksum;
+            static const char *it025_bridge_version;
+            RustBridgeApi *bridge = load_rust_bridge_api();
+            char state_message[256];
+            if (!it025_state_ready) {
+                it025_bridge_version = bridge == NULL || bridge->version == NULL
+                        ? NULL : bridge->version();
+                if (it025_bridge_version == NULL || it025_bridge_version[0] == '\0' ||
+                        !try_rust_bridge_get_i32_global(root, "seam_state_checksum",
+                                state_message, sizeof(state_message)) ||
+                        !parse_state_value(state_message, &it025_state_checksum) ||
+                        it025_state_checksum <= 0) {
+                    __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG,
+                            "IT-025 state checksum was unavailable from the live Rust JIT global bridge");
+                    (*env)->ReleaseStringUTFChars(env, project_root, root);
+                    values_i32[0] = -1;
+                    return -1;
+                }
+                it025_state_ready = 1;
+            }
+            if (it025_bridge_version == NULL) {
+                __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG,
+                        "IT-025 Rust bridge version was unavailable after initialization");
+                (*env)->ReleaseStringUTFChars(env, project_root, root);
+                values_i32[0] = -1;
+                return -1;
+            }
+            log_workshop_it025_marker(env, it025_bridge_version, it025_state_checksum,
+                    stasis_render_trace(values_i32, values_f32, values_u8),
+                    values_i32[STASIS_RENDER_I_VERSION],
+                    values_i32[STASIS_RENDER_I_FRAME_TOKEN]);
+        }
+#endif
     }
-    (*env)->SetIntArrayRegion(env, frame_values, 0, frame_len, (const jint *)values);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
     return (jint)status;
 }
+
+#if STASIS_RENDER_ACCEPTANCE
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeFrameAbiDescriptor(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    char descriptor_json[512];
+    const StasisJniFrameDescriptor *i32 = &stasis_jni_frame_descriptors[0];
+    const StasisJniFrameDescriptor *f32 = &stasis_jni_frame_descriptors[1];
+    const StasisJniFrameDescriptor *u8 = &stasis_jni_frame_descriptors[2];
+    snprintf(descriptor_json, sizeof(descriptor_json),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"descriptor\","
+            "\"lanes\":[{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu},"
+            "{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu},"
+            "{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu}]}",
+            i32->lane, i32->byte_capacity, i32->alignment,
+            f32->lane, f32->byte_capacity, f32->alignment,
+            u8->lane, u8->byte_capacity, u8->alignment);
+    return (*env)->NewStringUTF(env, descriptor_json);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeFrameTrace(
+        JNIEnv *env, jclass activity_class, jobject frame_i32, jobject frame_f32,
+        jobject frame_u8) {
+    (void)activity_class;
+    if (!validate_stasis_jni_frame_buffers(env, frame_i32, frame_f32, frame_u8)) {
+        return -1;
+    }
+    int32_t *values_i32 = (int32_t *)(*env)->GetDirectBufferAddress(env, frame_i32);
+    float *values_f32 = (float *)(*env)->GetDirectBufferAddress(env, frame_f32);
+    uint8_t *values_u8 = (uint8_t *)(*env)->GetDirectBufferAddress(env, frame_u8);
+    return (jint)stasis_render_trace(values_i32, values_f32, values_u8);
+}
+#endif
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeLastFrameError(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    if (stasis_jni_last_frame_error[0] != '\0') {
+        char message[sizeof(stasis_jni_last_frame_error)];
+        snprintf(message, sizeof(message), "%s", stasis_jni_last_frame_error);
+        clear_stasis_jni_frame_error();
+        return (*env)->NewStringUTF(env, message);
+    }
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->last_frame_error == NULL || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "native preview frame failed");
+    }
+    char *message = bridge->last_frame_error();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "native preview frame failed");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeInspectRuntimeState(
+        JNIEnv *env, jclass activity_class, jstring project_root) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->inspect_runtime_state == NULL || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"RuntimeStateError\",\"error\":\"live runtime inspection unavailable\"}");
+    }
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"RuntimeStateError\",\"error\":\"unable to read project root\"}");
+    }
+    char *result = bridge->inspect_runtime_state(root);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (result == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"RuntimeStateError\",\"error\":\"live runtime inspection returned null\"}");
+    }
+    jstring response = (*env)->NewStringUTF(env, result);
+    bridge->free_string(result);
+    return response;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
     (void)activity_class;

@@ -1,0 +1,200 @@
+name: Android Emulator Seams
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      release_shell_test_id:
+        description: "Optional release-shell seam test ID (for example IT-021)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: android-emulator-seams-nightly
+  cancel-in-progress: false
+
+jobs:
+  release-shell-seams:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
+      STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
+    steps:
+      - name: Checkout Stasis
+        uses: actions/checkout@v7
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Checkout SDL3
+        uses: actions/checkout@v7
+        with:
+          repository: libsdl-org/SDL
+          ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
+          path: target/android-link-deps/SDL
+
+      - name: Checkout SDL3_image
+        uses: actions/checkout@v7
+        with:
+          repository: libsdl-org/SDL_image
+          ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
+          path: target/android-link-deps/SDL_image
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Android Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run generated Android AOT release-shell seams
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STASIS_RELEASE_SHELL_TEST_ID: ${{ inputs.release_shell_test_id }}
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          cores: 2
+          ram-size: 4096M
+          ndk: 27.0.12077973
+          cmake: 3.22.1
+          emulator-boot-timeout: 900
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
+            -no-boot-anim -camera-back none
+          script: |
+            pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1 -TestId "$STASIS_RELEASE_SHELL_TEST_ID"
+
+      - name: Upload Android release-shell evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-shell-seam
+          path: artifacts/android_release_shell/e
+          if-no-files-found: warn
+
+      - name: Upload Android resource-restore evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-resource-restore-seam
+          path: artifacts/android_resource_restore/e
+          if-no-files-found: warn
+
+      - name: Upload Android touch round-trip evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-touch-roundtrip-seam
+          path: artifacts/android_touch_roundtrip/e
+          if-no-files-found: warn
+
+      - name: Upload Android orientation metrics evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-orientation-metrics-seam
+          path: artifacts/android_orientation_metrics/e
+          if-no-files-found: warn
+
+      - name: Upload Android packaged-assets evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-packaged-assets-seam
+          path: artifacts/android_packaged_assets/e
+          if-no-files-found: warn
+
+  workshop-seams:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
+      STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
+    steps:
+      - name: Checkout Stasis
+        uses: actions/checkout@v7
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Checkout SDL3
+        uses: actions/checkout@v7
+        with:
+          repository: libsdl-org/SDL
+          ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
+          path: target/android-link-deps/SDL
+
+      - name: Checkout SDL3_image
+        uses: actions/checkout@v7
+        with:
+          repository: libsdl-org/SDL_image
+          ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
+          path: target/android-link-deps/SDL_image
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Android Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Android Workshop seams
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          cores: 2
+          ram-size: 4096M
+          ndk: 27.0.12077973
+          cmake: 3.22.1
+          emulator-boot-timeout: 900
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
+            -no-boot-anim -camera-back none
+          script: |
+            pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 -Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90
+
+      - name: Upload Android Workshop IT-025 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-workshop-it025-seam
+          path: artifacts/android_workshop_seam/e
+          if-no-files-found: warn

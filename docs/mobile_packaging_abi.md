@@ -73,11 +73,9 @@ Required outputs:
 - `stasis_mobile_abi.json`, a versioned metadata file described below
 - packaged assets under the platform bundle root described below
 
-The current Android AOT bundle helper already writes generated symbol and link
-metadata for Android packaging, but it does not yet satisfy this full contract:
-mobile v1 must also carry the `main` entrypoint and the versioned ABI metadata
-below. Follow-up mobile tasks should converge Android and iOS on this contract
-instead of adding platform-specific symbol discovery.
+The shared mobile AOT helper writes the fixed entry symbols, link inputs, and
+asset metadata consumed by both generated platform shells. Neither shell
+discovers symbols independently.
 
 ### Metadata Schema
 
@@ -142,7 +140,11 @@ Rules:
 
 ## Runtime Contract
 
-Mobile shells link one shared SDL-only Stasis runtime core.
+Mobile shells link one SDL-only Stasis runtime core. Android production folds
+that core, SDL3, SDL3_image's PNG-only decoder, and the generated AOT objects
+into one `arm64-v8a/libmain.so`. Release delivery is an AAB; generated release
+APKs are useful for direct size and device acceptance checks. The x86-64 target
+remains available only with `--development-build` for emulator workflows.
 
 Rules:
 
@@ -150,7 +152,8 @@ Rules:
 - Android and iOS shells should share the same C runtime ABI wherever platform
   SDK differences do not force a thin adapter.
 - The runtime drives the app lifecycle and calls `main` once, then `tick` and
-  `render` on the fixed tick/frame loop.
+  `render` on the shell-paced 60 Hz tick/frame loop. Display refresh may block
+  presentation, but it must not redefine deterministic game speed.
 - Platform pause, resume, focus, and shutdown events are runtime-owned and must
   not require dynamic game code replacement.
 - Audio and graphics device unavailability must leave gameplay state coherent
@@ -177,5 +180,6 @@ Follow-up tasks should use this note as their contract boundary:
 - AOT emission work should produce the linkable outputs and metadata above.
 - Android shell work should consume those outputs for one `arm64-v8a` app.
 - iOS shell work should consume the same outputs for one `arm64` app.
-- The eventual `package-mobile` command should be a thin orchestration layer
-  around this contract.
+- `package-mobile` is the thin orchestration layer around this contract; it
+  copies the AOT bundle into a Gradle or Xcode shell without adding another
+  compiler or runtime path.

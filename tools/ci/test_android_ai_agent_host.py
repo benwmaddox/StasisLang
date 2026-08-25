@@ -16,8 +16,8 @@ import run_android_ai_model_comparison as comparison
 
 
 class AndroidAiAgentHostTests(unittest.TestCase):
-    def test_agent_turn_limit_is_twenty_five(self) -> None:
-        self.assertEqual(25, host.MAX_TURNS)
+    def test_agent_turn_limit_is_fifteen(self) -> None:
+        self.assertEqual(15, host.MAX_TURNS)
 
     def test_all_gpt_5_6_comparison_models_have_pricing(self) -> None:
         self.assertEqual(
@@ -88,11 +88,21 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         response = {
             "mode": "tool_calls",
             "working_notes": "Intent: inspect. Observed: none. Next: inspect. Blocker: none.",
-            "tool_calls": [{"tool": "list_symbols", "args": {}}] * 13,
+            "tool_calls": [{"tool": "list_symbols", "args": {}}] * 51,
         }
         calls, errors = host.validate_response_shape(response)
         self.assertEqual([], calls)
-        self.assertIn("exceeds 12 calls", errors[0]["error"])
+        self.assertIn("exceeds 50 calls", errors[0]["error"])
+
+    def test_fifty_tool_calls_are_accepted(self) -> None:
+        response = {
+            "mode": "tool_calls",
+            "working_notes": "Intent: inspect. Observed: targets. Next: read. Blocker: none.",
+            "tool_calls": [{"tool": "read_symbol", "args": {"name": "tick"}}] * 50,
+        }
+        calls, errors = host.validate_response_shape(response)
+        self.assertEqual([], errors)
+        self.assertEqual(50, len(calls))
 
     def test_empty_irrelevant_action_array_is_harmless(self) -> None:
         response = {
@@ -120,6 +130,50 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         retained = host.retained_observations(memory)
         self.assertEqual(16, len(retained))
         self.assertEqual("new", retained[0]["result"]["source"])
+
+    def test_successful_write_memory_omits_source_and_hash(self) -> None:
+        memory: dict[str, dict] = {}
+        host.remember_observations(memory, [{
+            "tool": "write_symbol",
+            "args": {"name": "tick", "new_source": "function tick(): void {}"},
+            "result": {"status": "written"},
+        }])
+        args = host.retained_observations(memory)[0]["args"]
+        self.assertNotIn("new_source", args)
+        self.assertNotIn("new_source_sha256", args)
+        self.assertEqual(24, args["new_source_chars"])
+
+    def test_initial_symbols_target_entry_and_direct_imports(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        (project / "src/main.stasis").write_text(
+            'import "paddle.stasis";\nfunction main(): void {}\nfunction tick(): void {}\n',
+            encoding="utf-8",
+        )
+        (project / "src/paddle.stasis").write_text(
+            "function update_paddle(): void {}\n", encoding="utf-8")
+        (project / "src/unrelated.stasis").write_text(
+            "function unrelated(): void {}\n", encoding="utf-8")
+        index = host.build_shared_context(project, "resize paddle")["project_context"]["project_symbol_index"]
+        self.assertEqual(["src/main.stasis", "src/paddle.stasis"], index["files"])
+        self.assertEqual(["src/paddle.stasis"], index["imports"]["src/main.stasis"])
+        self.assertNotIn("unrelated", [item["name"] for item in index["symbols"]])
+
+    def test_list_symbols_filters_and_references_are_compact(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        (project / "src/main.stasis").write_text(
+            "global GameState { paddle_y: i32; }\n"
+            "function tick(): void { GameState.paddle_y += 1; }\n"
+            "function render(): void { let y = GameState.paddle_y; }\n",
+            encoding="utf-8",
+        )
+        listing = host.compact_symbol_listing(project, {"query": "tick"})
+        self.assertEqual(["tick"], [item["name"] for item in listing["items"]])
+        references = host.find_symbol_references(project, "GameState.paddle_y")
+        self.assertEqual({"write", "read"}, {item["kind"] for item in references["references"]})
+        self.assertTrue(all("source" not in item and "source_hash" not in item
+                            for item in references["references"]))
 
     def test_followup_keeps_shared_context_byte_stable(self) -> None:
         temporary, project = self.make_project()

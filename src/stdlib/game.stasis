@@ -1,4 +1,0 @@
-// Backwards-compatible shim.
-//
-// Prefer importing `game_collision.stasis`, `game_math.stasis`, or `game_draw.stasis`.
-import "game_collision.stasis";

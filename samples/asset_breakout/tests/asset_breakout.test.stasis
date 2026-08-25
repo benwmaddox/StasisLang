@@ -1,0 +1,88 @@
+import "../src/main.stasis";
+
+test `brick layout is deterministic`(): bool {
+    initialize_bricks();
+    if (bricks[0].x != 25.0 || bricks[0].y != 36.0 || !bricks[0].alive) {
+        return false;
+    }
+    if (bricks[34].x != 517.0 || bricks[34].y != 148.0 || bricks_left != 35) {
+        return false;
+    }
+    return true;
+}
+
+test `paddle input clamps to arena`(): bool {
+    set_paddle_x(-40.0);
+    if (paddle_x != 0.0) {
+        return false;
+    }
+    set_paddle_x(700.0);
+    return paddle_x == 544.0;
+}
+
+test `ball removes one brick and bounces`(): bool {
+    initialize_bricks();
+    ball_active = true;
+    ball_x = 25.0;
+    ball_y = 58.0;
+    ball_vx = 0.0;
+    ball_vy = -2.6;
+    update_ball();
+    return bricks_left == 34 && !bricks[0].alive && ball_vy > 0.0;
+}
+
+test `ball bounces from paddle`(): bool {
+    reset_round();
+    ball_active = true;
+    ball_x = 320.0;
+    ball_y = 320.0;
+    ball_vx = 0.0;
+    ball_vy = 2.0;
+    update_ball();
+    return ball_vy < 0.0 && !round_done;
+}
+
+test `round reset restores bricks and ball`(): bool {
+    initialize_bricks();
+    bricks[0].alive = false;
+    bricks_left = 34;
+    round_done = true;
+    reset_round();
+    return bricks_left == 35 && bricks[0].alive && !round_done && !ball_active;
+}
+
+test `hot swap preserves active round`(): bool {
+    reset_round();
+    ball_active = true;
+    ball_x = 123.0;
+    ball_y = 87.0;
+    bricks_left = 12;
+    presentation_variant = 0;
+    on_code_swap();
+    return presentation_variant == 1 && ball_active && ball_x == 123.0 && ball_y == 87.0 && bricks_left == 12;
+}
+
+test `asset loading progress is bounded`(): bool {
+    if (loading_percent(-1) != 0 || loading_percent(0) != 0) {
+        return false;
+    }
+    if (loading_percent(2) != 50 || loading_percent(ASSET_TOTAL) != 100) {
+        return false;
+    }
+    return loading_percent(ASSET_TOTAL + 1) == 100;
+}
+
+test `simulation stays gated until assets are ready`(): bool {
+    loader.assets_ready = false;
+    loader.failed = false;
+    if (!loading_is_blocking()) {
+        return false;
+    }
+    loader.assets_ready = true;
+    if (loading_is_blocking()) {
+        return false;
+    }
+    loader.assets_ready = false;
+    loader.failed = true;
+    return !loading_is_blocking();
+}
