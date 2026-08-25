@@ -91,6 +91,11 @@ jobs:
           cmake --build target/render-parity-native --config Release
           ctest --test-dir target/render-parity-native -C Release --output-on-failure
 
+      - name: Test bounded audio ring
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Iruntime runtime/stasis_audio_ring.c runtime/tests/stasis_audio_ring_test.c -o /tmp/stasis_audio_ring_test
+          /tmp/stasis_audio_ring_test
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

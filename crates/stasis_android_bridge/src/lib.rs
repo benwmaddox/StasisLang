@@ -24,6 +24,7 @@ unsafe extern "C" {
 
 use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_dynload::StasisAudioHostApi;
 #[cfg(test)]
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::state_migration::{
@@ -51,6 +52,16 @@ pub const ANDROID_RENDER_GFX_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER
 pub const ANDROID_RENDER_GFX_F32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_F32_COUNT;
 pub const ANDROID_RENDER_GFX_U8_CAPACITY: usize = stasis_dynload::STASIS_RENDER_U8_COUNT;
 pub const ANDROID_RENDER_I_FRAME_TOKEN: usize = 26;
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_install_audio_api(api: *const StasisAudioHostApi) -> i32 {
+    if api.is_null() {
+        stasis_dynload::install_audio_host_api(None);
+        return 1;
+    }
+    stasis_dynload::install_audio_host_api(Some(unsafe { *api }));
+    1
+}
 
 #[derive(Debug)]
 enum AndroidBridgeError {

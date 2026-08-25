@@ -14,6 +14,7 @@
 #include "stasis_render_contract.h"
 #include "stasis_mobile_aot_runtime.h"
 #include "stasis_platform_storage.h"
+#include "stasis_android_audio.h"
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
@@ -39,6 +40,17 @@ typedef char *(*stasis_android_bridge_find_references_fn)(const char *project_ro
 typedef char *(*stasis_android_bridge_semantic_edit_fn)(const char *project_root, const char *entry_file, const char *request_json, int dry_run, int validate, int run_tests);
 typedef int (*stasis_android_bridge_set_storage_root_fn)(const char *storage_root);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
+typedef struct StasisAudioHostApi {
+    int (*init)(int, int, int);
+    void (*shutdown)(void);
+    int (*is_available)(void);
+    int (*get_sample_rate)(void);
+    int (*get_channels)(void);
+    int (*get_queued_frames)(void);
+    int (*get_underruns)(void);
+    int (*push_f32_interleaved)(const float *, int);
+} StasisAudioHostApi;
+typedef int (*stasis_android_bridge_install_audio_api_fn)(const StasisAudioHostApi *api);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
 typedef void (*stasis_codex_android_cancel_response_fn)(void);
@@ -67,6 +79,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_semantic_edit_fn semantic_edit;
     stasis_android_bridge_set_storage_root_fn set_storage_root;
     stasis_android_bridge_free_string_fn free_string;
+    stasis_android_bridge_install_audio_api_fn install_audio_api;
     int attempted;
 } RustBridgeApi;
 
@@ -343,12 +356,28 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_set_storage_root_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_storage_root");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
+    rust_bridge_api.install_audio_api =
+            (stasis_android_bridge_install_audio_api_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_install_audio_api");
     if (rust_bridge_api.version == NULL ||
         rust_bridge_api.compile_project == NULL ||
         rust_bridge_api.run_tick == NULL ||
         rust_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG, "Rust Android bridge missing required symbols");
         return NULL;
+    }
+
+    if (rust_bridge_api.install_audio_api != NULL) {
+        const StasisAudioHostApi audio_api = {
+            stasis_audio_init,
+            stasis_audio_shutdown,
+            stasis_audio_is_available,
+            stasis_audio_get_sample_rate,
+            stasis_audio_get_channels,
+            stasis_audio_get_queued_frames,
+            stasis_audio_get_underruns,
+            stasis_audio_push_f32_interleaved};
+        rust_bridge_api.install_audio_api(&audio_api);
     }
 
     return &rust_bridge_api;
@@ -647,6 +676,38 @@ Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activ
     (void)activity_class;
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "native smoke entry loaded");
     return (*env)->NewStringUTF(env, "Stasis Android native smoke loaded");
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioSetPaused(
+        JNIEnv *env, jclass activity_class, jboolean paused) {
+    (void)env;
+    (void)activity_class;
+    stasis_android_audio_set_paused(paused ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioSetFocus(
+        JNIEnv *env, jclass activity_class, jboolean focused) {
+    (void)env;
+    (void)activity_class;
+    stasis_android_audio_set_focus(focused ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioShutdown(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    stasis_audio_shutdown();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioRequested(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    return stasis_android_audio_is_requested() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL

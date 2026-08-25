@@ -1923,7 +1923,7 @@ fn write_mobile_aot_engine_bundle(
         MobileAotTarget::AndroidArm64 | MobileAotTarget::AndroidX86_64
     ) {
         let path = output_dir.join("published_aot_objects.cmake");
-        write_android_aot_cmake_file(&bundle.object_paths_by_function_id, &path)?;
+        write_android_aot_cmake_file(&bundle.object_paths_by_function_id, &bindings_source, &path)?;
         Some(path)
     } else {
         None
@@ -2235,6 +2235,7 @@ fn mobile_aot_relative_path(output_dir: &Path, path: &Path) -> Result<String, St
 
 fn write_android_aot_cmake_file(
     object_paths_by_function_id: &std::collections::BTreeMap<u32, PathBuf>,
+    bindings_source: &Path,
     output_path: &Path,
 ) -> Result<(), String> {
     let output_dir = output_path.parent().ok_or_else(|| {
@@ -2249,6 +2250,10 @@ fn write_android_aot_cmake_file(
         let relative = mobile_aot_relative_path(output_dir, path)?;
         out.push_str(&format!("  \"${{CMAKE_CURRENT_LIST_DIR}}/{relative}\"\n"));
     }
+    let bindings_relative = mobile_aot_relative_path(output_dir, bindings_source)?;
+    out.push_str(&format!(
+        "  \"${{CMAKE_CURRENT_LIST_DIR}}/{bindings_relative}\"\n"
+    ));
     out.push_str(")\n");
     fs::write(output_path, out).map_err(|error| {
         format!(
@@ -3114,7 +3119,7 @@ mod tests {
         assert!(cmake.contains("set(STASIS_PUBLISHED_AOT_OBJECTS"));
         assert!(cmake.contains("${CMAKE_CURRENT_LIST_DIR}/"));
         assert!(!cmake.contains(&output_dir.to_string_lossy().replace('\\', "/")));
-        assert!(!cmake.contains("published_aot_bindings.c"));
+        assert!(cmake.contains("published_aot_bindings.c"));
         let package_manifest: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(output_dir.join("mobile_aot_bundle_manifest.json"))
                 .expect("read package manifest"),

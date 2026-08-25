@@ -688,7 +688,7 @@ functions.
 - Status: `in progress (bounded WAV mixer and compiler/runtime contracts complete; event submission and device acceptance remain)`
 #### AS4 - Desktop and Android Audio Backends
 - Scope: Implement device initialization, callback/queue integration, focus/interruption handling, pause/resume, route changes, latency, underrun recovery, and clean shutdown.
-- Progress: Asset voices share the existing SDL3 device stream and lifecycle callback on desktop and mobile instead of restoring the prior Windows MCI/Android Java split. The full pinned SDL desktop runtime compiles with the mixer; physical Android focus, interruption, and route-change acceptance remain.
+- Progress: Asset voices share the existing SDL3 device stream and lifecycle callback on desktop and mobile instead of restoring the prior Windows MCI/Android Java split. Android API 26+ additionally has a low-latency shared-mode AAudio PCM-float sink with bounded SPSC buffering, truthful availability, queue/underrun diagnostics, and focus/lifecycle cleanup; the generated Brickout AOT bridge forwards registered f32 buffers through the same native sink. The full pinned SDL desktop runtime compiles with the mixer; physical Android focus, interruption, route-change, and audible-output acceptance remain.
 - Done gate: The same audio sample plays on desktop and Android and recovers correctly from Android lifecycle/audio-focus events.
 - Status: `in progress (shared backend compiled; physical mobile acceptance remains)`
 #### AS5 - Asset Packaging and JIT/AOT Parity

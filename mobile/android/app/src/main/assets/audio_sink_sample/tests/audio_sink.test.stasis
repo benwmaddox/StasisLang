@@ -1,0 +1,3 @@
+test "audio fixture constants remain bounded" {
+    assert(AUDIO_FRAMES_PER_PUSH == 256);
+}

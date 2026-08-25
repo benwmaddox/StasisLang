@@ -27,6 +27,8 @@ static int32_t hash_text(const char *text) {
 }
 
 static char last_sprite_path[64];
+static float last_audio_samples[4];
+static int last_audio_frames;
 static int sprite_handle_to_load = 1;
 static int released_sprite_handle;
 static int released_sprite_count;
@@ -62,7 +64,13 @@ int stasis_audio_get_channels(void) { return 2; }
 int stasis_audio_get_queued_frames(void) { return 0; }
 int stasis_audio_get_underruns(void) { return 0; }
 int stasis_audio_push_f32_interleaved(const float *samples, int frames) {
-    return samples == NULL ? 0 : frames;
+    int index;
+    if (samples == NULL || frames <= 0) return 0;
+    last_audio_frames = frames;
+    for (index = 0; index < 4 && index < frames * 2; index += 1) {
+        last_audio_samples[index] = samples[index];
+    }
+    return frames;
 }
 int stasis_audio_load_wav(const char *path) { return path ? 1 : 0; }
 void stasis_audio_release(int asset_handle) { (void)asset_handle; }
@@ -161,6 +169,7 @@ int main(void) {
     enum { STRESS_LITERAL_COUNT = 640 };
     int32_t external = 4;
     int32_t external_array[3] = {7, 8, 9};
+    float external_audio[4] = {0.1f, -0.1f, 0.2f, -0.2f};
     int32_t overlapping_i32[5] = {1, 2, 3, 4, 5};
     float overlapping_f32[5] = {1, 2, 3, 4, 5};
     uint8_t external_u8[4] = {1, 2, 3, 4};
@@ -201,6 +210,13 @@ int main(void) {
     CHECK(stasis_jit_global_i32_array_load(20, 0, 1) == 8);
     stasis_jit_global_i32_array_store(20, 0, 2, 12);
     CHECK(external_array[2] == 12);
+
+    stasis_jit_register_global_f32_array(24, 0, external_audio, 4);
+    CHECK(stasis_jit_global_f32_array_ptr(24, 0, 4) == external_audio);
+    CHECK(stasis_jit_audio_push_f32_interleaved(24, 2) == 2);
+    CHECK(last_audio_frames == 2);
+    CHECK(last_audio_samples[0] == 0.1f && last_audio_samples[1] == -0.1f);
+    CHECK(last_audio_samples[2] == 0.2f && last_audio_samples[3] == -0.2f);
 
     stasis_jit_register_global_u8_array(22, 0, external_u8, 4);
     CHECK(stasis_jit_global_u8_array_ptr(22, 0, 4) == external_u8);

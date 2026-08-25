@@ -6319,12 +6319,44 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Audio host API (JIT extern call bridge)
 // ============================================================
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StasisAudioHostApi {
+    pub init: Option<extern "C" fn(i32, i32, i32) -> i32>,
+    pub shutdown: Option<extern "C" fn()>,
+    pub is_available: Option<extern "C" fn() -> i32>,
+    pub get_sample_rate: Option<extern "C" fn() -> i32>,
+    pub get_channels: Option<extern "C" fn() -> i32>,
+    pub get_queued_frames: Option<extern "C" fn() -> i32>,
+    pub get_underruns: Option<extern "C" fn() -> i32>,
+    pub push_f32_interleaved: Option<extern "C" fn(*const f32, i32) -> i32>,
+}
+
+static AUDIO_HOST_API: OnceLock<Mutex<Option<StasisAudioHostApi>>> = OnceLock::new();
+
+fn current_audio_host_api() -> Option<StasisAudioHostApi> {
+    *AUDIO_HOST_API
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("audio host API mutex poisoned")
+}
+
+pub fn install_audio_host_api(api: Option<StasisAudioHostApi>) {
+    *AUDIO_HOST_API
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("audio host API mutex poisoned") = api;
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_init(
     sample_rate: i32,
     channels: i32,
     target_latency_frames: i32,
 ) -> i32 {
+    if let Some(init) = current_audio_host_api().and_then(|api| api.init) {
+        return init(sample_rate, channels, target_latency_frames);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6341,6 +6373,10 @@ pub extern "C" fn stasis_jit_audio_init(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_shutdown() {
+    if let Some(shutdown) = current_audio_host_api().and_then(|api| api.shutdown) {
+        shutdown();
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -6356,6 +6392,9 @@ pub extern "C" fn stasis_jit_audio_shutdown() {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
+    if let Some(available) = current_audio_host_api().and_then(|api| api.is_available) {
+        return available();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6371,6 +6410,9 @@ pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_sample_rate() -> i32 {
+    if let Some(get) = current_audio_host_api().and_then(|api| api.get_sample_rate) {
+        return get();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6386,6 +6428,9 @@ pub extern "C" fn stasis_jit_audio_get_sample_rate() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_channels() -> i32 {
+    if let Some(get) = current_audio_host_api().and_then(|api| api.get_channels) {
+        return get();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6401,6 +6446,9 @@ pub extern "C" fn stasis_jit_audio_get_channels() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_queued_frames() -> i32 {
+    if let Some(get) = current_audio_host_api().and_then(|api| api.get_queued_frames) {
+        return get();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6416,6 +6464,9 @@ pub extern "C" fn stasis_jit_audio_get_queued_frames() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_underruns() -> i32 {
+    if let Some(get) = current_audio_host_api().and_then(|api| api.get_underruns) {
+        return get();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6450,6 +6501,15 @@ fn with_jit_audio_f32_interleaved(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_push_f32_interleaved(samples: i32, frame_count: i32) -> i32 {
+    if let Some(host) = current_audio_host_api() {
+        let Some(push) = host.push_f32_interleaved else {
+            return 0;
+        };
+        let channels = host.get_channels.map(|get| get()).unwrap_or(0);
+        return with_jit_audio_f32_interleaved(samples, frame_count, channels, |values, frames| {
+            push(values, frames)
+        });
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };

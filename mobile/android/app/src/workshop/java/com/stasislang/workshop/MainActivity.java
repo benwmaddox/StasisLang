@@ -317,6 +317,7 @@ public final class MainActivity extends Activity {
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric syncMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
+    private AndroidAudioFocus audioFocus;
     private boolean compileReady;
     private boolean compileAttempted;
     private boolean jniFrameAbiAcceptanceRun;
@@ -345,6 +346,10 @@ public final class MainActivity extends Activity {
     }
 
     private static native String nativeStatus();
+    private static native void nativeAudioSetPaused(boolean paused);
+    private static native void nativeAudioSetFocus(boolean focused);
+    private static native void nativeAudioShutdown();
+    private static native boolean nativeAudioRequested();
     private static native String nativeCompileProject(String projectRoot);
     private static native int nativeSetStorageRoot(String storageRoot);
     private static native String nativeSourceItems(String projectRoot);
@@ -385,6 +390,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        audioFocus = new AndroidAudioFocus(this, MainActivity::nativeAudioSetFocus);
         if (nativeSetStorageRoot(new File(getFilesDir(), "stasis_preferences").getAbsolutePath()) == 0) {
             throw new IllegalStateException("Unable to initialize preference storage");
         }
@@ -455,6 +461,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        nativeAudioSetPaused(false);
         if (gamePreview != null) gamePreview.onHostResume();
         codexLoginLifecycle.onResume();
         refreshPhoneNativeCodexStatus();
@@ -466,6 +473,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioSetPaused(true);
         if (gamePreview != null) gamePreview.onHostPause();
         codexLoginLifecycle.onPause();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
@@ -520,6 +529,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         activityDestroyed = true;
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioShutdown();
         stopVoiceRecognition();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
@@ -12154,6 +12165,7 @@ public final class MainActivity extends Activity {
                 status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
                         screenWidth, screenHeight, renderer.frameI32Bytes(),
                         renderer.frameF32Bytes(), renderer.frameU8Bytes());
+                if (audioFocus != null && nativeAudioRequested()) audioFocus.resume();
                 releaseCancellationApplied = renderer.cancelPendingSpriteReleases(
                         nativePollSpriteReleaseCancellations());
                 if (!drainReleases && releaseCancellationApplied) {

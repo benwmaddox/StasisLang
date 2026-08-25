@@ -1517,11 +1517,27 @@ def main() -> int:
     assert "frameToken != lastAcceptanceGlesEvidenceToken" in preview_renderer
     assert "nativeFrameTrace" in native
     assert "Stasis Android native smoke loaded" in native
+    assert "stasis_android_audio_set_paused" in native
+    assert "stasis_android_audio_set_focus" in native
+    assert "stasis_android_bridge_install_audio_api" in native
+    android_audio = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
+    assert "AAudioStreamBuilder_openStream" in android_audio
+    assert "AAudioStreamBuilder_setFormat" in android_audio
+    assert "AAudioStreamBuilder_setUsage" in android_audio
+    assert "AAudioStreamBuilder_setContentType" in android_audio
+    assert "AAUDIO_USAGE_GAME" in android_audio
+    assert "AAUDIO_CONTENT_TYPE_MUSIC" in android_audio
+    assert "stasis_audio_get_queued_frames" in android_audio
+    assert "stasis_audio_get_underruns" in android_audio
+    assert "stasis_audio_push_f32_interleaved" in android_audio
+    assert "stasis_audio_ring" in read("runtime/stasis_audio_ring.c")
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
     assert "add_library(stasis_mobile_smoke SHARED" in cmake
     assert "stasis_mobile_smoke.c" in cmake
     assert "stasis_android_sprite.c" in cmake
+    assert "stasis_android_audio.c" in cmake
+    assert "stasis_audio_ring.c" in cmake
     assert "../../../../../../runtime" in cmake
     assert "find_library(math_lib m)" in cmake
     assert "STASIS_ANDROID_PUBLISHED_AOT" not in cmake
@@ -1561,6 +1577,13 @@ def main() -> int:
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")
     assert "Collision logic lives" in collision
+
+    audio_fixture = read("mobile/android/app/src/main/assets/audio_sink_sample/stasis.json")
+    assert '"name": "brickout_audio"' in audio_fixture
+    assert '"application_id": "com.stasislang.brickoutaudio"' in audio_fixture
+    assert '"entry": "src/main.stasis"' in audio_fixture
+    audio_source = read("mobile/android/app/src/main/assets/audio_sink_sample/src/main.stasis")
+    assert "audio_push_f32_interleaved" in audio_source
 
     print("android shell structure ok")
     return 0

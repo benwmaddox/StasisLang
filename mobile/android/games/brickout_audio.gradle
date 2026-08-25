@@ -1,0 +1,11 @@
+ext.stasisGameDescriptor = [
+        schemaVersion: 1,
+        id: 'brickout_audio',
+        runtimeId: 'brickout_audio_aot',
+        applicationId: 'com.stasislang.brickoutaudio',
+        label: 'Stasis Brickout Audio',
+        projectDirectory: new File(rootProject.projectDir, 'app/src/main/assets/audio_sink_sample'),
+        entrySource: 'src/main.stasis',
+        assetManifest: 'assets/manifest.json',
+        testPattern: 'tests/**/*.test.stasis'
+]
