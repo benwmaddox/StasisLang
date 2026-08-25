@@ -1578,6 +1578,13 @@ def main() -> int:
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")
     assert "Collision logic lives" in collision
 
+    audio_fixture = read("mobile/android/app/src/main/assets/audio_sink_sample/stasis.json")
+    assert '"name": "brickout_audio"' in audio_fixture
+    assert '"application_id": "com.stasislang.brickoutaudio"' in audio_fixture
+    assert '"entry": "src/main.stasis"' in audio_fixture
+    audio_source = read("mobile/android/app/src/main/assets/audio_sink_sample/src/main.stasis")
+    assert "audio_push_f32_interleaved" in audio_source
+
     print("android shell structure ok")
     return 0
 
