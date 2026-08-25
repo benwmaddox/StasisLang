@@ -358,7 +358,13 @@ void stasis_android_audio_set_focus(int focused) {
 }
 
 int stasis_android_audio_is_requested(void) {
-    return atomic_load_explicit(&audio_attempted, memory_order_acquire);
+    StasisAndroidAudioContext *context = audio_context_acquire();
+    int value = 0;
+    if (context != NULL) {
+        value = atomic_load_explicit(&context->error, memory_order_acquire) == 0;
+        audio_context_release(context);
+    }
+    return value;
 }
 
 int stasis_android_audio_is_running(void) {

@@ -1584,6 +1584,23 @@ def main() -> int:
     assert '"entry": "src/main.stasis"' in audio_fixture
     audio_source = read("mobile/android/app/src/main/assets/audio_sink_sample/src/main.stasis")
     assert "audio_push_f32_interleaved" in audio_source
+    audio_native = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
+    audio_requested = audio_native[
+        audio_native.index("int stasis_android_audio_is_requested(void)"):audio_native.index(
+            "int stasis_android_audio_is_running(void)")]
+    assert "audio_context_acquire" in audio_requested
+    assert "context->error" in audio_requested
+    assert "audio_attempted" not in audio_requested
+    activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
+    assert "private void shutdownGameAudio()" in activity
+    assert "if (audioFocus != null) audioFocus.pause();" in activity
+    assert "nativeAudioShutdown();" in activity
+    activation = activity[activity.index("private boolean activateProject"):activity.index(
+        "private boolean hasPendingSourceEdit")]
+    assert activation.index("WorkshopProjectRegistry.setActive(this, project);") < activation.index(
+        "shutdownGameAudio();")
+    assert "gradle assemblePublishedDebug" not in read("mobile/android/README.md")
+    assert not (ROOT / "mobile/android/games/brickout_audio.gradle").exists()
 
     print("android shell structure ok")
     return 0
