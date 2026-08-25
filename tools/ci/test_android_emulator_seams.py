@@ -204,6 +204,42 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("[int]$PerSeamTimeoutSeconds = 660", self.emulator_script)
         self.assertLess(5 * 660, 75 * 60)
 
+    def test_release_wrapper_defaults_to_all_seams_in_stable_order(self):
+        self.assertIn('[string]$TestId = ""', self.emulator_script)
+        self.assertIn('$selectedSeams = if ($TestId)', self.emulator_script)
+        ordered_ids = [
+            self.emulator_script.index(f'TestId = "{test_id}"')
+            for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021")
+        ]
+        self.assertEqual(sorted(ordered_ids), ordered_ids)
+        self.assertIn('} else {\n    $seams\n}', self.emulator_script)
+
+    def test_workflow_dispatch_can_scope_it021_without_changing_workflow_call(self):
+        self.assertIn("workflow_call:\n  workflow_dispatch:\n    inputs:", self.workflow)
+        self.assertIn("release_shell_test_id:", self.workflow)
+        self.assertIn('type: string', self.workflow)
+        self.assertIn(
+            'STASIS_RELEASE_SHELL_TEST_ID: ${{ inputs.release_shell_test_id }}',
+            self.workflow,
+        )
+        self.assertIn(
+            'test_release_shell_emulator.ps1 -TestId "$env:STASIS_RELEASE_SHELL_TEST_ID"',
+            self.workflow,
+        )
+        self.assertNotIn(
+            'test_release_shell_emulator.ps1 -TestId "${{ inputs.release_shell_test_id }}"',
+            self.workflow,
+        )
+        self.assertIn('Where-Object { $_.TestId -eq $TestId }', self.emulator_script)
+        self.assertIn('TestId = "IT-021"', self.emulator_script)
+
+    def test_release_wrapper_rejects_unknown_test_ids_before_execution(self):
+        self.assertIn('$TestId -notin $validTestIds', self.emulator_script)
+        self.assertIn('Unknown Android release-shell seam test ID', self.emulator_script)
+        validation = self.emulator_script.index('$validTestIds =')
+        first_execution = self.emulator_script.index('test_release_shell.ps1')
+        self.assertLess(validation, first_execution)
+
     def test_packaged_assets_use_the_non_lifecycle_resource_pixel_oracle(self):
         self.assertIn('if expectations.get("resource_regions"):', self.release_runner)
         expectations = json.loads(
