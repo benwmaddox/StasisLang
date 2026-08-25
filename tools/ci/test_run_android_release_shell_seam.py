@@ -153,6 +153,31 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             self.assertEqual(manifest_hash, result["manifest_sha256"])
             self.assertEqual("/data/user/0/com.example.seam/files/stasis_game", result["asset_root"])
             self.assertEqual(1, result["identities"]["sprite"]["handle"])
+            stable["asset_root"] = "/data/data/com.example.seam/files/stasis_game"
+            alias_result = seam.validate_asset_audio_markers(
+                markers,
+                {"stable_frame": 30, "state_checksum": 2310, "assets": {}},
+                {"package_id": "com.example.seam", "assets": "."},
+                package_manifest,
+            )
+            self.assertEqual(stable["asset_root"], alias_result["asset_root"])
+            for malicious_root in (
+                "/data/data/com.other.seam/files/stasis_game",
+                "/data/user/0/com.example.seam/files/stasis_game/extra",
+                "/data/user/0/com.example.seam/files/../other",
+                "",
+            ):
+                stable["asset_root"] = malicious_root
+                with self.assertRaisesRegex(
+                    seam.SeamError, "asset_root expected one of.*actual"
+                ):
+                    seam.validate_asset_audio_markers(
+                        markers,
+                        {"stable_frame": 30, "state_checksum": 2310, "assets": {}},
+                        {"package_id": "com.example.seam", "assets": "."},
+                        package_manifest,
+                    )
+            stable["asset_root"] = "/data/user/0/com.example.seam/files/stasis_game"
             stable["audio_replay_matches"] = 0
             with self.assertRaisesRegex(seam.SeamError, "field audio_replay_matches"):
                 seam.validate_asset_audio_markers(

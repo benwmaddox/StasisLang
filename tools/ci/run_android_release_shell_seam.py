@@ -129,11 +129,15 @@ def validate_asset_audio_markers(
             f"IT-021 field asset_manifest_sha256 expected {manifest_hash} actual {actual_hash}; "
             f"evidence path {manifest_path}"
         )
-    expected_root = f"/data/user/0/{package['package_id']}/files/stasis_game"
+    package_id = package["package_id"]
+    expected_roots = (
+        f"/data/user/0/{package_id}/files/stasis_game",
+        f"/data/data/{package_id}/files/stasis_game",
+    )
     actual_root = stable.get("asset_root")
-    if actual_root != expected_root:
+    if actual_root not in expected_roots:
         raise SeamError(
-            f"IT-021 field asset_root expected {expected_root} actual {actual_root}; "
+            f"IT-021 field asset_root expected one of {expected_roots} actual {actual_root}; "
             f"evidence path {package_manifest}"
         )
     handles = assets.get("handles", {})
