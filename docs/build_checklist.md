@@ -3,7 +3,12 @@
 This checklist is the implementation plan and is aligned with:
 - `docs/spec.md`
 - `docs/live-compilation-prd.md`
+- [`deterministic_live_simulation_roadmap.md`](deterministic_live_simulation_roadmap.md), which supplies the cross-cutting product promise and capability gate order
 - `docs/android_workshop_prd.md`
+
+The roadmap is alignment context only. This file owns implementation slices, mutable task status,
+and temporary sequencing; it does not duplicate the roadmap's product promise or normative language
+semantics.
 
 Status note:
 - This repository's stable compiler is implemented in Rust (`cargo build`, `cargo test`).

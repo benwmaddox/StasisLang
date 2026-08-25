@@ -412,6 +412,7 @@ cargo run -p stasis --release -- play `
 - `docs/project_architecture.md` - recommended input, tick, state, and render
   structure for Stasis projects
 - `docs/knowledge/README.md` — concise language, tool, data, and fixed-tick game patterns
+- [`docs/deterministic_live_simulation_roadmap.md`](docs/deterministic_live_simulation_roadmap.md) — cross-cutting live simulation promise, boundaries, and capability gates
 - `docs/spec.md` — canonical language semantics
 - `docs/live-compilation-prd.md` — hot-swap product and architecture requirements
 - `docs/toolchain_cli.md` — CLI and workspace contract

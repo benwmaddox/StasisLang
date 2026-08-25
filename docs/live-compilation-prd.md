@@ -16,6 +16,10 @@ Enable fast, reliable, low-friction iteration on a running Stasis-based game by 
 
 directly inside the running game engine, avoiding disk I/O and process restarts.
 
+The cross-cutting deterministic live simulation promise, capability order, and evidence gates are
+defined in [`docs/deterministic_live_simulation_roadmap.md`](deterministic_live_simulation_roadmap.md).
+This PRD owns the hot-swap architecture and requirements; it does not duplicate that roadmap.
+
 The system must:
 
 - preserve game state across code changes
@@ -512,6 +516,10 @@ full measurement and executable-memory budgets are in `docs/jit_generation_contr
 must not be on the hot path.
 
 ## 15. Development Phases
+
+These local development phases own the hot-compilation implementation sequence and status. The
+cross-cutting deterministic simulation outcome and capability dependencies remain in the
+[`deterministic_live_simulation_roadmap.md`](deterministic_live_simulation_roadmap.md).
 
 Phase P0 (#184):
 - Lock selective reverse-caller invalidation and the host-entry-only trampoline ABI.
