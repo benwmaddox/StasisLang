@@ -529,8 +529,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         activityDestroyed = true;
-        if (audioFocus != null) audioFocus.pause();
-        nativeAudioShutdown();
+        shutdownGameAudio();
         stopVoiceRecognition();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
@@ -2808,6 +2807,7 @@ public final class MainActivity extends Activity {
         }
         try {
             WorkshopProjectRegistry.setActive(this, project);
+            shutdownGameAudio();
             activeProject = project;
             lastExplorationAudioSerial = 0;
             projectRootFile = project.root;
@@ -2851,6 +2851,11 @@ public final class MainActivity extends Activity {
             setStatusText("Project switch failed: " + error.getMessage());
             return false;
         }
+    }
+
+    private void shutdownGameAudio() {
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioShutdown();
     }
 
     private boolean hasPendingSourceEdit() {
