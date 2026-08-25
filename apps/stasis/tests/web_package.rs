@@ -526,7 +526,9 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let runtime = fs::read_to_string(output.join("game.js"))
         .expect("game.js")
         .replace("\r\n", "\n");
-    let index = fs::read_to_string(output.join("index.html")).expect("index.html");
+    let index = fs::read_to_string(output.join("index.html"))
+        .expect("index.html")
+        .replace("\r\n", "\n");
     assert!(index.contains(r#"<title>web_export_smoke</title>"#));
     assert!(index.contains(r#"<h1 id="stasis-loading-title">web_export_smoke</h1>"#));
     assert!(index.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
@@ -637,8 +639,8 @@ fn network_web_package_embeds_retained_nested_assets_only() {
     let source_path = workspace.join("main.stasis");
     let source_text = fs::read_to_string(&source_path)
         .expect("read network fixture source")
-        .replace("assets/smoke.ttf", "assets/fonts/ui.ttf");
-    assert!(source_text.contains("load_font(\"assets/fonts/ui.ttf\""));
+        .replace("/assets/smoke.ttf", "/assets/fonts/ui.ttf");
+    assert!(source_text.contains("load_font(\"/assets/fonts/ui.ttf\""));
     fs::write(&source_path, source_text).expect("rewrite retained font path");
 
     let unused_path = workspace.join("assets/fonts/unused.ttf");
