@@ -313,7 +313,10 @@ public final class MainActivity extends SDLActivity {
 
     private void updateRuntimeError() {
         String message = nativeReadRuntimeError();
-        if (message != null && !message.isEmpty()) showRuntimeError(message);
+        if (message != null && !message.isEmpty()
+                && (displayedRuntimeError == null || !displayedRuntimeError.endsWith(message))) {
+            showRuntimeError(message);
+        }
     }
 
     private void updateJoinUrl() {

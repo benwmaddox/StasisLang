@@ -357,6 +357,15 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
         self.assertIn("runtimeError.announceForAccessibility(displayMessage);", method)
 
+        update_start = source.index("private void updateRuntimeError")
+        update_end = source.index("private void updateJoinUrl", update_start)
+        update_method = source[update_start:update_end]
+        self.assertIn(
+            "displayedRuntimeError == null || !displayedRuntimeError.endsWith(message)",
+            update_method,
+        )
+        self.assertIn("showRuntimeError(message);", update_method)
+
         runner_start = self.release_runner.index("asset_rejection =")
         runner_end = self.release_runner.index("return 0", runner_start)
         rejection_runner = self.release_runner[runner_start:runner_end]
