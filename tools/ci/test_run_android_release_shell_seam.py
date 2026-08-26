@@ -31,6 +31,108 @@ def write_rgb_png(
 
 
 class AndroidReleaseShellSeamTests(unittest.TestCase):
+    def test_install_policy_keeps_default_uninstall_and_allows_only_stateful_recovery(self):
+        self.assertEqual(
+            {
+                "existing_installation": False,
+                "replaced_existing_installation": False,
+                "retained_installation": False,
+            },
+            seam.validate_install_policy(False, False, False, "IT-017", None),
+        )
+        self.assertEqual(
+            {
+                "existing_installation": False,
+                "replaced_existing_installation": False,
+                "retained_installation": True,
+            },
+            seam.validate_install_policy(False, True, False, "IT-022", "malformed-manifest"),
+        )
+        self.assertEqual(
+            {
+                "existing_installation": True,
+                "replaced_existing_installation": True,
+                "retained_installation": False,
+            },
+            seam.validate_install_policy(True, False, True, "IT-021", None),
+        )
+        with self.assertRaisesRegex(seam.SeamError, "existing test package"):
+            seam.validate_install_policy(False, False, True, "IT-021", None)
+        with self.assertRaisesRegex(seam.SeamError, "only allowed for the recovery"):
+            seam.validate_install_policy(True, False, True, "IT-017", None)
+        with self.assertRaisesRegex(seam.SeamError, "contradictory"):
+            seam.validate_install_policy(False, True, True, "IT-022", "missing")
+        with self.assertRaisesRegex(seam.SeamError, "only allowed for an IT-022"):
+            seam.validate_install_policy(False, True, False, "IT-017", None)
+        with self.assertRaisesRegex(seam.SeamError, "only allowed for an IT-022"):
+            seam.validate_install_policy(False, True, False, "IT-022", "")
+
+    def test_retention_requires_successful_rejection_evidence(self):
+        self.assertTrue(seam.should_retain_installed_package(True, "passed"))
+        self.assertFalse(seam.should_retain_installed_package(True, "failed"))
+        self.assertFalse(seam.should_retain_installed_package(False, "passed"))
+
+    def test_terminal_event_stops_rejection_polling_before_stable(self):
+        self.assertEqual(
+            "asset_rejected",
+            seam.terminal_event({"asset_rejection": {"code": "missing_asset"}}),
+        )
+        self.assertEqual("stable", seam.terminal_event({"stable_frame": 30}))
+
+    def test_it022_storage_probe_requires_absent_staging_and_root(self):
+        self.assertEqual(
+            {"staging_absent": True, "root_unpublished": True},
+            seam.validate_rejection_storage_state("absent\n", "absent\n"),
+        )
+        with self.assertRaisesRegex(seam.SeamError, "published extraction state"):
+            seam.validate_rejection_storage_state("present", "absent")
+
+    def test_it022_rejection_requires_native_diagnostic_and_no_game_markers(self):
+        diagnostic = (
+            "code=tampered_asset path=assets/token.bin detail=asset hash does not match the manifest"
+        )
+        markers = [
+            {
+                "schema": seam.SCHEMA,
+                "test_id": "IT-022",
+                "event": "asset_rejected",
+                "frame": 0,
+                "initialized": 0,
+                "accepted": 0,
+                "presented": 0,
+                "asset_error": diagnostic,
+            }
+        ]
+        result = seam.validate_asset_rejection_markers(
+            markers,
+            "I/Stasis: Stasis IT-022 asset verification rejected package: " + diagnostic,
+            {
+                "asset_rejection": {
+                    "variant": "tampered",
+                    "code": "tampered_asset",
+                    "path": "assets/token.bin",
+                }
+            },
+        )
+        self.assertEqual("tampered_asset", result["code"])
+
+    def test_it022_diagnostic_parser_preserves_paths_with_spaces(self):
+        diagnostic = "code=missing_asset path=assets/dir with space.bin detail=asset is missing"
+        result = seam.validate_asset_rejection_markers(
+            [{"event": "asset_rejected", "accepted": 0, "presented": 0, "asset_error": diagnostic}],
+            "Stasis IT-022 asset verification rejected package: " + diagnostic,
+            {"asset_rejection": {"code": "missing_asset", "path": "assets/dir with space.bin"}},
+        )
+        self.assertEqual("assets/dir with space.bin", result["path"])
+
+    def test_it022_rejection_rejects_initialized_marker(self):
+        with self.assertRaisesRegex(seam.SeamError, "initialization/frame"):
+            seam.validate_asset_rejection_markers(
+                [{"event": "initialized", "frame": 0}],
+                "",
+                {"asset_rejection": {"code": "missing_asset"}},
+            )
+
     def test_evidence_target_matches_packaged_android_abi(self):
         self.assertEqual(
             seam.release_shell_target({"target": "android-arm64"}),
@@ -903,6 +1005,28 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             ("shell", "settings", "put", "system", "user_rotation", "3"),
             calls,
         )
+
+    def test_cleanup_retains_install_when_recovery_needs_existing_data(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_kwargs):
+            calls.append(arguments)
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            errors = seam.restore_device_state(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                True,
+                "null",
+                None,
+                retain_installed_package=True,
+            )
+
+        self.assertEqual([], errors)
+        self.assertIn(("shell", "am", "force-stop", "com.example.seam"), calls)
+        self.assertNotIn(("uninstall", "com.example.seam"), calls)
 
     def test_cleanup_restores_orientation_and_prior_display_override(self):
         calls = []

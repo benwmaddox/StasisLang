@@ -70,6 +70,12 @@ $seams = @(
         TestId = "IT-021"
         Project = "samples/android_packaged_assets_seam"
         Output = "android_packaged_assets"
+    },
+    @{
+        TestId = "IT-022"
+        Project = "samples/android_packaged_assets_seam"
+        Expectations = "samples/android_asset_rejection_seam/android_seam_expectations.json"
+        Output = "android_asset_rejection"
     }
 )
 
@@ -84,12 +90,18 @@ $selectedSeams = if ($TestId) {
 }
 
 foreach ($seam in $selectedSeams) {
+    $seamTimeout = if ($seam.TestId -eq "IT-022") {
+        900
+    } else {
+        $PerSeamTimeoutSeconds
+    }
     & (Join-Path $scriptRoot "test_release_shell.ps1") `
         -Serial $Serial `
         -ProjectPath $seam.Project `
         -Target android-x86_64 `
         -OutputPath (Join-Path $artifactRootPath $seam.Output) `
-        -TotalTimeoutSeconds $PerSeamTimeoutSeconds
+        -ExpectationsPath $(if ($seam.Expectations) { $seam.Expectations } else { "" }) `
+        -TotalTimeoutSeconds $seamTimeout
     if ($LASTEXITCODE -ne 0) {
         throw "Android emulator seam $($seam.Project) failed with exit code $LASTEXITCODE"
     }

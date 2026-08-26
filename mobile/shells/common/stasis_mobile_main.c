@@ -235,6 +235,43 @@ static void report_runtime_status(const char *stage, int status) {
     stasis_host_report_runtime_error(message);
 }
 
+#if defined(STASIS_ENABLE_SEAM_TESTS)
+static void log_asset_rejection_marker(const char *test_id, const char *diagnostic) {
+    char escaped[512];
+    size_t output = 0;
+    for (size_t index = 0; diagnostic[index] != '\0' && output + 2 < sizeof(escaped); index++) {
+        unsigned char byte = (unsigned char)diagnostic[index];
+        if (byte == '"' || byte == '\\') {
+            escaped[output++] = '\\';
+            escaped[output++] = (char)byte;
+        } else if (byte == '\n') {
+            escaped[output++] = '\\';
+            escaped[output++] = 'n';
+        } else if (byte == '\r') {
+            escaped[output++] = '\\';
+            escaped[output++] = 'r';
+        } else if (byte == '\t') {
+            escaped[output++] = '\\';
+            escaped[output++] = 't';
+        } else if (byte < 0x20) {
+            escaped[output++] = '?';
+        } else {
+            escaped[output++] = (char)byte;
+        }
+    }
+    escaped[output] = '\0';
+    SDL_Log(
+        "Stasis seam: {\"schema\":\"stasis.seam_test.v1\","
+        "\"test_id\":\"%s\",\"event\":\"asset_rejected\","
+        "\"frame\":0,\"initialized\":0,\"accepted\":0,"
+        "\"rejected\":1,\"presented\":0,\"validation\":0,"
+        "\"asset_error\":\"%s\"}",
+        test_id,
+        escaped
+    );
+}
+#endif
+
 static int configure_asset_root(void) {
 #if defined(__APPLE__) && !defined(__ANDROID__)
     const char *base = SDL_GetBasePath();
@@ -275,6 +312,18 @@ int SDL_main(int argc, char **argv) {
     if (configure_asset_root() != 0) {
         stasis_host_report_runtime_error("Stasis could not configure the bundled asset root");
         SDL_Log("Stasis could not configure the bundled asset root");
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
+    const char *asset_error = SDL_getenv("STASIS_ASSET_VERIFICATION_ERROR");
+    if (asset_error != NULL && asset_error[0] != '\0') {
+        stasis_host_report_runtime_error(asset_error);
+        SDL_Log("Stasis IT-022 asset verification rejected package: %s", asset_error);
+#if defined(STASIS_ENABLE_SEAM_TESTS)
+        const char *seam_test_id = SDL_getenv("STASIS_SEAM_TEST_ID");
+        if (seam_test_id != NULL && strcmp(seam_test_id, "IT-022") == 0) {
+            log_asset_rejection_marker(seam_test_id, asset_error);
+        }
+#endif
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
     SDL_Log(

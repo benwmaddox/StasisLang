@@ -30,6 +30,18 @@ public final class StasisAssetCache {
     public static final long MAX_ASSET_BYTES = 128L * 1024L * 1024L;
     public static final long MAX_TOTAL_ASSET_BYTES = 150L * 1024L * 1024L;
     public static final long MAX_COPIED_TREE_BYTES = 150L * 1024L * 1024L;
+    public static final int MAX_DIAGNOSTIC_BYTES = 384;
+    private static final int MAX_DIAGNOSTIC_CODE_BYTES = 64;
+    private static final int MAX_DIAGNOSTIC_PATH_BYTES = 160;
+
+    /** Stable IT-022 failure identifiers shared by Java, native, and seam logs. */
+    public static final String ERROR_MALFORMED_MANIFEST = "malformed_manifest";
+    public static final String ERROR_MISSING_ASSET = "missing_asset";
+    public static final String ERROR_TAMPERED_ASSET = "tampered_asset";
+    public static final String ERROR_TRAVERSAL_PATH = "traversal_path";
+    public static final String ERROR_DUPLICATE_ASSET = "duplicate_asset";
+    public static final String ERROR_OVERSIZED_ASSET = "oversized_asset";
+    public static final String ERROR_INVALID_TREE = "invalid_asset_tree";
 
     private static final String PACKAGED_ROOT = "stasis_game";
     private static final String MANIFEST_PATH = "assets/manifest.json";
@@ -42,6 +54,87 @@ public final class StasisAssetCache {
         String[] list(String path) throws IOException;
 
         InputStream open(String path) throws IOException;
+    }
+
+    /** A bounded, machine-readable preparation failure with a stable asset path. */
+    public static final class VerificationException extends IOException {
+        private final String code;
+        private final String path;
+
+        VerificationException(String code, String path, String detail, Throwable cause) {
+            super(formatDiagnostic(code, path, detail), cause);
+            this.code = code;
+            this.path = path;
+        }
+
+        public String getCode() {
+            return code;
+        }
+
+        public String getPath() {
+            return path;
+        }
+
+        public String getDiagnostic() {
+            return getMessage();
+        }
+    }
+
+    private static String formatDiagnostic(String code, String path, String detail) {
+        String safeCode = code == null || code.isEmpty() ? "unknown" : code;
+        String safePath = path == null || path.isEmpty() ? MANIFEST_PATH : path;
+        String safeDetail = detail == null || detail.isEmpty() ? "rejected" : detail;
+        String boundedCode = truncateUtf8(safeCode, MAX_DIAGNOSTIC_CODE_BYTES);
+        String boundedPath = truncateUtf8(safePath, MAX_DIAGNOSTIC_PATH_BYTES);
+        int grammarBytes = "code= path= detail=".getBytes(StandardCharsets.UTF_8).length;
+        int detailBudget = Math.max(0, MAX_DIAGNOSTIC_BYTES - grammarBytes
+                - boundedCode.getBytes(StandardCharsets.UTF_8).length
+                - boundedPath.getBytes(StandardCharsets.UTF_8).length);
+        String boundedDetail = truncateUtf8(safeDetail, detailBudget);
+        return "code=" + boundedCode + " path=" + boundedPath + " detail=" + boundedDetail;
+    }
+
+    /** Keep externally forwarded diagnostics bounded without dropping the field grammar. */
+    public static String boundDiagnostic(String diagnostic) {
+        if (diagnostic == null || diagnostic.getBytes(StandardCharsets.UTF_8).length
+                <= MAX_DIAGNOSTIC_BYTES) {
+            return diagnostic;
+        }
+        int pathMarker = diagnostic.indexOf(" path=");
+        int detailMarker = pathMarker < 0 ? -1 : diagnostic.indexOf(" detail=", pathMarker);
+        if (diagnostic.startsWith("code=") && pathMarker >= 0 && detailMarker >= 0) {
+            return formatDiagnostic(
+                    diagnostic.substring("code=".length(), pathMarker),
+                    diagnostic.substring(pathMarker + " path=".length(), detailMarker),
+                    diagnostic.substring(detailMarker + " detail=".length()));
+        }
+        return truncateUtf8(diagnostic, MAX_DIAGNOSTIC_BYTES);
+    }
+
+    private static String truncateUtf8(String value, int maxBytes) {
+        if (maxBytes <= 0 || value.isEmpty()) return "";
+        StringBuilder bounded = new StringBuilder();
+        int usedBytes = 0;
+        for (int index = 0; index < value.length();) {
+            int codePoint = value.codePointAt(index);
+            String character = new String(Character.toChars(codePoint));
+            int characterBytes = character.getBytes(StandardCharsets.UTF_8).length;
+            if (usedBytes + characterBytes > maxBytes) break;
+            bounded.append(character);
+            usedBytes += characterBytes;
+            index += Character.charCount(codePoint);
+        }
+        return bounded.toString();
+    }
+
+    private static VerificationException verificationFailure(
+            String code, String path, String detail) {
+        return new VerificationException(code, path, detail, null);
+    }
+
+    private static VerificationException verificationFailure(
+            String code, String path, String detail, Throwable cause) {
+        return new VerificationException(code, path, detail, cause);
     }
 
     interface PublicationInterceptor {
@@ -136,27 +229,44 @@ public final class StasisAssetCache {
     private final File filesDir;
     private final String packageName;
     private final String releaseIdentity;
+    private final long maxAssetBytes;
     private final PublicationInterceptor publicationInterceptor;
     private final InventoryProbe inventoryProbe;
     private final BackupCleanupProbe backupCleanupProbe;
 
     public StasisAssetCache(AssetSource source, File filesDir, String packageName,
             String releaseIdentity) {
-        this(source, filesDir, packageName, releaseIdentity, NO_INTERCEPTOR);
+        this(source, filesDir, packageName, releaseIdentity, NO_INTERCEPTOR,
+                NO_INVENTORY_PROBE, NO_CLEANUP_PROBE, MAX_ASSET_BYTES);
+    }
+
+    /** Test-only bound override; production callers always use MAX_ASSET_BYTES. */
+    public StasisAssetCache(AssetSource source, File filesDir, String packageName,
+            String releaseIdentity, long maxAssetBytes) {
+        this(source, filesDir, packageName, releaseIdentity, NO_INTERCEPTOR,
+                NO_INVENTORY_PROBE, NO_CLEANUP_PROBE, maxAssetBytes);
     }
 
     StasisAssetCache(AssetSource source, File filesDir, String packageName,
             String releaseIdentity, PublicationInterceptor publicationInterceptor) {
         this(source, filesDir, packageName, releaseIdentity, publicationInterceptor,
-                NO_INVENTORY_PROBE, NO_CLEANUP_PROBE);
+                NO_INVENTORY_PROBE, NO_CLEANUP_PROBE, MAX_ASSET_BYTES);
     }
 
     StasisAssetCache(AssetSource source, File filesDir, String packageName,
             String releaseIdentity, PublicationInterceptor publicationInterceptor,
             InventoryProbe inventoryProbe, BackupCleanupProbe backupCleanupProbe) {
+        this(source, filesDir, packageName, releaseIdentity, publicationInterceptor,
+                inventoryProbe, backupCleanupProbe, MAX_ASSET_BYTES);
+    }
+
+    StasisAssetCache(AssetSource source, File filesDir, String packageName,
+            String releaseIdentity, PublicationInterceptor publicationInterceptor,
+            InventoryProbe inventoryProbe, BackupCleanupProbe backupCleanupProbe,
+            long maxAssetBytes) {
         if (source == null || filesDir == null || packageName == null || releaseIdentity == null
                 || publicationInterceptor == null || inventoryProbe == null
-                || backupCleanupProbe == null) {
+                || backupCleanupProbe == null || maxAssetBytes <= 0) {
             throw new IllegalArgumentException("asset cache arguments must be non-null");
         }
         this.source = source;
@@ -166,6 +276,7 @@ public final class StasisAssetCache {
         this.publicationInterceptor = publicationInterceptor;
         this.inventoryProbe = inventoryProbe;
         this.backupCleanupProbe = backupCleanupProbe;
+        this.maxAssetBytes = maxAssetBytes;
     }
 
     public Result prepare() throws IOException {
@@ -175,8 +286,22 @@ public final class StasisAssetCache {
         File[] backups = backupSlots();
         deleteTree(staging);
 
-        byte[] packagedManifest = readSourceBounded(MANIFEST_PATH, MAX_MANIFEST_BYTES, metrics);
-        Manifest manifest = Manifest.parse(packagedManifest);
+        byte[] packagedManifest;
+        try {
+            packagedManifest = readSourceBounded(MANIFEST_PATH, MAX_MANIFEST_BYTES, metrics);
+        } catch (IOException error) {
+            throw verificationFailure(ERROR_MALFORMED_MANIFEST, MANIFEST_PATH,
+                    error.getMessage(), error);
+        }
+        Manifest manifest;
+        try {
+            manifest = Manifest.parse(packagedManifest);
+        } catch (VerificationException error) {
+            throw error;
+        } catch (IOException error) {
+            throw verificationFailure(ERROR_MALFORMED_MANIFEST, MANIFEST_PATH,
+                    error.getMessage(), error);
+        }
         String manifestHash = sha256(packagedManifest);
         if (recoverPublication(root, backups, packagedManifest, manifestHash, metrics)) {
             return new Result(root, true, metrics, manifestHash);
@@ -236,25 +361,33 @@ public final class StasisAssetCache {
         byte[] extractedManifest = readFileBounded(new File(root, MANIFEST_PATH),
                 MAX_MANIFEST_BYTES, metrics);
         if (!MessageDigest.isEqual(packagedManifest, extractedManifest)) {
-            throw new IOException("extracted asset manifest differs from the packaged manifest");
+            throw verificationFailure(ERROR_TAMPERED_ASSET, MANIFEST_PATH,
+                    "extracted manifest differs from packaged manifest");
         }
         long totalBytes = 0;
         for (AssetEntry entry : manifest.assets) {
             File file = safeFile(root, entry.path);
-            if (!file.isFile() || file.length() > MAX_ASSET_BYTES) {
-                throw new IOException("packaged asset is missing or oversized: " + entry.path);
+            if (!file.isFile()) {
+                throw verificationFailure(ERROR_MISSING_ASSET, entry.path, "asset is missing");
+            }
+            if (file.length() > maxAssetBytes) {
+                throw verificationFailure(ERROR_OVERSIZED_ASSET, entry.path,
+                        "asset exceeds the per-file byte limit");
             }
             totalBytes += file.length();
             if (totalBytes > MAX_TOTAL_ASSET_BYTES) {
-                throw new IOException("packaged assets exceed the total byte limit");
+                throw verificationFailure(ERROR_OVERSIZED_ASSET, entry.path,
+                        "assets exceed the total byte limit");
             }
             if (!entry.sha256.equals(sha256(file, metrics))) {
-                throw new IOException("packaged asset hash mismatch: " + entry.path);
+                throw verificationFailure(ERROR_TAMPERED_ASSET, entry.path,
+                        "asset hash does not match the manifest");
             }
         }
         List<InventoryEntry> inventory = collectInventory(root);
         if (inventory.size() > MAX_TREE_FILES) {
-            throw new IOException("extracted asset tree exceeds the file limit");
+            throw verificationFailure(ERROR_INVALID_TREE, MANIFEST_PATH,
+                    "extracted asset tree exceeds the file limit");
         }
     }
 
@@ -362,25 +495,41 @@ public final class StasisAssetCache {
 
     private void copyAssetTree(String sourcePath, File output, Metrics metrics, int depth,
             CopyState state) throws IOException {
-        if (depth > 64) throw new IOException("packaged asset tree is too deep");
+        if (depth > 64) {
+            throw verificationFailure(ERROR_INVALID_TREE, assetPath(sourcePath),
+                    "packaged asset tree is too deep");
+        }
         String[] children = source.list(sourcePath);
         if (children != null && children.length > 0) {
-            if (children.length > MAX_TREE_FILES) throw new IOException("packaged asset directory is too large");
+            if (children.length > MAX_TREE_FILES) {
+                throw verificationFailure(ERROR_INVALID_TREE, assetPath(sourcePath),
+                        "packaged asset directory is too large");
+            }
             if (!output.isDirectory() && !output.mkdirs()) {
                 throw new IOException("unable to create " + output);
             }
+            Set<String> childNames = new HashSet<>();
             for (String child : children) {
                 if (child == null || child.isEmpty() || child.equals(".") || child.equals("..")
                         || child.indexOf('/') >= 0
                         || child.indexOf('\\') >= 0) {
-                    throw new IOException("invalid packaged asset name");
+                    throw verificationFailure(ERROR_INVALID_TREE, assetPath(sourcePath),
+                            "invalid packaged asset name");
+                }
+                if (!childNames.add(child)) {
+                    throw verificationFailure(ERROR_DUPLICATE_ASSET,
+                            assetPath(sourcePath + "/" + child),
+                            "packaged asset name is duplicated");
                 }
                 copyAssetTree(sourcePath + "/" + child, new File(output, child), metrics,
                         depth + 1, state);
             }
             return;
         }
-        if (++state.fileCount > MAX_TREE_FILES) throw new IOException("packaged asset tree is too large");
+        if (++state.fileCount > MAX_TREE_FILES) {
+            throw verificationFailure(ERROR_INVALID_TREE, assetPath(sourcePath),
+                    "packaged asset tree is too large");
+        }
         File parent = output.getParentFile();
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
             throw new IOException("unable to create " + parent);
@@ -388,13 +537,23 @@ public final class StasisAssetCache {
         try (InputStream input = source.open(sourcePath); FileOutputStream outputStream =
                 new FileOutputStream(output)) {
             long perFileLimit = sourcePath.equals(PACKAGED_ROOT + "/" + MANIFEST_PATH)
-                    ? MAX_MANIFEST_BYTES : MAX_ASSET_BYTES;
-            copy(input, outputStream, metrics, true, perFileLimit, state);
+                    ? MAX_MANIFEST_BYTES : maxAssetBytes;
+            copy(input, outputStream, metrics, true, perFileLimit, state, assetPath(sourcePath));
+        } catch (VerificationException error) {
+            throw error;
+        } catch (IOException error) {
+            throw verificationFailure(ERROR_MISSING_ASSET, assetPath(sourcePath),
+                    error.getMessage(), error);
         }
     }
 
+    private static String assetPath(String sourcePath) {
+        String prefix = PACKAGED_ROOT + "/";
+        return sourcePath.startsWith(prefix) ? sourcePath.substring(prefix.length()) : sourcePath;
+    }
+
     private static void copy(InputStream input, OutputStream output, Metrics metrics,
-            boolean packaged, long perFileLimit, CopyState state) throws IOException {
+            boolean packaged, long perFileLimit, CopyState state, String path) throws IOException {
         byte[] buffer = new byte[16 * 1024];
         long total = 0;
         int count;
@@ -402,7 +561,8 @@ public final class StasisAssetCache {
             total += count;
             state.totalBytes += count;
             if (total > perFileLimit || state.totalBytes > MAX_COPIED_TREE_BYTES) {
-                throw new IOException("packaged asset tree exceeds its byte limit");
+                throw verificationFailure(ERROR_OVERSIZED_ASSET, path,
+                        "packaged asset tree exceeds its byte limit");
             }
             if (packaged) metrics.packagedReadBytes += count;
             else metrics.cacheReadBytes += count;
@@ -476,20 +636,30 @@ public final class StasisAssetCache {
     }
 
     private static File safeFile(File root, String path) throws IOException {
-        if (!isSafeAssetPath(path)) throw new IOException("unsafe asset path: " + path);
+        if (!isSafeAssetPath(path)) {
+            throw verificationFailure(ERROR_TRAVERSAL_PATH, path,
+                    "asset path is outside the assets directory");
+        }
         File file = new File(root, path);
         String rootPath = root.getCanonicalPath() + File.separator;
         if (!file.getCanonicalPath().startsWith(rootPath)) {
-            throw new IOException("asset path escapes extraction root: " + path);
+            throw verificationFailure(ERROR_TRAVERSAL_PATH, path,
+                    "asset path escapes extraction root");
         }
         return file;
     }
 
     private static boolean isSafeAssetPath(String path) {
-        return path != null && path.startsWith("assets/") && !path.endsWith("/")
-                && path.indexOf('\\') < 0 && path.indexOf('\0') < 0 && !path.contains("//")
-                && !path.contains("/../") && !path.endsWith("/..") && !path.contains("/./")
-                && !path.endsWith("/.");
+        if (path == null || !path.startsWith("assets/") || path.endsWith("/")
+                || path.indexOf('\\') >= 0 || path.indexOf('\0') >= 0 || path.contains("//")
+                || path.contains("/../") || path.endsWith("/..") || path.contains("/./")
+                || path.endsWith("/.")) {
+            return false;
+        }
+        for (int index = 0; index < path.length(); index++) {
+            if (path.charAt(index) < 0x20 || path.charAt(index) == 0x7f) return false;
+        }
+        return true;
     }
 
     private static List<InventoryEntry> collectInventory(File root) throws IOException {
@@ -667,35 +837,62 @@ public final class StasisAssetCache {
 
         static Manifest parse(byte[] bytes) throws IOException {
             Object value = new JsonParser(new String(bytes, StandardCharsets.UTF_8)).parse();
-            if (!(value instanceof Map)) throw new IOException("asset manifest is not an object");
+            if (!(value instanceof Map)) {
+                throw verificationFailure(ERROR_MALFORMED_MANIFEST, MANIFEST_PATH,
+                        "manifest is not an object");
+            }
             Map<?, ?> object = (Map<?, ?>) value;
             if (!(object.get("schema") instanceof String)
                     || !"stasis-assets".equals(object.get("schema"))) {
-                throw new IOException("unsupported packaged asset manifest");
+                throw verificationFailure(ERROR_MALFORMED_MANIFEST, MANIFEST_PATH,
+                        "unsupported manifest schema");
             }
             Object version = object.get("version");
             if (!(version instanceof Long)
                     || (((Long) version).longValue() != 1L && ((Long) version).longValue() != 2L)) {
-                throw new IOException("unsupported packaged asset manifest version");
+                throw verificationFailure(ERROR_MALFORMED_MANIFEST, MANIFEST_PATH,
+                        "unsupported manifest version");
             }
             Object rawAssets = object.get("assets");
             if (!(rawAssets instanceof List) || ((List<?>) rawAssets).size() > MAX_MANIFEST_ASSETS) {
-                throw new IOException("asset manifest exceeds the entry limit");
+                throw verificationFailure(ERROR_OVERSIZED_ASSET, MANIFEST_PATH,
+                        "manifest exceeds the entry limit");
             }
             Set<String> ids = new HashSet<>();
             Set<String> paths = new HashSet<>();
             List<AssetEntry> assets = new ArrayList<>();
             for (Object raw : (List<?>) rawAssets) {
-                if (!(raw instanceof Map)) throw new IOException("invalid asset manifest entry");
+                if (!(raw instanceof Map)) {
+                    throw verificationFailure(ERROR_MALFORMED_MANIFEST, MANIFEST_PATH,
+                            "manifest entry is not an object");
+                }
                 Map<?, ?> entry = (Map<?, ?>) raw;
                 Object id = entry.get("id");
                 Object path = entry.get("path");
                 Object hash = entry.get("content_sha256");
-                if (!(id instanceof String) || ((String) id).isEmpty() || !ids.add((String) id)
-                        || !(path instanceof String) || !isSafeAssetPath((String) path)
-                        || !paths.add((String) path) || !(hash instanceof String)
-                        || !((String) hash).matches("[0-9a-f]{64}")) {
-                    throw new IOException("invalid or duplicate asset manifest entry");
+                if (!(id instanceof String) || ((String) id).isEmpty()) {
+                    throw verificationFailure(ERROR_MALFORMED_MANIFEST, MANIFEST_PATH,
+                            "manifest entry id is invalid");
+                }
+                if (!(path instanceof String)) {
+                    throw verificationFailure(ERROR_MALFORMED_MANIFEST, MANIFEST_PATH,
+                            "manifest entry path is invalid");
+                }
+                if (!isSafeAssetPath((String) path)) {
+                    throw verificationFailure(ERROR_TRAVERSAL_PATH, (String) path,
+                            "manifest entry path is outside the assets directory");
+                }
+                if (!paths.add((String) path)) {
+                    throw verificationFailure(ERROR_DUPLICATE_ASSET, (String) path,
+                            "manifest entry path is duplicated");
+                }
+                if (!ids.add((String) id)) {
+                    throw verificationFailure(ERROR_DUPLICATE_ASSET, (String) path,
+                            "manifest entry id is duplicated");
+                }
+                if (!(hash instanceof String) || !((String) hash).matches("[0-9a-f]{64}")) {
+                    throw verificationFailure(ERROR_MALFORMED_MANIFEST, (String) path,
+                            "manifest entry hash is invalid");
                 }
                 assets.add(new AssetEntry((String) path, (String) hash));
             }
@@ -745,6 +942,7 @@ public final class StasisAssetCache {
                 String key = string();
                 whitespace();
                 require(':');
+                if (result.containsKey(key)) throw error("duplicate JSON object key");
                 result.put(key, value(depth));
                 whitespace();
                 if (take('}')) return result;

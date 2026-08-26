@@ -159,7 +159,9 @@ depend on an attached phone, a self-hosted runner, or a preinstalled local AVD.
 The workflow retains the lifecycle, touch, orientation, screenshot, and cleanup
 oracles and uploads the established evidence artifacts from each shard. The
 public x86_64 target requires `--development-build`; production packages remain
-`android-arm64`.
+`android-arm64`. The release-shell shard also runs IT-022, which rebuilds six
+controlled asset variants and verifies stable Java/native rejection diagnostics
+before launching the pristine package for recovery.
 
 Physical-device runs are optional supplemental release evidence for OEM GPU,
 surface, and density behavior. They are not a CI or task-readiness gate.

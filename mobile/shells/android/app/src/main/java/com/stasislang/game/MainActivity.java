@@ -30,6 +30,7 @@ public final class MainActivity extends SDLActivity {
     private static final boolean STASIS_NETWORK_ENABLED = @STASIS_NETWORK_ENABLED@ != 0;
 
     private static native void nativeSetAssetRoot(String path);
+    private static native void nativeSetAssetVerificationError(String diagnostic);
     private static native void nativeSetAssetManifestSha256(String sha256);
     private static native void nativeSetSeamTestId(String testId);
     private static native boolean nativeReadPerformanceMetrics(float[] output);
@@ -77,6 +78,7 @@ public final class MainActivity extends SDLActivity {
     protected void onCreate(Bundle state) {
         System.loadLibrary("main");
         String seamTestId = getIntent().getStringExtra("stasis.seam_test_id");
+        String assetVariant = getIntent().getStringExtra("stasis.asset_variant");
         if (BuildConfig.STASIS_SEAM_TESTS && seamTestId != null) {
             nativeSetSeamTestId(seamTestId);
         }
@@ -87,6 +89,7 @@ public final class MainActivity extends SDLActivity {
                     + Long.toHexString(System.nanoTime()));
         }
         nativeSetAssetRoot(invalidAssetRoot.getAbsolutePath());
+        nativeSetAssetVerificationError(null);
         String startupError = null;
         try {
             PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
@@ -97,7 +100,10 @@ public final class MainActivity extends SDLActivity {
             long startedNanos = System.nanoTime();
             StasisAssetCache.Result result = new StasisAssetCache(
                     new AndroidAssetSource(getAssets()), getFilesDir(), getPackageName(),
-                    releaseIdentity).prepare();
+                    releaseIdentity,
+                    BuildConfig.STASIS_SEAM_TESTS && "IT-022".equals(seamTestId)
+                            && "oversized".equals(assetVariant)
+                            ? 1L : StasisAssetCache.MAX_ASSET_BYTES).prepare();
             StasisAssetCache.Metrics metrics = result.getMetrics();
             long elapsedMillis = (System.nanoTime() - startedNanos) / 1_000_000L;
             Log.i("Stasis", "Asset cache mode=" + (result.isReused() ? "reuse" : "cold")
@@ -117,7 +123,16 @@ public final class MainActivity extends SDLActivity {
             }
         } catch (Exception error) {
             Log.e("Stasis", "Asset cache preparation failed before runtime startup", error);
-            startupError = "Asset verification failed: " + error.getMessage();
+            String diagnostic;
+            if (error instanceof StasisAssetCache.VerificationException) {
+                diagnostic = error.getMessage();
+            } else {
+                diagnostic = StasisAssetCache.boundDiagnostic(
+                        "code=asset_cache_failure path=assets/manifest.json detail="
+                                + error.getMessage());
+            }
+            nativeSetAssetVerificationError(diagnostic);
+            startupError = "Asset verification failed\n" + diagnostic;
         }
         super.onCreate(state);
         installDiagnosticOverlay();

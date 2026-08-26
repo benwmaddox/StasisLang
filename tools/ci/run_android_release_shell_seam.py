@@ -17,6 +17,7 @@ from pathlib import Path
 
 SCHEMA = "stasis.seam_test.v1"
 MARKER = re.compile(r"Stasis seam: (\{[^\r\n]+\})")
+ASSET_DIAGNOSTIC = re.compile(r"code=([^ ]+) path=(.*?) detail=(.+)")
 
 
 class SeamError(RuntimeError):
@@ -57,6 +58,11 @@ def parse_markers(log: str, test_id: str) -> list[dict]:
     return markers
 
 
+def terminal_event(expectations: dict) -> str:
+    """Return the marker that ends polling for this shell lane."""
+    return "asset_rejected" if expectations.get("asset_rejection") is not None else "stable"
+
+
 def validate_markers(markers: list[dict], expectations: dict) -> dict:
     stable_frame = expectations["stable_frame"]
     events = {(item.get("event"), item.get("frame")): item for item in markers}
@@ -86,6 +92,99 @@ def validate_markers(markers: list[dict], expectations: dict) -> dict:
     if mismatches:
         raise SeamError(f"Android stable-frame marker mismatch: {mismatches}")
     return stable
+
+
+def validate_asset_rejection_markers(
+    markers: list[dict], log: str, expectations: dict
+) -> dict:
+    """Validate IT-022 rejection before any guest initialization or frame."""
+    rejection = expectations.get("asset_rejection")
+    if not isinstance(rejection, dict):
+        raise SeamError("IT-022 expectations are missing asset_rejection")
+    if any(item.get("event") in ("initialized", "frame", "stable") for item in markers):
+        raise SeamError("IT-022 rejected package emitted a game initialization/frame marker")
+    marker = next((item for item in markers if item.get("event") == "asset_rejected"), None)
+    if marker is None:
+        raise SeamError("IT-022 package rejection marker is missing")
+    diagnostic = marker.get("asset_error")
+    if not isinstance(diagnostic, str):
+        raise SeamError("IT-022 rejection marker has no asset_error diagnostic")
+    parsed = ASSET_DIAGNOSTIC.fullmatch(diagnostic)
+    if parsed is None:
+        raise SeamError(f"IT-022 rejection diagnostic is not stable: {diagnostic}")
+    code, path, detail = parsed.groups()
+    for key, actual in (("code", code), ("path", path)):
+        expected = rejection.get(key)
+        if expected is not None and expected != actual:
+            raise SeamError(
+                f"IT-022 {key} expected {expected} actual {actual}; diagnostic={diagnostic}"
+            )
+    if marker.get("accepted") != 0 or marker.get("presented") != 0:
+        raise SeamError("IT-022 rejected package reported accepted or presented work")
+    if "Stasis IT-022 asset verification rejected package: " + diagnostic not in log:
+        raise SeamError("IT-022 native rejection log does not preserve Java diagnostic")
+    if rejection.get("detail_contains") and rejection["detail_contains"] not in detail:
+        raise SeamError(
+            f"IT-022 detail expected {rejection['detail_contains']} actual {detail}"
+        )
+    return {"code": code, "path": path, "detail": detail, "diagnostic": diagnostic}
+
+
+def validate_rejection_storage_state(staging_probe: str, root_probe: str) -> dict[str, bool]:
+    """Require a fresh rejected install to publish neither staging nor root."""
+    staging = staging_probe.strip().lower()
+    root = root_probe.strip().lower()
+    if staging != "absent" or root != "absent":
+        raise SeamError(
+            f"IT-022 rejected package published extraction state: staging={staging!r} root={root!r}"
+        )
+    return {"staging_absent": True, "root_unpublished": True}
+
+
+def validate_install_policy(
+    preinstalled: bool,
+    retain_installed_package: bool,
+    replace_existing_package: bool,
+    test_id: str,
+    asset_variant: str | None,
+) -> dict[str, bool]:
+    """Validate the narrowly scoped install behavior used by the seam runner."""
+    rejection = test_id == "IT-022" and bool(asset_variant)
+    recovery = test_id == "IT-021" and not asset_variant
+    if retain_installed_package and replace_existing_package:
+        raise SeamError(
+            "retaining an install and replacing an existing package are contradictory"
+        )
+    if retain_installed_package and not rejection:
+        raise SeamError(
+            "retaining an install is only allowed for an IT-022 rejection variant"
+        )
+    if retain_installed_package and preinstalled:
+        raise SeamError(
+            "refusing to retain a malformed run over a preinstalled test package"
+        )
+    if replace_existing_package and not recovery:
+        raise SeamError(
+            "replacing an existing package is only allowed for the recovery invocation"
+        )
+    if replace_existing_package and not preinstalled:
+        raise SeamError(
+            "recovery requires an existing test package to replace"
+        )
+    if preinstalled and not replace_existing_package:
+        raise SeamError(
+            "refusing to replace preinstalled test package; remove it explicitly"
+        )
+    return {
+        "existing_installation": preinstalled,
+        "replaced_existing_installation": replace_existing_package,
+        "retained_installation": retain_installed_package,
+    }
+
+
+def should_retain_installed_package(requested: bool, evidence_status: str) -> bool:
+    """Retain a rejected install only after its complete seam evidence passes."""
+    return requested and evidence_status == "passed"
 
 
 def packaged_asset_manifest(package_manifest: Path, package: dict) -> tuple[Path, str]:
@@ -1037,16 +1136,14 @@ def restore_device_state(
     installed: bool,
     immersive_confirmation: str,
     device_state: dict | None = None,
+    retain_installed_package: bool = False,
 ) -> list[str]:
     errors = []
     operations = []
     if installed:
-        operations.extend(
-            (
-                ("force-stop", ("shell", "am", "force-stop", package_id)),
-                ("uninstall", ("uninstall", package_id)),
-            )
-        )
+        operations.append(("force-stop", ("shell", "am", "force-stop", package_id)))
+        if not retain_installed_package:
+            operations.append(("uninstall", ("uninstall", package_id)))
     if device_state is not None:
         size = device_state.get("wm_size_override")
         operations.append(
@@ -1107,6 +1204,17 @@ def main() -> int:
     parser.add_argument("--apk", type=Path, required=True)
     parser.add_argument("--package-manifest", type=Path, required=True)
     parser.add_argument("--expectations", type=Path, required=True)
+    parser.add_argument("--asset-variant")
+    parser.add_argument(
+        "--retain-installed-package",
+        action="store_true",
+        help="retain the newly installed package after this run for recovery",
+    )
+    parser.add_argument(
+        "--replace-existing-package",
+        action="store_true",
+        help="allow this recovery run to replace the retained test package",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=int, default=90)
     args = parser.parse_args()
@@ -1134,10 +1242,13 @@ def main() -> int:
             required=False,
         ).strip()
     )
-    if preinstalled:
-        raise SeamError(
-            f"refusing to replace preinstalled test package {package_id}; remove it explicitly"
-        )
+    install_policy = validate_install_policy(
+        preinstalled,
+        args.retain_installed_package,
+        args.replace_existing_package,
+        test_id,
+        args.asset_variant,
+    )
     immersive_confirmation = _run(
         args.adb,
         args.serial,
@@ -1195,6 +1306,7 @@ def main() -> int:
             )
         },
         "artifacts": {"log": str(log_path), "capture": str(capture_path)},
+        "install_policy": install_policy,
     }
     if device_state is not None:
         evidence["original_device_state"] = device_state
@@ -1257,10 +1369,16 @@ def main() -> int:
             "--es",
             "stasis.seam_test_id",
             test_id,
+            *( (
+                "--es",
+                "stasis.asset_variant",
+                args.asset_variant,
+            ) if args.asset_variant else () ),
         )
         deadline = time.monotonic() + args.timeout_seconds
         log = ""
         markers: list[dict] = []
+        expected_terminal_event = terminal_event(expectations)
         while time.monotonic() < deadline:
             log = _run(
                 args.adb,
@@ -1273,9 +1391,78 @@ def main() -> int:
                 "*:S",
             )
             markers = parse_markers(log, test_id)
-            if any(item.get("event") == "stable" for item in markers):
+            if any(item.get("event") == expected_terminal_event for item in markers):
                 break
             time.sleep(1)
+        asset_rejection = expectations.get("asset_rejection")
+        if asset_rejection is not None:
+            rejection = validate_asset_rejection_markers(markers, log, expectations)
+            log_path.write_text(log, encoding="utf-8")
+            first_pid = _run(
+                args.adb, args.serial, "shell", "pidof", package_id, required=False
+            ).strip()
+            if not first_pid:
+                raise SeamError("IT-022 rejected package process exited unexpectedly")
+            staging_probe = _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "run-as",
+                package_id,
+                "sh",
+                "-c",
+                "if [ -e files/.stasis_game.staging ]; then echo present; else echo absent; fi",
+                required=False,
+            )
+            root_probe = _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "run-as",
+                package_id,
+                "sh",
+                "-c",
+                "if [ -e files/stasis_game ]; then echo present; else echo absent; fi",
+                required=False,
+            )
+            storage = validate_rejection_storage_state(staging_probe, root_probe)
+            time.sleep(1)
+            second_pid = _run(
+                args.adb, args.serial, "shell", "pidof", package_id, required=False
+            ).strip()
+            if second_pid != first_pid:
+                raise SeamError("IT-022 rejected package entered a crash loop")
+            _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "uiautomator",
+                "dump",
+                "/sdcard/stasis-it022-ui.xml",
+                required=False,
+            )
+            ui_xml = _run(
+                args.adb,
+                args.serial,
+                "shell",
+                "cat",
+                "/sdcard/stasis-it022-ui.xml",
+                required=False,
+            )
+            if "Stasis runtime error" not in ui_xml or rejection["diagnostic"] not in ui_xml:
+                raise SeamError("IT-022 Java error overlay is not visible with the native diagnostic")
+            evidence.update(
+                {
+                    "status": "passed",
+                    "asset_rejection": rejection,
+                    "process_id": first_pid,
+                    "java_error_visible": True,
+                    **storage,
+                    "lifecycle_events": [item["event"] for item in markers],
+                    "presentation_oracle": "native_rejection_before_game_runtime",
+                }
+            )
+            return 0
         stable = validate_markers(markers, expectations)
         if test_id == "IT-021" or "assets" in expectations:
             evidence["assets"] = validate_asset_audio_markers(
@@ -1680,6 +1867,10 @@ def main() -> int:
                 installed,
                 immersive_confirmation,
                 device_state,
+                should_retain_installed_package(
+                    args.retain_installed_package,
+                    evidence["status"],
+                ),
             )
         )
         evidence["device_state_restored"] = not cleanup_errors
