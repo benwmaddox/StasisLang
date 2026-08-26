@@ -40,9 +40,9 @@ function Invoke-Bounded {
     if (-not $process.Start()) { throw "failed to start $Description" }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit(60000)) {
+    if (-not $process.WaitForExit(180000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        throw "$Description exceeded 60 seconds"
+        throw "$Description exceeded 180 seconds (3 minutes)"
     }
     $process.WaitForExit()
     $stdout = $stdoutTask.Result

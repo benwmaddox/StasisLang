@@ -12170,7 +12170,7 @@ public final class MainActivity extends Activity {
                 status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
                         screenWidth, screenHeight, renderer.frameI32Bytes(),
                         renderer.frameF32Bytes(), renderer.frameU8Bytes());
-                if (audioFocus != null && nativeAudioRequested()) audioFocus.resume();
+                if (activity.audioFocus != null && nativeAudioRequested()) activity.audioFocus.resume();
                 releaseCancellationApplied = renderer.cancelPendingSpriteReleases(
                         nativePollSpriteReleaseCancellations());
                 if (!drainReleases && releaseCancellationApplied) {
