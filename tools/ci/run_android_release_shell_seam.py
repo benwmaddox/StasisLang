@@ -120,6 +120,99 @@ def probe_rejection_storage_path(
     )
 
 
+def _clip_probe_text(value: str, limit: int = 320) -> str:
+    value = value.strip()
+    return value if len(value) <= limit else value[: limit - 3] + "..."
+
+
+def validate_it022_error_overlay(ui_xml: str, diagnostic: str) -> dict[str, bool]:
+    """Require the expected IT-022 error content on one XML node."""
+    start = ui_xml.find("<?xml")
+    if start < 0:
+        start = ui_xml.find("<hierarchy")
+    end = ui_xml.rfind("</hierarchy>")
+    if start < 0 or end < start:
+        raise SeamError("IT-022 UI hierarchy XML is missing or incomplete")
+    xml = ui_xml[start : end + len("</hierarchy>")]
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as error:
+        raise SeamError(f"IT-022 UI hierarchy XML is malformed: {error}") from error
+    if root.tag != "hierarchy":
+        raise SeamError("IT-022 UI hierarchy XML has no hierarchy root")
+    overlay_nodes = [
+        node
+        for node in root.iter("node")
+        if node.attrib.get("content-desc") == "Stasis runtime error"
+    ]
+    if not overlay_nodes:
+        raise SeamError("IT-022 UI hierarchy has no Stasis runtime error node")
+    required_text = (
+        "Release runtime error",
+        "Asset verification failed",
+        diagnostic,
+    )
+    if not any(
+        all(value in node.attrib.get("text", "") for value in required_text)
+        for node in overlay_nodes
+    ):
+        raise SeamError(
+            "IT-022 error overlay node is missing required text: "
+            + ", ".join(required_text[:2])
+            + " and native diagnostic"
+        )
+    return {"java_error_visible": True}
+
+
+def capture_it022_error_overlay(
+    adb: Path,
+    serial: str | None,
+    diagnostic: str,
+    deadline_seconds: float = 10.0,
+    retry_interval_seconds: float = 0.25,
+) -> dict[str, bool | int]:
+    """Poll a direct UI XML dump until the IT-022 rejection overlay is ready."""
+    deadline = time.monotonic() + deadline_seconds
+    attempts = 0
+    last_error = ""
+    last_result = None
+    while True:
+        result = _run_result(
+            adb,
+            serial,
+            "exec-out",
+            "uiautomator",
+            "dump",
+            "--compressed",
+            "/dev/tty",
+        )
+        attempts += 1
+        last_result = result
+        if result.returncode == 0:
+            try:
+                evidence = validate_it022_error_overlay(result.stdout, diagnostic)
+            except SeamError as error:
+                last_error = str(error)
+            else:
+                return {**evidence, "attempts": attempts}
+        else:
+            last_error = (
+                f"adb UI dump failed with exit={result.returncode}: "
+                f"{_clip_probe_text(result.stderr)}"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(max(retry_interval_seconds, 0.0), remaining))
+    assert last_result is not None
+    raise SeamError(
+        f"IT-022 Java error overlay was not visible after {attempts} attempts: "
+        f"{last_error}; final_exit={last_result.returncode} "
+        f"final_stdout={_clip_probe_text(last_result.stdout)!r} "
+        f"final_stderr={_clip_probe_text(last_result.stderr)!r}"
+    )
+
+
 def parse_markers(log: str, test_id: str) -> list[dict]:
     markers = []
     for match in MARKER.finditer(log):
@@ -1496,31 +1589,17 @@ def main() -> int:
             ).strip()
             if second_pid != first_pid:
                 raise SeamError("IT-022 rejected package entered a crash loop")
-            _run(
+            overlay = capture_it022_error_overlay(
                 args.adb,
                 args.serial,
-                "shell",
-                "uiautomator",
-                "dump",
-                "/sdcard/stasis-it022-ui.xml",
-                required=False,
+                rejection["diagnostic"],
             )
-            ui_xml = _run(
-                args.adb,
-                args.serial,
-                "shell",
-                "cat",
-                "/sdcard/stasis-it022-ui.xml",
-                required=False,
-            )
-            if "Stasis runtime error" not in ui_xml or rejection["diagnostic"] not in ui_xml:
-                raise SeamError("IT-022 Java error overlay is not visible with the native diagnostic")
             evidence.update(
                 {
                     "status": "passed",
                     "asset_rejection": rejection,
                     "process_id": first_pid,
-                    "java_error_visible": True,
+                    **overlay,
                     **storage,
                     "lifecycle_events": [item["event"] for item in markers],
                     "presentation_oracle": "native_rejection_before_game_runtime",

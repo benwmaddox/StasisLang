@@ -119,6 +119,89 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             ),
         )
 
+    def test_it022_overlay_probe_accepts_structured_hierarchy_and_direct_command(self):
+        diagnostic = "code=missing_asset path=assets/token.bin detail=asset is missing"
+        ui_xml = (
+            "UI hierarchy dumped to: /dev/tty\n"
+            "<?xml version='1.0'?><hierarchy><node "
+            "content-desc='Stasis runtime error' "
+            "text='Release runtime error: Asset verification failed: "
+            "code=missing_asset path=assets/token.bin detail=asset is missing'/>"
+            "</hierarchy>"
+        )
+        result = SimpleNamespace(returncode=0, stdout=ui_xml, stderr="")
+        with mock.patch.object(seam, "_run_result", return_value=result) as run_result:
+            evidence = seam.capture_it022_error_overlay(
+                Path("adb"), "emulator-5554", diagnostic, deadline_seconds=1
+            )
+        self.assertEqual({"java_error_visible": True, "attempts": 1}, evidence)
+        run_result.assert_called_once_with(
+            Path("adb"),
+            "emulator-5554",
+            "exec-out",
+            "uiautomator",
+            "dump",
+            "--compressed",
+            "/dev/tty",
+        )
+
+    def test_it022_overlay_probe_retries_until_hierarchy_is_ready(self):
+        diagnostic = "code=missing_asset path=assets/token.bin detail=asset is missing"
+        valid_xml = (
+            "<?xml version='1.0'?><hierarchy><node "
+            "content-desc='Stasis runtime error' "
+            "text='Release runtime error Asset verification failed "
+            "code=missing_asset path=assets/token.bin detail=asset is missing'/>"
+            "</hierarchy>"
+        )
+        results = [
+            SimpleNamespace(returncode=0, stdout="<?xml bad", stderr=""),
+            SimpleNamespace(returncode=0, stdout=valid_xml, stderr=""),
+        ]
+        with (
+            mock.patch.object(seam, "_run_result", side_effect=results) as run_result,
+            mock.patch.object(seam.time, "monotonic", side_effect=[0.0, 0.1]),
+            mock.patch.object(seam.time, "sleep") as sleep,
+        ):
+            evidence = seam.capture_it022_error_overlay(
+                Path("adb"), None, diagnostic, deadline_seconds=1, retry_interval_seconds=0.2
+            )
+        self.assertEqual(2, evidence["attempts"])
+        sleep.assert_called_once_with(0.2)
+        self.assertEqual(2, run_result.call_count)
+
+    def test_it022_overlay_probe_reports_command_failure_diagnostics(self):
+        result = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="uiautomator: permission denied\n",
+        )
+        with mock.patch.object(seam, "_run_result", return_value=result):
+            with self.assertRaisesRegex(
+                seam.SeamError, "after 1 attempts.*permission denied"
+            ):
+                seam.capture_it022_error_overlay(
+                    Path("adb"), None, "native diagnostic", deadline_seconds=0
+                )
+
+    def test_it022_overlay_probe_rejects_malformed_or_unrelated_hierarchy(self):
+        with self.assertRaisesRegex(seam.SeamError, "missing or incomplete"):
+            seam.validate_it022_error_overlay("UI hierarchy dumped to: /dev/tty\n", "diag")
+        with self.assertRaisesRegex(seam.SeamError, "malformed"):
+            seam.validate_it022_error_overlay(
+                "<hierarchy><node></hierarchy>", "diag"
+            )
+        with self.assertRaisesRegex(seam.SeamError, "no Stasis runtime error node"):
+            seam.validate_it022_error_overlay(
+                "<hierarchy><node content-desc='Other' text='diag'/></hierarchy>", "diag"
+            )
+        with self.assertRaisesRegex(seam.SeamError, "missing required text"):
+            seam.validate_it022_error_overlay(
+                "<hierarchy><node content-desc='Stasis runtime error' "
+                "text='Release runtime error'/></hierarchy>",
+                "diag",
+            )
+
     def test_it022_storage_probe_rejects_run_as_failure(self):
         with self.assertRaisesRegex(seam.SeamError, "storage probe.*failed"):
             seam.classify_rejection_storage_probe(
