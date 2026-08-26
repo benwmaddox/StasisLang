@@ -31,6 +31,67 @@ def write_rgb_png(
 
 
 class AndroidReleaseShellSeamTests(unittest.TestCase):
+    def test_terminal_event_stops_rejection_polling_before_stable(self):
+        self.assertEqual(
+            "asset_rejected",
+            seam.terminal_event({"asset_rejection": {"code": "missing_asset"}}),
+        )
+        self.assertEqual("stable", seam.terminal_event({"stable_frame": 30}))
+
+    def test_it022_storage_probe_requires_absent_staging_and_root(self):
+        self.assertEqual(
+            {"staging_absent": True, "root_unpublished": True},
+            seam.validate_rejection_storage_state("absent\n", "absent\n"),
+        )
+        with self.assertRaisesRegex(seam.SeamError, "published extraction state"):
+            seam.validate_rejection_storage_state("present", "absent")
+
+    def test_it022_rejection_requires_native_diagnostic_and_no_game_markers(self):
+        diagnostic = (
+            "code=tampered_asset path=assets/token.bin detail=asset hash does not match the manifest"
+        )
+        markers = [
+            {
+                "schema": seam.SCHEMA,
+                "test_id": "IT-022",
+                "event": "asset_rejected",
+                "frame": 0,
+                "initialized": 0,
+                "accepted": 0,
+                "presented": 0,
+                "asset_error": diagnostic,
+            }
+        ]
+        result = seam.validate_asset_rejection_markers(
+            markers,
+            "I/Stasis: Stasis IT-022 asset verification rejected package: " + diagnostic,
+            {
+                "asset_rejection": {
+                    "variant": "tampered",
+                    "code": "tampered_asset",
+                    "path": "assets/token.bin",
+                }
+            },
+        )
+        self.assertEqual("tampered_asset", result["code"])
+
+    def test_it022_diagnostic_parser_preserves_paths_with_spaces(self):
+        diagnostic = "code=missing_asset path=assets/dir with space.bin detail=asset is missing"
+        result = seam.validate_asset_rejection_markers(
+            [{"event": "asset_rejected", "accepted": 0, "presented": 0, "asset_error": diagnostic}],
+            "Stasis IT-022 asset verification rejected package: " + diagnostic,
+            {"asset_rejection": {"code": "missing_asset", "path": "assets/dir with space.bin"}},
+        )
+        self.assertEqual("assets/dir with space.bin", result["path"])
+
+    def test_it022_rejection_rejects_initialized_marker(self):
+        with self.assertRaisesRegex(seam.SeamError, "initialization/frame"):
+            seam.validate_asset_rejection_markers(
+                [{"event": "initialized", "frame": 0}],
+                "",
+                {"asset_rejection": {"code": "missing_asset"}},
+            )
+
     def test_evidence_target_matches_packaged_android_abi(self):
         self.assertEqual(
             seam.release_shell_target({"target": "android-arm64"}),

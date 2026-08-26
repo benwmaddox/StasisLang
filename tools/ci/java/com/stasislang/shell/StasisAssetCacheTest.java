@@ -209,6 +209,20 @@ public final class StasisAssetCacheTest {
                             .equals("newer"),
                     "first install publishes despite unavailable stale slots");
 
+            Files.delete(packaged.resolve("stasis_game/assets/.stasis_asset_cache.v1"));
+            boolean oversized = false;
+            try {
+                new StasisAssetCache(source, temp.resolve("oversized-seam").toFile(),
+                        PACKAGE, RELEASE, 1L).prepare();
+            } catch (StasisAssetCache.VerificationException expected) {
+                oversized = true;
+                check(StasisAssetCache.ERROR_OVERSIZED_ASSET.equals(expected.getCode()),
+                        "seam bound uses stable oversized code");
+                check("assets/token.txt".equals(expected.getPath()),
+                        "seam bound preserves oversized asset path");
+            }
+            check(oversized, "bounded seam limit rejects oversized input");
+
             String malformedUnicode = Character.toString((char)92) + "uZZZZ";
             String tokenHash = hex(MessageDigest.getInstance("SHA-256").digest(
                     Files.readAllBytes(packaged.resolve("stasis_game/assets/token.txt"))));
@@ -218,12 +232,28 @@ public final class StasisAssetCacheTest {
                             + "\",\"path\":\"assets/token.txt\","
                             + "\"content_sha256\":\"" + tokenHash + "\"}]}"));
             boolean malformed = false;
+            Path malformedFiles = temp.resolve("malformed-files");
             try {
-                cache(source, temp.resolve("malformed-files").toFile(), RELEASE).prepare();
-            } catch (IOException expected) {
+                cache(source, malformedFiles.toFile(), RELEASE).prepare();
+            } catch (StasisAssetCache.VerificationException expected) {
                 malformed = true;
+                check(StasisAssetCache.ERROR_MALFORMED_MANIFEST.equals(expected.getCode()),
+                        "malformed manifest has stable code");
+                check("assets/manifest.json".equals(expected.getPath()),
+                        "malformed manifest has stable path");
+                check(expected.getMessage().contains("code=malformed_manifest path=assets/manifest.json"),
+                        "malformed manifest diagnostic is machine-readable");
             }
             check(malformed, "malformed unicode is reported as IOException");
+            check(!Files.exists(malformedFiles.resolve(".stasis_game.staging")),
+                    "malformed manifest never leaves partial staging");
+            String bounded = StasisAssetCache.boundDiagnostic("code=test path=assets/x detail="
+                    + new String(new char[4096]).replace('\0', 'x'));
+            check(bounded.getBytes(StandardCharsets.UTF_8).length
+                    <= StasisAssetCache.MAX_DIAGNOSTIC_BYTES,
+                    "diagnostic forwarding remains bounded");
+            check(bounded.startsWith("code=test path=assets/x detail="),
+                    "bounded diagnostic keeps the shared protocol prefix");
 
             System.out.println("stasis asset cache JVM scenarios ok");
         } finally {

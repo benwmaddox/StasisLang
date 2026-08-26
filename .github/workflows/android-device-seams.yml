@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       release_shell_test_id:
-        description: "Optional release-shell seam test ID (for example IT-021)"
+        description: "Optional release-shell seam test ID (for example IT-022)"
         required: false
         default: ""
         type: string
@@ -122,6 +122,14 @@ jobs:
         with:
           name: android-packaged-assets-seam
           path: artifacts/android_packaged_assets/e
+          if-no-files-found: warn
+
+      - name: Upload Android asset-rejection evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-asset-rejection-seam
+          path: artifacts/android_asset_rejection/e
           if-no-files-found: warn
 
   workshop-seams:

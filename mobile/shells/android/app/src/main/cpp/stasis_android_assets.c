@@ -56,6 +56,37 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetAssetRoot(
     (*env)->ReleaseStringUTFChars(env, path, root);
 }
 
+/* Java performs package verification before SDL starts.  Keep the exact
+ * bounded diagnostic in the process environment so SDL_main can reject the
+ * package before binding AOT entries or initializing the game. */
+JNIEXPORT void JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetAssetVerificationError(
+    JNIEnv *env,
+    jclass activity,
+    jstring value
+) {
+    (void)activity;
+    if (value == NULL) {
+        unsetenv("STASIS_ASSET_VERIFICATION_ERROR");
+        return;
+    }
+    const char *message = (*env)->GetStringUTFChars(env, value, NULL);
+    if (message == NULL) {
+        return;
+    }
+    if (strlen(message) > 400) {
+        setenv(
+            "STASIS_ASSET_VERIFICATION_ERROR",
+            "code=asset_cache_failure path=assets/manifest.json detail=diagnostic exceeded native limit",
+            1
+        );
+        (*env)->ReleaseStringUTFChars(env, value, message);
+        return;
+    }
+    setenv("STASIS_ASSET_VERIFICATION_ERROR", message, 1);
+    (*env)->ReleaseStringUTFChars(env, value, message);
+}
+
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 JNIEXPORT void JNICALL
 Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetAssetManifestSha256(

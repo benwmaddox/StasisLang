@@ -113,10 +113,12 @@ try {
     Assert-In-Time "package-mobile"
 
     $gradle = Resolve-Gradle
-    & $gradle -p (Join-Path $packageRoot "android") `
-        :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
-    if ($LASTEXITCODE -ne 0) { throw "$testId Gradle build failed with exit code $LASTEXITCODE" }
-    Assert-In-Time "Gradle build"
+    if ($testId -ne "IT-022") {
+        & $gradle -p (Join-Path $packageRoot "android") `
+            :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
+        if ($LASTEXITCODE -ne 0) { throw "$testId Gradle build failed with exit code $LASTEXITCODE" }
+        Assert-In-Time "Gradle build"
+    }
 
     $apk = [System.IO.Path]::Combine(
         $packageRoot,
@@ -128,16 +130,65 @@ try {
         "debug",
         "app-debug.apk"
     )
-    if (-not (Test-Path $apk)) { throw "Generated Android APK is missing: $apk" }
-    python tools/ci/run_android_release_shell_seam.py `
-        --adb $adb `
-        --serial $Serial `
-        --apk $apk `
-        --package-manifest (Join-Path $packageRoot "stasis_mobile_package.json") `
-        --expectations $ExpectationsPath `
-        --output $evidenceRoot `
-        --timeout-seconds ([math]::Max(15, $TotalTimeoutSeconds - [math]::Floor($startedAt.Elapsed.TotalSeconds)))
-    if ($LASTEXITCODE -ne 0) { throw "$testId device acceptance failed with exit code $LASTEXITCODE" }
+    if ($testId -ne "IT-022" -and -not (Test-Path $apk)) {
+        throw "Generated Android APK is missing: $apk"
+    }
+    $packageManifest = Join-Path $packageRoot "stasis_mobile_package.json"
+    if ($testId -eq "IT-022") {
+        $variants = @("missing", "tampered", "traversal", "duplicate", "oversized", "malformed-manifest")
+        foreach ($variant in $variants) {
+            Assert-In-Time "IT-022 $variant setup"
+            $variantRoot = Join-Path $artifactRoot (Join-Path "variants" $variant)
+            Copy-Item -LiteralPath $packageRoot -Destination $variantRoot -Recurse
+            $variantExpectations = Join-Path $variantRoot "android_seam_expectations.json"
+            Copy-Item -LiteralPath $ExpectationsPath -Destination $variantExpectations
+            python tools/ci/mutate_android_asset_variant.py `
+                --root (Join-Path $variantRoot "android/app/src/main/assets/stasis_game") `
+                --variant $variant `
+                --expectations $variantExpectations
+            if ($LASTEXITCODE -ne 0) { throw "IT-022 $variant mutation failed" }
+            & $gradle -p (Join-Path $variantRoot "android") `
+                :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "IT-022 $variant Gradle build failed with exit code $LASTEXITCODE" }
+            $variantApk = Join-Path $variantRoot "android/app/build/outputs/apk/debug/app-debug.apk"
+            python tools/ci/run_android_release_shell_seam.py `
+                --adb $adb `
+                --serial $Serial `
+                --apk $variantApk `
+                --package-manifest (Join-Path $variantRoot "stasis_mobile_package.json") `
+                --expectations $variantExpectations `
+                --output (Join-Path $evidenceRoot $variant) `
+                --asset-variant $variant `
+                --timeout-seconds ([math]::Max(15, $TotalTimeoutSeconds - [math]::Floor($startedAt.Elapsed.TotalSeconds)))
+            if ($LASTEXITCODE -ne 0) { throw "IT-022 $variant device acceptance failed with exit code $LASTEXITCODE" }
+        }
+        # The pristine build is the recovery proof after all rejected packages.
+        & $gradle -p (Join-Path $packageRoot "android") `
+            :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
+        if ($LASTEXITCODE -ne 0) { throw "IT-022 valid recovery Gradle build failed with exit code $LASTEXITCODE" }
+        if (-not (Test-Path $apk)) { throw "Generated Android APK is missing: $apk" }
+        Assert-In-Time "IT-022 valid recovery build"
+        $validExpectations = Join-Path $repoRoot "samples/android_packaged_assets_seam/android_seam_expectations.json"
+        python tools/ci/run_android_release_shell_seam.py `
+            --adb $adb `
+            --serial $Serial `
+            --apk $apk `
+            --package-manifest $packageManifest `
+            --expectations $validExpectations `
+            --output (Join-Path $evidenceRoot "valid-recovery") `
+            --timeout-seconds ([math]::Max(15, $TotalTimeoutSeconds - [math]::Floor($startedAt.Elapsed.TotalSeconds)))
+        if ($LASTEXITCODE -ne 0) { throw "IT-022 valid recovery acceptance failed with exit code $LASTEXITCODE" }
+    } else {
+        python tools/ci/run_android_release_shell_seam.py `
+            --adb $adb `
+            --serial $Serial `
+            --apk $apk `
+            --package-manifest $packageManifest `
+            --expectations $ExpectationsPath `
+            --output $evidenceRoot `
+            --timeout-seconds ([math]::Max(15, $TotalTimeoutSeconds - [math]::Floor($startedAt.Elapsed.TotalSeconds)))
+        if ($LASTEXITCODE -ne 0) { throw "$testId device acceptance failed with exit code $LASTEXITCODE" }
+    }
     Assert-In-Time "device acceptance"
 } finally {
     Pop-Location

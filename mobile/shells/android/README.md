@@ -36,6 +36,16 @@ metadata/tree changes without claiming cryptographic detection of a same-
 privilege rewrite that restores every recorded metadata value. Startup logs
 cold/reuse elapsed time and packaged/cache read-write byte counters.
 
+When preparation rejects a package, the cache returns a stable
+`code=<cause> path=<asset> detail=<reason>` diagnostic. The Java overlay and
+native SDL gate preserve that same diagnostic, and `SDL_main` returns before
+AOT binding, game initialization, or frame submission. The IT-022 emulator
+seam builds missing, tampered, traversal, duplicate, oversized, and malformed-
+manifest variants, checks that staging is never published, then launches the
+pristine package as a recovery proof. The oversized case uses a seam-only
+one-byte bound override while retaining the production 128 MiB default, so CI
+does not need to carry or package a 128 MiB fixture.
+
 iOS does not use this extraction cache. Its immutable app-bundle assets are
 opened directly by the iOS shell; the Android cache is not forced onto that
 platform.
@@ -46,7 +56,7 @@ The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for
 initialization, the first frame, stable frame 30, and fixture-owned probe
 sequence changes; ordinary app launches do not compile or enable the marker
-hooks. CI runs IT-017 on a hosted API 35 x86_64 emulator. The same driver can be
+hooks. CI runs IT-017 through IT-022 on a hosted API 35 x86_64 emulator. The same driver can be
 run against an ARM64 device with the default target, or an x86_64 emulator with
 `-Target android-x86_64`:
 

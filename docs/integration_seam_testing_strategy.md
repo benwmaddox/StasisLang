@@ -177,7 +177,7 @@ named for the injected failure, and leave the production path unchanged.
 |---|---|---:|---|
 | Fast contract | every PR and `tools/validate_repo.sh` | 2 min | descriptor parity, JIT HostFrame, buffer bounds, diagnostic schemas |
 | Native integration | nightly, platform-sharded | 15 min | desktop real runtime, linked AOT/C runtime, package link and symbol audit |
-| Android emulator | nightly | 15 min/test shard | Two concurrent isolated API35 x86_64 shards: generated release-shell IT-017-IT-020 and Workshop JNI/JIT IT-025-IT-027 |
+| Android emulator | nightly | 15 min/test shard | Two concurrent isolated API35 x86_64 shards: generated release-shell IT-017-IT-022 and Workshop JNI/JIT IT-025-IT-027 |
 | Physical device | optional release candidate and scheduled farm | 15 min/test shard | Supplemental OEM driver, density, lifecycle, and representative rendering evidence |
 
 Tests should be promoted toward the faster lane when a deterministic lower
@@ -236,7 +236,7 @@ in Maddox Tasks as Backlog children of the integration-test program.
 | IT-019 | 1 | Rotate and resize the release shell and prove native/drawable/logical metrics and generations reach Stasis before the restored frame. | Metric/generation record and named pixel regions | Emulator |
 | IT-020 | 1 | Background/resume and recreate the release Activity after resources load; verify the first accepted frame restores sprite, fallback, and cached text. | Restore events, same-process counter advance, per-epoch generations, Android compositor capture | Emulator |
 | IT-021 | 2 | Package and load real sprite/font/text/audio assets in the release shell. | Manifest identity, render regions, offline/queued audio evidence | Emulator |
-| IT-022 | 2 | Build controlled packages with a missing, tampered, traversal, and oversized asset and verify deterministic startup rejection. | Structured user-visible/runtime diagnostic | Emulator |
+| IT-022 | 2 | Build controlled packages with missing, tampered, traversal, duplicate, oversized, and malformed-manifest assets; reject before game initialization and prove a valid package recovers afterward. | Stable code/path agreement between Java/native diagnostics, no partial staging, bounded process | Emulator |
 | IT-023 | 2 | Write a Stasis preference through the Android platform store, kill/relaunch the process, and read it through AOT. | Persisted value and scoped storage path | Device |
 | IT-024 | 2 | Return non-zero from each mobile lifecycle entry and verify the shell stops cleanly and surfaces the exact entry/result. | Runtime error and absence of crash loop | Emulator |
 
