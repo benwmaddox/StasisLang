@@ -89,6 +89,7 @@ const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md"
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
+const PROJECT_GIT_ATTRIBUTES: &str = "*.svg text eol=lf\n";
 const KNOWLEDGE_FILES: &[&str] = &[
     "README.md",
     "a-little-stasis/01-three-entry-points.md",
@@ -1445,6 +1446,7 @@ fn create_project_with_options(
         root.join(".vscode/extensions.json"),
     ];
     if initialize_git {
+        reserved_paths.push(root.join(".gitattributes"));
         reserved_paths.push(root.join(".githooks/pre-commit"));
     }
     let vscode_directory = root.join(".vscode");
@@ -1491,6 +1493,9 @@ fn create_project_with_options(
         &root.join(PROJECT_ARCHITECTURE_NAME),
         PROJECT_ARCHITECTURE_GUIDE,
     )?;
+    if initialize_git {
+        write_new_file(&root.join(".gitattributes"), PROJECT_GIT_ATTRIBUTES)?;
+    }
     write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
     write_new_file(
         &root.join("tests/main.test.stasis"),

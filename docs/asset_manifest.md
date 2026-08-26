@@ -117,6 +117,26 @@ The package contains only the selected display envelope's output, not multiple r
 
 ## Identity and validation
 
+`content_sha256` is the SHA-256 digest of the exact raw master-file bytes on
+disk. Stasis hashes those bytes as-is; the verifier does not normalize text or
+line endings. Consequently, line endings are part of an asset's identity even
+when LF and CRLF render identically.
+
+Fresh Git projects created with `stasis new` include this narrow policy in
+`.gitattributes`:
+
+```gitattributes
+*.svg text eol=lf
+```
+
+Existing repositories should add the same rule before generating or updating
+SVG manifest hashes. This is an asset-integrity policy only. Stasis source
+formatting remains line-ending-neutral and does not require LF for `.stasis`
+files. At the verifier boundary, an SVG containing any raw CR byte is rejected
+with `asset_svg_line_endings_not_lf`, even if its manifest hash matches those
+CRLF or lone-CR bytes. Other asset formats remain governed by their exact raw
+hash and are not subject to this SVG-only line-ending check.
+
 - IDs are 1-128 ASCII letters, digits, `.`, `_`, or `-` and are unique within a project.
 - Runtime handles are the nonzero FNV-1a 32-bit hash of `<kind>:<id>`. Load fails if two entries collide; platforms must not repair or renumber collisions independently.
 - Manifest paths use forward slashes, start with `assets/`, contain only normal path components, and must resolve to a regular file under the canonical project `assets/` directory. Source `@asset_path` literals may additionally use the rooted `/assets/...` spelling. URI paths, drive paths, UNC paths, any embedded backslash separator, and leading slash paths other than `/assets/...` are compile errors; dynamic manifest paths remain canonical `assets/...` paths.
