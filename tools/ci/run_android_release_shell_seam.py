@@ -141,6 +141,52 @@ def validate_rejection_storage_state(staging_probe: str, root_probe: str) -> dic
     return {"staging_absent": True, "root_unpublished": True}
 
 
+def validate_install_policy(
+    preinstalled: bool,
+    retain_installed_package: bool,
+    replace_existing_package: bool,
+    test_id: str,
+    asset_variant: str | None,
+) -> dict[str, bool]:
+    """Validate the narrowly scoped install behavior used by the seam runner."""
+    rejection = test_id == "IT-022" and bool(asset_variant)
+    recovery = test_id == "IT-021" and not asset_variant
+    if retain_installed_package and replace_existing_package:
+        raise SeamError(
+            "retaining an install and replacing an existing package are contradictory"
+        )
+    if retain_installed_package and not rejection:
+        raise SeamError(
+            "retaining an install is only allowed for an IT-022 rejection variant"
+        )
+    if retain_installed_package and preinstalled:
+        raise SeamError(
+            "refusing to retain a malformed run over a preinstalled test package"
+        )
+    if replace_existing_package and not recovery:
+        raise SeamError(
+            "replacing an existing package is only allowed for the recovery invocation"
+        )
+    if replace_existing_package and not preinstalled:
+        raise SeamError(
+            "recovery requires an existing test package to replace"
+        )
+    if preinstalled and not replace_existing_package:
+        raise SeamError(
+            "refusing to replace preinstalled test package; remove it explicitly"
+        )
+    return {
+        "existing_installation": preinstalled,
+        "replaced_existing_installation": replace_existing_package,
+        "retained_installation": retain_installed_package,
+    }
+
+
+def should_retain_installed_package(requested: bool, evidence_status: str) -> bool:
+    """Retain a rejected install only after its complete seam evidence passes."""
+    return requested and evidence_status == "passed"
+
+
 def packaged_asset_manifest(package_manifest: Path, package: dict) -> tuple[Path, str]:
     """Resolve and hash the manifest that was copied into the generated package."""
     candidates = []
@@ -1090,16 +1136,14 @@ def restore_device_state(
     installed: bool,
     immersive_confirmation: str,
     device_state: dict | None = None,
+    retain_installed_package: bool = False,
 ) -> list[str]:
     errors = []
     operations = []
     if installed:
-        operations.extend(
-            (
-                ("force-stop", ("shell", "am", "force-stop", package_id)),
-                ("uninstall", ("uninstall", package_id)),
-            )
-        )
+        operations.append(("force-stop", ("shell", "am", "force-stop", package_id)))
+        if not retain_installed_package:
+            operations.append(("uninstall", ("uninstall", package_id)))
     if device_state is not None:
         size = device_state.get("wm_size_override")
         operations.append(
@@ -1161,6 +1205,16 @@ def main() -> int:
     parser.add_argument("--package-manifest", type=Path, required=True)
     parser.add_argument("--expectations", type=Path, required=True)
     parser.add_argument("--asset-variant")
+    parser.add_argument(
+        "--retain-installed-package",
+        action="store_true",
+        help="retain the newly installed package after this run for recovery",
+    )
+    parser.add_argument(
+        "--replace-existing-package",
+        action="store_true",
+        help="allow this recovery run to replace the retained test package",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=int, default=90)
     args = parser.parse_args()
@@ -1188,10 +1242,13 @@ def main() -> int:
             required=False,
         ).strip()
     )
-    if preinstalled:
-        raise SeamError(
-            f"refusing to replace preinstalled test package {package_id}; remove it explicitly"
-        )
+    install_policy = validate_install_policy(
+        preinstalled,
+        args.retain_installed_package,
+        args.replace_existing_package,
+        test_id,
+        args.asset_variant,
+    )
     immersive_confirmation = _run(
         args.adb,
         args.serial,
@@ -1249,6 +1306,7 @@ def main() -> int:
             )
         },
         "artifacts": {"log": str(log_path), "capture": str(capture_path)},
+        "install_policy": install_policy,
     }
     if device_state is not None:
         evidence["original_device_state"] = device_state
@@ -1809,6 +1867,10 @@ def main() -> int:
                 installed,
                 immersive_confirmation,
                 device_state,
+                should_retain_installed_package(
+                    args.retain_installed_package,
+                    evidence["status"],
+                ),
             )
         )
         evidence["device_state_restored"] = not cleanup_errors

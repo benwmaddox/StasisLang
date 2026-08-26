@@ -31,6 +31,47 @@ def write_rgb_png(
 
 
 class AndroidReleaseShellSeamTests(unittest.TestCase):
+    def test_install_policy_keeps_default_uninstall_and_allows_only_stateful_recovery(self):
+        self.assertEqual(
+            {
+                "existing_installation": False,
+                "replaced_existing_installation": False,
+                "retained_installation": False,
+            },
+            seam.validate_install_policy(False, False, False, "IT-017", None),
+        )
+        self.assertEqual(
+            {
+                "existing_installation": False,
+                "replaced_existing_installation": False,
+                "retained_installation": True,
+            },
+            seam.validate_install_policy(False, True, False, "IT-022", "malformed-manifest"),
+        )
+        self.assertEqual(
+            {
+                "existing_installation": True,
+                "replaced_existing_installation": True,
+                "retained_installation": False,
+            },
+            seam.validate_install_policy(True, False, True, "IT-021", None),
+        )
+        with self.assertRaisesRegex(seam.SeamError, "existing test package"):
+            seam.validate_install_policy(False, False, True, "IT-021", None)
+        with self.assertRaisesRegex(seam.SeamError, "only allowed for the recovery"):
+            seam.validate_install_policy(True, False, True, "IT-017", None)
+        with self.assertRaisesRegex(seam.SeamError, "contradictory"):
+            seam.validate_install_policy(False, True, True, "IT-022", "missing")
+        with self.assertRaisesRegex(seam.SeamError, "only allowed for an IT-022"):
+            seam.validate_install_policy(False, True, False, "IT-017", None)
+        with self.assertRaisesRegex(seam.SeamError, "only allowed for an IT-022"):
+            seam.validate_install_policy(False, True, False, "IT-022", "")
+
+    def test_retention_requires_successful_rejection_evidence(self):
+        self.assertTrue(seam.should_retain_installed_package(True, "passed"))
+        self.assertFalse(seam.should_retain_installed_package(True, "failed"))
+        self.assertFalse(seam.should_retain_installed_package(False, "passed"))
+
     def test_terminal_event_stops_rejection_polling_before_stable(self):
         self.assertEqual(
             "asset_rejected",
@@ -964,6 +1005,28 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             ("shell", "settings", "put", "system", "user_rotation", "3"),
             calls,
         )
+
+    def test_cleanup_retains_install_when_recovery_needs_existing_data(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_kwargs):
+            calls.append(arguments)
+            return ""
+
+        with mock.patch.object(seam, "_run", side_effect=fake_run):
+            errors = seam.restore_device_state(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                True,
+                "null",
+                None,
+                retain_installed_package=True,
+            )
+
+        self.assertEqual([], errors)
+        self.assertIn(("shell", "am", "force-stop", "com.example.seam"), calls)
+        self.assertNotIn(("uninstall", "com.example.seam"), calls)
 
     def test_cleanup_restores_orientation_and_prior_display_override(self):
         calls = []

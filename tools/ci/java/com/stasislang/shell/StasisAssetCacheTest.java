@@ -255,6 +255,26 @@ public final class StasisAssetCacheTest {
             check(bounded.startsWith("code=test path=assets/x detail="),
                     "bounded diagnostic keeps the shared protocol prefix");
 
+            String asciiDiagnostic = new StasisAssetCache.VerificationException(
+                    "tampered_asset",
+                    "assets/" + new String(new char[512]).replace('\0', 'p'),
+                    new String(new char[512]).replace('\0', 'd'),
+                    null).getDiagnostic();
+            checkDiagnostic(asciiDiagnostic, "tampered_asset", "assets/");
+            check(asciiDiagnostic.getBytes(StandardCharsets.UTF_8).length
+                    <= StasisAssetCache.MAX_DIAGNOSTIC_BYTES,
+                    "ASCII diagnostic remains bounded");
+
+            String unicodeDiagnostic = new StasisAssetCache.VerificationException(
+                    "missing_asset",
+                    "assets/" + repeat("界", 256),
+                    repeat("詳細", 256),
+                    null).getDiagnostic();
+            checkDiagnostic(unicodeDiagnostic, "missing_asset", "assets/");
+            check(unicodeDiagnostic.getBytes(StandardCharsets.UTF_8).length
+                    <= StasisAssetCache.MAX_DIAGNOSTIC_BYTES,
+                    "Unicode diagnostic remains UTF-8 bounded");
+
             System.out.println("stasis asset cache JVM scenarios ok");
         } finally {
             delete(temp.toFile());
@@ -308,6 +328,23 @@ public final class StasisAssetCacheTest {
 
     private static void check(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
+    }
+
+    private static void checkDiagnostic(String diagnostic, String code, String pathPrefix) {
+        int pathMarker = diagnostic.indexOf(" path=");
+        int detailMarker = diagnostic.indexOf(" detail=", pathMarker);
+        check(diagnostic.startsWith("code=" + code), "diagnostic preserves code delimiter");
+        check(pathMarker > 0 && detailMarker > pathMarker,
+                "diagnostic preserves complete field delimiters");
+        check(diagnostic.substring(pathMarker + " path=".length(), detailMarker)
+                        .startsWith(pathPrefix),
+                "diagnostic preserves path prefix");
+    }
+
+    private static String repeat(String value, int count) {
+        StringBuilder result = new StringBuilder(value.length() * count);
+        for (int index = 0; index < count; index++) result.append(value);
+        return result.toString();
     }
 
     private static void delete(File file) throws IOException {

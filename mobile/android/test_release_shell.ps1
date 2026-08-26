@@ -151,6 +151,8 @@ try {
                 :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
             if ($LASTEXITCODE -ne 0) { throw "IT-022 $variant Gradle build failed with exit code $LASTEXITCODE" }
             $variantApk = Join-Path $variantRoot "android/app/build/outputs/apk/debug/app-debug.apk"
+            $retentionArgs = @()
+            if ($variant -eq $variants[-1]) { $retentionArgs = @("--retain-installed-package") }
             python tools/ci/run_android_release_shell_seam.py `
                 --adb $adb `
                 --serial $Serial `
@@ -159,6 +161,7 @@ try {
                 --expectations $variantExpectations `
                 --output (Join-Path $evidenceRoot $variant) `
                 --asset-variant $variant `
+                @retentionArgs `
                 --timeout-seconds ([math]::Max(15, $TotalTimeoutSeconds - [math]::Floor($startedAt.Elapsed.TotalSeconds)))
             if ($LASTEXITCODE -ne 0) { throw "IT-022 $variant device acceptance failed with exit code $LASTEXITCODE" }
         }
@@ -176,6 +179,7 @@ try {
             --package-manifest $packageManifest `
             --expectations $validExpectations `
             --output (Join-Path $evidenceRoot "valid-recovery") `
+            --replace-existing-package `
             --timeout-seconds ([math]::Max(15, $TotalTimeoutSeconds - [math]::Floor($startedAt.Elapsed.TotalSeconds)))
         if ($LASTEXITCODE -ne 0) { throw "IT-022 valid recovery acceptance failed with exit code $LASTEXITCODE" }
     } else {

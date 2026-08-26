@@ -31,6 +31,8 @@ public final class StasisAssetCache {
     public static final long MAX_TOTAL_ASSET_BYTES = 150L * 1024L * 1024L;
     public static final long MAX_COPIED_TREE_BYTES = 150L * 1024L * 1024L;
     public static final int MAX_DIAGNOSTIC_BYTES = 384;
+    private static final int MAX_DIAGNOSTIC_CODE_BYTES = 64;
+    private static final int MAX_DIAGNOSTIC_PATH_BYTES = 160;
 
     /** Stable IT-022 failure identifiers shared by Java, native, and seam logs. */
     public static final String ERROR_MALFORMED_MANIFEST = "malformed_manifest";
@@ -60,7 +62,7 @@ public final class StasisAssetCache {
         private final String path;
 
         VerificationException(String code, String path, String detail, Throwable cause) {
-            super(boundDiagnostic(formatDiagnostic(code, path, detail)), cause);
+            super(formatDiagnostic(code, path, detail), cause);
             this.code = code;
             this.path = path;
         }
@@ -79,23 +81,50 @@ public final class StasisAssetCache {
     }
 
     private static String formatDiagnostic(String code, String path, String detail) {
+        String safeCode = code == null || code.isEmpty() ? "unknown" : code;
         String safePath = path == null || path.isEmpty() ? MANIFEST_PATH : path;
         String safeDetail = detail == null || detail.isEmpty() ? "rejected" : detail;
-        return "code=" + code + " path=" + safePath + " detail=" + safeDetail;
+        String boundedCode = truncateUtf8(safeCode, MAX_DIAGNOSTIC_CODE_BYTES);
+        String boundedPath = truncateUtf8(safePath, MAX_DIAGNOSTIC_PATH_BYTES);
+        int grammarBytes = "code= path= detail=".getBytes(StandardCharsets.UTF_8).length;
+        int detailBudget = Math.max(0, MAX_DIAGNOSTIC_BYTES - grammarBytes
+                - boundedCode.getBytes(StandardCharsets.UTF_8).length
+                - boundedPath.getBytes(StandardCharsets.UTF_8).length);
+        String boundedDetail = truncateUtf8(safeDetail, detailBudget);
+        return "code=" + boundedCode + " path=" + boundedPath + " detail=" + boundedDetail;
     }
 
-    /** Keep JNI/environment forwarding bounded while retaining one shared diagnostic string. */
+    /** Keep externally forwarded diagnostics bounded without dropping the field grammar. */
     public static String boundDiagnostic(String diagnostic) {
         if (diagnostic == null || diagnostic.getBytes(StandardCharsets.UTF_8).length
                 <= MAX_DIAGNOSTIC_BYTES) {
             return diagnostic;
         }
-        int end = Math.min(MAX_DIAGNOSTIC_BYTES, diagnostic.length());
-        while (end > 0 && diagnostic.substring(0, end).getBytes(StandardCharsets.UTF_8).length
-                > MAX_DIAGNOSTIC_BYTES) {
-            end--;
+        int pathMarker = diagnostic.indexOf(" path=");
+        int detailMarker = pathMarker < 0 ? -1 : diagnostic.indexOf(" detail=", pathMarker);
+        if (diagnostic.startsWith("code=") && pathMarker >= 0 && detailMarker >= 0) {
+            return formatDiagnostic(
+                    diagnostic.substring("code=".length(), pathMarker),
+                    diagnostic.substring(pathMarker + " path=".length(), detailMarker),
+                    diagnostic.substring(detailMarker + " detail=".length()));
         }
-        return diagnostic.substring(0, end);
+        return truncateUtf8(diagnostic, MAX_DIAGNOSTIC_BYTES);
+    }
+
+    private static String truncateUtf8(String value, int maxBytes) {
+        if (maxBytes <= 0 || value.isEmpty()) return "";
+        StringBuilder bounded = new StringBuilder();
+        int usedBytes = 0;
+        for (int index = 0; index < value.length();) {
+            int codePoint = value.codePointAt(index);
+            String character = new String(Character.toChars(codePoint));
+            int characterBytes = character.getBytes(StandardCharsets.UTF_8).length;
+            if (usedBytes + characterBytes > maxBytes) break;
+            bounded.append(character);
+            usedBytes += characterBytes;
+            index += Character.charCount(codePoint);
+        }
+        return bounded.toString();
     }
 
     private static VerificationException verificationFailure(
