@@ -1361,8 +1361,42 @@ fn compute_file_sha256_hex(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn self_host_repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+const SELF_HOST_RUNTIME_CMAKE: &str = "runtime/CMakeLists.txt";
+const SELF_HOST_MOBILE_MAIN: &str = "mobile/shells/common/stasis_mobile_main.c";
+
+fn self_host_inputs_are_complete(root: &Path) -> bool {
+    root.join(SELF_HOST_RUNTIME_CMAKE).is_file() && root.join(SELF_HOST_MOBILE_MAIN).is_file()
+}
+
+fn resolve_self_host_repo_root(
+    executable_path: Option<&Path>,
+    compile_time_root: &Path,
+) -> Result<PathBuf, String> {
+    let executable_parent = executable_path.and_then(Path::parent);
+    if let Some(parent) = executable_parent {
+        if self_host_inputs_are_complete(parent) {
+            return Ok(parent.to_path_buf());
+        }
+    }
+    if self_host_inputs_are_complete(compile_time_root) {
+        return Ok(compile_time_root.to_path_buf());
+    }
+
+    let executable_location = executable_parent
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    Err(format!(
+        "unable to locate Stasis self-host repository inputs; checked executable directory {} and compile-time repository {}. Expected {} and {}",
+        executable_location,
+        compile_time_root.display(),
+        SELF_HOST_RUNTIME_CMAKE,
+        SELF_HOST_MOBILE_MAIN,
+    ))
+}
+
+fn self_host_repo_root() -> Result<PathBuf, String> {
+    let compile_time_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    resolve_self_host_repo_root(std::env::current_exe().ok().as_deref(), &compile_time_root)
 }
 
 fn resolve_self_host_aot_entry_file(
@@ -1412,7 +1446,7 @@ fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
     }
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| self_host_repo_root().join("target"));
+        .or_else(|| self_host_repo_root().ok().map(|root| root.join("target")))?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     let link_lib_names: &[&str] = if cfg!(windows) {
         &["stasis_dynload.dll.lib"]
@@ -1543,7 +1577,7 @@ fn ensure_stasis_dynload_link_library() -> Result<PathBuf, String> {
     if let Some(existing) = resolve_stasis_dynload_lib() {
         return Ok(existing);
     }
-    let repo_root = self_host_repo_root();
+    let repo_root = self_host_repo_root()?;
     let mut command = std::process::Command::new("cargo");
     if cfg!(windows) {
         command.arg("build").arg("-p").arg("stasis_dynload");
@@ -1741,7 +1775,7 @@ fn ensure_rust_lld_link_wrapper(artifact_root: &Path) -> Option<PathBuf> {
 }
 
 fn ensure_runtime_release_artifacts() -> Result<(PathBuf, PathBuf), String> {
-    let repo_root = self_host_repo_root();
+    let repo_root = self_host_repo_root()?;
     let runner = resolve_runtime_runner_path(&repo_root);
     let graphics = resolve_runtime_graphics_path(&repo_root);
     if let (Some(runner), Some(graphics)) = (runner, graphics) {
@@ -3367,7 +3401,7 @@ fn package_engine_bundle_monolithic_windows(
     output_exe: &Path,
     project_dir: &Path,
 ) -> Result<SelfHostedAotCliSummary, String> {
-    let repo_root = self_host_repo_root();
+    let repo_root = self_host_repo_root()?;
     let aot_root = backend.aot_artifact_root.join("windows_monolith");
     std::fs::create_dir_all(&aot_root).map_err(|error| {
         format!(
@@ -6893,6 +6927,80 @@ mod self_host_file_selection_tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_self_host_inputs(root: &Path) {
+        fs::create_dir_all(root.join("runtime")).expect("create runtime directory");
+        fs::create_dir_all(root.join("mobile/shells/common"))
+            .expect("create mobile shell directory");
+        fs::write(root.join(SELF_HOST_RUNTIME_CMAKE), "installed runtime\n")
+            .expect("write runtime input");
+        fs::write(root.join(SELF_HOST_MOBILE_MAIN), "installed mobile shell\n")
+            .expect("write mobile input");
+    }
+
+    #[test]
+    fn self_host_repo_root_prefers_installed_executable_root() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_self_host_root_prefer_{stamp}"));
+        let compile_root = root.join("compile");
+        let installed_root = root.join("installed");
+        write_self_host_inputs(&compile_root);
+        write_self_host_inputs(&installed_root);
+
+        let executable = installed_root.join("stasis.exe");
+        let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect("installed root should resolve");
+        assert_eq!(resolved, installed_root);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn self_host_repo_root_falls_back_when_installed_root_is_incomplete() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_self_host_root_fallback_{stamp}"));
+        let compile_root = root.join("compile");
+        let installed_root = root.join("installed");
+        write_self_host_inputs(&compile_root);
+        fs::create_dir_all(installed_root.join("runtime")).expect("create partial runtime");
+        fs::write(
+            installed_root.join(SELF_HOST_RUNTIME_CMAKE),
+            "partial runtime\n",
+        )
+        .expect("write partial input");
+
+        let executable = installed_root.join("stasis.exe");
+        let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect("compile root should resolve");
+        assert_eq!(resolved, compile_root);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn self_host_repo_root_reports_missing_layouts() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_self_host_root_missing_{stamp}"));
+        let compile_root = root.join("compile");
+        let executable = root.join("installed/stasis.exe");
+
+        let error = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect_err("missing roots should report an actionable error");
+        assert!(error.contains("runtime/CMakeLists.txt"));
+        assert!(error.contains("mobile/shells/common/stasis_mobile_main.c"));
+        assert!(error.contains(&compile_root.display().to_string()));
+
+        fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn self_host_project_entry_selects_project_local_import_closure() {
