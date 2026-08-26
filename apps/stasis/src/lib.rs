@@ -7,6 +7,7 @@ mod frame_pacer;
 mod host_set_registry;
 mod live_workspace;
 mod mobile_aot_bindings;
+mod play_error_toasts;
 mod record_replay;
 mod runtime_exec;
 mod stasis_test_runner;
@@ -35,6 +36,7 @@ pub use window_config::WindowConfig;
 use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
 use frame_pacer::FramePacer;
 use live_workspace::LiveWorkspace;
+use play_error_toasts::{EmbeddedToastFont, PlayErrorToasts};
 use record_replay::{ReplayPlayer, ReplayRecorder};
 use runtime_exec::RuntimeLauncher;
 use serde::{Deserialize, Serialize};
@@ -2582,7 +2584,11 @@ fn run_play_in_process_inner(
         .and_then(|capture| capture.audio_output.as_deref())
         .map(RecordingAudioSink::create)
         .transpose()?;
-    gfx.set_asset_root(prepared_asset_root.as_deref().unwrap_or(&project_root))?;
+    let renderer_asset_root = prepared_asset_root
+        .as_deref()
+        .unwrap_or(&project_root)
+        .to_path_buf();
+    gfx.set_asset_root(&renderer_asset_root)?;
     let mut frame_evidence = DesktopFrameEvidence::from_env()?;
     let configured_title = window_title.or_else(|| {
         live.as_ref()
@@ -2592,6 +2598,19 @@ fn run_play_in_process_inner(
     // Create a small default window up-front so runtime calls (fonts/sprites) succeed during guest main().
     // Guest `init_window(...)` requests will be applied immediately after main returns.
     let _ = gfx.init_window(800, 600, &title)?;
+    let (toast_font_file, toast_font_handle) = match EmbeddedToastFont::stage(&renderer_asset_root)
+        .and_then(|font| {
+            gfx.load_font(font.runtime_path(), 16)
+                .map(|handle| (font, handle))
+        }) {
+        Ok((font, handle)) => (Some(font), Some(handle)),
+        Err(error) => {
+            println!("[toast] disabled: {error}");
+            (None, None)
+        }
+    };
+    let _toast_font_file = toast_font_file;
+    let mut play_error_toasts = PlayErrorToasts::new(toast_font_handle);
 
     let mut jit = JitProcess::new();
     if let Some(profile) = profile.as_ref() {
@@ -2719,7 +2738,14 @@ fn run_play_in_process_inner(
                 );
             } else {
                 match result {
-                    Err(error) => println!("[swap] revision {} rejected: {error}", job.revision),
+                    Err(error) => {
+                        println!("[swap] revision {} rejected: {error}", job.revision);
+                        play_error_toasts.enqueue_error(
+                            "Live compile failed",
+                            &error,
+                            Instant::now(),
+                        );
+                    }
                     Ok(prepared) => {
                         let emitted = prepared
                             .candidate
@@ -2739,13 +2765,20 @@ fn run_play_in_process_inner(
                         );
                         let commit_ms = commit_started.elapsed().as_millis();
                         match commit_result {
-                            Err(error) => println!(
-                                "[swap] revision {} aborted (compile={}ms package={}ms commit={}ms): {error}",
-                                prepared.revision,
-                                prepared.compile_ms,
-                                prepared.package_ms,
-                                commit_ms
-                            ),
+                            Err(error) => {
+                                println!(
+                                    "[swap] revision {} aborted (compile={}ms package={}ms commit={}ms): {error}",
+                                    prepared.revision,
+                                    prepared.compile_ms,
+                                    prepared.package_ms,
+                                    commit_ms
+                                );
+                                play_error_toasts.enqueue_error(
+                                    "Live swap failed",
+                                    &error,
+                                    Instant::now(),
+                                );
+                            }
                             Ok(entrypoints) => {
                                 tick_code_ptr = entrypoints.tick_code_ptr;
                                 render_code_ptr = entrypoints.render_code_ptr;
@@ -2798,6 +2831,11 @@ fn run_play_in_process_inner(
                 Err(error) => {
                     finished_watch_revision = requested_watch_revision;
                     println!("[watch] failed starting background compile: {error}");
+                    play_error_toasts.enqueue_error(
+                        "Live compile unavailable",
+                        &error,
+                        Instant::now(),
+                    );
                 }
             }
         }
@@ -2859,24 +2897,40 @@ fn run_play_in_process_inner(
                 prepared_asset_root.as_deref(),
                 &asset_path,
             ) {
-                Ok(Some(runtime_path)) => {
-                    gfx.notify_file_changed(&runtime_path)?;
-                    println!(
+                Ok(Some(runtime_path)) => match gfx.notify_file_changed(&runtime_path) {
+                    Ok(()) => println!(
                         "[asset] refreshed {}",
                         normalize_watch_path_for_log(&asset_path)
-                    );
-                }
+                    ),
+                    Err(error) => {
+                        println!(
+                            "[asset] refreshed {}, but runtime notification failed: {error}",
+                            normalize_watch_path_for_log(&asset_path)
+                        );
+                        play_error_toasts.enqueue_error(
+                            "Asset reload failed",
+                            &error,
+                            Instant::now(),
+                        );
+                    }
+                },
                 Ok(None) => {}
-                Err(error) => println!(
-                    "[asset] refresh rejected {}: {error}",
-                    normalize_watch_path_for_log(&asset_path)
-                ),
+                Err(error) => {
+                    println!(
+                        "[asset] refresh rejected {}: {error}",
+                        normalize_watch_path_for_log(&asset_path)
+                    );
+                    play_error_toasts.enqueue_error("Asset refresh failed", &error, Instant::now());
+                }
             }
         }
         if needs_data_reload {
             match load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit)) {
                 Ok(()) => println!("[data] rebound {} file(s)", data_binding_paths.len()),
-                Err(error) => println!("[data] reload rejected: {error}"),
+                Err(error) => {
+                    println!("[data] reload rejected: {error}");
+                    play_error_toasts.enqueue_error("Data reload failed", &error, Instant::now());
+                }
             }
         }
         if ignored_changes > 0 && !needs_recompile {
@@ -3015,6 +3069,12 @@ fn run_play_in_process_inner(
                 }
             }
         }
+        play_error_toasts.append_to_buffers(
+            &mut gfx_cmd_i32,
+            &mut gfx_cmd_f32,
+            &mut gfx_cmd_u8,
+            Instant::now(),
+        );
         gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
         if let (Some(capture), Some(audio)) = (capture.as_ref(), recording_audio.as_mut()) {
             let frame = ticks_executed.saturating_add(1);
