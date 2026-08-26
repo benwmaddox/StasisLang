@@ -554,14 +554,6 @@ fn project_commands_emit_stable_json_from_nested_directories() {
             "assets": [],
         })
     );
-    let build_ready = stasis(&["build", "--mode", "dev"], &project);
-    assert_eq!(
-        build_ready.status.code(),
-        Some(0),
-        "generated project build should have its canonical asset manifest: stdout={} stderr={}",
-        String::from_utf8_lossy(&build_ready.stdout),
-        String::from_utf8_lossy(&build_ready.stderr)
-    );
     assert!(manifest["vendor"]["stasis"].get("update_policy").is_none());
     assert_eq!(
         manifest["vendor"]["stasis"]["sha256"]
@@ -763,6 +755,15 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         .as_str()
         .unwrap_or_default()
         .contains("does not exist"));
+
+    let build_ready = stasis(&["build", "--mode", "dev"], &project);
+    assert_eq!(
+        build_ready.status.code(),
+        Some(0),
+        "generated project build should have its canonical asset manifest: stdout={} stderr={}",
+        String::from_utf8_lossy(&build_ready.stdout),
+        String::from_utf8_lossy(&build_ready.stderr)
+    );
 
     fs::remove_dir_all(&parent).ok();
 }
