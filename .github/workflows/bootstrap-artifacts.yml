@@ -165,6 +165,8 @@ jobs:
           Copy-Item README.md "$out/" -Force
           Copy-Item LICENSE "$out/" -Force
           Copy-Item THIRD_PARTY_NOTICES.md "$out/" -Force
+          New-Item -ItemType Directory -Force -Path "$out/tools/windows" | Out-Null
+          Copy-Item tools/windows/stasis-signing.ps1 "$out/tools/windows/" -Force
           Copy-Item src "$out/" -Recurse -Force
           Copy-Item samples "$out/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null

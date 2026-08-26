@@ -13,6 +13,7 @@ mod runtime_exec;
 mod stasis_test_runner;
 mod watch;
 mod window_config;
+pub mod windows_signing;
 
 pub use compiler_backend::build_aot_direct_storage_source;
 pub use compiler_backend::run_self_host_aot_cli;
@@ -32,6 +33,10 @@ pub use stasis_test_runner::{
     run_jit_tests_in_directory_with_session, StasisTestRunSession, StasisTestRunSummary,
 };
 pub use window_config::WindowConfig;
+pub use windows_signing::{
+    provision_local_certificate, sign_artifacts, signing_required, status as signing_status,
+    verify_artifacts, ProvisionResult, SigningOptions, SigningStatus,
+};
 
 use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
 use frame_pacer::FramePacer;

@@ -27,6 +27,11 @@ sidecar manifest from the resolved runtime payload directory during initializati
 embedded manifest and exposes the release/development classification to build
 audit tools.
 
+Windows release/bootstrap archives also ship `tools/windows/stasis-signing.ps1`. Any release
+signing step runs before provenance or hash manifests are finalized, so recorded hashes describe
+the signed bytes. The archive entrypoint accepts explicit `status`, `sign`, and `verify` operations;
+production credentials remain CI-supplied and are never generated or persisted by the toolchain.
+
 ## Local release and development builds
 
 A source checkout has no authority to claim an official release. Local proof

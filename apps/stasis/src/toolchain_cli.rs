@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
-    load_and_apply_play_data_bindings_for_test, resolve_play_data_binding_paths,
-    run_live_in_process, run_live_in_process_with_data, run_play_in_process_with_replay,
-    run_play_in_process_with_window_title, run_self_host_aot_cli_with_options, LiveRunConfig,
-    PlayReplayConfig, StasisTestRunSession,
+    load_and_apply_play_data_bindings_for_test, provision_local_certificate,
+    resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
+    run_play_in_process_with_replay, run_play_in_process_with_window_title,
+    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
+    LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetFormat, AssetLimits, AudioEncoding,
@@ -227,6 +228,7 @@ const COMMANDS: &[&str] = &[
     "build",
     "package",
     "package-mobile",
+    "signing",
     "inspect",
     "replay",
     "verify",
@@ -400,6 +402,9 @@ enum ToolchainCommand {
         mode: BuildMode,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+        /// Select optional, required, or automatic Windows signing behavior.
+        #[arg(long, value_enum, default_value_t = SigningSelection::Auto)]
+        signing: SigningSelection,
     },
     /// Assemble a distributable desktop or mobile directory.
     Package {
@@ -410,6 +415,9 @@ enum ToolchainCommand {
         /// Force a visibly labeled development package.
         #[arg(long)]
         development_build: bool,
+        /// Select optional, required, or automatic Windows signing behavior.
+        #[arg(long, value_enum, default_value_t = SigningSelection::Auto)]
+        signing: SigningSelection,
     },
     /// Assemble a release-only Android or iOS app project around one AOT game.
     PackageMobile {
@@ -429,6 +437,11 @@ enum ToolchainCommand {
         profile_warmup_frames: u32,
         #[arg(long, default_value_t = 300)]
         profile_sample_frames: u32,
+    },
+    /// Inspect and operate the repository-owned Windows signing policy.
+    Signing {
+        #[command(subcommand)]
+        command: SigningCommand,
     },
     /// Report compiler-owned state memory, layout, and mobile budget information.
     Inspect {
@@ -475,6 +488,34 @@ enum VendorCommand {
     Status,
     /// Atomically replace the checked-in snapshot with this executable's sources.
     Update,
+}
+
+#[derive(Debug, Subcommand)]
+enum SigningCommand {
+    /// Report deterministic signer discovery and credential configuration status.
+    Status,
+    /// Explicitly provision a non-exportable CurrentUser development certificate.
+    Provision,
+    /// Sign explicit executable or toolchain artifact paths.
+    Sign {
+        #[arg(value_name = "ARTIFACT", required = true)]
+        artifacts: Vec<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        tool: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        certificate: Option<PathBuf>,
+        #[arg(long, value_name = "THUMBPRINT")]
+        thumbprint: Option<String>,
+        #[arg(long, value_name = "URL")]
+        timestamp_url: Option<String>,
+    },
+    /// Verify Authenticode signatures on explicit artifact paths.
+    Verify {
+        #[arg(value_name = "ARTIFACT", required = true)]
+        artifacts: Vec<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        tool: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -626,6 +667,23 @@ impl From<SymbolKindArg> for WorkshopSourceItemKind {
 enum BuildMode {
     Dev,
     Release,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SigningSelection {
+    Auto,
+    Optional,
+    Required,
+}
+
+impl SigningSelection {
+    fn env_value(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Optional => Some("optional"),
+            Self::Required => Some("required"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -1034,6 +1092,81 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Env => "env",
         ToolchainCommand::Vendor { .. } => "vendor",
         ToolchainCommand::Symbol { .. } => "symbol",
+        ToolchainCommand::Signing { .. } => "signing",
+    }
+}
+
+fn with_signing_selection<T>(selection: SigningSelection, operation: impl FnOnce() -> T) -> T {
+    let Some(value) = selection.env_value() else {
+        return operation();
+    };
+    let previous = env::var_os("STASIS_SIGNING_MODE");
+    env::set_var("STASIS_SIGNING_MODE", value);
+    let result = operation();
+    match previous {
+        Some(value) => env::set_var("STASIS_SIGNING_MODE", value),
+        None => env::remove_var("STASIS_SIGNING_MODE"),
+    }
+    result
+}
+
+fn signing_command(command: SigningCommand) -> Result<CommandResult, String> {
+    match command {
+        SigningCommand::Status => {
+            let status = signing_status();
+            let human = if status.diagnostics.is_empty() {
+                format!(
+                    "Windows signing ready: signer={} certificate_configured={}",
+                    status.signer.as_deref().unwrap_or("none"),
+                    status.certificate_configured
+                )
+            } else {
+                format!("Windows signing status: {}", status.diagnostics.join("; "))
+            };
+            Ok(CommandResult::success(
+                human,
+                serde_json::to_value(status)
+                    .map_err(|error| format!("failed to serialize signing status: {error}"))?,
+            ))
+        }
+        SigningCommand::Provision => {
+            let result = provision_local_certificate()?;
+            Ok(CommandResult::success(
+                format!(
+                    "provisioned CurrentUser development certificate {}",
+                    result.thumbprint
+                ),
+                serde_json::to_value(result).map_err(|error| {
+                    format!("failed to serialize signing provisioning result: {error}")
+                })?,
+            ))
+        }
+        SigningCommand::Sign {
+            artifacts,
+            tool,
+            certificate,
+            thumbprint,
+            timestamp_url,
+        } => {
+            let options = SigningOptions {
+                tool,
+                certificate,
+                thumbprint,
+                timestamp_url,
+            };
+            sign_artifacts(&artifacts, &options)?;
+            Ok(CommandResult::success(
+                format!("signed {} artifact(s)", artifacts.len()),
+                json!({"artifacts": artifacts.iter().map(|path| display_path(path)).collect::<Vec<_>>(), "digest": "SHA256", "page_hashes": true}),
+            ))
+        }
+        SigningCommand::Verify { artifacts, tool } => {
+            verify_artifacts(&artifacts, tool.as_deref())?;
+            Ok(CommandResult::success(
+                format!("verified {} artifact(s)", artifacts.len()),
+                json!({"artifacts": artifacts.iter().map(|path| display_path(path)).collect::<Vec<_>>(), "verified": true}),
+            ))
+        }
     }
 }
 
@@ -1059,6 +1192,7 @@ fn execute(
         ToolchainCommand::Version => Ok(version_result()),
         ToolchainCommand::EditorInfo => editor_info_result(),
         ToolchainCommand::Env => env_result(workspace_arg.as_deref()),
+        ToolchainCommand::Signing { command } => signing_command(command),
         ToolchainCommand::Verify => Err(
             "verify is unavailable in toolchain 0.1; no replay verification contract is implemented"
                 .to_string(),
@@ -1220,17 +1354,22 @@ fn execute(
                         )
                     }
                 }
-                ToolchainCommand::Build { mode, out } => {
+                ToolchainCommand::Build { mode, out, signing } => {
                     validate_optional_workspace_path(&workspace, "build output", out.as_deref())?;
-                    build_workspace(&workspace, mode, out.as_deref())
+                    with_signing_selection(signing, || {
+                        build_workspace(&workspace, mode, out.as_deref())
+                    })
                 }
                 ToolchainCommand::Package {
                     target,
                     out,
                     development_build,
+                    signing,
                 } => {
                     validate_optional_workspace_path(&workspace, "package output", out.as_deref())?;
-                    package_workspace(&workspace, target, out.as_deref(), development_build)
+                    with_signing_selection(signing, || {
+                        package_workspace(&workspace, target, out.as_deref(), development_build)
+                    })
                 }
                 ToolchainCommand::PackageMobile {
                     target,
