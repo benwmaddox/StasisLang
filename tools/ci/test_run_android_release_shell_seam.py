@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tools.ci import run_android_release_shell_seam as seam
@@ -86,6 +87,70 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(seam.SeamError, "published extraction state"):
             seam.validate_rejection_storage_state("present", "absent")
+
+    def test_it022_storage_probe_classifies_present_path_and_uses_direct_run_as(self):
+        result = SimpleNamespace(returncode=0, stdout="files/stasis_game\n", stderr="")
+        with mock.patch.object(seam, "_run_result", return_value=result) as run_result:
+            self.assertEqual(
+                "present",
+                seam.probe_rejection_storage_path(
+                    Path("adb"), "emulator-5554", "com.example.seam", "files/stasis_game"
+                ),
+            )
+        run_result.assert_called_once_with(
+            Path("adb"),
+            "emulator-5554",
+            "shell",
+            "run-as",
+            "com.example.seam",
+            "ls",
+            "-d",
+            "files/stasis_game",
+        )
+
+    def test_it022_storage_probe_parses_no_such_file_as_absent(self):
+        self.assertEqual(
+            "absent",
+            seam.classify_rejection_storage_probe(
+                "files/.stasis_game.staging",
+                1,
+                "",
+                "ls: files/.stasis_game.staging: No such file or directory\n",
+            ),
+        )
+
+    def test_it022_storage_probe_rejects_run_as_failure(self):
+        with self.assertRaisesRegex(seam.SeamError, "storage probe.*failed"):
+            seam.classify_rejection_storage_probe(
+                "files/stasis_game", 1, "", "run-as: package is not debuggable\n"
+            )
+
+    def test_it022_storage_probe_rejects_mixed_missing_path_diagnostics(self):
+        with self.assertRaisesRegex(seam.SeamError, "storage probe.*failed"):
+            seam.classify_rejection_storage_probe(
+                "files/stasis_game",
+                1,
+                "",
+                "ls: files/stasis_game: No such file or directory\n"
+                "run-as: package is not debuggable\n",
+            )
+
+    def test_it022_storage_probe_rejects_unexpected_success_output_or_diagnostics(self):
+        with self.assertRaisesRegex(seam.SeamError, "unexpected success output"):
+            seam.classify_rejection_storage_probe(
+                "files/stasis_game", 0, "files/other\n", ""
+            )
+        with self.assertRaisesRegex(seam.SeamError, "unexpected success output"):
+            seam.classify_rejection_storage_probe(
+                "files/stasis_game", 0, "files/stasis_game\n", "warning\n"
+            )
+        with self.assertRaisesRegex(seam.SeamError, "unexpected missing-path output"):
+            seam.classify_rejection_storage_probe(
+                "files/stasis_game",
+                1,
+                "unexpected\n",
+                "ls: files/stasis_game: No such file or directory\n",
+            )
 
     def test_it022_rejection_requires_native_diagnostic_and_no_game_markers(self):
         diagnostic = (
