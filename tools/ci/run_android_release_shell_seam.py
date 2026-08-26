@@ -24,6 +24,18 @@ class SeamError(RuntimeError):
     pass
 
 
+def _run_result(
+    adb: Path,
+    serial: str | None,
+    *arguments: str,
+):
+    command = [str(adb)]
+    if serial:
+        command.extend(("-s", serial))
+    command.extend(arguments)
+    return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
 def _run(
     adb: Path,
     serial: str | None,
@@ -31,11 +43,14 @@ def _run(
     text: bool = True,
     required: bool = True,
 ):
-    command = [str(adb)]
-    if serial:
-        command.extend(("-s", serial))
-    command.extend(arguments)
-    result = subprocess.run(command, capture_output=True, text=text, check=False)
+    if not text:
+        command = [str(adb)]
+        if serial:
+            command.extend(("-s", serial))
+        command.extend(arguments)
+        result = subprocess.run(command, capture_output=True, text=False, check=False)
+    else:
+        result = _run_result(adb, serial, *arguments)
     if required and result.returncode != 0:
         stderr = (
             result.stderr.strip()
@@ -44,6 +59,65 @@ def _run(
         )
         raise SeamError(f"adb {' '.join(arguments)} failed: {stderr}")
     return result.stdout
+
+
+def classify_rejection_storage_probe(
+    relative_path: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> str:
+    """Classify one direct run-as path probe without hiding adb diagnostics."""
+    output = stdout.strip()
+    diagnostic = stderr.strip()
+    if returncode == 0:
+        if output != relative_path or diagnostic:
+            raise SeamError(
+                "IT-022 storage probe for "
+                f"{relative_path} returned unexpected success output: "
+                f"stdout={output!r} stderr={diagnostic!r}"
+            )
+        return "present"
+    diagnostic_lines = [line.strip().lower() for line in diagnostic.splitlines() if line.strip()]
+    if diagnostic_lines and all(
+        "no such file or directory" in line for line in diagnostic_lines
+    ):
+        if output:
+            raise SeamError(
+                "IT-022 storage probe for "
+                f"{relative_path} returned unexpected missing-path output: "
+                f"stdout={output!r} stderr={diagnostic!r}"
+            )
+        return "absent"
+    raise SeamError(
+        f"IT-022 storage probe for {relative_path} failed: "
+        f"exit={returncode} stdout={output!r} stderr={diagnostic!r}"
+    )
+
+
+def probe_rejection_storage_path(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    relative_path: str,
+) -> str:
+    """Probe an app-private path through run-as while preserving result details."""
+    result = _run_result(
+        adb,
+        serial,
+        "shell",
+        "run-as",
+        package_id,
+        "ls",
+        "-d",
+        relative_path,
+    )
+    return classify_rejection_storage_probe(
+        relative_path,
+        result.returncode,
+        result.stdout,
+        result.stderr,
+    )
 
 
 def parse_markers(log: str, test_id: str) -> list[dict]:
@@ -1403,27 +1477,17 @@ def main() -> int:
             ).strip()
             if not first_pid:
                 raise SeamError("IT-022 rejected package process exited unexpectedly")
-            staging_probe = _run(
+            staging_probe = probe_rejection_storage_path(
                 args.adb,
                 args.serial,
-                "shell",
-                "run-as",
                 package_id,
-                "sh",
-                "-c",
-                "if [ -e files/.stasis_game.staging ]; then echo present; else echo absent; fi",
-                required=False,
+                "files/.stasis_game.staging",
             )
-            root_probe = _run(
+            root_probe = probe_rejection_storage_path(
                 args.adb,
                 args.serial,
-                "shell",
-                "run-as",
                 package_id,
-                "sh",
-                "-c",
-                "if [ -e files/stasis_game ]; then echo present; else echo absent; fi",
-                required=False,
+                "files/stasis_game",
             )
             storage = validate_rejection_storage_state(staging_probe, root_probe)
             time.sleep(1)
