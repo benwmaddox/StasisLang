@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #if defined(_WIN32)
 #include <io.h>
 #endif
@@ -34,6 +38,18 @@ int stasis_audio_voice_is_playing(int voice_handle);
 #include "stasis_mobile_runtime.h"
 
 void stasis_host_report_runtime_error(const char *message);
+
+static void stasis_pregraphics_info_log(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+#if defined(__ANDROID__)
+    __android_log_vprint(ANDROID_LOG_INFO, "Stasis", format, args);
+#else
+    SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_INFO, format, args);
+#endif
+    va_end(args);
+}
+
 #if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
 void stasis_mobile_network_present_join_url(void);
 #endif
@@ -260,7 +276,7 @@ static void log_asset_rejection_marker(const char *test_id, const char *diagnost
         }
     }
     escaped[output] = '\0';
-    SDL_Log(
+    stasis_pregraphics_info_log(
         "Stasis seam: {\"schema\":\"stasis.seam_test.v1\","
         "\"test_id\":\"%s\",\"event\":\"asset_rejected\","
         "\"frame\":0,\"initialized\":0,\"accepted\":0,"
@@ -317,7 +333,9 @@ int SDL_main(int argc, char **argv) {
     const char *asset_error = SDL_getenv("STASIS_ASSET_VERIFICATION_ERROR");
     if (asset_error != NULL && asset_error[0] != '\0') {
         stasis_host_report_runtime_error(asset_error);
-        SDL_Log("Stasis IT-022 asset verification rejected package: %s", asset_error);
+        stasis_pregraphics_info_log(
+            "Stasis IT-022 asset verification rejected package: %s", asset_error
+        );
 #if defined(STASIS_ENABLE_SEAM_TESTS)
         const char *seam_test_id = SDL_getenv("STASIS_SEAM_TEST_ID");
         if (seam_test_id != NULL && strcmp(seam_test_id, "IT-022") == 0) {
