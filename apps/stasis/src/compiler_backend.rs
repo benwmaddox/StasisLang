@@ -6835,61 +6835,7 @@ pub fn run_self_host_aot_cli(
 }
 
 pub fn sign_output_artifact_if_configured(artifact_path: &Path) -> Result<(), String> {
-    let sign_tool = std::env::var_os("STASIS_AOT_SIGN_TOOL").filter(|tool| !tool.is_empty());
-    let signing_required =
-        std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").is_some_and(|value| value == "1");
-    let Some(sign_tool) = sign_tool else {
-        return if signing_required {
-            Err("STASIS_REQUIRE_SIGNED_EXECUTION=1 but STASIS_AOT_SIGN_TOOL is not set".to_string())
-        } else {
-            Ok(())
-        };
-    };
-    let sign_tool_path = Path::new(&sign_tool);
-    if (sign_tool_path.is_absolute() || sign_tool_path.components().count() > 1)
-        && !sign_tool_path.is_file()
-    {
-        if signing_required {
-            return Err(format!(
-                "configured signer tool {:?} does not exist",
-                sign_tool
-            ));
-        }
-        eprintln!(
-            "warning: ignoring unavailable optional signer tool {:?}",
-            sign_tool
-        );
-        return Ok(());
-    }
-    let status = match std::process::Command::new(&sign_tool)
-        .arg(artifact_path)
-        .status()
-    {
-        Ok(status) => status,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !signing_required => {
-            eprintln!(
-                "warning: ignoring unavailable optional signer tool {:?}",
-                sign_tool
-            );
-            return Ok(());
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to launch signer tool {:?} for {}: {error}",
-                sign_tool,
-                artifact_path.display()
-            ));
-        }
-    };
-    if !status.success() {
-        return Err(format!(
-            "signer tool {:?} failed for {} with status {:?}",
-            sign_tool,
-            artifact_path.display(),
-            status.code()
-        ));
-    }
-    Ok(())
+    crate::windows_signing::sign_output_artifact_if_configured(artifact_path)
 }
 
 fn maybe_sign_output_executable(output_exe: &Path) -> Result<(), String> {

@@ -253,14 +253,15 @@ jobs:
         run: |
           $certificate = Join-Path $env:RUNNER_TEMP "stasis-signing.pfx"
           [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
-          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Sort-Object FullName -Descending | Select-Object -First 1).FullName
-          if (-not $signtool) { throw "signtool.exe not found" }
+          $env:STASIS_SIGNING_CERTIFICATE = $certificate
+          $env:STASIS_SIGNING_TIMESTAMP_URL = "http://timestamp.digicert.com"
           @(
             "target/${{ matrix.rust_target }}/release/stasis.exe",
+            "target/${{ matrix.rust_target }}/release/stasis_dynload.dll",
             "runtime/build_ci/bin/Release/stasis_graphics.dll",
             "runtime/build_ci/bin/Release/stasis_runner.exe"
           ) | ForEach-Object {
-            & $signtool sign /fd SHA256 /f $certificate /p $env:STASIS_SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/windows/stasis-signing.ps1 sign -Artifact $_
             if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $_" }
           }
           Remove-Item -LiteralPath $certificate -Force
@@ -332,6 +333,8 @@ jobs:
           Copy-Item README.md "$out/" -Force
           Copy-Item LICENSE "$out/" -Force
           Copy-Item THIRD_PARTY_NOTICES.md "$out/" -Force
+          New-Item -ItemType Directory -Force -Path "$out/tools/windows" | Out-Null
+          Copy-Item tools/windows/stasis-signing.ps1 "$out/tools/windows/" -Force
           # Ship the stdlib + samples so relative imports keep working in the bundle.
           Copy-Item src "$out/" -Recurse -Force
           Copy-Item samples "$out/" -Recurse -Force

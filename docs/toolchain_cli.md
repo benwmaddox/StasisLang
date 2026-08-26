@@ -38,6 +38,10 @@ stasis package-mobile --target android-arm64
 stasis package-mobile --target ios-arm64
 stasis inspect
 stasis inspect --capacity state.enemies=512
+stasis signing status
+stasis signing provision
+stasis signing sign path\to\artifact.exe
+stasis signing verify path\to\artifact.exe
 ```
 
 `stasis init --name brick_game .` initializes an existing directory. The built-in template copies
@@ -174,7 +178,14 @@ cloning a generated repository, reactivate the checked-in hook with
 - `build --mode dev`: compile through JIT and write `build/dev-build.json` as a deterministic
   receipt.
 - `build --mode release`: use the shared Cranelift AOT pipeline and write the native executable to
-  `build/`.
+  `build/`. On Windows, `--signing required` makes unavailable signer/certificate configuration
+  fail before the artifact is accepted; `auto` preserves optional legacy hook behavior.
+- `signing status|provision|sign|verify`: inspect Windows signer discovery, explicitly provision a
+  CurrentUser-only development certificate, sign explicit executable/toolchain paths, or verify
+  Authenticode signatures. These commands do not require `stasis.json`; `provision` is never a
+  production credential path. Stasis-controlled signing requests SHA-256 file digests and page
+  hashes. The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
+  remains supported as a one-argument external hook for existing cross-platform build flows.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
   assets, graphics runtime when present, and verified release provenance. Windows packages keep
   the game-named executable as the only root file and place all support files under `app/`.
