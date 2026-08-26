@@ -30,6 +30,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.workshop_script = read("mobile/android/test_render_emulator.ps1")
         cls.rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
         cls.provenance_script = read("mobile/android/rust_bridge_provenance.ps1")
+        cls.mobile_main = read("mobile/shells/common/stasis_mobile_main.c")
 
     def workflow_job_body(self, name: str) -> str:
         match = re.search(
@@ -276,6 +277,41 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertLess(variant_copy, variant_build)
         self.assertIn("--asset-variant $variant", self.release_script)
         self.assertIn("one-byte bound override", read("mobile/shells/android/README.md"))
+
+    def test_it022_pregraphics_rejection_logs_use_stable_android_tag(self):
+        source = self.mobile_main
+        helper_start = source.index("static void stasis_pregraphics_info_log")
+        helper_end = source.index("#if defined(__APPLE__)", helper_start)
+        helper = source[helper_start:helper_end]
+        rejection_start = source.index("const char *asset_error")
+        rejection_end = source.index(
+            "return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;", rejection_start
+        )
+        rejection = source[rejection_start:rejection_end]
+        marker_start = source.index("static void log_asset_rejection_marker")
+        marker_end = source.index("#endif", marker_start)
+        marker = source[marker_start:marker_end]
+
+        self.assertIn("#include <android/log.h>", source)
+        self.assertIn(
+            '__android_log_vprint(ANDROID_LOG_INFO, "Stasis", format, args)',
+            helper,
+        )
+        self.assertIn(
+            "SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_INFO, format, args)",
+            helper,
+        )
+        self.assertIn("stasis_pregraphics_info_log(", rejection)
+        self.assertIn(
+            '"Stasis IT-022 asset verification rejected package: %s", asset_error',
+            rejection,
+        )
+        self.assertIn("stasis_pregraphics_info_log(", marker)
+        self.assertIn('\\\"event\\\":\\\"asset_rejected', marker)
+        self.assertLess(
+            source.index("stasis_pregraphics_info_log"),
+            source.index("stasis_mobile_runtime_initialize"),
+        )
 
     def test_strategy_makes_emulator_the_readiness_gate(self):
         self.assertIn("hosted x86_64 emulator is the CI and readiness", self.strategy)
