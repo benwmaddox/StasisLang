@@ -375,8 +375,16 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
         self.assertIn('capture_path', rejection_runner)
         self.assertIn('"foreground_restored": foreground_restored', rejection_runner)
-        self.assertIn('ui_hierarchy_path = args.output / "ui-hierarchy.xml"', self.release_runner)
-        self.assertIn('"ui_hierarchy": str(ui_hierarchy_path)', self.release_runner)
+        self.assertIn(
+            'ui_hierarchy_path = args.output / "ui-hierarchy.xml"', self.release_runner
+        )
+        self.assertIn(
+            'evidence["artifacts"]["ui_hierarchy"] = str(ui_hierarchy_path)',
+            rejection_runner,
+        )
+        artifacts_start = self.release_runner.index('"artifacts":')
+        artifacts_end = self.release_runner.index('"install_policy":', artifacts_start)
+        self.assertNotIn('"ui_hierarchy"', self.release_runner[artifacts_start:artifacts_end])
 
     def test_strategy_makes_emulator_the_readiness_gate(self):
         self.assertIn("hosted x86_64 emulator is the CI and readiness", self.strategy)

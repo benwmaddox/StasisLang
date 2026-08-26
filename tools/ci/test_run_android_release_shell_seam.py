@@ -200,10 +200,11 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         diagnostic = "code=missing_asset path=assets/token.bin detail=asset is missing"
         valid_xml = (
             "<?xml version='1.0'?><hierarchy><node "
-            "content-desc='Stasis runtime error' "
+            "content-desc='Stasis runtime error Release runtime error "
+            "Asset verification failed code=missing_asset path=assets/token.bin "
+            "detail=asset is missing' "
             "bounds='[0,0][4,4]' "
-            "text='Release runtime error Asset verification failed "
-            "code=missing_asset path=assets/token.bin detail=asset is missing'/>"
+            "text=''/>"
             "</hierarchy>"
         )
         results = [
@@ -234,6 +235,16 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         self.assertEqual(2, evidence["attempts"])
         sleep.assert_called_once_with(0.2)
         self.assertEqual(2, run_result.call_count)
+
+    def test_it022_overlay_probe_rejects_text_only_details(self):
+        diagnostic = "code=missing_asset path=assets/token.bin detail=asset is missing"
+        ui_xml = (
+            "<hierarchy><node content-desc='Stasis runtime error' "
+            "bounds='[0,0][4,4]' text='Release runtime error Asset verification failed "
+            "code=missing_asset path=assets/token.bin detail=asset is missing'/></hierarchy>"
+        )
+        with self.assertRaisesRegex(seam.SeamError, "missing required text"):
+            seam.validate_it022_error_overlay(ui_xml, diagnostic)
 
     def test_it022_overlay_probe_reports_command_failure_diagnostics(self):
         result = SimpleNamespace(

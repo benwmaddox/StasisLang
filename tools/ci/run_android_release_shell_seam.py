@@ -158,12 +158,7 @@ def validate_it022_error_overlay(
         node
         for node in overlay_nodes
         if all(
-            value
-            in (
-                node.attrib.get("text", "")
-                + "\n"
-                + node.attrib.get("content-desc", "")
-            )
+            value in node.attrib.get("content-desc", "")
             for value in required_text
         )
     ]
@@ -1554,11 +1549,7 @@ def main() -> int:
                 "command_buffer",
             )
         },
-        "artifacts": {
-            "log": str(log_path),
-            "capture": str(capture_path),
-            "ui_hierarchy": str(ui_hierarchy_path),
-        },
+        "artifacts": {"log": str(log_path), "capture": str(capture_path)},
         "install_policy": install_policy,
     }
     if device_state is not None:
@@ -1677,6 +1668,7 @@ def main() -> int:
             )
             if foreground_restored:
                 time.sleep(0.25)
+            evidence["artifacts"]["ui_hierarchy"] = str(ui_hierarchy_path)
             overlay = capture_it022_error_overlay(
                 args.adb,
                 args.serial,
