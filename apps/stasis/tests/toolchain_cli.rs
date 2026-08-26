@@ -536,6 +536,32 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         &fs::read(project.join("stasis.json")).expect("read generated manifest"),
     )
     .expect("parse generated manifest");
+    assert_eq!(
+        fs::read_to_string(project.join("assets/manifest.json"))
+            .expect("read generated asset manifest"),
+        "{\n  \"schema\": \"stasis-assets\",\n  \"version\": 1,\n  \"assets\": []\n}\n"
+    );
+    let asset_manifest: Value = serde_json::from_str(
+        &fs::read_to_string(project.join("assets/manifest.json"))
+            .expect("read generated asset manifest"),
+    )
+    .expect("parse generated asset manifest");
+    assert_eq!(
+        asset_manifest,
+        json!({
+            "schema": "stasis-assets",
+            "version": 1,
+            "assets": [],
+        })
+    );
+    let build_ready = stasis(&["build", "--mode", "dev"], &project);
+    assert_eq!(
+        build_ready.status.code(),
+        Some(0),
+        "generated project build should have its canonical asset manifest: stdout={} stderr={}",
+        String::from_utf8_lossy(&build_ready.stdout),
+        String::from_utf8_lossy(&build_ready.stderr)
+    );
     assert!(manifest["vendor"]["stasis"].get("update_policy").is_none());
     assert_eq!(
         manifest["vendor"]["stasis"]["sha256"]
