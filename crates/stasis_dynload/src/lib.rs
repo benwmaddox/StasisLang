@@ -1172,6 +1172,7 @@ pub struct StasisGraphicsApi {
     stasis_recording_audio_pull_f32_interleaved: Option<usize>,
     stasis_test_get_render_submission_state: Option<usize>,
     stasis_gfx_notify_file_changed: Option<usize>,
+    stasis_load_font: Option<usize>,
     stasis_sleep_ms: usize,
 }
 
@@ -1218,6 +1219,7 @@ impl StasisGraphicsApi {
             .ok();
         let stasis_gfx_notify_file_changed =
             lib.symbol_address("stasis_gfx_notify_file_changed").ok();
+        let stasis_load_font = lib.symbol_address("stasis_load_font").ok();
         let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
         Ok(Self {
             _lib: lib,
@@ -1234,6 +1236,7 @@ impl StasisGraphicsApi {
             stasis_recording_audio_pull_f32_interleaved,
             stasis_test_get_render_submission_state,
             stasis_gfx_notify_file_changed,
+            stasis_load_font,
             stasis_sleep_ms,
         })
     }
@@ -1530,6 +1533,29 @@ impl StasisGraphicsApi {
             callback(path.as_ptr());
             Ok(())
         }
+    }
+
+    /// Load a font through the existing path-based graphics runtime symbol.
+    pub fn load_font(&self, path: &Path, size: i32) -> Result<i32, String> {
+        let address = self
+            .stasis_load_font
+            .ok_or_else(|| "graphics runtime lacks font loading support".to_string())?;
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| "font path contains an interior NUL byte".to_string())?;
+        #[cfg(windows)]
+        let callback: extern "system" fn(*const c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*const c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        let handle = callback(path.as_ptr(), size);
+        if handle <= 0 {
+            return Err(format!(
+                "graphics runtime rejected font {}",
+                path.to_string_lossy()
+            ));
+        }
+        Ok(handle)
     }
 
     pub fn sleep_ms(&self, ms: i32) -> Result<(), String> {
