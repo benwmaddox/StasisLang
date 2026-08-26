@@ -170,6 +170,41 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 workflow_name,
             )
 
+    def test_windows_graphics_smoke_requires_monolithic_package_payload(self):
+        for workflow_name in (
+            ".github/workflows/nightly-release.yml",
+            ".github/workflows/bootstrap-artifacts.yml",
+        ):
+            workflow = (ROOT / workflow_name).read_text(encoding="utf-8")
+            windows_start = workflow.index(
+                "      - name: Smoke test bundled graphics runtime (windows)"
+            )
+            unix_start = workflow.index(
+                "      - name: Smoke test bundled CLI (unix)"
+            )
+            windows_block = workflow[windows_start:unix_start]
+
+            self.assertRegex(
+                windows_block,
+                r'if \(-not \(Test-Path "[^"\n]+/app/stasis\.json"\)\) \{ throw "game package manifest missing" \}',
+                workflow_name,
+            )
+            self.assertRegex(
+                windows_block,
+                r'if \(-not \(Test-Path "[^"\n]+/app/stasis_provenance\.json"\)\) \{ throw "game package provenance missing" \}',
+                workflow_name,
+            )
+            self.assertRegex(
+                windows_block,
+                r'if \(Test-Path "[^"\n]+/app/ci_smoke\.dll"\) \{ throw "obsolete game package library present; monolithic Windows package must not contain app/ci_smoke\.dll" \}',
+                workflow_name,
+            )
+            self.assertNotRegex(
+                windows_block,
+                r'if \(-not \(Test-Path "[^"\n]+/app/ci_smoke\.dll"\)\)',
+                workflow_name,
+            )
+
     def test_nightly_release_filters_top_level_regular_assets(self):
         workflow = (ROOT / ".github/workflows/nightly-release.yml").read_text(
             encoding="utf-8"

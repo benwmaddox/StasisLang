@@ -407,7 +407,9 @@ jobs:
             Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
             .\stasis.exe --workspace cli-smoke package --target desktop
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package runner missing" }
-            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/ci_smoke.dll")) { throw "game package library missing" }
+            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis.json")) { throw "game package manifest missing" }
+            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis_provenance.json")) { throw "game package provenance missing" }
+            if (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/ci_smoke.dll") { throw "obsolete game package library present; monolithic Windows package must not contain app/ci_smoke.dll" }
             .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
             .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
             Move-Item $repoNetworkSource $repoNetworkBackup -Force
