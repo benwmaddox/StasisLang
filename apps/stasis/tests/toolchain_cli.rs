@@ -592,7 +592,22 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let pre_commit = fs::read_to_string(project.join(".githooks/pre-commit"))
         .expect("read generated pre-commit hook");
     assert!(pre_commit.contains("stasis format --check"));
-    assert!(!project.join(".gitattributes").exists());
+    assert_eq!(
+        fs::read(project.join(".gitattributes")).expect("read generated Git attributes"),
+        b"*.[sS][vV][gG] text eol=lf\n"
+    );
+    for path in [
+        "assets/example.svg",
+        "assets/example.SVG",
+        "assets/example.SvG",
+    ] {
+        let svg_eol = git(&["check-attr", "eol", "--", path], &project);
+        assert!(svg_eol.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&svg_eol.stdout),
+            format!("{path}: eol: lf\n")
+        );
+    }
     assert_eq!(
         fs::read_to_string(project.join(".vscode/settings.json"))
             .expect("read generated VS Code settings"),
@@ -764,6 +779,41 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         String::from_utf8_lossy(&build_ready.stdout),
         String::from_utf8_lossy(&build_ready.stderr)
     );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn init_preserves_existing_svg_line_ending_policy() {
+    let parent = temp_dir("init_existing_gitattributes");
+    let project = parent.join("demo");
+    fs::create_dir_all(&project).expect("create project directory");
+    fs::write(project.join(".gitattributes"), "*.png binary\n").expect("write existing policy");
+
+    let initialized = stasis(&["--json", "init", "--name", "demo", "."], &project);
+    assert_eq!(initialized.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitattributes")).expect("read existing Git attributes"),
+        "*.png binary\n"
+    );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn new_refuses_to_overwrite_existing_svg_line_ending_policy() {
+    let parent = temp_dir("new_existing_gitattributes");
+    let project = parent.join("demo");
+    fs::create_dir_all(&project).expect("create project directory");
+    fs::write(project.join(".gitattributes"), "*.png binary\n").expect("write existing policy");
+
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_ne!(created.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitattributes")).expect("read existing Git attributes"),
+        "*.png binary\n"
+    );
+    assert!(!project.join("stasis.json").exists());
 
     fs::remove_dir_all(&parent).ok();
 }

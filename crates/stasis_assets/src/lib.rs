@@ -371,8 +371,16 @@ pub fn load_project_asset_manifest(
                 "asset must resolve to a file inside the project assets directory",
             ));
         }
-        let (content_sha256, byte_length) = sha256_file(&absolute_path, limits.max_asset_bytes)
-            .map_err(|error| entry_error(error.0, &entry, error.1))?;
+        let require_svg_lf = matches!(
+            &entry.format,
+            AssetFormat::Sprite {
+                encoding: SpriteEncoding::Svg,
+                ..
+            }
+        );
+        let (content_sha256, byte_length) =
+            sha256_file(&absolute_path, limits.max_asset_bytes, require_svg_lf)
+                .map_err(|error| entry_error(error.0, &entry, error.1))?;
         if content_sha256 != entry.content_sha256 {
             return Err(entry_error(
                 "asset_content_hash_mismatch",
@@ -614,7 +622,7 @@ pub fn prepare_asset_bundle(
             fs::copy(&cached, &destination)
                 .map_err(|error| format!("failed to stage asset {}: {error}", entry.id))?;
         }
-        let (output_hash, _) = sha256_file(&destination, u64::MAX)
+        let (output_hash, _) = sha256_file(&destination, u64::MAX, false)
             .map_err(|error| format!("failed to hash prepared asset {}: {}", entry.id, error.1))?;
         entry.prepared_from_sha256 = Some(entry.content_sha256.clone());
         entry.content_sha256 = output_hash;
@@ -1087,7 +1095,11 @@ fn read_bounded(
     Ok(bytes)
 }
 
-fn sha256_file(path: &Path, limit: u64) -> Result<(String, u64), (&'static str, String)> {
+fn sha256_file(
+    path: &Path,
+    limit: u64,
+    reject_carriage_returns: bool,
+) -> Result<(String, u64), (&'static str, String)> {
     let mut file =
         File::open(path).map_err(|error| ("asset_file_read_failed", error.to_string()))?;
     let mut digest = Sha256::new();
@@ -1107,6 +1119,13 @@ fn sha256_file(path: &Path, limit: u64) -> Result<(String, u64), (&'static str, 
             return Err((
                 "asset_file_too_large",
                 format!("asset exceeds {limit} bytes"),
+            ));
+        }
+        if reject_carriage_returns && buffer[..read].contains(&b'\r') {
+            return Err((
+                "asset_svg_line_endings_not_lf",
+                "SVG asset bytes must use LF line endings; add `*.svg text eol=lf` to .gitattributes"
+                    .to_string(),
             ));
         }
         digest.update(&buffer[..read]);
@@ -1162,6 +1181,23 @@ mod tests {
             prepared_from_sha256: None,
             format: AssetFormat::Sprite {
                 encoding: SpriteEncoding::Png,
+                width: 2,
+                height: 3,
+                layout: None,
+            },
+            prepare: None,
+            dependencies: vec![],
+        }
+    }
+
+    fn svg_sprite(id: &str, path: &str, bytes: &[u8]) -> AssetEntry {
+        AssetEntry {
+            id: id.to_string(),
+            path: path.to_string(),
+            content_sha256: sha256_bytes(bytes),
+            prepared_from_sha256: None,
+            format: AssetFormat::Sprite {
+                encoding: SpriteEncoding::Svg,
                 width: 2,
                 height: 3,
                 layout: None,
@@ -1366,6 +1402,64 @@ mod tests {
                 .code,
             "asset_content_hash_mismatch"
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn accepts_lf_svg_with_matching_raw_hash() {
+        let root = project("svg_lf");
+        let bytes = b"<svg>\n  <path/>\n</svg>\n";
+        fs::write(root.join("assets/images/hero.svg"), bytes).unwrap();
+        write_manifest(
+            &root,
+            vec![svg_sprite("hero", "assets/images/hero.svg", bytes)],
+        );
+
+        let resolved = load_project_asset_manifest(&root, AssetLimits::default()).unwrap();
+        assert_eq!(resolved.assets[0].byte_length, bytes.len() as u64);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_crlf_svg_even_when_raw_hash_matches() {
+        let root = project("svg_crlf");
+        let bytes = b"<svg>\r\n  <path/>\r\n</svg>\r\n";
+        fs::write(root.join("assets/images/hero.svg"), bytes).unwrap();
+        write_manifest(
+            &root,
+            vec![svg_sprite("hero", "assets/images/hero.svg", bytes)],
+        );
+
+        let error = load_project_asset_manifest(&root, AssetLimits::default()).unwrap_err();
+        assert_eq!(error.code, "asset_svg_line_endings_not_lf");
+        assert!(error.detail.contains("*.svg text eol=lf"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_lone_carriage_return_in_svg() {
+        let root = project("svg_cr");
+        let bytes = b"<svg>\r  <path/>\r</svg>\r";
+        fs::write(root.join("assets/images/hero.svg"), bytes).unwrap();
+        write_manifest(
+            &root,
+            vec![svg_sprite("hero", "assets/images/hero.svg", bytes)],
+        );
+
+        let error = load_project_asset_manifest(&root, AssetLimits::default()).unwrap_err();
+        assert_eq!(error.code, "asset_svg_line_endings_not_lf");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn non_svg_asset_with_carriage_return_still_uses_exact_hash() {
+        let root = project("png_cr");
+        let bytes = b"binary\rdata";
+        fs::write(root.join("assets/images/hero.png"), bytes).unwrap();
+        write_manifest(&root, vec![sprite("hero", "assets/images/hero.png", bytes)]);
+
+        let resolved = load_project_asset_manifest(&root, AssetLimits::default()).unwrap();
+        assert_eq!(resolved.assets[0].byte_length, bytes.len() as u64);
         fs::remove_dir_all(root).ok();
     }
 
