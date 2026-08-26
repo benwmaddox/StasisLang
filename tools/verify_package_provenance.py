@@ -9,6 +9,11 @@ import json
 import pathlib
 
 
+COMMAND_BUFFER_NAME = "gfx_cmd"
+CURRENT_COMMAND_BUFFER_VERSION = 5
+LEGACY_COMMAND_BUFFER_VERSION = 4
+
+
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -25,6 +30,41 @@ def mobile_package_id(name: str) -> str:
         else:
             component += f"x{byte:02x}"
     return f"com.stasislang.{component}"
+
+
+def validate_command_buffer(
+    parser: argparse.ArgumentParser, manifest: dict, *, allow_legacy: bool
+) -> None:
+    command_buffer = manifest.get("command_buffer")
+    if not isinstance(command_buffer, dict):
+        parser.error("provenance is missing command_buffer contract")
+    if command_buffer.get("name") != COMMAND_BUFFER_NAME:
+        parser.error(
+            "provenance command_buffer family must be gfx_cmd: "
+            f"{command_buffer.get('name')!r}"
+        )
+    version = command_buffer.get("version")
+    if type(version) is int and version == CURRENT_COMMAND_BUFFER_VERSION:
+        return
+    if (
+        allow_legacy
+        and type(version) is int
+        and version == LEGACY_COMMAND_BUFFER_VERSION
+        and manifest.get("development_build") is False
+        and manifest.get("dirty_state") is False
+        and isinstance(manifest.get("release_tag"), str)
+        and (
+            manifest["release_tag"].startswith("v")
+            or manifest["release_tag"].startswith("nightly-")
+        )
+    ):
+        return
+    parser.error(
+        "unsupported gfx_cmd command_buffer schema: "
+        f"expected current {CURRENT_COMMAND_BUFFER_VERSION}"
+        + (f" or official legacy {LEGACY_COMMAND_BUFFER_VERSION}" if allow_legacy else "")
+        + f", found {version!r}"
+    )
 
 
 def verify_mobile_shells(
@@ -171,6 +211,8 @@ def main() -> int:
     packaged = json.loads(
         (args.package_root / "stasis_provenance.json").read_text(encoding="utf-8")
     )
+    validate_command_buffer(parser, release, allow_legacy=True)
+    validate_command_buffer(parser, packaged, allow_legacy=True)
     if release != packaged:
         parser.error("packaged provenance does not exactly match the release manifest")
     runtime_sources = release["runtime_sources"] if args.expect_runtime_sources else {}

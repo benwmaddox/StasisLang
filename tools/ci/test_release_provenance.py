@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from tools.generate_release_provenance import RUNTIME_FILES
+from tools.generate_release_provenance import RUNTIME_FILES, render_contract_version
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -15,6 +15,36 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    def test_render_contract_version_resolves_current_header_alias(self):
+        self.assertEqual(5, render_contract_version(ROOT))
+
+    def test_render_contract_version_rejects_missing_or_non_numeric_alias(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            header = runtime / "stasis_render_contract.h"
+            header.write_text(
+                "#define STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V5_VERSION\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "missing STASIS_RENDER_V5_VERSION"):
+                render_contract_version(root)
+            header.write_text(
+                "#define STASIS_RENDER_V5_VERSION STASIS_RENDER_V6_VERSION\n"
+                "#define STASIS_RENDER_V6_VERSION 6\n"
+                "#define STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V5_VERSION\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(6, render_contract_version(root))
+            header.write_text(
+                "#define STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V5_VERSION\n"
+                "#define STASIS_RENDER_V5_VERSION not_numeric\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "not a numeric alias"):
+                render_contract_version(root)
+
     def test_audio_asset_decoder_is_part_of_release_provenance(self):
         self.assertIn("MINIMP3-LICENSE.txt", RUNTIME_FILES)
         self.assertIn("minimp3.h", RUNTIME_FILES)
@@ -189,6 +219,8 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "release_tag": "v1.0.0",
                 "source_commit": "0123456789012345678901234567890123456789",
                 "development_build": False,
+                "dirty_state": False,
+                "command_buffer": {"name": "gfx_cmd", "version": 5},
                 "runtime_sources": {"runtime/stasis_graphics.c": expected},
                 "mobile_shell_sources": {
                     "mobile/shells/common/main.c": hashlib.sha256(common_shell).hexdigest(),
@@ -242,6 +274,51 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "--expect-runtime-sources",
             ]
             self.assertEqual(subprocess.run(command, check=False).returncode, 0)
+            legacy = dict(manifest)
+            legacy["command_buffer"] = {"name": "gfx_cmd", "version": 4}
+            (release / "stasis_release_provenance.json").write_text(
+                json.dumps(legacy), encoding="utf-8"
+            )
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(legacy), encoding="utf-8"
+            )
+            self.assertEqual(
+                subprocess.run(command, check=False).returncode,
+                0,
+                "official legacy gfx_cmd schema 4 must remain accepted",
+            )
+            unsupported = dict(legacy)
+            unsupported["command_buffer"] = {"name": "other_cmd", "version": 9}
+            (release / "stasis_release_provenance.json").write_text(
+                json.dumps(unsupported), encoding="utf-8"
+            )
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(unsupported), encoding="utf-8"
+            )
+            contract_failed = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(contract_failed.returncode, 0)
+            self.assertIn("command_buffer family must be gfx_cmd", contract_failed.stderr)
+            numeric_type = dict(manifest)
+            numeric_type["command_buffer"] = {"name": "gfx_cmd", "version": 5.0}
+            (release / "stasis_release_provenance.json").write_text(
+                json.dumps(numeric_type), encoding="utf-8"
+            )
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(numeric_type), encoding="utf-8"
+            )
+            numeric_failed = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(numeric_failed.returncode, 0)
+            self.assertIn("unsupported gfx_cmd command_buffer schema", numeric_failed.stderr)
+            (release / "stasis_release_provenance.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
             (release / "mobile/shells/android/main.c").write_bytes(b"substituted shell\n")
             shell_failed = subprocess.run(command, check=False, capture_output=True, text=True)
             self.assertNotEqual(shell_failed.returncode, 0)

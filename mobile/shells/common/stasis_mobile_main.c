@@ -278,7 +278,7 @@ int SDL_main(int argc, char **argv) {
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
     SDL_Log(
-        "Stasis provenance: %s tag=%s commit=%s renderer=gfx_cmd_v1",
+        "Stasis provenance: %s tag=%s commit=%s renderer=gfx_cmd schema=5",
         STASIS_PACKAGE_BUILD_LABEL,
         STASIS_PACKAGE_RELEASE_TAG,
         STASIS_PACKAGE_SOURCE_COMMIT

@@ -53,6 +53,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int I_DROPPED_RECTS = 25;
     static final int I_FRAME_TOKEN = 26;
     static final int I_SPRITE_BASE = 32;
+    static final int F_CLEAR_BASE = 0;
     static final int F_LINE_BASE = 4;
     static final int MAX_GEOMETRY = 10_000;
     static final int GEOMETRY_F32_STRIDE = 8;

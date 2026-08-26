@@ -21,6 +21,10 @@ GFX_CMD = Path("src/stdlib/internal/gfx_cmd.stasis")
 DYNLOAD = Path("crates/stasis_dynload/src/lib.rs")
 DESKTOP = Path("apps/stasis/src/lib.rs")
 AOT = Path("apps/stasis/src/compiler_backend.rs")
+TOOLCHAIN = Path("apps/stasis/src/toolchain_cli.rs")
+RELEASE_PROVENANCE = Path("tools/generate_release_provenance.py")
+PACKAGE_PROVENANCE = Path("tools/verify_package_provenance.py")
+WEB = Path("runtime/web/game.js")
 ANDROID = Path("crates/stasis_android_bridge/src/lib.rs")
 JAVA_RENDERER = Path(
     "mobile/android/app/src/main/java/com/stasislang/workshop/StasisPreviewRenderer.java"
@@ -31,8 +35,9 @@ WORKSHOP = Path(
 JNI = Path("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
 NATIVE_HOST = Path("runtime/stasis_graphics.c")
 REQUIRED = (
-    RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, ANDROID,
-    JAVA_RENDERER, WORKSHOP, JNI, NATIVE_HOST,
+    RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
+    RELEASE_PROVENANCE, PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER,
+    WORKSHOP, JNI, NATIVE_HOST,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -139,14 +144,28 @@ def stasis_constants(text: str) -> dict[str, int]:
 
 def rust_constants(text: str, prefix: str) -> dict[str, int]:
     pairs = re.findall(
-        rf"^\s*(?:pub\s+)?const\s+({re.escape(prefix)}[A-Z0-9_]+):\s*(?:usize|i32)\s*=\s*([^;]+);",
+        rf"^\s*(?:pub\s+)?const\s+({re.escape(prefix)}[A-Z0-9_]+):\s*(?:usize|i32|i64)\s*=\s*([^;]+);",
         text, re.M,
     )
     return resolve({name: expression for name, expression in pairs})
 
 
+def python_constants(text: str, prefix: str) -> dict[str, int]:
+    pairs = re.findall(
+        rf"^({re.escape(prefix)}[A-Z0-9_]*)\s*=\s*([0-9][0-9_]*)\s*$", text, re.M
+    )
+    return {name: int(expression.replace("_", "")) for name, expression in pairs}
+
+
 def java_constants(text: str) -> dict[str, int]:
     pairs = re.findall(r"^\s*(?:private\s+)?static\s+final\s+int\s+([A-Z][A-Z0-9_]+)\s*=\s*([^;]+);", text, re.M)
+    return resolve({name: expression for name, expression in pairs})
+
+
+def javascript_constants(text: str) -> dict[str, int]:
+    pairs = re.findall(
+        r"^\s*const\s+(GFX_[A-Z0-9_]+)\s*=\s*([^;]+);", text, re.M
+    )
     return resolve({name: expression for name, expression in pairs})
 
 
@@ -215,6 +234,8 @@ RENDER_TO_RUST = {
     "STASIS_RENDER_V2_MAGIC": "STASIS_RENDER_MAGIC",
     "STASIS_RENDER_V2_VERSION": "STASIS_RENDER_V2_VERSION",
     "STASIS_RENDER_V3_VERSION": "STASIS_RENDER_V3_VERSION",
+    "STASIS_RENDER_V4_VERSION": "STASIS_RENDER_V4_VERSION",
+    "STASIS_RENDER_V5_VERSION": "STASIS_RENDER_VERSION",
     "STASIS_RENDER_CURRENT_VERSION": "STASIS_RENDER_VERSION",
     "STASIS_RENDER_I_ORDER_COUNT": "STASIS_RENDER_ORDER_COUNT_INDEX",
     "STASIS_RENDER_I_RECT_COUNT": "STASIS_RENDER_RECT_COUNT_INDEX",
@@ -222,22 +243,89 @@ RENDER_TO_RUST = {
     "STASIS_RENDER_MAX_ORDER": "STASIS_RENDER_MAX_ORDER",
     "STASIS_RENDER_I_SPRITE_BASE": "STASIS_RENDER_SPRITE_BASE",
     "STASIS_RENDER_MAX_LINES": "STASIS_RENDER_MAX_LINES",
+    "STASIS_RENDER_MAX_GEOMETRY": "STASIS_RENDER_MAX_GEOMETRY",
+    "STASIS_RENDER_GEOMETRY_F32_STRIDE": "STASIS_RENDER_GEOMETRY_STRIDE_F32",
     "STASIS_RENDER_LINE_F32_STRIDE": "STASIS_RENDER_LINE_STRIDE",
     "STASIS_RENDER_MAX_SPRITES": "STASIS_RENDER_MAX_SPRITES",
     "STASIS_RENDER_SPRITE_I32_STRIDE": "STASIS_RENDER_SPRITE_STRIDE_I32",
     "STASIS_RENDER_F_SPRITE_BASE": "STASIS_RENDER_SPRITE_BASE_F32",
     "STASIS_RENDER_SPRITE_F32_STRIDE": "STASIS_RENDER_SPRITE_STRIDE_F32",
+    "STASIS_RENDER_LEGACY_SPRITE_F32_STRIDE": "STASIS_RENDER_LEGACY_SPRITE_STRIDE_F32",
+    "STASIS_RENDER_F_CLEAR_BASE": "STASIS_RENDER_F_CLEAR_BASE",
+    "STASIS_RENDER_F_LINE_BASE": "STASIS_RENDER_F_LINE_BASE",
+    "STASIS_RENDER_F_RECT_REVERSE_BASE": "STASIS_RENDER_RECT_REVERSE_BASE_F32",
+    "STASIS_RENDER_LEGACY_F_TEXT_BASE": "STASIS_RENDER_LEGACY_TEXT_BASE_F32",
     "STASIS_RENDER_I_TEXT_BASE": "STASIS_RENDER_TEXT_BASE_I32",
     "STASIS_RENDER_F_TEXT_BASE": "STASIS_RENDER_TEXT_BASE_F32",
     "STASIS_RENDER_MAX_TEXT": "STASIS_RENDER_MAX_TEXT",
     "STASIS_RENDER_TEXT_I32_STRIDE": "STASIS_RENDER_TEXT_STRIDE_I32",
     "STASIS_RENDER_TEXT_F32_STRIDE": "STASIS_RENDER_TEXT_STRIDE_F32",
+    "STASIS_RENDER_TEXT_MAX_BYTES": "STASIS_RENDER_U8_COUNT",
+}
+
+RENDER_TO_WEB = {
+    "STASIS_RENDER_V2_MAGIC": "GFX_CMD_MAGIC",
+    "STASIS_RENDER_V2_VERSION": "GFX_CMD_V2_VERSION",
+    "STASIS_RENDER_V3_VERSION": "GFX_CMD_V3_VERSION",
+    "STASIS_RENDER_V4_VERSION": "GFX_CMD_V4_VERSION",
+    "STASIS_RENDER_V5_VERSION": "GFX_CMD_V5_VERSION",
+    "STASIS_RENDER_CURRENT_VERSION": "GFX_CMD_CURRENT_VERSION",
+    "STASIS_RENDER_FLAG_CLEAR": "GFX_FLAG_CLEAR",
+    "STASIS_RENDER_FLAG_PRESENT": "GFX_FLAG_PRESENT",
+    "STASIS_RENDER_I_MAGIC": "GFX_I_MAGIC",
+    "STASIS_RENDER_I_VERSION": "GFX_I_VERSION",
+    "STASIS_RENDER_I_FLAGS": "GFX_I_FLAGS",
+    "STASIS_RENDER_I_LINE_COUNT": "GFX_I_LINE_COUNT",
+    "STASIS_RENDER_I_SPRITE_COUNT": "GFX_I_SPRITE_COUNT",
+    "STASIS_RENDER_I_TEXT_COUNT": "GFX_I_TEXT_COUNT",
+    "STASIS_RENDER_I_TEXT_BYTES_USED": "GFX_I_TEXT_BYTES_USED",
+    "STASIS_RENDER_I_ORDER_COUNT": "GFX_I_ORDER_COUNT",
+    "STASIS_RENDER_I_RECT_COUNT": "GFX_I_RECT_COUNT",
+    "STASIS_RENDER_I_SPRITE_BASE": "GFX_I_SPRITE_BASE",
+    "STASIS_RENDER_I_TEXT_BASE": "GFX_I_TEXT_BASE",
+    "STASIS_RENDER_I_ORDER_BASE": "GFX_I_ORDER_BASE",
+    "STASIS_RENDER_F_CLEAR_BASE": "GFX_F_CLEAR_BASE",
+    "STASIS_RENDER_F_LINE_BASE": "GFX_F_LINE_BASE",
+    "STASIS_RENDER_F_SPRITE_BASE": "GFX_F_SPRITE_BASE",
+    "STASIS_RENDER_F_RECT_REVERSE_BASE": "GFX_F_RECT_REVERSE_BASE",
+    "STASIS_RENDER_F_TEXT_BASE": "GFX_F_TEXT_BASE",
+    "STASIS_RENDER_LEGACY_F_TEXT_BASE": "GFX_F_LEGACY_TEXT_BASE",
+    "STASIS_RENDER_MAX_GEOMETRY": "GFX_MAX_GEOMETRY",
+    "STASIS_RENDER_GEOMETRY_F32_STRIDE": "GFX_GEOMETRY_STRIDE_F32",
+    "STASIS_RENDER_MAX_LINES": "GFX_MAX_LINES",
+    "STASIS_RENDER_LINE_F32_STRIDE": "GFX_LINE_STRIDE_F32",
+    "STASIS_RENDER_MAX_SPRITES": "GFX_MAX_SPRITES",
+    "STASIS_RENDER_SPRITE_I32_STRIDE": "GFX_SPRITE_STRIDE_I32",
+    "STASIS_RENDER_LEGACY_SPRITE_F32_STRIDE": "GFX_LEGACY_SPRITE_STRIDE_F32",
+    "STASIS_RENDER_SPRITE_F32_STRIDE": "GFX_SPRITE_STRIDE_F32",
+    "STASIS_RENDER_MAX_TEXT": "GFX_MAX_TEXT",
+    "STASIS_RENDER_TEXT_I32_STRIDE": "GFX_TEXT_STRIDE_I32",
+    "STASIS_RENDER_TEXT_F32_STRIDE": "GFX_TEXT_STRIDE_F32",
+    "STASIS_RENDER_TEXT_MAX_BYTES": "GFX_TEXT_MAX_BYTES",
+    "STASIS_RENDER_MAX_ORDER": "GFX_MAX_ORDER",
+    "STASIS_RENDER_ORDER_KIND_SCALE": "GFX_ORDER_KIND_SCALE",
+    "STASIS_RENDER_ORDER_LINE": "GFX_ORDER_LINE",
+    "STASIS_RENDER_ORDER_SPRITE": "GFX_ORDER_SPRITE",
+    "STASIS_RENDER_ORDER_TEXT": "GFX_ORDER_TEXT",
+    "STASIS_RENDER_ORDER_RECT": "GFX_ORDER_RECT",
+}
+
+RENDER_TO_TOOLCHAIN_PROVENANCE = {
+    "STASIS_RENDER_CURRENT_VERSION": "GFX_CMD_CURRENT_VERSION",
+    "STASIS_RENDER_V4_VERSION": "GFX_CMD_LEGACY_VERSION",
+}
+
+RENDER_TO_PACKAGE_PROVENANCE = {
+    "STASIS_RENDER_CURRENT_VERSION": "CURRENT_COMMAND_BUFFER_VERSION",
+    "STASIS_RENDER_V4_VERSION": "LEGACY_COMMAND_BUFFER_VERSION",
 }
 
 RENDER_TO_JAVA = {
     "STASIS_RENDER_V2_MAGIC": "RENDER_MAGIC",
     "STASIS_RENDER_V2_VERSION": "RENDER_V2_VERSION",
     "STASIS_RENDER_V3_VERSION": "RENDER_V3_VERSION",
+    "STASIS_RENDER_V4_VERSION": "RENDER_V4_VERSION",
+    "STASIS_RENDER_V5_VERSION": "RENDER_VERSION",
     "STASIS_RENDER_CURRENT_VERSION": "RENDER_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "FLAG_PRESENT",
@@ -252,6 +340,8 @@ RENDER_TO_JAVA = {
     "STASIS_RENDER_TEXT_MAX_BYTES": "TEXT_U8_CAPACITY",
     "STASIS_RENDER_I32_COUNT": "FRAME_I32_CAPACITY",
     "STASIS_RENDER_F32_COUNT": "FRAME_F32_CAPACITY",
+    "STASIS_RENDER_F_CLEAR_BASE": "F_CLEAR_BASE",
+    "STASIS_RENDER_LEGACY_F_TEXT_BASE": "LEGACY_F_TEXT_BASE",
 }
 
 
@@ -262,6 +352,19 @@ def compare(producer: str, consumer: str, expected: dict[str, int], actual: dict
         if value != expected[source_name]:
             failures.append(Mismatch(producer, consumer, source_name, expected[source_name], value))
     return failures
+
+
+def check_literal(
+    producer: Path,
+    consumer: Path,
+    text: str,
+    field: str,
+    expected: object,
+    needle: str,
+) -> Mismatch | None:
+    if needle in text:
+        return None
+    return Mismatch(label(producer), label(consumer), field, expected, "missing")
 
 
 def literal_array(text: str, name: str) -> int | str:
@@ -296,11 +399,42 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
     host = stasis_constants(sources[HOST_FRAME])
     gfx = stasis_constants(sources[GFX_CMD])
     rust = rust_constants(sources[DYNLOAD], "STASIS_RENDER_")
+    toolchain_provenance = rust_constants(sources[TOOLCHAIN], "GFX_CMD_")
+    package_provenance = python_constants(sources[PACKAGE_PROVENANCE], "CURRENT_COMMAND_BUFFER_VERSION")
+    package_provenance.update(python_constants(sources[PACKAGE_PROVENANCE], "LEGACY_COMMAND_BUFFER_VERSION"))
     java = java_constants(sources[JAVA_RENDERER])
+    web = javascript_constants(sources[WEB])
     failures = compare(label(RENDER_HEADER), label(GFX_CMD), render, gfx, RENDER_TO_GFX)
     failures += compare(label(RENDER_HEADER), label(DYNLOAD), render, rust, RENDER_TO_RUST)
     failures += compare(label(RENDER_HEADER), label(JAVA_RENDERER), render, java, RENDER_TO_JAVA)
-    checks = len(RENDER_TO_GFX) + len(RENDER_TO_RUST) + len(RENDER_TO_JAVA)
+    failures += compare(label(RENDER_HEADER), label(WEB), render, web, RENDER_TO_WEB)
+    failures += compare(label(RENDER_HEADER), label(TOOLCHAIN), render, toolchain_provenance, RENDER_TO_TOOLCHAIN_PROVENANCE)
+    failures += compare(label(RENDER_HEADER), label(PACKAGE_PROVENANCE), render, package_provenance, RENDER_TO_PACKAGE_PROVENANCE)
+    checks = (
+        len(RENDER_TO_GFX)
+        + len(RENDER_TO_RUST)
+        + len(RENDER_TO_JAVA)
+        + len(RENDER_TO_WEB)
+        + len(RENDER_TO_TOOLCHAIN_PROVENANCE)
+        + len(RENDER_TO_PACKAGE_PROVENANCE)
+    )
+    for mismatch in (
+        check_literal(RENDER_HEADER, RELEASE_PROVENANCE, sources[RELEASE_PROVENANCE],
+                      "command_buffer.name", "gfx_cmd", 'COMMAND_BUFFER_NAME = "gfx_cmd"'),
+        check_literal(RENDER_HEADER, RELEASE_PROVENANCE, sources[RELEASE_PROVENANCE],
+                      "command_buffer.version.source", "render_contract_version(root)",
+                      "command_buffer_version = render_contract_version(root)"),
+        check_literal(RENDER_HEADER, RELEASE_PROVENANCE, sources[RELEASE_PROVENANCE],
+                      "command_buffer.version.emission", "command_buffer_version",
+                      '"version": command_buffer_version'),
+        check_literal(RENDER_HEADER, TOOLCHAIN, sources[TOOLCHAIN],
+                      "command_buffer.name", "gfx_cmd", 'GFX_CMD_NAME: &str = "gfx_cmd"'),
+        check_literal(RENDER_HEADER, PACKAGE_PROVENANCE, sources[PACKAGE_PROVENANCE],
+                      "command_buffer.name", "gfx_cmd", 'COMMAND_BUFFER_NAME = "gfx_cmd"'),
+    ):
+        checks += 1
+        if mismatch is not None:
+            failures.append(mismatch)
     for lane, pattern in DESCRIPTOR_PATTERNS.items():
         checks += 1
         if not re.search(pattern, sources[RENDER_HEADER]):

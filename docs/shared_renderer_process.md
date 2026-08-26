@@ -2,7 +2,7 @@
 
 Stasis shipping packages use one renderer process on desktop, Android, and iOS:
 
-1. JIT or AOT game code writes the `gfx_cmd` v4 guest buffers.
+1. JIT or AOT game code writes the stable `gfx_cmd` family buffers (current schema v5).
 2. `stasis_gfx_submit_u8` validates and interprets that versioned buffer.
 3. `stasis_graphics.c` owns frame order, resources, blending, filtering,
    clipping state, fallback sprites, and renderer shutdown.
@@ -17,7 +17,7 @@ magic or versions are rejected without drawing.
 
 ## Command contract
 
-Schema v4 keeps clear and present as frame boundaries and records each line,
+Schema v5 keeps clear and present as frame boundaries and records each line,
 filled rectangle, sprite, direct-text, or cached-text submission in one bounded cross-category
 order stream. Payloads remain in typed category arrays; each order entry names
 its category and payload index. The trace mixes an explicit kind marker and every
@@ -26,7 +26,7 @@ invalid text ranges contribute metadata but never read outside the byte buffer.
 JIT and AOT traces must match exactly for the representative conformance frame.
 
 For compatibility, schema v2 and schema v3 frames with an empty order stream
-use the prior line -> sprite -> text order. Schema v4's empty-order fallback is
+use the prior line -> sprite -> text order. Schemas v4 and v5 preserve the empty-order fallback
 line -> filled rectangle -> sprite -> text. This supports games that prebuild
 persistent category buffers with `gfx_cmd_set_*_at` and count setters. New calls
 to `gfx_cmd_line`, `gfx_cmd_rect`, `gfx_cmd_sprite`, `gfx_cmd_text`, their cached/bulk variants,
@@ -37,13 +37,13 @@ Coordinates are logical top-left pixels. Colors and alpha are straight alpha;
 SDL uses source-alpha over destination. Sprite alpha is clamped to `0..255`,
 linear filtering is used for normal sprite textures, rotation is clockwise
 around the destination center, and an invalid sprite handle resolves to the
-procedural magenta checker. Schema v4 has no clip command; the interpreter
+procedural magenta checker. The gfx_cmd family has no clip command; the interpreter
 resets the SDL clip rectangle at each frame boundary. Text and SVG rasterization,
 cache keys, and resource replacement live in `stasis_graphics.c`, so platform
 shells cannot redefine them.
 
 Logical, native, drawable, safe-viewport, input-transform, and resource-density
-semantics are defined in `display_metrics.md`. Reserved gfx_cmd v4 header slots
+semantics are defined in `display_metrics.md`. Reserved gfx_cmd v5 header slots
 carry host display metadata to embedded previews but do not participate in the
 backend-independent command trace.
 
