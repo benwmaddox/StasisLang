@@ -53,6 +53,7 @@ public final class MainActivity extends SDLActivity {
     private String joinUrlValue;
     private Runnable hudUpdater;
     private String displayedRuntimeError;
+    private String startupAssetVerificationDiagnostic;
 
     @Override
     public void setOrientationBis(int width, int height, boolean resizable, String hint) {
@@ -131,6 +132,7 @@ public final class MainActivity extends SDLActivity {
                         "code=asset_cache_failure path=assets/manifest.json detail="
                                 + error.getMessage());
             }
+            startupAssetVerificationDiagnostic = diagnostic;
             nativeSetAssetVerificationError(diagnostic);
             startupError = "Asset verification failed\n" + diagnostic;
         }
@@ -313,7 +315,14 @@ public final class MainActivity extends SDLActivity {
 
     private void updateRuntimeError() {
         String message = nativeReadRuntimeError();
-        if (message != null && !message.isEmpty()) showRuntimeError(message);
+        if (message != null && !message.isEmpty()
+                && !(startupAssetVerificationDiagnostic != null
+                && message.equals(startupAssetVerificationDiagnostic)
+                && displayedRuntimeError != null
+                && displayedRuntimeError.equals(
+                        "Asset verification failed\n" + startupAssetVerificationDiagnostic))) {
+            showRuntimeError(message);
+        }
     }
 
     private void updateJoinUrl() {
