@@ -148,15 +148,17 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         ui_xml = (
             "UI hierarchy dumped to: /dev/tty\n"
             "<?xml version='1.0'?><hierarchy><node "
-            "content-desc='Stasis runtime error' "
+            "content-desc='Stasis runtime error&#10;Release runtime error&#10;"
+            "Asset verification failed: code=missing_asset path=assets/token.bin "
+            "detail=asset is missing' "
             "bounds='[0,0][4,4]' "
-            "text='Release runtime error: Asset verification failed: "
-            "code=missing_asset path=assets/token.bin detail=asset is missing'/>"
+            "text=''/>"
             "</hierarchy>"
         )
         result = SimpleNamespace(returncode=0, stdout=ui_xml, stderr="")
         with tempfile.TemporaryDirectory() as temporary:
             capture = Path(temporary) / "stable-frame.png"
+            ui_hierarchy = Path(temporary) / "ui-hierarchy.xml"
             write_rgb_png(capture, 4, 4, [[(80, 0, 0)] * 4 for _ in range(4)])
             screenshot = capture.read_bytes()
             with (
@@ -168,8 +170,10 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                     "emulator-5554",
                     diagnostic,
                     capture,
+                    ui_hierarchy,
                     deadline_seconds=1,
                 )
+            self.assertEqual(ui_xml, ui_hierarchy.read_text(encoding="utf-8"))
         self.assertEqual(
             {
                 "java_error_visible": True,
@@ -208,6 +212,7 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as temporary:
             capture = Path(temporary) / "stable-frame.png"
+            ui_hierarchy = Path(temporary) / "ui-hierarchy.xml"
             write_rgb_png(capture, 4, 4, [[(80, 0, 0)] * 4 for _ in range(4)])
             screenshot = capture.read_bytes()
             with (
@@ -221,9 +226,11 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                     None,
                     diagnostic,
                     capture,
+                    ui_hierarchy,
                     deadline_seconds=1,
                     retry_interval_seconds=0.2,
                 )
+            self.assertEqual(valid_xml, ui_hierarchy.read_text(encoding="utf-8"))
         self.assertEqual(2, evidence["attempts"])
         sleep.assert_called_once_with(0.2)
         self.assertEqual(2, run_result.call_count)
@@ -235,16 +242,18 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             stderr="uiautomator: permission denied\n",
         )
         with mock.patch.object(seam, "_run_result", return_value=result):
-            with self.assertRaisesRegex(
-                seam.SeamError, "after 1 attempts.*permission denied"
-            ):
-                seam.capture_it022_error_overlay(
-                    Path("adb"),
-                    None,
-                    "native diagnostic",
-                    Path("capture.png"),
-                    deadline_seconds=0,
-                )
+            with tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaisesRegex(
+                    seam.SeamError, "after 1 attempts.*permission denied"
+                ):
+                    seam.capture_it022_error_overlay(
+                        Path("adb"),
+                        None,
+                        "native diagnostic",
+                        Path(temporary) / "capture.png",
+                        Path(temporary) / "ui-hierarchy.xml",
+                        deadline_seconds=0,
+                    )
 
     def test_it022_overlay_probe_rejects_malformed_or_unrelated_hierarchy(self):
         with self.assertRaisesRegex(seam.SeamError, "missing or incomplete"):

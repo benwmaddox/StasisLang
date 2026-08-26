@@ -345,9 +345,11 @@ public final class MainActivity extends SDLActivity {
     private void showRuntimeError(String message) {
         if (runtimeError == null || message == null || message.equals(displayedRuntimeError)) return;
         displayedRuntimeError = message;
-        runtimeError.setText("Release runtime error\n" + message);
+        String displayMessage = "Release runtime error\n" + message;
+        runtimeError.setText(displayMessage);
+        runtimeError.setContentDescription("Stasis runtime error\n" + displayMessage);
         runtimeError.setVisibility(View.VISIBLE);
-        runtimeError.announceForAccessibility(message);
+        runtimeError.announceForAccessibility(displayMessage);
     }
 
     private static int debugColorForBudget(int budgetPercent) {
