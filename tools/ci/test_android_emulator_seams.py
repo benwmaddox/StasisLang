@@ -353,6 +353,12 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             rejection_runner.index("capture_it022_error_overlay("),
             rejection_runner.index("validate_rejection_process_identity("),
         )
+        self.assertIn('time.sleep(1.0)', rejection_runner)
+        self.assertLess(
+            rejection_runner.index('time.sleep(1.0)'),
+            rejection_runner.index("validate_rejection_process_identity("),
+        )
+        self.assertIn('capture_path', rejection_runner)
         self.assertIn('"foreground_restored": foreground_restored', rejection_runner)
 
     def test_strategy_makes_emulator_the_readiness_gate(self):

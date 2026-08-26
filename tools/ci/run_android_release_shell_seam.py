@@ -125,7 +125,9 @@ def _clip_probe_text(value: str, limit: int = 320) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
-def validate_it022_error_overlay(ui_xml: str, diagnostic: str) -> dict[str, bool]:
+def validate_it022_error_overlay(
+    ui_xml: str, diagnostic: str
+) -> dict[str, bool | list[int]]:
     """Require the expected IT-022 error content on one XML node."""
     start = ui_xml.find("<?xml")
     if start < 0:
@@ -152,25 +154,73 @@ def validate_it022_error_overlay(ui_xml: str, diagnostic: str) -> dict[str, bool
         "Asset verification failed",
         diagnostic,
     )
-    if not any(
-        all(value in node.attrib.get("text", "") for value in required_text)
+    matching_nodes = [
+        node
         for node in overlay_nodes
-    ):
+        if all(value in node.attrib.get("text", "") for value in required_text)
+    ]
+    if not matching_nodes:
         raise SeamError(
             "IT-022 error overlay node is missing required text: "
             + ", ".join(required_text[:2])
             + " and native diagnostic"
         )
-    return {"java_error_visible": True}
+    for node in matching_nodes:
+        bounds_text = node.attrib.get("bounds", "")
+        bounds_match = re.fullmatch(
+            r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_text
+        )
+        if bounds_match is None:
+            continue
+        bounds = [int(value) for value in bounds_match.groups()]
+        if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            continue
+        return {"java_error_visible": True, "overlay_bounds": bounds}
+    raise SeamError("IT-022 error overlay node has malformed bounds")
+
+
+def validate_it022_overlay_capture(
+    capture: Path, bounds: list[int]
+) -> dict[str, int | list[int]]:
+    """Require red-dominant pixels inside the reported overlay bounds."""
+    if len(bounds) != 4 or not all(isinstance(value, int) for value in bounds):
+        raise SeamError(f"IT-022 error overlay bounds are malformed: {bounds!r}")
+    left, top, right, bottom = bounds
+    width, height, pixels = read_png_rgb(capture)
+    if left < 0 or top < 0 or right > width or bottom > height:
+        raise SeamError(
+            f"IT-022 error overlay bounds are outside captured PNG: "
+            f"bounds={bounds!r} size={[width, height]}"
+        )
+    if right <= left or bottom <= top:
+        raise SeamError(f"IT-022 error overlay bounds are empty: {bounds!r}")
+    samples = [
+        pixels[row * width + column]
+        for row in range(top, bottom)
+        for column in range(left, right)
+    ]
+    red_pixels = sum(
+        1
+        for red, green, blue in samples
+        if red >= 40 and red >= green + 20 and red >= blue + 20
+    )
+    minimum_red_pixels = max(4, min(2000, len(samples) // 100))
+    if red_pixels < minimum_red_pixels:
+        raise SeamError(
+            "IT-022 error overlay has no meaningful red-dominant pixels: "
+            f"observed={red_pixels} minimum={minimum_red_pixels} bounds={bounds!r}"
+        )
+    return {"overlay_bounds": bounds, "overlay_red_pixels": red_pixels}
 
 
 def capture_it022_error_overlay(
     adb: Path,
     serial: str | None,
     diagnostic: str,
+    capture: Path,
     deadline_seconds: float = 10.0,
     retry_interval_seconds: float = 0.25,
-) -> dict[str, bool | int]:
+) -> dict[str, bool | int | list[int]]:
     """Poll a direct UI XML dump until the IT-022 rejection overlay is ready."""
     deadline = time.monotonic() + deadline_seconds
     attempts = 0
@@ -191,6 +241,12 @@ def capture_it022_error_overlay(
         if result.returncode == 0:
             try:
                 evidence = validate_it022_error_overlay(result.stdout, diagnostic)
+                capture.write_bytes(
+                    _run(adb, serial, "exec-out", "screencap", "-p", text=False)
+                )
+                evidence.update(
+                    validate_it022_overlay_capture(capture, evidence["overlay_bounds"])
+                )
             except SeamError as error:
                 last_error = str(error)
             else:
@@ -1610,7 +1666,9 @@ def main() -> int:
                 args.adb,
                 args.serial,
                 rejection["diagnostic"],
+                capture_path,
             )
+            time.sleep(1.0)
             second_pid = validate_rejection_process_identity(
                 args.adb,
                 args.serial,

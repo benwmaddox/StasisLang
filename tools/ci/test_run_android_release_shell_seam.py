@@ -149,16 +149,36 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             "UI hierarchy dumped to: /dev/tty\n"
             "<?xml version='1.0'?><hierarchy><node "
             "content-desc='Stasis runtime error' "
+            "bounds='[0,0][4,4]' "
             "text='Release runtime error: Asset verification failed: "
             "code=missing_asset path=assets/token.bin detail=asset is missing'/>"
             "</hierarchy>"
         )
         result = SimpleNamespace(returncode=0, stdout=ui_xml, stderr="")
-        with mock.patch.object(seam, "_run_result", return_value=result) as run_result:
-            evidence = seam.capture_it022_error_overlay(
-                Path("adb"), "emulator-5554", diagnostic, deadline_seconds=1
-            )
-        self.assertEqual({"java_error_visible": True, "attempts": 1}, evidence)
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "stable-frame.png"
+            write_rgb_png(capture, 4, 4, [[(80, 0, 0)] * 4 for _ in range(4)])
+            screenshot = capture.read_bytes()
+            with (
+                mock.patch.object(seam, "_run_result", return_value=result) as run_result,
+                mock.patch.object(seam, "_run", return_value=screenshot) as run,
+            ):
+                evidence = seam.capture_it022_error_overlay(
+                    Path("adb"),
+                    "emulator-5554",
+                    diagnostic,
+                    capture,
+                    deadline_seconds=1,
+                )
+        self.assertEqual(
+            {
+                "java_error_visible": True,
+                "overlay_bounds": [0, 0, 4, 4],
+                "overlay_red_pixels": 16,
+                "attempts": 1,
+            },
+            evidence,
+        )
         run_result.assert_called_once_with(
             Path("adb"),
             "emulator-5554",
@@ -168,12 +188,16 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             "--compressed",
             "/dev/tty",
         )
+        run.assert_called_once_with(
+            Path("adb"), "emulator-5554", "exec-out", "screencap", "-p", text=False
+        )
 
     def test_it022_overlay_probe_retries_until_hierarchy_is_ready(self):
         diagnostic = "code=missing_asset path=assets/token.bin detail=asset is missing"
         valid_xml = (
             "<?xml version='1.0'?><hierarchy><node "
             "content-desc='Stasis runtime error' "
+            "bounds='[0,0][4,4]' "
             "text='Release runtime error Asset verification failed "
             "code=missing_asset path=assets/token.bin detail=asset is missing'/>"
             "</hierarchy>"
@@ -182,14 +206,24 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="<?xml bad", stderr=""),
             SimpleNamespace(returncode=0, stdout=valid_xml, stderr=""),
         ]
-        with (
-            mock.patch.object(seam, "_run_result", side_effect=results) as run_result,
-            mock.patch.object(seam.time, "monotonic", side_effect=[0.0, 0.1]),
-            mock.patch.object(seam.time, "sleep") as sleep,
-        ):
-            evidence = seam.capture_it022_error_overlay(
-                Path("adb"), None, diagnostic, deadline_seconds=1, retry_interval_seconds=0.2
-            )
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "stable-frame.png"
+            write_rgb_png(capture, 4, 4, [[(80, 0, 0)] * 4 for _ in range(4)])
+            screenshot = capture.read_bytes()
+            with (
+                mock.patch.object(seam, "_run_result", side_effect=results) as run_result,
+                mock.patch.object(seam, "_run", return_value=screenshot),
+                mock.patch.object(seam.time, "monotonic", side_effect=[0.0, 0.1]),
+                mock.patch.object(seam.time, "sleep") as sleep,
+            ):
+                evidence = seam.capture_it022_error_overlay(
+                    Path("adb"),
+                    None,
+                    diagnostic,
+                    capture,
+                    deadline_seconds=1,
+                    retry_interval_seconds=0.2,
+                )
         self.assertEqual(2, evidence["attempts"])
         sleep.assert_called_once_with(0.2)
         self.assertEqual(2, run_result.call_count)
@@ -205,7 +239,11 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 seam.SeamError, "after 1 attempts.*permission denied"
             ):
                 seam.capture_it022_error_overlay(
-                    Path("adb"), None, "native diagnostic", deadline_seconds=0
+                    Path("adb"),
+                    None,
+                    "native diagnostic",
+                    Path("capture.png"),
+                    deadline_seconds=0,
                 )
 
     def test_it022_overlay_probe_rejects_malformed_or_unrelated_hierarchy(self):
@@ -225,6 +263,25 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 "text='Release runtime error'/></hierarchy>",
                 "diag",
             )
+
+    def test_it022_overlay_capture_requires_visible_red_pixels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "capture.png"
+            write_rgb_png(capture, 4, 4, [[(80, 0, 0)] * 4 for _ in range(4)])
+            evidence = seam.validate_it022_overlay_capture(capture, [0, 0, 4, 4])
+            self.assertEqual(
+                {"overlay_bounds": [0, 0, 4, 4], "overlay_red_pixels": 16}, evidence
+            )
+            write_rgb_png(capture, 4, 4, [[(30, 30, 30)] * 4 for _ in range(4)])
+            with self.assertRaisesRegex(seam.SeamError, "red-dominant"):
+                seam.validate_it022_overlay_capture(capture, [0, 0, 4, 4])
+
+    def test_it022_overlay_capture_rejects_invalid_bounds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "capture.png"
+            write_rgb_png(capture, 4, 4, [[(80, 0, 0)] * 4 for _ in range(4)])
+            with self.assertRaisesRegex(seam.SeamError, "outside captured PNG"):
+                seam.validate_it022_overlay_capture(capture, [0, 0, 5, 4])
 
     def test_it022_storage_probe_rejects_run_as_failure(self):
         with self.assertRaisesRegex(seam.SeamError, "storage probe.*failed"):
