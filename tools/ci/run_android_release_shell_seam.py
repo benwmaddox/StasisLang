@@ -145,7 +145,7 @@ def validate_it022_error_overlay(
     overlay_nodes = [
         node
         for node in root.iter("node")
-        if node.attrib.get("content-desc") == "Stasis runtime error"
+        if node.attrib.get("content-desc", "").startswith("Stasis runtime error")
     ]
     if not overlay_nodes:
         raise SeamError("IT-022 UI hierarchy has no Stasis runtime error node")
@@ -157,7 +157,10 @@ def validate_it022_error_overlay(
     matching_nodes = [
         node
         for node in overlay_nodes
-        if all(value in node.attrib.get("text", "") for value in required_text)
+        if all(
+            value in node.attrib.get("content-desc", "")
+            for value in required_text
+        )
     ]
     if not matching_nodes:
         raise SeamError(
@@ -218,6 +221,7 @@ def capture_it022_error_overlay(
     serial: str | None,
     diagnostic: str,
     capture: Path,
+    ui_hierarchy: Path,
     deadline_seconds: float = 10.0,
     retry_interval_seconds: float = 0.25,
 ) -> dict[str, bool | int | list[int]]:
@@ -238,6 +242,7 @@ def capture_it022_error_overlay(
         )
         attempts += 1
         last_result = result
+        ui_hierarchy.write_text(result.stdout, encoding="utf-8")
         if result.returncode == 0:
             try:
                 evidence = validate_it022_error_overlay(result.stdout, diagnostic)
@@ -1468,6 +1473,7 @@ def main() -> int:
     log_path = args.output / "logcat.txt"
     initial_capture_path = args.output / "initial-frame.png"
     capture_path = args.output / "stable-frame.png"
+    ui_hierarchy_path = args.output / "ui-hierarchy.xml"
     evidence_path = args.output / "evidence.json"
     preinstalled = bool(
         _run(
@@ -1662,11 +1668,13 @@ def main() -> int:
             )
             if foreground_restored:
                 time.sleep(0.25)
+            evidence["artifacts"]["ui_hierarchy"] = str(ui_hierarchy_path)
             overlay = capture_it022_error_overlay(
                 args.adb,
                 args.serial,
                 rejection["diagnostic"],
                 capture_path,
+                ui_hierarchy_path,
             )
             time.sleep(1.0)
             second_pid = validate_rejection_process_identity(

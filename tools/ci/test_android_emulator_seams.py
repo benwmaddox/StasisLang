@@ -342,6 +342,21 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             source.index("stasis_mobile_runtime_initialize"),
         )
 
+    def test_runtime_error_accessibility_description_preserves_full_diagnostic(self):
+        source = read(
+            "mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java"
+        )
+        start = source.index("private void showRuntimeError")
+        end = source.index("private static int debugColorForBudget", start)
+        method = source[start:end]
+        self.assertIn('String displayMessage = "Release runtime error\\n" + message;', method)
+        self.assertIn("runtimeError.setText(displayMessage);", method)
+        self.assertIn(
+            'runtimeError.setContentDescription("Stasis runtime error\\n" + displayMessage);',
+            method,
+        )
+        self.assertIn("runtimeError.announceForAccessibility(displayMessage);", method)
+
         runner_start = self.release_runner.index("asset_rejection =")
         runner_end = self.release_runner.index("return 0", runner_start)
         rejection_runner = self.release_runner[runner_start:runner_end]
@@ -360,6 +375,16 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
         self.assertIn('capture_path', rejection_runner)
         self.assertIn('"foreground_restored": foreground_restored', rejection_runner)
+        self.assertIn(
+            'ui_hierarchy_path = args.output / "ui-hierarchy.xml"', self.release_runner
+        )
+        self.assertIn(
+            'evidence["artifacts"]["ui_hierarchy"] = str(ui_hierarchy_path)',
+            rejection_runner,
+        )
+        artifacts_start = self.release_runner.index('"artifacts":')
+        artifacts_end = self.release_runner.index('"install_policy":', artifacts_start)
+        self.assertNotIn('"ui_hierarchy"', self.release_runner[artifacts_start:artifacts_end])
 
     def test_strategy_makes_emulator_the_readiness_gate(self):
         self.assertIn("hosted x86_64 emulator is the CI and readiness", self.strategy)
