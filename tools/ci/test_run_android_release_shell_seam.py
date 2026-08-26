@@ -88,6 +88,30 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         with self.assertRaisesRegex(seam.SeamError, "published extraction state"):
             seam.validate_rejection_storage_state("present", "absent")
 
+    def test_it022_process_identity_accepts_original_pid_after_overlay(self):
+        with mock.patch.object(seam, "_run", return_value="1234\n") as run:
+            self.assertEqual(
+                "1234",
+                seam.validate_rejection_process_identity(
+                    Path("adb"), "emulator-5554", "com.example.seam", "1234"
+                ),
+            )
+        run.assert_called_once_with(
+            Path("adb"),
+            "emulator-5554",
+            "shell",
+            "pidof",
+            "com.example.seam",
+            required=False,
+        )
+
+    def test_it022_process_identity_rejects_restart_after_overlay(self):
+        with mock.patch.object(seam, "_run", return_value="5678\n"):
+            with self.assertRaisesRegex(seam.SeamError, "crash loop"):
+                seam.validate_rejection_process_identity(
+                    Path("adb"), "emulator-5554", "com.example.seam", "1234"
+                )
+
     def test_it022_storage_probe_classifies_present_path_and_uses_direct_run_as(self):
         result = SimpleNamespace(returncode=0, stdout="files/stasis_game\n", stderr="")
         with mock.patch.object(seam, "_run_result", return_value=result) as run_result:

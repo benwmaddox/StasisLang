@@ -288,6 +288,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;", rejection_start
         )
         rejection = source[rejection_start:rejection_end]
+        rejection_with_return = source[
+            rejection_start : rejection_end
+            + len("return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;")
+        ]
         marker_start = source.index("static void log_asset_rejection_marker")
         marker_end = source.index("#endif", marker_start)
         marker = source[marker_start:marker_end]
@@ -308,10 +312,48 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
         self.assertIn("stasis_pregraphics_info_log(", marker)
         self.assertIn('\\\"event\\\":\\\"asset_rejected', marker)
+        wait_start = source.index(
+            "static void stasis_mobile_wait_for_asset_rejection_quit"
+        )
+        wait_end = source.index("#if defined(STASIS_ENABLE_SEAM_TESTS)", wait_start)
+        wait_helper = source[wait_start:wait_end]
+        self.assertIn("#if defined(__ANDROID__)", wait_helper)
+        self.assertIn("SDL_InitSubSystem(SDL_INIT_EVENTS)", wait_helper)
+        self.assertIn("SDL_Init(SDL_INIT_EVENTS)", wait_helper)
+        self.assertLess(
+            wait_helper.index("SDL_InitSubSystem(SDL_INIT_EVENTS)"),
+            wait_helper.index("SDL_WaitEvent(&event)"),
+        )
+        self.assertIn("SDL_WaitEvent(&event)", wait_helper)
+        self.assertIn("SDL_EVENT_QUIT", wait_helper)
+        self.assertIn(
+            "stasis_mobile_wait_for_asset_rejection_quit();", rejection_with_return
+        )
+        self.assertLess(
+            rejection_with_return.index("stasis_mobile_wait_for_asset_rejection_quit();"),
+            rejection_with_return.index("return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;"),
+        )
         self.assertLess(
             source.index("stasis_pregraphics_info_log"),
             source.index("stasis_mobile_runtime_initialize"),
         )
+        self.assertLess(
+            wait_start,
+            source.index("stasis_mobile_runtime_initialize"),
+        )
+
+        runner_start = self.release_runner.index("asset_rejection =")
+        runner_end = self.release_runner.index("return 0", runner_start)
+        rejection_runner = self.release_runner[runner_start:runner_end]
+        self.assertLess(
+            rejection_runner.index("ensure_test_activity_foreground("),
+            rejection_runner.index("capture_it022_error_overlay("),
+        )
+        self.assertLess(
+            rejection_runner.index("capture_it022_error_overlay("),
+            rejection_runner.index("validate_rejection_process_identity("),
+        )
+        self.assertIn('"foreground_restored": foreground_restored', rejection_runner)
 
     def test_strategy_makes_emulator_the_readiness_gate(self):
         self.assertIn("hosted x86_64 emulator is the CI and readiness", self.strategy)

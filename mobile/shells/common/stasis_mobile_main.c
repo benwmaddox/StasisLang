@@ -251,6 +251,24 @@ static void report_runtime_status(const char *stage, int status) {
     stasis_host_report_runtime_error(message);
 }
 
+static void stasis_mobile_wait_for_asset_rejection_quit(void) {
+#if defined(__ANDROID__)
+    SDL_Event event;
+    if (!SDL_InitSubSystem(SDL_INIT_EVENTS) && !SDL_Init(SDL_INIT_EVENTS)) {
+        stasis_pregraphics_info_log(
+            "Stasis asset rejection could not initialize events: %s", SDL_GetError()
+        );
+        return;
+    }
+    stasis_pregraphics_info_log("Stasis asset rejection waiting for quit");
+    while (SDL_WaitEvent(&event)) {
+        if (event.type == SDL_EVENT_QUIT) {
+            break;
+        }
+    }
+#endif
+}
+
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 static void log_asset_rejection_marker(const char *test_id, const char *diagnostic) {
     char escaped[512];
@@ -342,6 +360,7 @@ int SDL_main(int argc, char **argv) {
             log_asset_rejection_marker(seam_test_id, asset_error);
         }
 #endif
+        stasis_mobile_wait_for_asset_rejection_quit();
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
     SDL_Log(

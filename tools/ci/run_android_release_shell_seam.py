@@ -308,6 +308,21 @@ def validate_rejection_storage_state(staging_probe: str, root_probe: str) -> dic
     return {"staging_absent": True, "root_unpublished": True}
 
 
+def validate_rejection_process_identity(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    expected_pid: str,
+) -> str:
+    """Require the rejected package to keep the original process alive."""
+    actual_pid = _run(
+        adb, serial, "shell", "pidof", package_id, required=False
+    ).strip()
+    if actual_pid != expected_pid:
+        raise SeamError("IT-022 rejected package entered a crash loop")
+    return actual_pid
+
+
 def validate_install_policy(
     preinstalled: bool,
     retain_installed_package: bool,
@@ -1583,22 +1598,31 @@ def main() -> int:
                 "files/stasis_game",
             )
             storage = validate_rejection_storage_state(staging_probe, root_probe)
-            time.sleep(1)
-            second_pid = _run(
-                args.adb, args.serial, "shell", "pidof", package_id, required=False
-            ).strip()
-            if second_pid != first_pid:
-                raise SeamError("IT-022 rejected package entered a crash loop")
+            foreground_restored = ensure_test_activity_foreground(
+                args.adb,
+                args.serial,
+                package_id,
+                component,
+            )
+            if foreground_restored:
+                time.sleep(0.25)
             overlay = capture_it022_error_overlay(
                 args.adb,
                 args.serial,
                 rejection["diagnostic"],
+            )
+            second_pid = validate_rejection_process_identity(
+                args.adb,
+                args.serial,
+                package_id,
+                first_pid,
             )
             evidence.update(
                 {
                     "status": "passed",
                     "asset_rejection": rejection,
                     "process_id": first_pid,
+                    "foreground_restored": foreground_restored,
                     **overlay,
                     **storage,
                     "lifecycle_events": [item["event"] for item in markers],
