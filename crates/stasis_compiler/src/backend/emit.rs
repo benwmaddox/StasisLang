@@ -142,9 +142,6 @@ pub(crate) fn collect_supported_call_signatures(
         if !is_supported_call_lane_type(function.return_type, type_table, true) {
             continue;
         }
-        if function.params.len() > 8 {
-            continue;
-        }
         if !function
             .params
             .iter()

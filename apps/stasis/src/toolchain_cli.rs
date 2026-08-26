@@ -153,6 +153,12 @@ function @effects(graphics) render(): i32 {
     return 0;
 }
 "#;
+const DEFAULT_ASSET_MANIFEST: &str = r#"{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": []
+}
+"#;
 const PROJECT_VSCODE_SETTINGS: &str = r#"{
   "[stasis]": {
     "editor.defaultFormatter": "stasislang.stasis",
@@ -1440,6 +1446,7 @@ fn create_project_with_options(
         root.join(PROJECT_ARCHITECTURE_NAME),
         root.join("src/main.stasis"),
         root.join("tests/main.test.stasis"),
+        root.join("assets/manifest.json"),
         root.join("vendor/stasis"),
         root.join(".vscode/settings.json"),
         root.join(".vscode/extensions.json"),
@@ -1471,6 +1478,18 @@ fn create_project_with_options(
             ));
         }
     }
+    let assets_directory = root.join("assets");
+    if assets_directory.exists() {
+        let metadata = fs::symlink_metadata(&assets_directory).map_err(|error| {
+            format!("failed to inspect {}: {error}", assets_directory.display())
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "refusing to write asset manifest through {}",
+                assets_directory.display()
+            ));
+        }
+    }
     for reserved in &reserved_paths {
         if reserved.exists() {
             return Err(format!("refusing to overwrite {}", reserved.display()));
@@ -1480,6 +1499,8 @@ fn create_project_with_options(
         .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
     fs::create_dir_all(root.join("tests"))
         .map_err(|error| format!("failed to create tests directory: {error}"))?;
+    fs::create_dir_all(&assets_directory)
+        .map_err(|error| format!("failed to create assets directory: {error}"))?;
     let mut manifest = ProjectManifest::new(name.clone());
     manifest.vendor = Some(vendor_manifest);
     write_manifest(&manifest_path, &manifest)?;
@@ -1492,6 +1513,7 @@ fn create_project_with_options(
         PROJECT_ARCHITECTURE_GUIDE,
     )?;
     write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
+    write_new_file(&root.join("assets/manifest.json"), DEFAULT_ASSET_MANIFEST)?;
     write_new_file(
         &root.join("tests/main.test.stasis"),
         "test `new project is ready`(): bool {\r\n    return 1 == 1;\r\n}\r\n",
