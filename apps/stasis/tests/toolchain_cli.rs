@@ -576,14 +576,20 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert!(pre_commit.contains("stasis format --check"));
     assert_eq!(
         fs::read(project.join(".gitattributes")).expect("read generated Git attributes"),
-        b"*.svg text eol=lf\n"
+        b"*.[sS][vV][gG] text eol=lf\n"
     );
-    let svg_eol = git(&["check-attr", "eol", "--", "assets/example.svg"], &project);
-    assert!(svg_eol.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&svg_eol.stdout),
-        "assets/example.svg: eol: lf\n"
-    );
+    for path in [
+        "assets/example.svg",
+        "assets/example.SVG",
+        "assets/example.SvG",
+    ] {
+        let svg_eol = git(&["check-attr", "eol", "--", path], &project);
+        assert!(svg_eol.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&svg_eol.stdout),
+            format!("{path}: eol: lf\n")
+        );
+    }
     assert_eq!(
         fs::read_to_string(project.join(".vscode/settings.json"))
             .expect("read generated VS Code settings"),

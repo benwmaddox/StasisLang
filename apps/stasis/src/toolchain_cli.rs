@@ -89,7 +89,7 @@ const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md"
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
-const PROJECT_GIT_ATTRIBUTES: &str = "*.svg text eol=lf\n";
+const PROJECT_GIT_ATTRIBUTES: &str = "*.[sS][vV][gG] text eol=lf\n";
 const KNOWLEDGE_FILES: &[&str] = &[
     "README.md",
     "a-little-stasis/01-three-entry-points.md",

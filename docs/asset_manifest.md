@@ -126,16 +126,27 @@ Fresh Git projects created with `stasis new` include this narrow policy in
 `.gitattributes`:
 
 ```gitattributes
-*.svg text eol=lf
+*.[sS][vV][gG] text eol=lf
 ```
 
-Existing repositories should add the same rule before generating or updating
-SVG manifest hashes. This is an asset-integrity policy only. Stasis source
-formatting remains line-ending-neutral and does not require LF for `.stasis`
-files. At the verifier boundary, an SVG containing any raw CR byte is rejected
-with `asset_svg_line_endings_not_lf`, even if its manifest hash matches those
-CRLF or lone-CR bytes. Other asset formats remain governed by their exact raw
-hash and are not subject to this SVG-only line-ending check.
+For an existing repository, migrate SVGs before generating or updating
+manifest hashes:
+
+1. Add `*.[sS][vV][gG] text eol=lf` to `.gitattributes`.
+2. Convert every existing SVG in the working tree to LF bytes, or commit the
+   policy and use a fresh normalized checkout. `git add --renormalize -- '*.[sS][vV][gG]'`
+   updates the index but does not convert current working files by itself.
+3. Verify the working-tree bytes contain no CR, then renormalize and stage the
+   SVGs (and `.gitattributes`) with `git add --renormalize -- '*.[sS][vV][gG]'`.
+4. Verify the staged files and Git `eol` attributes, then regenerate the
+   manifest hashes from those LF working-tree bytes.
+
+This is an asset-integrity policy only. Stasis source formatting remains
+line-ending-neutral and does not require LF for `.stasis` files. At the
+verifier boundary, an SVG containing any raw CR byte is rejected with
+`asset_svg_line_endings_not_lf`, even if its manifest hash matches those CRLF
+or lone-CR bytes. Other asset formats remain governed by their exact raw hash
+and are not subject to this SVG-only line-ending check.
 
 - IDs are 1-128 ASCII letters, digits, `.`, `_`, or `-` and are unique within a project.
 - Runtime handles are the nonzero FNV-1a 32-bit hash of `<kind>:<id>`. Load fails if two entries collide; platforms must not repair or renumber collisions independently.
