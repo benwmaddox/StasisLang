@@ -28,6 +28,7 @@ python3 -m unittest tools.ci.test_cargo_cache
 python3 -m unittest tools.ci.test_unsafe_boundaries
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
+python3 -m unittest tools.ci.test_local_toolchain_install
 python3 -m unittest tools.ci.test_sdl3_migration
 python3 -m unittest tools.ci.test_windows_sign_runner
 python3 -m unittest tools.ci.test_windows_signing_policy

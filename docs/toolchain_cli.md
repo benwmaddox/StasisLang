@@ -20,6 +20,11 @@ Run `stasis version` and `stasis env` to verify the selected installation. Upgra
 extract a newer versioned archive and update `PATH`. Keeping two extracted versions is supported;
 the first executable on `PATH` wins.
 
+On Windows, a source checkout can build and install one verified CLI/runtime pair with
+`scripts/install_local_toolchain.ps1`. It derives a shared build fingerprint from the clean source
+revision, validates `stasis --json editor-info`, runs a bounded headless record smoke, and promotes
+the complete staged bundle to `bin` only after validation.
+
 ## Create and use a project
 
 ```text

@@ -19,6 +19,9 @@ if (-not $OutputRoot.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCa
 }
 
 $runtimeBuild = Join-Path $repoRoot "target/local-editor-runtime"
+$commonGitDir = (git -C $repoRoot rev-parse --path-format=absolute --git-common-dir).Trim()
+if ($LASTEXITCODE -ne 0) { throw "Failed to resolve the shared Cargo target." }
+$cargoTarget = Join-Path (Split-Path -Parent $commonGitDir) "build/codex-cargo-target"
 $toolchainRoot = Join-Path $repoRoot "target/local-editor-toolchain-win32-x64"
 $toolchainArchive = Join-Path $repoRoot "target/stasis-local-toolchain-win32-x64.zip"
 $extensionRoot = Join-Path $repoRoot "vscode-stasis"
@@ -28,9 +31,10 @@ if (-not $SkipBuild) {
   $env:STASIS_RELEASE_ID = $ReleaseId
   $env:STASIS_SOURCE_COMMIT = (git -C $repoRoot rev-parse HEAD).Trim()
   $env:STASIS_BUILD_TARGET = "x86_64-pc-windows-msvc"
-  cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") -p stasis --release
+  $env:STASIS_BUILD_FINGERPRINT = (python (Join-Path $repoRoot "tools/compute_toolchain_fingerprint.py") --source-commit $env:STASIS_SOURCE_COMMIT --release-id $ReleaseId).Trim()
+  python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") -p stasis --release
   if ($LASTEXITCODE -ne 0) { throw "Stasis release build failed." }
-  cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") -p stasis_dynload --release
+  python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") -p stasis_dynload --release
   if ($LASTEXITCODE -ne 0) { throw "Stasis dynamic runtime build failed." }
 
   $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
@@ -62,15 +66,16 @@ if (-not $SkipBuild) {
     -DSTASIS_GRAPHICS_SDL_ONLY=ON `
     -DSTASIS_BUILD_RUNNER=OFF `
     -DSTASIS_BUILD_SYS=OFF `
-    -DSTASIS_RELEASE_ID="$ReleaseId"
+    -DSTASIS_RELEASE_ID="$ReleaseId" `
+    -DSTASIS_BUILD_FINGERPRINT="$($env:STASIS_BUILD_FINGERPRINT)"
   if ($LASTEXITCODE -ne 0) { throw "Graphics runtime configuration failed." }
   cmake --build $runtimeBuild --config Release --target stasis_graphics
   if ($LASTEXITCODE -ne 0) { throw "Graphics runtime build failed." }
 
   if (Test-Path $toolchainRoot) { Remove-Item -LiteralPath $toolchainRoot -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $toolchainRoot | Out-Null
-  Copy-Item (Join-Path $repoRoot "target/release/stasis.exe") $toolchainRoot -Force
-  Copy-Item (Join-Path $repoRoot "target/release/stasis_dynload.dll") $toolchainRoot -Force
+  Copy-Item (Join-Path $cargoTarget "release/stasis.exe") $toolchainRoot -Force
+  Copy-Item (Join-Path $cargoTarget "release/stasis_dynload.dll") $toolchainRoot -Force
   Copy-Item (Join-Path $runtimeBuild "bin/Release/*.dll") $toolchainRoot -Force
   Copy-Item (Join-Path $repoRoot "src") $toolchainRoot -Recurse -Force
 

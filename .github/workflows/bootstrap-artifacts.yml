@@ -22,9 +22,18 @@ jobs:
           - ubuntu-latest
           - macos-14
     runs-on: ${{ matrix.os }}
+    env:
+      STASIS_RELEASE_ID: bootstrap-${{ github.sha }}
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Compute shared toolchain fingerprint
+        shell: pwsh
+        run: |
+          $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $env:STASIS_SOURCE_COMMIT --release-id $env:STASIS_RELEASE_ID).Trim()
+          "STASIS_BUILD_FINGERPRINT=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -72,7 +81,9 @@ jobs:
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
             -DSTASIS_GRAPHICS_SDL_ONLY=ON \
             -DSTASIS_BUILD_RUNNER="${runner_build}" \
-            -DSTASIS_BUILD_SYS=OFF
+            -DSTASIS_BUILD_SYS=OFF \
+            -DSTASIS_RELEASE_ID="${STASIS_RELEASE_ID}" \
+            -DSTASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}"
           cmake --build runtime/build_ci --config Release --target "${build_targets[@]}"
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
@@ -94,7 +105,9 @@ jobs:
             -DSTASIS_GRAPHICS_SDL_ONLY=ON `
             -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON `
             -DSTASIS_BUILD_RUNNER=ON `
-            -DSTASIS_BUILD_SYS=OFF
+            -DSTASIS_BUILD_SYS=OFF `
+            -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" `
+            -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
 
           cmake --build $buildDir --config Release --target stasis_graphics stasis_runner stasis_render_contract_test stasis_asset_path_test
           ctest --test-dir $buildDir -C Release -R "stasis_(render_command|asset_path)_contract" --output-on-failure

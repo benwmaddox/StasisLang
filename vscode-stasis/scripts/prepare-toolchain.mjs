@@ -39,6 +39,12 @@ if (!envelope.ok || envelope.command !== "editor-info" || envelope.result?.schem
   throw new Error("The bundled executable did not return a valid Stasis editor identity.");
 }
 const identity = envelope.result;
+const fingerprintPattern = /^[0-9a-f]{64}$/u;
+if (!fingerprintPattern.test(identity.build_fingerprint ?? "") ||
+    !fingerprintPattern.test(identity.graphics_runtime?.build_fingerprint ?? "") ||
+    identity.graphics_runtime.build_fingerprint !== identity.build_fingerprint) {
+  throw new Error("The bundled executable did not return a matching verified build fingerprint.");
+}
 if (identity.graphics_runtime?.release_id !== identity.release_id) {
   throw new Error("The Stasis executable and graphics runtime have different release identities.");
 }
