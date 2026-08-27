@@ -93,6 +93,8 @@ class LocalToolchainInstallTests(unittest.TestCase):
         self.assertIn('Move-Item -LiteralPath $Staging -Destination $Destination', SCRIPT)
         self.assertIn('[Parameter(Mandatory)] [scriptblock]$PostActivationValidation', SCRIPT)
         self.assertIn('& $PostActivationValidation', SCRIPT)
+        self.assertIn('InjectBackupCleanupFailure', SCRIPT)
+        self.assertIn('Write-Warning "installed toolchain, but could not remove backup', SCRIPT)
         self.assertIn('previous bin was restored', SCRIPT)
         self.assertIn('TestInjectPromotionFailure', SCRIPT)
         self.assertIn('TestInjectValidationFailure', SCRIPT)
@@ -118,11 +120,13 @@ class LocalToolchainInstallTests(unittest.TestCase):
         promotion = SCRIPT[promotion_start:promotion_end]
         backup_move = promotion.index('Move-Item -LiteralPath $Destination -Destination $backup')
         validation = promotion.index('& $PostActivationValidation')
-        backup_cleanup = promotion.index(
-            'Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop'
-        )
+        transaction_end = promotion.index('\n  } catch {', validation)
+        backup_cleanup = promotion.index('if (Test-Path -LiteralPath $backup)', transaction_end)
         self.assertLess(backup_move, validation)
-        self.assertLess(validation, backup_cleanup)
+        self.assertLess(validation, transaction_end)
+        self.assertLess(transaction_end, backup_cleanup)
+        self.assertIn('try {', promotion[backup_cleanup:])
+        self.assertIn('Write-Warning', promotion[backup_cleanup:])
 
     def test_post_activation_rollback_removes_candidate_and_staging(self):
         promotion_start = SCRIPT.index('function Promote-ToolchainDirectory')
@@ -132,6 +136,17 @@ class LocalToolchainInstallTests(unittest.TestCase):
         self.assertIn('Move-Item -LiteralPath $backup -Destination $Destination -Force', promotion)
         self.assertIn('Remove-Item -LiteralPath $Staging -Recurse -Force', promotion)
         self.assertIn('Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop', promotion)
+
+    def test_cleanup_failure_is_best_effort_after_transaction(self):
+        promotion_start = SCRIPT.index('function Promote-ToolchainDirectory')
+        promotion_end = SCRIPT.index('\nfunction Copy-RuntimeSources', promotion_start)
+        promotion = SCRIPT[promotion_start:promotion_end]
+        catch_end = promotion.index('\n  }\n  if (Test-Path -LiteralPath $backup)', promotion.index('  } catch {'))
+        cleanup = promotion[catch_end:]
+        self.assertIn('InjectBackupCleanupFailure', cleanup)
+        self.assertIn('Write-Warning', cleanup)
+        self.assertLess(promotion.index('& $PostActivationValidation'), catch_end)
+        self.assertNotIn('Move-Item -LiteralPath $backup -Destination $Destination -Force', cleanup)
 
     def test_no_development_fingerprint_fallback(self):
         self.assertNotIn('STASIS_BUILD_FINGERPRINT = "development"', SCRIPT)

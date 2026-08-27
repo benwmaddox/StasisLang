@@ -92,6 +92,7 @@ function Promote-ToolchainDirectory {
     [Parameter(Mandatory)] [string]$Staging,
     [Parameter(Mandatory)] [string]$Destination,
     [Parameter(Mandatory)] [scriptblock]$PostActivationValidation,
+    [switch]$InjectBackupCleanupFailure,
     [switch]$InjectFailure
   )
   $backup = "$Destination.backup-$PID-$([guid]::NewGuid().ToString('N'))"
@@ -101,9 +102,6 @@ function Promote-ToolchainDirectory {
     if ($InjectFailure) { throw "test-injected promotion failure" }
     Move-Item -LiteralPath $Staging -Destination $Destination
     & $PostActivationValidation
-    if (Test-Path -LiteralPath $backup) {
-      Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop
-    }
   } catch {
     if (Test-Path -LiteralPath $Destination) {
       Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
@@ -115,6 +113,14 @@ function Promote-ToolchainDirectory {
       Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
     }
     throw "toolchain promotion failed; previous bin was restored: $($_.Exception.Message)"
+  }
+  if (Test-Path -LiteralPath $backup) {
+    try {
+      if ($InjectBackupCleanupFailure) { throw "test-injected backup cleanup failure" }
+      Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop
+    } catch {
+      Write-Warning "installed toolchain, but could not remove backup ${backup}: $($_.Exception.Message)"
+    }
   }
 }
 
@@ -193,6 +199,36 @@ if ($TestPromotionOnly) {
   if (Test-Path -LiteralPath $successStaging) { throw "successful promotion left staging behind" }
   if (Get-ChildItem -LiteralPath $successRoot -Filter "bin.backup-*" -ErrorAction SilentlyContinue) {
     throw "successful promotion left a backup behind"
+  }
+
+  $cleanupRoot = Join-Path $testRoot "cleanup-failure"
+  $cleanupDestination = Join-Path $cleanupRoot "bin"
+  $cleanupStaging = Join-Path $cleanupRoot "staging"
+  New-Item -ItemType Directory -Force -Path $cleanupDestination, $cleanupStaging | Out-Null
+  Set-Content -LiteralPath (Join-Path $cleanupDestination "marker.txt") -Value "previous" -NoNewline
+  Set-Content -LiteralPath (Join-Path $cleanupDestination "prior-only.txt") -Value "keep" -NoNewline
+  Set-Content -LiteralPath (Join-Path $cleanupStaging "marker.txt") -Value "new" -NoNewline
+  $cleanupWarnings = @(
+    Promote-ToolchainDirectory -Staging $cleanupStaging -Destination $cleanupDestination -PostActivationValidation {
+      $candidateMarker = Get-Content -LiteralPath (Join-Path $cleanupDestination "marker.txt") -Raw
+      if ($candidateMarker -ne "new") { throw "post-activation validation did not see the candidate" }
+      Set-Content -LiteralPath (Join-Path $cleanupDestination "validation-ran.txt") -Value "yes" -NoNewline
+    } -InjectBackupCleanupFailure 3>&1 | ForEach-Object { $_.ToString() }
+  )
+  $marker = Get-Content -LiteralPath (Join-Path $cleanupDestination "marker.txt") -Raw
+  if ($marker -ne "new") { throw "backup cleanup failure restored the prior bin" }
+  if (-not (Test-Path -LiteralPath (Join-Path $cleanupDestination "validation-ran.txt"))) {
+    throw "backup cleanup failure skipped post-activation validation"
+  }
+  if (Test-Path -LiteralPath (Join-Path $cleanupDestination "prior-only.txt")) {
+    throw "backup cleanup failure restored prior-only contents"
+  }
+  if (Test-Path -LiteralPath $cleanupStaging) { throw "backup cleanup failure left staging behind" }
+  if (-not (Get-ChildItem -LiteralPath $cleanupRoot -Filter "bin.backup-*" -ErrorAction SilentlyContinue)) {
+    throw "backup cleanup failure did not leave the backup for manual cleanup"
+  }
+  if (-not ($cleanupWarnings -match "could not remove backup")) {
+    throw "backup cleanup failure did not report a warning"
   }
 
   $rollbackRoot = Join-Path $testRoot "rollback"
