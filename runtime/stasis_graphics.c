@@ -47,12 +47,7 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
-/* nanosvg for SVG parsing/rasterization */
-#define NANOSVG_IMPLEMENTATION
-#define NANOSVG_ALL_COLOR_KEYWORDS
-#include "nanosvg.h"
-#define NANOSVGRAST_IMPLEMENTATION
-#include "nanosvgrast.h"
+#include "stasis_svg.h"
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void flush_sprites(void);
@@ -3029,7 +3024,7 @@ STASIS_EXPORT int stasis_gfx_debug_get_frame_hash(void) {
     return (int)g_debug_frame_hash;
 }
 
-/* SVG rasterization (paths, gradients, transforms) via NanoSVG */
+/* SVG rasterization (paths, gradients, transforms) via ThorVG. */
 static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* out_w, int* out_h) {
     *out_pixels = NULL;
     *out_w = 0;
@@ -3041,48 +3036,10 @@ static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* o
         return 0;
     }
 
-    NSVGimage* image = nsvgParseFromFile(resolved, "px", 96.0f);
-    if (!image) {
+    if (!stasis_svg_rasterize_file(resolved, 0, 0, out_pixels, out_w, out_h)) {
         fprintf(stderr, "bake_svg_to_rgba: failed to parse %s\n", resolved);
         return 0;
     }
-
-    int w = (int)ceilf(image->width);
-    int h = (int)ceilf(image->height);
-    if (w <= 0 || h <= 0) {
-        fprintf(stderr, "bake_svg_to_rgba: invalid size %dx%d in %s\n", w, h, resolved);
-        nsvgDelete(image);
-        return 0;
-    }
-
-    NSVGrasterizer* rast = nsvgCreateRasterizer();
-    if (!rast) {
-        fprintf(stderr, "bake_svg_to_rgba: failed to create rasterizer for %s\n", resolved);
-        nsvgDelete(image);
-        return 0;
-    }
-
-    unsigned char* pixels = (unsigned char*)malloc((size_t)w * (size_t)h * 4u);
-    if (!pixels) {
-        fprintf(stderr, "bake_svg_to_rgba: OOM allocating %d x %d buffer for %s\n", w, h, resolved);
-        nsvgDeleteRasterizer(rast);
-        nsvgDelete(image);
-        return 0;
-    }
-    memset(pixels, 0, (size_t)w * (size_t)h * 4u);
-
-    float sx = (float)w / image->width;
-    float sy = (float)h / image->height;
-    float scale = sx < sy ? sx : sy;
-
-    nsvgRasterize(rast, image, 0.0f, 0.0f, scale, pixels, w, h, w * 4);
-
-    nsvgDeleteRasterizer(rast);
-    nsvgDelete(image);
-
-    *out_pixels = pixels;
-    *out_w = w;
-    *out_h = h;
     return 1;
 }
 
@@ -3103,59 +3060,11 @@ static int bake_svg_to_rgba_sized(const char* resolved_path, int max_w, int max_
         return 0;
     }
 
-    NSVGimage* image = nsvgParseFromFile(resolved_path, "px", 96.0f);
-    if (!image) {
+    if (!stasis_svg_rasterize_file(
+            resolved_path, max_w, max_h, out_pixels, out_w, out_h)) {
         fprintf(stderr, "bake_svg_to_rgba_sized: failed to parse %s\n", resolved_path);
         return 0;
     }
-
-    if (image->width <= 0 || image->height <= 0) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: invalid SVG size %.1fx%.1f in %s\n",
-                image->width, image->height, resolved_path);
-        nsvgDelete(image);
-        return 0;
-    }
-
-    /* Calculate scale to fit within max dimensions, preserving aspect ratio */
-    float scale_x = (float)max_w / image->width;
-    float scale_y = (float)max_h / image->height;
-    float scale = (scale_x < scale_y) ? scale_x : scale_y;
-
-    /* Calculate content size (rounded up) and center it in the full target buffer. */
-    int content_w = (int)ceilf(image->width * scale);
-    int content_h = (int)ceilf(image->height * scale);
-    if (content_w < 1) content_w = 1;
-    if (content_h < 1) content_h = 1;
-    if (content_w > max_w) content_w = max_w;
-    if (content_h > max_h) content_h = max_h;
-
-    float tx = (float)(max_w - content_w) * 0.5f;
-    float ty = (float)(max_h - content_h) * 0.5f;
-
-    NSVGrasterizer* rast = nsvgCreateRasterizer();
-    if (!rast) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: failed to create rasterizer for %s\n", resolved_path);
-        nsvgDelete(image);
-        return 0;
-    }
-
-    unsigned char* pixels = (unsigned char*)malloc((size_t)max_w * (size_t)max_h * 4u);
-    if (!pixels) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved_path);
-        nsvgDeleteRasterizer(rast);
-        nsvgDelete(image);
-        return 0;
-    }
-    memset(pixels, 0, (size_t)max_w * (size_t)max_h * 4u);
-
-    nsvgRasterize(rast, image, tx, ty, scale, pixels, max_w, max_h, max_w * 4);
-
-    nsvgDeleteRasterizer(rast);
-    nsvgDelete(image);
-
-    *out_pixels = pixels;
-    *out_w = max_w;
-    *out_h = max_h;
     return 1;
 }
 

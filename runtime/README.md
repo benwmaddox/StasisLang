@@ -34,6 +34,14 @@ remain in logical pixels. A drawable-density change invalidates the affected
 sprite and font caches so they are rebuilt before their next draw. Framebuffer
 captures use the drawable resolution.
 
+SVG parsing and CPU rasterization use the vendored ThorVG 1.2.0 CPU/SVG build
+pinned in `third_party/thorvg/STASIS_PROVENANCE.md`. The bridge initializes four
+ThorVG workers once per process and serializes each asset bake while ThorVG uses
+those workers internally. SVG content is clipped to its declared viewport;
+geometry outside the root viewport no longer bleeds into transparent contain-fit
+padding. GPU texture upload and mipmap generation remain separate publication
+steps after the CPU bake.
+
 ## Prerequisites
 
 - CMake 3.16+

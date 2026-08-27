@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
-project(stasis_graphics C)
+project(stasis_graphics C CXX)
+
+# Prefer static CRT when possible (for single-exe bundling).
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 set(STASIS_RELEASE_ID "development" CACHE STRING "Immutable Stasis toolchain release identity")
 
@@ -41,6 +46,7 @@ option(
     ${STASIS_MOBILE_PLATFORM}
 )
 option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" OFF)
+option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke tests" OFF)
 
 if(STASIS_BUILD_MONOLITH)
     set(STASIS_GRAPHICS_BUNDLE_SDL ON CACHE BOOL "" FORCE)
@@ -51,17 +57,27 @@ if(STASIS_BUILD_MONOLITH)
     set(STASIS_BUILD_MOBILE_RUNTIME ON CACHE BOOL "" FORCE)
 endif()
 
+if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR
+   STASIS_BUILD_MOBILE_RUNTIME OR STASIS_SVG_BUILD_TESTS)
+    add_subdirectory(third_party/thorvg)
+endif()
+
+if(STASIS_SVG_BUILD_TESTS)
+    enable_testing()
+    add_executable(stasis_svg_smoke tests/stasis_svg_smoke.cpp stasis_svg.cpp)
+    target_link_libraries(stasis_svg_smoke PRIVATE stasis_thorvg)
+    add_test(
+        NAME stasis_svg_smoke
+        COMMAND stasis_svg_smoke "${CMAKE_CURRENT_LIST_DIR}/tests/fixtures/viewport-clip.svg"
+    )
+endif()
+
 # Android and other restricted platforms do not support the OpenGL 2.1 + GLEW path.
 option(
     STASIS_GRAPHICS_SDL_ONLY
     "Build the canonical SDL_Renderer runtime (disable only for legacy GL conformance)"
     ON
 )
-
-# Prefer static CRT when possible (for single-exe bundling)
-if (MSVC)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-endif()
 
 # Find graphics deps only when building graphics targets.
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_MOBILE_RUNTIME)
@@ -146,9 +162,10 @@ if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_
 endif()
 
 function(configure_stasis_target target is_static sdl_only)
-    target_sources(${target} PRIVATE stasis_graphics.c stasis_audio_assets.c)
+    target_sources(${target} PRIVATE stasis_graphics.c stasis_audio_assets.c stasis_svg.cpp)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     target_link_libraries(${target} PRIVATE
+        stasis_thorvg
         $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>
         $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image>,SDL3_image::SDL3_image,SDL3_image::SDL3_image-static>
     )

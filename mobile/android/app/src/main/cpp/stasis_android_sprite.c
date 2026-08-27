@@ -1,49 +1,23 @@
 #include <jni.h>
-#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 
-#define NANOSVG_IMPLEMENTATION
-#include "nanosvg.h"
-#define NANOSVGRAST_IMPLEMENTATION
-#include "nanosvgrast.h"
+#include "stasis_svg.h"
 
 #define STASIS_MAX_SPRITE_DIMENSION 16384
 #define STASIS_MAX_SPRITE_PIXELS 16000000
 #define STASIS_MAX_SPRITE_FILE_BYTES (64 * 1024 * 1024)
 
-static jintArray stasis_rasterize_svg_image(
-        JNIEnv *env, NSVGimage *image, jint width, jint height) {
-    if (image == NULL || image->width <= 0.0f || image->height <= 0.0f) {
-        if (image != NULL) nsvgDelete(image);
-        return NULL;
-    }
-    float scale_x = (float)width / image->width;
-    float scale_y = (float)height / image->height;
-    float scale = scale_x < scale_y ? scale_x : scale_y;
-    int content_w = (int)ceilf(image->width * scale);
-    int content_h = (int)ceilf(image->height * scale);
-    if (content_w < 1) content_w = 1;
-    if (content_h < 1) content_h = 1;
-    if (content_w > width) content_w = width;
-    if (content_h > height) content_h = height;
-    float tx = (float)(width - content_w) * 0.5f;
-    float ty = (float)(height - content_h) * 0.5f;
-
-    NSVGrasterizer *rasterizer = nsvgCreateRasterizer();
+static jintArray stasis_rgba_to_jint_array(
+        JNIEnv *env, unsigned char *rgba, jint width, jint height) {
     size_t pixel_count = (size_t)width * (size_t)height;
-    unsigned char *rgba = (unsigned char *)calloc(pixel_count, 4u);
     jint *argb = (jint *)malloc(pixel_count * sizeof(jint));
-    if (rasterizer == NULL || rgba == NULL || argb == NULL) {
-        free(argb);
+    if (rgba == NULL || argb == NULL) {
         free(rgba);
-        if (rasterizer != NULL) nsvgDeleteRasterizer(rasterizer);
-        nsvgDelete(image);
+        free(argb);
         return NULL;
     }
-    nsvgRasterize(rasterizer, image, tx, ty, scale, rgba, width, height, width * 4);
     for (size_t index = 0; index < pixel_count; index += 1) {
         unsigned char *pixel = rgba + index * 4u;
         argb[index] = (jint)(((uint32_t)pixel[3] << 24) |
@@ -55,8 +29,6 @@ static jintArray stasis_rasterize_svg_image(
     }
     free(argb);
     free(rgba);
-    nsvgDeleteRasterizer(rasterizer);
-    nsvgDelete(image);
     return result;
 }
 
@@ -77,9 +49,17 @@ Java_com_stasislang_workshop_MainActivity_nativeDecodeSvgSprite(
         (*env)->ReleaseStringUTFChars(env, path, native_path);
         return NULL;
     }
-    NSVGimage *image = nsvgParseFromFile(native_path, "px", 96.0f);
+    unsigned char *rgba = NULL;
+    int output_width = 0;
+    int output_height = 0;
+    int rasterized = stasis_svg_rasterize_file(
+        native_path, width, height, &rgba, &output_width, &output_height);
     (*env)->ReleaseStringUTFChars(env, path, native_path);
-    return stasis_rasterize_svg_image(env, image, width, height);
+    if (!rasterized || output_width != width || output_height != height) {
+        free(rgba);
+        return NULL;
+    }
+    return stasis_rgba_to_jint_array(env, rgba, width, height);
 }
 
 JNIEXPORT jintArray JNICALL
@@ -93,15 +73,22 @@ Java_com_stasislang_workshop_MainActivity_nativeDecodeSvgSpriteBytes(
     }
     jsize length = (*env)->GetArrayLength(env, bytes);
     if (length <= 0 || length > STASIS_MAX_SPRITE_FILE_BYTES) return NULL;
-    char *source = (char *)malloc((size_t)length + 1u);
+    char *source = (char *)malloc((size_t)length);
     if (source == NULL) return NULL;
     (*env)->GetByteArrayRegion(env, bytes, 0, length, (jbyte *)source);
     if ((*env)->ExceptionCheck(env)) {
         free(source);
         return NULL;
     }
-    source[length] = '\0';
-    NSVGimage *image = nsvgParse(source, "px", 96.0f);
+    unsigned char *rgba = NULL;
+    int output_width = 0;
+    int output_height = 0;
+    int rasterized = stasis_svg_rasterize_memory(
+        source, (size_t)length, width, height, &rgba, &output_width, &output_height);
     free(source);
-    return stasis_rasterize_svg_image(env, image, width, height);
+    if (!rasterized || output_width != width || output_height != height) {
+        free(rgba);
+        return NULL;
+    }
+    return stasis_rgba_to_jint_array(env, rgba, width, height);
 }
