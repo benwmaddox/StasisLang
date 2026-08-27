@@ -1,8 +1,10 @@
 """Deterministic source-contract checks for the Windows local installer."""
 
 from pathlib import Path
+import re
 import unittest
 from tools.compute_toolchain_fingerprint import fingerprint
+from tools.generate_release_provenance import RUNTIME_DIRS, RUNTIME_FILES
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,13 +35,45 @@ class LocalToolchainInstallTests(unittest.TestCase):
             'stasis_graphics.dll',
             'stasis_runner.exe',
             'Get-ChildItem -LiteralPath (Split-Path -Parent $runtime) -Filter "*.dll"',
-            'Join-Path $staging "runtime"',
+            'Join-Path $Destination "runtime"',
             'Join-Path $staging "mobile"',
             'Join-Path $staging "tools/windows"',
             '$signingArtifacts',
             'configured local signer failed',
         ):
             self.assertIn(required, SCRIPT)
+
+    def test_runtime_staging_excludes_generated_build_outputs(self):
+        files_match = re.search(
+            r"\$runtimeSourceFiles\s*=\s*@\((.*?)\n\)", SCRIPT, re.DOTALL
+        )
+        self.assertIsNotNone(files_match)
+        runtime_files = set(re.findall(r'"([^"]+)"', files_match.group(1)))
+        directories_match = re.search(
+            r"\$runtimeSourceDirectories\s*=\s*@\((.*?)\)", SCRIPT, re.DOTALL
+        )
+        self.assertIsNotNone(directories_match)
+        runtime_directories = set(
+            re.findall(r'"([^"]+)"', directories_match.group(1))
+        )
+
+        self.assertEqual(set(RUNTIME_FILES), runtime_files)
+        self.assertEqual(set(RUNTIME_DIRS), runtime_directories)
+        self.assertIn("third_party/thorvg", runtime_directories)
+        self.assertNotIn("build", runtime_directories)
+        self.assertNotIn("build_ci", runtime_directories)
+        self.assertNotIn("stasis_graphics.dll", runtime_files)
+        self.assertNotIn("stasis_runner.exe", runtime_files)
+        self.assertIn("foreach ($relative in $runtimeSourceFiles)", SCRIPT)
+        self.assertIn("foreach ($relative in $runtimeSourceDirectories)", SCRIPT)
+        self.assertIn(
+            "Copy-RuntimeSources -SourceRoot $repoRoot -Destination $staging", SCRIPT
+        )
+        self.assertNotIn(
+            'Copy-Item -LiteralPath (Join-Path $repoRoot "runtime") '
+            '-Destination (Join-Path $staging "runtime") -Recurse',
+            SCRIPT,
+        )
 
     def test_promotion_is_staged_and_rolls_back(self):
         self.assertIn('Move-Item -LiteralPath $Destination -Destination $backup', SCRIPT)

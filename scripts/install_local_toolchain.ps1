@@ -16,6 +16,33 @@ if (-not $binRoot.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)
   throw "BinRoot must stay inside the Stasis repository."
 }
 
+$runtimeSourceFiles = @(
+  "CMakeLists.txt",
+  "MINIMP3-LICENSE.txt",
+  "minimp3.h",
+  "minimp3_ex.h",
+  "stasis_svg.cpp",
+  "stasis_svg.h",
+  "stasis_asset_path.h",
+  "stasis_display_scale.h",
+  "stasis_render_contract.h",
+  "stasis_renderer_lifecycle.h",
+  "stasis_performance_metrics.h",
+  "stasis_audio_assets.c",
+  "stasis_audio_assets.h",
+  "stasis_graphics.c",
+  "stasis_runner.manifest",
+  "stasis_runner_macos.plist.in",
+  "stasis_mobile_aot_runtime.c",
+  "stasis_mobile_aot_runtime.h",
+  "stasis_mobile_runtime.c",
+  "stasis_mobile_runtime.h",
+  "stasis_platform_storage.c",
+  "stasis_platform_storage.h",
+  "stb_truetype.h"
+)
+$runtimeSourceDirectories = @("third_party/thorvg")
+
 function Invoke-Bounded {
   param(
     [Parameter(Mandatory)] [string]$FilePath,
@@ -89,6 +116,31 @@ function Promote-ToolchainDirectory {
     } catch {
       Write-Warning "installed toolchain, but could not remove backup ${backup}: $($_.Exception.Message)"
     }
+  }
+}
+
+function Copy-RuntimeSources {
+  param(
+    [Parameter(Mandatory)] [string]$SourceRoot,
+    [Parameter(Mandatory)] [string]$Destination
+  )
+  $runtimeDestination = Join-Path $Destination "runtime"
+  New-Item -ItemType Directory -Force -Path $runtimeDestination | Out-Null
+  foreach ($relative in $runtimeSourceFiles) {
+    $source = Join-Path (Join-Path $SourceRoot "runtime") $relative
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+      throw "runtime source input is missing: $relative"
+    }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $runtimeDestination $relative) -Force
+  }
+  foreach ($relative in $runtimeSourceDirectories) {
+    $source = Join-Path (Join-Path $SourceRoot "runtime") $relative
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+      throw "runtime source directory is missing: $relative"
+    }
+    $destinationPath = Join-Path $runtimeDestination $relative
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destinationPath -Recurse -Force
   }
 }
 
@@ -199,7 +251,7 @@ try {
     Copy-Item -Destination $staging -Force
   Copy-Item -LiteralPath $runner -Destination (Join-Path $staging "stasis_runner.exe")
   Copy-Item -LiteralPath (Join-Path $repoRoot "src") -Destination (Join-Path $staging "src") -Recurse
-  Copy-Item -LiteralPath (Join-Path $repoRoot "runtime") -Destination (Join-Path $staging "runtime") -Recurse
+  Copy-RuntimeSources -SourceRoot $repoRoot -Destination $staging
   Copy-Item -LiteralPath (Join-Path $repoRoot "mobile") -Destination (Join-Path $staging "mobile") -Recurse
   Copy-Item -LiteralPath (Join-Path $repoRoot "tools/windows") -Destination (Join-Path $staging "tools/windows") -Recurse
   Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination (Join-Path $staging "README.md")
