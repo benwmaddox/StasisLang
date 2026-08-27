@@ -31,7 +31,7 @@ Production builds retain SDL video, rendering, input events, audio, timers,
 threads, and filesystem support. Camera, GPU, joystick, haptic, HID, power,
 sensor, dialog, tray, and Vulkan paths are disabled. SDL_image retains only its
 stb-backed PNG decoder. SVG assets remain supported by the graphics runtime's
-NanoSVG path, so SDL_image's separate SVG decoder is disabled. SDL_image cannot
+ThorVG path, so SDL_image's separate SVG decoder is disabled. SDL_image cannot
 be removed while PNG remains part of the asset contract unless a replacement
 PNG decoder is first moved into the graphics runtime.
 

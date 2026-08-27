@@ -24,8 +24,8 @@ RUNTIME_FILES = (
     "MINIMP3-LICENSE.txt",
     "minimp3.h",
     "minimp3_ex.h",
-    "nanosvg.h",
-    "nanosvgrast.h",
+    "stasis_svg.cpp",
+    "stasis_svg.h",
     "stasis_display_scale.h",
     "stasis_asset_path.h",
     "stasis_render_contract.h",
@@ -44,6 +44,7 @@ RUNTIME_FILES = (
     "stasis_platform_storage.h",
     "stb_truetype.h",
 )
+RUNTIME_DIRS = ("third_party/thorvg",)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -131,6 +132,13 @@ def main() -> int:
         if not path.is_file():
             parser.error(f"release runtime source is missing: {path}")
         runtime_sources[f"runtime/{name}"] = sha256(path)
+    for name in RUNTIME_DIRS:
+        directory = root / "runtime" / name
+        if not directory.is_dir():
+            parser.error(f"release runtime source directory is missing: {directory}")
+        for path in sorted(directory.rglob("*")):
+            if path.is_file():
+                runtime_sources[path.relative_to(root).as_posix()] = sha256(path)
     mobile_shell_sources = {
         path.relative_to(root).as_posix(): sha256(path)
         for path in sorted((root / "mobile" / "shells").rglob("*"))

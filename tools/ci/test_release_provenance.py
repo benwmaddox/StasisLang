@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from tools.generate_release_provenance import RUNTIME_FILES, render_contract_version
+from tools.generate_release_provenance import RUNTIME_DIRS, RUNTIME_FILES, render_contract_version
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -56,6 +56,40 @@ class ReleaseProvenanceTests(unittest.TestCase):
         self.assertIn("stasis_platform_storage.c", RUNTIME_FILES)
         self.assertIn("stasis_platform_storage.h", RUNTIME_FILES)
 
+    def test_thorvg_is_part_of_release_provenance(self):
+        self.assertIn("stasis_svg.cpp", RUNTIME_FILES)
+        self.assertIn("stasis_svg.h", RUNTIME_FILES)
+        self.assertIn("third_party/thorvg", RUNTIME_DIRS)
+
+    def test_thorvg_source_closure_is_wired_for_desktop_android_and_ios(self):
+        thorvg = ROOT / "runtime/third_party/thorvg"
+        cmake = (thorvg / "CMakeLists.txt").read_text(encoding="utf-8")
+        sources = set(re.findall(r"^\s+(src/[^\s]+\.cpp)$", cmake, re.MULTILINE))
+        self.assertGreater(len(sources), 30)
+        for source in sources:
+            self.assertTrue((thorvg / source).is_file(), source)
+
+        runtime_cmake = (ROOT / "runtime/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("stasis_graphics.c stasis_audio_assets.c stasis_svg.cpp", runtime_cmake)
+        self.assertIn("stasis_thorvg", runtime_cmake)
+
+        android_cmake = (
+            ROOT / "mobile/android/app/src/main/cpp/CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        self.assertIn("runtime/stasis_svg.cpp", android_cmake)
+        self.assertIn("runtime/third_party/thorvg", android_cmake)
+        self.assertIn("stasis_thorvg", android_cmake)
+
+        ios_project = (
+            ROOT / "mobile/shells/ios/StasisMobile.xcodeproj/project.pbxproj"
+        ).read_text(encoding="utf-8")
+        self.assertIn("../runtime/stasis_svg.cpp", ios_project)
+        for source in sources:
+            self.assertIn(f"../runtime/third_party/thorvg/{source}", ios_project)
+
+        self.assertFalse((ROOT / "runtime/nanosvg.h").exists())
+        self.assertFalse((ROOT / "runtime/nanosvgrast.h").exists())
+
     def test_windows_dpi_manifest_is_part_of_release_provenance(self):
         self.assertIn("stasis_runner.manifest", RUNTIME_FILES)
 
@@ -94,6 +128,8 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     windows_files,
                     f"{filename} missing from Windows assembly in {workflow_name}",
                 )
+            self.assertIn("cp -R runtime/third_party", workflow)
+            self.assertIn('Copy-Item "runtime/third_party"', workflow)
 
     def test_release_workflows_select_platform_smoke_executable(self):
         for workflow_name in (

@@ -10,3 +10,4 @@
 *.yaml text eol=lf
 *.svg text eol=lf
 mobile/android/app/src/main/assets/**/assets/manifest.json text eol=lf
+runtime/third_party/thorvg/** text eol=lf -whitespace

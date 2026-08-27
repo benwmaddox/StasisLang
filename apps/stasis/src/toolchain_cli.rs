@@ -65,8 +65,8 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "MINIMP3-LICENSE.txt",
     "minimp3.h",
     "minimp3_ex.h",
-    "nanosvg.h",
-    "nanosvgrast.h",
+    "stasis_svg.cpp",
+    "stasis_svg.h",
     "stasis_display_scale.h",
     "stasis_asset_path.h",
     "stasis_render_contract.h",
@@ -85,6 +85,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_platform_storage.h",
     "stb_truetype.h",
 ];
+const MOBILE_RUNTIME_DIRS: &[&str] = &["third_party/thorvg"];
 const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md");
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
@@ -5325,6 +5326,9 @@ fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> 
     for name in MOBILE_RUNTIME_FILES {
         copy_file(&source.join(name), &destination.join(name))?;
     }
+    for name in MOBILE_RUNTIME_DIRS {
+        copy_required_dir(&source.join(name), &destination.join(name))?;
+    }
     Ok(())
 }
 
@@ -5517,6 +5521,20 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
             ));
         }
     }
+    for name in MOBILE_RUNTIME_DIRS {
+        let prefix = format!("runtime/{name}");
+        let actual = content_hashes(&root.join("runtime").join(name), &prefix)?;
+        let expected = sources
+            .iter()
+            .filter(|(key, _)| key.starts_with(&format!("{prefix}/")))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<serde_json::Map<String, Value>>();
+        if actual != expected {
+            return Err(format!(
+                "release runtime directory hash mismatch for {prefix}"
+            ));
+        }
+    }
     let expected_shells = value["mobile_shell_sources"]
         .as_object()
         .ok_or_else(|| "release provenance is missing mobile_shell_sources".to_string())?;
@@ -5555,6 +5573,12 @@ fn local_provenance(development_build: bool) -> Result<Value, String> {
             format!("runtime/{name}"),
             Value::String(sha256_file(&runtime.join(name))?),
         );
+    }
+    for name in MOBILE_RUNTIME_DIRS {
+        sources.extend(content_hashes(
+            &runtime.join(name),
+            &format!("runtime/{name}"),
+        )?);
     }
     let dirty_state = development_build
         || git_text(&["status", "--porcelain", "--untracked-files=no"])
@@ -8152,6 +8176,14 @@ mod tests {
                 Value::String(sha256_file(&path).expect("hash runtime fixture")),
             );
         }
+        let thorvg = runtime.join("third_party/thorvg");
+        fs::create_dir_all(&thorvg).expect("create ThorVG fixture");
+        let thorvg_license = thorvg.join("LICENSE");
+        fs::write(&thorvg_license, b"fixture MIT license\n").expect("write ThorVG fixture");
+        runtime_sources.insert(
+            "runtime/third_party/thorvg/LICENSE".to_string(),
+            Value::String(sha256_file(&thorvg_license).expect("hash ThorVG fixture")),
+        );
         let shells = root.join("mobile/shells/common");
         fs::create_dir_all(&shells).expect("create shell fixture");
         fs::write(shells.join("stasis_mobile_main.c"), b"official shell\n")

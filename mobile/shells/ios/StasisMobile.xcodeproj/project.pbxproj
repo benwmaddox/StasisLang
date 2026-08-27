@@ -14,6 +14,43 @@
 		100000000000000000000008 /* stasis_audio_assets.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* stasis_audio_assets.c */; };
 		100000000000000000000006 /* published_aot_bindings.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* published_aot_bindings.c */; };
 		100000000000000000000007 /* stasis_game in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* stasis_game */; };
+		110000000000000000000001 /* stasis_svg.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000001 /* stasis_svg.cpp */; };
+		110000000000000000000002 /* tvgCompressor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000002 /* tvgCompressor.cpp */; };
+		110000000000000000000003 /* tvgMath.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000003 /* tvgMath.cpp */; };
+		110000000000000000000004 /* tvgStr.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000004 /* tvgStr.cpp */; };
+		110000000000000000000005 /* tvgAccessor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000005 /* tvgAccessor.cpp */; };
+		110000000000000000000006 /* tvgAnimation.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000006 /* tvgAnimation.cpp */; };
+		110000000000000000000007 /* tvgCanvas.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000007 /* tvgCanvas.cpp */; };
+		110000000000000000000008 /* tvgFill.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000008 /* tvgFill.cpp */; };
+		110000000000000000000009 /* tvgInitializer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000009 /* tvgInitializer.cpp */; };
+		110000000000000000000010 /* tvgLoaderMgr.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000010 /* tvgLoaderMgr.cpp */; };
+		110000000000000000000011 /* tvgPaint.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000011 /* tvgPaint.cpp */; };
+		110000000000000000000012 /* tvgPicture.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000012 /* tvgPicture.cpp */; };
+		110000000000000000000013 /* tvgRender.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000013 /* tvgRender.cpp */; };
+		110000000000000000000014 /* tvgSaver.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000014 /* tvgSaver.cpp */; };
+		110000000000000000000015 /* tvgScene.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000015 /* tvgScene.cpp */; };
+		110000000000000000000016 /* tvgShape.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000016 /* tvgShape.cpp */; };
+		110000000000000000000017 /* tvgTaskScheduler.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000017 /* tvgTaskScheduler.cpp */; };
+		110000000000000000000018 /* tvgText.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000018 /* tvgText.cpp */; };
+		110000000000000000000019 /* tvgSwBlendOp.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000019 /* tvgSwBlendOp.cpp */; };
+		110000000000000000000020 /* tvgSwFill.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000020 /* tvgSwFill.cpp */; };
+		110000000000000000000021 /* tvgSwImage.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000021 /* tvgSwImage.cpp */; };
+		110000000000000000000022 /* tvgSwMemPool.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000022 /* tvgSwMemPool.cpp */; };
+		110000000000000000000023 /* tvgSwPostEffect.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000023 /* tvgSwPostEffect.cpp */; };
+		110000000000000000000024 /* tvgSwRaster.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000024 /* tvgSwRaster.cpp */; };
+		110000000000000000000025 /* tvgSwRenderer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000025 /* tvgSwRenderer.cpp */; };
+		110000000000000000000026 /* tvgSwRle.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000026 /* tvgSwRle.cpp */; };
+		110000000000000000000027 /* tvgSwShape.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000027 /* tvgSwShape.cpp */; };
+		110000000000000000000028 /* tvgSwStroke.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000028 /* tvgSwStroke.cpp */; };
+		110000000000000000000029 /* tvgSwUtil.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000029 /* tvgSwUtil.cpp */; };
+		110000000000000000000030 /* tvgRawLoader.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000030 /* tvgRawLoader.cpp */; };
+		110000000000000000000031 /* tvgSvgBuilder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000031 /* tvgSvgBuilder.cpp */; };
+		110000000000000000000032 /* tvgSvgCssStyle.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000032 /* tvgSvgCssStyle.cpp */; };
+		110000000000000000000033 /* tvgSvgLoader.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000033 /* tvgSvgLoader.cpp */; };
+		110000000000000000000034 /* tvgSvgPath.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000034 /* tvgSvgPath.cpp */; };
+		110000000000000000000035 /* tvgSvgUtil.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000035 /* tvgSvgUtil.cpp */; };
+		110000000000000000000036 /* tvgXmlParser.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000036 /* tvgXmlParser.cpp */; };
+		110000000000000000000037 /* tvgCapi.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000037 /* tvgCapi.cpp */; };
 
 		300000000000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -26,6 +63,43 @@
 				100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */,
 				100000000000000000000005 /* stasis_graphics.c in Sources */,
 				100000000000000000000008 /* stasis_audio_assets.c in Sources */,
+				110000000000000000000001 /* stasis_svg.cpp in Sources */,
+				110000000000000000000002 /* tvgCompressor.cpp in Sources */,
+				110000000000000000000003 /* tvgMath.cpp in Sources */,
+				110000000000000000000004 /* tvgStr.cpp in Sources */,
+				110000000000000000000005 /* tvgAccessor.cpp in Sources */,
+				110000000000000000000006 /* tvgAnimation.cpp in Sources */,
+				110000000000000000000007 /* tvgCanvas.cpp in Sources */,
+				110000000000000000000008 /* tvgFill.cpp in Sources */,
+				110000000000000000000009 /* tvgInitializer.cpp in Sources */,
+				110000000000000000000010 /* tvgLoaderMgr.cpp in Sources */,
+				110000000000000000000011 /* tvgPaint.cpp in Sources */,
+				110000000000000000000012 /* tvgPicture.cpp in Sources */,
+				110000000000000000000013 /* tvgRender.cpp in Sources */,
+				110000000000000000000014 /* tvgSaver.cpp in Sources */,
+				110000000000000000000015 /* tvgScene.cpp in Sources */,
+				110000000000000000000016 /* tvgShape.cpp in Sources */,
+				110000000000000000000017 /* tvgTaskScheduler.cpp in Sources */,
+				110000000000000000000018 /* tvgText.cpp in Sources */,
+				110000000000000000000019 /* tvgSwBlendOp.cpp in Sources */,
+				110000000000000000000020 /* tvgSwFill.cpp in Sources */,
+				110000000000000000000021 /* tvgSwImage.cpp in Sources */,
+				110000000000000000000022 /* tvgSwMemPool.cpp in Sources */,
+				110000000000000000000023 /* tvgSwPostEffect.cpp in Sources */,
+				110000000000000000000024 /* tvgSwRaster.cpp in Sources */,
+				110000000000000000000025 /* tvgSwRenderer.cpp in Sources */,
+				110000000000000000000026 /* tvgSwRle.cpp in Sources */,
+				110000000000000000000027 /* tvgSwShape.cpp in Sources */,
+				110000000000000000000028 /* tvgSwStroke.cpp in Sources */,
+				110000000000000000000029 /* tvgSwUtil.cpp in Sources */,
+				110000000000000000000030 /* tvgRawLoader.cpp in Sources */,
+				110000000000000000000031 /* tvgSvgBuilder.cpp in Sources */,
+				110000000000000000000032 /* tvgSvgCssStyle.cpp in Sources */,
+				110000000000000000000033 /* tvgSvgLoader.cpp in Sources */,
+				110000000000000000000034 /* tvgSvgPath.cpp in Sources */,
+				110000000000000000000035 /* tvgSvgUtil.cpp in Sources */,
+				110000000000000000000036 /* tvgXmlParser.cpp in Sources */,
+				110000000000000000000037 /* tvgCapi.cpp in Sources */,
 				100000000000000000000006 /* published_aot_bindings.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -59,6 +133,43 @@
 		200000000000000000000009 /* StasisMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = StasisMobile.xcconfig; sourceTree = "<group>"; };
 		200000000000000000000010 /* stasis_audio_assets.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_audio_assets.c; sourceTree = "<group>"; };
 		200000000000000000000011 /* stasis_ios_network.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_network.m; sourceTree = "<group>"; };
+		210000000000000000000001 /* stasis_svg.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/stasis_svg.cpp; sourceTree = "<group>"; };
+		210000000000000000000002 /* tvgCompressor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/common/tvgCompressor.cpp; sourceTree = "<group>"; };
+		210000000000000000000003 /* tvgMath.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/common/tvgMath.cpp; sourceTree = "<group>"; };
+		210000000000000000000004 /* tvgStr.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/common/tvgStr.cpp; sourceTree = "<group>"; };
+		210000000000000000000005 /* tvgAccessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgAccessor.cpp; sourceTree = "<group>"; };
+		210000000000000000000006 /* tvgAnimation.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgAnimation.cpp; sourceTree = "<group>"; };
+		210000000000000000000007 /* tvgCanvas.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgCanvas.cpp; sourceTree = "<group>"; };
+		210000000000000000000008 /* tvgFill.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgFill.cpp; sourceTree = "<group>"; };
+		210000000000000000000009 /* tvgInitializer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgInitializer.cpp; sourceTree = "<group>"; };
+		210000000000000000000010 /* tvgLoaderMgr.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgLoaderMgr.cpp; sourceTree = "<group>"; };
+		210000000000000000000011 /* tvgPaint.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgPaint.cpp; sourceTree = "<group>"; };
+		210000000000000000000012 /* tvgPicture.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgPicture.cpp; sourceTree = "<group>"; };
+		210000000000000000000013 /* tvgRender.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgRender.cpp; sourceTree = "<group>"; };
+		210000000000000000000014 /* tvgSaver.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgSaver.cpp; sourceTree = "<group>"; };
+		210000000000000000000015 /* tvgScene.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgScene.cpp; sourceTree = "<group>"; };
+		210000000000000000000016 /* tvgShape.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgShape.cpp; sourceTree = "<group>"; };
+		210000000000000000000017 /* tvgTaskScheduler.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgTaskScheduler.cpp; sourceTree = "<group>"; };
+		210000000000000000000018 /* tvgText.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/tvgText.cpp; sourceTree = "<group>"; };
+		210000000000000000000019 /* tvgSwBlendOp.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwBlendOp.cpp; sourceTree = "<group>"; };
+		210000000000000000000020 /* tvgSwFill.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwFill.cpp; sourceTree = "<group>"; };
+		210000000000000000000021 /* tvgSwImage.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwImage.cpp; sourceTree = "<group>"; };
+		210000000000000000000022 /* tvgSwMemPool.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwMemPool.cpp; sourceTree = "<group>"; };
+		210000000000000000000023 /* tvgSwPostEffect.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwPostEffect.cpp; sourceTree = "<group>"; };
+		210000000000000000000024 /* tvgSwRaster.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwRaster.cpp; sourceTree = "<group>"; };
+		210000000000000000000025 /* tvgSwRenderer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwRenderer.cpp; sourceTree = "<group>"; };
+		210000000000000000000026 /* tvgSwRle.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwRle.cpp; sourceTree = "<group>"; };
+		210000000000000000000027 /* tvgSwShape.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwShape.cpp; sourceTree = "<group>"; };
+		210000000000000000000028 /* tvgSwStroke.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwStroke.cpp; sourceTree = "<group>"; };
+		210000000000000000000029 /* tvgSwUtil.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/renderer/cpu_engine/tvgSwUtil.cpp; sourceTree = "<group>"; };
+		210000000000000000000030 /* tvgRawLoader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/loaders/raw/tvgRawLoader.cpp; sourceTree = "<group>"; };
+		210000000000000000000031 /* tvgSvgBuilder.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/loaders/svg/tvgSvgBuilder.cpp; sourceTree = "<group>"; };
+		210000000000000000000032 /* tvgSvgCssStyle.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/loaders/svg/tvgSvgCssStyle.cpp; sourceTree = "<group>"; };
+		210000000000000000000033 /* tvgSvgLoader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/loaders/svg/tvgSvgLoader.cpp; sourceTree = "<group>"; };
+		210000000000000000000034 /* tvgSvgPath.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/loaders/svg/tvgSvgPath.cpp; sourceTree = "<group>"; };
+		210000000000000000000035 /* tvgSvgUtil.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/loaders/svg/tvgSvgUtil.cpp; sourceTree = "<group>"; };
+		210000000000000000000036 /* tvgXmlParser.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/loaders/svg/tvgXmlParser.cpp; sourceTree = "<group>"; };
+		210000000000000000000037 /* tvgCapi.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/bindings/capi/tvgCapi.cpp; sourceTree = "<group>"; };
 
 		400000000000000000000001 = {
 			isa = PBXGroup;
@@ -70,6 +181,43 @@
 				200000000000000000000004 /* stasis_mobile_aot_runtime.c */,
 				200000000000000000000005 /* stasis_graphics.c */,
 				200000000000000000000010 /* stasis_audio_assets.c */,
+				210000000000000000000001 /* stasis_svg.cpp */,
+				210000000000000000000002 /* tvgCompressor.cpp */,
+				210000000000000000000003 /* tvgMath.cpp */,
+				210000000000000000000004 /* tvgStr.cpp */,
+				210000000000000000000005 /* tvgAccessor.cpp */,
+				210000000000000000000006 /* tvgAnimation.cpp */,
+				210000000000000000000007 /* tvgCanvas.cpp */,
+				210000000000000000000008 /* tvgFill.cpp */,
+				210000000000000000000009 /* tvgInitializer.cpp */,
+				210000000000000000000010 /* tvgLoaderMgr.cpp */,
+				210000000000000000000011 /* tvgPaint.cpp */,
+				210000000000000000000012 /* tvgPicture.cpp */,
+				210000000000000000000013 /* tvgRender.cpp */,
+				210000000000000000000014 /* tvgSaver.cpp */,
+				210000000000000000000015 /* tvgScene.cpp */,
+				210000000000000000000016 /* tvgShape.cpp */,
+				210000000000000000000017 /* tvgTaskScheduler.cpp */,
+				210000000000000000000018 /* tvgText.cpp */,
+				210000000000000000000019 /* tvgSwBlendOp.cpp */,
+				210000000000000000000020 /* tvgSwFill.cpp */,
+				210000000000000000000021 /* tvgSwImage.cpp */,
+				210000000000000000000022 /* tvgSwMemPool.cpp */,
+				210000000000000000000023 /* tvgSwPostEffect.cpp */,
+				210000000000000000000024 /* tvgSwRaster.cpp */,
+				210000000000000000000025 /* tvgSwRenderer.cpp */,
+				210000000000000000000026 /* tvgSwRle.cpp */,
+				210000000000000000000027 /* tvgSwShape.cpp */,
+				210000000000000000000028 /* tvgSwStroke.cpp */,
+				210000000000000000000029 /* tvgSwUtil.cpp */,
+				210000000000000000000030 /* tvgRawLoader.cpp */,
+				210000000000000000000031 /* tvgSvgBuilder.cpp */,
+				210000000000000000000032 /* tvgSvgCssStyle.cpp */,
+				210000000000000000000033 /* tvgSvgLoader.cpp */,
+				210000000000000000000034 /* tvgSvgPath.cpp */,
+				210000000000000000000035 /* tvgSvgUtil.cpp */,
+				210000000000000000000036 /* tvgXmlParser.cpp */,
+				210000000000000000000037 /* tvgCapi.cpp */,
 				200000000000000000000006 /* published_aot_bindings.c */,
 				200000000000000000000007 /* stasis_game */,
 				200000000000000000000009 /* StasisMobile.xcconfig */,
@@ -111,13 +259,13 @@
 		800000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 200000000000000000000009 /* StasisMobile.xcconfig */;
-			buildSettings = {CLANG_C_LANGUAGE_STANDARD = c11; INFOPLIST_FILE = StasisMobile/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = @STASIS_PACKAGE_ID@; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; };
+			buildSettings = {CLANG_C_LANGUAGE_STANDARD = c11; CLANG_CXX_LANGUAGE_STANDARD = "c++14"; GCC_PREPROCESSOR_DEFINITIONS = ("$(inherited)", "TVG_STATIC=1", "NOMINMAX=1"); HEADER_SEARCH_PATHS = ("$(PROJECT_DIR)/../runtime", "$(PROJECT_DIR)/../runtime/third_party/thorvg", "$(PROJECT_DIR)/../runtime/third_party/thorvg/inc", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/common", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/renderer", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/renderer/cpu_engine", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/loaders", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/loaders/raw", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/loaders/svg", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/bindings/capi"); INFOPLIST_FILE = StasisMobile/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = @STASIS_PACKAGE_ID@; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; };
 			name = Debug;
 		};
 		800000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 200000000000000000000009 /* StasisMobile.xcconfig */;
-			buildSettings = {CLANG_C_LANGUAGE_STANDARD = c11; INFOPLIST_FILE = StasisMobile/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = @STASIS_PACKAGE_ID@; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; };
+			buildSettings = {CLANG_C_LANGUAGE_STANDARD = c11; CLANG_CXX_LANGUAGE_STANDARD = "c++14"; GCC_PREPROCESSOR_DEFINITIONS = ("$(inherited)", "TVG_STATIC=1", "NOMINMAX=1"); HEADER_SEARCH_PATHS = ("$(PROJECT_DIR)/../runtime", "$(PROJECT_DIR)/../runtime/third_party/thorvg", "$(PROJECT_DIR)/../runtime/third_party/thorvg/inc", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/common", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/renderer", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/renderer/cpu_engine", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/loaders", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/loaders/raw", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/loaders/svg", "$(PROJECT_DIR)/../runtime/third_party/thorvg/src/bindings/capi"); INFOPLIST_FILE = StasisMobile/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = @STASIS_PACKAGE_ID@; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; };
 			name = Release;
 		};
 

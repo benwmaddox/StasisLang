@@ -14,7 +14,7 @@ Target user outcome: avoid hand-writing repeated `gfx_load_sprite("assets/foo.sv
 ## Current Baseline (Repo Findings)
 
 - Asset loading is runtime-only today through `gfx_load_sprite(path: string, max_w: i32, max_h: i32)`.
-- Runtime rasterization parses SVG width/height using NanoSVG and bakes to requested max dimensions.
+- Runtime rasterization parses SVG width/height using the pinned ThorVG SVG loader and bakes to requested max dimensions.
 - AOT manifest already carries compile-time metadata for:
   - `string_literals`
   - `collection_max_lengths`
