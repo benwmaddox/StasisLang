@@ -3,6 +3,7 @@ param(
   [string]$BinRoot = "",
   [switch]$SkipBuild,
   [switch]$TestInjectPromotionFailure,
+  [switch]$TestInjectValidationFailure,
   [switch]$TestPromotionOnly,
   [string]$TestPromotionRoot = ""
 )
@@ -90,6 +91,7 @@ function Promote-ToolchainDirectory {
   param(
     [Parameter(Mandatory)] [string]$Staging,
     [Parameter(Mandatory)] [string]$Destination,
+    [Parameter(Mandatory)] [scriptblock]$PostActivationValidation,
     [switch]$InjectFailure
   )
   $backup = "$Destination.backup-$PID-$([guid]::NewGuid().ToString('N'))"
@@ -98,6 +100,10 @@ function Promote-ToolchainDirectory {
     if ($hadPrevious) { Move-Item -LiteralPath $Destination -Destination $backup }
     if ($InjectFailure) { throw "test-injected promotion failure" }
     Move-Item -LiteralPath $Staging -Destination $Destination
+    & $PostActivationValidation
+    if (Test-Path -LiteralPath $backup) {
+      Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop
+    }
   } catch {
     if (Test-Path -LiteralPath $Destination) {
       Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
@@ -109,13 +115,6 @@ function Promote-ToolchainDirectory {
       Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
     }
     throw "toolchain promotion failed; previous bin was restored: $($_.Exception.Message)"
-  }
-  if (Test-Path -LiteralPath $backup) {
-    try {
-      Remove-Item -LiteralPath $backup -Recurse -Force
-    } catch {
-      Write-Warning "installed toolchain, but could not remove backup ${backup}: $($_.Exception.Message)"
-    }
   }
 }
 
@@ -174,8 +173,60 @@ if ($TestPromotionOnly) {
   if (-not $incompleteRejected) { throw "incomplete staging unexpectedly passed validation" }
   $marker = Get-Content -LiteralPath (Join-Path $testDestination "marker.txt") -Raw
   if ($marker -ne "previous") { throw "incomplete staging changed the prior bin" }
+
+  $successRoot = Join-Path $testRoot "success"
+  $successDestination = Join-Path $successRoot "bin"
+  $successStaging = Join-Path $successRoot "staging"
+  New-Item -ItemType Directory -Force -Path $successDestination, $successStaging | Out-Null
+  Set-Content -LiteralPath (Join-Path $successDestination "marker.txt") -Value "previous" -NoNewline
+  Set-Content -LiteralPath (Join-Path $successStaging "marker.txt") -Value "new" -NoNewline
+  Promote-ToolchainDirectory -Staging $successStaging -Destination $successDestination -PostActivationValidation {
+    $candidateMarker = Get-Content -LiteralPath (Join-Path $successDestination "marker.txt") -Raw
+    if ($candidateMarker -ne "new") { throw "post-activation validation did not see the candidate" }
+    Set-Content -LiteralPath (Join-Path $successDestination "validation-ran.txt") -Value "yes" -NoNewline
+  }
+  $marker = Get-Content -LiteralPath (Join-Path $successDestination "marker.txt") -Raw
+  if ($marker -ne "new") { throw "successful promotion did not activate the candidate" }
+  if (-not (Test-Path -LiteralPath (Join-Path $successDestination "validation-ran.txt"))) {
+    throw "post-activation validation did not run"
+  }
+  if (Test-Path -LiteralPath $successStaging) { throw "successful promotion left staging behind" }
+  if (Get-ChildItem -LiteralPath $successRoot -Filter "bin.backup-*" -ErrorAction SilentlyContinue) {
+    throw "successful promotion left a backup behind"
+  }
+
+  $rollbackRoot = Join-Path $testRoot "rollback"
+  $rollbackDestination = Join-Path $rollbackRoot "bin"
+  $rollbackStaging = Join-Path $rollbackRoot "staging"
+  New-Item -ItemType Directory -Force -Path $rollbackDestination, $rollbackStaging | Out-Null
+  Set-Content -LiteralPath (Join-Path $rollbackDestination "marker.txt") -Value "previous" -NoNewline
+  Set-Content -LiteralPath (Join-Path $rollbackDestination "prior-only.txt") -Value "keep" -NoNewline
+  Set-Content -LiteralPath (Join-Path $rollbackStaging "marker.txt") -Value "new" -NoNewline
   try {
-    Promote-ToolchainDirectory -Staging $testStaging -Destination $testDestination -InjectFailure
+    Promote-ToolchainDirectory -Staging $rollbackStaging -Destination $rollbackDestination -PostActivationValidation {
+      $candidateMarker = Get-Content -LiteralPath (Join-Path $rollbackDestination "marker.txt") -Raw
+      if ($candidateMarker -ne "new") { throw "post-activation validation did not see the candidate" }
+      Set-Content -LiteralPath (Join-Path $rollbackDestination "validation-ran.txt") -Value "yes" -NoNewline
+      throw "test-injected post-activation validation failure"
+    }
+    throw "post-activation validation failure injection unexpectedly succeeded"
+  } catch {
+    if (-not (Test-Path -LiteralPath (Join-Path $rollbackDestination "prior-only.txt"))) {
+      throw "validation rollback did not restore the prior bin"
+    }
+    $marker = Get-Content -LiteralPath (Join-Path $rollbackDestination "marker.txt") -Raw
+    if ($marker -ne "previous") { throw "validation rollback restored the wrong bin contents" }
+    if (Test-Path -LiteralPath (Join-Path $rollbackDestination "validation-ran.txt")) {
+      throw "validation rollback left candidate contents behind"
+    }
+    if (Test-Path -LiteralPath $rollbackStaging) { throw "validation rollback left staging behind" }
+    if (Get-ChildItem -LiteralPath $rollbackRoot -Filter "bin.backup-*" -ErrorAction SilentlyContinue) {
+      throw "validation rollback left a backup behind"
+    }
+  }
+
+  try {
+    Promote-ToolchainDirectory -Staging $testStaging -Destination $testDestination -PostActivationValidation { } -InjectFailure
     throw "promotion failure injection unexpectedly succeeded"
   } catch {
     if (-not (Test-Path -LiteralPath (Join-Path $testDestination "marker.txt"))) {
@@ -183,8 +234,12 @@ if ($TestPromotionOnly) {
     }
     $marker = Get-Content -LiteralPath (Join-Path $testDestination "marker.txt") -Raw
     if ($marker -ne "previous") { throw "promotion rollback restored the wrong bin contents" }
+    if (Test-Path -LiteralPath $testStaging) { throw "promotion rollback left staging behind" }
+    if (Get-ChildItem -LiteralPath $testRoot -Filter "bin.backup-*" -ErrorAction SilentlyContinue) {
+      throw "promotion rollback left a backup behind"
+    }
   }
-  Write-Host "Toolchain promotion rollback test passed"
+  Write-Host "Toolchain promotion transaction tests passed"
   exit 0
 }
 
@@ -212,8 +267,11 @@ if (Test-Path -LiteralPath $staging) { throw "fresh staging directory already ex
 
 try {
   if (-not $SkipBuild) {
-    Invoke-Bounded -FilePath $python -Arguments @("tools/cargo_cache.py", "run", "--", "cargo", "build", "--manifest-path", (Join-Path $repoRoot "Cargo.toml"), "-p", "stasis", "--release") | Out-Null
-    Invoke-Bounded -FilePath $python -Arguments @("tools/cargo_cache.py", "run", "--", "cargo", "build", "--manifest-path", (Join-Path $repoRoot "Cargo.toml"), "-p", "stasis_dynload", "--release") | Out-Null
+    Invoke-Bounded -FilePath $python -Arguments @(
+      "tools/cargo_cache.py", "run", "--", "cargo", "build",
+      "--manifest-path", (Join-Path $repoRoot "Cargo.toml"),
+      "-p", "stasis", "-p", "stasis_dynload", "--release"
+    ) | Out-Null
 
     $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
     if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
@@ -281,23 +339,29 @@ try {
   }
   Assert-CompleteToolchainStaging -Root $staging
 
-  $editorInfoText = Invoke-Bounded -FilePath (Join-Path $staging "stasis.exe") -Arguments @("--json", "editor-info") -WorkingDirectory $staging
-  $editorInfo = $editorInfoText | ConvertFrom-Json
-  if ($editorInfo.result.build_fingerprint -ne $fingerprint -or $editorInfo.result.graphics_runtime.build_fingerprint -ne $fingerprint) {
-    throw "staged editor-info fingerprint does not match source revision $fingerprint"
-  }
-
   $smokeOutput = Join-Path $repoRoot "target/local-editor-record-smoke"
-  if (Test-Path -LiteralPath $smokeOutput) { Remove-Item -LiteralPath $smokeOutput -Recurse -Force }
-  Invoke-Bounded -FilePath (Join-Path $staging "stasis.exe") -Arguments @(
-    "--workspace", (Join-Path $repoRoot "samples/windows_launch_smoke"), "record",
-    "--output", $smokeOutput, "--width", "320", "--height", "180", "--fps", "30", "--frames", "1"
-  ) -WorkingDirectory (Join-Path $repoRoot "samples/windows_launch_smoke") | Out-Null
-  if (-not (Get-ChildItem -LiteralPath $smokeOutput -Filter "*.png" -File -ErrorAction SilentlyContinue)) {
-    throw "bounded record smoke did not produce a PNG frame"
+  $postActivationValidation = {
+    $installedExecutable = Join-Path $binRoot "stasis.exe"
+    $editorInfoText = Invoke-Bounded -FilePath $installedExecutable -Arguments @("--json", "editor-info") -WorkingDirectory $binRoot
+    $editorInfo = $editorInfoText | ConvertFrom-Json
+    if ($editorInfo.result.build_fingerprint -ne $fingerprint -or $editorInfo.result.graphics_runtime.build_fingerprint -ne $fingerprint) {
+      throw "activated editor-info fingerprint does not match source revision $fingerprint"
+    }
+
+    if (Test-Path -LiteralPath $smokeOutput) { Remove-Item -LiteralPath $smokeOutput -Recurse -Force }
+    Invoke-Bounded -FilePath $installedExecutable -Arguments @(
+      "--workspace", (Join-Path $repoRoot "samples/windows_launch_smoke"), "record",
+      "--output", $smokeOutput, "--width", "320", "--height", "180", "--fps", "30", "--frames", "1"
+    ) -WorkingDirectory $binRoot | Out-Null
+    if (-not (Get-ChildItem -LiteralPath $smokeOutput -Filter "*.png" -File -ErrorAction SilentlyContinue)) {
+      throw "bounded record smoke did not produce a PNG frame"
+    }
+    if ($TestInjectValidationFailure -and $env:STASIS_TEST_MODE -eq "1") {
+      throw "test-injected post-activation validation failure"
+    }
   }
 
-  Promote-ToolchainDirectory -Staging $staging -Destination $binRoot -InjectFailure:($TestInjectPromotionFailure -and $env:STASIS_TEST_MODE -eq "1")
+  Promote-ToolchainDirectory -Staging $staging -Destination $binRoot -PostActivationValidation $postActivationValidation -InjectFailure:($TestInjectPromotionFailure -and $env:STASIS_TEST_MODE -eq "1")
   Write-Host "Installed verified Stasis toolchain in $binRoot (fingerprint $fingerprint)"
 } catch {
   if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
