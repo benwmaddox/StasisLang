@@ -8341,12 +8341,14 @@ mod tests {
             fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read Android CMake");
         assert!(android_cmake.contains("stasis_mobile_runtime"));
+        assert!(android_cmake.contains("project(stasis_mobile_android C CXX)"));
         assert!(android_cmake.contains("published_aot_objects.cmake"));
         assert!(android_cmake.contains("STASIS_PUBLISHED_AOT_OBJECTS"));
         assert!(!android_cmake.contains("file(GLOB STASIS_AOT_OBJECTS"));
         assert!(android_cmake.contains("libmain.map"));
         assert!(android_cmake.contains("SDL3::SDL3-static"));
         assert!(android_cmake.contains("SDL3_image::SDL3_image-static"));
+        assert!(android_cmake.contains("set_property(TARGET main PROPERTY LINKER_LANGUAGE CXX)"));
         assert!(android_cmake.contains("-Wl,--gc-sections"));
         assert!(android_cmake.contains("-flto"));
         assert!(!android_cmake.contains("stasis_dynload"));
@@ -8549,6 +8551,14 @@ mod tests {
             .expect("read Xcode project");
         let config =
             fs::read_to_string(ios.join("ios/StasisMobile.xcconfig")).expect("read Xcode config");
+        assert!(project
+            .contains("HEADER_SEARCH_PATHS = (\"$(inherited)\", \"$(PROJECT_DIR)/../runtime\""));
+        assert_eq!(
+            project
+                .matches("HEADER_SEARCH_PATHS = (\"$(inherited)\", ")
+                .count(),
+            2
+        );
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
         assert!(!project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));

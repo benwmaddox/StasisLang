@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(stasis_mobile_android C)
+project(stasis_mobile_android C CXX)
 
 option(STASIS_ENABLE_SEAM_TESTS "Enable generated release-shell seam hooks" OFF)
 set(STASIS_NETWORK_ENABLED @STASIS_NETWORK_ENABLED@)
@@ -89,6 +89,7 @@ add_library(main SHARED
     "${STASIS_AOT_DIR}/published_aot_bindings.c"
     ${STASIS_PUBLISHED_AOT_OBJECTS}
 )
+set_property(TARGET main PROPERTY LINKER_LANGUAGE CXX)
 if(STASIS_ENABLE_SEAM_TESTS)
     target_compile_definitions(main PRIVATE STASIS_ENABLE_SEAM_TESTS=1)
 endif()
