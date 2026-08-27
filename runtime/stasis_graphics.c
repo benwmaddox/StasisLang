@@ -58,6 +58,12 @@ static void render_postfx(void);
 #define STASIS_RELEASE_ID "development"
 #endif
 
+/* Set by the supported toolchain build. An empty value is intentionally not a
+ * valid installed-toolchain identity. */
+#ifndef STASIS_BUILD_FINGERPRINT
+#define STASIS_BUILD_FINGERPRINT ""
+#endif
+
 static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
     (void)userdata;
     (void)category;
@@ -133,6 +139,10 @@ STASIS_EXPORT int stasis_graphics_runtime_abi_version(void) {
 
 STASIS_EXPORT const char* stasis_graphics_release_id(void) {
     return STASIS_RELEASE_ID;
+}
+
+STASIS_EXPORT const char* stasis_graphics_build_fingerprint(void) {
+    return STASIS_BUILD_FINGERPRINT;
 }
 
 /* Global state */

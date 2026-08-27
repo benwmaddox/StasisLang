@@ -7,6 +7,7 @@ if(MSVC)
 endif()
 
 set(STASIS_RELEASE_ID "development" CACHE STRING "Immutable Stasis toolchain release identity")
+set(STASIS_BUILD_FINGERPRINT "" CACHE STRING "Exact source/toolchain fingerprint shared with the CLI")
 
 set(STASIS_MOBILE_PLATFORM OFF)
 if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -164,6 +165,7 @@ endif()
 function(configure_stasis_target target is_static sdl_only)
     target_sources(${target} PRIVATE stasis_graphics.c stasis_audio_assets.c stasis_svg.cpp)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
+    target_compile_definitions(${target} PRIVATE STASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}")
     target_link_libraries(${target} PRIVATE
         stasis_thorvg
         $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>

@@ -170,6 +170,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Compute shared toolchain fingerprint
+        shell: bash
+        run: |
+          fingerprint="$(python3 tools/compute_toolchain_fingerprint.py --source-commit "$STASIS_SOURCE_COMMIT" --release-id "$STASIS_RELEASE_ID")"
+          echo "STASIS_BUILD_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+
       - name: Download immutable mobile network support
         uses: actions/download-artifact@v8
         with:
@@ -222,6 +228,7 @@ jobs:
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
             -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}" `
+            -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT" `
             -DSTASIS_GRAPHICS_SDL_ONLY=ON `
             -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON `
             -DSTASIS_BUILD_RUNNER=ON `
@@ -241,7 +248,8 @@ jobs:
             -DSTASIS_GRAPHICS_SDL_ONLY=ON \
             -DSTASIS_BUILD_RUNNER=ON \
             -DSTASIS_BUILD_SYS=OFF \
-            -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}"
+            -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}" \
+            -DSTASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}"
           cmake --build runtime/build_ci --config Release --target stasis_graphics stasis_runner
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"

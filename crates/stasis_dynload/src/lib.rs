@@ -1121,14 +1121,97 @@ fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String>
 pub fn graphics_runtime_release_id(path: &Path) -> Result<String, String> {
     let lib = Library::load(path)?;
     verify_graphics_runtime_abi(&lib, path)?;
-    let address = lib
-        .symbol_address("stasis_graphics_release_id")
-        .map_err(|_| {
-            format!(
-                "incompatible stasis graphics runtime {}: missing release identity",
-                path.display()
-            )
-        })?;
+    read_graphics_runtime_string(&lib, path, "stasis_graphics_release_id", "release identity")
+}
+
+pub fn graphics_runtime_build_fingerprint(path: &Path) -> Result<String, String> {
+    let lib = Library::load(path)?;
+    verify_graphics_runtime_abi(&lib, path)?;
+    read_graphics_runtime_string(
+        &lib,
+        path,
+        "stasis_graphics_build_fingerprint",
+        "build fingerprint",
+    )
+}
+
+pub fn graphics_runtime_identity(path: &Path) -> Result<(String, String), String> {
+    let lib = Library::load(path)?;
+    verify_graphics_runtime_abi(&lib, path)?;
+    let release_id =
+        read_graphics_runtime_string(&lib, path, "stasis_graphics_release_id", "release identity")?;
+    let fingerprint = read_graphics_runtime_string(
+        &lib,
+        path,
+        "stasis_graphics_build_fingerprint",
+        "build fingerprint",
+    )?;
+    Ok((release_id, fingerprint))
+}
+
+/// Returns the fingerprint compiled into the Rust side of this toolchain.
+///
+/// An absent value is expected for ordinary source-tree development builds and
+/// is deliberately not treated as an installed-toolchain identity.
+pub fn compiled_build_fingerprint() -> Option<&'static str> {
+    option_env!("STASIS_BUILD_FINGERPRINT")
+        .map(str::trim)
+        .filter(|value| is_verified_build_fingerprint(value))
+}
+
+pub fn is_verified_build_fingerprint(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == 64
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !value.eq_ignore_ascii_case("development")
+}
+
+pub fn verify_graphics_runtime_build_fingerprint(
+    path: &Path,
+    expected: &str,
+) -> Result<(), String> {
+    let lib = Library::load(path)?;
+    verify_graphics_runtime_build_fingerprint_on_library(&lib, path, expected)
+}
+
+fn verify_graphics_runtime_build_fingerprint_on_library(
+    lib: &Library,
+    path: &Path,
+    expected: &str,
+) -> Result<(), String> {
+    if !is_verified_build_fingerprint(expected) {
+        return Err(
+            "stasis CLI has no verified build fingerprint; refusing installed runtime startup"
+                .to_string(),
+        );
+    }
+    let actual = read_graphics_runtime_string(
+        lib,
+        path,
+        "stasis_graphics_build_fingerprint",
+        "build fingerprint",
+    )?;
+    if actual != expected {
+        return Err(format!(
+            "toolchain build fingerprint mismatch: stasis is '{expected}' but {} is '{actual}'",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn read_graphics_runtime_string(
+    lib: &Library,
+    path: &Path,
+    symbol: &str,
+    label: &str,
+) -> Result<String, String> {
+    let address = lib.symbol_address(symbol).map_err(|_| {
+        format!(
+            "incompatible stasis graphics runtime {}: missing {label}",
+            path.display()
+        )
+    })?;
     #[cfg(windows)]
     let value = {
         let identity: extern "system" fn() -> *const c_char =
@@ -1142,18 +1225,24 @@ pub fn graphics_runtime_release_id(path: &Path) -> Result<String, String> {
     };
     if value.is_null() {
         return Err(format!(
-            "incompatible stasis graphics runtime {}: empty release identity",
-            path.display()
+            "incompatible stasis graphics runtime {}: empty {label}",
+            path.display(),
         ));
     }
     let value = unsafe { std::ffi::CStr::from_ptr(value) }
         .to_str()
         .map_err(|_| {
             format!(
-                "incompatible stasis graphics runtime {}: release identity is not UTF-8",
-                path.display()
+                "incompatible stasis graphics runtime {}: {label} is not UTF-8",
+                path.display(),
             )
         })?;
+    if value.trim().is_empty() {
+        return Err(format!(
+            "incompatible stasis graphics runtime {}: empty {label}",
+            path.display()
+        ));
+    }
     Ok(value.to_string())
 }
 
@@ -1197,6 +1286,23 @@ impl StasisGraphicsApi {
     pub fn load(path: &Path) -> Result<Self, String> {
         let lib = Library::load(path)?;
         verify_graphics_runtime_abi(&lib, path)?;
+        if let Some(expected) = option_env!("STASIS_BUILD_FINGERPRINT") {
+            verify_graphics_runtime_build_fingerprint_on_library(&lib, path, expected)?;
+        }
+        if let Some(expected) = option_env!("STASIS_RELEASE_ID") {
+            let actual = read_graphics_runtime_string(
+                &lib,
+                path,
+                "stasis_graphics_release_id",
+                "release identity",
+            )?;
+            if actual != expected {
+                return Err(format!(
+                    "toolchain release mismatch: stasis is '{expected}' but {} is '{actual}'",
+                    path.display()
+                ));
+            }
+        }
         let stasis_init_window = lib.symbol_address("stasis_init_window")?;
         let stasis_set_asset_root = lib.symbol_address("stasis_set_asset_root")?;
         let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
@@ -7060,6 +7166,16 @@ mod tests {
             .expect("test executable directory")
             .join(runtime_library_file_names()[0]);
         assert_eq!(candidates.first(), Some(&expected));
+    }
+
+    #[test]
+    fn build_fingerprint_contract_accepts_only_sha256_hex() {
+        let valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(is_verified_build_fingerprint(valid));
+        assert!(is_verified_build_fingerprint(&valid.to_ascii_uppercase()));
+        assert!(!is_verified_build_fingerprint("development"));
+        assert!(!is_verified_build_fingerprint(""));
+        assert!(!is_verified_build_fingerprint("not-a-sha256"));
     }
 
     #[test]

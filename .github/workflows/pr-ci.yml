@@ -119,9 +119,17 @@ jobs:
   bootstrap-smoke-windows:
     if: ${{ inputs.run_slow_seams }}
     runs-on: windows-latest
+    env:
+      STASIS_RELEASE_ID: ci-${{ github.sha }}
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Compute shared toolchain fingerprint
+        shell: pwsh
+        run: |
+          $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $env:STASIS_SOURCE_COMMIT --release-id $env:STASIS_RELEASE_ID).Trim()
+          "STASIS_BUILD_FINGERPRINT=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Check Stasis src layout
         run: python tools/ci/check_stasis_src_layout.py
 
@@ -144,7 +152,7 @@ jobs:
           $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
           if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
           $env:STASIS_CMAKE_GENERATOR = $generator
-          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF
+          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/render-parity-runtime --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -240,6 +248,8 @@ jobs:
             runtime_library: libstasis_graphics.dylib
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_RELEASE_ID: ci-${{ github.sha }}
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
       STASIS_E2E_VSCODE_VERSION: "1.96.0"
       STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/vscode-e2e-runtime/bin/${{ matrix.runtime_library }}
       STASIS_TOOLCHAIN_DIR: ${{ github.workspace }}/target/vscode-e2e-toolchain
@@ -249,6 +259,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Compute shared toolchain fingerprint
+        shell: bash
+        run: |
+          fingerprint="$(python3 tools/compute_toolchain_fingerprint.py --source-commit "$STASIS_SOURCE_COMMIT" --release-id "$STASIS_RELEASE_ID")"
+          echo "STASIS_BUILD_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -286,7 +301,9 @@ jobs:
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
             -DSTASIS_GRAPHICS_SDL_ONLY=ON \
             -DSTASIS_BUILD_RUNNER="${runner_build}" \
-            -DSTASIS_BUILD_SYS=OFF
+            -DSTASIS_BUILD_SYS=OFF \
+            -DSTASIS_RELEASE_ID="$STASIS_RELEASE_ID" \
+            -DSTASIS_BUILD_FINGERPRINT="$STASIS_BUILD_FINGERPRINT"
           cmake --build target/vscode-e2e-runtime --config Release --target "${build_targets[@]}"
           test -f "$STASIS_RUNTIME_LIBRARY_PATH"
           if [[ "${{ runner.os }}" == "macOS" ]]; then

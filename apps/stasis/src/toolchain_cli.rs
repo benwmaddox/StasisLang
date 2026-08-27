@@ -1183,6 +1183,9 @@ fn execute(
     workspace_arg: Option<PathBuf>,
     json_output: bool,
 ) -> Result<CommandResult, String> {
+    if command_requires_runtime(&command) {
+        verify_installed_toolchain_identity()?;
+    }
     match command {
         ToolchainCommand::New { name, dir } => create_new_project(dir.unwrap_or_else(|| PathBuf::from(&name)), name),
         ToolchainCommand::Init { dir, name } => {
@@ -1418,6 +1421,37 @@ fn execute(
                 _ => Err("unsupported command routing".to_string()),
             }
         }
+    }
+}
+
+fn command_requires_runtime(command: &ToolchainCommand) -> bool {
+    match command {
+        ToolchainCommand::Ai { .. }
+        | ToolchainCommand::Gauntlet { .. }
+        | ToolchainCommand::Validate { .. }
+        | ToolchainCommand::ValidateRuntime { .. }
+        | ToolchainCommand::Record { .. }
+        | ToolchainCommand::Replay { .. }
+        | ToolchainCommand::Lsp { .. }
+        | ToolchainCommand::Dap { .. }
+        | ToolchainCommand::Tui { .. }
+        | ToolchainCommand::Build { .. }
+        | ToolchainCommand::Package { .. }
+        | ToolchainCommand::PackageMobile { .. } => true,
+        ToolchainCommand::Run { .. } => true,
+        ToolchainCommand::New { .. }
+        | ToolchainCommand::Init { .. }
+        | ToolchainCommand::Version
+        | ToolchainCommand::EditorInfo
+        | ToolchainCommand::Env
+        | ToolchainCommand::Signing { .. }
+        | ToolchainCommand::Verify
+        | ToolchainCommand::Fmt { .. }
+        | ToolchainCommand::Check
+        | ToolchainCommand::Test { .. }
+        | ToolchainCommand::Inspect { .. }
+        | ToolchainCommand::Vendor { .. }
+        | ToolchainCommand::Symbol { .. } => false,
     }
 }
 
@@ -6457,27 +6491,33 @@ fn editor_info_result() -> Result<CommandResult, String> {
         .map_err(|error| format!("failed to locate stasis executable: {error}"))?
         .canonicalize()
         .map_err(|error| format!("failed to resolve stasis executable: {error}"))?;
-    let runtime = installed_runtime_library().ok_or_else(|| {
-        format!(
-            "the Stasis graphics runtime is not installed beside {}",
-            executable.display()
-        )
-    })?;
+    let runtime = require_installed_runtime(&executable, installed_runtime_library())?;
     let runtime = runtime
         .canonicalize()
         .map_err(|error| format!("failed to resolve graphics runtime: {error}"))?;
-    stasis_dynload::StasisGraphicsApi::load(&runtime)
-        .map_err(|error| format!("the sibling graphics runtime is incompatible: {error}"))?;
 
     let version = env!("CARGO_PKG_VERSION");
     let release_id = option_env!("STASIS_RELEASE_ID").unwrap_or("development");
-    let runtime_release_id = stasis_dynload::graphics_runtime_release_id(&runtime)?;
+    let build_fingerprint = option_env!("STASIS_BUILD_FINGERPRINT").ok_or_else(|| {
+        "stasis CLI has no verified build fingerprint; refusing installed runtime startup"
+            .to_string()
+    })?;
+    if !stasis_dynload::is_verified_build_fingerprint(build_fingerprint) {
+        return Err(format!(
+            "stasis CLI has invalid build fingerprint '{build_fingerprint}'; refusing installed runtime startup"
+        ));
+    }
+    let (runtime_release_id, runtime_build_fingerprint) =
+        stasis_dynload::graphics_runtime_identity(&runtime)?;
     if runtime_release_id != release_id {
         return Err(format!(
             "toolchain release mismatch: stasis is '{release_id}' but {} is '{runtime_release_id}'",
             runtime.display()
         ));
     }
+    ensure_matching_build_fingerprints(build_fingerprint, &runtime_build_fingerprint, &runtime)?;
+    stasis_dynload::StasisGraphicsApi::load(&runtime)
+        .map_err(|error| format!("the sibling graphics runtime is incompatible: {error}"))?;
     let source_commit = option_env!("STASIS_SOURCE_COMMIT").unwrap_or("development");
     let target = option_env!("STASIS_BUILD_TARGET")
         .map(str::to_string)
@@ -6485,6 +6525,7 @@ fn editor_info_result() -> Result<CommandResult, String> {
     let data = json!({
         "schema": 1,
         "release_id": release_id,
+        "build_fingerprint": build_fingerprint,
         "version": version,
         "source_commit": source_commit,
         "target": target,
@@ -6501,6 +6542,7 @@ fn editor_info_result() -> Result<CommandResult, String> {
         "graphics_runtime": {
             "path": runtime,
             "release_id": runtime_release_id,
+            "build_fingerprint": runtime_build_fingerprint,
             "sha256": sha256_file(&runtime)?,
         },
     });
@@ -6508,6 +6550,96 @@ fn editor_info_result() -> Result<CommandResult, String> {
         format!("stasis editor toolchain {release_id} ({target})"),
         data,
     ))
+}
+
+fn ensure_matching_build_fingerprints(
+    expected: &str,
+    actual: &str,
+    runtime: &Path,
+) -> Result<(), String> {
+    if !stasis_dynload::is_verified_build_fingerprint(expected) {
+        return Err(format!(
+            "stasis CLI has invalid build fingerprint '{expected}'; refusing installed runtime startup"
+        ));
+    }
+    if !stasis_dynload::is_verified_build_fingerprint(actual) {
+        return Err(format!(
+            "incompatible stasis graphics runtime {}: invalid build fingerprint '{actual}'",
+            runtime.display()
+        ));
+    }
+    if expected != actual {
+        return Err(format!(
+            "toolchain build fingerprint mismatch: stasis is '{expected}' but {} is '{actual}'",
+            runtime.display()
+        ));
+    }
+    Ok(())
+}
+
+fn require_installed_runtime(
+    executable: &Path,
+    runtime: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    runtime.ok_or_else(|| {
+        format!(
+            "the Stasis graphics runtime is not installed beside {}",
+            executable.display()
+        )
+    })
+}
+
+/// Check the installed executable/runtime pair before a graphical service is
+/// started. This is intentionally independent of project loading so a stale
+/// DLL cannot execute guest startup code.
+pub(crate) fn verify_installed_toolchain_identity() -> Result<(), String> {
+    let expected = option_env!("STASIS_BUILD_FINGERPRINT");
+    let runtime = installed_runtime_library();
+    let release_id = option_env!("STASIS_RELEASE_ID").unwrap_or("development");
+    if runtime.is_none() && expected.is_none() && release_id == "development" {
+        return Ok(());
+    }
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    verify_installed_toolchain_identity_for(
+        &executable,
+        runtime,
+        expected,
+        release_id,
+    )
+}
+
+fn verify_installed_toolchain_identity_for(
+    executable: &Path,
+    runtime: Option<PathBuf>,
+    expected: Option<&str>,
+    release_id: &str,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        if runtime.is_none() && release_id == "development" {
+            return Ok(());
+        }
+        return Err(
+            "stasis CLI has no verified build fingerprint; refusing installed runtime startup"
+                .to_string(),
+        );
+    };
+    if !stasis_dynload::is_verified_build_fingerprint(expected) {
+        return Err(format!(
+            "stasis CLI has invalid build fingerprint '{expected}'; refusing installed runtime startup"
+        ));
+    }
+    let runtime = require_installed_runtime(executable, runtime)?
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve graphics runtime: {error}"))?;
+    let (runtime_release_id, actual) = stasis_dynload::graphics_runtime_identity(&runtime)?;
+    if runtime_release_id != release_id {
+        return Err(format!(
+            "toolchain release mismatch: stasis is '{release_id}' but {} is '{runtime_release_id}'",
+            runtime.display()
+        ));
+    }
+    ensure_matching_build_fingerprints(expected, &actual, &runtime)
 }
 
 fn wait_for_live_terminal_shutdown(
@@ -9120,5 +9252,90 @@ mod tests {
             .contains("outside the workspace"));
         remove_temp(&root);
         remove_temp(&outside);
+    }
+
+    #[test]
+    fn matching_toolchain_fingerprints_are_accepted() {
+        let fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        ensure_matching_build_fingerprints(
+            fingerprint,
+            fingerprint,
+            Path::new("stasis_graphics.dll"),
+        )
+        .expect("matching CLI/runtime identity");
+    }
+
+    #[test]
+    fn mismatched_toolchain_fingerprints_are_rejected_before_runtime_startup() {
+        let expected = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let actual = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        let error =
+            ensure_matching_build_fingerprints(expected, actual, Path::new("stasis_graphics.dll"))
+                .expect_err("mismatched CLI/runtime identity");
+        assert!(
+            error.contains("toolchain build fingerprint mismatch"),
+            "{error}"
+        );
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains(actual), "{error}");
+    }
+
+    #[test]
+    fn unverified_toolchain_fingerprints_are_rejected() {
+        let error = ensure_matching_build_fingerprints(
+            "development",
+            "development",
+            Path::new("stasis_graphics.dll"),
+        )
+        .expect_err("development is not an installed identity");
+        assert!(error.contains("invalid build fingerprint"), "{error}");
+    }
+
+    #[test]
+    fn missing_installed_runtime_is_an_editor_info_error() {
+        let error = require_installed_runtime(Path::new("stasis.exe"), None)
+            .expect_err("editor-info must reject a missing installed runtime");
+        assert!(
+            error.contains("graphics runtime is not installed beside"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn stamped_toolchain_rejects_missing_sibling_runtime() {
+        let fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let error = verify_installed_toolchain_identity_for(
+            Path::new("stasis.exe"),
+            None,
+            Some(fingerprint),
+            "development",
+        )
+        .expect_err("stamped toolchain must require its sibling runtime");
+        assert_eq!(
+            error,
+            "the Stasis graphics runtime is not installed beside stasis.exe"
+        );
+    }
+
+    #[test]
+    fn unstamped_source_development_allows_missing_sibling_runtime() {
+        verify_installed_toolchain_identity_for(Path::new("stasis.exe"), None, None, "development")
+            .expect("unstamped source development may run without a sibling runtime");
+    }
+
+    #[test]
+    fn every_run_mode_checks_installed_toolchain_identity() {
+        assert!(command_requires_runtime(&ToolchainCommand::Run {
+            watch: false,
+            headless: true,
+            ticks: 1,
+            fast_forward: true,
+        }));
+        assert!(command_requires_runtime(&ToolchainCommand::Run {
+            watch: true,
+            headless: false,
+            ticks: 0,
+            fast_forward: false,
+        }));
     }
 }

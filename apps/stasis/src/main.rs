@@ -937,6 +937,10 @@ fn try_run_play_subcommand() -> Option<i32> {
     if first != "play" {
         return None;
     }
+    if let Err(message) = toolchain_cli::verify_installed_toolchain_identity() {
+        eprintln!("{message}");
+        return Some(1);
+    }
     let arg_list: Vec<String> = args.collect();
     let parsed = match parse_play_cli_args(&arg_list) {
         Ok(value) => value,
@@ -1033,6 +1037,10 @@ fn try_run_probe_graphics_runtime_subcommand() -> Option<i32> {
     let first = args.next()?;
     if first != "probe-graphics-runtime" {
         return None;
+    }
+    if let Err(error) = toolchain_cli::verify_installed_toolchain_identity() {
+        eprintln!("{error}");
+        return Some(1);
     }
 
     let candidates = stasis_dynload::runtime_library_candidate_paths();
