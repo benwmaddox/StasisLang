@@ -91,6 +91,7 @@ const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
 const PROJECT_GIT_ATTRIBUTES: &str = "*.[sS][vV][gG] text eol=lf\n";
+const PROJECT_GIT_IGNORE: &str = "/vendor/stasis/docs/\n";
 const KNOWLEDGE_FILES: &[&str] = &[
     "README.md",
     "a-little-stasis/01-three-entry-points.md",
@@ -1489,6 +1490,7 @@ fn create_project_with_options(
     ];
     if initialize_git {
         reserved_paths.push(root.join(".gitattributes"));
+        reserved_paths.push(root.join(".gitignore"));
         reserved_paths.push(root.join(".githooks/pre-commit"));
     }
     let vscode_directory = root.join(".vscode");
@@ -1551,6 +1553,7 @@ fn create_project_with_options(
     )?;
     if initialize_git {
         write_new_file(&root.join(".gitattributes"), PROJECT_GIT_ATTRIBUTES)?;
+        write_new_file(&root.join(".gitignore"), PROJECT_GIT_IGNORE)?;
     }
     write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
     write_new_file(&root.join("assets/manifest.json"), DEFAULT_ASSET_MANIFEST)?;

@@ -596,6 +596,34 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         fs::read(project.join(".gitattributes")).expect("read generated Git attributes"),
         b"*.[sS][vV][gG] text eol=lf\n"
     );
+    assert_eq!(
+        fs::read(project.join(".gitignore")).expect("read generated Git ignore"),
+        b"/vendor/stasis/docs/\n"
+    );
+    assert!(git(
+        &[
+            "check-ignore",
+            "--quiet",
+            "--no-index",
+            "--",
+            "vendor/stasis/docs/README.md",
+        ],
+        &project
+    )
+    .status
+    .success());
+    assert!(!git(
+        &[
+            "check-ignore",
+            "--quiet",
+            "--no-index",
+            "--",
+            "vendor/stasis/stdlib/internal/host_frame.stasis",
+        ],
+        &project
+    )
+    .status
+    .success());
     for path in [
         "assets/example.svg",
         "assets/example.SVG",
@@ -801,6 +829,24 @@ fn init_preserves_existing_svg_line_ending_policy() {
 }
 
 #[test]
+fn init_preserves_existing_git_ignore_policy() {
+    let parent = temp_dir("init_existing_gitignore");
+    let project = parent.join("demo");
+    fs::create_dir_all(&project).expect("create project directory");
+    fs::write(project.join(".gitignore"), "custom-cache/\n")
+        .expect("write existing Git ignore policy");
+
+    let initialized = stasis(&["--json", "init", "--name", "demo", "."], &project);
+    assert_eq!(initialized.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).expect("read existing Git ignore policy"),
+        "custom-cache/\n"
+    );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
 fn new_refuses_to_overwrite_existing_svg_line_ending_policy() {
     let parent = temp_dir("new_existing_gitattributes");
     let project = parent.join("demo");
@@ -812,6 +858,25 @@ fn new_refuses_to_overwrite_existing_svg_line_ending_policy() {
     assert_eq!(
         fs::read_to_string(project.join(".gitattributes")).expect("read existing Git attributes"),
         "*.png binary\n"
+    );
+    assert!(!project.join("stasis.json").exists());
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn new_refuses_to_overwrite_existing_git_ignore_policy() {
+    let parent = temp_dir("new_existing_gitignore");
+    let project = parent.join("demo");
+    fs::create_dir_all(&project).expect("create project directory");
+    fs::write(project.join(".gitignore"), "custom-cache/\n")
+        .expect("write existing Git ignore policy");
+
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_ne!(created.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).expect("read existing Git ignore policy"),
+        "custom-cache/\n"
     );
     assert!(!project.join("stasis.json").exists());
 
