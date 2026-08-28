@@ -1,14 +1,38 @@
-// Device acceptance fixture extracted from Brickout's generated f32 stereo tone path.
-extern function audio_is_available(): bool;
-extern function audio_get_sample_rate(): i32;
-extern function audio_get_queued_frames(): i32;
-extern function audio_get_underruns(): i32;
-extern function audio_push_f32_interleaved(samples: f32[], frame_count: i32): i32;
+// This fixture deliberately covers two independent Android audio boundaries:
+// manifest-backed asset playback through the shared decoder/mixer, and the
+// low-level f32 push path used to exercise the AAudio sink lifecycle.
+// Keep the fixture self-contained: generated Brickout projects bind these
+// compatibility declarations directly instead of depending on a vendored
+// stdlib tree being present in the project directory.
+extern function @effects(audio) audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
+extern function @effects(audio) audio_is_available(): bool;
+extern function @effects(audio) audio_get_sample_rate(): i32;
+extern function @effects(audio) audio_get_queued_frames(): i32;
+extern function @effects(audio) audio_push_f32_interleaved(samples: f32[], frame_count: i32): i32;
+
+function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_music") audio_load_music(path: string): i32;
+function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_effect") audio_load_effect(path: string): i32;
+function @effects(audio)@extern("stasis_jit_audio_play_music") audio_play_music(asset_handle: i32, loop: bool, volume: f32): bool;
+function @effects(audio)@extern("stasis_jit_audio_play_effect") audio_play_effect(asset_handle: i32, volume: f32): bool;
+
 extern function sin_fast(value: f32): f32;
 
 const AUDIO_FRAMES_PER_PUSH: i32 = 256;
+const AUDIO_EVENT_NONE: i32 = 0;
+const AUDIO_EVENT_MUSIC: i32 = 1;
+const AUDIO_EVENT_EFFECT: i32 = 2;
 const PI2: f32 = 6.2831855;
 
+global music_handle: i32;
+global effect_handle: i32;
+global manifest_music_ready: bool;
+global manifest_effect_ready: bool;
+global manifest_audio_started: bool;
+global manifest_audio_failed: bool;
+global manifest_music_playing: bool;
+global manifest_effect_played: bool;
+global manifest_audio_event: i32;
+global manifest_audio_ticks: i32;
 global audio_buf: f32[512];
 global audio_ready: bool;
 global audio_sr: i32;
@@ -42,36 +66,84 @@ function fill_audio_chunk(sample_rate: i32): void {
     let frame: i32 = 0;
     for (frame = 0; frame < AUDIO_FRAMES_PER_PUSH; frame = frame + 1) {
         let sample: f32 = sin_fast(audio_phase) * 0.08;
-        audio_phase = audio_phase + (440.0 / sr_f) * PI2;
-        if (audio_phase > PI2) { audio_phase = audio_phase - PI2; }
+        audio_phase = audio_phase +(440.0 / sr_f) * PI2;
+        if (audio_phase > PI2) {
+            audio_phase = audio_phase - PI2;
+        }
         let index: i32 = frame * 2;
         audio_buf[index] = sample;
         audio_buf[index + 1] = sample;
     }
 }
 
-function audio_update(): void {
-    if (!audio_ready) { return; }
+// Keep this push-only path separate from manifest playback. It is retained so
+// the same fixture continues to prove AAudio ring capacity, pause, and resume.
+function audio_sink_acceptance_update(): void {
+    if (!audio_ready) {
+        return;
+    }
     let queued: i32 = audio_get_queued_frames();
     let target: i32 = audio_sr / 5;
     let batch: i32 = 0;
     for (batch = 0; batch < 8 && queued < target; batch = batch + 1) {
         fill_audio_chunk(audio_sr);
         let pushed: i32 = audio_push_f32_interleaved(audio_buf, AUDIO_FRAMES_PER_PUSH);
-        if (pushed < 1) { return; }
+        if (pushed < 1) {
+            return;
+        }
         queued = queued + pushed;
     }
 }
 
+// Compatibility handles are published synchronously by the shared host. Their
+// positive values are stored as deterministic readiness state, and the integer
+// event sequence makes music-before-effect submission inspectable in a
+// generated-AOT/package seam without a second event queue.
+function manifest_audio_update(): void {
+    if (manifest_audio_failed || manifest_audio_started) {
+        return;
+    }
+    if (!manifest_music_ready || !manifest_effect_ready) {
+        manifest_audio_failed = true;
+        return;
+    }
+    if (!audio_play_music(music_handle, true, 0.18)) {
+        manifest_audio_failed = true;
+        return;
+    }
+    manifest_music_playing = true;
+    manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_MUSIC;
+    if (!audio_play_effect(effect_handle, 0.25)) {
+        manifest_audio_failed = true;
+        return;
+    }
+    manifest_effect_played = true;
+    manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_EFFECT;
+    manifest_audio_started = true;
+}
+
 function main(): void {
-    audio_ready = audio_is_available();
-    if (audio_ready) { audio_sr = audio_get_sample_rate(); }
+    audio_ready = audio_init(48000, 2, 1024) && audio_is_available();
+    if (audio_ready) {
+        audio_sr = audio_get_sample_rate();
+    }
     audio_phase = 0.0;
+    music_handle = audio_load_music("assets/tone.mp3");
+    effect_handle = audio_load_effect("assets/tone.wav");
+    manifest_music_ready = music_handle > 0;
+    manifest_effect_ready = effect_handle > 0;
+    manifest_audio_event = AUDIO_EVENT_NONE;
+    manifest_audio_started = false;
+    manifest_audio_failed = !manifest_music_ready || !manifest_effect_ready;
 }
 
 function tick(): void {
     GameState.tick_count += 1;
-    audio_update();
+    manifest_audio_update();
+    if (manifest_audio_started) {
+        manifest_audio_ticks += 1;
+    }
+    audio_sink_acceptance_update();
 }
 
 function render(): void {

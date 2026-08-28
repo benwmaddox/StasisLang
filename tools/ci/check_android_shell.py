@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1582,8 +1584,69 @@ def main() -> int:
     assert '"name": "brickout_audio"' in audio_fixture
     assert '"application_id": "com.stasislang.brickoutaudio"' in audio_fixture
     assert '"entry": "src/main.stasis"' in audio_fixture
+    audio_manifest_text = read(
+        "mobile/android/app/src/main/assets/audio_sink_sample/assets/manifest.json"
+    )
+    audio_manifest = json.loads(audio_manifest_text)
+    assert audio_manifest["schema"] == "stasis-assets"
+    assert audio_manifest["version"] == 1
+    audio_assets = {asset["id"]: asset for asset in audio_manifest["assets"]}
+    assert set(audio_assets) == {"brickout_music", "brickout_effect"}
+    assert audio_assets["brickout_music"]["path"] == "assets/tone.mp3"
+    assert audio_assets["brickout_music"]["content_sha256"] == (
+        "5aa0c29e0cd59ae25af7957e07a0f4cfc2506c63ba10e055ae9e6584187e4a3c"
+    )
+    assert audio_assets["brickout_music"]["format"] == {
+        "kind": "audio",
+        "encoding": "mp3",
+        "channels": 1,
+        "sample_rate": 24000,
+        "duration_frames": 18000,
+    }
+    assert audio_assets["brickout_effect"]["path"] == "assets/tone.wav"
+    assert audio_assets["brickout_effect"]["content_sha256"] == (
+        "e6a12792fdbb340eb48009a5cc1ff5162ec69279787605d73678d41658d836f4"
+    )
+    assert audio_assets["brickout_effect"]["format"] == {
+        "kind": "audio",
+        "encoding": "wav",
+        "channels": 1,
+        "sample_rate": 24000,
+        "duration_frames": 18000,
+    }
+    audio_root = ROOT / "mobile/android/app/src/main/assets/audio_sink_sample"
+    canonical_audio_root = ROOT / "samples/audio_asset_playback/assets"
+    for asset in audio_assets.values():
+        asset_path = audio_root / asset["path"]
+        assert asset_path.is_file()
+        assert hashlib.sha256(asset_path.read_bytes()).hexdigest() == asset["content_sha256"]
+        assert asset_path.read_bytes() == (canonical_audio_root / asset_path.name).read_bytes()
     audio_source = read("mobile/android/app/src/main/assets/audio_sink_sample/src/main.stasis")
+    assert "AudioAsset" not in audio_source
+    assert "import \"/vendor/stasis/src/stdlib/audio.stasis\"" not in audio_source
+    assert '"assets/tone.mp3"' in audio_source
+    assert '"assets/tone.wav"' in audio_source
+    assert 'function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_music")' in audio_source
+    assert 'function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_effect")' in audio_source
+    assert 'function @effects(audio)@extern("stasis_jit_audio_play_music")' in audio_source
+    assert 'function @effects(audio)@extern("stasis_jit_audio_play_effect")' in audio_source
+    assert "global music_handle: i32" in audio_source
+    assert "global effect_handle: i32" in audio_source
+    assert "manifest_music_ready = music_handle > 0" in audio_source
+    assert "manifest_effect_ready = effect_handle > 0" in audio_source
+    assert "manifest_audio_update" in audio_source
+    assert "audio_play_music(music_handle, true, 0.18)" in audio_source
+    assert "audio_play_effect(effect_handle, 0.25)" in audio_source
+    assert "manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_MUSIC" in audio_source
+    assert "manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_EFFECT" in audio_source
+    assert "audio_sink_acceptance_update" in audio_source
     assert "audio_push_f32_interleaved" in audio_source
+    audio_test = read(
+        "mobile/android/app/src/main/assets/audio_sink_sample/tests/audio_sink.test.stasis"
+    )
+    assert 'import "../src/main.stasis"' in audio_test
+    assert "audio fixture keeps bounded sink handles and event contracts" in audio_test
+    assert "AUDIO_EVENT_NONE == 0" in audio_test
     audio_native = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
     audio_requested = audio_native[
         audio_native.index("int stasis_android_audio_is_requested(void)"):audio_native.index(

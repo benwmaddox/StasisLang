@@ -683,12 +683,12 @@ functions.
 - Status: `in progress (host implementation complete; device golden remains)`
 #### AS3 - Audio Decode, Mixer, and Playback API
 - Scope: Add bounded sound/music decode, voices/streams, play/stop/pause, loop, volume/pan, mixing, asset handles, and deterministic audio-event submission.
-- Progress: A shared SDL callback mixer now decodes bounded mono/stereo PCM16 WAV assets, linearly resamples them to the device rate, mixes 32 overlapping voices with loop/volume/pan/pause/stop controls, and preserves Brickout's `load_music`/`load_effect` convenience API. JIT and mobile AOT shims expose the same handles. A hardware-free contract test verifies decoding, overlap, resampling, pan, music pause/volume/stop, and release behavior; focused JIT/AOT compiler tests verify every compatibility call. Deterministic game-event submission and physical-device acceptance remain.
+- Progress: A shared SDL callback mixer now decodes bounded mono/stereo PCM16 WAV and MP3 assets, linearly resamples them to the device rate, mixes 32 overlapping voices with loop/volume/pan/pause/stop controls, and preserves Brickout's `load_music`/`load_effect` convenience API. JIT and mobile AOT shims expose the same handles. Hardware-free contract coverage now checks exact decode metadata, corrupt/missing rejection, all 32 voice slots with deterministic 33rd rejection, bounded output, and control behavior; the packaged mobile seam proves ordered music/effect event submission and byte/hash parity. Physical-device acceptance remains.
 - Done gate: Stasis code can play overlapping effects and streaming music through a real mixer rather than the current unavailable stub.
-- Status: `in progress (bounded WAV mixer and compiler/runtime contracts complete; event submission and device acceptance remain)`
+- Status: `in progress (bounded WAV/MP3 mixer, event submission, and compiler/runtime contracts complete; device acceptance remains)`
 #### AS4 - Desktop and Android Audio Backends
 - Scope: Implement device initialization, callback/queue integration, focus/interruption handling, pause/resume, route changes, latency, underrun recovery, and clean shutdown.
-- Progress: Asset voices share the existing SDL3 device stream and lifecycle callback on desktop and mobile instead of restoring the prior Windows MCI/Android Java split. Android API 26+ additionally has a low-latency shared-mode AAudio PCM-float sink with bounded SPSC buffering, truthful availability, queue/underrun diagnostics, and focus/lifecycle cleanup; the generated Brickout AOT bridge forwards registered f32 buffers through the same native sink. The full pinned SDL desktop runtime compiles with the mixer; physical Android focus, interruption, route-change, and audible-output acceptance remain.
+- Progress: Asset voices share the existing SDL3 device stream and lifecycle callback on desktop and mobile instead of restoring the prior Windows MCI/Android Java split. Android API 26+ additionally has a low-latency shared-mode AAudio PCM-float sink with bounded SPSC buffering, truthful availability, queue/underrun diagnostics, and focus/lifecycle cleanup; the generated Brickout fixture covers manifest-backed MP3/WAV playback separately from its registered f32 sink push path. The full pinned SDL desktop runtime compiles with the mixer; physical Android focus, interruption, route-change, and audible-output acceptance remain.
 - Done gate: The same audio sample plays on desktop and Android and recovers correctly from Android lifecycle/audio-focus events.
 - Status: `in progress (shared backend compiled; physical mobile acceptance remains)`
 #### AS5 - Asset Packaging and JIT/AOT Parity
@@ -698,12 +698,14 @@ functions.
 - Status: `in progress`
 #### AS6 - Headless Asset and Event Tests
 - Scope: Add deterministic manifest/decode/event/mixer tests, golden sprite output, audio buffer checks, corruption/limit cases, and host-set denial tests without requiring hardware.
+- Progress: Runtime contract coverage proves exact WAV/MP3 metadata, deterministic missing/corrupt rejection, bounded 32-voice allocation with a rejected 33rd voice, repeatable mixed output, and control clamping. The mobile packaged seam validates declared audio metadata, byte/hash parity, ordered music/effect submission, and non-silent repeatable MP3 mixing without a device.
 - Done gate: CI proves asset semantics, hot-reload safety, and audio mixing deterministically; hardware checks are a separate acceptance layer.
-- Status: `planned`
+- Status: `in progress (audio manifest/decode/event/mixer coverage complete; broader asset-event matrix remains)`
 #### AS7 - Sprite and Audio End-to-End Sample Acceptance
 - Scope: Upgrade a representative game (Brickout Revenge) to load real sprites and audio, hot reload assets, run in JIT/AOT, and pass desktop plus Android acceptance checks.
+- Progress: The Android Brickout fixture carries shared-manifest MP3 music and WAV effect bytes with exact hashes and bounded metadata, and the generated AOT package seam verifies music-before-effect submission through the compatibility APIs. Physical audible-output proof is still a separate device/emulator acceptance layer.
 - Done gate: The sample is visibly rendered with sprites and audibly produces music/effects on supported devices in dev and published builds.
-- Status: `planned`
+- Status: `in progress (manifest-backed package seam complete; physical audible acceptance remains)`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

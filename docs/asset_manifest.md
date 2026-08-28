@@ -79,10 +79,12 @@ Fonts use `{"kind":"font","encoding":"ttf"}` or
 preparation metadata is not valid for fonts.
 
 Audio uses `{"kind":"audio","encoding":"wav","sample_rate":24000,"channels":1,"duration_frames":24000}`.
-The first runtime playback slice accepts bounded little-endian PCM16 WAV files. Other manifest audio
-encodings remain valid for storage and packaging but are rejected by `audio_load_music` and
-`audio_load_effect` until a matching shared decoder lands; the runtime never guesses an encoding
-from content that contradicts its extension.
+The shared runtime playback slice accepts bounded little-endian PCM16 WAV and MP3 files through
+`audio_load_music` and `audio_load_effect`. Ogg and M4A remain valid for storage and packaging but
+are rejected until a matching shared decoder lands; the runtime never guesses an encoding from
+content that contradicts its extension. Audio metadata is descriptive and is checked by the shared
+resolver before packaging; the decoder independently checks the bounded file and decoded sample
+limits before publishing a runtime handle.
 
 ## Generated package contract
 
