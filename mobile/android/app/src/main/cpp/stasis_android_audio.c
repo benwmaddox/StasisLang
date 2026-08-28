@@ -1,10 +1,14 @@
 #include "stasis_android_audio.h"
+#include "stasis_asset_path.h"
+#include "stasis_audio_assets.h"
 #include "stasis_audio_ring.h"
 
 #include <aaudio/AAudio.h>
 #include <android/log.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <sched.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -16,6 +20,8 @@
 #define STASIS_AUDIO_DEFAULT_RATE 48000
 #define STASIS_AUDIO_DEFAULT_CHANNELS 2
 #define STASIS_AUDIO_DEFAULT_LATENCY 2048
+#define STASIS_AUDIO_PROJECT_ROOT_SIZE 1024
+#define STASIS_AUDIO_RESOLVED_PATH_SIZE 2048
 
 typedef struct StasisAndroidAudioContext {
     AAudioStream *stream;
@@ -37,6 +43,65 @@ static _Atomic int audio_paused;
 static _Atomic int audio_focused;
 static _Atomic int audio_attempted;
 static _Atomic int audio_init_error;
+static pthread_mutex_t audio_assets_lock = PTHREAD_MUTEX_INITIALIZER;
+static StasisAudioAssetStore audio_assets;
+static char audio_project_root[STASIS_AUDIO_PROJECT_ROOT_SIZE];
+
+static void audio_assets_reset_locked(int clear_project_root) {
+    stasis_audio_assets_reset(&audio_assets);
+    if (clear_project_root) audio_project_root[0] = '\0';
+}
+
+static void audio_assets_ensure_initialized_locked(void) {
+    if (audio_assets.next_asset_handle <= 0 || audio_assets.next_voice_handle <= 0) {
+        stasis_audio_assets_reset(&audio_assets);
+    }
+}
+
+static int audio_guest_path_escapes_root(const char *path) {
+    const char *cursor = path;
+    size_t depth = 0;
+    if (!path) return 1;
+    while (*cursor != '\0') {
+        const char *segment;
+        size_t segment_len;
+        while (*cursor == '/' || *cursor == '\\') cursor += 1;
+        if (*cursor == '\0') break;
+        segment = cursor;
+        while (*cursor != '\0' && *cursor != '/' && *cursor != '\\') cursor += 1;
+        segment_len = (size_t)(cursor - segment);
+        if (segment_len == 1 && segment[0] == '.') continue;
+        if (segment_len == 2 && segment[0] == '.' && segment[1] == '.') {
+            if (depth == 0) return 1;
+            depth -= 1;
+            continue;
+        }
+        depth += 1;
+    }
+    return 0;
+}
+
+static int audio_resolve_path_locked(
+    const char *path,
+    char *resolved,
+    size_t resolved_size
+) {
+    char normalized[STASIS_AUDIO_RESOLVED_PATH_SIZE];
+    int written;
+    if (!audio_project_root[0] || !path || !*path ||
+        audio_guest_path_escapes_root(path) ||
+        !stasis_asset_normalize_relative_path(path, normalized, sizeof(normalized))) {
+        return 0;
+    }
+    written = snprintf(resolved, resolved_size, "%s/%s", audio_project_root, normalized);
+    return written > 0 && (size_t)written < resolved_size;
+}
+
+static void audio_assets_reset(int clear_project_root) {
+    pthread_mutex_lock(&audio_assets_lock);
+    audio_assets_reset_locked(clear_project_root);
+    pthread_mutex_unlock(&audio_assets_lock);
+}
 
 typedef void (*StasisAaudioSetBuilderIntFn)(AAudioStreamBuilder *, int32_t);
 
@@ -111,6 +176,15 @@ static aaudio_data_callback_result_t audio_data_callback(
     if (num_frames > 0) {
         stasis_audio_ring_consume(&context->ring,
             (float *)audio_data, (uint32_t)num_frames);
+        /* The device callback must never wait behind a guest-side asset load or
+         * control mutation. A missed try-lock leaves the ring output intact and
+         * the next callback gets another chance to mix decoded voices. */
+        if (context->channels == 2 &&
+            pthread_mutex_trylock(&audio_assets_lock) == 0) {
+            stasis_audio_assets_mix(&audio_assets, (float *)audio_data,
+                num_frames, context->sample_rate);
+            pthread_mutex_unlock(&audio_assets_lock);
+        }
     }
     audio_callback_leave(context);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
@@ -184,6 +258,17 @@ static void audio_retire_context(StasisAndroidAudioContext *context) {
     free(context);
 }
 
+static void audio_close_context(void) {
+    StasisAndroidAudioContext *context;
+    audio_lock_context();
+    context = atomic_exchange_explicit(&audio_context, NULL, memory_order_relaxed);
+    if (context != NULL) {
+        atomic_store_explicit(&context->retired, 1, memory_order_release);
+    }
+    audio_unlock_context();
+    audio_retire_context(context);
+}
+
 int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) {
     AAudioStreamBuilder *builder = NULL;
     StasisAndroidAudioContext *context = NULL;
@@ -194,7 +279,10 @@ int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) 
         (channels != 1 && channels != 2) || target_latency_frames <= 0) {
         return 0;
     }
-    stasis_audio_shutdown();
+    /* Reinitialization clears old decoded voices but preserves the project root
+     * installed immediately before the guest's main() calls audio_init(). */
+    audio_close_context();
+    audio_assets_reset(0);
     atomic_store_explicit(&audio_attempted, 1, memory_order_release);
     context = calloc(1, sizeof(*context));
     if (context == NULL) goto fail;
@@ -256,14 +344,8 @@ fail:
 }
 
 void stasis_audio_shutdown(void) {
-    StasisAndroidAudioContext *context;
-    audio_lock_context();
-    context = atomic_exchange_explicit(&audio_context, NULL, memory_order_relaxed);
-    if (context != NULL) {
-        atomic_store_explicit(&context->retired, 1, memory_order_release);
-    }
-    audio_unlock_context();
-    audio_retire_context(context);
+    audio_close_context();
+    audio_assets_reset(1);
     atomic_store_explicit(&audio_attempted, 0, memory_order_release);
 }
 
@@ -284,7 +366,6 @@ int stasis_audio_is_available(void) {
     latency = context->target_latency;
     audio_context_release(context);
     if (error != 0 && audio_should_run()) {
-        stasis_audio_shutdown();
         return stasis_audio_init(rate, channels, latency);
     }
     return 1;
@@ -345,6 +426,138 @@ int stasis_audio_push_f32_interleaved(const float *samples, int frame_count) {
         audio_context_release(context);
     }
     return value;
+}
+
+int stasis_audio_set_project_root(const char *project_root) {
+    size_t length;
+    if (!project_root || !*project_root) {
+        audio_assets_reset(1);
+        return 0;
+    }
+    length = strlen(project_root);
+    if (length >= sizeof(audio_project_root)) {
+        audio_assets_reset(1);
+        return 0;
+    }
+
+    pthread_mutex_lock(&audio_assets_lock);
+    if (strcmp(audio_project_root, project_root) != 0) {
+        audio_assets_reset_locked(0);
+        memcpy(audio_project_root, project_root, length + 1);
+    }
+    pthread_mutex_unlock(&audio_assets_lock);
+    return 1;
+}
+
+static int audio_load_asset(const char *path, int wav_only) {
+    char resolved[STASIS_AUDIO_RESOLVED_PATH_SIZE];
+    int handle;
+    pthread_mutex_lock(&audio_assets_lock);
+    if (!audio_resolve_path_locked(path, resolved, sizeof(resolved))) {
+        pthread_mutex_unlock(&audio_assets_lock);
+        __android_log_print(ANDROID_LOG_WARN, STASIS_AUDIO_LOG_TAG,
+            "rejected guest audio path: %s", path ? path : "");
+        return 0;
+    }
+    audio_assets_ensure_initialized_locked();
+    handle = wav_only
+        ? stasis_audio_assets_load_wav(&audio_assets, resolved)
+        : stasis_audio_assets_load(&audio_assets, resolved);
+    pthread_mutex_unlock(&audio_assets_lock);
+    if (handle <= 0) {
+        __android_log_print(ANDROID_LOG_WARN, STASIS_AUDIO_LOG_TAG,
+            "failed to load guest audio path: %s", path);
+    }
+    return handle;
+}
+
+int stasis_audio_load_wav(const char *path) {
+    return audio_load_asset(path, 1);
+}
+
+void stasis_audio_release(int asset_handle) {
+    pthread_mutex_lock(&audio_assets_lock);
+    stasis_audio_assets_release(&audio_assets, asset_handle);
+    pthread_mutex_unlock(&audio_assets_lock);
+}
+
+int stasis_audio_play(int asset_handle, int loop, float volume, float pan) {
+    int voice_handle;
+    pthread_mutex_lock(&audio_assets_lock);
+    audio_assets_ensure_initialized_locked();
+    voice_handle = stasis_audio_assets_play(
+        &audio_assets, asset_handle, loop, volume, pan);
+    pthread_mutex_unlock(&audio_assets_lock);
+    return voice_handle;
+}
+
+void stasis_audio_stop(int voice_handle) {
+    pthread_mutex_lock(&audio_assets_lock);
+    stasis_audio_assets_stop_voice(&audio_assets, voice_handle);
+    pthread_mutex_unlock(&audio_assets_lock);
+}
+
+int stasis_audio_voice_is_playing(int voice_handle) {
+    int playing;
+    pthread_mutex_lock(&audio_assets_lock);
+    playing = stasis_audio_assets_voice_is_playing(&audio_assets, voice_handle);
+    pthread_mutex_unlock(&audio_assets_lock);
+    return playing;
+}
+
+void stasis_audio_voice_set_paused(int voice_handle, int paused) {
+    pthread_mutex_lock(&audio_assets_lock);
+    stasis_audio_assets_voice_set_paused(&audio_assets, voice_handle, paused);
+    pthread_mutex_unlock(&audio_assets_lock);
+}
+
+void stasis_audio_voice_set_volume_pan(int voice_handle, float volume, float pan) {
+    pthread_mutex_lock(&audio_assets_lock);
+    stasis_audio_assets_voice_set_volume_pan(
+        &audio_assets, voice_handle, volume, pan);
+    pthread_mutex_unlock(&audio_assets_lock);
+}
+
+int stasis_audio_load_music(const char *path) {
+    return audio_load_asset(path, 0);
+}
+
+int stasis_audio_load_effect(const char *path) {
+    return audio_load_asset(path, 0);
+}
+
+int stasis_audio_play_music(int asset_handle, int loop, float volume) {
+    int voice_handle;
+    pthread_mutex_lock(&audio_assets_lock);
+    audio_assets_ensure_initialized_locked();
+    /* Music is exclusive per asset, matching the desktop convenience API. */
+    stasis_audio_assets_stop_asset(&audio_assets, asset_handle);
+    voice_handle = stasis_audio_assets_play(
+        &audio_assets, asset_handle, loop, volume, 0.0f);
+    pthread_mutex_unlock(&audio_assets_lock);
+    return voice_handle > 0;
+}
+
+void stasis_audio_stop_music(int asset_handle) {
+    pthread_mutex_lock(&audio_assets_lock);
+    stasis_audio_assets_stop_asset(&audio_assets, asset_handle);
+    pthread_mutex_unlock(&audio_assets_lock);
+}
+
+void stasis_audio_pause_music(int asset_handle, int paused) {
+    pthread_mutex_lock(&audio_assets_lock);
+    stasis_audio_assets_set_asset_paused(&audio_assets, asset_handle, paused);
+    pthread_mutex_unlock(&audio_assets_lock);
+}
+
+void stasis_audio_set_music_volume(int asset_handle, float volume) {
+    pthread_mutex_lock(&audio_assets_lock);
+    stasis_audio_assets_set_asset_volume(&audio_assets, asset_handle, volume);
+    pthread_mutex_unlock(&audio_assets_lock);
+}
+
+int stasis_audio_play_effect(int asset_handle, float volume) {
+    return stasis_audio_play(asset_handle, 0, volume, 0.0f) > 0;
 }
 
 void stasis_android_audio_set_paused(int paused) {

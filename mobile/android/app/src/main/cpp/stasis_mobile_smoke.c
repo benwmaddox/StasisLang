@@ -49,6 +49,20 @@ typedef struct StasisAudioHostApi {
     int (*get_queued_frames)(void);
     int (*get_underruns)(void);
     int (*push_f32_interleaved)(const float *, int);
+    int (*load_wav)(const char *);
+    void (*release)(int);
+    int (*play)(int, int, float, float);
+    void (*stop)(int);
+    int (*voice_is_playing)(int);
+    void (*voice_set_paused)(int, int);
+    void (*voice_set_volume_pan)(int, float, float);
+    int (*load_music)(const char *);
+    int (*load_effect)(const char *);
+    int (*play_music)(int, int, float);
+    void (*stop_music)(int);
+    void (*pause_music)(int, int);
+    void (*set_music_volume)(int, float);
+    int (*play_effect)(int, float);
 } StasisAudioHostApi;
 typedef int (*stasis_android_bridge_install_audio_api_fn)(const StasisAudioHostApi *api);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
@@ -376,7 +390,21 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             stasis_audio_get_channels,
             stasis_audio_get_queued_frames,
             stasis_audio_get_underruns,
-            stasis_audio_push_f32_interleaved};
+            stasis_audio_push_f32_interleaved,
+            stasis_audio_load_wav,
+            stasis_audio_release,
+            stasis_audio_play,
+            stasis_audio_stop,
+            stasis_audio_voice_is_playing,
+            stasis_audio_voice_set_paused,
+            stasis_audio_voice_set_volume_pan,
+            stasis_audio_load_music,
+            stasis_audio_load_effect,
+            stasis_audio_play_music,
+            stasis_audio_stop_music,
+            stasis_audio_pause_music,
+            stasis_audio_set_music_volume,
+            stasis_audio_play_effect};
         rust_bridge_api.install_audio_api(&audio_api);
     }
 
@@ -522,6 +550,10 @@ static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring requ
 }
 
 static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, char *message, size_t message_size) {
+    if (!stasis_audio_set_project_root(project_root)) {
+        snprintf(message, message_size, "RunError: invalid audio project root");
+        return 1;
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick == NULL || bridge->free_string == NULL) {
         return 0;
@@ -539,6 +571,10 @@ static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int t
 }
 
 static int try_rust_bridge_set_i32_global(const char *project_root, const char *path, int value, char *message, size_t message_size) {
+    if (!stasis_audio_set_project_root(project_root)) {
+        snprintf(message, message_size, "StateError: invalid audio project root");
+        return 1;
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->set_i32_global == NULL || bridge->free_string == NULL) {
         snprintf(message, message_size, "StateError: Rust Android bridge set_i32_global unavailable");
@@ -557,6 +593,10 @@ static int try_rust_bridge_set_i32_global(const char *project_root, const char *
 }
 
 static int try_rust_bridge_run_tests(const char *project_root, char *message, size_t message_size) {
+    if (!stasis_audio_set_project_root(project_root)) {
+        snprintf(message, message_size, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"invalid audio project root\"}");
+        return 1;
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tests == NULL || bridge->free_string == NULL) {
         return 0;
@@ -572,6 +612,10 @@ static int try_rust_bridge_run_tests(const char *project_root, char *message, si
 }
 
 static int try_rust_bridge_get_i32_global(const char *project_root, const char *path, char *message, size_t message_size) {
+    if (!stasis_audio_set_project_root(project_root)) {
+        snprintf(message, message_size, "StateError: invalid audio project root");
+        return 1;
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->get_i32_global == NULL || bridge->free_string == NULL) {
         snprintf(message, message_size, "StateError: Rust Android bridge get_i32_global unavailable");
@@ -608,6 +652,9 @@ static void log_workshop_it025_marker(JNIEnv *env, const char *bridge_version,
 
 #endif
 static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len) {
+    if (!stasis_audio_set_project_root(project_root)) {
+        return -1;
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick_frame == NULL) {
         return -1;

@@ -1523,6 +1523,66 @@ def main() -> int:
     assert "stasis_android_audio_set_focus" in native
     assert "stasis_android_bridge_install_audio_api" in native
     android_audio = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
+    dynload = read("crates/stasis_dynload/src/lib.rs")
+    dynload_audio_api = dynload[
+        dynload.index("pub struct StasisAudioHostApi"):dynload.index(
+            "static AUDIO_HOST_API", dynload.index("pub struct StasisAudioHostApi"))
+    ]
+    native_audio_api = native[
+        native.index("typedef struct StasisAudioHostApi"):native.index(
+            "} StasisAudioHostApi;", native.index("typedef struct StasisAudioHostApi"))
+    ]
+    audio_api_fields = [
+        ("init", "pub init", "int (*init)"),
+        ("shutdown", "pub shutdown", "void (*shutdown)"),
+        ("is_available", "pub is_available", "int (*is_available)"),
+        ("get_sample_rate", "pub get_sample_rate", "int (*get_sample_rate)"),
+        ("get_channels", "pub get_channels", "int (*get_channels)"),
+        ("get_queued_frames", "pub get_queued_frames", "int (*get_queued_frames)"),
+        ("get_underruns", "pub get_underruns", "int (*get_underruns)"),
+        ("push_f32_interleaved", "pub push_f32_interleaved", "int (*push_f32_interleaved)"),
+        ("load_wav", "pub load_wav", "int (*load_wav)"),
+        ("release", "pub release", "void (*release)"),
+        ("play", "pub play", "int (*play)"),
+        ("stop", "pub stop", "void (*stop)"),
+        ("voice_is_playing", "pub voice_is_playing", "int (*voice_is_playing)"),
+        ("voice_set_paused", "pub voice_set_paused", "void (*voice_set_paused)"),
+        ("voice_set_volume_pan", "pub voice_set_volume_pan", "void (*voice_set_volume_pan)"),
+        ("load_music", "pub load_music", "int (*load_music)"),
+        ("load_effect", "pub load_effect", "int (*load_effect)"),
+        ("play_music", "pub play_music", "int (*play_music)"),
+        ("stop_music", "pub stop_music", "void (*stop_music)"),
+        ("pause_music", "pub pause_music", "void (*pause_music)"),
+        ("set_music_volume", "pub set_music_volume", "void (*set_music_volume)"),
+        ("play_effect", "pub play_effect", "int (*play_effect)"),
+    ]
+    rust_positions = []
+    native_positions = []
+    for _, rust_field, native_field in audio_api_fields:
+        assert rust_field in dynload_audio_api
+        assert native_field in native_audio_api
+        rust_positions.append(dynload_audio_api.index(rust_field))
+        native_positions.append(native_audio_api.index(native_field))
+    assert rust_positions == sorted(rust_positions)
+    assert native_positions == sorted(native_positions)
+    for callback in (
+        "stasis_audio_load_wav",
+        "stasis_audio_release",
+        "stasis_audio_play",
+        "stasis_audio_stop",
+        "stasis_audio_voice_is_playing",
+        "stasis_audio_voice_set_paused",
+        "stasis_audio_voice_set_volume_pan",
+        "stasis_audio_load_music",
+        "stasis_audio_load_effect",
+        "stasis_audio_play_music",
+        "stasis_audio_stop_music",
+        "stasis_audio_pause_music",
+        "stasis_audio_set_music_volume",
+        "stasis_audio_play_effect",
+    ):
+        assert callback in native
+        assert callback in android_audio
     assert "AAudioStreamBuilder_openStream" in android_audio
     assert "AAudioStreamBuilder_setFormat" in android_audio
     assert "AAudioStreamBuilder_setUsage" in android_audio
@@ -1532,6 +1592,15 @@ def main() -> int:
     assert "stasis_audio_get_queued_frames" in android_audio
     assert "stasis_audio_get_underruns" in android_audio
     assert "stasis_audio_push_f32_interleaved" in android_audio
+    assert "stasis_audio_set_project_root" in android_audio
+    assert "stasis_asset_normalize_relative_path" in android_audio
+    assert "audio_guest_path_escapes_root" in android_audio
+    assert "pthread_mutex_trylock" in android_audio
+    assert "stasis_audio_assets_mix" in android_audio
+    assert "stasis_audio_assets_reset" in android_audio
+    assert "stasis_audio_assets_stop_asset(&audio_assets, asset_handle)" in android_audio
+    assert "return voice_handle > 0;" in android_audio
+    assert "stasis_audio_assets.c" in read("mobile/android/app/src/main/cpp/CMakeLists.txt")
     assert "stasis_audio_ring" in read("runtime/stasis_audio_ring.c")
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
@@ -1539,6 +1608,7 @@ def main() -> int:
     assert "stasis_mobile_smoke.c" in cmake
     assert "stasis_android_sprite.c" in cmake
     assert "stasis_android_audio.c" in cmake
+    assert "stasis_audio_assets.c" in cmake
     assert "stasis_audio_ring.c" in cmake
     assert "../../../../../../runtime" in cmake
     assert "find_library(math_lib m)" in cmake

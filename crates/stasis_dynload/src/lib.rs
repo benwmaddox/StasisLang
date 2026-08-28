@@ -6474,6 +6474,20 @@ pub struct StasisAudioHostApi {
     pub get_queued_frames: Option<extern "C" fn() -> i32>,
     pub get_underruns: Option<extern "C" fn() -> i32>,
     pub push_f32_interleaved: Option<extern "C" fn(*const f32, i32) -> i32>,
+    pub load_wav: Option<extern "C" fn(*const c_char) -> i32>,
+    pub release: Option<extern "C" fn(i32)>,
+    pub play: Option<extern "C" fn(i32, i32, f32, f32) -> i32>,
+    pub stop: Option<extern "C" fn(i32)>,
+    pub voice_is_playing: Option<extern "C" fn(i32) -> i32>,
+    pub voice_set_paused: Option<extern "C" fn(i32, i32)>,
+    pub voice_set_volume_pan: Option<extern "C" fn(i32, f32, f32)>,
+    pub load_music: Option<extern "C" fn(*const c_char) -> i32>,
+    pub load_effect: Option<extern "C" fn(*const c_char) -> i32>,
+    pub play_music: Option<extern "C" fn(i32, i32, f32) -> i32>,
+    pub stop_music: Option<extern "C" fn(i32)>,
+    pub pause_music: Option<extern "C" fn(i32, i32)>,
+    pub set_music_volume: Option<extern "C" fn(i32, f32)>,
+    pub play_effect: Option<extern "C" fn(i32, f32) -> i32>,
 }
 
 static AUDIO_HOST_API: OnceLock<Mutex<Option<StasisAudioHostApi>>> = OnceLock::new();
@@ -6490,6 +6504,17 @@ pub fn install_audio_host_api(api: Option<StasisAudioHostApi>) {
         .get_or_init(|| Mutex::new(None))
         .lock()
         .expect("audio host API mutex poisoned") = api;
+}
+
+fn invoke_audio_host_path(
+    path_id: i32,
+    callback: Option<extern "C" fn(*const c_char) -> i32>,
+) -> Option<i32> {
+    let callback = callback?;
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return Some(0);
+    };
+    Some(callback(path.as_ptr()))
 }
 
 #[no_mangle]
@@ -6673,6 +6698,12 @@ pub extern "C" fn stasis_jit_audio_push_f32_interleaved(samples: i32, frame_coun
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_load_wav(path_id: i32) -> i32 {
+    if let Some(result) = invoke_audio_host_path(
+        path_id,
+        current_audio_host_api().and_then(|api| api.load_wav),
+    ) {
+        return result;
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -6692,6 +6723,10 @@ pub extern "C" fn stasis_jit_audio_load_wav(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_release(asset_handle: i32) {
+    if let Some(release) = current_audio_host_api().and_then(|api| api.release) {
+        release(asset_handle);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -6712,6 +6747,9 @@ pub extern "C" fn stasis_jit_audio_play(
     volume: f32,
     pan: f32,
 ) -> i32 {
+    if let Some(play) = current_audio_host_api().and_then(|api| api.play) {
+        return play(asset_handle, looped, volume, pan);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6729,6 +6767,10 @@ pub extern "C" fn stasis_jit_audio_play(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_stop(voice_handle: i32) {
+    if let Some(stop) = current_audio_host_api().and_then(|api| api.stop) {
+        stop(voice_handle);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -6744,6 +6786,9 @@ pub extern "C" fn stasis_jit_audio_stop(voice_handle: i32) {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_voice_is_playing(voice_handle: i32) -> i32 {
+    if let Some(is_playing) = current_audio_host_api().and_then(|api| api.voice_is_playing) {
+        return is_playing(voice_handle);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6759,6 +6804,10 @@ pub extern "C" fn stasis_jit_audio_voice_is_playing(voice_handle: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_voice_set_paused(voice_handle: i32, paused: i32) {
+    if let Some(set_paused) = current_audio_host_api().and_then(|api| api.voice_set_paused) {
+        set_paused(voice_handle, paused);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -6774,6 +6823,11 @@ pub extern "C" fn stasis_jit_audio_voice_set_paused(voice_handle: i32, paused: i
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_voice_set_volume_pan(voice_handle: i32, volume: f32, pan: f32) {
+    if let Some(set_volume_pan) = current_audio_host_api().and_then(|api| api.voice_set_volume_pan)
+    {
+        set_volume_pan(voice_handle, volume, pan);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -6789,6 +6843,12 @@ pub extern "C" fn stasis_jit_audio_voice_set_volume_pan(voice_handle: i32, volum
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_load_music(path_id: i32) -> i32 {
+    if let Some(result) = invoke_audio_host_path(
+        path_id,
+        current_audio_host_api().and_then(|api| api.load_music),
+    ) {
+        return result;
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -6808,6 +6868,12 @@ pub extern "C" fn stasis_jit_audio_load_music(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_load_effect(path_id: i32) -> i32 {
+    if let Some(result) = invoke_audio_host_path(
+        path_id,
+        current_audio_host_api().and_then(|api| api.load_effect),
+    ) {
+        return result;
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -6827,6 +6893,9 @@ pub extern "C" fn stasis_jit_audio_load_effect(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_play_music(asset_handle: i32, looped: i32, volume: f32) -> i32 {
+    if let Some(play_music) = current_audio_host_api().and_then(|api| api.play_music) {
+        return play_music(asset_handle, looped, volume);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -6843,6 +6912,10 @@ pub extern "C" fn stasis_jit_audio_play_music(asset_handle: i32, looped: i32, vo
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_stop_music(asset_handle: i32) {
+    if let Some(stop_music) = current_audio_host_api().and_then(|api| api.stop_music) {
+        stop_music(asset_handle);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -6858,6 +6931,10 @@ pub extern "C" fn stasis_jit_audio_stop_music(asset_handle: i32) {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_pause_music(asset_handle: i32, paused: i32) {
+    if let Some(pause_music) = current_audio_host_api().and_then(|api| api.pause_music) {
+        pause_music(asset_handle, paused);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -6873,6 +6950,10 @@ pub extern "C" fn stasis_jit_audio_pause_music(asset_handle: i32, paused: i32) {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_set_music_volume(asset_handle: i32, volume: f32) {
+    if let Some(set_music_volume) = current_audio_host_api().and_then(|api| api.set_music_volume) {
+        set_music_volume(asset_handle, volume);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -6888,6 +6969,9 @@ pub extern "C" fn stasis_jit_audio_set_music_volume(asset_handle: i32, volume: f
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_play_effect(asset_handle: i32, volume: f32) -> i32 {
+    if let Some(play_effect) = current_audio_host_api().and_then(|api| api.play_effect) {
+        return play_effect(asset_handle, volume);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -7060,6 +7144,8 @@ mod tests {
     }
 
     static TEST_SPRITE_RELEASES: AtomicUsize = AtomicUsize::new(0);
+    static TEST_AUDIO_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_AUDIO_PATH_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     fn test_sprite_load(_: &[u8], _: i32, _: i32) -> i32 {
         77
@@ -7091,11 +7177,132 @@ mod tests {
         0
     }
 
+    extern "C" fn test_audio_load(path: *const c_char) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        if !path.is_null() {
+            let path = unsafe { std::ffi::CStr::from_ptr(path) };
+            if path.to_bytes().starts_with(b"assets/") {
+                TEST_AUDIO_PATH_CALLS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        101
+    }
+
+    extern "C" fn test_audio_release(_: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_play(_: i32, _: i32, _: f32, _: f32) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        202
+    }
+
+    extern "C" fn test_audio_stop(_: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_voice_is_playing(_: i32) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        1
+    }
+
+    extern "C" fn test_audio_voice_set_paused(_: i32, _: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_voice_set_volume_pan(_: i32, _: f32, _: f32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_play_music(_: i32, _: i32, _: f32) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        303
+    }
+
+    extern "C" fn test_audio_stop_music(_: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_pause_music(_: i32, _: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_set_music_volume(_: i32, _: f32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_play_effect(_: i32, _: f32) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        404
+    }
+
+    struct AudioHostReset;
+
+    impl Drop for AudioHostReset {
+        fn drop(&mut self) {
+            install_audio_host_api(None);
+            clear_jit_string_literal_table();
+        }
+    }
+
     fn test_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("dynload test lock mutex poisoned")
+    }
+
+    #[test]
+    fn audio_asset_bridges_dispatch_through_installed_host_api() {
+        let _guard = test_lock();
+        let _host_reset = AudioHostReset;
+        TEST_AUDIO_CALLBACKS.store(0, Ordering::SeqCst);
+        TEST_AUDIO_PATH_CALLS.store(0, Ordering::SeqCst);
+        clear_jit_string_literal_table();
+        upsert_jit_string_literal(900, "assets/music.mp3");
+        upsert_jit_string_literal(901, "assets/effect.wav");
+
+        install_audio_host_api(Some(StasisAudioHostApi {
+            init: None,
+            shutdown: None,
+            is_available: None,
+            get_sample_rate: None,
+            get_channels: None,
+            get_queued_frames: None,
+            get_underruns: None,
+            push_f32_interleaved: None,
+            load_wav: Some(test_audio_load),
+            release: Some(test_audio_release),
+            play: Some(test_audio_play),
+            stop: Some(test_audio_stop),
+            voice_is_playing: Some(test_audio_voice_is_playing),
+            voice_set_paused: Some(test_audio_voice_set_paused),
+            voice_set_volume_pan: Some(test_audio_voice_set_volume_pan),
+            load_music: Some(test_audio_load),
+            load_effect: Some(test_audio_load),
+            play_music: Some(test_audio_play_music),
+            stop_music: Some(test_audio_stop_music),
+            pause_music: Some(test_audio_pause_music),
+            set_music_volume: Some(test_audio_set_music_volume),
+            play_effect: Some(test_audio_play_effect),
+        }));
+
+        assert_eq!(stasis_jit_audio_load_wav(901), 101);
+        assert_eq!(stasis_jit_audio_load_music(900), 101);
+        assert_eq!(stasis_jit_audio_load_effect(901), 101);
+        stasis_jit_audio_release(101);
+        assert_eq!(stasis_jit_audio_play(101, 1, 0.5, -0.25), 202);
+        stasis_jit_audio_stop(202);
+        assert_eq!(stasis_jit_audio_voice_is_playing(202), 1);
+        stasis_jit_audio_voice_set_paused(202, 1);
+        stasis_jit_audio_voice_set_volume_pan(202, 0.25, 0.5);
+        assert_eq!(stasis_jit_audio_play_music(101, 1, 0.4), 303);
+        stasis_jit_audio_stop_music(303);
+        stasis_jit_audio_pause_music(101, 1);
+        stasis_jit_audio_set_music_volume(101, 0.2);
+        assert_eq!(stasis_jit_audio_play_effect(101, 0.3), 404);
+        assert_eq!(TEST_AUDIO_PATH_CALLS.load(Ordering::SeqCst), 3);
+        assert_eq!(TEST_AUDIO_CALLBACKS.load(Ordering::SeqCst), 14);
     }
 
     #[test]
