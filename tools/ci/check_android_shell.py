@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1521,6 +1523,66 @@ def main() -> int:
     assert "stasis_android_audio_set_focus" in native
     assert "stasis_android_bridge_install_audio_api" in native
     android_audio = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
+    dynload = read("crates/stasis_dynload/src/lib.rs")
+    dynload_audio_api = dynload[
+        dynload.index("pub struct StasisAudioHostApi"):dynload.index(
+            "static AUDIO_HOST_API", dynload.index("pub struct StasisAudioHostApi"))
+    ]
+    native_audio_api = native[
+        native.index("typedef struct StasisAudioHostApi"):native.index(
+            "} StasisAudioHostApi;", native.index("typedef struct StasisAudioHostApi"))
+    ]
+    audio_api_fields = [
+        ("init", "pub init", "int (*init)"),
+        ("shutdown", "pub shutdown", "void (*shutdown)"),
+        ("is_available", "pub is_available", "int (*is_available)"),
+        ("get_sample_rate", "pub get_sample_rate", "int (*get_sample_rate)"),
+        ("get_channels", "pub get_channels", "int (*get_channels)"),
+        ("get_queued_frames", "pub get_queued_frames", "int (*get_queued_frames)"),
+        ("get_underruns", "pub get_underruns", "int (*get_underruns)"),
+        ("push_f32_interleaved", "pub push_f32_interleaved", "int (*push_f32_interleaved)"),
+        ("load_wav", "pub load_wav", "int (*load_wav)"),
+        ("release", "pub release", "void (*release)"),
+        ("play", "pub play", "int (*play)"),
+        ("stop", "pub stop", "void (*stop)"),
+        ("voice_is_playing", "pub voice_is_playing", "int (*voice_is_playing)"),
+        ("voice_set_paused", "pub voice_set_paused", "void (*voice_set_paused)"),
+        ("voice_set_volume_pan", "pub voice_set_volume_pan", "void (*voice_set_volume_pan)"),
+        ("load_music", "pub load_music", "int (*load_music)"),
+        ("load_effect", "pub load_effect", "int (*load_effect)"),
+        ("play_music", "pub play_music", "int (*play_music)"),
+        ("stop_music", "pub stop_music", "void (*stop_music)"),
+        ("pause_music", "pub pause_music", "void (*pause_music)"),
+        ("set_music_volume", "pub set_music_volume", "void (*set_music_volume)"),
+        ("play_effect", "pub play_effect", "int (*play_effect)"),
+    ]
+    rust_positions = []
+    native_positions = []
+    for _, rust_field, native_field in audio_api_fields:
+        assert rust_field in dynload_audio_api
+        assert native_field in native_audio_api
+        rust_positions.append(dynload_audio_api.index(rust_field))
+        native_positions.append(native_audio_api.index(native_field))
+    assert rust_positions == sorted(rust_positions)
+    assert native_positions == sorted(native_positions)
+    for callback in (
+        "stasis_audio_load_wav",
+        "stasis_audio_release",
+        "stasis_audio_play",
+        "stasis_audio_stop",
+        "stasis_audio_voice_is_playing",
+        "stasis_audio_voice_set_paused",
+        "stasis_audio_voice_set_volume_pan",
+        "stasis_audio_load_music",
+        "stasis_audio_load_effect",
+        "stasis_audio_play_music",
+        "stasis_audio_stop_music",
+        "stasis_audio_pause_music",
+        "stasis_audio_set_music_volume",
+        "stasis_audio_play_effect",
+    ):
+        assert callback in native
+        assert callback in android_audio
     assert "AAudioStreamBuilder_openStream" in android_audio
     assert "AAudioStreamBuilder_setFormat" in android_audio
     assert "AAudioStreamBuilder_setUsage" in android_audio
@@ -1530,6 +1592,15 @@ def main() -> int:
     assert "stasis_audio_get_queued_frames" in android_audio
     assert "stasis_audio_get_underruns" in android_audio
     assert "stasis_audio_push_f32_interleaved" in android_audio
+    assert "stasis_audio_set_project_root" in android_audio
+    assert "stasis_asset_normalize_relative_path" in android_audio
+    assert "audio_guest_path_escapes_root" in android_audio
+    assert "pthread_mutex_trylock" in android_audio
+    assert "stasis_audio_assets_mix" in android_audio
+    assert "stasis_audio_assets_reset" in android_audio
+    assert "stasis_audio_assets_stop_asset(&audio_assets, asset_handle)" in android_audio
+    assert "return voice_handle > 0;" in android_audio
+    assert "stasis_audio_assets.c" in read("mobile/android/app/src/main/cpp/CMakeLists.txt")
     assert "stasis_audio_ring" in read("runtime/stasis_audio_ring.c")
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
@@ -1537,6 +1608,7 @@ def main() -> int:
     assert "stasis_mobile_smoke.c" in cmake
     assert "stasis_android_sprite.c" in cmake
     assert "stasis_android_audio.c" in cmake
+    assert "stasis_audio_assets.c" in cmake
     assert "stasis_audio_ring.c" in cmake
     assert "../../../../../../runtime" in cmake
     assert "find_library(math_lib m)" in cmake
@@ -1582,8 +1654,69 @@ def main() -> int:
     assert '"name": "brickout_audio"' in audio_fixture
     assert '"application_id": "com.stasislang.brickoutaudio"' in audio_fixture
     assert '"entry": "src/main.stasis"' in audio_fixture
+    audio_manifest_text = read(
+        "mobile/android/app/src/main/assets/audio_sink_sample/assets/manifest.json"
+    )
+    audio_manifest = json.loads(audio_manifest_text)
+    assert audio_manifest["schema"] == "stasis-assets"
+    assert audio_manifest["version"] == 1
+    audio_assets = {asset["id"]: asset for asset in audio_manifest["assets"]}
+    assert set(audio_assets) == {"brickout_music", "brickout_effect"}
+    assert audio_assets["brickout_music"]["path"] == "assets/tone.mp3"
+    assert audio_assets["brickout_music"]["content_sha256"] == (
+        "5aa0c29e0cd59ae25af7957e07a0f4cfc2506c63ba10e055ae9e6584187e4a3c"
+    )
+    assert audio_assets["brickout_music"]["format"] == {
+        "kind": "audio",
+        "encoding": "mp3",
+        "channels": 1,
+        "sample_rate": 24000,
+        "duration_frames": 18000,
+    }
+    assert audio_assets["brickout_effect"]["path"] == "assets/tone.wav"
+    assert audio_assets["brickout_effect"]["content_sha256"] == (
+        "e6a12792fdbb340eb48009a5cc1ff5162ec69279787605d73678d41658d836f4"
+    )
+    assert audio_assets["brickout_effect"]["format"] == {
+        "kind": "audio",
+        "encoding": "wav",
+        "channels": 1,
+        "sample_rate": 24000,
+        "duration_frames": 18000,
+    }
+    audio_root = ROOT / "mobile/android/app/src/main/assets/audio_sink_sample"
+    canonical_audio_root = ROOT / "samples/audio_asset_playback/assets"
+    for asset in audio_assets.values():
+        asset_path = audio_root / asset["path"]
+        assert asset_path.is_file()
+        assert hashlib.sha256(asset_path.read_bytes()).hexdigest() == asset["content_sha256"]
+        assert asset_path.read_bytes() == (canonical_audio_root / asset_path.name).read_bytes()
     audio_source = read("mobile/android/app/src/main/assets/audio_sink_sample/src/main.stasis")
+    assert "AudioAsset" not in audio_source
+    assert "import \"/vendor/stasis/src/stdlib/audio.stasis\"" not in audio_source
+    assert '"assets/tone.mp3"' in audio_source
+    assert '"assets/tone.wav"' in audio_source
+    assert 'function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_music")' in audio_source
+    assert 'function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_effect")' in audio_source
+    assert 'function @effects(audio)@extern("stasis_jit_audio_play_music")' in audio_source
+    assert 'function @effects(audio)@extern("stasis_jit_audio_play_effect")' in audio_source
+    assert "global music_handle: i32" in audio_source
+    assert "global effect_handle: i32" in audio_source
+    assert "manifest_music_ready = music_handle > 0" in audio_source
+    assert "manifest_effect_ready = effect_handle > 0" in audio_source
+    assert "manifest_audio_update" in audio_source
+    assert "audio_play_music(music_handle, true, 0.18)" in audio_source
+    assert "audio_play_effect(effect_handle, 0.25)" in audio_source
+    assert "manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_MUSIC" in audio_source
+    assert "manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_EFFECT" in audio_source
+    assert "audio_sink_acceptance_update" in audio_source
     assert "audio_push_f32_interleaved" in audio_source
+    audio_test = read(
+        "mobile/android/app/src/main/assets/audio_sink_sample/tests/audio_sink.test.stasis"
+    )
+    assert 'import "../src/main.stasis"' in audio_test
+    assert "audio fixture keeps bounded sink handles and event contracts" in audio_test
+    assert "AUDIO_EVENT_NONE == 0" in audio_test
     audio_native = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
     audio_requested = audio_native[
         audio_native.index("int stasis_android_audio_is_requested(void)"):audio_native.index(

@@ -9,6 +9,7 @@ add_library(stasis_mobile_smoke SHARED
     stasis_android_sprite.c
     stasis_android_audio.c
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../runtime/stasis_svg.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../runtime/stasis_audio_assets.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../runtime/stasis_audio_ring.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../runtime/stasis_platform_storage.c")
 add_subdirectory(

@@ -4,7 +4,10 @@ use serde_json::json;
 use stasis::{
     audit_mobile_aot_bindings, sign_output_artifact_if_configured, write_mobile_aot_bindings_source,
 };
-use stasis_assets::{load_project_asset_manifest, prepare_asset_bundle, sha256_bytes, AssetLimits};
+use stasis_assets::{
+    load_project_asset_manifest, prepare_asset_bundle, sha256_bytes, AssetFormat, AssetLimits,
+    AudioEncoding,
+};
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::EngineEntrypoints;
 use std::fs;
@@ -135,16 +138,23 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
         project.join("assets/ui.ttf"),
     )
     .expect("copy font fixture");
+    fs::copy(
+        repository_root().join("samples/audio_asset_playback/assets/tone.mp3"),
+        project.join("assets/music.mp3"),
+    )
+    .expect("copy compressed music fixture");
     let wav = wav_fixture();
-    fs::write(project.join("assets/tone.wav"), &wav).expect("write audio fixture");
+    fs::write(project.join("assets/effect.wav"), &wav).expect("write audio fixture");
     fs::copy(project.join("assets/ui.ttf"), tree.0.join("outside.ttf"))
         .expect("write traversal sentinel");
 
     let sprite = fs::read(project.join("assets/sprite.png")).expect("read sprite fixture");
     let font = fs::read(project.join("assets/ui.ttf")).expect("read font fixture");
+    let music = fs::read(project.join("assets/music.mp3")).expect("read music fixture");
     let source_hashes = [
         sha256_bytes(&sprite),
         sha256_bytes(&font),
+        sha256_bytes(&music),
         sha256_bytes(&wav),
     ];
     let manifest = json!({
@@ -153,7 +163,8 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
         "assets": [
             {"id":"sprite","path":"assets/sprite.png","content_sha256":source_hashes[0],"format":{"kind":"sprite","encoding":"png","width":64,"height":64},"dependencies":[]},
             {"id":"ui","path":"assets/ui.ttf","content_sha256":source_hashes[1],"format":{"kind":"font","encoding":"ttf"},"dependencies":[]},
-            {"id":"tone","path":"assets/tone.wav","content_sha256":source_hashes[2],"format":{"kind":"audio","encoding":"wav","sample_rate":24000,"channels":1,"duration_frames":4},"dependencies":[]}
+            {"id":"music","path":"assets/music.mp3","content_sha256":source_hashes[2],"format":{"kind":"audio","encoding":"mp3","sample_rate":24000,"channels":1,"duration_frames":18000},"dependencies":[]},
+            {"id":"effect","path":"assets/effect.wav","content_sha256":source_hashes[3],"format":{"kind":"audio","encoding":"wav","sample_rate":24000,"channels":1,"duration_frames":4},"dependencies":[]}
         ]
     });
     fs::write(
@@ -169,12 +180,20 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
 
     let resolved = load_project_asset_manifest(&project, AssetLimits::default())
         .expect("validate source asset identities and hashes");
-    assert_eq!(resolved.assets.len(), 3);
+    assert_eq!(resolved.assets.len(), 4);
     let prepared = prepare_asset_bundle(&resolved, &bundle_root, tree.0.join("asset-cache"))
         .expect("prepare mobile stasis_game bundle");
-    assert_eq!(prepared.copied_assets, 3);
+    assert_eq!(prepared.copied_assets, 4);
     let packaged = load_project_asset_manifest(&bundle_root, AssetLimits::default())
         .expect("validate packaged asset identities and hashes");
+    assert_eq!(
+        fs::read(bundle_root.join("assets/music.mp3")).expect("read packaged music"),
+        music
+    );
+    assert_eq!(
+        fs::read(bundle_root.join("assets/effect.wav")).expect("read packaged effect"),
+        wav
+    );
     assert_eq!(
         packaged
             .by_id("sprite")
@@ -193,12 +212,58 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
     );
     assert_eq!(
         packaged
-            .by_id("tone")
+            .by_id("music")
             .expect("packaged audio")
             .entry
             .content_sha256,
         source_hashes[2]
     );
+    assert_eq!(
+        packaged
+            .by_id("effect")
+            .expect("packaged effect")
+            .entry
+            .content_sha256,
+        source_hashes[3]
+    );
+    match &packaged
+        .by_id("music")
+        .expect("packaged music")
+        .entry
+        .format
+    {
+        AssetFormat::Audio {
+            encoding,
+            channels,
+            sample_rate,
+            duration_frames,
+        } => {
+            assert_eq!(*encoding, AudioEncoding::Mp3);
+            assert_eq!(*channels, 1);
+            assert_eq!(*sample_rate, 24_000);
+            assert_eq!(*duration_frames, 18_000);
+        }
+        format => panic!("unexpected packaged music format: {format:?}"),
+    }
+    match &packaged
+        .by_id("effect")
+        .expect("packaged effect")
+        .entry
+        .format
+    {
+        AssetFormat::Audio {
+            encoding,
+            channels,
+            sample_rate,
+            duration_frames,
+        } => {
+            assert_eq!(*encoding, AudioEncoding::Wav);
+            assert_eq!(*channels, 1);
+            assert_eq!(*sample_rate, 24_000);
+            assert_eq!(*duration_frames, 4);
+        }
+        format => panic!("unexpected packaged effect format: {format:?}"),
+    }
 
     let mut process = AotProcess::new();
     process
@@ -284,6 +349,7 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
     let stdout = String::from_utf8(run.stdout).expect("UTF-8 harness output");
     assert!(stdout.contains("stasis.seam_test.v1 IT-015"));
     assert!(stdout.contains("samples=0.125:0.125 offline_active=1"));
+    assert!(stdout.contains("events=12 music_played=1 effect_played=1"));
     assert!(stdout.contains("../../missing.wav"));
     let trace = stdout
         .split_whitespace()
@@ -306,7 +372,8 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
             "path": asset.entry.path,
             "sha256": asset.entry.content_sha256
         })).collect::<Vec<_>>(),
-        "native_handles": {"sprite": "positive", "font": "positive", "cached_text": "positive", "audio": "positive", "voice": "positive"},
+        "native_handles": {"sprite": "positive", "font": "positive", "cached_text": "positive", "audio": "positive", "voice": "positive", "music": "positive", "effect": "positive"},
+        "audio_events": {"order": ["music", "effect"], "music_played": true, "effect_played": true},
         "render_trace": trace,
         "offline_audio": {"output_lr_frame_1": [0.125, 0.125], "voice_active_after_4_output_frames": true},
         "containment": {
