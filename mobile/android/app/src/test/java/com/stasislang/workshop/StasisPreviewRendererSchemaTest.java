@@ -36,6 +36,7 @@ public final class StasisPreviewRendererSchemaTest {
 
         assertEquals(0, replaced[0].sprites.length);
         assertEquals(0, replaced[0].spriteValues.length);
+        assertEquals(0, replaced[0].clips.length);
     }
 
     @Test
@@ -45,8 +46,11 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(79_996, StasisPreviewRenderer.F_RECT_REVERSE_BASE);
         assertEquals(112_772, StasisPreviewRenderer.F_TEXT_BASE);
         assertEquals(18_464, StasisPreviewRenderer.I_ORDER_BASE);
-        assertEquals(34_608, StasisPreviewRenderer.FRAME_I32_CAPACITY);
-        assertEquals(125_060, StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        assertEquals(125_060, StasisPreviewRenderer.F_CLIP_BASE);
+        assertEquals(256, StasisPreviewRenderer.MAX_CLIPS);
+        assertEquals(4, StasisPreviewRenderer.CLIP_STRIDE_F32);
+        assertEquals(35_120, StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        assertEquals(126_084, StasisPreviewRenderer.FRAME_F32_CAPACITY);
         assertEquals(65_536, StasisPreviewRenderer.TEXT_U8_CAPACITY);
     }
 
@@ -219,6 +223,10 @@ public final class StasisPreviewRendererSchemaTest {
         int text = StasisPreviewRenderer.ORDER_TEXT * StasisPreviewRenderer.ORDER_KIND_SCALE;
         int rectangle = StasisPreviewRenderer.ORDER_RECT
                 * StasisPreviewRenderer.ORDER_KIND_SCALE;
+        int clipPush = StasisPreviewRenderer.ORDER_CLIP_PUSH
+                * StasisPreviewRenderer.ORDER_KIND_SCALE;
+        int clipPop = StasisPreviewRenderer.ORDER_CLIP_POP
+                * StasisPreviewRenderer.ORDER_KIND_SCALE;
 
         int[] backgroundFirst = {sprite, rectangle, line, text};
         int[] overlayFirst = {line, text, rectangle, sprite};
@@ -231,6 +239,10 @@ public final class StasisPreviewRendererSchemaTest {
                 StasisPreviewRenderer.orderKind(backgroundFirst[3]));
         assertEquals(StasisPreviewRenderer.ORDER_RECT,
                 StasisPreviewRenderer.orderKind(backgroundFirst[1]));
+        assertEquals(StasisPreviewRenderer.ORDER_CLIP_PUSH,
+                StasisPreviewRenderer.orderKind(clipPush + 2));
+        assertEquals(StasisPreviewRenderer.ORDER_CLIP_POP,
+                StasisPreviewRenderer.orderKind(clipPop));
         assertEquals(0, StasisPreviewRenderer.orderIndex(backgroundFirst[0]));
         assertEquals(-1, StasisPreviewRenderer.orderIndex(-1));
     }
@@ -253,6 +265,12 @@ public final class StasisPreviewRendererSchemaTest {
                 StasisPreviewRenderer.MAX_GEOMETRY - 1, Integer.MAX_VALUE));
         assertEquals(0, StasisPreviewRenderer.activeRectF32Count(
                 StasisPreviewRenderer.RENDER_V3_VERSION, 0, 1));
+        assertEquals(0, StasisPreviewRenderer.clampedClipCount(
+                StasisPreviewRenderer.RENDER_V5_VERSION, 3));
+        assertEquals(3, StasisPreviewRenderer.clampedClipCount(
+                StasisPreviewRenderer.RENDER_VERSION, 3));
+        assertEquals(StasisPreviewRenderer.MAX_CLIPS, StasisPreviewRenderer.clampedClipCount(
+                StasisPreviewRenderer.RENDER_VERSION, Integer.MAX_VALUE));
         assertEquals(StasisPreviewRenderer.MAX_TEXT * StasisPreviewRenderer.TEXT_F32_STRIDE,
                 StasisPreviewRenderer.activeTextF32Count(Integer.MAX_VALUE));
         assertEquals(StasisPreviewRenderer.TEXT_U8_CAPACITY,
@@ -318,6 +336,7 @@ public final class StasisPreviewRendererSchemaTest {
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_BYTES_USED, 4);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_CLIP_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_LOGICAL_W, 360);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DRAWABLE_H, 2400);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DENSITY_GENERATION, 7);
@@ -333,6 +352,10 @@ public final class StasisPreviewRendererSchemaTest {
                 StasisPreviewRenderer.F_SPRITE_BASE + 4, 0.25f);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_BASE, 5);
         renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_TEXT_BASE, 42.0f);
+        renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_CLIP_BASE, 8.0f);
+        renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_CLIP_BASE + 1, 9.0f);
+        renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_CLIP_BASE + 2, 70.0f);
+        renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_CLIP_BASE + 3, 40.0f);
         renderer.frameU8Bytes().put(0, (byte)'A');
         renderer.frameU8Bytes().put(1, (byte)'B');
         renderer.frameU8Bytes().put(2, (byte)'C');
@@ -340,7 +363,7 @@ public final class StasisPreviewRendererSchemaTest {
 
         StasisPreviewRenderer.LogicalFrameSnapshot snapshot = renderer.captureLogicalFrame();
 
-        assertEquals(StasisPreviewRenderer.I_RECT_COUNT + 2, snapshot.header.length);
+        assertEquals(StasisPreviewRenderer.I_CLIP_COUNT + 2, snapshot.header.length);
         assertEquals(360, snapshot.header[StasisPreviewRenderer.I_LOGICAL_W]);
         assertEquals(2400, snapshot.header[StasisPreviewRenderer.I_DRAWABLE_H]);
         assertEquals(7, snapshot.header[StasisPreviewRenderer.I_DENSITY_GENERATION]);
@@ -362,6 +385,9 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(1, snapshot.order.length);
         assertEquals(StasisPreviewRenderer.ORDER_SPRITE,
                 StasisPreviewRenderer.orderKind(snapshot.order[0]));
+        assertEquals(4, snapshot.clips.length);
+        assertEquals(8.0f, snapshot.clips[0], 0.0f);
+        assertEquals(40.0f, snapshot.clips[3], 0.0f);
     }
 
     @Test

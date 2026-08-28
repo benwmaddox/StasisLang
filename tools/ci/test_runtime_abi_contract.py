@@ -44,20 +44,20 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_stasis_capacity_drift_names_both_sides(self):
         failures, _ = self.run_with(
             contract.GFX_CMD,
-            "global gfx_cmd_i32: i32[34608];",
-            "global gfx_cmd_i32: i32[34609];",
+            "global gfx_cmd_i32: i32[35120];",
+            "global gfx_cmd_i32: i32[35121];",
         )
         message = "\n".join(map(str, failures))
         self.assertIn("producer=runtime/stasis_render_contract.h", message)
         self.assertIn("consumer=src/stdlib/internal/gfx_cmd.stasis", message)
         self.assertIn("field=gfx_cmd_i32.length", message)
-        self.assertIn("expected=34608 actual=34609", message)
+        self.assertIn("expected=35120 actual=35121", message)
 
     def test_java_version_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.JAVA_RENDERER,
-            "static final int RENDER_VERSION = 5;",
-            "static final int RENDER_VERSION = 6;",
+            "static final int RENDER_V6_VERSION = 6;",
+            "static final int RENDER_V6_VERSION = 5;",
         )
         self.assertTrue(any(failure.field == "STASIS_RENDER_CURRENT_VERSION" for failure in failures))
 
@@ -87,9 +87,9 @@ class RuntimeAbiContractTests(unittest.TestCase):
 
     def test_web_current_version_capacity_stride_and_offset_drift(self):
         mutations = (
-            ("const GFX_CMD_CURRENT_VERSION = GFX_CMD_V5_VERSION;",
+            ("const GFX_CMD_CURRENT_VERSION = GFX_CMD_V6_VERSION;",
              "const GFX_CMD_CURRENT_VERSION = GFX_CMD_V4_VERSION;",
-             "STASIS_RENDER_CURRENT_VERSION", 5, 4),
+             "STASIS_RENDER_CURRENT_VERSION", 6, 4),
             ("const GFX_MAX_TEXT = 2048;", "const GFX_MAX_TEXT = 2047;",
              "STASIS_RENDER_MAX_TEXT", 2048, 2047),
             ("const GFX_SPRITE_STRIDE_F32 = 8;", "const GFX_SPRITE_STRIDE_F32 = 7;",
@@ -107,10 +107,10 @@ class RuntimeAbiContractTests(unittest.TestCase):
 
     def test_provenance_current_version_drift_reports_values(self):
         mutations = (
-            (contract.PACKAGE_PROVENANCE, "CURRENT_COMMAND_BUFFER_VERSION = 5",
-             "CURRENT_COMMAND_BUFFER_VERSION = 6", "tools/verify_package_provenance.py"),
-            (contract.TOOLCHAIN, "GFX_CMD_CURRENT_VERSION: i64 = 5",
-             "GFX_CMD_CURRENT_VERSION: i64 = 6", "apps/stasis/src/toolchain_cli.rs"),
+            (contract.PACKAGE_PROVENANCE, "CURRENT_COMMAND_BUFFER_VERSION = 6",
+             "CURRENT_COMMAND_BUFFER_VERSION = 5", "tools/verify_package_provenance.py"),
+            (contract.TOOLCHAIN, "GFX_CMD_CURRENT_VERSION: i64 = 6",
+             "GFX_CMD_CURRENT_VERSION: i64 = 5", "apps/stasis/src/toolchain_cli.rs"),
         )
         for path, old, new, consumer in mutations:
             failures, _ = self.run_with(path, old, new)
@@ -119,8 +119,8 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 if failure.field == "STASIS_RENDER_CURRENT_VERSION"
                 and failure.consumer == consumer
             )
-            self.assertEqual(5, failure.expected)
-            self.assertEqual(6, failure.actual)
+            self.assertEqual(6, failure.expected)
+            self.assertEqual(5, failure.actual)
 
     def test_rust_offset_drift_is_rejected(self):
         failures, _ = self.run_with(
@@ -141,8 +141,8 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_generated_aot_registration_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.AOT,
-            "gfx_cmd_f32, 125060);",
-            "gfx_cmd_f32, 125059);",
+            "gfx_cmd_f32, 126084);",
+            "gfx_cmd_f32, 126083);",
         )
         self.assertTrue(any(failure.field == "gfx_cmd_f32.registration_length" for failure in failures))
 

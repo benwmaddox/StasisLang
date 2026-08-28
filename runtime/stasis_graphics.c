@@ -53,6 +53,9 @@
 static void flush_sprites(void);
 static void render_postfx(void);
 #endif
+static void stasis_render_reset_clip(void);
+static void stasis_render_push_clip(float x, float y, float w, float h);
+static void stasis_render_pop_clip(void);
 
 #ifndef STASIS_RELEASE_ID
 #define STASIS_RELEASE_ID "development"
@@ -1712,6 +1715,15 @@ static struct {
 static LineVertex g_line_vertices[MAX_LINES * 2];
 static int g_line_count = 0;
 static int g_debug_frame_counter = 0;
+
+typedef struct {
+    float x;
+    float y;
+    float w;
+    float h;
+} StasisRenderClip;
+static StasisRenderClip g_render_clip_stack[STASIS_RENDER_MAX_CLIPS];
+static int g_render_clip_depth = 0;
 
 /* Simple shader + buffer for line rendering */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -4788,6 +4800,7 @@ STASIS_EXPORT void stasis_begin_frame(void) {
     }
     g_resource_frame_ready = stasis_restore_renderer_resources() != 0;
     g_line_count = 0;
+    stasis_render_reset_clip();
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderClipRect(g_renderer, NULL);
@@ -5278,11 +5291,125 @@ STASIS_EXPORT void stasis_fill_rect(float x, float y, float w, float h,
 #endif
 }
 
+static void stasis_render_set_clip(StasisRenderClip clip) {
+    if (clip.w < 0.0f) clip.w = 0.0f;
+    if (clip.h < 0.0f) clip.h = 0.0f;
+    if (g_use_sdl_renderer) {
+        if (!g_renderer) return;
+        SDL_Rect rect = {
+            (int)floorf(clip.x),
+            (int)floorf(clip.y),
+            (int)ceilf(clip.w),
+            (int)ceilf(clip.h)};
+        SDL_SetRenderClipRect(g_renderer, &rect);
+        return;
+    }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    const int logical_w = g_display_metrics.logical_w > 0
+        ? g_display_metrics.logical_w : g_window_width;
+    const int logical_h = g_display_metrics.logical_h > 0
+        ? g_display_metrics.logical_h : g_window_height;
+    const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
+    const float scale_x = logical_w > 0 ? viewport.w / (float)logical_w : 1.0f;
+    const float scale_y = logical_h > 0 ? viewport.h / (float)logical_h : 1.0f;
+    const int left = (int)floorf(viewport.x + clip.x * scale_x);
+    const int top = (int)floorf(viewport.y + clip.y * scale_y);
+    const int right = (int)ceilf(viewport.x + (clip.x + clip.w) * scale_x);
+    const int bottom = (int)ceilf(viewport.y + (clip.y + clip.h) * scale_y);
+    int scissor_left = left;
+    int scissor_top = top;
+    int scissor_right = right;
+    int scissor_bottom = bottom;
+    const int viewport_left = (int)floorf(viewport.x);
+    const int viewport_top = (int)floorf(viewport.y);
+    const int viewport_right = (int)ceilf(viewport.x + viewport.w);
+    const int viewport_bottom = (int)ceilf(viewport.y + viewport.h);
+    if (scissor_left < viewport_left) scissor_left = viewport_left;
+    if (scissor_top < viewport_top) scissor_top = viewport_top;
+    if (scissor_right > viewport_right) scissor_right = viewport_right;
+    if (scissor_bottom > viewport_bottom) scissor_bottom = viewport_bottom;
+    if (scissor_right < scissor_left) scissor_right = scissor_left;
+    if (scissor_bottom < scissor_top) scissor_bottom = scissor_top;
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(
+        scissor_left,
+        g_display_metrics.drawable_h - scissor_bottom,
+        scissor_right - scissor_left,
+        scissor_bottom - scissor_top);
+#else
+    (void)clip;
+#endif
+}
+
+static void stasis_render_reset_clip(void) {
+    g_render_clip_depth = 0;
+    memset(g_render_clip_stack, 0, sizeof(g_render_clip_stack));
+    if (g_use_sdl_renderer) {
+        if (g_renderer) SDL_SetRenderClipRect(g_renderer, NULL);
+        return;
+    }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    glDisable(GL_SCISSOR_TEST);
+#endif
+}
+
+static void stasis_render_push_clip(float x, float y, float w, float h) {
+    if (g_render_clip_depth >= STASIS_RENDER_MAX_CLIPS) return;
+    StasisRenderClip clip = {x, y, w, h};
+    const float logical_w = g_display_metrics.logical_w > 0
+        ? (float)g_display_metrics.logical_w : (float)g_window_width;
+    const float logical_h = g_display_metrics.logical_h > 0
+        ? (float)g_display_metrics.logical_h : (float)g_window_height;
+    const float left = clip.x > 0.0f ? clip.x : 0.0f;
+    const float top = clip.y > 0.0f ? clip.y : 0.0f;
+    const float right_limit = clip.x + clip.w < logical_w
+        ? clip.x + clip.w : logical_w;
+    const float bottom_limit = clip.y + clip.h < logical_h
+        ? clip.y + clip.h : logical_h;
+    clip.x = left;
+    clip.y = top;
+    clip.w = right_limit > left ? right_limit - left : 0.0f;
+    clip.h = bottom_limit > top ? bottom_limit - top : 0.0f;
+    if (g_render_clip_depth > 0) {
+        const StasisRenderClip parent = g_render_clip_stack[g_render_clip_depth - 1];
+        const float parent_right = parent.x + parent.w;
+        const float parent_bottom = parent.y + parent.h;
+        const float clipped_right = clip.x + clip.w < parent_right
+            ? clip.x + clip.w : parent_right;
+        const float clipped_bottom = clip.y + clip.h < parent_bottom
+            ? clip.y + clip.h : parent_bottom;
+        if (clip.x < parent.x) clip.x = parent.x;
+        if (clip.y < parent.y) clip.y = parent.y;
+        clip.w = clipped_right > clip.x ? clipped_right - clip.x : 0.0f;
+        clip.h = clipped_bottom > clip.y ? clipped_bottom - clip.y : 0.0f;
+    }
+    g_render_clip_stack[g_render_clip_depth++] = clip;
+    stasis_render_set_clip(clip);
+}
+
+static void stasis_render_pop_clip(void) {
+    if (g_render_clip_depth <= 0) return;
+    g_render_clip_depth--;
+    if (g_render_clip_depth == 0) {
+        if (g_use_sdl_renderer) {
+            if (g_renderer) SDL_SetRenderClipRect(g_renderer, NULL);
+        }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        else {
+            glDisable(GL_SCISSOR_TEST);
+        }
+#endif
+        return;
+    }
+    stasis_render_set_clip(g_render_clip_stack[g_render_clip_depth - 1]);
+}
+
 /*
- * Command-buffer submission (v2-v4).
+ * Command-buffer submission (v2-v6).
  *
  * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
- * Flush category-local batches before a later command category draws.
+ * Flush category-local batches before a later command category or clip state
+ * change draws.
  */
 static void flush_ordered_lines(void) {
     if (g_line_count == 0) return;
@@ -5465,6 +5592,7 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
     const int32_t gfx_cmd_max_sprites = STASIS_RENDER_MAX_SPRITES;
     const int32_t gfx_cmd_max_text = STASIS_RENDER_MAX_TEXT;
     const int32_t gfx_cmd_max_text_bytes = STASIS_RENDER_TEXT_MAX_BYTES;
+    const int32_t gfx_cmd_max_clips = STASIS_RENDER_MAX_CLIPS;
 
     int32_t line_count = cmd_i32[3];
     int32_t sprite_count = cmd_i32[4];
@@ -5508,9 +5636,15 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
     }
 
     const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
+    const int32_t clip_count = version >= STASIS_RENDER_V6_VERSION
+        ? stasis_render_clamp_count(
+            cmd_i32[STASIS_RENDER_I_CLIP_COUNT], gfx_cmd_max_clips)
+        : 0;
+    const int32_t max_order = version >= STASIS_RENDER_V6_VERSION
+        ? STASIS_RENDER_MAX_ORDER : STASIS_RENDER_V5_MAX_ORDER;
     const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
         ? stasis_render_clamp_count(
-            cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER)
+            cmd_i32[STASIS_RENDER_I_ORDER_COUNT], max_order)
         : 0;
     if (order_count > 0) {
         int32_t pending_kind = 0;
@@ -5519,7 +5653,21 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
             if (entry < 0) continue;
             const int32_t kind = entry / STASIS_RENDER_ORDER_KIND_SCALE;
             const int32_t index = entry % STASIS_RENDER_ORDER_KIND_SCALE;
-            if (kind == STASIS_RENDER_ORDER_LINE && index < line_count) {
+            if (kind == STASIS_RENDER_ORDER_CLIP_PUSH && index < clip_count) {
+                flush_ordered_lines();
+                flush_ordered_sprites();
+                const int32_t base = STASIS_RENDER_F_CLIP_BASE +
+                    index * STASIS_RENDER_CLIP_F32_STRIDE;
+                stasis_render_push_clip(
+                    cmd_f32[base + 0], cmd_f32[base + 1],
+                    cmd_f32[base + 2], cmd_f32[base + 3]);
+                pending_kind = 0;
+            } else if (kind == STASIS_RENDER_ORDER_CLIP_POP && index == 0) {
+                flush_ordered_lines();
+                flush_ordered_sprites();
+                stasis_render_pop_clip();
+                pending_kind = 0;
+            } else if (kind == STASIS_RENDER_ORDER_LINE && index < line_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
                 stasis_draw_lines_f32(
                     cmd_f32 + STASIS_RENDER_F_LINE_BASE +
@@ -5561,6 +5709,10 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
             stasis_draw_ordered_text(cmd_i32, version, cmd_f32, cmd_u8, text_bytes_used, index);
         }
     }
+
+    /* A valid v6 stream is balanced; reset defensively before postfx/present so
+     * a malformed host-side sequence cannot leak clipping into the next frame. */
+    stasis_render_reset_clip();
 
     /* Present only if requested (lets benchmarks exclude swap/vsync). */
     if ((flags & STASIS_RENDER_FLAG_PRESENT) != 0) {

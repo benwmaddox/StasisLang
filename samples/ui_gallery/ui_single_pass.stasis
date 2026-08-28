@@ -1,0 +1,689 @@
+// Small, single-pass UI layout and interaction helpers.
+//
+// Geometry is deliberately ephemeral: `ui_begin_frame` resets the current
+// rectangle and scope stack and every following operation derives a fresh
+// rectangle from the current parent.  The only globals that survive a frame
+// are semantic interaction state (button capture and scroll offsets).
+
+import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
+import "/vendor/stasis/stdlib/graphics.stasis";
+
+enum UiStackDirection {
+    Forward,
+    Reverse,
+}
+
+enum UiViewportFit {
+    Stretch,
+    Contain,
+    Cover,
+    IntegerScale,
+}
+
+const UI_MAX_STACK_DEPTH: i32 = 32;
+const UI_MAX_SCROLL_STATES: i32 = 32;
+
+// Status bits describe deterministic misuse without throwing away the frame.
+const UI_STATUS_STACK_OVERFLOW: i32 = 1;
+const UI_STATUS_STACK_UNDERFLOW: i32 = 2;
+const UI_STATUS_BAD_ARGUMENT: i32 = 4;
+const UI_STATUS_OVERFLOW: i32 = 8;
+const UI_STATUS_REST_REPEATED: i32 = 16;
+const UI_STATUS_SCROLL_CAPACITY: i32 = 32;
+
+// Current-frame output rectangle.  Callers use these accessors immediately
+// after an operation; no rectangle is retained for the next frame.
+global ui_rect_x: f32;
+global ui_rect_y: f32;
+global ui_rect_w: f32;
+global ui_rect_h: f32;
+global ui_status_value: i32;
+global ui_stack_depth: i32;
+global ui_scope_overflow_count: i32;
+
+// Each scope stores its parent output plus the cursor for one axis.  Arrays
+// are fixed-size so a malformed screen cannot allocate or grow at runtime.
+global ui_scope_kind: i32[32];
+global ui_scope_direction: i32[32];
+global ui_scope_x: f32[32];
+global ui_scope_y: f32[32];
+global ui_scope_w: f32[32];
+global ui_scope_h: f32[32];
+global ui_scope_cursor: f32[32];
+global ui_scope_spacing: f32[32];
+global ui_scope_rest_used: i32[32];
+global ui_scope_parent_x: f32[32];
+global ui_scope_parent_y: f32[32];
+global ui_scope_parent_w: f32[32];
+global ui_scope_parent_h: f32[32];
+
+// Semantic interaction state.  These values are intentionally not rects.
+global ui_active_id: i32;
+global ui_active_layer: i32;
+global ui_active_pointer: i32;
+global ui_pointer_consumed: i32;
+global ui_modal_layer: i32;
+global ui_hot_id: i32;
+global ui_scroll_ids: i32[32];
+global ui_scroll_used: i32[32];
+global ui_scroll_offsets: f32[32];
+global ui_scroll_drag_pointer: i32[32];
+global ui_scroll_drag_start_pointer_y: f32[32];
+global ui_scroll_drag_start_offset: f32[32];
+global ui_scroll_current_slot: i32;
+global ui_scroll_current_x: f32;
+global ui_scroll_current_y: f32;
+global ui_scroll_current_w: f32;
+global ui_scroll_current_h: f32;
+global ui_scroll_current_content_h: f32;
+global ui_scroll_current_max_offset: f32;
+global ui_scroll_clip_active: i32;
+
+function @inline ui_min_f32(a: f32, b: f32): f32 {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+function @inline ui_max_f32(a: f32, b: f32): f32 {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+function @inline ui_set_rect(x: f32, y: f32, w: f32, h: f32): void {
+    ui_rect_x = x;
+    ui_rect_y = y;
+    ui_rect_w = w;
+    ui_rect_h = h;
+}
+
+function @inline ui_mark_status(flag: i32): void {
+    // Status flags are powers of two.  Stasis intentionally keeps bitwise
+    // operators out of the source language, so add a flag only once.
+    if (flag <= 0) {
+        return;
+    }
+    if ((ui_status_value / flag) % 2 == 0) {
+        ui_status_value = ui_status_value + flag;
+    }
+}
+
+function @inline ui_current_x(): f32 {
+    return ui_rect_x;
+}
+
+function @inline ui_current_y(): f32 {
+    return ui_rect_y;
+}
+
+function @inline ui_current_width(): f32 {
+    return ui_rect_w;
+}
+
+function @inline ui_current_height(): f32 {
+    return ui_rect_h;
+}
+
+function @inline ui_status(): i32 {
+    return ui_status_value;
+}
+
+function @inline ui_stack_level(): i32 {
+    return ui_stack_depth;
+}
+
+function ui_begin_frame(x: f32, y: f32, w: f32, h: f32): void {
+    ui_set_rect(x, y, w, h);
+    ui_status_value = 0;
+    ui_stack_depth = 0;
+    ui_scope_overflow_count = 0;
+    ui_hot_id = 0;
+    ui_pointer_consumed = 0;
+    ui_scroll_current_slot = -1;
+    ui_scroll_current_x = 0.0;
+    ui_scroll_current_y = 0.0;
+    ui_scroll_current_w = 0.0;
+    ui_scroll_current_h = 0.0;
+    ui_scroll_current_content_h = 0.0;
+    ui_scroll_current_max_offset = 0.0;
+    ui_scroll_clip_active = 0;
+}
+
+function ui_scope_begin(kind: i32, direction: UiStackDirection, x: f32, y: f32, w: f32, h: f32, spacing: f32): void {
+    if (ui_stack_depth >= UI_MAX_STACK_DEPTH) {
+        ui_mark_status(UI_STATUS_STACK_OVERFLOW);
+        ui_scope_overflow_count = ui_scope_overflow_count + 1;
+        ui_set_rect(x, y, w, h);
+        return;
+    }
+
+    let depth: i32 = ui_stack_depth;
+    ui_scope_kind[depth] = kind;
+    ui_scope_direction[depth] = 0;
+    if (direction == UiStackDirection.Reverse) {
+        ui_scope_direction[depth] = 1;
+    }
+    ui_scope_x[depth] = x;
+    ui_scope_y[depth] = y;
+    ui_scope_w[depth] = w;
+    ui_scope_h[depth] = h;
+    ui_scope_spacing[depth] = spacing;
+    ui_scope_rest_used[depth] = 0;
+    ui_scope_parent_x[depth] = ui_rect_x;
+    ui_scope_parent_y[depth] = ui_rect_y;
+    ui_scope_parent_w[depth] = ui_rect_w;
+    ui_scope_parent_h[depth] = ui_rect_h;
+
+    if (spacing < 0.0) {
+        ui_scope_spacing[depth] = 0.0;
+        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+    }
+
+    if (kind == 1) {
+        if (direction == UiStackDirection.Reverse) {
+            ui_scope_cursor[depth] = x + w;
+        } else {
+            ui_scope_cursor[depth] = x;
+        }
+    } else {
+        if (direction == UiStackDirection.Reverse) {
+            ui_scope_cursor[depth] = y + h;
+        } else {
+            ui_scope_cursor[depth] = y;
+        }
+    }
+
+    ui_stack_depth = depth + 1;
+    ui_set_rect(x, y, w, h);
+}
+
+function ui_vstack_begin(x: f32, y: f32, w: f32, h: f32, spacing: f32, direction: UiStackDirection): void {
+    ui_scope_begin(2, direction, x, y, w, h, spacing);
+}
+
+function ui_hstack_begin(x: f32, y: f32, w: f32, h: f32, spacing: f32, direction: UiStackDirection): void {
+    ui_scope_begin(1, direction, x, y, w, h, spacing);
+}
+
+function ui_scope_next_fixed(extent: f32): void {
+    if (ui_scope_overflow_count > 0) {
+        ui_set_rect(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    if (ui_stack_depth <= 0) {
+        ui_mark_status(UI_STATUS_STACK_UNDERFLOW);
+        ui_set_rect(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    let depth: i32 = ui_stack_depth - 1;
+    let size: f32 = extent;
+    if (size < 0.0) {
+        size = 0.0;
+        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+    }
+
+    let spacing: f32 = ui_scope_spacing[depth];
+    let reverse: bool = ui_scope_direction[depth] == 1;
+    if (ui_scope_kind[depth] == 1) {
+        let x: f32 = ui_scope_cursor[depth];
+        if (reverse) {
+            x = x - size;
+        }
+        ui_set_rect(x, ui_scope_y[depth], size, ui_scope_h[depth]);
+        if (reverse) {
+            ui_scope_cursor[depth] = x - spacing;
+            if (x < ui_scope_x[depth]) {
+                ui_mark_status(UI_STATUS_OVERFLOW);
+            }
+        } else {
+            ui_scope_cursor[depth] = x + size + spacing;
+            if (x + size > ui_scope_x[depth] + ui_scope_w[depth]) {
+                ui_mark_status(UI_STATUS_OVERFLOW);
+            }
+        }
+    } else {
+        let y: f32 = ui_scope_cursor[depth];
+        if (reverse) {
+            y = y - size;
+        }
+        ui_set_rect(ui_scope_x[depth], y, ui_scope_w[depth], size);
+        if (reverse) {
+            ui_scope_cursor[depth] = y - spacing;
+            if (y < ui_scope_y[depth]) {
+                ui_mark_status(UI_STATUS_OVERFLOW);
+            }
+        } else {
+            ui_scope_cursor[depth] = y + size + spacing;
+            if (y + size > ui_scope_y[depth] + ui_scope_h[depth]) {
+                ui_mark_status(UI_STATUS_OVERFLOW);
+            }
+        }
+    }
+}
+
+function ui_scope_next_rest(): void {
+    if (ui_scope_overflow_count > 0) {
+        ui_set_rect(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    if (ui_stack_depth <= 0) {
+        ui_mark_status(UI_STATUS_STACK_UNDERFLOW);
+        ui_set_rect(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    let depth: i32 = ui_stack_depth - 1;
+    if (ui_scope_rest_used[depth] != 0) {
+        ui_mark_status(UI_STATUS_REST_REPEATED);
+        ui_set_rect(ui_rect_x, ui_rect_y, 0.0, 0.0);
+        return;
+    }
+    ui_scope_rest_used[depth] = 1;
+
+    let reverse: bool = ui_scope_direction[depth] == 1;
+    if (ui_scope_kind[depth] == 1) {
+        let x: f32 = ui_scope_x[depth];
+        let w: f32 = ui_scope_w[depth];
+        if (reverse) {
+            w = ui_scope_cursor[depth] - x;
+            x = ui_scope_x[depth];
+        } else {
+            x = ui_scope_cursor[depth];
+            w = ui_scope_x[depth] + ui_scope_w[depth] - x;
+        }
+        if (w < 0.0) {
+            w = 0.0;
+            ui_mark_status(UI_STATUS_OVERFLOW);
+        }
+        ui_set_rect(x, ui_scope_y[depth], w, ui_scope_h[depth]);
+    } else {
+        let y: f32 = ui_scope_y[depth];
+        let h: f32 = ui_scope_h[depth];
+        if (reverse) {
+            h = ui_scope_cursor[depth] - y;
+            y = ui_scope_y[depth];
+        } else {
+            y = ui_scope_cursor[depth];
+            h = ui_scope_y[depth] + ui_scope_h[depth] - y;
+        }
+        if (h < 0.0) {
+            h = 0.0;
+            ui_mark_status(UI_STATUS_OVERFLOW);
+        }
+        ui_set_rect(ui_scope_x[depth], y, ui_scope_w[depth], h);
+    }
+}
+
+function ui_scope_end(): void {
+    if (ui_scope_overflow_count > 0) {
+        ui_scope_overflow_count = ui_scope_overflow_count - 1;
+        ui_set_rect(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    if (ui_stack_depth <= 0) {
+        ui_mark_status(UI_STATUS_STACK_UNDERFLOW);
+        return;
+    }
+    let depth: i32 = ui_stack_depth - 1;
+    ui_set_rect(ui_scope_parent_x[depth], ui_scope_parent_y[depth], ui_scope_parent_w[depth], ui_scope_parent_h[depth]);
+    ui_stack_depth = depth;
+}
+
+function ui_vstack_next_fixed(extent: f32): void {
+    ui_scope_next_fixed(extent);
+}
+
+function ui_hstack_next_fixed(extent: f32): void {
+    ui_scope_next_fixed(extent);
+}
+
+function ui_vstack_next_rest(): void {
+    ui_scope_next_rest();
+}
+
+function ui_hstack_next_rest(): void {
+    ui_scope_next_rest();
+}
+
+function ui_vstack_end(): void {
+    ui_scope_end();
+}
+
+function ui_hstack_end(): void {
+    ui_scope_end();
+}
+
+function ui_inset(x: f32, y: f32, w: f32, h: f32, pad_left: f32, pad_top: f32, pad_right: f32, pad_bottom: f32): void {
+    let next_x: f32 = x + pad_left;
+    let next_y: f32 = y + pad_top;
+    let next_w: f32 = w - pad_left - pad_right;
+    let next_h: f32 = h - pad_top - pad_bottom;
+    if (next_w < 0.0) {
+        next_w = 0.0;
+        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+    }
+    if (next_h < 0.0) {
+        next_h = 0.0;
+        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+    }
+    ui_set_rect(next_x, next_y, next_w, next_h);
+}
+
+function ui_anchor(x: f32, y: f32, w: f32, h: f32, child_w: f32, child_h: f32, horizontal: UiHorizontal, vertical: UiVertical): void {
+    let safe_w: f32 = child_w;
+    let safe_h: f32 = child_h;
+    if (safe_w < 0.0) {
+        safe_w = 0.0;
+        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+    }
+    if (safe_h < 0.0) {
+        safe_h = 0.0;
+        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+    }
+    ui_set_rect(ui_place_x(x, w, safe_w, horizontal), ui_place_y(y, h, safe_h, vertical), safe_w, safe_h);
+}
+
+function ui_anchor_current(child_w: f32, child_h: f32, horizontal: UiHorizontal, vertical: UiVertical): void {
+    ui_anchor(ui_rect_x, ui_rect_y, ui_rect_w, ui_rect_h, child_w, child_h, horizontal, vertical);
+}
+
+function @inline ui_contains(x: f32, y: f32, w: f32, h: f32, point_x: f32, point_y: f32): bool {
+    return point_x >= x && point_x < x + w && point_y >= y && point_y < y + h;
+}
+
+function ui_current_contains(point_x: f32, point_y: f32): bool {
+    return ui_contains(ui_rect_x, ui_rect_y, ui_rect_w, ui_rect_h, point_x, point_y);
+}
+
+function ui_intersection(x: f32, y: f32, w: f32, h: f32, clip_x: f32, clip_y: f32, clip_w: f32, clip_h: f32): void {
+    let left: f32 = ui_max_f32(x, clip_x);
+    let top: f32 = ui_max_f32(y, clip_y);
+    let right: f32 = ui_min_f32(x + w, clip_x + clip_w);
+    let bottom: f32 = ui_min_f32(y + h, clip_y + clip_h);
+    if (right <= left || bottom <= top) {
+        ui_set_rect(left, top, 0.0, 0.0);
+        return;
+    }
+    ui_set_rect(left, top, right - left, bottom - top);
+}
+
+function ui_viewport_fit(x: f32, y: f32, w: f32, h: f32, content_w: f32, content_h: f32, fit: UiViewportFit): void {
+    if (w <= 0.0 || h <= 0.0 || content_w <= 0.0 || content_h <= 0.0) {
+        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_set_rect(x, y, 0.0, 0.0);
+        return;
+    }
+    if (fit == UiViewportFit.Stretch) {
+        ui_set_rect(x, y, w, h);
+        return;
+    }
+
+    let scale_x: f32 = w / content_w;
+    let scale_y: f32 = h / content_h;
+    let scale: f32 = scale_x;
+    if (fit == UiViewportFit.Cover) {
+        if (scale_y > scale_x) {
+            scale = scale_y;
+        }
+    } else {
+        if (scale_y < scale_x) {
+            scale = scale_y;
+        }
+        if (fit == UiViewportFit.IntegerScale) {
+            // Keep integer pixels when the target is larger.  For a target
+            // smaller than the source, falling back to the contain scale is
+            // the only way to keep the whole source visible.
+            if (scale >= 1.0) {
+                let integer_scale: i32 = f32_to_i32(scale);
+                if (integer_scale > 0) {
+                    scale = i32_to_f32(integer_scale);
+                }
+            }
+        }
+    }
+
+    let fitted_w: f32 = content_w * scale;
+    let fitted_h: f32 = content_h * scale;
+    ui_set_rect(x +(w - fitted_w) * 0.5, y +(h - fitted_h) * 0.5, fitted_w, fitted_h);
+}
+
+function ui_viewport_contains(point_x: f32, point_y: f32): bool {
+    return ui_current_contains(point_x, point_y);
+}
+
+function ui_viewport_map_x(point_x: f32, content_w: f32): f32 {
+    if (ui_rect_w <= 0.0) {
+        return 0.0;
+    }
+    return(point_x - ui_rect_x) * content_w / ui_rect_w;
+}
+
+function ui_viewport_map_y(point_y: f32, content_h: f32): f32 {
+    if (ui_rect_h <= 0.0) {
+        return 0.0;
+    }
+    return(point_y - ui_rect_y) * content_h / ui_rect_h;
+}
+
+function ui_modal_set(layer_id: i32): void {
+    if (layer_id != 0 && ui_modal_layer != layer_id && ui_active_layer != 0 && ui_active_layer != layer_id) {
+        ui_active_id = 0;
+        ui_active_layer = 0;
+        ui_active_pointer = -1;
+    }
+    if (layer_id == 0 && ui_modal_layer != 0 && ui_active_layer == ui_modal_layer) {
+        ui_active_id = 0;
+        ui_active_layer = 0;
+        ui_active_pointer = -1;
+    }
+    ui_modal_layer = layer_id;
+}
+
+function @inline ui_modal_layer_id(): i32 {
+    return ui_modal_layer;
+}
+
+function @inline ui_input_allowed(layer_id: i32): bool {
+    return ui_modal_layer == 0 || ui_modal_layer == layer_id;
+}
+
+function ui_button(
+    layer_id: i32,
+    id: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    pointer_id: i32,
+    pointer_x: f32,
+    pointer_y: f32,
+    pointer_down: bool,
+    went_down: bool,
+    went_up: bool
+): bool {
+    let inside: bool = ui_contains(x, y, w, h, pointer_x, pointer_y);
+    if (ui_input_allowed(layer_id) && ui_pointer_consumed == 0 && inside) {
+        ui_hot_id = id;
+    }
+    if (!ui_input_allowed(layer_id)) {
+        return false;
+    }
+
+    if (ui_pointer_consumed != 0 && ui_active_id != id) {
+        return false;
+    }
+    if (went_down && inside && ui_pointer_consumed == 0) {
+        ui_active_id = id;
+        ui_active_layer = layer_id;
+        ui_active_pointer = pointer_id;
+        ui_pointer_consumed = 1;
+    }
+
+    if (ui_active_id != id || ui_active_layer != layer_id || ui_active_pointer != pointer_id) {
+        return false;
+    }
+
+    if (!pointer_down && !went_up) {
+        return false;
+    }
+    if (went_up) {
+        let clicked: bool = inside;
+        ui_active_id = 0;
+        ui_active_layer = 0;
+        ui_active_pointer = -1;
+        return clicked;
+    }
+    return false;
+}
+
+function @inline ui_button_hot(id: i32): bool {
+    return ui_hot_id == id;
+}
+
+function @inline ui_button_active(id: i32): bool {
+    return ui_active_id == id;
+}
+
+function @inline ui_pointer_capture_active(): bool {
+    return ui_active_id != 0;
+}
+
+function @inline ui_pointer_capture_id(): i32 {
+    return ui_active_pointer;
+}
+
+function ui_scroll_slot(id: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < UI_MAX_SCROLL_STATES; i = i + 1) {
+        if (ui_scroll_used[i] != 0 && ui_scroll_ids[i] == id) {
+            return i;
+        }
+    }
+    for (i = 0; i < UI_MAX_SCROLL_STATES; i = i + 1) {
+        if (ui_scroll_used[i] == 0) {
+            ui_scroll_used[i] = 1;
+            ui_scroll_ids[i] = id;
+            ui_scroll_offsets[i] = 0.0;
+            ui_scroll_drag_pointer[i] = -1;
+            return i;
+        }
+    }
+    ui_mark_status(UI_STATUS_SCROLL_CAPACITY);
+    return -1;
+}
+
+function ui_scroll_clamp_slot(slot: i32, content_h: f32, viewport_h: f32): void {
+    let maximum: f32 = content_h - viewport_h;
+    if (maximum < 0.0) {
+        maximum = 0.0;
+    }
+    if (ui_scroll_offsets[slot] < 0.0) {
+        ui_scroll_offsets[slot] = 0.0;
+    }
+    if (ui_scroll_offsets[slot] > maximum) {
+        ui_scroll_offsets[slot] = maximum;
+    }
+}
+
+function ui_scroll_begin(id: i32, x: f32, y: f32, w: f32, h: f32, content_h: f32): void {
+    let slot: i32 = ui_scroll_slot(id);
+    ui_scroll_current_slot = slot;
+    ui_scroll_current_x = x;
+    ui_scroll_current_y = y;
+    ui_scroll_current_w = w;
+    ui_scroll_current_h = h;
+    ui_scroll_current_content_h = content_h;
+    ui_scroll_current_max_offset = content_h - h;
+    if (ui_scroll_current_max_offset < 0.0) {
+        ui_scroll_current_max_offset = 0.0;
+    }
+    if (slot < 0) {
+        ui_set_rect(x, y, w, h);
+        return;
+    }
+    ui_scroll_clamp_slot(slot, content_h, h);
+    ui_set_rect(x, y, w, h);
+}
+
+function ui_scroll_offset(): f32 {
+    if (ui_scroll_current_slot < 0) {
+        return 0.0;
+    }
+    return ui_scroll_offsets[ui_scroll_current_slot];
+}
+
+function ui_scroll_max_offset(): f32 {
+    return ui_scroll_current_max_offset;
+}
+
+function ui_scroll_content_y(screen_y: f32): f32 {
+    return screen_y - ui_scroll_offset();
+}
+
+function ui_scroll_item_y(index: i32, row_h: f32, spacing: f32): f32 {
+    return ui_scroll_current_y + i32_to_f32(index) *(row_h + spacing) - ui_scroll_offset();
+}
+
+function ui_scroll_item_visible(index: i32, row_h: f32, spacing: f32): bool {
+    let item_y: f32 = ui_scroll_item_y(index, row_h, spacing);
+    return item_y + row_h > ui_scroll_current_y && item_y < ui_scroll_current_y + ui_scroll_current_h;
+}
+
+// Input/layout and rendering are separate passes.  Call this immediately
+// before emitting scroll content in the render pass; `ui_scroll_end` restores
+// the renderer's prior clip.  Keeping the push out of `ui_scroll_begin` means
+// hit testing never mutates the draw command stream.
+function ui_scroll_clip_begin(): void {
+    if (ui_scroll_current_slot < 0 || ui_scroll_clip_active != 0) {
+        return;
+    }
+    gfx_push_clip(
+        ui_scroll_current_x,
+        ui_scroll_current_y,
+        ui_scroll_current_w,
+        ui_scroll_current_h);
+    ui_scroll_clip_active = 1;
+}
+
+function ui_scroll_end(): void {
+    if (ui_scroll_clip_active == 0) {
+        return;
+    }
+    gfx_pop_clip();
+    ui_scroll_clip_active = 0;
+}
+
+function ui_scroll_drag(pointer_id: i32, pointer_x: f32, pointer_y: f32, went_down: bool, pointer_down: bool, went_up: bool): void {
+    let slot: i32 = ui_scroll_current_slot;
+    if (slot < 0) {
+        return;
+    }
+    let inside: bool = ui_contains(ui_scroll_current_x, ui_scroll_current_y, ui_scroll_current_w, ui_scroll_current_h, pointer_x, pointer_y);
+    if (went_down && inside && ui_pointer_consumed == 0 && ui_scroll_current_max_offset > 0.0) {
+        ui_scroll_drag_pointer[slot] = pointer_id;
+        ui_scroll_drag_start_pointer_y[slot] = pointer_y;
+        ui_scroll_drag_start_offset[slot] = ui_scroll_offsets[slot];
+        ui_pointer_consumed = 1;
+    }
+    if (ui_scroll_drag_pointer[slot] != pointer_id) {
+        return;
+    }
+    if (pointer_down || went_up) {
+        ui_scroll_offsets[slot] = ui_scroll_drag_start_offset[slot] + ui_scroll_drag_start_pointer_y[slot] - pointer_y;
+        ui_scroll_clamp_slot(slot, ui_scroll_current_content_h, ui_scroll_current_h);
+    }
+    if (went_up) {
+        ui_scroll_drag_pointer[slot] = -1;
+    }
+}
+
+function ui_scroll_is_dragging(): bool {
+    if (ui_scroll_current_slot < 0) {
+        return false;
+    }
+    return ui_scroll_drag_pointer[ui_scroll_current_slot] >= 0;
+}

@@ -1748,8 +1748,8 @@ mod tests {
     }
 
     fn run_gfx_capacity_jit(gfx_source: &str) -> GfxCapacityResult {
-        const I32_COUNT: usize = 34_608;
-        const F32_COUNT: usize = 125_060;
+        const I32_COUNT: usize = 35_120;
+        const F32_COUNT: usize = 126_084;
         const U8_COUNT: usize = 65_536;
         let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut jit = JitProcess::new();
@@ -1831,7 +1831,7 @@ mod tests {
             ("text_count", 7, 2_048),
             ("dropped_text", 8, 2),
             ("text_bytes_used", 9, 65_536),
-            ("order_count", 22, 16_144),
+            ("order_count", 22, 16_148),
             ("dropped_order", 23, 1),
             ("rect_count", 24, 5_000),
             ("dropped_rects", 25, 1),

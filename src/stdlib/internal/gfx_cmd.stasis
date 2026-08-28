@@ -1,16 +1,18 @@
 import "../stdlib.stasis";
 
-// Graphics command buffer (v5)
+// Graphics command buffer (v6)
 //
 // Policy:
-// - Ordering: line, rectangle, sprite, and text calls append to one bounded order stream.
+// - Ordering: line, rectangle, sprite, text, and ordered clip calls append to one bounded order stream.
 // - Geometry: lines grow forward and rectangles grow backward in one fixed arena.
 // - Compatibility: an empty order stream uses lines -> rectangles -> sprites -> text order.
 // - Coordinates: logical top-left pixels from the HostFrame display contract.
 
 const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 
-const GFX_CMD_VERSION: i32 = 5;
+const GFX_CMD_V5_VERSION: i32 = 5;
+const GFX_CMD_V6_VERSION: i32 = 6;
+const GFX_CMD_VERSION: i32 = GFX_CMD_V6_VERSION;
 
 // i32 header indices
 const GFX_I_MAGIC: i32 = 0;
@@ -42,6 +44,8 @@ const GFX_I_ORDER_COUNT: i32 = 22;
 const GFX_I_DROPPED_ORDER: i32 = 23;
 const GFX_I_RECT_COUNT: i32 = 24;
 const GFX_I_DROPPED_RECTS: i32 = 25;
+const GFX_I_CLIP_COUNT: i32 = 27;
+const GFX_I_DROPPED_CLIPS: i32 = 28;
 const GFX_I_SPRITE_BASE: i32 = 32;
 const GFX_I_ORDER_BASE: i32 = 18464;
 
@@ -65,12 +69,16 @@ const GFX_TEXT_STRIDE_I32: i32 = 3; // font, byte_offset, byte_len
 const GFX_TEXT_STRIDE_F32: i32 = 6; // x,y,r,g,b,a
 
 const GFX_TEXT_MAX_BYTES: i32 = 65536;
-const GFX_MAX_ORDER: i32 = 16144;
+const GFX_MAX_CLIPS: i32 = 256;
+const GFX_CLIP_STRIDE_F32: i32 = 4; // x,y,w,h
+const GFX_MAX_ORDER: i32 = 16656;
 const GFX_ORDER_KIND_SCALE: i32 = 16384;
 const GFX_ORDER_LINE: i32 = 1;
 const GFX_ORDER_SPRITE: i32 = 2;
 const GFX_ORDER_TEXT: i32 = 3;
 const GFX_ORDER_RECT: i32 = 4;
+const GFX_ORDER_CLIP_PUSH: i32 = 5;
+const GFX_ORDER_CLIP_POP: i32 = 6;
 
 // f32 layout
 const GFX_F_CLEAR_R: i32 = 0;
@@ -81,15 +89,16 @@ const GFX_F_LINE_BASE: i32 = 4;
 const GFX_F_SPRITE_BASE: i32 = 80004;
 const GFX_F_RECT_REVERSE_BASE: i32 = 79996;
 const GFX_F_TEXT_BASE: i32 = 112772;
+const GFX_F_CLIP_BASE: i32 = 125060;
 
 // NOTE: Array sizes must be integer literals in Stasis today.
 // Keep these in sync with the constants above:
-// - i32 count = 32 + (4096*3) + (2048*3) + 16144 = 34608
-// - f32 count = 4 + (10000*8) + (4096*8) + (2048*6) = 125060
+// - i32 count = 32 + (4096*3) + (2048*3) + 16656 = 35120
+// - f32 count = 4 + (10000*8) + (4096*8) + (2048*6) + (256*4) = 126084
 const GFX_I_TEXT_BASE: i32 = 12320;
 
-global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[125060];
+global gfx_cmd_i32: i32[35120];
+global gfx_cmd_f32: f32[126084];
 global gfx_cmd_u8: u8[65536];
 
 // Begin a new frame, resetting all counts (typical immediate-mode usage).
@@ -108,6 +117,8 @@ function @inline gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_DROPPED_ORDER] = 0;
     gfx_cmd_i32[GFX_I_RECT_COUNT] = 0;
     gfx_cmd_i32[GFX_I_DROPPED_RECTS] = 0;
+    gfx_cmd_i32[GFX_I_CLIP_COUNT] = 0;
+    gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = 0;
 }
 
 // Begin a new frame without clearing counts/streams (persistent-mode usage).
@@ -124,6 +135,7 @@ function @inline gfx_cmd_begin_persistent(): void {
     gfx_cmd_i32[GFX_I_DROPPED_TEXT] = 0;
     gfx_cmd_i32[GFX_I_DROPPED_ORDER] = 0;
     gfx_cmd_i32[GFX_I_DROPPED_RECTS] = 0;
+    gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = 0;
 }
 
 function @inline gfx_cmd_append_order(kind: i32, index: i32): bool {
@@ -135,6 +147,32 @@ function @inline gfx_cmd_append_order(kind: i32, index: i32): bool {
     gfx_cmd_i32[GFX_I_ORDER_BASE + order_index] = kind * GFX_ORDER_KIND_SCALE + index;
     gfx_cmd_i32[GFX_I_ORDER_COUNT] = order_index + 1;
     return true;
+}
+
+// Append a logical top-origin clip descriptor.  The descriptor is indexed by
+// the push entry; pop entries carry index zero and restore the previous clip.
+function gfx_cmd_clip_push(x: f32, y: f32, w: f32, h: f32): void {
+    let i: i32 = gfx_cmd_i32[GFX_I_CLIP_COUNT];
+    if (i < 0 || i >= GFX_MAX_CLIPS) {
+        gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = gfx_cmd_i32[GFX_I_DROPPED_CLIPS] + 1;
+        return;
+    }
+    if (!gfx_cmd_append_order(GFX_ORDER_CLIP_PUSH, i)) {
+        gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = gfx_cmd_i32[GFX_I_DROPPED_CLIPS] + 1;
+        return;
+    }
+    let base: i32 = GFX_F_CLIP_BASE + i * GFX_CLIP_STRIDE_F32;
+    gfx_cmd_f32[base + 0] = x;
+    gfx_cmd_f32[base + 1] = y;
+    gfx_cmd_f32[base + 2] = w;
+    gfx_cmd_f32[base + 3] = h;
+    gfx_cmd_i32[GFX_I_CLIP_COUNT] = i + 1;
+}
+
+function @inline gfx_cmd_clip_pop(): void {
+    if (!gfx_cmd_append_order(GFX_ORDER_CLIP_POP, 0)) {
+        gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = gfx_cmd_i32[GFX_I_DROPPED_CLIPS] + 1;
+    }
 }
 
 function @inline gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): void {
@@ -514,6 +552,10 @@ function @inline gfx_cmd_rect_count(): i32 {
     return gfx_cmd_i32[GFX_I_RECT_COUNT];
 }
 
+function @inline gfx_cmd_clip_count(): i32 {
+    return gfx_cmd_i32[GFX_I_CLIP_COUNT];
+}
+
 function @inline gfx_cmd_text_count(): i32 {
     return gfx_cmd_i32[GFX_I_TEXT_COUNT];
 }
@@ -532,6 +574,10 @@ function @inline gfx_cmd_dropped_sprites(): i32 {
 
 function @inline gfx_cmd_dropped_rects(): i32 {
     return gfx_cmd_i32[GFX_I_DROPPED_RECTS];
+}
+
+function @inline gfx_cmd_dropped_clips(): i32 {
+    return gfx_cmd_i32[GFX_I_DROPPED_CLIPS];
 }
 
 function @inline gfx_cmd_dropped_text(): i32 {

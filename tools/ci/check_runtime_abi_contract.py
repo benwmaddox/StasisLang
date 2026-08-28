@@ -171,6 +171,8 @@ def javascript_constants(text: str) -> dict[str, int]:
 
 RENDER_TO_GFX = {
     "STASIS_RENDER_V2_MAGIC": "GFX_CMD_MAGIC",
+    "STASIS_RENDER_V5_VERSION": "GFX_CMD_V5_VERSION",
+    "STASIS_RENDER_V6_VERSION": "GFX_CMD_V6_VERSION",
     "STASIS_RENDER_CURRENT_VERSION": "GFX_CMD_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "GFX_FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "GFX_FLAG_PRESENT",
@@ -199,6 +201,7 @@ RENDER_TO_GFX = {
     "STASIS_RENDER_I_ORDER_COUNT": "GFX_I_ORDER_COUNT",
     "STASIS_RENDER_I_DROPPED_ORDER": "GFX_I_DROPPED_ORDER",
     "STASIS_RENDER_I_RECT_COUNT": "GFX_I_RECT_COUNT",
+    "STASIS_RENDER_I_CLIP_COUNT": "GFX_I_CLIP_COUNT",
     "STASIS_RENDER_I_DROPPED_RECTS": "GFX_I_DROPPED_RECTS",
     "STASIS_RENDER_I_SPRITE_BASE": "GFX_I_SPRITE_BASE",
     "STASIS_RENDER_I_TEXT_BASE": "GFX_I_TEXT_BASE",
@@ -207,6 +210,7 @@ RENDER_TO_GFX = {
     "STASIS_RENDER_F_SPRITE_BASE": "GFX_F_SPRITE_BASE",
     "STASIS_RENDER_F_RECT_REVERSE_BASE": "GFX_F_RECT_REVERSE_BASE",
     "STASIS_RENDER_F_TEXT_BASE": "GFX_F_TEXT_BASE",
+    "STASIS_RENDER_F_CLIP_BASE": "GFX_F_CLIP_BASE",
     "STASIS_RENDER_MAX_GEOMETRY": "GFX_MAX_GEOMETRY",
     "STASIS_RENDER_GEOMETRY_F32_STRIDE": "GFX_GEOMETRY_STRIDE_F32",
     "STASIS_RENDER_MAX_LINES": "GFX_MAX_LINES",
@@ -218,12 +222,16 @@ RENDER_TO_GFX = {
     "STASIS_RENDER_TEXT_I32_STRIDE": "GFX_TEXT_STRIDE_I32",
     "STASIS_RENDER_TEXT_F32_STRIDE": "GFX_TEXT_STRIDE_F32",
     "STASIS_RENDER_TEXT_MAX_BYTES": "GFX_TEXT_MAX_BYTES",
+    "STASIS_RENDER_MAX_CLIPS": "GFX_MAX_CLIPS",
+    "STASIS_RENDER_CLIP_F32_STRIDE": "GFX_CLIP_STRIDE_F32",
     "STASIS_RENDER_MAX_ORDER": "GFX_MAX_ORDER",
     "STASIS_RENDER_ORDER_KIND_SCALE": "GFX_ORDER_KIND_SCALE",
     "STASIS_RENDER_ORDER_LINE": "GFX_ORDER_LINE",
     "STASIS_RENDER_ORDER_SPRITE": "GFX_ORDER_SPRITE",
     "STASIS_RENDER_ORDER_TEXT": "GFX_ORDER_TEXT",
     "STASIS_RENDER_ORDER_RECT": "GFX_ORDER_RECT",
+    "STASIS_RENDER_ORDER_CLIP_PUSH": "GFX_ORDER_CLIP_PUSH",
+    "STASIS_RENDER_ORDER_CLIP_POP": "GFX_ORDER_CLIP_POP",
 }
 
 RENDER_TO_RUST = {
@@ -235,12 +243,17 @@ RENDER_TO_RUST = {
     "STASIS_RENDER_V2_VERSION": "STASIS_RENDER_V2_VERSION",
     "STASIS_RENDER_V3_VERSION": "STASIS_RENDER_V3_VERSION",
     "STASIS_RENDER_V4_VERSION": "STASIS_RENDER_V4_VERSION",
-    "STASIS_RENDER_V5_VERSION": "STASIS_RENDER_VERSION",
+    "STASIS_RENDER_V5_VERSION": "STASIS_RENDER_V5_VERSION",
+    "STASIS_RENDER_V6_VERSION": "STASIS_RENDER_V6_VERSION",
     "STASIS_RENDER_CURRENT_VERSION": "STASIS_RENDER_VERSION",
     "STASIS_RENDER_I_ORDER_COUNT": "STASIS_RENDER_ORDER_COUNT_INDEX",
     "STASIS_RENDER_I_RECT_COUNT": "STASIS_RENDER_RECT_COUNT_INDEX",
+    "STASIS_RENDER_I_CLIP_COUNT": "STASIS_RENDER_CLIP_COUNT_INDEX",
     "STASIS_RENDER_I_ORDER_BASE": "STASIS_RENDER_ORDER_BASE",
     "STASIS_RENDER_MAX_ORDER": "STASIS_RENDER_MAX_ORDER",
+    "STASIS_RENDER_V5_MAX_ORDER": "STASIS_RENDER_V5_MAX_ORDER",
+    "STASIS_RENDER_MAX_CLIPS": "STASIS_RENDER_MAX_CLIPS",
+    "STASIS_RENDER_CLIP_F32_STRIDE": "STASIS_RENDER_CLIP_STRIDE_F32",
     "STASIS_RENDER_I_SPRITE_BASE": "STASIS_RENDER_SPRITE_BASE",
     "STASIS_RENDER_MAX_LINES": "STASIS_RENDER_MAX_LINES",
     "STASIS_RENDER_MAX_GEOMETRY": "STASIS_RENDER_MAX_GEOMETRY",
@@ -257,6 +270,7 @@ RENDER_TO_RUST = {
     "STASIS_RENDER_LEGACY_F_TEXT_BASE": "STASIS_RENDER_LEGACY_TEXT_BASE_F32",
     "STASIS_RENDER_I_TEXT_BASE": "STASIS_RENDER_TEXT_BASE_I32",
     "STASIS_RENDER_F_TEXT_BASE": "STASIS_RENDER_TEXT_BASE_F32",
+    "STASIS_RENDER_F_CLIP_BASE": "STASIS_RENDER_CLIP_BASE_F32",
     "STASIS_RENDER_MAX_TEXT": "STASIS_RENDER_MAX_TEXT",
     "STASIS_RENDER_TEXT_I32_STRIDE": "STASIS_RENDER_TEXT_STRIDE_I32",
     "STASIS_RENDER_TEXT_F32_STRIDE": "STASIS_RENDER_TEXT_STRIDE_F32",
@@ -269,6 +283,7 @@ RENDER_TO_WEB = {
     "STASIS_RENDER_V3_VERSION": "GFX_CMD_V3_VERSION",
     "STASIS_RENDER_V4_VERSION": "GFX_CMD_V4_VERSION",
     "STASIS_RENDER_V5_VERSION": "GFX_CMD_V5_VERSION",
+    "STASIS_RENDER_V6_VERSION": "GFX_CMD_V6_VERSION",
     "STASIS_RENDER_CURRENT_VERSION": "GFX_CMD_CURRENT_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "GFX_FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "GFX_FLAG_PRESENT",
@@ -289,6 +304,7 @@ RENDER_TO_WEB = {
     "STASIS_RENDER_F_SPRITE_BASE": "GFX_F_SPRITE_BASE",
     "STASIS_RENDER_F_RECT_REVERSE_BASE": "GFX_F_RECT_REVERSE_BASE",
     "STASIS_RENDER_F_TEXT_BASE": "GFX_F_TEXT_BASE",
+    "STASIS_RENDER_F_CLIP_BASE": "GFX_F_CLIP_BASE",
     "STASIS_RENDER_LEGACY_F_TEXT_BASE": "GFX_F_LEGACY_TEXT_BASE",
     "STASIS_RENDER_MAX_GEOMETRY": "GFX_MAX_GEOMETRY",
     "STASIS_RENDER_GEOMETRY_F32_STRIDE": "GFX_GEOMETRY_STRIDE_F32",
@@ -302,12 +318,16 @@ RENDER_TO_WEB = {
     "STASIS_RENDER_TEXT_I32_STRIDE": "GFX_TEXT_STRIDE_I32",
     "STASIS_RENDER_TEXT_F32_STRIDE": "GFX_TEXT_STRIDE_F32",
     "STASIS_RENDER_TEXT_MAX_BYTES": "GFX_TEXT_MAX_BYTES",
+    "STASIS_RENDER_MAX_CLIPS": "GFX_MAX_CLIPS",
+    "STASIS_RENDER_CLIP_F32_STRIDE": "GFX_CLIP_STRIDE_F32",
     "STASIS_RENDER_MAX_ORDER": "GFX_MAX_ORDER",
     "STASIS_RENDER_ORDER_KIND_SCALE": "GFX_ORDER_KIND_SCALE",
     "STASIS_RENDER_ORDER_LINE": "GFX_ORDER_LINE",
     "STASIS_RENDER_ORDER_SPRITE": "GFX_ORDER_SPRITE",
     "STASIS_RENDER_ORDER_TEXT": "GFX_ORDER_TEXT",
     "STASIS_RENDER_ORDER_RECT": "GFX_ORDER_RECT",
+    "STASIS_RENDER_ORDER_CLIP_PUSH": "GFX_ORDER_CLIP_PUSH",
+    "STASIS_RENDER_ORDER_CLIP_POP": "GFX_ORDER_CLIP_POP",
 }
 
 RENDER_TO_TOOLCHAIN_PROVENANCE = {
@@ -325,7 +345,8 @@ RENDER_TO_JAVA = {
     "STASIS_RENDER_V2_VERSION": "RENDER_V2_VERSION",
     "STASIS_RENDER_V3_VERSION": "RENDER_V3_VERSION",
     "STASIS_RENDER_V4_VERSION": "RENDER_V4_VERSION",
-    "STASIS_RENDER_V5_VERSION": "RENDER_VERSION",
+    "STASIS_RENDER_V5_VERSION": "RENDER_V5_VERSION",
+    "STASIS_RENDER_V6_VERSION": "RENDER_V6_VERSION",
     "STASIS_RENDER_CURRENT_VERSION": "RENDER_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "FLAG_PRESENT",
@@ -370,14 +391,29 @@ def check_literal(
 def literal_array(text: str, name: str) -> int | str:
     patterns = (
         rf"\b{name}\s*:\s*(?:i32|f32|u8)\[([0-9_]+)\]",
+        rf"\b{name}\s*:\s*Vec<[^>]+>\s*=\s*vec!\[[^;]+;\s*(?:stasis_dynload::)?(STASIS_RENDER_[A-Z0-9_]+)\]",
         rf"\b{name}\s*:\s*Vec<[^>]+>\s*=\s*vec!\[[^;]+;\s*([0-9_]+)\]",
         rf"\b{name}\[([0-9_]+)\]",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
-            return int(match.group(1).replace("_", ""))
+            value = match.group(1)
+            return value if value.startswith("STASIS_RENDER_") else int(value.replace("_", ""))
     return "missing"
+
+
+def array_matches(actual: int | str, expected: int, name: str) -> bool:
+    if actual == expected:
+        return True
+    aliases = {
+        "gfx_cmd_i32": "STASIS_RENDER_I32_COUNT",
+        "gfx_cmd_f32": "STASIS_RENDER_F32_COUNT",
+        "gfx_cmd_u8": "STASIS_RENDER_U8_COUNT",
+    }
+    if actual == aliases.get(name):
+        return True
+    return False
 
 
 def label(path: Path) -> str:
@@ -451,7 +487,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         source = HOST_FRAME if name.startswith("host_") else GFX_CMD
         actual = literal_array(sources[source], name)
         checks += 1
-        if actual != expected:
+        if not array_matches(actual, expected, name):
             producer = HOST_FRAME if name.startswith("host_") else RENDER_HEADER
             failures.append(Mismatch(label(producer), label(source), f"{name}.length", expected, actual))
 
@@ -460,7 +496,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         for name, expected in arrays.items():
             actual = literal_array(text, name)
             checks += 1
-            if actual != expected:
+            if not array_matches(actual, expected, name):
                 producer = HOST_FRAME if name.startswith("host_") else RENDER_HEADER
                 failures.append(Mismatch(label(producer), label(consumer), f"{name}.length", expected, actual))
 
@@ -526,7 +562,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                     continue
                 actual = literal_array(text, name)
                 checks += 1
-                if actual != expected:
+                if not array_matches(actual, expected, name):
                     producer = HOST_FRAME if name.startswith("host_") else RENDER_HEADER
                     failures.append(Mismatch(label(producer), path.relative_to(root).as_posix(), f"{name}.length", expected, actual))
 

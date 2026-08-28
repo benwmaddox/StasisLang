@@ -3002,8 +3002,8 @@ void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
     source.push_str(
         "STASIS_EXPORT int32_t host_i32[768] = {0};\n\
 STASIS_EXPORT float host_f32[64] = {0};\n\
-STASIS_EXPORT int32_t gfx_cmd_i32[34608] = {0};\n\
-STASIS_EXPORT float gfx_cmd_f32[125060] = {0};\n\
+STASIS_EXPORT int32_t gfx_cmd_i32[35120] = {0};\n\
+STASIS_EXPORT float gfx_cmd_f32[126084] = {0};\n\
 STASIS_EXPORT uint8_t gfx_cmd_u8[65536] = {0};\n\
 STASIS_EXPORT int32_t host_req_seq = 0;\n\
 STASIS_EXPORT int32_t host_req_flags = 0;\n\
@@ -3019,10 +3019,10 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
             "stasis_jit_register_global_f32_array({host_f32_hash}, 0, host_f32, 64);"
         ),
         format!(
-            "stasis_jit_register_global_i32_array({gfx_cmd_i32_hash}, 0, gfx_cmd_i32, 34608);"
+            "stasis_jit_register_global_i32_array({gfx_cmd_i32_hash}, 0, gfx_cmd_i32, 35120);"
         ),
         format!(
-            "stasis_jit_register_global_f32_array({gfx_cmd_f32_hash}, 0, gfx_cmd_f32, 125060);"
+            "stasis_jit_register_global_f32_array({gfx_cmd_f32_hash}, 0, gfx_cmd_f32, 126084);"
         ),
         format!(
             "stasis_jit_register_global_u8_array({gfx_cmd_u8_hash}, 0, gfx_cmd_u8, 65536);"

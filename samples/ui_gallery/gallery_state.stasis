@@ -1,0 +1,33 @@
+import "ui_single_pass.stasis";
+
+const GALLERY_PAGE_STACKS: i32 = 0;
+const GALLERY_PAGE_ANCHORS: i32 = 1;
+const GALLERY_PAGE_SCROLL: i32 = 2;
+const GALLERY_PAGE_VIEWPORT: i32 = 3;
+const GALLERY_PAGE_COMBINED: i32 = 4;
+const GALLERY_LAYER_SCREEN: i32 = 1;
+const GALLERY_LAYER_MODAL: i32 = 2;
+const GALLERY_ID_STACKS: i32 = 100;
+const GALLERY_ID_ANCHORS: i32 = 101;
+const GALLERY_ID_SCROLL: i32 = 102;
+const GALLERY_ID_VIEWPORT: i32 = 103;
+const GALLERY_ID_COMBINED: i32 = 104;
+const GALLERY_ID_SCROLL_LIST: i32 = 110;
+const GALLERY_ID_FIT: i32 = 120;
+const GALLERY_ID_MODAL: i32 = 130;
+const GALLERY_ID_CLOSE: i32 = 131;
+
+struct GalleryState {
+    font: i32;
+    page: i32;
+    fit: UiViewportFit;
+    modal_open: bool;
+    world_tick: i32;
+    world_x: f32;
+    world_y: f32;
+    mapped_x: f32;
+    mapped_y: f32;
+    score: i32;
+}
+
+global gallery: GalleryState;

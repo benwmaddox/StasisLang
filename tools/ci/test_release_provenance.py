@@ -16,7 +16,7 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 class ReleaseProvenanceTests(unittest.TestCase):
     def test_render_contract_version_resolves_current_header_alias(self):
-        self.assertEqual(5, render_contract_version(ROOT))
+        self.assertEqual(6, render_contract_version(ROOT))
 
     def test_render_contract_version_rejects_missing_or_non_numeric_alias(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -291,7 +291,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "source_commit": "0123456789012345678901234567890123456789",
                 "development_build": False,
                 "dirty_state": False,
-                "command_buffer": {"name": "gfx_cmd", "version": 5},
+                "command_buffer": {"name": "gfx_cmd", "version": 6},
                 "runtime_sources": {"runtime/stasis_graphics.c": expected},
                 "mobile_shell_sources": {
                     "mobile/shells/common/main.c": hashlib.sha256(common_shell).hexdigest(),
@@ -372,7 +372,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertNotEqual(contract_failed.returncode, 0)
             self.assertIn("command_buffer family must be gfx_cmd", contract_failed.stderr)
             numeric_type = dict(manifest)
-            numeric_type["command_buffer"] = {"name": "gfx_cmd", "version": 5.0}
+            numeric_type["command_buffer"] = {"name": "gfx_cmd", "version": 6.0}
             (release / "stasis_release_provenance.json").write_text(
                 json.dumps(numeric_type), encoding="utf-8"
             )

@@ -38,17 +38,19 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
   return gl;
 }
 
-async function loadRuntime({ rects = 0, ordered = null, sprites = 0, spriteHandles = [], spriteSize = null, webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false } = {}) {
+async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
-  const i32 = new Int32Array(memory.buffer, 0, 20000);
-  const f32 = new Float32Array(memory.buffer, 100000, 100000);
-  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], images: 0, fills: 0, events: [], contextLost: false };
+  const i32 = new Int32Array(memory.buffer, 0, 35120);
+  const f32 = new Float32Array(memory.buffer, 100000, 126084);
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
     fillRect() { stats.fills += 1; stats.events.push("fill"); if (timing) now += 4; },
     fillText() {}, drawImage() { stats.images += 1; stats.events.push("image"); },
-    save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {},
+    save() {}, restore() { stats.restores += 1; }, beginPath() {}, moveTo() {}, lineTo() {},
+    rect(x, y, width, height) { stats.clipRects.push([x, y, width, height]); },
+    clip() { stats.clipCalls += 1; },
     stroke() { stats.events.push("stroke"); }, translate() {}, rotate() {}
   };
   const rasterStats = { draws: 0 };
@@ -97,8 +99,8 @@ async function loadRuntime({ rects = 0, ordered = null, sprites = 0, spriteHandl
     tick: () => { if (timing) now += 2; },
     render: () => {
       if (timing) now += 3;
-      if (!rects && !sprites) return;
-      i32[0] = MAGIC; i32[1] = sprites ? 5 : 4; i32[2] = 0; i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects;
+      if (!rects && !sprites && !clips.length) return;
+      i32[0] = MAGIC; i32[1] = clips.length ? 6 : sprites ? 5 : 4; i32[2] = 0; i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects; i32[27] = clips.length;
       if (ordered) {
         i32[3] = 1; i32[22] = ordered.length;
         ordered.forEach((encoded, index) => { i32[18464 + index] = encoded; });
@@ -117,6 +119,11 @@ async function loadRuntime({ rects = 0, ordered = null, sprites = 0, spriteHandl
         f32[baseF] = index + 0.5; f32[baseF + 1] = 2; f32[baseF + 2] = 8; f32[baseF + 3] = 10;
         f32[baseF + 4] = 0.1; f32[baseF + 5] = 0.2; f32[baseF + 6] = 0.9; f32[baseF + 7] = 0.8;
       }
+      clips.forEach((clip, index) => {
+        const base = 125060 + index * 4;
+        f32[base] = clip[0]; f32[base + 1] = clip[1];
+        f32[base + 2] = clip[2]; f32[base + 3] = clip[3];
+      });
     }
   }};
   const raf = [];
@@ -129,7 +136,7 @@ async function loadRuntime({ rects = 0, ordered = null, sprites = 0, spriteHandl
     AudioContext: class { constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; } close() {} resume() {} },
     TextDecoder, TextEncoder, setTimeout, clearTimeout
   };
-  contextObject.window = { STASIS_GAME: { memory: { gfx_cmd_i32: { offset: 0, length: 20000 }, gfx_cmd_f32: { offset: 100000, length: 100000 } }, strings: {}, assets: {} }, screen: contextObject.screen };
+  contextObject.window = { STASIS_GAME: { memory: { gfx_cmd_i32: { offset: 0, length: 35120 }, gfx_cmd_f32: { offset: 100000, length: 126084 } }, strings: {}, assets: {} }, screen: contextObject.screen };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
@@ -149,6 +156,18 @@ test("large ordered rectangle run uses one instanced composite", async () => {
   assert.deepEqual(runtime.stats.uploadedFloats, [64 * 8]);
   assert.equal(runtime.stats.images, 1);
   assert.equal(runtime.stats.fills, 0);
+});
+
+test("ordered clipping saves and restores nested Canvas2D state", async () => {
+  const scale = 16384;
+  const runtime = await loadRuntime({
+    clips: [[10, 12, 100, 80], [25, 30, 40, 24]],
+    ordered: [5 * scale, 5 * scale + 1, 6 * scale, 6 * scale]
+  });
+  runtime.frame();
+  assert.deepEqual(runtime.stats.clipRects, [[10, 12, 100, 80], [25, 30, 40, 24]]);
+  assert.equal(runtime.stats.clipCalls, 2);
+  assert.equal(runtime.stats.restores, 2);
 });
 
 test("interleaved commands flush rectangle batches in source order", async () => {

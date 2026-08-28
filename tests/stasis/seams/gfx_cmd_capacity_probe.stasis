@@ -60,9 +60,9 @@ function fill_text(): void {
 function trace_commands(): i32 {
     return native_render_trace(
         gfx_cmd_i32,
-        34608,
+        35120,
         gfx_cmd_f32,
-        125060,
+        126084,
         gfx_cmd_u8,
         65536
     );
