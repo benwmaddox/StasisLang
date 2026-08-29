@@ -1,4 +1,5 @@
 import "../ui_single_pass.stasis";
+import "../gallery_state.stasis";
 
 test `single pass stack recipe is deterministic`(): bool {
     ui_begin_frame(10.0, 20.0, 100.0, 100.0);
@@ -31,6 +32,21 @@ test `pointer capture and modal precedence are semantic state`(): bool {
     ui_begin_frame(0.0, 0.0, 200.0, 100.0);
     ui_modal_set(7);
     return ui_button(7, 12, 10.0, 10.0, 80.0, 40.0, 2, 100.0, 80.0, false, false, true) == false && !ui_pointer_capture_active();
+}
+
+test `modal close capture survives the next phone frame`(): bool {
+    ui_begin_frame(0.0, 0.0, 360.0, 240.0);
+    ui_modal_set(GALLERY_LAYER_MODAL);
+    if (ui_button(GALLERY_LAYER_MODAL, GALLERY_ID_CLOSE, 220.0, 160.0, 128.0, 38.0, 7, 260.0, 178.0, true, true, false)) {
+        return false;
+    }
+    if (!ui_pointer_capture_active() || ui_pointer_capture_id() != 7) {
+        return false;
+    }
+
+    ui_begin_frame(0.0, 0.0, 360.0, 240.0);
+    ui_modal_set(GALLERY_LAYER_MODAL);
+    return ui_button(GALLERY_LAYER_MODAL, GALLERY_ID_CLOSE, 220.0, 160.0, 128.0, 38.0, 7, 260.0, 178.0, false, false, true) && !ui_pointer_capture_active();
 }
 
 test `scroll offset clamps after a drag`(): bool {

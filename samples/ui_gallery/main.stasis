@@ -32,9 +32,10 @@ function tick(): i32 {
         gallery.world_x = 4.0;
         gallery.score += 1;
     }
-    ui_modal_set(0);
     if (gallery.modal_open) {
         ui_modal_set(GALLERY_LAYER_MODAL);
+    } else {
+        ui_modal_set(0);
     }
     let pointer_id: i32 = -1;
     let pointer_x: f32 = 0.0;
