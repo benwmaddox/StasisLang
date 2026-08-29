@@ -70,7 +70,8 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertTrue((thorvg / source).is_file(), source)
 
         runtime_cmake = (ROOT / "runtime/CMakeLists.txt").read_text(encoding="utf-8")
-        self.assertIn("stasis_graphics.c stasis_audio_assets.c stasis_svg.cpp", runtime_cmake)
+        self.assertIn("stasis_graphics.c stasis_image_writer.c", runtime_cmake)
+        self.assertIn("stasis_audio_assets.c stasis_svg.cpp", runtime_cmake)
         self.assertIn("stasis_thorvg", runtime_cmake)
 
         android_cmake = (
@@ -92,6 +93,10 @@ class ReleaseProvenanceTests(unittest.TestCase):
 
     def test_windows_dpi_manifest_is_part_of_release_provenance(self):
         self.assertIn("stasis_runner.manifest", RUNTIME_FILES)
+
+    def test_image_writer_sources_are_part_of_release_provenance(self):
+        self.assertIn("stasis_image_writer.c", RUNTIME_FILES)
+        self.assertIn("stasis_image_writer.h", RUNTIME_FILES)
 
     def test_macos_retina_plist_is_part_of_release_provenance(self):
         self.assertIn("stasis_runner_macos.plist.in", RUNTIME_FILES)

@@ -163,7 +163,7 @@ if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_
 endif()
 
 function(configure_stasis_target target is_static sdl_only)
-    target_sources(${target} PRIVATE stasis_graphics.c stasis_audio_assets.c stasis_svg.cpp)
+    target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_svg.cpp)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     target_compile_definitions(${target} PRIVATE STASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}")
     target_link_libraries(${target} PRIVATE
@@ -302,6 +302,16 @@ endif()
 
 if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     enable_testing()
+    add_executable(
+        stasis_image_writer_test
+        tests/stasis_image_writer_test.c
+        stasis_image_writer.c
+    )
+    target_include_directories(stasis_image_writer_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(WIN32)
+        target_compile_definitions(stasis_image_writer_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME stasis_image_writer_contract COMMAND stasis_image_writer_test)
     add_executable(
         stasis_audio_ring_test
         tests/stasis_audio_ring_test.c

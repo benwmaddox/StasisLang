@@ -75,6 +75,8 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",
+    "stasis_image_writer.c",
+    "stasis_image_writer.h",
     "stasis_runner.manifest",
     "stasis_runner_macos.plist.in",
     "stasis_mobile_aot_runtime.c",
