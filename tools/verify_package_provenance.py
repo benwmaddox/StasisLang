@@ -12,6 +12,10 @@ import pathlib
 COMMAND_BUFFER_NAME = "gfx_cmd"
 CURRENT_COMMAND_BUFFER_VERSION = 6
 LEGACY_COMMAND_BUFFER_VERSION = 4
+ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
+ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
+ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
+ASSET_PACKAGE_IDENTITY_VERSION = 1
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -30,6 +34,41 @@ def mobile_package_id(name: str) -> str:
         else:
             component += f"x{byte:02x}"
     return f"com.stasislang.{component}"
+
+
+def verify_asset_package_identities(
+    parser: argparse.ArgumentParser, package_root: pathlib.Path
+) -> None:
+    packaged_manifests = sorted(package_root.rglob("assets/manifest.json"))
+    for manifest_path in packaged_manifests:
+        identity_path = manifest_path.parent.parent / ASSET_PACKAGE_IDENTITY_NAME
+        if not identity_path.is_file():
+            parser.error(
+                f"asset package identity is missing for packaged manifest: {manifest_path}"
+            )
+
+    for identity_path in sorted(package_root.rglob(ASSET_PACKAGE_IDENTITY_NAME)):
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        if set(identity) != {"schema", "version", "manifest_path", "manifest_sha256"}:
+            parser.error(f"malformed asset package identity: {identity_path}")
+        if identity["schema"] != ASSET_PACKAGE_IDENTITY_SCHEMA:
+            parser.error(f"unsupported asset package identity schema: {identity_path}")
+        if identity["version"] != ASSET_PACKAGE_IDENTITY_VERSION:
+            parser.error(f"unsupported asset package identity version: {identity_path}")
+        relative = pathlib.PurePosixPath(identity["manifest_path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            parser.error(f"unsafe asset manifest identity path: {identity_path}")
+        if relative != ASSET_MANIFEST_RELATIVE_PATH:
+            parser.error(f"unsupported asset manifest identity path: {identity_path}")
+        manifest_path = identity_path.parent / pathlib.Path(*relative.parts)
+        if not manifest_path.is_file():
+            parser.error(f"asset package identity manifest is missing: {manifest_path}")
+        actual = sha256(manifest_path)
+        if actual != identity["manifest_sha256"]:
+            parser.error(
+                f"asset package manifest hash mismatch: expected "
+                f"{identity['manifest_sha256']}, found {actual}"
+            )
 
 
 def validate_command_buffer(
@@ -215,6 +254,7 @@ def main() -> int:
     validate_command_buffer(parser, packaged, allow_legacy=True)
     if release != packaged:
         parser.error("packaged provenance does not exactly match the release manifest")
+    verify_asset_package_identities(parser, args.package_root)
     runtime_sources = release["runtime_sources"] if args.expect_runtime_sources else {}
     for relative, expected in runtime_sources.items():
         relative_path = pathlib.PurePosixPath(relative)

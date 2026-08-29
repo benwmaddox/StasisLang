@@ -1,7 +1,38 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 
 pub const CONTRACT_VERSION: u16 = 1;
+pub const CONTRACT_VERSION_UNSUPPORTED_CODE: &str = "stasis.contractVersionUnsupported";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContractVersionError {
+    pub expected: u16,
+    pub actual: u16,
+}
+
+impl fmt::Display for ContractVersionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "contract version mismatch: expected {}, got {}",
+            self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for ContractVersionError {}
+
+pub fn validate_contract_version(version: u16) -> Result<(), ContractVersionError> {
+    if version == CONTRACT_VERSION {
+        Ok(())
+    } else {
+        Err(ContractVersionError {
+            expected: CONTRACT_VERSION,
+            actual: version,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
@@ -52,6 +83,10 @@ impl FileChangeEvent {
             change_kind,
         }
     }
+
+    pub fn validate_version(&self) -> Result<(), ContractVersionError> {
+        validate_contract_version(self.contract_version)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +122,10 @@ impl CompileRequest {
             host_set_hash: None,
         }
     }
+
+    pub fn validate_version(&self) -> Result<(), ContractVersionError> {
+        validate_contract_version(self.contract_version)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +138,8 @@ pub enum DiagnosticSeverity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub message: String,
     pub path: Option<PathBuf>,
     pub line: Option<u32>,
@@ -161,6 +202,10 @@ pub struct CompileResult {
 }
 
 impl CompileResult {
+    pub fn validate_version(&self) -> Result<(), ContractVersionError> {
+        validate_contract_version(self.contract_version)
+    }
+
     pub fn success(
         request_id: RequestId,
         layout_hash: LayoutHash,
@@ -277,6 +322,10 @@ impl SwapCommitRequest {
             hook_fn_id: None,
         }
     }
+
+    pub fn validate_version(&self) -> Result<(), ContractVersionError> {
+        validate_contract_version(self.contract_version)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +345,10 @@ pub struct SwapCommitResult {
 }
 
 impl SwapCommitResult {
+    pub fn validate_version(&self) -> Result<(), ContractVersionError> {
+        validate_contract_version(self.contract_version)
+    }
+
     pub fn success(
         request_id: RequestId,
         swapped_fn_ids: Vec<FnId>,
@@ -417,6 +470,7 @@ mod tests {
         let request_id = RequestId(9);
         let diagnostic = Diagnostic {
             severity: DiagnosticSeverity::Error,
+            code: None,
             message: "unexpected token".to_string(),
             path: Some(PathBuf::from("samples/game.stasis")),
             line: Some(12),
@@ -459,5 +513,37 @@ mod tests {
         assert!(result.swapped_fn_ids.is_empty());
         assert!(result.new_generation.is_none());
         assert_eq!(result.error.as_deref(), Some("on_code_swap failed"));
+    }
+
+    #[test]
+    fn checked_in_compile_failure_fixture_is_byte_exact() {
+        let fixture = include_str!("../../../../contracts/v1/fixtures/compile_failure.json").trim();
+        let result: CompileResult = serde_json::from_str(fixture).expect("compile fixture");
+        result.validate_version().expect("supported version");
+        assert_eq!(result.diagnostics[0].code.as_deref(), Some("stasis.parse"));
+        assert_eq!(serde_json::to_string(&result).unwrap(), fixture);
+    }
+
+    #[test]
+    fn checked_in_activation_failure_fixture_is_byte_exact() {
+        let fixture =
+            include_str!("../../../../contracts/v1/fixtures/activation_failure.json").trim();
+        let result: SwapCommitResult = serde_json::from_str(fixture).expect("activation fixture");
+        result.validate_version().expect("supported version");
+        assert_eq!(serde_json::to_string(&result).unwrap(), fixture);
+    }
+
+    #[test]
+    fn unsupported_compile_result_fixture_rejects_before_payload_use() {
+        let fixture =
+            include_str!("../../../../contracts/v1/fixtures/unsupported_compile_result.json");
+        let result: CompileResult = serde_json::from_str(fixture).expect("unsupported fixture");
+        let error = result.validate_version().expect_err("version must reject");
+        assert_eq!(error.expected, CONTRACT_VERSION);
+        assert_eq!(error.actual, CONTRACT_VERSION + 1);
+        assert_eq!(
+            CONTRACT_VERSION_UNSUPPORTED_CODE,
+            "stasis.contractVersionUnsupported"
+        );
     }
 }

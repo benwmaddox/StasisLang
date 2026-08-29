@@ -464,6 +464,100 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+pub const ASSET_PACKAGE_IDENTITY_SCHEMA: &str = "stasis.asset_package";
+pub const ASSET_PACKAGE_IDENTITY_VERSION: u32 = 1;
+pub const ASSET_PACKAGE_IDENTITY_PATH: &str = "stasis_asset_package.json";
+pub const ASSET_PACKAGE_IDENTITY_HASH_ALGORITHM: &str = "sha256";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetPackageIdentity {
+    pub schema: String,
+    pub version: u32,
+    pub manifest_path: String,
+    pub manifest_sha256: String,
+}
+
+impl AssetPackageIdentity {
+    pub fn from_manifest_bytes(manifest_bytes: &[u8]) -> Self {
+        Self {
+            schema: ASSET_PACKAGE_IDENTITY_SCHEMA.to_string(),
+            version: ASSET_PACKAGE_IDENTITY_VERSION,
+            manifest_path: DEFAULT_ASSET_MANIFEST_PATH.to_string(),
+            manifest_sha256: sha256_bytes(manifest_bytes),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), AssetManifestError> {
+        if self.schema != ASSET_PACKAGE_IDENTITY_SCHEMA {
+            return Err(manifest_error(
+                "asset_package_schema_unsupported",
+                None,
+                None,
+                format!(
+                    "expected {ASSET_PACKAGE_IDENTITY_SCHEMA}, found {}",
+                    self.schema
+                ),
+            ));
+        }
+        if self.version != ASSET_PACKAGE_IDENTITY_VERSION {
+            return Err(manifest_error(
+                "asset_package_version_unsupported",
+                None,
+                None,
+                format!(
+                    "expected version {ASSET_PACKAGE_IDENTITY_VERSION}, found {}",
+                    self.version
+                ),
+            ));
+        }
+        if self.manifest_path != DEFAULT_ASSET_MANIFEST_PATH {
+            return Err(manifest_error(
+                "asset_package_manifest_path_invalid",
+                None,
+                None,
+                format!(
+                    "expected manifest path {DEFAULT_ASSET_MANIFEST_PATH}, found {}",
+                    self.manifest_path
+                ),
+            ));
+        }
+        if self.manifest_sha256.len() != 64
+            || !self
+                .manifest_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(manifest_error(
+                "asset_package_manifest_hash_invalid",
+                None,
+                None,
+                "manifest_sha256 must be 64 lowercase hexadecimal characters",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn write_asset_package_identity(
+    destination_root: impl AsRef<Path>,
+) -> Result<AssetPackageIdentity, String> {
+    let destination_root = destination_root.as_ref();
+    let manifest_path = destination_root.join(DEFAULT_ASSET_MANIFEST_PATH);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "failed to read packaged asset manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let identity = AssetPackageIdentity::from_manifest_bytes(&manifest_bytes);
+    let encoded = serde_json::to_vec_pretty(&identity)
+        .map_err(|error| format!("failed to encode asset package identity: {error}"))?;
+    fs::write(destination_root.join(ASSET_PACKAGE_IDENTITY_PATH), encoded)
+        .map_err(|error| format!("failed to write asset package identity: {error}"))?;
+    Ok(identity)
+}
+
 pub fn prepare_asset_bundle(
     resolved: &ResolvedAssetManifest,
     destination_root: impl AsRef<Path>,
@@ -640,6 +734,7 @@ pub fn prepare_asset_bundle(
         generated,
     )
     .map_err(|error| format!("failed to write prepared asset manifest: {error}"))?;
+    write_asset_package_identity(destination_root)?;
     Ok(summary)
 }
 
@@ -1220,6 +1315,38 @@ mod tests {
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn asset_package_identity_binds_exact_manifest_bytes_and_rejects_drift() {
+        let root = project("package_identity");
+        let manifest_bytes = br#"{"schema":"stasis-assets","version":2,"assets":[]}"#;
+        fs::write(root.join(DEFAULT_ASSET_MANIFEST_PATH), manifest_bytes).unwrap();
+
+        let identity = write_asset_package_identity(&root).expect("write identity");
+        assert_eq!(identity.schema, ASSET_PACKAGE_IDENTITY_SCHEMA);
+        assert_eq!(identity.version, ASSET_PACKAGE_IDENTITY_VERSION);
+        assert_eq!(identity.manifest_path, DEFAULT_ASSET_MANIFEST_PATH);
+        assert_eq!(identity.manifest_sha256, sha256_bytes(manifest_bytes));
+        identity.validate().expect("valid identity");
+
+        let encoded = fs::read(root.join(ASSET_PACKAGE_IDENTITY_PATH)).unwrap();
+        let decoded: AssetPackageIdentity = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, identity);
+
+        let mut unsupported = identity.clone();
+        unsupported.version += 1;
+        assert_eq!(
+            unsupported.validate().unwrap_err().code,
+            "asset_package_version_unsupported"
+        );
+        let mut bad_hash = identity;
+        bad_hash.manifest_sha256 = "ABC".to_string();
+        assert_eq!(
+            bad_hash.validate().unwrap_err().code,
+            "asset_package_manifest_hash_invalid"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

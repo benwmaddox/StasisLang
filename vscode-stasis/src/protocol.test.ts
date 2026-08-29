@@ -14,6 +14,63 @@ test("live response validation rejects unrelated stdout", () => {
   assert.equal(isLiveResponse({ kind: "status" }), false);
 });
 
+function loadJsonl(relativePath: string): Array<{ case: string; expect: string; payload: unknown }> {
+  return fs
+    .readFileSync(path.resolve(__dirname, "..", "..", relativePath), "utf8")
+    .trim()
+    .split("\n")
+    .map(line => JSON.parse(line) as { case: string; expect: string; payload: unknown });
+}
+
+const LIVE_COMMAND_TYPES = new Set([
+  "help", "status", "pause", "resume", "step", "capture_frame", "set_input_state",
+  "cancel", "quit", "symbols", "read", "references", "diagnostics", "hover",
+  "definition", "organize_imports", "quick_fixes", "inlay_hints", "call_hierarchy",
+  "type_hierarchy", "rename_preview", "validate", "validation_snapshot",
+  "validation_reinitialize", "validation_restore", "validation_clear", "complete",
+  "palette", "edit", "edit_batch", "preview", "apply", "changes", "undo", "redo",
+  "inspect", "inspect_all", "watch", "unwatch", "set", "print", "evaluate", "do",
+  "cell_put", "cell_run", "cell_list", "cell_clear", "cell_persist",
+]);
+
+function isLiveRequestShape(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.schema_version === "number" && Number.isInteger(candidate.schema_version) &&
+    typeof candidate.request_id === "number" && Number.isInteger(candidate.request_id) &&
+    typeof candidate.type === "string" && LIVE_COMMAND_TYPES.has(candidate.type)
+  );
+}
+
+test("shared live protocol fixtures agree on request shape acceptance", () => {
+  for (const record of loadJsonl("tests/characterization/live_protocol/v1/requests.jsonl")) {
+    assert.equal(
+      isLiveRequestShape(record.payload),
+      true,
+      `${record.case} must be accepted as JSON shape before Rust semantics`,
+    );
+  }
+  for (const record of loadJsonl("tests/characterization/live_protocol/v1/malformed.jsonl")) {
+    if (record.case.startsWith("request_")) {
+      assert.equal(isLiveRequestShape(record.payload), false, `${record.case} shape`);
+    }
+  }
+});
+
+test("shared live protocol response fixtures agree on valid and malformed shapes", () => {
+  for (const record of loadJsonl("tests/characterization/live_protocol/v1/responses.jsonl")) {
+    assert.equal(isLiveResponse(record.payload), true, `${record.case} response shape`);
+  }
+  for (const record of loadJsonl("tests/characterization/live_protocol/v1/malformed.jsonl")) {
+    if (record.case.startsWith("response_")) {
+      assert.equal(isLiveResponse(record.payload), false, `${record.case} response shape`);
+    }
+  }
+});
+
 test("runtime values display scalars without protocol wrappers", () => {
   assert.equal(displayRuntimeValue({ type: "i32", value: 42 }), "42");
   assert.equal(displayRuntimeValue({ hp: 4, active: true }), '{"hp":4,"active":true}');

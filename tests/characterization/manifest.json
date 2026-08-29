@@ -1,0 +1,377 @@
+{
+  "schema": "stasis.architecture_characterization_manifest.v1",
+  "version": 1,
+  "description": "Authoritative boundary-to-evidence inventory for the architecture characterization lanes.",
+  "rows": [
+    {
+      "id": "compiler.pipeline",
+      "boundary": "compiler/parser/semantics/diagnostics/reachability/patching/JIT/AOT/Wasm",
+      "fixture": [
+        "tests/stasis/characterization/compiler_pipeline_v1.stasis",
+        "tests/characterization/compiler_pipeline_v1.json",
+        "crates/stasis_compiler/tests/architecture_characterization.rs"
+      ],
+      "owner": "stasis_compiler",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": true,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test architecture_characterization -- --test-threads=1",
+      "expected_evidence": "One source produces equal semantic snapshots, canonical reachable symbols, patch reasons, stable layouts, JIT execution, normalized CLIF, AOT artifacts, and structurally parsed Wasm facts."
+    },
+    {
+      "id": "compiler.parser.fixtures",
+      "boundary": "parser",
+      "fixture": [
+        "crates/stasis_compiler/src/frontend/parser.rs",
+        "tests/stasis/parser_valid_main.stasis",
+        "tests/stasis/parser_invalid_missing_semicolon.stasis"
+      ],
+      "owner": "stasis_compiler",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_compiler --lib parser -- --test-threads=1",
+      "expected_evidence": "Parser tests accept valid syntax and reject malformed syntax with source context."
+    },
+    {
+      "id": "compiler.semantic.data-flow",
+      "boundary": "semantics/data-flow",
+      "fixture": [
+        "crates/stasis_compiler/src/data_flow.rs",
+        "crates/stasis_compiler/src/compiler.rs"
+      ],
+      "owner": "stasis_compiler",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_compiler --lib data_flow -- --test-threads=1",
+      "expected_evidence": "Data-flow summaries and effect contracts retain reads, writes, calls, and bounded-loop facts."
+    },
+    {
+      "id": "compiler.diagnostics",
+      "boundary": "diagnostics",
+      "fixture": [
+        "crates/stasis_compiler/src/lib.rs",
+        "tests/stasis/parser_invalid_missing_semicolon.stasis"
+      ],
+      "owner": "stasis_compiler",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_compiler --lib diagnostic -- --test-threads=1",
+      "expected_evidence": "Diagnostics preserve path, range, symbol, code, and deterministic message fields."
+    },
+    {
+      "id": "compiler.reachability",
+      "boundary": "reachability pruning",
+      "fixture": [
+        "crates/stasis_compiler/src/backend/reachability.rs",
+        "tests/stasis/characterization/compiler_pipeline_v1.stasis"
+      ],
+      "owner": "stasis_compiler",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_compiler --lib reachability -- --test-threads=1",
+      "expected_evidence": "Lifecycle roots and their dependencies are emitted while the unreferenced fixture function remains out of target artifacts."
+    },
+    {
+      "id": "compiler.patch-plan",
+      "boundary": "incremental patch planning",
+      "fixture": [
+        "crates/stasis_compiler/src/backend/patch_plan.rs",
+        "tests/stasis/characterization/compiler_pipeline_v1.stasis"
+      ],
+      "owner": "stasis_compiler",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_compiler --lib patch -- --test-threads=1",
+      "expected_evidence": "Cold and edited plans freeze exact changed, re-JIT, reused, host-entry, and reason-chain sets."
+    },
+    {
+      "id": "compiler.failed-publication-rollback",
+      "boundary": "failed publication rollback",
+      "fixture": [
+        "crates/stasis_compiler/src/backend/jit.rs",
+        "apps/stasis/src/compiler_backend.rs"
+      ],
+      "owner": "stasis_runner",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": true,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis --lib rejected_between_tick_layout_migration_keeps_old_code_and_state -- --test-threads=1",
+      "expected_evidence": "A rejected edit leaves the previous executable code and state observable."
+    },
+    {
+      "id": "host.host-frame-layout",
+      "boundary": "HostFrame/render layouts",
+      "fixture": [
+        "crates/stasis_compiler/tests/host_frame_jit_seam.rs",
+        "src/stdlib/internal/host_frame.stasis",
+        "runtime/stasis_render_contract.h"
+      ],
+      "owner": "stasis_compiler",
+      "evidence": "behavioral",
+      "lane": "platform-host",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test host_frame_jit_seam -- --test-threads=1",
+      "expected_evidence": "Every HostFrame lane round-trips through compiled Stasis accessors and the render contract remains aligned."
+    },
+    {
+      "id": "host.cross-host-contract",
+      "boundary": "versioned HostFrame/render/lifecycle/entrypoint/diagnostic/transaction/asset identity registry",
+      "fixture": [
+        "contracts/v1/host_runtime.json",
+        "contracts/v1/fixtures/valid_envelope.json",
+        "contracts/v1/fixtures/unsupported_version.json",
+        "tools/ci/check_host_runtime_contract.py"
+      ],
+      "owner": "contracts/v1",
+      "evidence": "structural-lint",
+      "lane": "fast-hermetic",
+      "default_gate": true,
+      "command": "python tools/ci/check_host_runtime_contract.py",
+      "expected_evidence": "The registry matches Stasis, C, Rust, Java, JavaScript, Web, toolchain, and provenance consumers; unsupported registry versions reject deterministically."
+    },
+    {
+      "id": "runtime.render-layout",
+      "boundary": "render command layout",
+      "fixture": [
+        "samples/render_parity/capture_manifest.json",
+        "tools/ci/verify_render_parity.py",
+        "runtime/tests/stasis_render_contract_test.c"
+      ],
+      "owner": "runtime",
+      "evidence": "structural-lint",
+      "lane": "platform-host",
+      "default_gate": false,
+      "command": "python tools/ci/verify_render_parity.py --profile portable",
+      "expected_evidence": "The portable render-parity fixture, command inventory, and declared regions are structurally valid."
+    },
+    {
+      "id": "runtime.assets",
+      "boundary": "asset identity/loading",
+      "fixture": [
+        "runtime/tests/stasis_asset_path_test.c",
+        "runtime/tests/stasis_asset_tasks_test.c",
+        "runtime/web/tests/asset_paths.test.mjs"
+      ],
+      "owner": "runtime",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "node --test runtime/web/tests/asset_paths.test.mjs",
+      "expected_evidence": "Packaged and fallback asset paths resolve to package-relative values without escaping the package."
+    },
+    {
+      "id": "runtime.audio",
+      "boundary": "audio queue/voice lifecycle",
+      "fixture": [
+        "runtime/tests/stasis_audio_ring_test.c",
+        "runtime/web/tests/audio_suspended_queue.test.mjs",
+        "runtime/web/tests/audio_voice_contract.test.mjs"
+      ],
+      "owner": "runtime",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "node --test runtime/web/tests/audio_suspended_queue.test.mjs runtime/web/tests/audio_voice_contract.test.mjs",
+      "expected_evidence": "Suspended audio queues are bounded and stopped voice slots can be reused."
+    },
+    {
+      "id": "runtime.storage",
+      "boundary": "Web storage persistence/isolation",
+      "fixture": [
+        "runtime/web/game.js",
+        "runtime/web/tests/storage_contract.test.mjs"
+      ],
+      "owner": "runtime",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": true,
+      "command": "node --test runtime/web/tests/storage_contract.test.mjs",
+      "expected_evidence": "Storage persists values by scope/key, isolates projects, falls back on denied storage, and treats separator-bearing keys as opaque scoped values."
+    },
+    {
+      "id": "runtime.network",
+      "boundary": "Web network mailbox/checkpoint",
+      "fixture": [
+        "runtime/web/game.js",
+        "runtime/web/tests/network_mailbox_contract.test.mjs",
+        "tests/characterization/live_protocol/v1/requests.jsonl"
+      ],
+      "owner": "runtime",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": true,
+      "command": "node --test runtime/web/tests/network_mailbox_contract.test.mjs",
+      "expected_evidence": "Checkpoint bounds, credential isolation, queue limits, and WebSocket send/poll behavior execute under deterministic adapters."
+    },
+    {
+      "id": "host.desktop-jit",
+      "boundary": "desktop host/JIT",
+      "fixture": [
+        "apps/stasis/tests/desktop_input_frame_seam.rs",
+        "apps/stasis/tests/desktop_hot_swap_generation_seam.rs"
+      ],
+      "owner": "apps/stasis",
+      "evidence": "behavioral",
+      "lane": "platform-host",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis --test desktop_input_frame_seam -- --test-threads=1",
+      "expected_evidence": "Desktop input, frame, and generation seams preserve the runtime ordering contract."
+    },
+    {
+      "id": "host.workshop",
+      "boundary": "Android Workshop host",
+      "fixture": [
+        "tests/android/WorkshopProjectFormatPolicyTest.java",
+        "mobile/android/test_emulator.ps1",
+        "tools/ci/verify_android_workshop_seam.py"
+      ],
+      "owner": "mobile/android",
+      "evidence": "behavioral",
+      "lane": "device-browser",
+      "default_gate": false,
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File mobile/android/test_emulator.ps1 -Headless",
+      "expected_evidence": "Workshop emulator launch and asset/frame acceptance receipts are produced."
+    },
+    {
+      "id": "host.mobile-aot",
+      "boundary": "mobile AOT/runtime",
+      "fixture": [
+        "apps/stasis/tests/generated_mobile_aot_runtime_seam.rs",
+        "runtime/tests/stasis_mobile_aot_runtime_test.c",
+        "docs/mobile_aot_artifacts.md"
+      ],
+      "owner": "apps/stasis",
+      "evidence": "behavioral",
+      "lane": "platform-host",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis --test generated_mobile_aot_runtime_seam -- --test-threads=1",
+      "expected_evidence": "Generated AOT bindings and mobile lifecycle order agree with the native runtime."
+    },
+    {
+      "id": "host.web-runtime",
+      "boundary": "Web runtime/package",
+      "fixture": [
+        "runtime/web/game.js",
+        "apps/stasis/tests/web_package.rs",
+        "docs/web_packaging.md"
+      ],
+      "owner": "runtime/web",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "node --test runtime/web/tests/*.test.mjs",
+      "expected_evidence": "The browser runtime package executes its host seams under deterministic Node adapters."
+    },
+    {
+      "id": "package.asset-manifest",
+      "boundary": "package manifests",
+      "fixture": [
+        "docs/asset_manifest.md",
+        "crates/stasis_assets/src/lib.rs",
+        "tools/ci/check_android_release_package.py"
+      ],
+      "owner": "stasis_assets",
+      "evidence": "structural-lint",
+      "lane": "platform-host",
+      "default_gate": false,
+      "command": "python tools/ci/check_android_release_package.py --help",
+      "expected_evidence": "Package manifest checker exposes the required package/ABI/asset validation entrypoint."
+    },
+    {
+      "id": "live.protocol-rust",
+      "boundary": "LSP/live protocol Rust semantics",
+      "fixture": [
+        "crates/stasis_runner/src/live.rs",
+        "tests/characterization/live_protocol/v1/requests.jsonl",
+        "tests/characterization/live_protocol/v1/responses.jsonl",
+        "tests/characterization/live_protocol/v1/malformed.jsonl"
+      ],
+      "owner": "stasis_runner",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": true,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_runner --test shared_characterization_fixtures -- --test-threads=1",
+      "expected_evidence": "Rust deserializes the shared request/response fixtures and applies semantic request validation separately from JSON shape parsing."
+    },
+    {
+      "id": "live.protocol-lsp",
+      "boundary": "LSP/live integration",
+      "fixture": [
+        "crates/stasis_lsp/src/live_process.rs",
+        "crates/stasis_language_service/src/lib.rs",
+        "tests/characterization/live_protocol/v1/requests.jsonl"
+      ],
+      "owner": "stasis_lsp",
+      "evidence": "behavioral",
+      "lane": "platform-host",
+      "default_gate": false,
+      "command": "python tools/cargo_cache.py run -- cargo test -p stasis_lsp --lib -- --test-threads=1",
+      "expected_evidence": "LSP live-process requests retain protocol identity and diagnostic semantics."
+    },
+    {
+      "id": "vscode.protocol",
+      "boundary": "VS Code live protocol",
+      "fixture": [
+        "vscode-stasis/src/protocol.ts",
+        "vscode-stasis/src/protocol.test.ts",
+        "tests/characterization/live_protocol/v1/responses.jsonl",
+        "tests/characterization/live_protocol/v1/malformed.jsonl"
+      ],
+      "owner": "vscode-stasis",
+      "evidence": "behavioral",
+      "lane": "fast-hermetic",
+      "default_gate": true,
+      "command": "npm --prefix vscode-stasis test",
+      "expected_evidence": "TypeScript consumes shared response fixtures and agrees on shape-valid versus malformed cases."
+    },
+    {
+      "id": "vscode.extension-e2e",
+      "boundary": "VS Code extension/package",
+      "fixture": [
+        "vscode-stasis/package.json",
+        "vscode-stasis/src/e2e/suite.ts",
+        "docs/editor_toolchain_distribution.md"
+      ],
+      "owner": "vscode-stasis",
+      "evidence": "behavioral",
+      "lane": "device-browser",
+      "default_gate": false,
+      "command": "npm --prefix vscode-stasis run test:e2e",
+      "expected_evidence": "Installed VSIX launches the packaged toolchain and completes the extension-host workflow."
+    },
+    {
+      "id": "mobile.ios-packaging",
+      "boundary": "iOS package/link",
+      "fixture": [
+        "tools/ci/build_ios_package.sh",
+        "docs/mobile_aot_artifacts.md"
+      ],
+      "owner": "mobile/ios",
+      "evidence": "behavioral",
+      "lane": "device-browser",
+      "default_gate": false,
+      "command": "bash tools/ci/build_ios_package.sh",
+      "expected_evidence": "Packaging/link evidence is produced; simulator/device runtime behavior is intentionally not claimed by this lane."
+    },
+    {
+      "id": "validation.manifest-checker",
+      "boundary": "characterization inventory",
+      "fixture": [
+        "tests/characterization/manifest.json",
+        "tools/ci/run_architecture_characterization.py",
+        "tools/ci/test_run_architecture_characterization.py"
+      ],
+      "owner": "architecture",
+      "evidence": "structural-lint",
+      "lane": "fast-hermetic",
+      "default_gate": false,
+      "command": "python -m unittest tools.ci.test_run_architecture_characterization",
+      "expected_evidence": "Manifest schema, path confinement, unique IDs, evidence labels, and lane labels are validated."
+    }
+  ]
+}

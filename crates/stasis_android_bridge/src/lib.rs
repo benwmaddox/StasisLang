@@ -23,12 +23,14 @@ unsafe extern "C" {
 }
 
 use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
+#[cfg(test)]
+use stasis_compiler::backend::development_swap::DevelopmentSwapStatus;
+use stasis_compiler::backend::development_swap::{
+    commit_development_swap, DevelopmentSwapDescriptor, DevelopmentSwapHost, DevelopmentSwapReceipt,
+};
 use stasis_compiler::backend::jit::JitProcess;
 #[cfg(test)]
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
-use stasis_compiler::backend::state_migration::{
-    activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
-};
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, load_workshop_edit_workspace, load_workshop_project_with_diagnostic,
@@ -220,6 +222,7 @@ struct AndroidRuntimeSession {
     pending_candidate: Option<JitProcess>,
     pending_source_fingerprint: Option<u64>,
     pending_resource_catalog: Option<EmbeddedResourceCatalog>,
+    last_swap_receipt: Option<DevelopmentSwapReceipt>,
     tick_count: i32,
     previous_input: Option<AndroidBridgeTickInput>,
     display_metrics: AndroidDisplayMetrics,
@@ -1767,6 +1770,7 @@ fn build_runtime_session(
         pending_candidate: None,
         pending_source_fingerprint: None,
         pending_resource_catalog: None,
+        last_swap_receipt: None,
         tick_count: 0,
         previous_input: None,
         display_metrics,
@@ -1843,6 +1847,71 @@ fn recompile_runtime_session(
     Ok(())
 }
 
+impl std::fmt::Display for AndroidBridgeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain(detail) => formatter.write_str(detail),
+            Self::Source(diagnostic) => formatter.write_str(&diagnostic.message),
+            Self::Phase {
+                stage,
+                symbol,
+                detail,
+                resource,
+            } => {
+                write!(formatter, "{stage} '{symbol}' failed: {detail}")?;
+                if let Some(resource) = resource {
+                    write!(formatter, " (resource: {resource})")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+struct AndroidResourceStage {
+    pending: Option<EmbeddedResourceCatalog>,
+    previous: Option<Option<EmbeddedResourceCatalog>>,
+}
+
+struct AndroidResourcePublication {
+    pending: Option<EmbeddedResourceCatalog>,
+}
+
+impl DevelopmentSwapHost for AndroidResourcePublication {
+    type Staged = AndroidResourceStage;
+
+    fn stage(
+        &mut self,
+        _candidate: &JitProcess,
+        _descriptor: &DevelopmentSwapDescriptor,
+    ) -> Result<Self::Staged, String> {
+        Ok(AndroidResourceStage {
+            pending: self.pending.take(),
+            previous: None,
+        })
+    }
+
+    fn publish(&mut self, staged: &mut Self::Staged) -> Result<(), String> {
+        let Some(catalog) = staged.pending.take() else {
+            return Ok(());
+        };
+        let mut slot = embedded_resource_catalog()
+            .lock()
+            .map_err(|_| "embedded resource catalog mutex poisoned".to_string())?;
+        staged.previous = Some(slot.replace(catalog));
+        Ok(())
+    }
+
+    fn restore(&mut self, staged: Self::Staged) -> Result<(), String> {
+        if let Some(previous) = staged.previous {
+            *embedded_resource_catalog()
+                .lock()
+                .map_err(|_| "embedded resource catalog mutex poisoned".to_string())? = previous;
+        }
+        Ok(())
+    }
+}
+
 fn activate_pending_runtime_candidate(
     session: &mut AndroidRuntimeSession,
 ) -> Result<bool, AndroidBridgeError> {
@@ -1853,69 +1922,37 @@ fn activate_pending_runtime_candidate(
         .pending_source_fingerprint
         .take()
         .ok_or_else(|| "pending Android generation has no source fingerprint".to_string())?;
-    let pending_catalog = session.pending_resource_catalog.take();
-    let mut preview = plan_state_migration(
-        &session.jit.state_layout(),
-        &candidate.state_layout(),
-        Vec::new(),
-        false,
-        None,
-    )?;
-    finalize_runtime_preview(&candidate, &mut preview);
-    let previous_catalog = if let Some(catalog) = pending_catalog {
-        let mut slot = embedded_resource_catalog()
-            .lock()
-            .map_err(|_| "embedded resource catalog mutex poisoned")?;
-        Some(slot.replace(catalog))
-    } else {
-        None
-    };
     let run_hook = session.initialized && candidate.has_on_code_swap();
-    enum HookOutcome {
-        Applied,
-        Failed(AndroidBridgeError),
-    }
-    let activation = activate_candidate_transactionally(
-        Some(&session.jit),
-        &candidate,
-        &preview,
-        run_hook,
-        || {
-            if run_hook {
-                match candidate.execute_optional_on_code_swap() {
-                    Ok(()) => match take_embedded_resource_error() {
-                        Ok(()) => HookOutcome::Applied,
-                        Err(error) => {
-                            HookOutcome::Failed(resource_phase_error("on_code_swap", error))
-                        }
-                    },
-                    Err(error) => HookOutcome::Failed(AndroidBridgeError::phase(
-                        "runtime_entry",
-                        "on_code_swap",
-                        error,
-                        None,
-                    )),
-                }
-            } else {
-                HookOutcome::Applied
-            }
-        },
-        |outcome| matches!(outcome, HookOutcome::Applied),
-    );
-    let activation_error = match activation {
-        Ok(HookOutcome::Applied) => None,
-        Ok(HookOutcome::Failed(error)) => Some(error),
-        Err(error) => Some(AndroidBridgeError::Plain(error)),
+    let descriptor = DevelopmentSwapDescriptor::for_candidate(&candidate, run_hook);
+    let mut publication = AndroidResourcePublication {
+        pending: session.pending_resource_catalog.take(),
     };
-    if let Some(error) = activation_error {
-        if let Some(previous) = previous_catalog {
-            *embedded_resource_catalog()
-                .lock()
-                .map_err(|_| "embedded resource catalog mutex poisoned")? = previous;
+    let activation = commit_development_swap(
+        &mut session.jit,
+        candidate,
+        descriptor,
+        &mut publication,
+        |candidate| {
+            if run_hook {
+                candidate.execute_optional_on_code_swap().map_err(|error| {
+                    AndroidBridgeError::phase("runtime_entry", "on_code_swap", error, None)
+                })?;
+                take_embedded_resource_error()
+                    .map_err(|error| resource_phase_error("on_code_swap", error))?;
+            }
+            Ok(())
+        },
+    );
+    let receipt = match activation {
+        Ok(receipt) => receipt,
+        Err(failure) => {
+            session.last_swap_receipt = Some(failure.receipt);
+            return Err(failure
+                .hook_error
+                .unwrap_or_else(|| AndroidBridgeError::Plain(failure.error)));
         }
-        return Err(error);
-    }
-    session.jit = candidate;
+    };
+    session.last_swap_receipt = Some(receipt);
     session.source_fingerprint = pending_source_fingerprint;
     session.generation = session.generation.saturating_add(1);
     Ok(true)
@@ -5150,6 +5187,16 @@ function tick(): void {}
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
                 .expect_err("hook rejection should abort hot reload");
         assert!(error.contains("hook requested rejection"));
+        RUNTIME_SESSION.with(|session| {
+            assert_eq!(
+                session
+                    .borrow()
+                    .as_ref()
+                    .and_then(|session| session.last_swap_receipt.as_ref())
+                    .map(|receipt| receipt.status),
+                Some(DevelopmentSwapStatus::Rejected)
+            );
+        });
         assert_eq!(
             stasis_dynload::jit_string_literal_value(live_literal).as_deref(),
             Some("live")
@@ -5209,6 +5256,7 @@ function tick(): void {}
             pending_candidate: Some(candidate),
             pending_source_fingerprint: Some(2),
             pending_resource_catalog: None,
+            last_swap_receipt: None,
             tick_count: 0,
             previous_input: None,
             display_metrics: AndroidDisplayMetrics::new(1, 1, 1, 1),

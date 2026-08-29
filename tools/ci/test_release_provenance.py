@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from tools.generate_release_provenance import RUNTIME_DIRS, RUNTIME_FILES, render_contract_version
+from tools.verify_package_provenance import verify_asset_package_identities
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -15,6 +16,36 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    def test_asset_package_identity_binds_exact_manifest_bytes(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary)
+            (package / "assets").mkdir()
+            manifest = b'{"schema":"stasis-assets","version":2,"assets":[]}'
+            (package / "assets/manifest.json").write_bytes(manifest)
+            identity = {
+                "schema": "stasis.asset_package",
+                "version": 1,
+                "manifest_path": "assets/manifest.json",
+                "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            }
+            identity_path = package / "stasis_asset_package.json"
+            identity_path.write_text(
+                json.dumps(identity), encoding="utf-8"
+            )
+            verify_asset_package_identities(Parser(), package)
+            identity_path.unlink()
+            with self.assertRaisesRegex(ValueError, "identity is missing"):
+                verify_asset_package_identities(Parser(), package)
+            identity_path.write_text(json.dumps(identity), encoding="utf-8")
+            (package / "assets/manifest.json").write_bytes(manifest + b"\n")
+            with self.assertRaisesRegex(ValueError, "manifest hash mismatch"):
+                verify_asset_package_identities(Parser(), package)
+
     def test_render_contract_version_resolves_current_header_alias(self):
         self.assertEqual(6, render_contract_version(ROOT))
 
@@ -70,7 +101,8 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertTrue((thorvg / source).is_file(), source)
 
         runtime_cmake = (ROOT / "runtime/CMakeLists.txt").read_text(encoding="utf-8")
-        self.assertIn("stasis_graphics.c stasis_audio_assets.c stasis_svg.cpp", runtime_cmake)
+        self.assertIn("stasis_graphics.c stasis_image_writer.c", runtime_cmake)
+        self.assertIn("stasis_audio_assets.c stasis_svg.cpp", runtime_cmake)
         self.assertIn("stasis_thorvg", runtime_cmake)
 
         android_cmake = (
@@ -92,6 +124,10 @@ class ReleaseProvenanceTests(unittest.TestCase):
 
     def test_windows_dpi_manifest_is_part_of_release_provenance(self):
         self.assertIn("stasis_runner.manifest", RUNTIME_FILES)
+
+    def test_image_writer_sources_are_part_of_release_provenance(self):
+        self.assertIn("stasis_image_writer.c", RUNTIME_FILES)
+        self.assertIn("stasis_image_writer.h", RUNTIME_FILES)
 
     def test_macos_retina_plist_is_part_of_release_provenance(self):
         self.assertIn("stasis_runner_macos.plist.in", RUNTIME_FILES)

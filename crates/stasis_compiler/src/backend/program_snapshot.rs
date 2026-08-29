@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::backend::assets::{discover_asset_references, AssetReference};
-use crate::backend::emit::{
+use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compute_files_fingerprint,
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
 };
@@ -411,10 +411,14 @@ pub fn canonical_state_layout_digest_for_files(
     let mut types = TypeTable::new();
     types.ensure_utf8_view_id()?;
     types.ensure_ascii_view_id()?;
-    let constants = crate::backend::emit::collect_top_level_constant_values(&files, &mut types)?;
-    let globals = crate::backend::emit::collect_global_path_types(&files, &mut types, &constants)?;
-    let collections =
-        crate::backend::emit::collect_foreach_collection_infos(&files, &mut types, &constants)?;
+    let constants =
+        crate::backend::compile_analysis::collect_top_level_constant_values(&files, &mut types)?;
+    let globals = crate::backend::compile_analysis::collect_global_path_types(
+        &files, &mut types, &constants,
+    )?;
+    let collections = crate::backend::compile_analysis::collect_foreach_collection_infos(
+        &files, &mut types, &constants,
+    )?;
     let layout = build_state_layout(&globals, &collections, &types);
     state_layout_digest(&layout)
 }

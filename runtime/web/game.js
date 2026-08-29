@@ -346,6 +346,23 @@
     try { localStorage.setItem(key, value); } catch (_) { volatileStorage.set(key, value); }
     return 1;
   };
+  // Keep the browser runtime as the source of truth for characterization.  The
+  // hook is opt-in and only exists in deterministic test VMs; published pages
+  // do not expose internal storage or network state.
+  if (globalThis.STASIS_CHARACTERIZATION_TEST === true) {
+    window.__STASIS_CHARACTERIZATION__ = {
+      storageKey,
+      storageGet,
+      storageSet,
+      networkCheckpoint,
+      networkCheckpointKey,
+      networkLoadCheckpoint,
+      networkConnect,
+      networkPoll,
+      networkSend,
+      networkClient,
+    };
+  }
   const readAscii = (offset, length) => {
     if (!instance?.exports.memory || offset < 0 || length < 0) return "";
     const bytes = new Uint8Array(instance.exports.memory.buffer, offset, length);

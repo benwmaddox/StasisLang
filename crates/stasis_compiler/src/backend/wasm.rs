@@ -4,11 +4,12 @@
 //! storage or expression shapes fail at package time instead of receiving a
 //! target-specific substitute implementation.
 
-use crate::backend::emit::{
+use crate::backend::compile_analysis::{
     are_call_argument_and_param_compatible, build_compile_analysis_cache,
-    compute_files_fingerprint, hash_global_path, is_i32_numeric_type,
-    resolve_extern_call_signatures_with, ConstantValue,
+    compute_files_fingerprint, is_i32_numeric_type, resolve_extern_call_signatures_with,
+    ConstantValue,
 };
+use crate::backend::emit::hash_global_path;
 use crate::backend::program_snapshot::ProgramSnapshot;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
 use crate::frontend::types::{
@@ -21,9 +22,9 @@ use crate::ir::hir::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const I32: u8 = 0x7f;
-const F32: u8 = 0x7d;
-const F64: u8 = 0x7c;
+mod binary;
+
+use binary::{append_name_section, section, sleb, sleb64, string, uleb, F32, F64, I32};
 
 pub fn wasm_global_hash(path: &str) -> i32 {
     hash_global_path(path)
@@ -233,7 +234,7 @@ struct WasmSignature {
 
 fn lower_wasm_signature(
     signature: &Signature,
-    named_structs: &crate::backend::emit::NamedStructFieldTypeMap,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
 ) -> Result<WasmSignature, String> {
     let mut params = Vec::with_capacity(physical_param_count(&signature.params, named_structs));
     for type_id in &signature.params {
@@ -305,14 +306,14 @@ fn validate_signature(name: &str, signature: &Signature) -> Result<(), String> {
 
 fn is_struct_view_type(
     type_id: TypeId,
-    named_structs: &crate::backend::emit::NamedStructFieldTypeMap,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
 ) -> bool {
     named_structs.contains_key(&type_id)
 }
 
 fn physical_param_count(
     params: &[TypeId],
-    named_structs: &crate::backend::emit::NamedStructFieldTypeMap,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
 ) -> usize {
     params
         .iter()
@@ -356,7 +357,7 @@ struct StructScalarBinding {
 }
 
 fn build_struct_scalars(
-    analysis: &crate::backend::emit::CompileAnalysisCache,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
     memory: &BTreeMap<String, MemoryBinding>,
 ) -> BTreeMap<String, StructScalarBinding> {
     let mut out = BTreeMap::new();
@@ -415,7 +416,7 @@ fn is_byte_backed_type(type_id: TypeId, types: &TypeTable) -> bool {
 fn is_byte_backed_memory_path(
     path: &str,
     type_id: TypeId,
-    analysis: &crate::backend::emit::CompileAnalysisCache,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
     types: &TypeTable,
 ) -> bool {
     is_byte_backed_type(type_id, types)
@@ -428,7 +429,7 @@ fn is_byte_backed_memory_path(
 fn storage_width(
     type_id: TypeId,
     types: &TypeTable,
-    named_structs: &crate::backend::emit::NamedStructFieldTypeMap,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
 ) -> Result<u32, String> {
     match type_id {
         TYPE_ID_BOOL | TYPE_ID_U8 => Ok(1),
@@ -461,7 +462,7 @@ fn align_up(value: u32, alignment: u32) -> Result<u32, String> {
 }
 
 fn struct_memory_scalar_paths(
-    analysis: &crate::backend::emit::CompileAnalysisCache,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
 ) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     for (struct_path, type_id) in &analysis.global_path_types {
@@ -493,7 +494,7 @@ fn struct_memory_scalar_paths(
 }
 
 fn build_memory_bindings(
-    analysis: &crate::backend::emit::CompileAnalysisCache,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
     types: &TypeTable,
 ) -> Result<(BTreeMap<String, MemoryBinding>, u32), String> {
     let mut offset = 0u32;
@@ -629,7 +630,7 @@ fn build_string_literal_memory(
 
 fn initial_i32_for_path(
     path: &str,
-    analysis: &crate::backend::emit::CompileAnalysisCache,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
 ) -> Option<i32> {
     [".length", ".max_length"].iter().find_map(|suffix| {
         path.strip_suffix(suffix)
@@ -639,7 +640,7 @@ fn initial_i32_for_path(
 }
 
 fn build_struct_collections(
-    analysis: &crate::backend::emit::CompileAnalysisCache,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
     types: &TypeTable,
     memory: &BTreeMap<String, MemoryBinding>,
 ) -> Result<BTreeMap<String, StructCollectionBinding>, String> {
@@ -687,7 +688,7 @@ fn build_struct_collections(
 
 fn collect_imports(
     functions: &[(FunctionMeta, FunctionHIR)],
-    analysis: &crate::backend::emit::CompileAnalysisCache,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
 ) -> Result<(BTreeSet<String>, Vec<WasmImport>), String> {
     let mut called = BTreeSet::new();
     for (_, hir) in functions {
@@ -735,7 +736,7 @@ fn collect_imports(
 
 fn encode_module(
     functions: &[(FunctionMeta, FunctionHIR)],
-    analysis: &crate::backend::emit::CompileAnalysisCache,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
     types: &TypeTable,
     string_literals: &BTreeMap<i32, String>,
     debug_symbols: bool,
@@ -1216,21 +1217,6 @@ fn encode_global_accessor(
     Ok(body)
 }
 
-fn append_name_section(function_names: &[(u32, String)], module: &mut Vec<u8>) {
-    let mut function_subsection = Vec::new();
-    uleb(function_names.len() as u32, &mut function_subsection);
-    for (index, name) in function_names {
-        uleb(*index, &mut function_subsection);
-        string(name, &mut function_subsection);
-    }
-    let mut payload = Vec::new();
-    string("name", &mut payload);
-    payload.push(1);
-    uleb(function_subsection.len() as u32, &mut payload);
-    payload.extend(function_subsection);
-    section(0, payload, module);
-}
-
 fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
     fn expression(value: &SimpleExpr, out: &mut BTreeSet<String>) {
         match value {
@@ -1315,7 +1301,7 @@ fn encode_function(
     string_literal_memory: &BTreeMap<i32, StringLiteralMemoryBinding>,
     struct_collections: &BTreeMap<String, StructCollectionBinding>,
     struct_scalars: &BTreeMap<String, StructScalarBinding>,
-    named_structs: &crate::backend::emit::NamedStructFieldTypeMap,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
     types: &TypeTable,
     imports: &BTreeMap<String, u32>,
     internals: &BTreeMap<String, u32>,
@@ -1520,7 +1506,7 @@ struct EncodeContext<'a> {
     string_literal_memory: &'a BTreeMap<i32, StringLiteralMemoryBinding>,
     struct_collections: &'a BTreeMap<String, StructCollectionBinding>,
     struct_scalars: &'a BTreeMap<String, StructScalarBinding>,
-    named_structs: &'a crate::backend::emit::NamedStructFieldTypeMap,
+    named_structs: &'a crate::backend::compile_analysis::NamedStructFieldTypeMap,
     types: &'a TypeTable,
     constants: &'a BTreeMap<String, ConstantValue>,
     imports: &'a BTreeMap<String, u32>,
@@ -3753,58 +3739,6 @@ fn collect_string_literals(
         statements(&hir.statements, constants, &mut out);
     }
     out
-}
-
-fn section(id: u8, payload: Vec<u8>, module: &mut Vec<u8>) {
-    if payload.is_empty() {
-        return;
-    }
-    module.push(id);
-    uleb(payload.len() as u32, module);
-    module.extend(payload);
-}
-
-fn string(value: &str, out: &mut Vec<u8>) {
-    uleb(value.len() as u32, out);
-    out.extend(value.as_bytes());
-}
-
-fn uleb(mut value: u32, out: &mut Vec<u8>) {
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-fn sleb(mut value: i32, out: &mut Vec<u8>) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
-        out.push(if done { byte } else { byte | 0x80 });
-        if done {
-            break;
-        }
-    }
-}
-
-fn sleb64(mut value: i64, out: &mut Vec<u8>) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
-        out.push(if done { byte } else { byte | 0x80 });
-        if done {
-            break;
-        }
-    }
 }
 
 #[cfg(test)]

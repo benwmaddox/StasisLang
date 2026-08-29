@@ -1,0 +1,7 @@
+{"case":"status","expect":"valid","payload":{"schema_version":1,"request_id":1,"type":"status"}}
+{"case":"step_with_default","expect":"valid","payload":{"schema_version":1,"request_id":2,"type":"step"}}
+{"case":"symbols_with_filters","expect":"valid","payload":{"schema_version":1,"request_id":3,"type":"symbols","query":"score","kind":"global","files":["main.stasis"],"page":0,"limit":16}}
+{"case":"validate_requirement","expect":"valid","payload":{"schema_version":1,"request_id":4,"type":"validate","requirement":{"path":"score","op":"eq","value":7},"frames":2}}
+{"case":"edit_preview","expect":"valid","payload":{"schema_version":1,"request_id":5,"type":"edit","operation":"update","target":{"name":"tick","file":"main.stasis","kind":"function"},"source":"function tick(): i32 { return 7; }","preview":true,"run_tests":false}}
+{"case":"zero_request_id","expect":"semantic_invalid","payload":{"schema_version":1,"request_id":0,"type":"status"}}
+{"case":"unsupported_schema","expect":"semantic_invalid","payload":{"schema_version":2,"request_id":6,"type":"status"}}

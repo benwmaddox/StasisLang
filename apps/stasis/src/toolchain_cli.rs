@@ -10,8 +10,9 @@ use stasis::{
     LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
-    load_project_asset_manifest, prepare_asset_bundle, AssetFormat, AssetLimits, AudioEncoding,
-    FontEncoding, SpriteEncoding, DEFAULT_ASSET_MANIFEST_PATH,
+    load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
+    AssetLimits, AudioEncoding, FontEncoding, SpriteEncoding, ASSET_PACKAGE_IDENTITY_PATH,
+    DEFAULT_ASSET_MANIFEST_PATH,
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
@@ -75,6 +76,8 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",
+    "stasis_image_writer.c",
+    "stasis_image_writer.h",
     "stasis_runner.manifest",
     "stasis_runner_macos.plist.in",
     "stasis_mobile_aot_runtime.c",
@@ -996,7 +999,6 @@ fn parse_toolchain_command(args: &[OsString]) -> Option<ToolchainCommand> {
         .ok()
         .map(|parsed| parsed.command)
 }
-
 pub(super) fn try_run() -> Option<i32> {
     let args: Vec<OsString> = env::args_os().collect();
     if !is_toolchain_invocation(&args) {
@@ -4316,7 +4318,18 @@ fn package_web_workspace(
             .and_then(|web| web.loading_font.as_deref())
             .map(normalize_web_loading_font_path)
             .transpose()?;
-        let runtime_config = web_runtime_config(workspace, &process, development_build);
+        let mut runtime_config = web_runtime_config(workspace, &process, development_build);
+        let asset_identity_path = staging_root.join(ASSET_PACKAGE_IDENTITY_PATH);
+        if asset_identity_path.is_file() {
+            runtime_config["asset_package"] =
+                serde_json::from_slice(&fs::read(&asset_identity_path).map_err(|error| {
+                    format!(
+                        "failed to read Web asset package identity {}: {error}",
+                        asset_identity_path.display()
+                    )
+                })?)
+                .map_err(|error| format!("failed to decode Web asset package identity: {error}"))?;
+        }
         let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
             .replace("</", "<\\/");
@@ -4756,6 +4769,9 @@ fn stage_workspace_assets(
         .map_err(|error| format!("failed to prepare desktop build assets: {error}"))?;
     } else {
         copy_dir_if_exists(&assets, &destination_root.join("assets"))?;
+    }
+    if destination_root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        write_asset_package_identity(destination_root)?;
     }
     Ok(())
 }
@@ -6475,7 +6491,6 @@ fn validate_read_only_toolchain_stdlib(workspace_root: &Path) -> Result<(), Stri
     }
     Ok(())
 }
-
 fn is_editable_workshop_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized.starts_with("src/") || normalized.starts_with("tests/")
