@@ -634,6 +634,7 @@ pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message: "simulated compile failure".to_string(),
                     path: request.changed_files.first().cloned(),
                     line: Some(1),

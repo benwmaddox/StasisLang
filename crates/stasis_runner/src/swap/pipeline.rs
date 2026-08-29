@@ -1,7 +1,7 @@
 use crate::swap::contracts::{
     CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
     FnId, FunctionPatchSet, LayoutHash, RequestId, SwapCommitRequest, SwapCommitResult, TargetMode,
-    CONTRACT_VERSION,
+    CONTRACT_VERSION, CONTRACT_VERSION_UNSUPPORTED_CODE,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use std::collections::BTreeSet;
@@ -218,13 +218,14 @@ impl DevHotSwapPipeline {
         loop {
             match self.compile_result_rx.try_recv() {
                 Ok(result) => {
-                    let result = if result.contract_version == CONTRACT_VERSION {
+                    let result = if result.validate_version().is_ok() {
                         result
                     } else {
                         CompileResult::failed(
                             result.request_id,
                             vec![Diagnostic {
                                 severity: DiagnosticSeverity::Error,
+                                code: Some(CONTRACT_VERSION_UNSUPPORTED_CODE.to_string()),
                                 message: format!(
                                     "compile contract version mismatch: expected {}, got {}",
                                     CONTRACT_VERSION, result.contract_version
@@ -299,7 +300,7 @@ impl DevHotSwapPipeline {
         loop {
             match self.commit_result_rx.try_recv() {
                 Ok(result) => {
-                    let result = if result.contract_version == CONTRACT_VERSION {
+                    let result = if result.validate_version().is_ok() {
                         result
                     } else {
                         SwapCommitResult::failed(
@@ -420,6 +421,7 @@ mod tests {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message: "parse error".to_string(),
                     path: Some(PathBuf::from("samples/bad.stasis")),
                     line: Some(3),
@@ -620,6 +622,10 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.message.contains("contract version mismatch")));
+        assert_eq!(
+            compile_result.diagnostics[0].code.as_deref(),
+            Some(CONTRACT_VERSION_UNSUPPORTED_CODE)
+        );
     }
 
     #[test]

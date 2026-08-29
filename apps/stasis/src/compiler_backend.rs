@@ -401,6 +401,7 @@ impl CompilerBackend for IncrementalCompilerBackend {
                     request_id,
                     vec![Diagnostic {
                         severity: DiagnosticSeverity::Error,
+                        code: None,
                         message,
                         path: None,
                         line: None,
@@ -452,6 +453,7 @@ impl IncrementalCompilerBackend {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message,
                     path: request.changed_files.first().cloned(),
                     line: None,
@@ -466,6 +468,7 @@ impl IncrementalCompilerBackend {
                     request.request_id,
                     vec![Diagnostic {
                         severity: DiagnosticSeverity::Error,
+                        code: None,
                         message,
                         path: request.changed_files.first().cloned(),
                         line: None,
@@ -517,6 +520,7 @@ impl IncrementalCompilerBackend {
                     request.request_id,
                     vec![Diagnostic {
                         severity: DiagnosticSeverity::Error,
+                        code: None,
                         message,
                         path: request.changed_files.first().cloned(),
                         line: None,
@@ -565,6 +569,7 @@ impl IncrementalCompilerBackend {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message,
                     path: request.changed_files.first().cloned(),
                     line: None,
@@ -585,6 +590,7 @@ impl IncrementalCompilerBackend {
         let Some(source) = source else {
             return Diagnostic {
                 severity: DiagnosticSeverity::Error,
+                code: None,
                 message: fallback,
                 path: fallback_path,
                 line: None,
@@ -606,6 +612,7 @@ impl IncrementalCompilerBackend {
             start.saturating_sub(text[..start].rfind('\n').map_or(0, |index| index + 1)) as u32 + 1;
         Diagnostic {
             severity: DiagnosticSeverity::Error,
+            code: Some(source.code.as_str().to_string()),
             message: source.message.clone(),
             path: Some(
                 source_entry
@@ -643,6 +650,7 @@ impl IncrementalCompilerBackend {
                                 request.request_id,
                                 vec![Diagnostic {
                                     severity: DiagnosticSeverity::Error,
+                                    code: None,
                                     message,
                                     path: request.changed_files.first().cloned(),
                                     line: None,
@@ -661,6 +669,7 @@ impl IncrementalCompilerBackend {
                             request.request_id,
                             vec![Diagnostic {
                                 severity: DiagnosticSeverity::Error,
+                                code: None,
                                 message,
                                 path: request.changed_files.first().cloned(),
                                 line: None,
@@ -687,6 +696,7 @@ impl IncrementalCompilerBackend {
                     if let Err(error) = std::fs::remove_dir_all(&bundle_output_dir) {
                         return CompileResult::failed(request.request_id, vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
+                            code: None,
                             message: format!("failed to clear existing AOT engine bundle directory {}: {error}", bundle_output_dir.display()),
                             path: request.changed_files.first().cloned(), line: None, column: None,
                         }]);
@@ -702,6 +712,7 @@ impl IncrementalCompilerBackend {
                             request.request_id,
                             vec![Diagnostic {
                                 severity: DiagnosticSeverity::Error,
+                                code: None,
                                 message,
                                 path: request.changed_files.first().cloned(),
                                 line: None,
@@ -718,6 +729,7 @@ impl IncrementalCompilerBackend {
                         request.request_id,
                         vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
+                            code: None,
                             message: format!(
                                 "failed to stat AOT engine bundle manifest {}: {error}",
                                 bundle.manifest_path.display()
@@ -737,6 +749,7 @@ impl IncrementalCompilerBackend {
                         request.request_id,
                         vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
+                            code: None,
                             message: format!(
                                 "failed to hash AOT engine bundle manifest {}: {error}",
                                 bundle.manifest_path.display()
@@ -758,6 +771,7 @@ impl IncrementalCompilerBackend {
                             request.request_id,
                             vec![Diagnostic {
                                 severity: DiagnosticSeverity::Error,
+                                code: None,
                                 message,
                                 path: request.changed_files.first().cloned(),
                                 line: None,
@@ -814,8 +828,9 @@ impl IncrementalCompilerBackend {
                         return CompileResult::failed(
                         request.request_id,
                         vec![Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message: format!(
+                    severity: DiagnosticSeverity::Error,
+                    code: None,
+                    message: format!(
                                 "host ABI alias '{}' is ambiguous across canonical function identities",
                                 entry.name
                             ),
@@ -837,6 +852,7 @@ impl IncrementalCompilerBackend {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message:
                         "engine contract compile produced no emitted function mapping for patch set"
                             .to_string(),
@@ -863,6 +879,7 @@ impl IncrementalCompilerBackend {
                         request.request_id,
                         vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
+                            code: None,
                             message: format!(
                                 "AOT manifest FnId collision: '{}' vs '{}'",
                                 manifest_symbol_id, entry.symbol_id
@@ -889,6 +906,7 @@ impl IncrementalCompilerBackend {
                     request.request_id,
                     vec![Diagnostic {
                         severity: DiagnosticSeverity::Error,
+                        code: None,
                         message: "missing JIT engine package after successful JIT compile"
                             .to_string(),
                         path: request.changed_files.first().cloned(),
@@ -4026,6 +4044,7 @@ mod tests {
         assert_eq!(diagnostic.path, Some(PathBuf::from("dep.stasis")));
         assert_eq!(diagnostic.line, Some(2));
         assert_eq!(diagnostic.column, Some(1));
+        assert_eq!(diagnostic.code.as_deref(), Some("stasis.generic"));
     }
 
     fn assert_second_file_diagnostic(target_mode: TargetMode) {
