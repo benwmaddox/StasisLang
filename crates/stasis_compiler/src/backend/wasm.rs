@@ -22,9 +22,9 @@ use crate::ir::hir::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const I32: u8 = 0x7f;
-const F32: u8 = 0x7d;
-const F64: u8 = 0x7c;
+mod binary;
+
+use binary::{append_name_section, section, sleb, sleb64, string, uleb, F32, F64, I32};
 
 pub fn wasm_global_hash(path: &str) -> i32 {
     hash_global_path(path)
@@ -1215,21 +1215,6 @@ fn encode_global_accessor(
     branch(&matching, lane, setter, &mut body)?;
     body.push(0x0b);
     Ok(body)
-}
-
-fn append_name_section(function_names: &[(u32, String)], module: &mut Vec<u8>) {
-    let mut function_subsection = Vec::new();
-    uleb(function_names.len() as u32, &mut function_subsection);
-    for (index, name) in function_names {
-        uleb(*index, &mut function_subsection);
-        string(name, &mut function_subsection);
-    }
-    let mut payload = Vec::new();
-    string("name", &mut payload);
-    payload.push(1);
-    uleb(function_subsection.len() as u32, &mut payload);
-    payload.extend(function_subsection);
-    section(0, payload, module);
 }
 
 fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
@@ -3754,58 +3739,6 @@ fn collect_string_literals(
         statements(&hir.statements, constants, &mut out);
     }
     out
-}
-
-fn section(id: u8, payload: Vec<u8>, module: &mut Vec<u8>) {
-    if payload.is_empty() {
-        return;
-    }
-    module.push(id);
-    uleb(payload.len() as u32, module);
-    module.extend(payload);
-}
-
-fn string(value: &str, out: &mut Vec<u8>) {
-    uleb(value.len() as u32, out);
-    out.extend(value.as_bytes());
-}
-
-fn uleb(mut value: u32, out: &mut Vec<u8>) {
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-fn sleb(mut value: i32, out: &mut Vec<u8>) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
-        out.push(if done { byte } else { byte | 0x80 });
-        if done {
-            break;
-        }
-    }
-}
-
-fn sleb64(mut value: i64, out: &mut Vec<u8>) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
-        out.push(if done { byte } else { byte | 0x80 });
-        if done {
-            break;
-        }
-    }
 }
 
 #[cfg(test)]
