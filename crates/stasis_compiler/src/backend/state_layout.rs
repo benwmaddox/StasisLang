@@ -1,4 +1,4 @@
-use super::emit::{CollectionInfoMap, GlobalPathTypeMap};
+use super::compile_analysis::{CollectionInfoMap, GlobalPathTypeMap};
 use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
     TYPE_ID_U32, TYPE_ID_U8,

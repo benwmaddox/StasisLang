@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use crate::backend::emit::{
+use crate::backend::compile_analysis::{
     collect_supported_call_signatures, resolve_call_signature, CallSignatureMap,
     ResolvedExternCallSignature,
 };

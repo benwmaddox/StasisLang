@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::backend::emit::ConstantValue;
+use crate::backend::compile_analysis::ConstantValue;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{

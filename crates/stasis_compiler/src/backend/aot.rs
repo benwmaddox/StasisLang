@@ -1,3 +1,9 @@
+use crate::backend::compile_analysis::{
+    build_compile_analysis_cache, compile_analysis_requires_reemit, compute_files_fingerprint,
+    is_i32_abi_compatible_type, resolve_preferred_extern_call_signatures, select_emit_function_ids,
+    CallSignatureMap, CollectionInfoMap, ConstantValueMap, GlobalPathTypeMap,
+    NamedStructFieldTypeMap,
+};
 use crate::backend::emit::*;
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::state_layout::{is_named_scalar_state_path, StateLayout};

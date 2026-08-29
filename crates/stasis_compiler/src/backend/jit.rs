@@ -1,6 +1,12 @@
+use crate::backend::compile_analysis::{
+    build_compile_analysis_cache_from_resolved_externs, collect_supported_extern_call_signatures,
+    compute_files_fingerprint, resolve_extern_call_signatures_with_index, CallSignatureMap,
+    CollectionInfoMap, CompileAnalysisCache, ConstantValueMap, ExternCallSignature,
+    ExternSymbolAddressMap, GlobalPathTypeMap, NamedStructFieldTypeMap,
+    ResolvedExternCallSignature,
+};
 use crate::backend::emit::{
-    debug_variable_slot, resolve_extern_call_signatures_with_index, CompileAnalysisCache,
-    DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage,
+    debug_variable_slot, DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage,
 };
 use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReason,
@@ -2685,15 +2691,15 @@ fn array_storage_kind(
     if type_id == TYPE_ID_U16 {
         return Some(stasis_dynload::JitStorageKind::U16);
     }
-    if crate::backend::emit::is_i32_abi_compatible_type(type_id, type_table) {
+    if crate::backend::compile_analysis::is_i32_abi_compatible_type(type_id, type_table) {
         return Some(stasis_dynload::JitStorageKind::I32);
     }
     scalar_storage_kind(type_table, type_id)
 }
 
 fn build_direct_storage_bindings(
-    global_path_types: &crate::backend::emit::GlobalPathTypeMap,
-    collection_infos: &crate::backend::emit::CollectionInfoMap,
+    global_path_types: &crate::backend::compile_analysis::GlobalPathTypeMap,
+    collection_infos: &crate::backend::compile_analysis::CollectionInfoMap,
     type_table: &TypeTable,
     provision: bool,
 ) -> Result<DirectStorageBindings, String> {
