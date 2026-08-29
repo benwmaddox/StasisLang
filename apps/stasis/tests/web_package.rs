@@ -623,20 +623,8 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     assert!(!index.contains("__STASIS_"));
     assert!(!output.join("play").exists());
     assert!(output.join("stasis_provenance.json").is_file());
-    let asset_identity: AssetPackageIdentity = serde_json::from_slice(
-        &fs::read(output.join(ASSET_PACKAGE_IDENTITY_PATH)).expect("asset package identity"),
-    )
-    .expect("parse asset package identity");
-    asset_identity.validate().expect("valid asset identity");
-    assert_eq!(
-        asset_identity.manifest_sha256,
-        format!(
-            "{:x}",
-            Sha256::digest(fs::read(output.join("assets/manifest.json")).unwrap())
-        )
-    );
-    assert!(runtime.contains("\"schema\":\"stasis.asset_package\""));
-    assert!(runtime.contains(&asset_identity.manifest_sha256));
+    assert!(!output.join(ASSET_PACKAGE_IDENTITY_PATH).exists());
+    assert!(!runtime.contains("\"schema\":\"stasis.asset_package\""));
     assert!(!output.join("web_export_smoke.html").exists());
 
     fs::remove_dir_all(&output).expect("clean web package test output");
@@ -701,6 +689,21 @@ fn network_web_package_embeds_retained_nested_assets_only() {
 
     let relative_output = PathBuf::from(format!("build/network-bundle-output-{}", stamp()));
     let output = package(&workspace, &relative_output);
+    let asset_identity: AssetPackageIdentity = serde_json::from_slice(
+        &fs::read(output.join(ASSET_PACKAGE_IDENTITY_PATH)).expect("asset package identity"),
+    )
+    .expect("parse asset package identity");
+    asset_identity.validate().expect("valid asset identity");
+    assert_eq!(
+        asset_identity.manifest_sha256,
+        format!(
+            "{:x}",
+            Sha256::digest(fs::read(output.join("assets/manifest.json")).unwrap())
+        )
+    );
+    let runtime = fs::read_to_string(output.join("game.js")).expect("packaged Web runtime");
+    assert!(runtime.contains("\"schema\":\"stasis.asset_package\""));
+    assert!(runtime.contains(&asset_identity.manifest_sha256));
     let bundle = StaticBundle::decode(
         &fs::read(output.join("network_guest.bundle")).expect("read network guest bundle"),
     )
