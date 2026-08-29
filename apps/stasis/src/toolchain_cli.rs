@@ -237,6 +237,7 @@ const COMMANDS: &[&str] = &[
     "build",
     "package",
     "package-mobile",
+    "prepare",
     "signing",
     "inspect",
     "replay",
@@ -484,6 +485,8 @@ enum ToolchainCommand {
         #[command(subcommand)]
         command: VendorCommand,
     },
+    /// Materialize the selected toolchain standard library cache.
+    Prepare,
     /// Find and transactionally edit compiler-owned semantic symbols.
     Symbol {
         #[command(subcommand)]
@@ -613,6 +616,15 @@ enum SymbolCommand {
         #[arg(long)]
         no_tests: bool,
     },
+}
+
+impl SymbolCommand {
+    fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::List { .. } | Self::Find(_) | Self::Read(_) | Self::References { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -947,6 +959,44 @@ impl CommandResult {
     }
 }
 
+pub(super) fn is_read_only_symbol_invocation() -> bool {
+    let args: Vec<OsString> = env::args_os().collect();
+    is_read_only_symbol_args(&args)
+}
+
+fn is_read_only_symbol_args(args: &[OsString]) -> bool {
+    matches!(parse_toolchain_command(args), Some(ToolchainCommand::Symbol { command }) if command.is_read_only())
+}
+
+pub(super) fn should_skip_stale_stasis_cache_cleanup() -> bool {
+    if is_read_only_symbol_invocation() {
+        return true;
+    }
+    let args: Vec<OsString> = env::args_os().collect();
+    matches!(
+        parse_toolchain_command(&args),
+        Some(ToolchainCommand::Prepare)
+    )
+}
+
+#[cfg(test)]
+fn should_skip_stale_stasis_cache_cleanup_args(args: &[OsString]) -> bool {
+    match parse_toolchain_command(args) {
+        Some(ToolchainCommand::Prepare) => true,
+        Some(ToolchainCommand::Symbol { command }) => command.is_read_only(),
+        _ => false,
+    }
+}
+
+fn parse_toolchain_command(args: &[OsString]) -> Option<ToolchainCommand> {
+    if !is_toolchain_invocation(args) {
+        return None;
+    }
+    ToolchainCli::try_parse_from(args.to_vec())
+        .ok()
+        .map(|parsed| parsed.command)
+}
+
 pub(super) fn try_run() -> Option<i32> {
     let args: Vec<OsString> = env::args_os().collect();
     if !is_toolchain_invocation(&args) {
@@ -1093,6 +1143,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
         ToolchainCommand::PackageMobile { .. } => "package-mobile",
+        ToolchainCommand::Prepare => "prepare",
         ToolchainCommand::Inspect { .. } => "inspect",
         ToolchainCommand::Replay { .. } => "replay",
         ToolchainCommand::Verify => "verify",
@@ -1247,6 +1298,10 @@ fn execute(
             });
             let vendor_gate = match &other {
                 ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
+                ToolchainCommand::Prepare => VendorGate::Inspect,
+                ToolchainCommand::Symbol { command } if command.is_read_only() => {
+                    VendorGate::ReadOnly
+                }
                 _ => VendorGate::Sync,
             };
             let workspace = load_workspace_with_vendor_gate(workspace_path, vendor_gate)?;
@@ -1418,6 +1473,7 @@ fn execute(
                     mobile_budget_bytes,
                 } => inspect_workspace(&workspace, &capacities, mobile_budget_bytes),
                 ToolchainCommand::Vendor { command } => vendor_command(&workspace, command),
+                ToolchainCommand::Prepare => prepare_workspace(&workspace),
                 ToolchainCommand::Symbol { command } => symbol_workspace(&workspace, command),
                 _ => Err("unsupported command routing".to_string()),
             }
@@ -1452,6 +1508,7 @@ fn command_requires_runtime(command: &ToolchainCommand) -> bool {
         | ToolchainCommand::Test { .. }
         | ToolchainCommand::Inspect { .. }
         | ToolchainCommand::Vendor { .. }
+        | ToolchainCommand::Prepare
         | ToolchainCommand::Symbol { .. } => false,
     }
 }
@@ -1663,6 +1720,7 @@ fn write_manifest(path: &Path, manifest: &ProjectManifest) -> Result<(), String>
 enum VendorGate {
     Sync,
     Inspect,
+    ReadOnly,
 }
 
 fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
@@ -1722,21 +1780,32 @@ fn load_workspace_with_vendor_gate(
             }
         }
     }
-    if manifest.stdlib.as_deref() == Some("toolchain") {
+    if manifest.stdlib.as_deref() == Some("toolchain") && vendor_gate == VendorGate::Sync {
         sync_toolchain_stdlib(&root)?;
     }
-    if vendor_gate != VendorGate::Inspect {
-        reconcile_project_vendor(&root, &mut manifest)?;
+    match vendor_gate {
+        VendorGate::Sync => reconcile_project_vendor(&root, &mut manifest)?,
+        VendorGate::Inspect => {}
+        VendorGate::ReadOnly => {
+            validate_read_only_vendor(&root, &manifest)?;
+            if manifest.stdlib.as_deref() == Some("toolchain") {
+                validate_read_only_toolchain_stdlib(&root)?;
+            }
+        }
     }
     Ok(Workspace { root, manifest })
 }
 
-fn sync_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
+fn bundled_stdlib_source_tree() -> Result<PathBuf, String> {
     let stdlib = bundled_stdlib_dir()?;
-    let source = stdlib
+    stdlib
         .parent()
-        .ok_or_else(|| format!("bundled stdlib has no src parent: {}", stdlib.display()))?
-        .to_path_buf();
+        .ok_or_else(|| format!("bundled stdlib has no src parent: {}", stdlib.display()))
+        .map(Path::to_path_buf)
+}
+
+fn sync_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
+    let source = bundled_stdlib_source_tree()?;
     let fingerprint = directory_sha256(&source)?;
     let cache_root = workspace_root.join(".stasis_cache/toolchain");
     let target = cache_root.join("src");
@@ -1965,6 +2034,38 @@ fn inspect_project_vendor(
     })
 }
 
+fn validate_read_only_vendor(
+    workspace_root: &Path,
+    manifest: &ProjectManifest,
+) -> Result<(), String> {
+    if manifest.vendor.is_none() {
+        return Ok(());
+    }
+    let status = inspect_project_vendor(workspace_root, manifest)?;
+    let Some(actual_sha256) = status.actual_sha256.as_deref() else {
+        return Err("read-only symbol query did not update files: checked-in vendor snapshot is missing; run 'stasis vendor status' then 'stasis vendor update'".to_string());
+    };
+    let recorded_sha256 = status
+        .recorded
+        .as_ref()
+        .map(|recorded| recorded.sha256.as_str())
+        .unwrap_or_default();
+    if actual_sha256 == recorded_sha256 && actual_sha256 == status.installed.sha256 {
+        return Ok(());
+    }
+
+    let reason = if actual_sha256 != status.installed.sha256 && actual_sha256 == recorded_sha256 {
+        "is stale for the selected toolchain"
+    } else if actual_sha256 == status.installed.sha256 {
+        "has an inconsistent manifest fingerprint"
+    } else {
+        "has local changes"
+    };
+    Err(format!(
+        "read-only symbol query did not update files: checked-in vendor snapshot {reason}; run 'stasis vendor status' then 'stasis vendor update'"
+    ))
+}
+
 fn reconcile_project_vendor(
     workspace_root: &Path,
     manifest: &mut ProjectManifest,
@@ -2129,6 +2230,25 @@ fn vendor_command(workspace: &Workspace, command: VendorCommand) -> Result<Comma
             ))
         }
     }
+}
+
+fn prepare_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+    if workspace.manifest.stdlib.as_deref() != Some("toolchain") {
+        return Ok(CommandResult::success(
+            "toolchain stdlib preparation is not needed for this workspace",
+            json!({"prepared": false, "stdlib": workspace.manifest.stdlib}),
+        ));
+    }
+
+    sync_toolchain_stdlib(&workspace.root)?;
+    Ok(CommandResult::success(
+        "prepared the selected toolchain stdlib in .stasis_cache/toolchain/src",
+        json!({
+            "prepared": true,
+            "stdlib": "toolchain",
+            "path": ".stasis_cache/toolchain/src",
+        }),
+    ))
 }
 
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
@@ -5806,6 +5926,7 @@ fn symbol_workspace(
         .filter(|file| is_editable_workshop_path(&file.path))
         .cloned()
         .collect::<Vec<_>>();
+    let query_files = &files;
     match command {
         SymbolCommand::List {
             query,
@@ -5816,7 +5937,7 @@ fn symbol_workspace(
             limit,
         } => {
             let limit = limit.clamp(1, 200);
-            let mut items = workshop_source_items(&editable_files)?;
+            let mut items = workshop_source_items(query_files)?;
             if requested_files.len() > 16 {
                 return Err("symbol list accepts at most 16 --file values".to_string());
             }
@@ -5909,7 +6030,7 @@ fn symbol_workspace(
             ))
         }
         SymbolCommand::Find(args) => {
-            let items = find_workshop_symbols(&editable_files, &args.selector())?;
+            let items = find_workshop_symbols(query_files, &args.selector())?;
             let metadata = items
                 .iter()
                 .map(|item| {
@@ -5930,7 +6051,7 @@ fn symbol_workspace(
         }
         SymbolCommand::Read(args) => {
             let selector = args.selector();
-            let mut items = find_workshop_symbols(&editable_files, &selector)?;
+            let mut items = find_workshop_symbols(query_files, &selector)?;
             if items.len() != 1 {
                 return Err(format!(
                     "symbol read requires exactly one match; found {}",
@@ -5944,7 +6065,7 @@ fn symbol_workspace(
             ))
         }
         SymbolCommand::References { symbol, limit } => {
-            let references = find_workshop_references(&editable_files, &symbol, limit)?;
+            let references = find_workshop_references(query_files, &symbol, limit)?;
             let human = references
                 .iter()
                 .map(|reference| {
@@ -5979,7 +6100,7 @@ fn symbol_workspace(
                     expected_source_hash: None,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Update {
             target,
@@ -5998,7 +6119,7 @@ fn symbol_workspace(
                     expected_source_hash,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Delete {
             target,
@@ -6014,13 +6135,13 @@ fn symbol_workspace(
                     expected_source_hash,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Apply { request, options } => {
             let source = read_workspace_input(workspace, "semantic edit request", &request)?;
             let batch = serde_json::from_str::<WorkshopSemanticEditBatch>(&source)
                 .map_err(|error| format!("invalid semantic edit request: {error}"))?;
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Revert {
             receipt,
@@ -6049,13 +6170,16 @@ fn read_symbol_source(
 
 fn apply_symbol_batch(
     workspace: &Workspace,
-    files: &[WorkshopSourceFile],
+    editable_files: &[WorkshopSourceFile],
+    query_files: &[WorkshopSourceFile],
     mut batch: WorkshopSemanticEditBatch,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
-    normalize_cli_semantic_batch(files, &mut batch)?;
-    let (after, plan) = plan_workshop_semantic_edits(files, &batch)?;
-    validate_semantic_files(workspace, &after)?;
+    normalize_cli_semantic_batch(editable_files, &mut batch)?;
+    let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
+    ensure_editable_semantic_plan(&plan)?;
+    let validation_files = overlay_workshop_files(query_files, &after);
+    validate_semantic_files(workspace, &validation_files)?;
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -6127,6 +6251,20 @@ fn apply_symbol_batch(
             "receipt": relative_display(&workspace.root, &receipt),
         }),
     ))
+}
+
+fn overlay_workshop_files(
+    query_files: &[WorkshopSourceFile],
+    edited_files: &[WorkshopSourceFile],
+) -> Vec<WorkshopSourceFile> {
+    let mut files = query_files
+        .iter()
+        .map(|file| (file.path.clone(), file.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for file in edited_files {
+        files.insert(file.path.clone(), file.clone());
+    }
+    files.into_values().collect()
 }
 
 fn normalize_cli_semantic_batch(
@@ -6231,6 +6369,12 @@ fn revert_symbol_plan(
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let mut restored = current.clone();
     for change in &plan.changed_files {
+        if !is_editable_workshop_path(&change.file) {
+            return Err(format!(
+                "semantic edits are limited to project src/ and tests/ files: {}",
+                change.file
+            ));
+        }
         let file = restored
             .iter_mut()
             .find(|file| file.path == change.file)
@@ -6280,6 +6424,56 @@ fn read_workspace_input(workspace: &Workspace, field: &str, path: &Path) -> Resu
     let absolute = workspace.root.join(path);
     fs::read_to_string(&absolute)
         .map_err(|error| format!("failed to read {}: {error}", absolute.display()))
+}
+
+fn ensure_editable_semantic_plan(plan: &WorkshopSemanticEditPlan) -> Result<(), String> {
+    if let Some(change) = plan
+        .changed_files
+        .iter()
+        .find(|change| !is_editable_workshop_path(&change.file))
+    {
+        return Err(format!(
+            "semantic edits are limited to project src/ and tests/ files: {}",
+            change.file
+        ));
+    }
+    Ok(())
+}
+
+fn validate_read_only_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
+    let source = bundled_stdlib_source_tree()?;
+    let expected_fingerprint = directory_sha256(&source)?;
+    let target = workspace_root.join(".stasis_cache/toolchain/src");
+    let marker = target.join(".toolchain-sha256");
+    let missing_message = "read-only symbol query did not update files: toolchain stdlib cache is missing or unprepared; run 'stasis prepare'";
+    let stale_message = "read-only symbol query did not update files: toolchain stdlib cache is stale for the selected toolchain; run 'stasis prepare'";
+
+    let target_metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(missing_message.to_string());
+        }
+        Err(_) => return Err(missing_message.to_string()),
+    };
+    if target_metadata.file_type().is_symlink() || !target_metadata.is_dir() {
+        return Err(stale_message.to_string());
+    }
+
+    let marker_metadata = match fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(missing_message.to_string());
+        }
+        Err(_) => return Err(stale_message.to_string()),
+    };
+    if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+        return Err(stale_message.to_string());
+    }
+    let actual_fingerprint = fs::read_to_string(&marker).map_err(|_| stale_message.to_string())?;
+    if actual_fingerprint.trim() != expected_fingerprint {
+        return Err(stale_message.to_string());
+    }
+    Ok(())
 }
 
 fn is_editable_workshop_path(path: &str) -> bool {
@@ -6604,12 +6798,7 @@ pub(crate) fn verify_installed_toolchain_identity() -> Result<(), String> {
     }
     let executable = env::current_exe()
         .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
-    verify_installed_toolchain_identity_for(
-        &executable,
-        runtime,
-        expected,
-        release_id,
-    )
+    verify_installed_toolchain_identity_for(&executable, runtime, expected, release_id)
 }
 
 fn verify_installed_toolchain_identity_for(
@@ -8044,6 +8233,39 @@ mod tests {
         ] {
             ToolchainCli::try_parse_from(args).expect("parse vendor command");
         }
+        let parsed =
+            ToolchainCli::try_parse_from(["stasis", "prepare"]).expect("parse prepare command");
+        assert!(matches!(parsed.command, ToolchainCommand::Prepare));
+        assert!(!command_requires_runtime(&ToolchainCommand::Prepare));
+        let prepare_args = ["stasis", "prepare"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(should_skip_stale_stasis_cache_cleanup_args(&prepare_args));
+    }
+
+    #[test]
+    fn symbol_queries_are_the_only_symbol_commands_that_skip_cache_cleanup() {
+        for args in [
+            vec!["stasis", "--json", "symbol", "list"],
+            vec!["stasis", "symbol", "find", "main"],
+            vec!["stasis", "symbol", "read", "main"],
+            vec!["stasis", "symbol", "references", "state"],
+        ] {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert!(is_read_only_symbol_args(&args));
+            assert!(should_skip_stale_stasis_cache_cleanup_args(&args));
+        }
+        for args in [
+            vec!["stasis", "symbol", "add"],
+            vec!["stasis", "symbol", "update", "main"],
+            vec!["stasis", "symbol", "delete", "main"],
+            vec!["stasis", "check"],
+        ] {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert!(!is_read_only_symbol_args(&args));
+            assert!(!should_skip_stale_stasis_cache_cleanup_args(&args));
+        }
     }
 
     #[test]
@@ -8969,6 +9191,20 @@ mod tests {
         assert!(root
             .join(".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis")
             .is_file());
+
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn prepare_is_a_noop_without_toolchain_stdlib() {
+        let root = temp_dir("prepare_noop");
+        create_project(root.clone(), "demo".to_string()).expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load workspace");
+
+        let result = prepare_workspace(&workspace).expect("prepare workspace");
+        assert_eq!(result.data["prepared"], false);
+        assert_eq!(result.data["stdlib"], Value::Null);
+        assert!(!root.join(".stasis_cache/toolchain").exists());
 
         remove_temp(&root);
     }

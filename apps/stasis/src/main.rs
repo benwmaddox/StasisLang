@@ -3648,7 +3648,9 @@ function frame_width(): i32 { return 360; }
 }
 
 fn main() {
-    maybe_cleanup_stale_stasis_cache();
+    if !toolchain_cli::should_skip_stale_stasis_cache_cleanup() {
+        maybe_cleanup_stale_stasis_cache();
+    }
 
     if let Some(exit) = toolchain_cli::try_run() {
         std::process::exit(exit);
