@@ -417,6 +417,7 @@ cargo run -p stasis --release -- play `
 - `docs/live-compilation-prd.md` — hot-swap product and architecture requirements
 - `docs/toolchain_cli.md` — CLI and workspace contract
 - `docs/mobile_packaging.md` — Android and iOS packaging
+- [`docs/architecture_complexity_and_simplification.md`](docs/architecture_complexity_and_simplification.md) - directional complexity inventory and conservative consolidation sequence
 - `apps/stasis` — integrated app and CLI
 - `crates/stasis_compiler` — frontend, semantic checks, and Cranelift lowering
 - `crates/stasis_jit` — JIT/AOT support and function-pointer indirection
