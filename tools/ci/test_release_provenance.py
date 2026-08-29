@@ -33,10 +33,15 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "manifest_path": "assets/manifest.json",
                 "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
             }
-            (package / "stasis_asset_package.json").write_text(
+            identity_path = package / "stasis_asset_package.json"
+            identity_path.write_text(
                 json.dumps(identity), encoding="utf-8"
             )
             verify_asset_package_identities(Parser(), package)
+            identity_path.unlink()
+            with self.assertRaisesRegex(ValueError, "identity is missing"):
+                verify_asset_package_identities(Parser(), package)
+            identity_path.write_text(json.dumps(identity), encoding="utf-8")
             (package / "assets/manifest.json").write_bytes(manifest + b"\n")
             with self.assertRaisesRegex(ValueError, "manifest hash mismatch"):
                 verify_asset_package_identities(Parser(), package)

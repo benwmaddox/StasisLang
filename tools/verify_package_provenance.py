@@ -13,6 +13,7 @@ COMMAND_BUFFER_NAME = "gfx_cmd"
 CURRENT_COMMAND_BUFFER_VERSION = 6
 LEGACY_COMMAND_BUFFER_VERSION = 4
 ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
+ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
 ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
 ASSET_PACKAGE_IDENTITY_VERSION = 1
 
@@ -38,6 +39,14 @@ def mobile_package_id(name: str) -> str:
 def verify_asset_package_identities(
     parser: argparse.ArgumentParser, package_root: pathlib.Path
 ) -> None:
+    packaged_manifests = sorted(package_root.rglob("assets/manifest.json"))
+    for manifest_path in packaged_manifests:
+        identity_path = manifest_path.parent.parent / ASSET_PACKAGE_IDENTITY_NAME
+        if not identity_path.is_file():
+            parser.error(
+                f"asset package identity is missing for packaged manifest: {manifest_path}"
+            )
+
     for identity_path in sorted(package_root.rglob(ASSET_PACKAGE_IDENTITY_NAME)):
         identity = json.loads(identity_path.read_text(encoding="utf-8"))
         if set(identity) != {"schema", "version", "manifest_path", "manifest_sha256"}:
@@ -49,6 +58,8 @@ def verify_asset_package_identities(
         relative = pathlib.PurePosixPath(identity["manifest_path"])
         if relative.is_absolute() or ".." in relative.parts:
             parser.error(f"unsafe asset manifest identity path: {identity_path}")
+        if relative != ASSET_MANIFEST_RELATIVE_PATH:
+            parser.error(f"unsupported asset manifest identity path: {identity_path}")
         manifest_path = identity_path.parent / pathlib.Path(*relative.parts)
         if not manifest_path.is_file():
             parser.error(f"asset package identity manifest is missing: {manifest_path}")
