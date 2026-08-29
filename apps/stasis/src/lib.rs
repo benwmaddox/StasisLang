@@ -49,6 +49,11 @@ use serde_json::Value;
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
 };
+#[cfg(test)]
+use stasis_compiler::backend::development_swap::DevelopmentSwapStatus;
+use stasis_compiler::backend::development_swap::{
+    commit_development_swap, DevelopmentSwapDescriptor, DevelopmentSwapHost, DevelopmentSwapReceipt,
+};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::state_migration::{
     activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
@@ -2766,7 +2771,6 @@ fn run_play_in_process_inner(
                         let commit_result = commit_play_candidate_between_ticks(
                             &mut jit,
                             prepared.candidate,
-                            prepared.package.symbol_code_ptrs.keys().cloned().collect(),
                             &prepared.package,
                         );
                         let commit_ms = commit_started.elapsed().as_millis();
@@ -2786,6 +2790,7 @@ fn run_play_in_process_inner(
                                 );
                             }
                             Ok(entrypoints) => {
+                                debug_assert!(entrypoints.swap_receipt.is_some());
                                 tick_code_ptr = entrypoints.tick_code_ptr;
                                 render_code_ptr = entrypoints.render_code_ptr;
                                 if profile.is_some() {
@@ -3158,47 +3163,65 @@ fn run_play_in_process_inner(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PlayEntrypoints {
     tick_code_ptr: u64,
     render_code_ptr: u64,
+    swap_receipt: Option<DevelopmentSwapReceipt>,
+}
+
+struct PlayHostEntryPublication {
+    candidate: stasis_dynload::JitHostEntryTargets,
+}
+
+impl DevelopmentSwapHost for PlayHostEntryPublication {
+    type Staged = Option<stasis_dynload::JitHostEntryTargets>;
+
+    fn stage(
+        &mut self,
+        _candidate: &JitProcess,
+        _descriptor: &DevelopmentSwapDescriptor,
+    ) -> Result<Self::Staged, String> {
+        stasis_dynload::validate_jit_host_entry_targets(&self.candidate)?;
+        Ok(stasis_dynload::jit_host_entry_targets())
+    }
+
+    fn publish(&mut self, _staged: &mut Self::Staged) -> Result<(), String> {
+        stasis_dynload::publish_jit_host_entry_targets(self.candidate)
+    }
+
+    fn restore(&mut self, staged: Self::Staged) -> Result<(), String> {
+        if let Some(previous) = staged {
+            stasis_dynload::begin_jit_host_entry_session(previous)?;
+        }
+        Ok(())
+    }
 }
 
 fn commit_play_candidate_between_ticks(
     active: &mut JitProcess,
     candidate: JitProcess,
-    changed_functions: Vec<String>,
     package: &JitEnginePackage,
 ) -> Result<PlayEntrypoints, String> {
     let revision = stasis_dynload::jit_host_entry_targets()
         .map_or(1, |targets| targets.revision.saturating_add(1));
     let targets = package.host_entry_targets(revision)?;
-    stasis_dynload::validate_jit_host_entry_targets(&targets)?;
-    let mut preview = plan_state_migration(
-        &active.state_layout(),
-        &candidate.state_layout(),
-        changed_functions,
-        false,
-        None,
-    )?;
-    finalize_runtime_preview(&candidate, &mut preview);
-    activate_candidate_transactionally(
-        Some(&*active),
+    let mut publication = PlayHostEntryPublication { candidate: targets };
+    let descriptor = DevelopmentSwapDescriptor::for_candidate(
         &candidate,
-        &preview,
         package.on_code_swap_code_ptr.is_some(),
-        || {
+    );
+    let swap_receipt =
+        commit_development_swap(active, candidate, descriptor, &mut publication, |_| {
             package.on_code_swap_code_ptr.map_or(Ok(()), |code_ptr| {
                 stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
             })
-        },
-        Result::is_ok,
-    )??;
-    stasis_dynload::publish_jit_host_entry_targets(targets)?;
-    active.accept_staged_candidate(candidate);
+        })
+        .map_err(|failure| failure.error)?;
     Ok(PlayEntrypoints {
         tick_code_ptr: stasis_dynload::jit_host_tick_trampoline_ptr() as u64,
         render_code_ptr: stasis_dynload::jit_host_render_trampoline_ptr() as u64,
+        swap_receipt: Some(swap_receipt),
     })
 }
 
@@ -6758,6 +6781,7 @@ mod tests {
         let active_entrypoints = PlayEntrypoints {
             tick_code_ptr: stasis_dynload::jit_host_tick_trampoline_ptr() as u64,
             render_code_ptr: stasis_dynload::jit_host_render_trampoline_ptr() as u64,
+            swap_receipt: None,
         };
         assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(0));
         assert_eq!(
@@ -6779,13 +6803,15 @@ mod tests {
         let package = candidate
             .build_engine_package(&EngineEntrypoints::runtime_default())
             .expect("build staged v2 package");
-        let published = commit_play_candidate_between_ticks(
-            &mut active,
-            candidate,
-            package.symbol_code_ptrs.keys().cloned().collect(),
-            &package,
-        )
-        .expect("commit and publish v2 at the production between-tick boundary");
+        let published = commit_play_candidate_between_ticks(&mut active, candidate, &package)
+            .expect("commit and publish v2 at the production between-tick boundary");
+        assert_eq!(
+            published
+                .swap_receipt
+                .as_ref()
+                .map(|receipt| receipt.status),
+            Some(DevelopmentSwapStatus::Accepted)
+        );
         assert_eq!(published.tick_code_ptr, active_entrypoints.tick_code_ptr);
         assert_eq!(
             published.render_code_ptr,
@@ -6889,13 +6915,8 @@ mod tests {
         )
         .expect("simulate live edit publishing while watch compile is pending");
 
-        commit_play_candidate_between_ticks(
-            &mut active,
-            prepared.candidate,
-            prepared.package.symbol_code_ptrs.keys().cloned().collect(),
-            &prepared.package,
-        )
-        .expect("publish v2");
+        commit_play_candidate_between_ticks(&mut active, prepared.candidate, &prepared.package)
+            .expect("publish v2");
         assert_eq!(
             stasis_dynload::jit_host_tick_trampoline_ptr(),
             tick_trampoline
@@ -6933,6 +6954,7 @@ mod tests {
         let active_entrypoints = PlayEntrypoints {
             tick_code_ptr: active_package.tick_code_ptr,
             render_code_ptr: active_package.render_code_ptr,
+            swap_receipt: None,
         };
         assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(0));
         assert_eq!(
@@ -6956,13 +6978,8 @@ mod tests {
         let package = candidate
             .build_engine_package(&EngineEntrypoints::runtime_default())
             .expect("build rejecting package");
-        let error = commit_play_candidate_between_ticks(
-            &mut active,
-            candidate,
-            package.symbol_code_ptrs.keys().cloned().collect(),
-            &package,
-        )
-        .expect_err("swap hook must reject at the production boundary");
+        let error = commit_play_candidate_between_ticks(&mut active, candidate, &package)
+            .expect_err("swap hook must reject at the production boundary");
         assert!(error.contains("rejection"));
 
         assert_eq!(

@@ -141,5 +141,10 @@
     "compile_result_fields": ["contract_version", "request_id", "status", "diagnostics", "layout_hash", "fn_patch_set", "hook_symbol", "host_set_id", "host_set_hash", "hook_fn_id", "aot_linked_image_path", "aot_linked_image_size_bytes", "aot_linked_image_sha256", "aot_function_symbols", "jit_code_ptr_overrides"],
     "activation_result_fields": ["contract_version", "request_id", "status", "swapped_fn_ids", "new_generation", "error"]
   },
+  "development_swap": {
+    "version": 1,
+    "status_tags": ["accepted", "rejected"],
+    "receipt_fields": ["schema_version", "status", "changed_functions", "state_layout_compatible", "layout_changed", "from_layout_version", "to_layout_version"]
+  },
   "asset_package": {"schema": "stasis.asset_package", "version": 1, "identity_path": "stasis_asset_package.json", "manifest_path": "assets/manifest.json", "hash_algorithm": "sha256"}
 }

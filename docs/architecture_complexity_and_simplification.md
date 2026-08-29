@@ -372,6 +372,31 @@ Acceptance gates:
 - Desktop and Workshop produce equivalent receipts for equivalent candidates.
 - Stop/shutdown and child-exit paths release or reject pending candidates.
 
+Delivered boundary: `crates/stasis_compiler/src/backend/development_swap.rs`
+now owns the JIT-specific synchronous transition, not a universal host
+controller. A fully compiled candidate enters with a sorted/deduplicated
+change descriptor. The module plans and finalizes state migration, stages a
+narrow host publication participant, activates through the bounded runtime
+snapshot/restore path, publishes host resources, runs the optional hook, and
+accepts the candidate only after every step succeeds. Every failure carries
+the same versioned accepted/rejected receipt shape.
+
+Desktop supplies only a JIT host-entry participant; its prior entry table is
+restored if publication or the hook rejects. Android Workshop supplies only an
+embedded-resource participant; its prior catalog is restored with the old JIT
+runtime and state. Candidate compilation, watch scheduling, JNI, lifecycle,
+windowing, rendering, and diagnostics remain in their existing owners. The
+runner pipeline also exposes explicit shutdown that joins its compiler worker,
+drains queued values, and emits deterministic failed commit results for
+unaccepted request IDs; `Drop` uses the same cleanup path.
+
+Focused evidence covers accepted publication, incompatible layout, staging
+failure, partial publication failure, hook mutation plus rejection, desktop
+between-tick acceptance/rejection, Workshop hook rollback, and pending pipeline
+shutdown. The architecture gate continues to exercise the existing rollback
+fixture, so the new owner replaces duplicated transition code without adding a
+parallel behavior path.
+
 These four P1 slices are the highest-value implementation units and should be
 tracked independently even when delivered under one architecture program.
 

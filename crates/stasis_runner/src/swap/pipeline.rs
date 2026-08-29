@@ -10,6 +10,9 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+pub const PIPELINE_STOPPED_BEFORE_COMMIT: &str =
+    "development swap pipeline stopped before candidate commit";
+
 enum CompilerThreadMessage {
     Compile(CompileRequest),
     Shutdown,
@@ -179,6 +182,45 @@ impl DevHotSwapPipeline {
         self.last_commit_duration
     }
 
+    /// Stops the compiler worker and deterministically rejects every request
+    /// that had not reached an accepted commit. Draining the channels here also
+    /// releases staged DTOs before host/process shutdown.
+    pub fn shutdown(&mut self) -> Vec<SwapCommitResult> {
+        if self.compiler_thread.is_none() {
+            return Vec::new();
+        }
+        let _ = self.compiler_tx.send(CompilerThreadMessage::Shutdown);
+        if let Some(join_handle) = self.compiler_thread.take() {
+            let _ = join_handle.join();
+        }
+
+        let mut request_ids = BTreeSet::new();
+        if let Some(request_id) = self.in_flight_compile.take() {
+            request_ids.insert(request_id);
+        }
+        if let Some(request_id) = self.in_flight_commit.take() {
+            request_ids.insert(request_id);
+        }
+        while let Ok(request) = self.commit_request_rx.try_recv() {
+            request_ids.insert(request.request_id);
+        }
+        while self.file_change_rx.try_recv().is_ok() {}
+        while self.compile_result_rx.try_recv().is_ok() {}
+        while self.commit_result_rx.try_recv().is_ok() {}
+        self.pending_files.clear();
+        self.in_flight_compile_started_at = None;
+        self.in_flight_commit_started_at = None;
+
+        let results = request_ids
+            .into_iter()
+            .map(|request_id| SwapCommitResult::failed(request_id, PIPELINE_STOPPED_BEFORE_COMMIT))
+            .collect::<Vec<_>>();
+        if let Some(last) = results.last() {
+            self.last_commit_result = Some(last.clone());
+        }
+        results
+    }
+
     fn drain_file_changes(&mut self) {
         loop {
             match self.file_change_rx.try_recv() {
@@ -328,10 +370,7 @@ impl DevHotSwapPipeline {
 
 impl Drop for DevHotSwapPipeline {
     fn drop(&mut self) {
-        let _ = self.compiler_tx.send(CompilerThreadMessage::Shutdown);
-        if let Some(join_handle) = self.compiler_thread.take() {
-            let _ = join_handle.join();
-        }
+        let _ = self.shutdown();
     }
 }
 
@@ -443,6 +482,29 @@ mod tests {
         assert_eq!(pipeline.pending_commit_requests(), 0);
         assert!(pipeline.last_commit_result().is_none());
         assert!(!pipeline.has_in_flight_work());
+    }
+
+    #[test]
+    fn shutdown_rejects_and_releases_pending_commit() {
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| {
+            CompileResult::success(request.request_id, LayoutHash([8; 32]), sample_patch_set())
+        });
+        pipeline.submit_file_change(sample_change("samples/shutdown.stasis", 1));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.pending_commit_requests() == 1
+        });
+
+        let results = pipeline.shutdown();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, SwapCommitStatus::Failed);
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some(PIPELINE_STOPPED_BEFORE_COMMIT)
+        );
+        assert!(!pipeline.has_in_flight_work());
+        assert_eq!(pipeline.pending_commit_requests(), 0);
+        assert!(pipeline.shutdown().is_empty());
     }
 
     #[test]

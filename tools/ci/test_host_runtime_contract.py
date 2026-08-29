@@ -42,6 +42,23 @@ class HostRuntimeContractTests(unittest.TestCase):
         self.assertIsNone(contract.validate_envelope(valid))
         self.assertEqual("unsupported contract version", contract.validate_envelope(unsupported))
 
+    def test_development_swap_receipt_drift_is_rejected(self):
+        source = (contract.ROOT / contract.DEVELOPMENT_SWAP).read_text(encoding="utf-8")
+        overlays = {
+            contract.DEVELOPMENT_SWAP: source.replace(
+                "pub schema_version: u16,", "pub receipt_version: u16,", 1
+            )
+        }
+        failures, _ = contract.check(
+            registry=copy.deepcopy(self.registry), overlays=overlays
+        )
+        self.assertTrue(
+            any(
+                failure.field == "development_swap.receipt_fields"
+                for failure in failures
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

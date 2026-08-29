@@ -23,13 +23,15 @@ JAVA_LIFECYCLE = Path(
 COMPILER = Path("crates/stasis_compiler/src/lib.rs")
 ASSETS = Path("crates/stasis_assets/src/lib.rs")
 SWAP_CONTRACTS = Path("crates/stasis_runner/src/swap/contracts.rs")
+DEVELOPMENT_SWAP = Path("crates/stasis_compiler/src/backend/development_swap.rs")
 DYNLOAD = Path("crates/stasis_dynload/src/lib.rs")
 MOBILE = Path("runtime/stasis_mobile_runtime.h")
 WEB = Path("runtime/web/game.js")
 
 EXPECTED_TOP_LEVEL = {
     "schema", "version", "host_frame", "render_command", "renderer_lifecycle",
-    "guest_entrypoints", "diagnostics", "compile_transaction", "asset_package",
+    "guest_entrypoints", "diagnostics", "compile_transaction", "development_swap",
+    "asset_package",
 }
 
 
@@ -150,6 +152,54 @@ def check(
         if transaction[registry_name] != actual_fields:
             failures.append(Failure(f"compile_transaction.{registry_name}", SWAP_CONTRACTS.as_posix(), actual_fields, transaction[registry_name]))
 
+    development_text = _read(DEVELOPMENT_SWAP, overlays)
+    development = registry["development_swap"]
+    development_version = re.search(
+        r"pub const DEVELOPMENT_SWAP_RECEIPT_SCHEMA_VERSION: u16 = (\d+);",
+        development_text,
+    )
+    actual_development_version = (
+        int(development_version.group(1)) if development_version else "missing"
+    )
+    if development["version"] != actual_development_version:
+        failures.append(
+            Failure(
+                "development_swap.version",
+                DEVELOPMENT_SWAP.as_posix(),
+                actual_development_version,
+                development["version"],
+            )
+        )
+    actual_receipt_fields = _struct_fields(development_text, "DevelopmentSwapReceipt")
+    if development["receipt_fields"] != actual_receipt_fields:
+        failures.append(
+            Failure(
+                "development_swap.receipt_fields",
+                DEVELOPMENT_SWAP.as_posix(),
+                actual_receipt_fields,
+                development["receipt_fields"],
+            )
+        )
+    status_match = re.search(
+        r"pub enum DevelopmentSwapStatus\s*\{(?P<body>.*?)\n\}",
+        development_text,
+        re.S,
+    )
+    actual_status_tags = (
+        [name.lower() for name in re.findall(r"^\s*([A-Z][A-Za-z0-9_]*)\s*,", status_match.group("body"), re.M)]
+        if status_match
+        else []
+    )
+    if development["status_tags"] != actual_status_tags:
+        failures.append(
+            Failure(
+                "development_swap.status_tags",
+                DEVELOPMENT_SWAP.as_posix(),
+                actual_status_tags,
+                development["status_tags"],
+            )
+        )
+
     entrypoints = registry["guest_entrypoints"]
     source_patterns = {
         "main": ((DYNLOAD, "stasis_jit_host_main_trampoline"), (MOBILE, "main_entry"), (WEB, "instance.exports.main")),
@@ -242,7 +292,7 @@ def check(
     abi_failures, abi_evidence = abi.check(overlays={path: text for path, text in overlays.items() if path in abi.REQUIRED})
     for failure in abi_failures:
         failures.append(Failure(f"existing_abi.{failure.field}", failure.consumer, failure.expected, failure.actual))
-    checks = len(host["constants"]) + len(render["constants"]) + len(lifecycle["states"]) + len(lifecycle["reasons"]) + len(source_codes) + len(asset_codes) + int(abi_evidence.get("checks", 0))
+    checks = len(host["constants"]) + len(render["constants"]) + len(lifecycle["states"]) + len(lifecycle["reasons"]) + len(source_codes) + len(asset_codes) + len(actual_receipt_fields) + len(actual_status_tags) + 1 + int(abi_evidence.get("checks", 0))
     return failures, {"schema": "stasis.host_contract.evidence.v1", "checks": checks, "status": "failed" if failures else "passed"}
 
 

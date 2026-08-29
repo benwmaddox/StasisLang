@@ -1,6 +1,7 @@
 pub mod aot;
 pub mod assets;
 pub(crate) mod compile_analysis;
+pub mod development_swap;
 pub(crate) mod emit;
 pub mod jit;
 pub mod patch_plan;
