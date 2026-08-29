@@ -21,6 +21,12 @@ rendering boundaries as the default unless the project documents a concrete reas
 
 ## Inspect narrowly
 
+Semantic symbol queries (`list`, `find`, `read`, and `references`) are read-only and never
+reconcile the checked-in vendor snapshot. If a project tracks `vendor/stasis`, use
+`stasis vendor status` to inspect it and the explicit `stasis vendor update` command to prepare a
+missing, locally changed, or stale snapshot. A failed query leaves the project and vendor bytes
+unchanged.
+
 1. Start a code task with `stasis --json symbol list`. Without `--file`, this returns a compact,
    source-free index for the manifest entry file and its direct imports, plus their import map.
 2. If that page is truncated or dominated by unrelated imports, use the import map to select the

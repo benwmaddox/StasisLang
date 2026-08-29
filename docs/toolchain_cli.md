@@ -94,6 +94,12 @@ The content hash still detects rebuilt development executables whose release ID 
 Git is the review and rollback mechanism, so synchronization does not prompt. Review and commit the
 vendor and manifest changes together with the compiler upgrade.
 
+The semantic symbol queries `list`, `find`, `read`, and `references` are strictly read-only. They
+never reconcile, create, or rewrite the project manifest, vendor tree, or toolchain state. If a
+tracked vendor snapshot is missing, locally changed, or stale for the selected executable, the
+query reports the condition without changing files. Prepare the workspace with `stasis vendor
+status`, then run the explicit `stasis vendor update` before retrying the query.
+
 Projects that should always use the standard library shipped with the selected toolchain can add
 `"stdlib": "toolchain"`. Before a workspace command starts, that exact stdlib and its matching
 runtime modules are synchronized transactionally into `.stasis_cache/toolchain/src/`; source imports
@@ -290,7 +296,8 @@ Global declarations are currently represented by their editable `globals` group 
 individually readable declaration items.
 
 `symbol references SYMBOL` has a different contract: it accepts one to eight dot-separated Stasis
-identifiers and compiler-lexes the editable project files for matching occurrences. Each result has
+identifiers and compiler-lexes the loaded module graph, including checked-in vendor imports, for
+matching occurrences. Each result has
 an exact UTF-8 byte span and is classified as `definition`, `read`, `write`, or `call`, together with
 its containing declaration. Function, struct, and test declaration occurrences are classified as
 definitions. Qualified typed field paths—including indexed receivers such as
