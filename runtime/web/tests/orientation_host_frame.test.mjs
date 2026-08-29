@@ -129,8 +129,8 @@ async function runSequence(first, second, options = {}) {
     const backingResize = ticks.at(-1);
     assert.equal(backingResize.resized, 1);
     assert.equal(backingResize.displayGeneration, 2);
-    assert.deepEqual(backingResize.drawable, second);
-    assert.deepEqual(backingResize.logical, second, "intentional backing resize reaches the same HostFrame");
+    assert.deepEqual(backingResize.drawable, first, "CSS extent remains the layout authority");
+    assert.deepEqual(backingResize.logical, second, "intentional logical resize reaches the same HostFrame");
     requestGlobals.host_req_seq.value = 2;
     frame();
     const unchangedRequest = ticks.at(-1);
@@ -162,6 +162,7 @@ async function runSequence(first, second, options = {}) {
     Math.round((second[1] - 1) * first[1] / second[1])
   ]);
   assert.equal(up.actionCount, 1, "release increments the action counter exactly once");
+  dispatch("pointerleave");
   frame();
   const quiet = ticks.at(-1);
   assert.equal(quiet.resized, 0);

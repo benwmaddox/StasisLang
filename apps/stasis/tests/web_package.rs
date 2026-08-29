@@ -782,7 +782,7 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
     }
     assert!(!runtime.contains("N/A"));
     assert!(
-        runtime.len() < 10_000,
+        runtime.len() < 12_000,
         "minimal runtime was {} bytes",
         runtime.len()
     );
@@ -835,8 +835,8 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
         "sys_memcpy_i32: sysMemcpyI32",
         "sys_memcpy_f32: sysMemcpyF32",
         "const pointerCount = pointer.hover || pointer.down || pointer.wentDown || pointer.wentUp ? 1 : 0;",
-        "const inside = event.clientX >= bounds.left && event.clientX <= bounds.right",
-        "&& event.clientY >= bounds.top && event.clientY <= bounds.bottom;",
+        "const right = Number.isFinite(bounds.right) ? bounds.right : bounds.left + width;",
+        "const bottom = Number.isFinite(bounds.bottom) ? bounds.bottom : bounds.top + height;",
         "pointer.hover = event.pointerType !== \"touch\" && inside;",
         "canvas.addEventListener(\"pointerleave\", () => { pointer.hover = false; });",
         "canvas.addEventListener(\"pointerup\", event => {\n    updatePointer(event);\n    pointer.down = false;\n    pointer.wentUp = true;\n  });",
@@ -852,6 +852,13 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     let index = fs::read_to_string(output.join("index.html")).expect("existing game index");
     assert!(!index.contains("Enable sound"));
     assert!(runtime.contains(r#""assets":{}"#));
+    assert!(runtime.contains(r#""asset_metadata":{"assets/smoke.png""#));
+    assert!(runtime.contains(r#""prepared_width":64"#));
+    assert!(runtime.contains(r#""prepared_bytes":455"#));
+    assert!(runtime.contains(r#""source_bytes":455"#));
+    assert!(runtime.contains(
+        r#""source_sha256":"98d61197c8db539121336207a1cc722093a0d3e0acd5ef5196c1eda3e9b92d72""#
+    ));
     assert!(!runtime.contains("../assets/"));
     for expected in [
         "data:image/png;base64,",

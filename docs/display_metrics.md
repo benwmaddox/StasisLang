@@ -52,6 +52,39 @@ scale changes. Callers can therefore rebuild layout or surface state on display
 generation while invalidating density-dependent resources exactly once per
 cache-key change.
 
+## Web display boundary
+
+The browser host keeps three extents separate: the guest logical canvas, the
+CSS rectangle selected by the shell fitter, and the physical canvas backing.
+`data-logical-width` and `data-logical-height` on the canvas are the shell's
+layout metadata; the shell never derives its aspect ratio from the physical
+`canvas.width` or `canvas.height`. The host allocates the physical backing as
+the CSS extent times the effective `devicePixelRatio`, rounded to whole pixels
+and reduced as one scale when the 8192-axis or 64 MiB backing cap would be
+exceeded. `data-*` receipts expose logical, CSS, backing, DPR, scale, cap, and
+generation values for inspection.
+
+Canvas2D receives one logical-unit transform per frame. Private WebGL2 targets
+are allocated in backing pixels and receive logical dimensions in their shader
+uniform; their completed image is composited into the main backing under an
+identity transform. This keeps rectangles, lines, text, sprites, clips, and
+intermediate targets from applying density twice. Pointer coordinates use the
+CSS bounding rectangle and map back to the logical canvas, including after a
+resize, orientation change, or DPR change.
+
+Web sprite preparation uses bounded density tiers (`1`, `1.25`, `1.5`, `2`,
+`3`, `4`, `6`, and `8`). A cache key includes canonical source identity,
+logical target extent, the selected physical output dimensions and tier, and
+fixed raster options; raw DPR and intermediate scale values are not key
+components. PNG sources are never enlarged into a derived tier; an
+under-provisioned source is retained with an explicit `data-asset-fallback`
+receipt. The runtime publishes source, prepared, decoded, atlas, and cache
+pixel/byte receipts (`data-asset-source-*`, `data-asset-prepared-*`,
+`data-asset-decoded-*`, `data-asset-atlas-*`, and `data-asset-cache-*`) where
+the browser can know them. Density generation invalidates each live atlas
+entry once, and stale async preparations are rejected by resource generation
+and tier key before becoming drawable.
+
 ## Resource cache policy
 
 SVG entries are keyed by canonical source identity, logical target extent, the

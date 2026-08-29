@@ -21,6 +21,47 @@
   const fonts = new Map();
   const fontLoads = new Map();
   const cachedText = new Map();
+  const DISPLAY_MAX_DPR = 4;
+  const DISPLAY_MIN_DPR = 0.5;
+  const DISPLAY_MAX_BACKING_WIDTH = 8192;
+  const DISPLAY_MAX_BACKING_HEIGHT = 8192;
+  const DISPLAY_MAX_BACKING_BYTES = 64 * 1024 * 1024;
+  const DISPLAY_MAX_RASTER_BYTES = 64 * 1024 * 1024;
+  const DISPLAY_DENSITY_TIERS = Object.freeze([1, 1.25, 1.5, 2, 3, 4, 6, 8]);
+  const RASTER_OPTIONS = "contain-center-high-smoothing-v1";
+  const SPRITE_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+  const display = {
+    logicalWidth: Math.max(1, Number(canvas.width) || 640),
+    logicalHeight: Math.max(1, Number(canvas.height) || 360),
+    cssWidth: 0,
+    cssHeight: 0,
+    backingWidth: Math.max(1, Number(canvas.width) || 640),
+    backingHeight: Math.max(1, Number(canvas.height) || 360),
+    rawDpr: 1,
+    effectiveDpr: 1,
+    scaleX: 1,
+    scaleY: 1,
+    contentScale: 1,
+    rasterScale: 1,
+    densityTier: 1,
+    displayGeneration: 1,
+    densityGeneration: 1,
+    backingBytes: 0,
+    fallback: "none",
+    densityKey: "1",
+  };
+  let resizeGenerationPending = true;
+  let logicalExtentPending = false;
+  let onDensityChange = () => {};
+  let spriteTierCache = new Map();
+  let spriteCacheHits = 0;
+  let spriteRasterCount = 0;
+  let spriteDecodedCount = 0;
+  let spriteStaleCount = 0;
+  const spriteDecodedSources = new Set();
+  let spriteCacheBytes = 0;
+  let latestAssetResource;
+  const MAX_SPRITE_CACHE_ENTRIES = 128;
   let nextHandle = 1;
   let instance;
   // @stasis-feature network begin
@@ -197,9 +238,6 @@
   let frames = 0;
   let tickIndex = 0;
   let resized = true;
-  let displayGeneration = 1;
-  let resizeGenerationPending = true;
-  let densityGeneration = 1;
   let lastWindowRequest = -1;
   let pendingFullscreen;
   let worstTick = 0;
@@ -304,6 +342,7 @@
   const ATLAS_PAGE_SIZE = 512;
   const ATLAS_PAGE_MAX = 2048;
   const ATLAS_MAX_PAGES = 8;
+  const ATLAS_MAX_BYTES = 64 * 1024 * 1024;
   const ATLAS_PADDING = 2;
   const startedAt = performance.now();
 
@@ -338,6 +377,233 @@
       ? game.assets[key]
       : key;
   };
+  const assetMetadata = id => {
+    const key = assetKey(stringValue(id));
+    return game.asset_metadata?.[key] || game.assetMetadata?.[key] || null;
+  };
+  const finitePositive = (value, fallback = 0) =>
+    Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback;
+  const boundedInteger = (value, minimum, maximum, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number)
+      ? Math.max(minimum, Math.min(maximum, Math.round(number)))
+      : fallback;
+  };
+  const displayNumber = value => Number.isFinite(value) ? String(Number(value.toFixed(6))) : "0";
+  const setCanvasMetadata = (name, value) => {
+    const text = String(value);
+    if (canvas.dataset && canvas.dataset[name] !== text) canvas.dataset[name] = text;
+    else if (!canvas.dataset && typeof canvas.setAttribute === "function") {
+      const attribute = `data-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
+      if (canvas.getAttribute?.(attribute) !== text) canvas.setAttribute(attribute, text);
+    }
+  };
+  const publishDisplayReceipt = () => {
+    if (!document.body?.dataset) return;
+    const data = document.body.dataset;
+    data.logicalWidth = displayNumber(display.logicalWidth);
+    data.logicalHeight = displayNumber(display.logicalHeight);
+    data.cssWidth = displayNumber(display.cssWidth);
+    data.cssHeight = displayNumber(display.cssHeight);
+    data.backingWidth = String(display.backingWidth);
+    data.backingHeight = String(display.backingHeight);
+    data.backingBytes = String(display.backingBytes);
+    data.devicePixelRatio = displayNumber(display.rawDpr);
+    data.effectiveDpr = displayNumber(display.effectiveDpr);
+    data.contentScale = displayNumber(display.contentScale);
+    data.rasterScale = displayNumber(display.rasterScale);
+    data.densityTier = displayNumber(display.densityTier);
+    data.displayGeneration = String(display.displayGeneration);
+    data.densityGeneration = String(display.densityGeneration);
+    data.backingFallback = display.fallback;
+    data.backingCap = display.fallback === "none" ? "none" : "capped";
+    data.spriteCacheHits = String(spriteCacheHits);
+    data.spriteRasterCount = String(spriteRasterCount);
+    data.spriteDecodedCount = String(spriteDecodedCount);
+    data.spriteStaleCount = String(spriteStaleCount);
+    data.assetCacheBytes = String(spriteCacheBytes);
+    data.assetCacheFallback = spriteCacheBytes > SPRITE_CACHE_MAX_BYTES ? "memory-cap" : "none";
+    if (latestAssetResource) {
+      const resource = latestAssetResource;
+      const metadata = resource.metadata || {};
+      data.assetSource = resource.source;
+      data.assetSourceIdentity = resource.sourceIdentity || "";
+      data.assetSourceWidth = String(resource.sourceWidth || metadata.source_width || 0);
+      data.assetSourceHeight = String(resource.sourceHeight || metadata.source_height || 0);
+      data.assetSourceBytes = String(resource.sourceBytes || metadata.source_bytes || 0);
+      data.assetPreparedWidth = String(resource.width || 0);
+      data.assetPreparedHeight = String(resource.height || 0);
+      data.assetPreparedBytes = String((resource.width || 0) * (resource.height || 0) * 4);
+      data.assetPreparedFileBytes = String(metadata.prepared_bytes || 0);
+      data.assetPreparedTier = displayNumber(resource.tier || 0);
+      data.assetLogicalWidth = String(resource.logicalWidth || 0);
+      data.assetLogicalHeight = String(resource.logicalHeight || 0);
+      data.assetTierKey = resource.tierKey || "";
+      data.assetFallback = resource.fallback || "none";
+      data.assetDecodedWidth = String(resource.decodedWidth || 0);
+      data.assetDecodedHeight = String(resource.decodedHeight || 0);
+      data.assetDecodedBytes = String(resource.decodedBytes || 0);
+      data.assetGeneration = String(resource.generation || 0);
+    }
+    const atlas = gpuBatcher?.metrics?.();
+    data.assetAtlasWidth = String(atlas?.width || 0);
+    data.assetAtlasHeight = String(atlas?.height || 0);
+    data.assetAtlasBytes = String(atlas?.allocatedBytes || 0);
+    data.assetAtlasGeneration = String(atlas?.generation || 0);
+    data.assetAtlasFallback = document.body.dataset.atlasFallback || "none";
+  };
+  const displayCssExtent = () => {
+    const bounds = canvas.getBoundingClientRect?.() || {};
+    const width = finitePositive(bounds.width)
+      || finitePositive(canvas.clientWidth)
+      || display.cssWidth
+      || display.logicalWidth;
+    const height = finitePositive(bounds.height)
+      || finitePositive(canvas.clientHeight)
+      || display.cssHeight
+      || display.logicalHeight;
+    return { width, height };
+  };
+  const densityTierFor = scale =>
+    DISPLAY_DENSITY_TIERS.find(tier => tier + 1e-9 >= scale) || DISPLAY_DENSITY_TIERS.at(-1);
+  const requestDisplaySync = () => {
+    resized = true;
+  };
+  const syncDisplayState = () => {
+    // Older test hosts without a dataset had no separate logical metadata.
+    // Preserve their explicit intrinsic resize behavior while real browsers
+    // always use the data-logical-* contract above the physical backing.
+    if (!canvas.dataset && !logicalExtentPending
+      && (canvas.width !== display.backingWidth || canvas.height !== display.backingHeight)) {
+      display.logicalWidth = boundedInteger(canvas.width, 1, DISPLAY_MAX_BACKING_WIDTH, display.logicalWidth);
+      display.logicalHeight = boundedInteger(canvas.height, 1, DISPLAY_MAX_BACKING_HEIGHT, display.logicalHeight);
+      logicalExtentPending = true;
+    }
+    const extent = displayCssExtent();
+    const requestedDpr = finitePositive(globalThis.devicePixelRatio, 1);
+    const rawDpr = Math.max(DISPLAY_MIN_DPR, Math.min(DISPLAY_MAX_DPR, requestedDpr));
+    const requestedWidth = Math.max(1, Math.round(extent.width * rawDpr));
+    const requestedHeight = Math.max(1, Math.round(extent.height * rawDpr));
+    const requestedBytes = requestedWidth * requestedHeight * 4;
+    const dimensionScale = Math.min(
+      1,
+      DISPLAY_MAX_BACKING_WIDTH / requestedWidth,
+      DISPLAY_MAX_BACKING_HEIGHT / requestedHeight
+    );
+    const byteScale = requestedBytes > DISPLAY_MAX_BACKING_BYTES
+      ? Math.sqrt(DISPLAY_MAX_BACKING_BYTES / requestedBytes)
+      : 1;
+    const capScale = Math.min(1, dimensionScale, byteScale);
+    const effectiveDpr = rawDpr * capScale;
+    let backingWidth = boundedInteger(
+      extent.width * effectiveDpr, 1, DISPLAY_MAX_BACKING_WIDTH, 1
+    );
+    let backingHeight = boundedInteger(
+      extent.height * effectiveDpr, 1, DISPLAY_MAX_BACKING_HEIGHT, 1
+    );
+    while (backingWidth * backingHeight * 4 > DISPLAY_MAX_BACKING_BYTES
+      && (backingWidth > 1 || backingHeight > 1)) {
+      const correction = Math.sqrt(DISPLAY_MAX_BACKING_BYTES / (backingWidth * backingHeight * 4));
+      const nextWidth = Math.max(1, Math.floor(backingWidth * correction));
+      const nextHeight = Math.max(1, Math.floor(backingHeight * correction));
+      if (nextWidth === backingWidth && nextHeight === backingHeight) {
+        if (backingWidth >= backingHeight) backingWidth -= 1;
+        else backingHeight -= 1;
+      } else {
+        backingWidth = nextWidth;
+        backingHeight = nextHeight;
+      }
+    }
+    const scaleX = backingWidth / Math.max(1, display.logicalWidth);
+    const scaleY = backingHeight / Math.max(1, display.logicalHeight);
+    const contentScale = Math.min(scaleX, scaleY);
+    const rasterScale = Math.max(1, Math.min(8, contentScale));
+    const densityTier = densityTierFor(rasterScale);
+    const fallback = [
+      requestedDpr !== rawDpr ? "dpr" : "",
+      dimensionScale < 1 ? "dimension" : "",
+      byteScale < 1 ? "bytes" : ""
+    ].filter(Boolean).join(",") || "none";
+    const extentChanged = logicalExtentPending
+      || display.cssWidth !== extent.width
+      || display.cssHeight !== extent.height
+      || display.backingWidth !== backingWidth
+      || display.backingHeight !== backingHeight
+      || display.logicalWidth <= 0 || display.logicalHeight <= 0;
+    const densityChanged = display.densityKey !== String(densityTier);
+    display.cssWidth = extent.width;
+    display.cssHeight = extent.height;
+    display.rawDpr = rawDpr;
+    display.effectiveDpr = effectiveDpr;
+    display.backingWidth = backingWidth;
+    display.backingHeight = backingHeight;
+    display.scaleX = scaleX;
+    display.scaleY = scaleY;
+    display.contentScale = contentScale;
+    display.rasterScale = rasterScale;
+    display.densityTier = densityTier;
+    display.backingBytes = backingWidth * backingHeight * 4;
+    display.fallback = fallback || "none";
+    if (extentChanged && !resizeGenerationPending) {
+      display.displayGeneration += 1;
+      resizeGenerationPending = true;
+    } else if (extentChanged) {
+      resized = true;
+    }
+    if (densityChanged) {
+      display.densityKey = String(densityTier);
+      display.densityGeneration += 1;
+      resized = true;
+      onDensityChange();
+    }
+    if (canvas.width !== backingWidth) canvas.width = backingWidth;
+    if (canvas.height !== backingHeight) canvas.height = backingHeight;
+    logicalExtentPending = false;
+    setCanvasMetadata("logicalWidth", display.logicalWidth);
+    setCanvasMetadata("logicalHeight", display.logicalHeight);
+    publishDisplayReceipt();
+    return display;
+  };
+  const setLogicalCanvas = (width, height) => {
+    const nextWidth = boundedInteger(width, 1, DISPLAY_MAX_BACKING_WIDTH, display.logicalWidth);
+    const nextHeight = boundedInteger(height, 1, DISPLAY_MAX_BACKING_HEIGHT, display.logicalHeight);
+    if (display.logicalWidth === nextWidth && display.logicalHeight === nextHeight) {
+      syncDisplayState();
+      return;
+    }
+    display.logicalWidth = nextWidth;
+    display.logicalHeight = nextHeight;
+    logicalExtentPending = true;
+    setCanvasMetadata("logicalWidth", nextWidth);
+    setCanvasMetadata("logicalHeight", nextHeight);
+    window.STASIS_REFIT_VIEWPORT?.();
+    syncDisplayState();
+  };
+  const displaySnapshot = () => ({
+    logicalWidth: display.logicalWidth,
+    logicalHeight: display.logicalHeight,
+    cssWidth: display.cssWidth,
+    cssHeight: display.cssHeight,
+    backingWidth: display.backingWidth,
+    backingHeight: display.backingHeight,
+    rawDpr: display.rawDpr,
+    effectiveDpr: display.effectiveDpr,
+    scaleX: display.scaleX,
+    scaleY: display.scaleY,
+    contentScale: display.contentScale,
+    rasterScale: display.rasterScale,
+    densityTier: display.densityTier,
+    displayGeneration: display.displayGeneration,
+    densityGeneration: display.densityGeneration,
+    backingBytes: display.backingBytes,
+    fallback: display.fallback,
+  });
+  setCanvasMetadata("logicalWidth", display.logicalWidth);
+  setCanvasMetadata("logicalHeight", display.logicalHeight);
+  window.STASIS_DISPLAY_RECEIPT = displaySnapshot;
+  if (globalThis.STASIS_CHARACTERIZATION_TEST === true) {
+    window.__STASIS_DISPLAY__ = displaySnapshot;
+  }
   const storageKey = (scopeId, keyId) => `stasis:${stringValue(scopeId)}:${stringValue(keyId)}`;
   const storageGet = key => {
     try { return localStorage.getItem(key); } catch (_) { return volatileStorage.get(key) ?? null; }
@@ -521,46 +787,285 @@
     return true;
   };
   const spriteDimensions = (width, height) => {
-    const valid = value => Number.isFinite(value) && value > 0 && value <= 8192;
+    const valid = value => Number.isFinite(value) && value > 0 && value <= DISPLAY_MAX_BACKING_WIDTH;
     if (!valid(width) || !valid(height)) return null;
     return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
   };
-  const prepareSprite = resource => {
-    const image = resource.image;
-    if (!image.complete || !image.naturalWidth || !image.naturalHeight) throw new Error("sprite image is unavailable");
-    const dimensions = resource.requested;
-    if (!dimensions) {
-      resource.drawable = image;
-      resource.width = image.naturalWidth;
-      resource.height = image.naturalHeight;
-      return;
+  const spriteEncoding = request => String(request.metadata?.encoding || "").toLowerCase();
+  const spriteMetadataDimensions = metadata => {
+    const width = finitePositive(
+      metadata?.prepared_width ?? metadata?.source_width ?? metadata?.width
+    );
+    const height = finitePositive(
+      metadata?.prepared_height ?? metadata?.source_height ?? metadata?.height
+    );
+    return width && height ? {
+      width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height))
+    } : null;
+  };
+  const spriteSourceIdentity = value => [
+    String(value.source ?? ""),
+    value.metadata?.source_sha256 || "",
+    value.metadata?.prepared_sha256 || "",
+  ].join("|");
+  const spriteTierKey = request => [
+    request.sourceIdentity,
+    request.logicalWidth || 0,
+    request.logicalHeight || 0,
+    request.width || 0,
+    request.height || 0,
+    request.tier || 0,
+    request.fallback || "none",
+    RASTER_OPTIONS,
+  ].join(":");
+  const publishAssetReceipt = resource => {
+    if (!document.body?.dataset || !resource) return;
+    latestAssetResource = resource;
+    publishDisplayReceipt();
+  };
+  const spriteRasterRequest = resource => {
+    const metadata = resource.metadata || {};
+    const metadataDimensions = spriteMetadataDimensions(metadata);
+    const logical = resource.requested || (
+      finitePositive(metadata.logical_width) && finitePositive(metadata.logical_height)
+        ? {
+            width: Number(metadata.logical_width), height: Number(metadata.logical_height)
+          }
+        : metadataDimensions
+    );
+    const tier = densityTierFor(display.rasterScale);
+    const requestedWidth = logical ? logical.width * tier : metadataDimensions?.width || 0;
+    const requestedHeight = logical ? logical.height * tier : metadataDimensions?.height || 0;
+    const dimensionCapped = requestedWidth > DISPLAY_MAX_BACKING_WIDTH
+      || requestedHeight > DISPLAY_MAX_BACKING_HEIGHT;
+    const desiredWidth = boundedInteger(
+      requestedWidth, 1, DISPLAY_MAX_BACKING_WIDTH, metadataDimensions?.width || 1
+    );
+    const desiredHeight = boundedInteger(
+      requestedHeight, 1, DISPLAY_MAX_BACKING_HEIGHT, metadataDimensions?.height || 1
+    );
+    const requestedBytes = desiredWidth * desiredHeight * 4;
+    const rasterCap = requestedBytes > DISPLAY_MAX_RASTER_BYTES
+      ? Math.sqrt(DISPLAY_MAX_RASTER_BYTES / requestedBytes)
+      : 1;
+    const width = boundedInteger(
+      desiredWidth * rasterCap, 1, DISPLAY_MAX_BACKING_WIDTH, desiredWidth
+    );
+    const height = boundedInteger(
+      desiredHeight * rasterCap, 1, DISPLAY_MAX_BACKING_HEIGHT, desiredHeight
+    );
+    const fallback = rasterCap < 1
+      ? "raster-bytes"
+      : dimensionCapped ? "raster-dimension" : "none";
+    const request = {
+      source: String(resource.source ?? ""),
+      metadata: Object.freeze({ ...metadata }),
+      sourceIdentity: spriteSourceIdentity(resource),
+      sourceDimensions: metadataDimensions,
+      sourceBytes: finitePositive(metadata.source_bytes),
+      encoding: spriteEncoding({ metadata }),
+      logicalWidth: logical?.width ? Math.max(1, Math.round(logical.width)) : 0,
+      logicalHeight: logical?.height ? Math.max(1, Math.round(logical.height)) : 0,
+      width, height, tier, fallback,
+      hasDimensions: Boolean(logical || metadataDimensions),
+      loadImage: () => ensureSpriteImage(resource),
+    };
+    request.key = spriteTierKey(request);
+    return Object.freeze(request);
+  };
+  const resultForSprite = (request, drawable, width, height, fallback,
+    sourceWidth, sourceHeight, decodedWidth = sourceWidth, decodedHeight = sourceHeight) => ({
+    drawable, width, height, fallback: fallback || "none",
+    sourceWidth, sourceHeight,
+    sourceBytes: request.sourceBytes || 0,
+    decodedWidth: decodedWidth || 0,
+    decodedHeight: decodedHeight || 0,
+    decodedBytes: (decodedWidth || 0) * (decodedHeight || 0) * 4,
+  });
+  const rasterSprite = async request => {
+    const bitmapFactory = globalThis.createImageBitmap;
+    const sourceDimensions = request.sourceDimensions;
+    const targetWidth = Math.max(1, Math.min(DISPLAY_MAX_BACKING_WIDTH, request.width || sourceDimensions?.width || 1));
+    const targetHeight = Math.max(1, Math.min(DISPLAY_MAX_BACKING_HEIGHT, request.height || sourceDimensions?.height || 1));
+    const rasterFallback = request.fallback !== "none" ? request.fallback : "bitmap-resize-unavailable";
+    const rasterOptions = {
+      resizeWidth: targetWidth,
+      resizeHeight: targetHeight,
+      resizeQuality: "high",
+    };
+    // A prepared physical source is sufficient to use the direct Blob path. It
+    // avoids constructing a full Image and lets the browser decode only the
+    // requested tier. Raster sources are never enlarged; SVG is vector-backed.
+    const canResizeSource = sourceDimensions && (
+      request.encoding === "svg"
+      || (targetWidth <= sourceDimensions.width && targetHeight <= sourceDimensions.height)
+    );
+    if (typeof bitmapFactory === "function" && typeof fetch === "function"
+        && request.source && canResizeSource) {
+      try {
+        const response = await fetch(request.source);
+        if (response?.ok !== false && typeof response.blob === "function") {
+          const blob = await response.blob();
+          const bitmap = await bitmapFactory(blob, rasterOptions);
+          if (bitmap) {
+            return resultForSprite(request, bitmap, targetWidth, targetHeight,
+              request.fallback, sourceDimensions.width, sourceDimensions.height,
+              targetWidth, targetHeight);
+          }
+        }
+      } catch (_) {
+        // Fall through to the genuine Image.decode/canvas fallback and expose
+        // the reason on the resulting receipt.
+      }
+    }
+    const image = await request.loadImage();
+    const sourceWidth = finitePositive(image.naturalWidth, sourceDimensions?.width || 0);
+    const sourceHeight = finitePositive(image.naturalHeight, sourceDimensions?.height || 0);
+    if (!sourceWidth || !sourceHeight) throw new Error("sprite image is unavailable");
+    const underprovisioned = ["png", "jpeg", "jpg", "webp"].includes(request.encoding) &&
+      (targetWidth > sourceWidth || targetHeight > sourceHeight);
+    if (underprovisioned) {
+      return resultForSprite(request, image, sourceWidth, sourceHeight,
+        "source-underprovisioned", sourceWidth, sourceHeight);
+    }
+    if (!request.hasDimensions) {
+      return resultForSprite(request, image, sourceWidth, sourceHeight,
+        request.fallback, sourceWidth, sourceHeight);
     }
     const raster = document.createElement?.("canvas");
     const rasterContext = raster?.getContext?.("2d");
     if (!raster || !rasterContext) throw new Error("sprite raster canvas unavailable");
-    raster.width = dimensions.width;
-    raster.height = dimensions.height;
+    raster.width = targetWidth;
+    raster.height = targetHeight;
     rasterContext.save?.();
-    rasterContext.clearRect?.(0, 0, dimensions.width, dimensions.height);
+    rasterContext.clearRect?.(0, 0, targetWidth, targetHeight);
     rasterContext.imageSmoothingEnabled = true;
     if ("imageSmoothingQuality" in rasterContext) rasterContext.imageSmoothingQuality = "high";
-    const scale = Math.min(dimensions.width / image.naturalWidth, dimensions.height / image.naturalHeight);
-    const drawWidth = image.naturalWidth * scale;
-    const drawHeight = image.naturalHeight * scale;
-    rasterContext.drawImage(image, (dimensions.width - drawWidth) / 2, (dimensions.height - drawHeight) / 2,
+    const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
+    const drawWidth = sourceWidth * scale;
+    const drawHeight = sourceHeight * scale;
+    rasterContext.drawImage(image, (targetWidth - drawWidth) / 2, (targetHeight - drawHeight) / 2,
       drawWidth, drawHeight);
     rasterContext.restore?.();
-    resource.drawable = raster;
-    resource.width = dimensions.width;
-    resource.height = dimensions.height;
+    return resultForSprite(request, raster, targetWidth, targetHeight,
+      rasterFallback, sourceWidth, sourceHeight);
   };
-  const createSpriteResource = (pathId, width, height, onReady) => {
-    const image = new Image();
-    const resource = {
-      image, drawable: null, requested: spriteDimensions(width, height),
-      width: 0, height: 0, ready: false, error: null, generation: 1,
-      readyPromise: null
+  const closeSpriteDrawable = drawable => drawable?.close?.();
+  const disposeSpriteCacheEntry = entry => {
+    if (!entry || entry.closed || entry.pending > 0 || entry.users > 0 || !entry.evicted) return;
+    if (spriteTierCache.get(entry.key) === entry) spriteTierCache.delete(entry.key);
+    if (!entry.result) {
+      if (entry.error) entry.closed = true;
+      return;
+    }
+    entry.closed = true;
+    closeSpriteDrawable(entry.result.drawable);
+    spriteCacheBytes = Math.max(0, spriteCacheBytes - (entry.byteLength || 0));
+    entry.byteLength = 0;
+  };
+  const evictSpriteCacheEntry = entry => {
+    if (!entry) return;
+    entry.evicted = true;
+    if (spriteTierCache.get(entry.key) === entry) spriteTierCache.delete(entry.key);
+    disposeSpriteCacheEntry(entry);
+  };
+  const releaseSpriteCacheEntry = entry => {
+    if (!entry) return;
+    entry.users = Math.max(0, entry.users - 1);
+    if (entry.pending === 0 && entry.users === 0) entry.evicted = true;
+    disposeSpriteCacheEntry(entry);
+  };
+  const trimSpriteCache = protectedEntry => {
+    while (spriteCacheBytes > SPRITE_CACHE_MAX_BYTES) {
+      let candidate;
+      for (const entry of spriteTierCache.values()) {
+        if (entry !== protectedEntry && entry.pending === 0 && entry.users === 0) {
+          candidate = entry;
+          break;
+        }
+      }
+      if (!candidate) break;
+      evictSpriteCacheEntry(candidate);
+    }
+  };
+  const spritePreparationEntry = request => {
+    let cached = spriteTierCache.get(request.key);
+    if (cached?.evicted || cached?.closed) {
+      if (spriteTierCache.get(request.key) === cached) spriteTierCache.delete(request.key);
+      cached = null;
+    }
+    if (cached) {
+      spriteCacheHits += 1;
+      return cached;
+    }
+    cached = {
+      key: request.key, promise: null, result: null, pending: 0, users: 0,
+      evicted: false, closed: false
     };
+    cached.promise = rasterSprite(request).then(result => {
+      cached.result = result;
+      cached.byteLength = (result.width || 0) * (result.height || 0) * 4;
+      spriteCacheBytes += cached.byteLength;
+      disposeSpriteCacheEntry(cached);
+      return result;
+    }).catch(error => {
+      cached.error = error;
+      if (cached.evicted && spriteTierCache.get(cached.key) === cached) spriteTierCache.delete(cached.key);
+      throw error;
+    });
+    spriteTierCache.set(request.key, cached);
+    while (spriteTierCache.size > MAX_SPRITE_CACHE_ENTRIES) {
+      const oldest = spriteTierCache.keys().next().value;
+      if (oldest === request.key) break;
+      const evicted = spriteTierCache.get(oldest);
+      evictSpriteCacheEntry(evicted);
+    }
+    spriteRasterCount += request.hasDimensions ? 1 : 0;
+    return cached;
+  };
+  const noteSpriteDecoded = (request, result) => {
+    if (!result?.decodedWidth || spriteDecodedSources.has(request.sourceIdentity)) return;
+    spriteDecodedSources.add(request.sourceIdentity);
+    spriteDecodedCount += 1;
+  };
+  // Return a preparation promise plus its cache entry without touching the
+  // live resource. The caller performs the generation/key-checked commit.
+  const prepareSprite = request => {
+    const entry = spritePreparationEntry(request);
+    entry.pending += 1;
+    let activeLease = true;
+    const lease = {
+      commit: () => {
+        if (!activeLease) return false;
+        activeLease = false;
+        entry.pending = Math.max(0, entry.pending - 1);
+        entry.users += 1;
+        disposeSpriteCacheEntry(entry);
+        return true;
+      },
+      cancel: () => {
+        if (!activeLease) return false;
+        activeLease = false;
+        entry.pending = Math.max(0, entry.pending - 1);
+        if (entry.pending === 0 && entry.users === 0) entry.evicted = true;
+        disposeSpriteCacheEntry(entry);
+        return true;
+      },
+    };
+    return {
+      entry,
+      lease,
+      promise: entry.promise.then(result => {
+        noteSpriteDecoded(request, result);
+        return { request, result, entry, lease };
+      }),
+    };
+  };
+  const ensureSpriteImage = resource => {
+    if (resource.imagePromise) return resource.imagePromise;
+    if (typeof Image !== "function") return Promise.reject(new Error("Image API unavailable"));
+    const image = new Image();
+    resource.image = image;
     const decoded = typeof image.decode === "function"
       ? () => image.decode()
       : () => new Promise((resolve, reject) => {
@@ -568,21 +1073,98 @@
         image.addEventListener?.("error", () => reject(new Error("sprite image failed to load")), { once: true });
         if (image.complete && image.naturalWidth) resolve();
       });
-    resource.readyPromise = Promise.resolve()
-      .then(decoded)
-      .then(() => prepareSprite(resource))
-      .then(() => {
-        resource.ready = true;
-        onReady?.(resource, true);
+    resource.imagePromise = Promise.resolve().then(decoded).then(() => {
+      if (!image.naturalWidth || !image.naturalHeight) throw new Error("sprite image is unavailable");
+      return image;
+    });
+    image.src = resource.source;
+    return resource.imagePromise;
+  };
+  const commitSpritePreparation = (resource, prepared) => {
+    const { request, result, entry, lease } = prepared;
+    if (!lease.commit()) return false;
+    resource.drawable = result.drawable;
+    resource.width = result.width;
+    resource.height = result.height;
+    resource.fallback = result.fallback || "none";
+    resource.sourceIdentity = request.sourceIdentity;
+    resource.sourceWidth = result.sourceWidth || 0;
+    resource.sourceHeight = result.sourceHeight || 0;
+    resource.sourceBytes = result.sourceBytes || 0;
+    resource.decodedWidth = result.decodedWidth || 0;
+    resource.decodedHeight = result.decodedHeight || 0;
+    resource.decodedBytes = result.decodedBytes || 0;
+    resource.logicalWidth = request.logicalWidth;
+    resource.logicalHeight = request.logicalHeight;
+    resource.tier = request.tier;
+    resource.tierKey = request.key;
+    resource.cacheEntry = entry;
+    trimSpriteCache(entry);
+    resource.pendingLease = null;
+    resource.pendingEntry = null;
+    resource.ready = true;
+    publishAssetReceipt(resource);
+    return true;
+  };
+  const startSpritePreparation = (resource, onReady) => {
+    resource.pendingLease?.cancel();
+    resource.pendingLease = null;
+    resource.pendingEntry = null;
+    const generation = resource.generation;
+    const request = spriteRasterRequest(resource);
+    resource.pendingTierKey = request.key;
+    resource.ready = false;
+    resource.error = null;
+    const preparation = prepareSprite(request);
+    resource.pendingLease = preparation.lease;
+    resource.pendingEntry = preparation.entry;
+    resource.readyPromise = preparation.promise
+      .then(prepared => {
+        const current = resource.generation === generation
+          && resource.pendingTierKey === request.key;
+        if (!current) {
+          prepared.lease.cancel();
+          spriteStaleCount += 1;
+          publishDisplayReceipt();
+          return resource;
+        }
+        if (commitSpritePreparation(resource, prepared)) onReady?.(resource, true);
         return resource;
       })
       .catch(error => {
+        const current = resource.generation === generation
+          && resource.pendingTierKey === request.key;
+        if (!current) {
+          preparation.lease.cancel();
+          spriteStaleCount += 1;
+          publishDisplayReceipt();
+          return resource;
+        }
+        preparation.lease.cancel();
+        resource.pendingLease = null;
+        if (resource.pendingEntry === preparation.entry) resource.pendingEntry = null;
         resource.error = error;
         resource.ready = false;
+        resource.fallback = request.fallback || "bitmap-resize-unavailable";
+        publishAssetReceipt(resource);
         onReady?.(resource, false);
         return resource;
       });
-    image.src = assetValue(pathId);
+    return resource.readyPromise;
+  };
+  const createSpriteResource = (pathId, width, height, onReady) => {
+    const source = assetValue(pathId);
+    const resource = {
+      image: null, imagePromise: null, source, metadata: assetMetadata(pathId), sourceIdentity: source,
+      drawable: null, requested: spriteDimensions(width, height),
+      logicalWidth: 0, logicalHeight: 0, tier: 1, tierKey: "", pendingTierKey: "",
+      width: 0, height: 0, sourceWidth: 0, sourceHeight: 0, sourceBytes: 0,
+      decodedWidth: 0, decodedHeight: 0, decodedBytes: 0,
+      ready: false, error: null, generation: 1, cacheEntry: null, pendingEntry: null,
+      pendingLease: null,
+      fallback: "none", readyPromise: null, onReady
+    };
+    startSpritePreparation(resource, onReady);
     return resource;
   };
   const loadSprite = (pathId, width, height) => {
@@ -590,6 +1172,33 @@
     sprites.set(handle, createSpriteResource(pathId, width, height));
     return handle;
   };
+  const invalidateDensityResources = () => {
+    let invalidated = 0;
+    for (const resource of sprites.values()) {
+      resource.generation += 1;
+      resource.ready = false;
+      resource.pendingLease?.cancel();
+      resource.pendingLease = null;
+      resource.pendingEntry = null;
+      releaseSpriteCacheEntry(resource.cacheEntry);
+      resource.cacheEntry = null;
+      trimSpriteCache(null);
+      resource.drawable = null;
+      gpuBatcher?.releaseResource(resource);
+      startSpritePreparation(resource, resource.onReady);
+      invalidated += 1;
+    }
+    for (const font of fonts.values()) {
+      font.densityTier = display.densityTier;
+      font.densityGeneration = display.densityGeneration;
+      font.cacheKey = [font.source, font.size, display.densityTier, RASTER_OPTIONS].join(":");
+    }
+    if (document.body?.dataset) {
+      document.body.dataset.assetDensityInvalidations = String(invalidated);
+      document.body.dataset.assetDensityGeneration = String(display.densityGeneration);
+    }
+  };
+  onDensityChange = invalidateDensityResources;
   const setCanvasFont = (font, size = font.renderSize) => {
     context.font = `${size}px ${font.family}`;
     context.textBaseline = "alphabetic";
@@ -636,13 +1245,21 @@
     const family = `stasis-font-${handle}`;
     const font = new FontFace(family, `url(${assetValue(pathId)})`);
     const fontInfo = {
-      family, size, renderSize: size, baseline: size, ready: false, pendingRuns: []
+      family, size, renderSize: size, baseline: size, ready: false, pendingRuns: [],
+      source: assetValue(pathId), metadata: assetMetadata(pathId),
+      densityTier: display.densityTier, densityGeneration: display.densityGeneration,
+      cacheKey: [assetValue(pathId), size, display.densityTier, RASTER_OPTIONS].join(":")
     };
     fonts.set(handle, fontInfo);
     const load = Promise.resolve()
       .then(() => font.load())
       .then(loaded => {
         document.fonts.add(loaded);
+        if (document.body?.dataset) {
+          document.body.dataset.fontSource = fontInfo.source;
+          document.body.dataset.fontRasterTier = displayNumber(fontInfo.densityTier);
+          document.body.dataset.fontDensityGeneration = String(fontInfo.densityGeneration);
+        }
         return loaded;
       });
     fontLoads.set(handle, load);
@@ -661,6 +1278,14 @@
     const resource = sprites.get(handle);
     if (resource) {
       resource.generation += 1;
+      resource.pendingLease?.cancel();
+      resource.pendingLease = null;
+      resource.pendingEntry = null;
+      releaseSpriteCacheEntry(resource.cacheEntry);
+      resource.cacheEntry = null;
+      trimSpriteCache(null);
+      resource.ready = false;
+      resource.drawable = null;
       sprites.delete(handle);
       gpuBatcher?.releaseResource(resource);
     }
@@ -1273,6 +1898,11 @@
       });
       const createAtlasPage = size => {
         if (atlasPages.length >= ATLAS_MAX_PAGES) return null;
+        const allocatedBytes = atlasPages.reduce((total, page) => total + page.size * page.size * 4, 0);
+        if (allocatedBytes + size * size * 4 > ATLAS_MAX_BYTES) {
+          document.body.dataset.atlasFallback = "memory-cap";
+          return null;
+        }
         const texture = gl.createTexture();
         if (!texture) throw new Error("WebGL atlas texture allocation failed");
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -1333,7 +1963,10 @@
         if (!resource.ready || !resource.drawable || !resource.width || !resource.height) return null;
         const paddedWidth = resource.width + ATLAS_PADDING * 2;
         const paddedHeight = resource.height + ATLAS_PADDING * 2;
-        if (paddedWidth > ATLAS_PAGE_MAX || paddedHeight > ATLAS_PAGE_MAX) return null;
+        if (paddedWidth > ATLAS_PAGE_MAX || paddedHeight > ATLAS_PAGE_MAX) {
+          document.body.dataset.atlasFallback = "dimension";
+          return null;
+        }
         let pageSize = ATLAS_PAGE_SIZE;
         while (pageSize < paddedWidth || pageSize < paddedHeight) pageSize *= 2;
         let page = null;
@@ -1393,8 +2026,10 @@
         return entry;
       };
       const draw = (values, count, stride, texture) => {
-        const width = Math.max(1, canvas.width | 0);
-        const height = Math.max(1, canvas.height | 0);
+        const width = display.backingWidth;
+        const height = display.backingHeight;
+        const logicalWidth = Math.max(1, display.logicalWidth);
+        const logicalHeight = Math.max(1, display.logicalHeight);
         if (target.width !== width || target.height !== height) {
           target.width = width;
           target.height = height;
@@ -1405,7 +2040,7 @@
           gl.clearColor(0, 0, 0, 0);
           gl.clear(gl.COLOR_BUFFER_BIT);
           gl.useProgram(rectangle.program);
-          gl.uniform2f(rectSize, width, height);
+          gl.uniform2f(rectSize, logicalWidth, logicalHeight);
           gl.bindVertexArray(rectVao);
           gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
           gl.bufferSubData(gl.ARRAY_BUFFER, 0, values, 0, count * stride);
@@ -1419,7 +2054,7 @@
           gl.clearColor(0, 0, 0, 0);
           gl.clear(gl.COLOR_BUFFER_BIT);
           gl.useProgram(spriteProgram.program);
-          gl.uniform2f(spriteSize, width, height);
+          gl.uniform2f(spriteSize, logicalWidth, logicalHeight);
           gl.uniform1i?.(spriteSampler, 0);
           gl.bindVertexArray(spriteVao);
           gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
@@ -1433,9 +2068,12 @@
           gl.bindVertexArray(null);
           failIfBad();
         }
+        context.save?.();
+        context.setTransform?.(1, 0, 0, 1, 0, 0);
         context.globalAlpha = 1;
         context.globalCompositeOperation = "source-over";
-        context.drawImage(target, 0, 0);
+        context.drawImage(target, 0, 0, width, height);
+        context.restore?.();
         performanceWorkload.composites += 1;
       };
       return (gpuBatcher = {
@@ -1461,6 +2099,11 @@
           pages: atlasPages.length,
           liveEntries: atlasPages.reduce((total, page) => total + page.entries.size, 0),
           allocatedBytes: atlasPages.reduce((total, page) => total + page.size * page.size * 4, 0),
+          width: atlasPages.reduce((total, page) => total + page.size, 0),
+          height: atlasPages.reduce((maximum, page) => Math.max(maximum, page.size), 0),
+          generation: atlasPages.reduce((maximum, page) => Math.max(
+            maximum, ...Array.from(page.entries, resource => resource.generation || 0)
+          ), 0),
           uploadCount: atlasUploadCount,
           uploadBytes: atlasUploadBytes
         })
@@ -1472,12 +2115,13 @@
   }
   function executeCommands() {
     performanceWorkload.commands += commands.length;
+    context.setTransform?.(display.scaleX, 0, 0, display.scaleY, 0, 0);
     context.globalAlpha = 1;
     context.globalCompositeOperation = "source-over";
     for (const command of commands) {
       if (command[0] === 0) {
         context.fillStyle = color(command[1], command[2], command[3]);
-        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillRect(0, 0, display.logicalWidth, display.logicalHeight);
       } else if (command[0] === 1) {
         context.globalAlpha = 1;
         context.fillStyle = color(command[5], command[6], command[7]);
@@ -1512,7 +2156,7 @@
       context.save();
       context.globalAlpha = Math.max(0, Math.min(1, f32[GFX_F_CLEAR_BASE + 3]));
       context.fillStyle = `rgb(${Math.round(f32[GFX_F_CLEAR_BASE] * 255)} ${Math.round(f32[GFX_F_CLEAR_BASE + 1] * 255)} ${Math.round(f32[GFX_F_CLEAR_BASE + 2] * 255)})`;
-      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillRect(0, 0, display.logicalWidth, display.logicalHeight);
       context.restore();
     }
     const drawLine = index => {
@@ -1845,16 +2489,18 @@
   }
 
   function writeHostFrame(timestamp) {
+    syncDisplayState();
     const iLayout = game.memory.host_i32;
     const fLayout = game.memory.host_f32;
-    if (!iLayout || !fLayout || !instance.exports.memory) return;
+    if (!iLayout || !fLayout || !instance.exports.memory) {
+      resizeGenerationPending = false;
+      return;
+    }
     const i32 = new Int32Array(instance.exports.memory.buffer, iLayout.offset, iLayout.length);
     const f32 = new Float32Array(instance.exports.memory.buffer, fLayout.offset, fLayout.length);
     i32.fill(0);
     f32.fill(0);
     const elapsedMs = timestamp - startedAt;
-    const bounds = canvas.getBoundingClientRect();
-    const ratio = devicePixelRatio || 1;
     const focused = document.hasFocus() ? 1 : 0;
     const pointerCount = pointer.hover || pointer.down || pointer.wentDown || pointer.wentUp ? 1 : 0;
     i32[0] = Math.floor(elapsedMs) | 0;
@@ -1863,20 +2509,26 @@
     i32[9] = 0;
     i32[10] = tickIndex++;
     i32[11] = resized ? 1 : 0;
-    i32[12] = Math.round(screen.width * ratio);
-    i32[13] = Math.round(screen.height * ratio);
+    i32[12] = Math.round(display.cssWidth);
+    i32[13] = Math.round(display.cssHeight);
     i32[14] = 3;
     i32[15] = (focused ? 2 : 0) | (document.hidden ? 4 : 0) | (resized ? 8 : 0);
     i32[16] = 0;
     i32[17] = focused;
     i32[18] = document.hidden ? 1 : 0;
     i32[19] = Math.floor(elapsedMs * 1000) | 0;
-    i32[22] = Math.round(screen.width * ratio);
-    i32[23] = Math.round(screen.height * ratio);
-    i32[24] = Math.round(bounds.width * ratio);
-    i32[25] = Math.round(bounds.height * ratio);
-    i32[30] = displayGeneration;
-    i32[31] = densityGeneration;
+    i32[20] = Math.round(display.logicalWidth);
+    i32[21] = Math.round(display.logicalHeight);
+    i32[22] = Math.round(display.cssWidth);
+    i32[23] = Math.round(display.cssHeight);
+    i32[24] = display.backingWidth;
+    i32[25] = display.backingHeight;
+    i32[26] = 0;
+    i32[27] = 0;
+    i32[28] = Math.round(display.logicalWidth);
+    i32[29] = Math.round(display.logicalHeight);
+    i32[30] = display.displayGeneration;
+    i32[31] = display.densityGeneration;
     for (const code of keys) {
       const scancode = sdlScancode(code);
       if (scancode !== undefined && scancode < 512) i32[32 + scancode] = 1;
@@ -1890,17 +2542,22 @@
       f32[1] = pointer.y;
       f32[2] = pointer.dx;
       f32[3] = pointer.dy;
-      f32[4] = canvas.width ? pointer.x / canvas.width : 0;
-      f32[5] = canvas.height ? pointer.y / canvas.height : 0;
+      f32[4] = display.logicalWidth ? pointer.x / display.logicalWidth : 0;
+      f32[5] = display.logicalHeight ? pointer.y / display.logicalHeight : 0;
     }
-    f32[48] = ratio;
-    f32[49] = ratio;
-    f32[50] = canvas.width;
-    f32[51] = canvas.height;
+    f32[48] = display.contentScale;
+    f32[49] = display.rasterScale;
+    f32[50] = display.logicalWidth;
+    f32[51] = display.logicalHeight;
     f32[52] = 0;
     f32[53] = 0;
-    f32[54] = canvas.width;
-    f32[55] = canvas.height;
+    f32[54] = display.logicalWidth;
+    f32[55] = display.logicalHeight;
+    f32[56] = display.cssWidth;
+    f32[57] = display.cssHeight;
+    f32[58] = display.effectiveDpr;
+    f32[59] = display.scaleX;
+    f32[60] = display.scaleY;
     document.body.dataset.hostTick = String(i32[10]);
     document.body.dataset.hostTimeMs = String(i32[0]);
     if (resized) document.body.dataset.resizeTick = String(i32[10]);
@@ -1924,21 +2581,11 @@
   }
 
   function setCanvasSize(width, height) {
-    width = Math.max(1, Math.min(width | 0, 8192));
-    height = Math.max(1, Math.min(height | 0, 8192));
-    if (canvas.width === width && canvas.height === height) return;
-    canvas.width = width;
-    canvas.height = height;
-    if (typeof window.STASIS_REFIT_VIEWPORT === "function") window.STASIS_REFIT_VIEWPORT();
-    markResized();
+    setLogicalCanvas(width, height);
   }
 
   function markResized() {
-    resized = true;
-    if (!resizeGenerationPending) {
-      displayGeneration += 1;
-      resizeGenerationPending = true;
-    }
+    requestDisplaySync();
   }
 
   function applyWindowRequest() {
@@ -1946,8 +2593,8 @@
     if (sequence === undefined || sequence === lastWindowRequest) return;
     lastWindowRequest = sequence;
     const flags = exportedI32("host_req_flags") || 0;
-    const width = exportedI32("host_req_window_w_px") || canvas.width;
-    const height = exportedI32("host_req_window_h_px") || canvas.height;
+    const width = exportedI32("host_req_window_w_px") || display.logicalWidth;
+    const height = exportedI32("host_req_window_h_px") || display.logicalHeight;
     if (flags & 1) {
       canvas.style.width = "";
       canvas.style.height = "";
@@ -2006,6 +2653,7 @@
     performanceWorkload.atlasAllocatedBytes = atlasMetrics?.allocatedBytes ?? -1;
     performanceWorkload.atlasUploadCount = atlasMetrics?.uploadCount ?? -1;
     performanceWorkload.atlasUploadBytes = atlasMetrics?.uploadBytes ?? -1;
+    publishDisplayReceipt();
     const renderMs = wasmRenderMs + browserReplayMs;
     const frameWorkMs = tickMs + renderMs;
     const renderPrepMs = -1;
@@ -2067,10 +2715,16 @@
 
   function updatePointer(event) {
     const bounds = canvas.getBoundingClientRect();
-    const x = Math.round((event.clientX - bounds.left) * canvas.width / bounds.width);
-    const y = Math.round((event.clientY - bounds.top) * canvas.height / bounds.height);
-    const inside = event.clientX >= bounds.left && event.clientX <= bounds.right
-      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+    const width = Math.max(1, finitePositive(bounds.width, display.cssWidth));
+    const height = Math.max(1, finitePositive(bounds.height, display.cssHeight));
+    const right = Number.isFinite(bounds.right) ? bounds.right : bounds.left + width;
+    const bottom = Number.isFinite(bounds.bottom) ? bounds.bottom : bounds.top + height;
+    const x = Math.round(Math.max(0, Math.min(display.logicalWidth,
+      (event.clientX - bounds.left) * display.logicalWidth / width)));
+    const y = Math.round(Math.max(0, Math.min(display.logicalHeight,
+      (event.clientY - bounds.top) * display.logicalHeight / height)));
+    const inside = event.clientX >= bounds.left && event.clientX <= right
+      && event.clientY >= bounds.top && event.clientY <= bottom;
     pointer.dx += x - pointer.x;
     pointer.dy += y - pointer.y;
     pointer.x = x;

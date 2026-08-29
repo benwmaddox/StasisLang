@@ -27,7 +27,9 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
     },
     enableVertexAttribArray() {}, disableVertexAttribArray() {}, vertexAttrib4f() {},
     vertexAttribPointer() {}, vertexAttribDivisor() {}, getUniformLocation: () => ({}),
-    viewport() {}, clearColor() {}, clear() {}, useProgram() {}, uniform2f() {}, uniform1i() {},
+    viewport() {}, clearColor() {}, clear() {}, useProgram() {}, uniform2f(_location, width, height) {
+      stats.uniforms.push([width, height]);
+    }, uniform1i() {},
     texParameteri() {}, pixelStorei() {}, texImage2D() { if (textureThrow) throw new Error("fake texture failure"); }, texSubImage2D() { if (textureThrow) throw new Error("fake texture failure"); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError: () => 0,
     isContextLost: () => stats.contextLost,
     enable() {}, blendFunc() {}, blendFuncSeparate() {}, drawArraysInstanced(_mode, _first, _vertices, count) {
@@ -38,14 +40,15 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
   return gl;
 }
 
-async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false } = {}) {
+async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, 35120);
   const f32 = new Float32Array(memory.buffer, 100000, 126084);
-  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false };
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], transforms: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [] };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
+    setTransform(...value) { stats.transforms.push(value); },
     fillRect() { stats.fills += 1; stats.events.push("fill"); if (timing) now += 4; },
     fillText() {}, drawImage() { stats.images += 1; stats.events.push("image"); },
     save() {}, restore() { stats.restores += 1; }, beginPath() {}, moveTo() {}, lineTo() {},
@@ -61,8 +64,9 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
   const gl = fakeGl(stats, webgl, throwing, textureThrow);
   const canvas = {
     width: 640, height: 360, style: {}, parentElement: { style: {} },
+    dataset: {},
     getContext: kind => kind === "2d" ? context2d : gl,
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 360 }),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: cssExtent[0], height: cssExtent[1] }),
     addEventListener() {}, setPointerCapture() {}, focus() {}, requestFullscreen: async () => {}
   };
   const hud = { textContent: "" };
@@ -130,19 +134,25 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
   const contextObject = {
     document, screen: { width: 640, height: 360 }, devicePixelRatio: 1,
     performance: { now: () => now }, WebAssembly: { instantiate: async (_bytes, imports) => { env = imports.env; return { instance }; } },
-    fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
+    fetch: async source => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0), blob: async () => fetchBlob ? fetchBlob(source) : { source } }),
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; }, cancelAnimationFrame() {},
-    addEventListener() {}, console, Image: class { constructor() { this.complete = imageReady; this.naturalWidth = imageReady ? 16 : 0; this.naturalHeight = imageReady ? 16 : 0; } decode() { return Promise.resolve(); } }, FontFace: class { load() { return Promise.resolve(this); } },
+    addEventListener() {}, console, Image: class { constructor() { stats.imageConstructed += 1; this.complete = imageReady; this.naturalWidth = imageReady ? imageExtent[0] : 0; this.naturalHeight = imageReady ? imageExtent[1] : 0; } decode() { stats.imageDecodeCalls += 1; return imageDecode ? imageDecode(this) : Promise.resolve(); } }, FontFace: class { load() { return Promise.resolve(this); } },
     AudioContext: class { constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; } close() {} resume() {} },
-    TextDecoder, TextEncoder, setTimeout, clearTimeout
+    TextDecoder, TextEncoder, setTimeout, clearTimeout, devicePixelRatio: dpr,
   };
-  contextObject.window = { STASIS_GAME: { memory: { gfx_cmd_i32: { offset: 0, length: 35120 }, gfx_cmd_f32: { offset: 100000, length: 126084 } }, strings: {}, assets: {} }, screen: contextObject.screen };
+  if (createImageBitmap) {
+    contextObject.createImageBitmap = async (source, options) => {
+      stats.bitmapCalls.push({ source, options });
+      return createImageBitmap(source, options, stats.bitmapCalls.length);
+    };
+  }
+  contextObject.window = { STASIS_GAME: { memory: { gfx_cmd_i32: { offset: 0, length: 35120 }, gfx_cmd_f32: { offset: 100000, length: 126084 }, host_i32: { offset: 230000, length: 768 }, host_f32: { offset: 233072, length: 64 } }, strings: {}, assets, asset_metadata: assetMetadata }, screen: contextObject.screen };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(body.dataset.ready, "true");
   return {
-    stats, body, hud, rasterStats, frame: () => raf.shift()(now),
+    stats, body, hud, rasterStats, offscreen, env, contextObject, frame: () => raf.shift()(now),
     loseContext: () => { stats.contextLost = true; offscreenListeners.get("webglcontextlost")?.({ preventDefault() {} }); },
     restoreContext: () => { stats.contextLost = false; offscreenListeners.get("webglcontextrestored")?.({}); }
   };
@@ -156,6 +166,15 @@ test("large ordered rectangle run uses one instanced composite", async () => {
   assert.deepEqual(runtime.stats.uploadedFloats, [64 * 8]);
   assert.equal(runtime.stats.images, 1);
   assert.equal(runtime.stats.fills, 0);
+});
+
+test("WebGL targets use physical framebuffers with logical shader dimensions and identity composite", async () => {
+  const runtime = await loadRuntime({ rects: 64, cssExtent: [800, 450], dpr: 2 });
+  runtime.frame();
+  assert.deepEqual(runtime.stats.uniforms[0], [640, 360]);
+  assert.equal(runtime.offscreen.width, 1600);
+  assert.equal(runtime.offscreen.height, 900);
+  assert.ok(runtime.stats.transforms.some(value => value[0] === 1 && value[3] === 1));
 });
 
 test("ordered clipping saves and restores nested Canvas2D state", async () => {
@@ -204,6 +223,9 @@ test("large same-handle sprite run uploads the private 64-byte records", async (
   assert.ok(atlasUv[0] > 0 && atlasUv[1] > 0 && atlasUv[2] < 1 && atlasUv[3] < 1);
   assert.ok(atlasUv[0] < atlasUv[2] && atlasUv[1] < atlasUv[3]);
   assert.equal(runtime.stats.images, 1);
+  assert.equal(runtime.body.dataset.assetAtlasWidth, "512");
+  assert.equal(runtime.body.dataset.assetAtlasHeight, "512");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(512 * 512 * 4));
 });
 
 test("requested sprite dimensions rasterize before Canvas fallback", async () => {
@@ -211,6 +233,188 @@ test("requested sprite dimensions rasterize before Canvas fallback", async () =>
   runtime.frame();
   assert.equal(runtime.stats.images, 1);
   assert.ok(runtime.rasterStats.draws >= 1);
+});
+
+test("density changes select one bounded sprite tier and reuse its cache", async () => {
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [16, 16], imageExtent: [64, 64], dpr: 1,
+    assetMetadata: { "": {
+      encoding: "svg", source_sha256: "source-master", prepared_sha256: "prepared-tier-1"
+    } }
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetPreparedTier, "1");
+  assert.equal(runtime.body.dataset.spriteRasterCount, "1");
+
+  runtime.contextObject.devicePixelRatio = 2;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "32");
+  assert.equal(runtime.body.dataset.assetPreparedTier, "2");
+  assert.equal(runtime.body.dataset.assetDensityInvalidations, "1");
+  assert.equal(runtime.body.dataset.spriteRasterCount, "2");
+  assert.equal(runtime.body.dataset.spriteDecodedCount, "1", "density rebuild reuses the decoded source");
+
+  runtime.env.gfx_load_sprite(0, 16, 16);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.spriteCacheHits, "1");
+  assert.equal(runtime.body.dataset.spriteRasterCount, "2");
+});
+
+test("optimized sprite preparation resizes a Blob without constructing or decoding an Image", async () => {
+  const bitmaps = [];
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [16, 16], assets: { "": "sprite.svg" },
+    assetMetadata: { "": {
+      encoding: "svg", prepared_width: 64, prepared_height: 64, prepared_bytes: 455,
+      source_bytes: 4096, source_sha256: "source-master", prepared_sha256: "prepared-master"
+    } },
+    createImageBitmap: (_source, options) => {
+      const bitmap = {
+        width: options.resizeWidth, height: options.resizeHeight, closed: false,
+        close() { this.closed = true; }
+      };
+      bitmaps.push(bitmap);
+      return bitmap;
+    }
+  });
+  runtime.frame();
+  assert.equal(runtime.stats.imageConstructed, 0);
+  assert.equal(runtime.stats.imageDecodeCalls, 0);
+  assert.equal(runtime.stats.bitmapCalls[0].options.resizeWidth, 16);
+  assert.equal(runtime.stats.bitmapCalls[0].options.resizeHeight, 16);
+  assert.equal(runtime.stats.bitmapCalls[0].options.resizeQuality, "high");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetPreparedBytes, String(16 * 16 * 4));
+  assert.equal(runtime.body.dataset.assetPreparedFileBytes, "455");
+  assert.equal(runtime.body.dataset.assetSourceWidth, "64");
+  assert.equal(runtime.body.dataset.assetSourceHeight, "64");
+  assert.equal(runtime.body.dataset.assetSourceBytes, "4096");
+  assert.equal(runtime.body.dataset.assetDecodedWidth, "16");
+  assert.equal(runtime.body.dataset.assetDecodedHeight, "16");
+  assert.equal(runtime.body.dataset.assetDecodedBytes, String(16 * 16 * 4));
+  assert.equal(bitmaps[0].closed, false);
+});
+
+test("equivalent density scales reuse one stable requested-tier preparation", async () => {
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [16, 16], dpr: 1.1,
+    assets: { "": "sprite.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 64 } },
+    createImageBitmap: (_source, options) => ({
+      width: options.resizeWidth, height: options.resizeHeight, close() {}
+    })
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetPreparedTier, "1.25");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "20");
+  assert.equal(runtime.body.dataset.spriteRasterCount, "1");
+  runtime.contextObject.devicePixelRatio = 1.2;
+  runtime.frame();
+  runtime.env.gfx_load_sprite(0, 16, 16);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.spriteCacheHits, "1");
+  assert.equal(runtime.body.dataset.spriteRasterCount, "1");
+});
+
+test("stale density preparation cannot overwrite a newer tier and closes its bitmap", async () => {
+  const pending = [];
+  const bitmaps = [];
+  const makeBitmap = (width, height) => {
+    const bitmap = { width, height, closed: false, close() { this.closed = true; } };
+    bitmaps.push(bitmap);
+    return bitmap;
+  };
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [16, 16], dpr: 1,
+    assets: { "": "stale.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 64 } },
+    createImageBitmap: (_source, options, call) => {
+      if (call === 1) return makeBitmap(options.resizeWidth, options.resizeHeight);
+      return new Promise(resolve => pending.push({ resolve, options }));
+    }
+  });
+  runtime.frame();
+  runtime.contextObject.devicePixelRatio = 2;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 1);
+  runtime.contextObject.devicePixelRatio = 3;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 2);
+  const stale = makeBitmap(pending[0].options.resizeWidth, pending[0].options.resizeHeight);
+  pending[0].resolve(stale);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stale.closed, true);
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.spriteStaleCount, "1");
+  const current = makeBitmap(pending[1].options.resizeWidth, pending[1].options.resizeHeight);
+  pending[1].resolve(current);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "48");
+  assert.equal(runtime.body.dataset.assetPreparedTier, "3");
+  assert.equal(runtime.body.dataset.assetGeneration, "3");
+  assert.equal(current.closed, false);
+});
+
+test("shared pending sprite preparation keeps a remaining waiter alive", async () => {
+  const pending = [];
+  const bitmaps = [];
+  const makeBitmap = (width, height) => {
+    const bitmap = { width, height, closed: false, close() { this.closed = true; } };
+    bitmaps.push(bitmap);
+    return bitmap;
+  };
+  const runtime = await loadRuntime({
+    sprites: 2, spriteHandles: [1, 2], spriteSize: [16, 16], dpr: 1,
+    assets: { "": "shared.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 64 } },
+    createImageBitmap: (_source, options, call) => {
+      if (call === 1) return makeBitmap(options.resizeWidth, options.resizeHeight);
+      return new Promise(resolve => pending.push({ resolve, options }));
+    }
+  });
+  runtime.frame();
+  runtime.contextObject.devicePixelRatio = 2;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 1);
+
+  runtime.env.gfx_release_sprite(1);
+  const remaining = makeBitmap(pending[0].options.resizeWidth, pending[0].options.resizeHeight);
+  pending[0].resolve(remaining);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.stats.images = 0;
+  runtime.frame();
+
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "32");
+  assert.equal(runtime.stats.images, 1);
+  assert.equal(remaining.closed, false);
+  runtime.env.gfx_release_sprite(2);
+  assert.equal(remaining.closed, true);
+  assert.ok(bitmaps.length >= 2);
+});
+
+test("raster source underprovision is explicit instead of browser upscaling", async () => {
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [16, 16], imageExtent: [8, 8],
+    assets: { "": "sprite.png" },
+    assetMetadata: { "": { encoding: "png", prepared_width: 8, prepared_height: 8 } },
+    createImageBitmap: () => { throw new Error("PNG source must not be enlarged"); }
+  });
+  runtime.frame();
+  assert.equal(runtime.stats.imageConstructed, 1);
+  assert.equal(runtime.stats.imageDecodeCalls, 1);
+  assert.equal(runtime.body.dataset.assetFallback, "source-underprovisioned");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "8");
 });
 
 test("sprite handle changes and interleaved primitives split in source order", async () => {
@@ -253,6 +457,7 @@ test("oversize sprite runs fall back to Canvas without partial GPU submission", 
   assert.equal(runtime.stats.instanced, 0);
   assert.equal(runtime.stats.images, 64);
   assert.equal(runtime.body.dataset.atlasPages, "0");
+  assert.equal(runtime.body.dataset.assetAtlasFallback, "dimension");
 });
 
 test("sprite texture failure and context loss replay through Canvas", async () => {
