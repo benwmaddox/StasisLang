@@ -598,6 +598,32 @@ test("raster source underprovision is explicit instead of browser upscaling", as
   assert.equal(runtime.body.dataset.assetSourceHeight, "4");
 });
 
+test("releasing the latest Image fallback clears its retained resource receipt", async () => {
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16], imageExtent: [8, 4],
+    assets: { "": "released.png" },
+    assetMetadata: { "": { encoding: "png", prepared_width: 8, prepared_height: 4 } }
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetReady, "true");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4));
+  assert.equal(runtime.body.dataset.assetSource, "released.png");
+
+  runtime.env.gfx_release_sprite(1);
+  assert.equal(runtime.body.dataset.assetReady, "false");
+  assert.equal(runtime.body.dataset.assetCacheBytes, "0");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetDecodedWidth, "8");
+  assert.equal(runtime.body.dataset.assetSourceWidth, "8");
+
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetReady, "false");
+  assert.equal(runtime.body.dataset.assetCacheBytes, "0");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetSource, "released.png");
+});
+
 test("sprite handle changes and interleaved primitives split in source order", async () => {
   const first = Array.from({ length: 64 }, (_, index) => 2 * 16384 + index);
   const second = Array.from({ length: 64 }, (_, index) => 2 * 16384 + 64 + index);

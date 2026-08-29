@@ -1376,6 +1376,16 @@
       resource.refreshFallback = "none";
       sprites.delete(handle);
       gpuBatcher?.releaseResource(resource);
+      resource.image = null;
+      resource.imagePromise = null;
+      if (latestAssetResource === resource) {
+        // Publish the terminal state while the receipt still points at this
+        // resource, then drop the diagnostic reference so its decoded Image
+        // cannot be retained after release. The already-published asset
+        // fields remain in the body dataset for later display receipts.
+        publishDisplayReceipt();
+        latestAssetResource = undefined;
+      }
     }
   };
   const requestSprite = (pathId, width, height) => {
