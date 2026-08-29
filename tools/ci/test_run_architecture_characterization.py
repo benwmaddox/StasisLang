@@ -28,6 +28,7 @@ class ArchitectureCharacterizationManifestTests(unittest.TestCase):
             {
                 "compiler.pipeline",
                 "compiler.failed-publication-rollback",
+                "host.cross-host-contract",
                 "runtime.storage",
                 "runtime.network",
                 "live.protocol-rust",

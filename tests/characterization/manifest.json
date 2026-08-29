@@ -119,6 +119,22 @@
       "expected_evidence": "Every HostFrame lane round-trips through compiled Stasis accessors and the render contract remains aligned."
     },
     {
+      "id": "host.cross-host-contract",
+      "boundary": "versioned HostFrame/render/lifecycle/entrypoint/diagnostic/transaction/asset identity registry",
+      "fixture": [
+        "contracts/v1/host_runtime.json",
+        "contracts/v1/fixtures/valid_envelope.json",
+        "contracts/v1/fixtures/unsupported_version.json",
+        "tools/ci/check_host_runtime_contract.py"
+      ],
+      "owner": "contracts/v1",
+      "evidence": "structural-lint",
+      "lane": "fast-hermetic",
+      "default_gate": true,
+      "command": "python tools/ci/check_host_runtime_contract.py",
+      "expected_evidence": "The registry matches Stasis, C, Rust, Java, JavaScript, Web, toolchain, and provenance consumers; unsupported registry versions reject deterministically."
+    },
+    {
       "id": "runtime.render-layout",
       "boundary": "render command layout",
       "fixture": [
