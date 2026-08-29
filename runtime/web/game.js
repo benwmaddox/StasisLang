@@ -383,10 +383,10 @@
   };
   const finitePositive = (value, fallback = 0) =>
     Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback;
-  const boundedInteger = (value, minimum, maximum, fallback) => {
+  const boundedInteger = (value, minimum, maximum, fallback, floorValue = false) => {
     const number = Number(value);
     return Number.isFinite(number)
-      ? Math.max(minimum, Math.min(maximum, Math.round(number)))
+      ? Math.max(minimum, Math.min(maximum, floorValue ? Math.floor(number) : Math.round(number)))
       : fallback;
   };
   const displayNumber = value => Number.isFinite(value) ? String(Number(value.toFixed(6))) : "0";
@@ -843,27 +843,34 @@
     const tier = densityTierFor(display.rasterScale);
     const requestedWidth = logical ? logical.width * tier : metadataDimensions?.width || 0;
     const requestedHeight = logical ? logical.height * tier : metadataDimensions?.height || 0;
-    const dimensionCapped = requestedWidth > DISPLAY_MAX_BACKING_WIDTH
-      || requestedHeight > DISPLAY_MAX_BACKING_HEIGHT;
-    const desiredWidth = boundedInteger(
-      requestedWidth, 1, DISPLAY_MAX_BACKING_WIDTH, metadataDimensions?.width || 1
+    const uncappedWidth = finitePositive(requestedWidth, metadataDimensions?.width || 1);
+    const uncappedHeight = finitePositive(requestedHeight, metadataDimensions?.height || 1);
+    const dimensionScale = Math.min(
+      1,
+      DISPLAY_MAX_BACKING_WIDTH / uncappedWidth,
+      DISPLAY_MAX_BACKING_HEIGHT / uncappedHeight
     );
-    const desiredHeight = boundedInteger(
-      requestedHeight, 1, DISPLAY_MAX_BACKING_HEIGHT, metadataDimensions?.height || 1
-    );
-    const requestedBytes = desiredWidth * desiredHeight * 4;
-    const rasterCap = requestedBytes > DISPLAY_MAX_RASTER_BYTES
-      ? Math.sqrt(DISPLAY_MAX_RASTER_BYTES / requestedBytes)
+    const dimensionWidth = uncappedWidth * dimensionScale;
+    const dimensionHeight = uncappedHeight * dimensionScale;
+    const dimensionBytes = dimensionWidth * dimensionHeight * 4;
+    const byteScale = dimensionBytes > DISPLAY_MAX_RASTER_BYTES
+      ? Math.sqrt(DISPLAY_MAX_RASTER_BYTES / dimensionBytes)
       : 1;
+    const capped = dimensionScale < 1 || byteScale < 1;
+    const finalScale = dimensionScale * byteScale;
     const width = boundedInteger(
-      desiredWidth * rasterCap, 1, DISPLAY_MAX_BACKING_WIDTH, desiredWidth
+      uncappedWidth * finalScale, 1, DISPLAY_MAX_BACKING_WIDTH,
+      metadataDimensions?.width || 1,
+      capped
     );
     const height = boundedInteger(
-      desiredHeight * rasterCap, 1, DISPLAY_MAX_BACKING_HEIGHT, desiredHeight
+      uncappedHeight * finalScale, 1, DISPLAY_MAX_BACKING_HEIGHT,
+      metadataDimensions?.height || 1,
+      capped
     );
-    const fallback = rasterCap < 1
+    const fallback = byteScale < 1
       ? "raster-bytes"
-      : dimensionCapped ? "raster-dimension" : "none";
+      : dimensionScale < 1 ? "raster-dimension" : "none";
     const request = {
       source: String(resource.source ?? ""),
       metadata: Object.freeze({ ...metadata }),
@@ -971,7 +978,22 @@
     const underprovisioned = ["png", "jpeg", "jpg", "webp"].includes(request.encoding) &&
       (targetWidth > sourceWidth || targetHeight > sourceHeight);
     if (underprovisioned) {
-      return resultForSprite(request, image, sourceWidth, sourceHeight,
+      const raster = document.createElement?.("canvas");
+      const rasterContext = raster?.getContext?.("2d");
+      if (!raster || !rasterContext) throw new Error("sprite contain surface unavailable");
+      raster.width = targetWidth;
+      raster.height = targetHeight;
+      rasterContext.save?.();
+      rasterContext.clearRect?.(0, 0, targetWidth, targetHeight);
+      rasterContext.imageSmoothingEnabled = true;
+      if ("imageSmoothingQuality" in rasterContext) rasterContext.imageSmoothingQuality = "high";
+      const scale = Math.min(1, targetWidth / sourceWidth, targetHeight / sourceHeight);
+      const drawWidth = Math.max(1, Math.min(sourceWidth, Math.round(sourceWidth * scale)));
+      const drawHeight = Math.max(1, Math.min(sourceHeight, Math.round(sourceHeight * scale)));
+      rasterContext.drawImage(image, (targetWidth - drawWidth) / 2, (targetHeight - drawHeight) / 2,
+        drawWidth, drawHeight);
+      rasterContext.restore?.();
+      return resultForSprite(request, raster, targetWidth, targetHeight,
         "source-underprovisioned", sourceWidth, sourceHeight);
     }
     if (!request.hasDimensions) {

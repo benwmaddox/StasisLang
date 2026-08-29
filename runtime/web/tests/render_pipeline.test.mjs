@@ -264,6 +264,29 @@ test("density changes select one bounded sprite tier and reuse its cache", async
   assert.equal(runtime.body.dataset.spriteRasterCount, "2");
 });
 
+test("large aspect-ratio sprite tiers use one uniform dimension cap", async () => {
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [4000, 1000], dpr: 3,
+    assets: { "": "large.svg" },
+    assetMetadata: { "": {
+      encoding: "svg", prepared_width: 12000, prepared_height: 3000
+    } },
+    createImageBitmap: (_source, options) => ({
+      width: options.resizeWidth, height: options.resizeHeight, close() {}
+    })
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetPreparedTier, "3");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "8192");
+  assert.equal(runtime.body.dataset.assetPreparedHeight, "2048");
+  assert.equal(runtime.body.dataset.assetPreparedBytes, String(8192 * 2048 * 4));
+  assert.equal(runtime.body.dataset.assetFallback, "raster-dimension");
+  assert.equal(runtime.stats.bitmapCalls[0].options.resizeWidth, 8192);
+  assert.equal(runtime.stats.bitmapCalls[0].options.resizeHeight, 2048);
+  assert.equal(8192 / 2048, 4);
+  assert.notEqual(runtime.stats.bitmapCalls[0].options.resizeHeight, 3000);
+});
+
 test("optimized sprite preparation resizes a Blob without constructing or decoding an Image", async () => {
   const bitmaps = [];
   const runtime = await loadRuntime({
@@ -555,16 +578,24 @@ test("shared pending sprite preparation keeps a remaining waiter alive", async (
 
 test("raster source underprovision is explicit instead of browser upscaling", async () => {
   const runtime = await loadRuntime({
-    sprites: 1, spriteHandles: [1], spriteSize: [16, 16], imageExtent: [8, 8],
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16], imageExtent: [8, 4],
     assets: { "": "sprite.png" },
-    assetMetadata: { "": { encoding: "png", prepared_width: 8, prepared_height: 8 } },
+    assetMetadata: { "": { encoding: "png", prepared_width: 8, prepared_height: 4 } },
     createImageBitmap: () => { throw new Error("PNG source must not be enlarged"); }
   });
   runtime.frame();
   assert.equal(runtime.stats.imageConstructed, 1);
   assert.equal(runtime.stats.imageDecodeCalls, 1);
+  assert.deepEqual(runtime.rasterStats.clears[0], [0, 0, 16, 16]);
+  assert.deepEqual(runtime.rasterStats.images[0].slice(1), [4, 6, 8, 4]);
   assert.equal(runtime.body.dataset.assetFallback, "source-underprovisioned");
-  assert.equal(runtime.body.dataset.assetPreparedWidth, "8");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetPreparedHeight, "16");
+  assert.equal(runtime.body.dataset.assetDecodedWidth, "8");
+  assert.equal(runtime.body.dataset.assetDecodedHeight, "4");
+  assert.equal(runtime.body.dataset.assetDecodedBytes, String(8 * 4 * 4));
+  assert.equal(runtime.body.dataset.assetSourceWidth, "8");
+  assert.equal(runtime.body.dataset.assetSourceHeight, "4");
 });
 
 test("sprite handle changes and interleaved primitives split in source order", async () => {
