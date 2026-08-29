@@ -615,6 +615,15 @@ enum SymbolCommand {
     },
 }
 
+impl SymbolCommand {
+    fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::List { .. } | Self::Find(_) | Self::Read(_) | Self::References { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 struct SymbolSelectorArgs {
     name: String,
@@ -947,6 +956,24 @@ impl CommandResult {
     }
 }
 
+pub(super) fn is_read_only_symbol_invocation() -> bool {
+    let args: Vec<OsString> = env::args_os().collect();
+    is_read_only_symbol_args(&args)
+}
+
+fn is_read_only_symbol_args(args: &[OsString]) -> bool {
+    if !is_toolchain_invocation(args) {
+        return false;
+    }
+    let Ok(parsed) = ToolchainCli::try_parse_from(args.to_vec()) else {
+        return false;
+    };
+    matches!(
+        parsed.command,
+        ToolchainCommand::Symbol { command } if command.is_read_only()
+    )
+}
+
 pub(super) fn try_run() -> Option<i32> {
     let args: Vec<OsString> = env::args_os().collect();
     if !is_toolchain_invocation(&args) {
@@ -1247,6 +1274,9 @@ fn execute(
             });
             let vendor_gate = match &other {
                 ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
+                ToolchainCommand::Symbol { command } if command.is_read_only() => {
+                    VendorGate::ReadOnly
+                }
                 _ => VendorGate::Sync,
             };
             let workspace = load_workspace_with_vendor_gate(workspace_path, vendor_gate)?;
@@ -1663,6 +1693,7 @@ fn write_manifest(path: &Path, manifest: &ProjectManifest) -> Result<(), String>
 enum VendorGate {
     Sync,
     Inspect,
+    ReadOnly,
 }
 
 fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
@@ -1722,11 +1753,13 @@ fn load_workspace_with_vendor_gate(
             }
         }
     }
-    if manifest.stdlib.as_deref() == Some("toolchain") {
+    if manifest.stdlib.as_deref() == Some("toolchain") && vendor_gate == VendorGate::Sync {
         sync_toolchain_stdlib(&root)?;
     }
-    if vendor_gate != VendorGate::Inspect {
-        reconcile_project_vendor(&root, &mut manifest)?;
+    match vendor_gate {
+        VendorGate::Sync => reconcile_project_vendor(&root, &mut manifest)?,
+        VendorGate::Inspect => {}
+        VendorGate::ReadOnly => validate_read_only_vendor(&root, &manifest)?,
     }
     Ok(Workspace { root, manifest })
 }
@@ -1963,6 +1996,30 @@ fn inspect_project_vendor(
         local_changes,
         update_available,
     })
+}
+
+fn validate_read_only_vendor(
+    workspace_root: &Path,
+    manifest: &ProjectManifest,
+) -> Result<(), String> {
+    if manifest.vendor.is_none() {
+        return Ok(());
+    }
+    let status = inspect_project_vendor(workspace_root, manifest)?;
+    if status.actual_sha256.as_deref() == Some(status.installed.sha256.as_str()) {
+        return Ok(());
+    }
+
+    let reason = if status.actual_sha256.is_none() {
+        "is missing"
+    } else if status.local_changes {
+        "has local changes"
+    } else {
+        "is stale for the selected toolchain"
+    };
+    Err(format!(
+        "read-only symbol query did not update files: checked-in vendor snapshot {reason}; run 'stasis vendor status' then 'stasis vendor update'"
+    ))
 }
 
 fn reconcile_project_vendor(
@@ -5806,6 +5863,7 @@ fn symbol_workspace(
         .filter(|file| is_editable_workshop_path(&file.path))
         .cloned()
         .collect::<Vec<_>>();
+    let query_files = &files;
     match command {
         SymbolCommand::List {
             query,
@@ -5816,7 +5874,7 @@ fn symbol_workspace(
             limit,
         } => {
             let limit = limit.clamp(1, 200);
-            let mut items = workshop_source_items(&editable_files)?;
+            let mut items = workshop_source_items(query_files)?;
             if requested_files.len() > 16 {
                 return Err("symbol list accepts at most 16 --file values".to_string());
             }
@@ -5909,7 +5967,7 @@ fn symbol_workspace(
             ))
         }
         SymbolCommand::Find(args) => {
-            let items = find_workshop_symbols(&editable_files, &args.selector())?;
+            let items = find_workshop_symbols(query_files, &args.selector())?;
             let metadata = items
                 .iter()
                 .map(|item| {
@@ -5930,7 +5988,7 @@ fn symbol_workspace(
         }
         SymbolCommand::Read(args) => {
             let selector = args.selector();
-            let mut items = find_workshop_symbols(&editable_files, &selector)?;
+            let mut items = find_workshop_symbols(query_files, &selector)?;
             if items.len() != 1 {
                 return Err(format!(
                     "symbol read requires exactly one match; found {}",
@@ -5944,7 +6002,7 @@ fn symbol_workspace(
             ))
         }
         SymbolCommand::References { symbol, limit } => {
-            let references = find_workshop_references(&editable_files, &symbol, limit)?;
+            let references = find_workshop_references(query_files, &symbol, limit)?;
             let human = references
                 .iter()
                 .map(|reference| {
@@ -5979,7 +6037,7 @@ fn symbol_workspace(
                     expected_source_hash: None,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Update {
             target,
@@ -5998,7 +6056,7 @@ fn symbol_workspace(
                     expected_source_hash,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Delete {
             target,
@@ -6014,13 +6072,13 @@ fn symbol_workspace(
                     expected_source_hash,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Apply { request, options } => {
             let source = read_workspace_input(workspace, "semantic edit request", &request)?;
             let batch = serde_json::from_str::<WorkshopSemanticEditBatch>(&source)
                 .map_err(|error| format!("invalid semantic edit request: {error}"))?;
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Revert {
             receipt,
@@ -6049,13 +6107,16 @@ fn read_symbol_source(
 
 fn apply_symbol_batch(
     workspace: &Workspace,
-    files: &[WorkshopSourceFile],
+    editable_files: &[WorkshopSourceFile],
+    query_files: &[WorkshopSourceFile],
     mut batch: WorkshopSemanticEditBatch,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
-    normalize_cli_semantic_batch(files, &mut batch)?;
-    let (after, plan) = plan_workshop_semantic_edits(files, &batch)?;
-    validate_semantic_files(workspace, &after)?;
+    normalize_cli_semantic_batch(editable_files, &mut batch)?;
+    let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
+    ensure_editable_semantic_plan(&plan)?;
+    let validation_files = overlay_workshop_files(query_files, &after);
+    validate_semantic_files(workspace, &validation_files)?;
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -6127,6 +6188,20 @@ fn apply_symbol_batch(
             "receipt": relative_display(&workspace.root, &receipt),
         }),
     ))
+}
+
+fn overlay_workshop_files(
+    query_files: &[WorkshopSourceFile],
+    edited_files: &[WorkshopSourceFile],
+) -> Vec<WorkshopSourceFile> {
+    let mut files = query_files
+        .iter()
+        .map(|file| (file.path.clone(), file.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for file in edited_files {
+        files.insert(file.path.clone(), file.clone());
+    }
+    files.into_values().collect()
 }
 
 fn normalize_cli_semantic_batch(
@@ -6231,6 +6306,12 @@ fn revert_symbol_plan(
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let mut restored = current.clone();
     for change in &plan.changed_files {
+        if !is_editable_workshop_path(&change.file) {
+            return Err(format!(
+                "semantic edits are limited to project src/ and tests/ files: {}",
+                change.file
+            ));
+        }
         let file = restored
             .iter_mut()
             .find(|file| file.path == change.file)
@@ -6280,6 +6361,20 @@ fn read_workspace_input(workspace: &Workspace, field: &str, path: &Path) -> Resu
     let absolute = workspace.root.join(path);
     fs::read_to_string(&absolute)
         .map_err(|error| format!("failed to read {}: {error}", absolute.display()))
+}
+
+fn ensure_editable_semantic_plan(plan: &WorkshopSemanticEditPlan) -> Result<(), String> {
+    if let Some(change) = plan
+        .changed_files
+        .iter()
+        .find(|change| !is_editable_workshop_path(&change.file))
+    {
+        return Err(format!(
+            "semantic edits are limited to project src/ and tests/ files: {}",
+            change.file
+        ));
+    }
+    Ok(())
 }
 
 fn is_editable_workshop_path(path: &str) -> bool {
@@ -6604,12 +6699,7 @@ pub(crate) fn verify_installed_toolchain_identity() -> Result<(), String> {
     }
     let executable = env::current_exe()
         .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
-    verify_installed_toolchain_identity_for(
-        &executable,
-        runtime,
-        expected,
-        release_id,
-    )
+    verify_installed_toolchain_identity_for(&executable, runtime, expected, release_id)
 }
 
 fn verify_installed_toolchain_identity_for(
@@ -8043,6 +8133,28 @@ mod tests {
             vec!["stasis", "vendor", "update"],
         ] {
             ToolchainCli::try_parse_from(args).expect("parse vendor command");
+        }
+    }
+
+    #[test]
+    fn symbol_queries_are_the_only_symbol_commands_that_skip_cache_cleanup() {
+        for args in [
+            vec!["stasis", "--json", "symbol", "list"],
+            vec!["stasis", "symbol", "find", "main"],
+            vec!["stasis", "symbol", "read", "main"],
+            vec!["stasis", "symbol", "references", "state"],
+        ] {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert!(is_read_only_symbol_args(&args));
+        }
+        for args in [
+            vec!["stasis", "symbol", "add"],
+            vec!["stasis", "symbol", "update", "main"],
+            vec!["stasis", "symbol", "delete", "main"],
+            vec!["stasis", "check"],
+        ] {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert!(!is_read_only_symbol_args(&args));
         }
     }
 

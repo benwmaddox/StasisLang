@@ -3648,7 +3648,9 @@ function frame_width(): i32 { return 360; }
 }
 
 fn main() {
-    maybe_cleanup_stale_stasis_cache();
+    if !toolchain_cli::is_read_only_symbol_invocation() {
+        maybe_cleanup_stale_stasis_cache();
+    }
 
     if let Some(exit) = toolchain_cli::try_run() {
         std::process::exit(exit);
