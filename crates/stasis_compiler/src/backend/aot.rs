@@ -1748,8 +1748,8 @@ mod tests {
     }
 
     fn run_gfx_capacity_jit(gfx_source: &str) -> GfxCapacityResult {
-        const I32_COUNT: usize = 34_608;
-        const F32_COUNT: usize = 125_060;
+        const I32_COUNT: usize = 35_120;
+        const F32_COUNT: usize = 126_084;
         const U8_COUNT: usize = 65_536;
         let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut jit = JitProcess::new();
@@ -1831,10 +1831,12 @@ mod tests {
             ("text_count", 7, 2_048),
             ("dropped_text", 8, 2),
             ("text_bytes_used", 9, 65_536),
-            ("order_count", 22, 16_144),
+            ("order_count", 22, 16_656),
             ("dropped_order", 23, 1),
             ("rect_count", 24, 5_000),
             ("dropped_rects", 25, 1),
+            ("clip_count", 27, 256),
+            ("dropped_clips", 28, 1),
         ];
         for (field, index, expected) in checks {
             let actual = result.i32s[index];
@@ -1850,7 +1852,10 @@ mod tests {
         {
             return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=geometry_arena_boundary expected=adjacent actual=overlap".to_string());
         }
-        if result.i32s[34_607] != 51_199 || result.u8s[65_535] != 0 {
+        if result.i32s[35_119] != 98_304
+            || result.f32s[126_083].to_bits() != 4.0f32.to_bits()
+            || result.u8s[65_535] != 0
+        {
             return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=terminal_entries expected=written actual=missing".to_string());
         }
         if result.trace == 0 {
@@ -1956,7 +1961,7 @@ mod tests {
             "status": "passed",
             "target": "jit+aot+native-trace",
             "fixture_revision": fixture_revision,
-            "checks": 20 + linked_aot_checks,
+            "checks": 22 + linked_aot_checks,
             "linked_aot_checks": linked_aot_checks,
             "oracle": {
                 "line_count": 5000,
@@ -1964,12 +1969,14 @@ mod tests {
                 "sprite_count": 4096,
                 "text_count": 2048,
                 "text_bytes_used": 65536,
-                "order_count": 16144,
+                "order_count": 16656,
+                "clip_count": 256,
                 "dropped": {
                     "lines": 1,
                     "rects": 1,
                     "sprites": 1,
                     "text": 2,
+                    "clips": 1,
                     "order": 1
                 },
                 "native_trace": jit_result.trace,

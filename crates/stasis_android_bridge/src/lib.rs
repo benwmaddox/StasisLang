@@ -24,7 +24,6 @@ unsafe extern "C" {
 
 use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
-use stasis_dynload::StasisAudioHostApi;
 #[cfg(test)]
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::state_migration::{
@@ -42,6 +41,7 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEdit, WorkshopSemanticEditOperation, WorkshopSourceItemKind,
     WorkshopSymbolSelector,
 };
+use stasis_dynload::StasisAudioHostApi;
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
@@ -5610,7 +5610,7 @@ function tick(): void {}
         );
 
         let idle_trace = run_frame(0, 0, 0, &mut frame_i32, &mut frame_f32, &mut frame_u8);
-        assert_eq!(idle_trace, 3_939_026_311);
+        assert_eq!(idle_trace, 3_533_510_058);
         assert_eq!(frame_i32[RECT_COUNT], 1);
         assert_eq!(frame_i32[ORDER_COUNT], 10);
         assert_eq!(frame_i32[FRAME_TOKEN], 4);
@@ -6362,7 +6362,8 @@ function render(): void {
             frame_u8.len(),
         );
         assert_eq!(status, 0);
-        assert_eq!(&frame_i32[..5], &[1196967473, 5, 3, 1, 1]);
+        // Legacy source frames are normalized to the canonical v6 destination layout.
+        assert_eq!(&frame_i32[..5], &[1196967473, 6, 3, 1, 1]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
         assert_eq!(&frame_i32[20..22], &[1, 1]);

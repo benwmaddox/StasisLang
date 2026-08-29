@@ -1,0 +1,172 @@
+import "/vendor/stasis/stdlib/graphics.stasis";
+import "ui_single_pass.stasis";
+import "gallery_state.stasis";
+
+function gallery_label(text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_text(gallery.font, text, x, y, r, g, b, a);
+}
+
+function gallery_panel(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32): void {
+    fill_rect(x, y, w, h, r, g, b, 0.96);
+    draw_line(x, y, x + w, y, 0.24, 0.42, 0.54, 1.0);
+    draw_line(x + w, y, x + w, y + h, 0.12, 0.25, 0.34, 1.0);
+    draw_line(x + w, y + h, x, y + h, 0.12, 0.25, 0.34, 1.0);
+    draw_line(x, y + h, x, y, 0.24, 0.42, 0.54, 1.0);
+}
+
+function gallery_button(x: f32, y: f32, w: f32, h: f32, id: i32, label: string, selected: bool): void {
+    let red: f32 = 0.10;
+    let green: f32 = 0.20;
+    let blue: f32 = 0.28;
+    if (selected) {
+        red = 0.18;
+        green = 0.48;
+        blue = 0.60;
+    }
+    if (ui_button_hot(id)) {
+        red = red + 0.10;
+        green = green + 0.10;
+        blue = blue + 0.10;
+    }
+    if (ui_button_active(id)) {
+        red = red + 0.08;
+        green = green + 0.08;
+    }
+    fill_rect(x, y, w, h, red, green, blue, 1.0);
+    gallery_label(label, x + 10.0, y + 12.0, 0.92, 0.96, 1.0, 1.0);
+}
+
+function gallery_button_current(id: i32, label: string, selected: bool): void {
+    gallery_button(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), id, label, selected);
+}
+
+function gallery_page_name(page: GalleryPage): string {
+    if (page == GalleryPage.Stacks) {
+        return "STACKS";
+    }
+    if (page == GalleryPage.Anchors) {
+        return "ANCHORS";
+    }
+    if (page == GalleryPage.Scroll) {
+        return "SCROLL";
+    }
+    if (page == GalleryPage.Viewport) {
+        return "VIEWPORT";
+    }
+    return "COMBINED";
+}
+
+function gallery_begin_screen(): void {
+    let x: f32 = gfx_safe_viewport_x();
+    let y: f32 = gfx_safe_viewport_y();
+    let w: f32 = gfx_safe_viewport_width();
+    let h: f32 = gfx_safe_viewport_height();
+    ui_begin_frame(x, y, w, h);
+    ui_inset(x, y, w, h, 18.0, 14.0, 18.0, 14.0);
+    ui_vstack_begin(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 12.0, UiStackDirection.Forward);
+    ui_vstack_next_fixed(58.0);
+}
+
+function gallery_draw_header(): void {
+    let x: f32 = ui_current_x();
+    let y: f32 = ui_current_y();
+    let w: f32 = ui_current_width();
+    let h: f32 = ui_current_height();
+    gallery_panel(x, y, w, h, 0.06, 0.13, 0.19);
+    gallery_label("STASIS / SINGLE-PASS UI GALLERY", x + 14.0, y + 8.0, 0.86, 0.96, 1.0, 1.0);
+    gallery_label("The recipe runs once: stacks carve, anchors place, scroll translates, viewports fit.", x + 14.0, y + 31.0, 0.58, 0.75, 0.84, 1.0);
+}
+
+function gallery_draw_navigation(): void {
+    let x: f32 = ui_current_x();
+    let y: f32 = ui_current_y();
+    let w: f32 = ui_current_width();
+    let h: f32 = ui_current_height();
+    ui_hstack_begin(x, y, w, h, 6.0, UiStackDirection.Forward);
+    ui_hstack_next_fixed(116.0);
+    let selected_stacks: bool = gallery.page == GalleryPage.Stacks;
+    gallery_button_current(GALLERY_ID_STACKS, "STACKS", selected_stacks);
+    ui_hstack_next_fixed(116.0);
+    let selected_anchors: bool = gallery.page == GalleryPage.Anchors;
+    gallery_button_current(GALLERY_ID_ANCHORS, "ANCHORS", selected_anchors);
+    ui_hstack_next_fixed(116.0);
+    let selected_scroll: bool = gallery.page == GalleryPage.Scroll;
+    gallery_button_current(GALLERY_ID_SCROLL, "SCROLL", selected_scroll);
+    ui_hstack_next_fixed(116.0);
+    let selected_viewport: bool = gallery.page == GalleryPage.Viewport;
+    gallery_button_current(GALLERY_ID_VIEWPORT, "VIEWPORT", selected_viewport);
+    ui_hstack_next_rest();
+    let selected_combined: bool = gallery.page == GalleryPage.Combined;
+    gallery_button_current(GALLERY_ID_COMBINED, "COMBINED", selected_combined);
+    ui_hstack_end();
+}
+
+function gallery_finish_screen(): void {
+    ui_vstack_end();
+}
+
+function gallery_tick_button(
+    layer_id: i32,
+    id: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    pointer_id: i32,
+    pointer_x: f32,
+    pointer_y: f32,
+    pointer_down: bool,
+    went_down: bool,
+    went_up: bool
+): bool {
+    return ui_button(layer_id, id, x, y, w, h, pointer_id, pointer_x, pointer_y, pointer_down, went_down, went_up);
+}
+
+function gallery_cycle_fit(): void {
+    if (gallery.fit == UiViewportFit.Stretch) {
+        gallery.fit = UiViewportFit.Contain;
+        return;
+    }
+    if (gallery.fit == UiViewportFit.Contain) {
+        gallery.fit = UiViewportFit.Cover;
+        return;
+    }
+    if (gallery.fit == UiViewportFit.Cover) {
+        gallery.fit = UiViewportFit.IntegerScale;
+        return;
+    }
+    gallery.fit = UiViewportFit.Stretch;
+}
+
+function gallery_fit_name(): string {
+    if (gallery.fit == UiViewportFit.Stretch) {
+        return "STRETCH";
+    }
+    if (gallery.fit == UiViewportFit.Contain) {
+        return "CONTAIN";
+    }
+    if (gallery.fit == UiViewportFit.Cover) {
+        return "COVER";
+    }
+    return "INTEGER SCALE";
+}
+
+function gallery_row_label(index: i32): string {
+    let kind: i32 = index % 6;
+    if (kind == 0) {
+        return "row / input";
+    }
+    if (kind == 1) {
+        return "row / layout";
+    }
+    if (kind == 2) {
+        return "row / paint";
+    }
+    if (kind == 3) {
+        return "row / audio";
+    }
+    if (kind == 4) {
+        return "row / network";
+    }
+    return "row / state";
+}

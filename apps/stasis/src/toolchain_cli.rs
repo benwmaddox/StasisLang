@@ -58,7 +58,7 @@ const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
 const GFX_CMD_LEGACY_VERSION: i64 = 4;
-const GFX_CMD_CURRENT_VERSION: i64 = 5;
+const GFX_CMD_CURRENT_VERSION: i64 = 6;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",
@@ -5493,7 +5493,7 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
         || !(current_command_buffer || legacy_command_buffer)
     {
         return Err(
-            "release provenance is not a clean official gfx_cmd schema 4/5 build".to_string(),
+            "release provenance is not a clean official gfx_cmd schema 4/6 build".to_string(),
         );
     }
     let release_tag = provenance_string_field(&value, "release_tag")?;
@@ -8361,7 +8361,7 @@ mod tests {
         wrong_family["command_buffer"]["name"] = json!("other_cmd");
         write_json_file(&manifest_path, &wrong_family).expect("write wrong-family fixture");
         let error = verify_release_provenance(&manifest_path).expect_err("reject wrong family");
-        assert!(error.contains("clean official gfx_cmd schema 4/5 build"));
+        assert!(error.contains("clean official gfx_cmd schema 4/6 build"));
         write_json_file(&manifest_path, &current_manifest).expect("restore current provenance");
 
         fs::write(

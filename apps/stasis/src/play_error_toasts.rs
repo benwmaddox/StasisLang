@@ -1,6 +1,6 @@
 //! Development-only error notifications for the in-process `stasis play` loop.
 //!
-//! This module intentionally owns no runtime or ABI state. It appends ordinary gfx_cmd v5
+//! This module intentionally owns no runtime or ABI state. It appends ordinary gfx_cmd v5/v6
 //! rectangle and text commands to the buffers that the guest already submitted.
 
 use std::collections::VecDeque;
@@ -13,7 +13,8 @@ pub const MAX_VISIBLE_TOASTS: usize = 5;
 pub const MAX_MESSAGE_BYTES: usize = 160;
 
 const GFX_CMD_MAGIC: i32 = 0x4758_4631;
-const GFX_CMD_VERSION: i32 = 5;
+const GFX_CMD_V5_VERSION: i32 = 5;
+const GFX_CMD_VERSION: i32 = 6;
 const GFX_I_VERSION: usize = 1;
 const GFX_I_LINE_COUNT: usize = 3;
 const GFX_I_SPRITE_COUNT: usize = 4;
@@ -27,7 +28,8 @@ const GFX_I_TEXT_BASE: usize = 12_320;
 const GFX_F_RECT_REVERSE_BASE: usize = 79_996;
 const GFX_F_TEXT_BASE: usize = 112_772;
 const GFX_MAX_GEOMETRY: usize = 10_000;
-const GFX_MAX_ORDER: usize = 16_144;
+const GFX_MAX_ORDER_V5: usize = 16_144;
+const GFX_MAX_ORDER: usize = 16_656;
 const GFX_MAX_TEXT: usize = 2_048;
 const GFX_TEXT_MAX_BYTES: usize = 65_536;
 const GFX_GEOMETRY_STRIDE_F32: usize = 8;
@@ -98,13 +100,19 @@ impl PlayErrorToasts {
         now: Instant,
     ) -> usize {
         self.prune(now);
-        if self.items.is_empty() || self.font_handle.is_none() || !valid_v5_header(cmd_i32) {
+        if self.items.is_empty() || self.font_handle.is_none() || !valid_header(cmd_i32) {
             return 0;
         }
 
+        let max_order = if cmd_i32[GFX_I_VERSION] >= GFX_CMD_VERSION {
+            GFX_MAX_ORDER
+        } else {
+            GFX_MAX_ORDER_V5
+        };
+
         let line_count = nonnegative_count(cmd_i32, GFX_I_LINE_COUNT, GFX_MAX_GEOMETRY);
         let mut rect_count = nonnegative_count(cmd_i32, GFX_I_RECT_COUNT, GFX_MAX_GEOMETRY);
-        let mut order_count = nonnegative_count(cmd_i32, GFX_I_ORDER_COUNT, GFX_MAX_ORDER);
+        let mut order_count = nonnegative_count(cmd_i32, GFX_I_ORDER_COUNT, max_order);
         let sprite_count = nonnegative_count(cmd_i32, GFX_I_SPRITE_COUNT, 4_096);
         let mut text_count = nonnegative_count(cmd_i32, GFX_I_TEXT_COUNT, GFX_MAX_TEXT);
         let mut text_bytes = nonnegative_count(cmd_i32, GFX_I_TEXT_BYTES_USED, GFX_TEXT_MAX_BYTES);
@@ -124,7 +132,7 @@ impl PlayErrorToasts {
                 .saturating_add(rect_count)
                 .saturating_add(sprite_count)
                 .saturating_add(text_count);
-            if guest_order_count > GFX_MAX_ORDER
+            if guest_order_count > max_order
                 || GFX_I_ORDER_BASE
                     .checked_add(guest_order_count)
                     .is_none_or(|end| end > cmd_i32.len())
@@ -132,29 +140,35 @@ impl PlayErrorToasts {
                 return 0;
             }
             for index in 0..line_count {
-                if !append_order(cmd_i32, &mut order_count, GFX_ORDER_LINE, index) {
+                if !append_order(cmd_i32, &mut order_count, max_order, GFX_ORDER_LINE, index) {
                     return 0;
                 }
             }
             for index in 0..rect_count {
-                if !append_order(cmd_i32, &mut order_count, GFX_ORDER_RECT, index) {
+                if !append_order(cmd_i32, &mut order_count, max_order, GFX_ORDER_RECT, index) {
                     return 0;
                 }
             }
             for index in 0..sprite_count {
-                if !append_order(cmd_i32, &mut order_count, GFX_ORDER_SPRITE, index) {
+                if !append_order(
+                    cmd_i32,
+                    &mut order_count,
+                    max_order,
+                    GFX_ORDER_SPRITE,
+                    index,
+                ) {
                     return 0;
                 }
             }
             for index in 0..text_count {
-                if !append_order(cmd_i32, &mut order_count, GFX_ORDER_TEXT, index) {
+                if !append_order(cmd_i32, &mut order_count, max_order, GFX_ORDER_TEXT, index) {
                     return 0;
                 }
             }
         }
 
         for (index, toast) in self.items.iter().enumerate() {
-            if order_count >= GFX_MAX_ORDER || line_count + rect_count >= GFX_MAX_GEOMETRY {
+            if order_count >= max_order || line_count + rect_count >= GFX_MAX_GEOMETRY {
                 break;
             }
             let y = 16.0 + index as f32 * 48.0;
@@ -163,7 +177,13 @@ impl PlayErrorToasts {
             if rect_base + GFX_GEOMETRY_STRIDE_F32 > cmd_f32.len() {
                 break;
             }
-            if !append_order(cmd_i32, &mut order_count, GFX_ORDER_RECT, rect_index) {
+            if !append_order(
+                cmd_i32,
+                &mut order_count,
+                max_order,
+                GFX_ORDER_RECT,
+                rect_index,
+            ) {
                 break;
             }
             write_rect(cmd_f32, rect_base, 16.0, y, toast_width, 36.0);
@@ -181,12 +201,18 @@ impl PlayErrorToasts {
                 .checked_add(bytes.len() + 1)
                 .is_none_or(|end| end > GFX_TEXT_MAX_BYTES)
                 || text_bytes + bytes.len() + 1 > cmd_u8.len()
-                || order_count >= GFX_MAX_ORDER
+                || order_count >= max_order
             {
                 continue;
             }
             let text_index = text_count;
-            if !append_order(cmd_i32, &mut order_count, GFX_ORDER_TEXT, text_index) {
+            if !append_order(
+                cmd_i32,
+                &mut order_count,
+                max_order,
+                GFX_ORDER_TEXT,
+                text_index,
+            ) {
                 continue;
             }
             let byte_offset = text_bytes;
@@ -234,9 +260,12 @@ impl PlayErrorToasts {
     }
 }
 
-fn valid_v5_header(cmd_i32: &[i32]) -> bool {
+fn valid_header(cmd_i32: &[i32]) -> bool {
     cmd_i32.first().copied() == Some(GFX_CMD_MAGIC)
-        && cmd_i32.get(GFX_I_VERSION).copied() == Some(GFX_CMD_VERSION)
+        && matches!(
+            cmd_i32.get(GFX_I_VERSION).copied(),
+            Some(GFX_CMD_V5_VERSION | GFX_CMD_VERSION)
+        )
 }
 
 fn nonnegative_count(buffer: &[i32], index: usize, maximum: usize) -> usize {
@@ -247,11 +276,17 @@ fn nonnegative_count(buffer: &[i32], index: usize, maximum: usize) -> usize {
         .clamp(0, maximum as i32) as usize
 }
 
-fn append_order(cmd_i32: &mut [i32], count: &mut usize, kind: i32, index: usize) -> bool {
+fn append_order(
+    cmd_i32: &mut [i32],
+    count: &mut usize,
+    max_order: usize,
+    kind: i32,
+    index: usize,
+) -> bool {
     let Some(slot) = GFX_I_ORDER_BASE.checked_add(*count) else {
         return false;
     };
-    if slot >= cmd_i32.len() || *count >= GFX_MAX_ORDER || index > i32::MAX as usize {
+    if slot >= cmd_i32.len() || *count >= max_order || index > i32::MAX as usize {
         return false;
     }
     cmd_i32[slot] = kind * GFX_ORDER_KIND_SCALE + index as i32;

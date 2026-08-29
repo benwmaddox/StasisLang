@@ -251,7 +251,8 @@
   const GFX_CMD_V3_VERSION = 3;
   const GFX_CMD_V4_VERSION = 4;
   const GFX_CMD_V5_VERSION = 5;
-  const GFX_CMD_CURRENT_VERSION = GFX_CMD_V5_VERSION;
+  const GFX_CMD_V6_VERSION = 6;
+  const GFX_CMD_CURRENT_VERSION = GFX_CMD_V6_VERSION;
   const GFX_FLAG_CLEAR = 1;
   const GFX_FLAG_PRESENT = 2;
   const GFX_I_MAGIC = 0;
@@ -263,6 +264,7 @@
   const GFX_I_TEXT_BYTES_USED = 9;
   const GFX_I_ORDER_COUNT = 22;
   const GFX_I_RECT_COUNT = 24;
+  const GFX_I_CLIP_COUNT = 27;
   const GFX_I_SPRITE_BASE = 32;
   const GFX_I_TEXT_BASE = 12320;
   const GFX_I_ORDER_BASE = 18464;
@@ -272,6 +274,7 @@
   const GFX_F_RECT_REVERSE_BASE = 79996;
   const GFX_F_TEXT_BASE = 112772;
   const GFX_F_LEGACY_TEXT_BASE = 96388;
+  const GFX_F_CLIP_BASE = 125060;
   const GFX_MAX_GEOMETRY = 10000;
   const GFX_GEOMETRY_STRIDE_F32 = 8;
   const GFX_MAX_LINES = GFX_MAX_GEOMETRY;
@@ -284,12 +287,16 @@
   const GFX_TEXT_STRIDE_I32 = 3;
   const GFX_TEXT_STRIDE_F32 = 6;
   const GFX_TEXT_MAX_BYTES = 65536;
-  const GFX_MAX_ORDER = GFX_MAX_LINES + GFX_MAX_SPRITES + GFX_MAX_TEXT;
+  const GFX_MAX_CLIPS = 256;
+  const GFX_CLIP_STRIDE_F32 = 4;
+  const GFX_MAX_ORDER = GFX_MAX_LINES + GFX_MAX_SPRITES + GFX_MAX_TEXT + GFX_MAX_CLIPS * 2;
   const GFX_ORDER_KIND_SCALE = 16384;
   const GFX_ORDER_LINE = 1;
   const GFX_ORDER_SPRITE = 2;
   const GFX_ORDER_TEXT = 3;
   const GFX_ORDER_RECT = 4;
+  const GFX_ORDER_CLIP_PUSH = 5;
+  const GFX_ORDER_CLIP_POP = 6;
   const RECT_CAP = GFX_MAX_GEOMETRY;
   const rectScratch = new Float32Array(RECT_CAP * 8);
   const SPRITE_CAP = GFX_MAX_SPRITES;
@@ -1416,6 +1423,9 @@
       };
       return (gpuBatcher = {
         target,
+        // Draw calls composite synchronously today. Keep an explicit boundary
+        // so ordered clip changes remain correct if batching becomes queued.
+        flush: () => {},
         drawRect: (values, count) => draw(values, count, 8, null),
         atlasFor,
         drawSprites: (values, count, page) => draw(values, count, 16, page.texture),
@@ -1477,6 +1487,9 @@
       ? GFX_SPRITE_STRIDE_F32 : GFX_LEGACY_SPRITE_STRIDE_F32;
     const textBase = version >= GFX_CMD_V5_VERSION
       ? GFX_F_TEXT_BASE : GFX_F_LEGACY_TEXT_BASE;
+    const flushGpuBatcher = () => {
+      gpuBatcher?.flush?.();
+    };
     const flags = i32[GFX_I_FLAGS];
     if (flags & GFX_FLAG_CLEAR) {
       context.save();
@@ -1725,13 +1738,34 @@
       ? Math.max(0, Math.min(i32[GFX_I_RECT_COUNT], GFX_MAX_GEOMETRY - lineCount)) : 0;
     const orderCount = version >= GFX_CMD_V3_VERSION
       ? Math.max(0, Math.min(i32[GFX_I_ORDER_COUNT], GFX_MAX_ORDER)) : 0;
+    const clipCount = version >= GFX_CMD_V6_VERSION
+      ? Math.max(0, Math.min(i32[GFX_I_CLIP_COUNT], GFX_MAX_CLIPS)) : 0;
+    let clipDepth = 0;
+    const pushClip = index => {
+      if (index < 0 || index >= clipCount) return;
+      flushGpuBatcher();
+      const base = GFX_F_CLIP_BASE + index * GFX_CLIP_STRIDE_F32;
+      context.save();
+      context.beginPath();
+      context.rect(f32[base], f32[base + 1], f32[base + 2], f32[base + 3]);
+      context.clip();
+      clipDepth += 1;
+    };
+    const popClip = () => {
+      if (clipDepth <= 0) return;
+      flushGpuBatcher();
+      context.restore();
+      clipDepth -= 1;
+    };
     performanceWorkload.commands += lineCount + rectCount + spriteCount + textCount;
     if (orderCount > 0) {
       for (let order = 0; order < orderCount; order += 1) {
         const encoded = i32[GFX_I_ORDER_BASE + order];
         const kind = Math.floor(encoded / GFX_ORDER_KIND_SCALE);
         const index = encoded % GFX_ORDER_KIND_SCALE;
-        if (kind === GFX_ORDER_LINE && index < lineCount) drawLine(index);
+        if (kind === GFX_ORDER_CLIP_PUSH) pushClip(index);
+        else if (kind === GFX_ORDER_CLIP_POP && index === 0) popClip();
+        else if (kind === GFX_ORDER_LINE && index < lineCount) drawLine(index);
         else if (kind === GFX_ORDER_SPRITE && index < spriteCount) {
           let runCount = 1;
           while (order + runCount < orderCount) {
@@ -1765,6 +1799,10 @@
       drawRectRun(0, rectCount, false);
       drawSpriteRun(0, spriteCount, false);
       for (let index = 0; index < textCount; index += 1) drawText(index);
+    }
+    while (clipDepth > 0) {
+      context.restore();
+      clipDepth -= 1;
     }
   }
 

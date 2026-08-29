@@ -21,7 +21,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int RENDER_V2_VERSION = 2;
     static final int RENDER_V3_VERSION = 3;
     static final int RENDER_V4_VERSION = 4;
-    static final int RENDER_VERSION = 5;
+    static final int RENDER_V5_VERSION = 5;
+    static final int RENDER_V6_VERSION = 6;
+    static final int RENDER_VERSION = RENDER_V6_VERSION;
     static final int FLAG_CLEAR = 1;
     static final int FLAG_PRESENT = 2;
 
@@ -52,6 +54,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int I_RECT_COUNT = 24;
     static final int I_DROPPED_RECTS = 25;
     static final int I_FRAME_TOKEN = 26;
+    static final int I_CLIP_COUNT = 27;
+    static final int I_DROPPED_CLIPS = 28;
     static final int I_SPRITE_BASE = 32;
     static final int F_CLEAR_BASE = 0;
     static final int F_LINE_BASE = 4;
@@ -67,12 +71,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int TEXT_I32_STRIDE = 3;
     static final int TEXT_F32_STRIDE = 6;
     static final int TEXT_U8_CAPACITY = 65_536;
-    static final int MAX_ORDER = MAX_LINES + MAX_SPRITES + MAX_TEXT;
+    static final int MAX_CLIPS = 256;
+    static final int MAX_ORDER = MAX_LINES + MAX_SPRITES + MAX_TEXT + MAX_CLIPS * 2;
     static final int ORDER_KIND_SCALE = 16_384;
     static final int ORDER_LINE = 1;
     static final int ORDER_SPRITE = 2;
     static final int ORDER_TEXT = 3;
     static final int ORDER_RECT = 4;
+    static final int ORDER_CLIP_PUSH = 5;
+    static final int ORDER_CLIP_POP = 6;
     static final int I_TEXT_BASE = I_SPRITE_BASE + MAX_SPRITES * SPRITE_I32_STRIDE;
     static final int F_SPRITE_BASE = F_LINE_BASE + MAX_LINES * LINE_F32_STRIDE;
     static final int F_RECT_REVERSE_BASE = F_SPRITE_BASE - GEOMETRY_F32_STRIDE;
@@ -80,12 +87,14 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int F_TEXT_BASE = F_SPRITE_BASE + MAX_SPRITES * SPRITE_F32_STRIDE;
     static final int I_ORDER_BASE = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
     static final int FRAME_I32_CAPACITY = I_ORDER_BASE + MAX_ORDER;
-    static final int FRAME_F32_CAPACITY = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
+    static final int F_CLIP_BASE = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
+    static final int CLIP_STRIDE_F32 = 4;
+    static final int FRAME_F32_CAPACITY = F_CLIP_BASE + MAX_CLIPS * CLIP_STRIDE_F32;
 
     // The production host header intentionally stops at density generation;
     // the frame token is read through frameToken() so this ABI stays 22 ints.
     private static final int HOST_HEADER_I32S = I_DENSITY_GENERATION + 1;
-    private static final int CAPTURE_HEADER_I32S = I_RECT_COUNT + 2;
+    private static final int CAPTURE_HEADER_I32S = I_CLIP_COUNT + 2;
     private static final int LINE_CHUNK_SIZE = 256;
     private static final int SPRITE_CHUNK_SIZE = 128;
     private static final int VERTICES_PER_QUAD = 6;
@@ -172,10 +181,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         final float[] textValues;
         final byte[] textBytes;
         final int[] order;
+        final float[] clips;
 
         LogicalFrameSnapshot(int[] header, float[] lines, float[] rectangles,
                 int[] sprites, float[] spriteValues,
-                int[] textMetadata, float[] textValues, byte[] textBytes, int[] order) {
+                int[] textMetadata, float[] textValues, byte[] textBytes, int[] order,
+                float[] clips) {
             this.header = header;
             this.lines = lines;
             this.rectangles = rectangles;
@@ -185,6 +196,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             this.textValues = textValues;
             this.textBytes = textBytes;
             this.order = order;
+            this.clips = clips;
         }
     }
 
@@ -332,6 +344,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int acceptanceTraceToken = -1;
     private int frameDrawCalls;
     private int activePipeline;
+    private final float[] clipStack = new float[MAX_CLIPS * 4];
+    private int clipDepth;
 
     StasisPreviewRenderer(TextureProvider textures, TimingListener timing) {
         this.textures = textures;
@@ -431,7 +445,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             pendingCapture.onCaptured(null, "a newer preview capture replaced this request",
                     new LogicalFrameSnapshot(new int[0], new float[0], new float[0],
                             new int[0], new float[0], new int[0], new float[0],
-                            new byte[0], new int[0]));
+                            new byte[0], new int[0], new float[0]));
         }
         pendingCapture = callback;
     }
@@ -706,9 +720,76 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return true;
     }
 
+    private void resetClipState() {
+        clipDepth = 0;
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+    }
+
+    private void applyClipScissor(float x, float y, float width, float height) {
+        float scaleX = logicalWidth <= 0 ? 1.0f
+                : displayViewport.width / (float) logicalWidth;
+        float scaleY = logicalHeight <= 0 ? 1.0f
+                : displayViewport.height / (float) logicalHeight;
+        int left = (int) Math.floor(displayViewport.x + x * scaleX);
+        int top = (int) Math.floor(displayViewport.y + y * scaleY);
+        int right = (int) Math.ceil(displayViewport.x + (x + width) * scaleX);
+        int bottom = (int) Math.ceil(displayViewport.y + (y + height) * scaleY);
+        int viewportRight = displayViewport.x + displayViewport.width;
+        int viewportBottom = displayViewport.y + displayViewport.height;
+        left = Math.max(displayViewport.x, Math.min(viewportRight, left));
+        top = Math.max(displayViewport.y, Math.min(viewportBottom, top));
+        right = Math.max(left, Math.min(viewportRight, right));
+        bottom = Math.max(top, Math.min(viewportBottom, bottom));
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glScissor(left, surfaceHeight - bottom, right - left, bottom - top);
+    }
+
+    private void pushClip(int index, int clipCount) {
+        if (index < 0 || index >= clipCount || clipDepth >= MAX_CLIPS) return;
+        int base = F_CLIP_BASE + index * CLIP_STRIDE_F32;
+        float x = frameF32.get(base);
+        float y = frameF32.get(base + 1);
+        float right = x + Math.max(0.0f, frameF32.get(base + 2));
+        float bottom = y + Math.max(0.0f, frameF32.get(base + 3));
+        float logicalRight = Math.max(0.0f, logicalWidth);
+        float logicalBottom = Math.max(0.0f, logicalHeight);
+        x = Math.max(0.0f, Math.min(logicalRight, x));
+        y = Math.max(0.0f, Math.min(logicalBottom, y));
+        right = Math.max(x, Math.min(logicalRight, right));
+        bottom = Math.max(y, Math.min(logicalBottom, bottom));
+        if (clipDepth > 0) {
+            int parent = (clipDepth - 1) * 4;
+            float parentRight = clipStack[parent] + clipStack[parent + 2];
+            float parentBottom = clipStack[parent + 1] + clipStack[parent + 3];
+            x = Math.max(x, clipStack[parent]);
+            y = Math.max(y, clipStack[parent + 1]);
+            right = Math.max(x, Math.min(right, parentRight));
+            bottom = Math.max(y, Math.min(bottom, parentBottom));
+        }
+        int destination = clipDepth * 4;
+        clipStack[destination] = x;
+        clipStack[destination + 1] = y;
+        clipStack[destination + 2] = Math.max(0.0f, right - x);
+        clipStack[destination + 3] = Math.max(0.0f, bottom - y);
+        clipDepth += 1;
+        applyClipScissor(x, y, right - x, bottom - y);
+    }
+
+    private void popClip() {
+        if (clipDepth <= 0) return;
+        clipDepth -= 1;
+        if (clipDepth == 0) {
+            GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+            return;
+        }
+        int base = (clipDepth - 1) * 4;
+        applyClipScissor(clipStack[base], clipStack[base + 1],
+                clipStack[base + 2], clipStack[base + 3]);
+    }
+
     private void drawFrame() {
         activePipeline = PIPELINE_NONE;
-        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        resetClipState();
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
         clearLetterboxBars();
         GLES20.glViewport(displayViewport.x,
@@ -737,6 +818,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             drawSprites(0, spriteCount);
             drawText(0, textCount);
             finishPipeline();
+            resetClipState();
             return;
         }
         int position = 0;
@@ -744,6 +826,19 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             int entry = frameI32.get(I_ORDER_BASE + position);
             int kind = orderKind(entry);
             int index = orderIndex(entry);
+            if (kind == ORDER_CLIP_PUSH) {
+                finishPipeline();
+                pushClip(index, clampedClipCount(frameI32.get(I_VERSION),
+                        frameI32.get(I_CLIP_COUNT)));
+                position += 1;
+                continue;
+            }
+            if (kind == ORDER_CLIP_POP && index == 0) {
+                finishPipeline();
+                popClip();
+                position += 1;
+                continue;
+            }
             int limit = kind == ORDER_LINE ? lineCount
                     : kind == ORDER_RECT ? rectCount
                     : kind == ORDER_SPRITE ? spriteCount
@@ -765,6 +860,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             position += run;
         }
         finishPipeline();
+        resetClipState();
     }
 
     private void prepareFrameResources() {
@@ -1168,6 +1264,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 && (values.get(I_VERSION) == RENDER_V2_VERSION
                     || values.get(I_VERSION) == RENDER_V3_VERSION
                     || values.get(I_VERSION) == RENDER_V4_VERSION
+                    || values.get(I_VERSION) == RENDER_V5_VERSION
                     || values.get(I_VERSION) == RENDER_VERSION);
     }
 
@@ -1200,6 +1297,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (version < RENDER_V4_VERSION) return 0;
         int lines = clampCount(lineCount, MAX_GEOMETRY);
         return clampCount(rectCount, MAX_GEOMETRY - lines);
+    }
+
+    static int clampedClipCount(int version, int clipCount) {
+        if (version < RENDER_V6_VERSION) return 0;
+        return clampCount(clipCount, MAX_CLIPS);
     }
 
     static int activeRectF32Count(int version, int lineCount, int rectCount) {
@@ -1271,9 +1373,14 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         for (int index = 0; index < order.length; index += 1) {
             order[index] = frameI32.get(I_ORDER_BASE + index);
         }
+        int clipCount = clampedClipCount(header[I_VERSION], header[I_CLIP_COUNT]);
+        float[] clips = new float[clipCount * CLIP_STRIDE_F32];
+        for (int index = 0; index < clips.length; index += 1) {
+            clips[index] = frameF32.get(F_CLIP_BASE + index);
+        }
         return new LogicalFrameSnapshot(
                 header, lines, rectangles, sprites, spriteValues,
-                textMetadata, textValues, textBytes, order);
+                textMetadata, textValues, textBytes, order, clips);
     }
 
     private static ByteBuffer directBytes(int capacity) {

@@ -1,0 +1,67 @@
+import "/vendor/stasis/stdlib/graphics.stasis";
+import "ui_single_pass.stasis";
+import "gallery_state.stasis";
+import "gallery_common.stasis";
+import "gallery_pages.stasis";
+
+function main(): i32 {
+    init_window(1100, 720, "Stasis UI Gallery");
+    gallery.font = load_font("assets/ui.ttf", 12);
+    gallery.page = GalleryPage.Stacks;
+    gallery.fit = UiViewportFit.Contain;
+    gallery.modal_open = false;
+    gallery.world_tick = 0;
+    gallery.world_x = 38.0;
+    gallery.world_y = 62.0;
+    gallery.mapped_x = 38.0;
+    gallery.mapped_y = 62.0;
+    gallery.score = 0;
+    if (gallery.font == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    if (should_quit()) {
+        return 1;
+    }
+    gallery.world_tick += 1;
+    gallery.world_x = gallery.world_x + 1.0;
+    if (gallery.world_x > 286.0) {
+        gallery.world_x = 4.0;
+        gallery.score += 1;
+    }
+    ui_modal_set(0);
+    if (gallery.modal_open) {
+        ui_modal_set(GALLERY_LAYER_MODAL);
+    }
+    let pointer_id: i32 = -1;
+    let pointer_x: f32 = 0.0;
+    let pointer_y: f32 = 0.0;
+    let pointer_down: bool = false;
+    let went_down: bool = false;
+    let went_up: bool = false;
+    if (input_pointer_count() > 0) {
+        pointer_id = input_pointer_id(0);
+        pointer_x = input_pointer_x_logical(0);
+        pointer_y = input_pointer_y_logical(0);
+        pointer_down = input_pointer_is_down(0);
+        went_down = input_pointer_went_down(0);
+        went_up = input_pointer_went_up(0);
+    }
+    gallery_tick_layout(pointer_id, pointer_x, pointer_y, pointer_down, went_down, went_up);
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.02, 0.04, 0.07, 1.0);
+    gallery_render_layout();
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

@@ -162,6 +162,27 @@ int main(void) {
     CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_ORDER_REFERENCE);
     CHECK(strcmp(stasis_render_validation_stage(STASIS_RENDER_BAD_ORDER_REFERENCE), "order_reference") == 0);
 
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_i32[STASIS_RENDER_I_CLIP_COUNT] = 1;
+    second_i32[STASIS_RENDER_I_ORDER_COUNT] = 2;
+    second_i32[STASIS_RENDER_I_ORDER_BASE + 0] =
+        STASIS_RENDER_ORDER_CLIP_PUSH * STASIS_RENDER_ORDER_KIND_SCALE;
+    second_i32[STASIS_RENDER_I_ORDER_BASE + 1] =
+        STASIS_RENDER_ORDER_CLIP_POP * STASIS_RENDER_ORDER_KIND_SCALE;
+    second_f32[STASIS_RENDER_F_CLIP_BASE + 0] = 12.0f;
+    second_f32[STASIS_RENDER_F_CLIP_BASE + 1] = 14.0f;
+    second_f32[STASIS_RENDER_F_CLIP_BASE + 2] = 80.0f;
+    second_f32[STASIS_RENDER_F_CLIP_BASE + 3] = 40.0f;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_VALID);
+    CHECK(stasis_render_trace(second_i32, second_f32, second_u8) != first_trace);
+    second_i32[STASIS_RENDER_I_ORDER_COUNT] = 1;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_CLIP_STACK);
+    CHECK(strcmp(stasis_render_validation_name(STASIS_RENDER_BAD_CLIP_STACK), "invalid_clip_stack") == 0);
+    second_i32[STASIS_RENDER_I_ORDER_COUNT] = 2;
+    second_i32[STASIS_RENDER_I_ORDER_BASE + 0] =
+        STASIS_RENDER_ORDER_CLIP_POP * STASIS_RENDER_ORDER_KIND_SCALE;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_CLIP_STACK);
+
     free(first_i32); free(first_f32); free(first_u8);
     free(second_i32); free(second_f32); free(second_u8);
 #undef CHECK

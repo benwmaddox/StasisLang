@@ -2,7 +2,7 @@
 
 Stasis shipping packages use one renderer process on desktop, Android, and iOS:
 
-1. JIT or AOT game code writes the stable `gfx_cmd` family buffers (current schema v5).
+1. JIT or AOT game code writes the stable `gfx_cmd` family buffers (current schema v6).
 2. `stasis_gfx_submit_u8` validates and interprets that versioned buffer.
 3. `stasis_graphics.c` owns frame order, resources, blending, filtering,
    clipping state, fallback sprites, and renderer shutdown.
@@ -17,11 +17,13 @@ magic or versions are rejected without drawing.
 
 ## Command contract
 
-Schema v5 keeps clear and present as frame boundaries and records each line,
+Schema v6 keeps clear and present as frame boundaries and records each line,
 filled rectangle, sprite, direct-text, or cached-text submission in one bounded cross-category
-order stream. Payloads remain in typed category arrays; each order entry names
-its category and payload index. The trace mixes an explicit kind marker and every
-consumed value in requested order. Counts are clamped to the contract capacities;
+order stream. It also records bounded logical top-origin clip descriptors and
+ordered clip-push/clip-pop entries in that same stream. Payloads remain in typed category arrays;
+each order entry names its category and payload index. The trace mixes an explicit kind marker and every
+consumed value in requested order. Clip state is nested, restored by pop, and reset at each frame
+boundary. Counts are clamped to the contract capacities;
 invalid text ranges contribute metadata but never read outside the byte buffer.
 JIT and AOT traces must match exactly for the representative conformance frame.
 
@@ -33,17 +35,18 @@ to `gfx_cmd_line`, `gfx_cmd_rect`, `gfx_cmd_sprite`, `gfx_cmd_text`, their cache
 append order entries automatically; games do not need a separate layer API.
 Invalid or out-of-range order references are skipped deterministically.
 
-Coordinates are logical top-left pixels. Colors and alpha are straight alpha;
+Coordinates are logical top-left pixels. Clip rectangles use the same logical
+top-origin coordinates; native GL/GLES converts them to drawable bottom-origin
+scissors while Canvas and SDL apply the equivalent top-origin clip. Colors and alpha are straight alpha;
 SDL uses source-alpha over destination. Sprite alpha is clamped to `0..255`,
 linear filtering is used for normal sprite textures, rotation is clockwise
 around the destination center, and an invalid sprite handle resolves to the
-procedural magenta checker. The gfx_cmd family has no clip command; the interpreter
-resets the SDL clip rectangle at each frame boundary. Text and SVG rasterization,
+procedural magenta checker. Text and SVG rasterization,
 cache keys, and resource replacement live in `stasis_graphics.c`, so platform
 shells cannot redefine them.
 
 Logical, native, drawable, safe-viewport, input-transform, and resource-density
-semantics are defined in `display_metrics.md`. Reserved gfx_cmd v5 header slots
+semantics are defined in `display_metrics.md`. Reserved gfx_cmd v6 header slots
 carry host display metadata to embedded previews but do not participate in the
 backend-independent command trace.
 
