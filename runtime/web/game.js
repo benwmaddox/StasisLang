@@ -444,6 +444,13 @@
       data.assetDecodedHeight = String(resource.decodedHeight || 0);
       data.assetDecodedBytes = String(resource.decodedBytes || 0);
       data.assetGeneration = String(resource.generation || 0);
+      data.assetReady = resource.ready ? "true" : "false";
+      data.assetRefreshState = resource.refreshing
+        ? "pending" : resource.refreshError ? "failed" : "none";
+      data.assetRefresh = data.assetRefreshState;
+      data.assetRefreshError = resource.refreshError
+        ? String(resource.refreshError?.message || resource.refreshError) : "";
+      data.assetRefreshFallback = resource.refreshFallback || "none";
     }
     const atlas = gpuBatcher?.metrics?.();
     data.assetAtlasWidth = String(atlas?.width || 0);
@@ -887,10 +894,19 @@
     const sourceDimensions = request.sourceDimensions;
     const targetWidth = Math.max(1, Math.min(DISPLAY_MAX_BACKING_WIDTH, request.width || sourceDimensions?.width || 1));
     const targetHeight = Math.max(1, Math.min(DISPLAY_MAX_BACKING_HEIGHT, request.height || sourceDimensions?.height || 1));
+    const fitScale = sourceDimensions
+      ? Math.min(targetWidth / sourceDimensions.width, targetHeight / sourceDimensions.height)
+      : 1;
+    const fitWidth = sourceDimensions
+      ? Math.max(1, Math.min(targetWidth, Math.round(sourceDimensions.width * fitScale)))
+      : targetWidth;
+    const fitHeight = sourceDimensions
+      ? Math.max(1, Math.min(targetHeight, Math.round(sourceDimensions.height * fitScale)))
+      : targetHeight;
     const rasterFallback = request.fallback !== "none" ? request.fallback : "bitmap-resize-unavailable";
     const rasterOptions = {
-      resizeWidth: targetWidth,
-      resizeHeight: targetHeight,
+      resizeWidth: fitWidth,
+      resizeHeight: fitHeight,
       resizeQuality: "high",
     };
     // A prepared physical source is sufficient to use the direct Blob path. It
@@ -898,7 +914,7 @@
     // requested tier. Raster sources are never enlarged; SVG is vector-backed.
     const canResizeSource = sourceDimensions && (
       request.encoding === "svg"
-      || (targetWidth <= sourceDimensions.width && targetHeight <= sourceDimensions.height)
+      || (fitWidth <= sourceDimensions.width && fitHeight <= sourceDimensions.height)
     );
     if (typeof bitmapFactory === "function" && typeof fetch === "function"
         && request.source && canResizeSource) {
@@ -908,9 +924,39 @@
           const blob = await response.blob();
           const bitmap = await bitmapFactory(blob, rasterOptions);
           if (bitmap) {
-            return resultForSprite(request, bitmap, targetWidth, targetHeight,
+            const decodedWidth = boundedInteger(bitmap.width, 1, targetWidth, fitWidth);
+            const decodedHeight = boundedInteger(bitmap.height, 1, targetHeight, fitHeight);
+            if (decodedWidth === targetWidth && decodedHeight === targetHeight) {
+              return resultForSprite(request, bitmap, targetWidth, targetHeight,
+                request.fallback, sourceDimensions.width, sourceDimensions.height,
+                decodedWidth, decodedHeight);
+            }
+            const surface = document.createElement?.("canvas");
+            const surfaceContext = surface?.getContext?.("2d");
+            if (!surface || !surfaceContext) {
+              closeSpriteDrawable(bitmap);
+              throw new Error("sprite contain surface unavailable");
+            }
+            surface.width = targetWidth;
+            surface.height = targetHeight;
+            try {
+              surfaceContext.save?.();
+              surfaceContext.clearRect?.(0, 0, targetWidth, targetHeight);
+              surfaceContext.imageSmoothingEnabled = true;
+              if ("imageSmoothingQuality" in surfaceContext) {
+                surfaceContext.imageSmoothingQuality = "high";
+              }
+              surfaceContext.drawImage(bitmap,
+                (targetWidth - decodedWidth) / 2,
+                (targetHeight - decodedHeight) / 2,
+                decodedWidth, decodedHeight);
+              surfaceContext.restore?.();
+            } finally {
+              closeSpriteDrawable(bitmap);
+            }
+            return resultForSprite(request, surface, targetWidth, targetHeight,
               request.fallback, sourceDimensions.width, sourceDimensions.height,
-              targetWidth, targetHeight);
+              decodedWidth, decodedHeight);
           }
         }
       } catch (_) {
@@ -1083,6 +1129,9 @@
   const commitSpritePreparation = (resource, prepared) => {
     const { request, result, entry, lease } = prepared;
     if (!lease.commit()) return false;
+    const oldCacheEntry = resource.cacheEntry;
+    const retained = Boolean(resource.ready && resource.drawable && oldCacheEntry);
+    gpuBatcher?.releaseResource(resource);
     resource.drawable = result.drawable;
     resource.width = result.width;
     resource.height = result.height;
@@ -1099,22 +1148,32 @@
     resource.tier = request.tier;
     resource.tierKey = request.key;
     resource.cacheEntry = entry;
+    resource.refreshing = false;
+    resource.refreshError = null;
+    resource.refreshFallback = "none";
     trimSpriteCache(entry);
     resource.pendingLease = null;
     resource.pendingEntry = null;
     resource.ready = true;
+    if (oldCacheEntry) releaseSpriteCacheEntry(oldCacheEntry);
     publishAssetReceipt(resource);
-    return true;
+    return { retained };
   };
   const startSpritePreparation = (resource, onReady) => {
+    const retained = Boolean(resource.ready && resource.drawable && resource.cacheEntry);
     resource.pendingLease?.cancel();
     resource.pendingLease = null;
     resource.pendingEntry = null;
     const generation = resource.generation;
     const request = spriteRasterRequest(resource);
     resource.pendingTierKey = request.key;
-    resource.ready = false;
-    resource.error = null;
+    resource.refreshing = retained;
+    resource.refreshError = retained ? null : resource.refreshError;
+    resource.refreshFallback = retained ? "pending" : resource.refreshFallback;
+    if (!retained) {
+      resource.ready = false;
+      resource.error = null;
+    }
     const preparation = prepareSprite(request);
     resource.pendingLease = preparation.lease;
     resource.pendingEntry = preparation.entry;
@@ -1128,7 +1187,8 @@
           publishDisplayReceipt();
           return resource;
         }
-        if (commitSpritePreparation(resource, prepared)) onReady?.(resource, true);
+        const committed = commitSpritePreparation(resource, prepared);
+        if (committed && !committed.retained) onReady?.(resource, true);
         return resource;
       })
       .catch(error => {
@@ -1143,6 +1203,14 @@
         preparation.lease.cancel();
         resource.pendingLease = null;
         if (resource.pendingEntry === preparation.entry) resource.pendingEntry = null;
+        if (retained && resource.ready && resource.drawable && resource.cacheEntry) {
+          resource.refreshing = false;
+          resource.refreshError = error;
+          resource.refreshFallback = request.fallback === "none"
+            ? "refresh-error" : request.fallback;
+          publishAssetReceipt(resource);
+          return resource;
+        }
         resource.error = error;
         resource.ready = false;
         resource.fallback = request.fallback || "bitmap-resize-unavailable";
@@ -1162,6 +1230,7 @@
       decodedWidth: 0, decodedHeight: 0, decodedBytes: 0,
       ready: false, error: null, generation: 1, cacheEntry: null, pendingEntry: null,
       pendingLease: null,
+      refreshing: false, refreshError: null, refreshFallback: "none",
       fallback: "none", readyPromise: null, onReady
     };
     startSpritePreparation(resource, onReady);
@@ -1176,15 +1245,9 @@
     let invalidated = 0;
     for (const resource of sprites.values()) {
       resource.generation += 1;
-      resource.ready = false;
       resource.pendingLease?.cancel();
       resource.pendingLease = null;
       resource.pendingEntry = null;
-      releaseSpriteCacheEntry(resource.cacheEntry);
-      resource.cacheEntry = null;
-      trimSpriteCache(null);
-      resource.drawable = null;
-      gpuBatcher?.releaseResource(resource);
       startSpritePreparation(resource, resource.onReady);
       invalidated += 1;
     }
@@ -1286,6 +1349,9 @@
       trimSpriteCache(null);
       resource.ready = false;
       resource.drawable = null;
+      resource.refreshing = false;
+      resource.refreshError = null;
+      resource.refreshFallback = "none";
       sprites.delete(handle);
       gpuBatcher?.releaseResource(resource);
     }
@@ -1959,7 +2025,8 @@
       };
       const atlasFor = resource => {
         const old = atlasByResource.get(resource);
-        if (old?.generation === resource.generation) return old;
+        if (old && (old.generation === resource.generation
+          || resource.refreshing || resource.refreshError)) return old;
         if (!resource.ready || !resource.drawable || !resource.width || !resource.height) return null;
         const paddedWidth = resource.width + ATLAS_PADDING * 2;
         const paddedHeight = resource.height + ATLAS_PADDING * 2;

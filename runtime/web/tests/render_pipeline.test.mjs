@@ -17,7 +17,7 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
     RGBA: 21, UNSIGNED_BYTE: 22, TEXTURE0: 23, UNPACK_FLIP_Y_WEBGL: 24,
     LINEAR_MIPMAP_LINEAR: 25, NO_ERROR: 0,
     createShader: () => { if (throwing) throw new Error("fake shader failure"); return {}; }, createProgram: () => ({}), createVertexArray: () => ({}), createBuffer: () => ({}), createTexture: () => ({}),
-    deleteTexture() {}, deleteBuffer() {}, deleteVertexArray() {}, deleteProgram() {},
+    deleteTexture() { stats.deletedTextures += 1; }, deleteBuffer() {}, deleteVertexArray() {}, deleteProgram() {},
     shaderSource() {}, compileShader() {}, getShaderParameter: () => true,
     attachShader() {}, linkProgram() {}, getProgramParameter: () => true,
     bindVertexArray() {}, bindBuffer() {}, bufferData() {},
@@ -44,7 +44,7 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, 35120);
   const f32 = new Float32Array(memory.buffer, 100000, 126084);
-  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], transforms: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [] };
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], transforms: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], deletedTextures: 0 };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
@@ -56,10 +56,10 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
     clip() { stats.clipCalls += 1; },
     stroke() { stats.events.push("stroke"); }, translate() {}, rotate() {}
   };
-  const rasterStats = { draws: 0 };
+  const rasterStats = { draws: 0, images: [], clears: [] };
   const rasterContext = {
     imageSmoothingEnabled: true, imageSmoothingQuality: "high",
-    clearRect() {}, drawImage() { rasterStats.draws += 1; }, save() {}, restore() {}
+    clearRect(...args) { rasterStats.clears.push(args); }, drawImage(...args) { rasterStats.draws += 1; rasterStats.images.push(args); }, save() {}, restore() {}
   };
   const gl = fakeGl(stats, webgl, throwing, textureThrow);
   const canvas = {
@@ -297,6 +297,156 @@ test("optimized sprite preparation resizes a Blob without constructing or decodi
   assert.equal(runtime.body.dataset.assetDecodedHeight, "16");
   assert.equal(runtime.body.dataset.assetDecodedBytes, String(16 * 16 * 4));
   assert.equal(bitmaps[0].closed, false);
+});
+
+test("optimized sprite preparation preserves aspect ratio in a centered tier surface", async () => {
+  const bitmaps = [];
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16],
+    assets: { "": "wide.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 32 } },
+    createImageBitmap: (_source, options) => {
+      const bitmap = {
+        width: options.resizeWidth, height: options.resizeHeight, closed: false,
+        close() { this.closed = true; }
+      };
+      bitmaps.push(bitmap);
+      return bitmap;
+    }
+  });
+  runtime.frame();
+  assert.equal(runtime.stats.imageConstructed, 0);
+  assert.equal(runtime.stats.imageDecodeCalls, 0);
+  assert.deepEqual([
+    runtime.stats.bitmapCalls[0].options.resizeWidth,
+    runtime.stats.bitmapCalls[0].options.resizeHeight
+  ], [16, 8]);
+  assert.deepEqual(runtime.rasterStats.clears[0], [0, 0, 16, 16]);
+  assert.deepEqual(runtime.rasterStats.images[0].slice(1), [0, 4, 16, 8]);
+  assert.equal(bitmaps[0].closed, true);
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetPreparedHeight, "16");
+  assert.equal(runtime.body.dataset.assetDecodedWidth, "16");
+  assert.equal(runtime.body.dataset.assetDecodedHeight, "8");
+  assert.equal(runtime.body.dataset.assetDecodedBytes, String(16 * 8 * 4));
+});
+
+test("density refresh keeps the old sprite drawable until the replacement commits", async () => {
+  const pending = [];
+  const bitmaps = [];
+  const makeBitmap = (width, height) => {
+    const bitmap = { width, height, closed: false, close() { this.closed = true; } };
+    bitmaps.push(bitmap);
+    return bitmap;
+  };
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16], dpr: 1,
+    assets: { "": "refresh.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 64 } },
+    createImageBitmap: (_source, options, call) => {
+      if (call === 1) return makeBitmap(options.resizeWidth, options.resizeHeight);
+      return new Promise(resolve => pending.push({ resolve, options }));
+    }
+  });
+  runtime.frame();
+  runtime.stats.images = 0;
+  runtime.contextObject.devicePixelRatio = 2;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 1);
+  assert.equal(runtime.stats.images, 1);
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetPreparedTier, "1");
+  assert.equal(runtime.body.dataset.assetReady, "true");
+  assert.equal(runtime.body.dataset.assetRefreshState, "pending");
+  assert.equal(runtime.body.dataset.assetRefreshFallback, "pending");
+  assert.equal(bitmaps[0].closed, false);
+
+  const replacement = makeBitmap(pending[0].options.resizeWidth, pending[0].options.resizeHeight);
+  pending[0].resolve(replacement);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "32");
+  assert.equal(runtime.body.dataset.assetPreparedTier, "2");
+  assert.equal(runtime.body.dataset.assetRefreshState, "none");
+  assert.equal(bitmaps[0].closed, true);
+  assert.equal(replacement.closed, false);
+  runtime.stats.images = 0;
+  runtime.frame();
+  assert.equal(runtime.stats.images, 1);
+});
+
+test("failed density refresh retains the old sprite cache and atlas ownership", async () => {
+  const pending = [];
+  const bitmaps = [];
+  const makeBitmap = (width, height) => {
+    const bitmap = { width, height, closed: false, close() { this.closed = true; } };
+    bitmaps.push(bitmap);
+    return bitmap;
+  };
+  const runtime = await loadRuntime({
+    sprites: 64, spriteHandles: Array(64).fill(1), spriteSize: [16, 16], dpr: 1,
+    imageDecode: () => Promise.reject(new Error("tier decode failed")),
+    assets: { "": "refresh-failure.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 64 } },
+    createImageBitmap: (_source, options, call) => {
+      if (call === 1) return makeBitmap(options.resizeWidth, options.resizeHeight);
+      return new Promise((resolve, reject) => pending.push({ resolve, reject, options }));
+    }
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "1");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4));
+  runtime.stats.images = 0;
+  runtime.contextObject.devicePixelRatio = 2;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 1);
+  assert.equal(runtime.stats.images, 1);
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetRefreshState, "pending");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "1");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4));
+  assert.equal(runtime.stats.deletedTextures, 0);
+
+  pending[0].reject(new Error("tier decode failed"));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.stats.images = 0;
+  runtime.frame();
+  assert.equal(runtime.stats.images, 1);
+  assert.equal(runtime.body.dataset.assetReady, "true");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetRefreshState, "failed");
+  assert.equal(runtime.body.dataset.assetRefreshError, "tier decode failed");
+  assert.equal(runtime.body.dataset.assetRefreshFallback, "refresh-error");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "1");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4));
+  assert.equal(runtime.stats.deletedTextures, 0);
+  assert.equal(bitmaps[0].closed, false);
+
+  runtime.contextObject.devicePixelRatio = 3;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 2);
+  assert.equal(runtime.body.dataset.assetRefreshState, "pending");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.stats.deletedTextures, 0);
+  const replacement = makeBitmap(pending[1].options.resizeWidth, pending[1].options.resizeHeight);
+  pending[1].resolve(replacement);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "48");
+  assert.equal(runtime.body.dataset.assetRefreshState, "none");
+  assert.equal(bitmaps[0].closed, true);
+  assert.equal(replacement.closed, false);
+  assert.equal(runtime.stats.deletedTextures, 1);
+  runtime.stats.images = 0;
+  runtime.frame();
+  assert.equal(runtime.stats.images, 1);
+  runtime.env.gfx_release_sprite(1);
+  assert.equal(replacement.closed, true);
+  assert.equal(runtime.stats.deletedTextures, 2);
 });
 
 test("equivalent density scales reuse one stable requested-tier preparation", async () => {
