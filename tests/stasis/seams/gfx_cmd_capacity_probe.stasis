@@ -57,6 +57,16 @@ function fill_text(): void {
     fill_cached_text();
 }
 
+// Fill every clip descriptor with a balanced depth-1 pair.  Keeping each
+// push immediately adjacent to its pop proves the expanded clip and order
+// lanes without depending on unbounded clip-stack depth.
+function fill_clips(): void {
+    for (let i: i32 = 0; i < 256; i += 1) {
+        gfx_cmd_clip_push(i32_to_f32(i), 2.0, 3.0, 4.0);
+        gfx_cmd_clip_pop();
+    }
+}
+
 function trace_commands(): i32 {
     return native_render_trace(
         gfx_cmd_i32,
@@ -143,7 +153,9 @@ function main(): i32 {
     fill_geometry();
     fill_sprites();
     fill_text();
+    fill_clips();
 
+    gfx_cmd_clip_push(256.0, 2.0, 3.0, 4.0);
     gfx_cmd_append_order(GFX_ORDER_LINE, 0);
     gfx_cmd_line(1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 1.0);
     gfx_cmd_rect(5.0, 6.0, 7.0, 8.0, 0.4, 0.5, 0.6, 1.0);
