@@ -126,7 +126,7 @@ test `scroll drag clamps and exposes translated rows`(): bool {
     ui_begin_frame(0.0, 0.0, 120.0, 60.0);
     ui_scroll_begin(900, 10.0, 5.0, 100.0, 50.0, 200.0);
     ui_scroll_drag(2, 50.0, -200.0, false, true, false);
-    if (ui_scroll_offset() != 150.0 || ui_scroll_item_y(3, 20.0, 5.0) != -50.0) {
+    if (ui_scroll_offset() != 150.0 || ui_scroll_item_y(3, 20.0, 5.0) != -70.0) {
         return false;
     }
     ui_scroll_drag(2, 50.0, -200.0, false, false, true);
