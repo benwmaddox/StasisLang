@@ -611,6 +611,12 @@
     backingBytes: display.backingBytes,
     fallback: display.fallback,
   });
+  const hostDesktopDimension = (screenExtent, cssExtent) => {
+    const fallback = finitePositive(cssExtent, 1);
+    const extent = finitePositive(screenExtent);
+    const pixels = extent > 0 ? extent * display.rawDpr : fallback;
+    return boundedInteger(pixels, 1, 0x7fffffff, Math.round(fallback));
+  };
   setCanvasMetadata("logicalWidth", display.logicalWidth);
   setCanvasMetadata("logicalHeight", display.logicalHeight);
   window.STASIS_DISPLAY_RECEIPT = displaySnapshot;
@@ -2614,8 +2620,8 @@
     i32[9] = 0;
     i32[10] = tickIndex++;
     i32[11] = resized ? 1 : 0;
-    i32[12] = Math.round(display.cssWidth);
-    i32[13] = Math.round(display.cssHeight);
+    i32[12] = hostDesktopDimension(globalThis.screen?.width, display.cssWidth);
+    i32[13] = hostDesktopDimension(globalThis.screen?.height, display.cssHeight);
     i32[14] = 3;
     i32[15] = (focused ? 2 : 0) | (document.hidden ? 4 : 0) | (resized ? 8 : 0);
     i32[16] = 0;
