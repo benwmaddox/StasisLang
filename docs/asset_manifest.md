@@ -4,6 +4,21 @@
 
 Version 1 manifests remain valid and package their files unchanged. Version 2 adds optional display and sprite preparation metadata. Sprite-sheet layout metadata is optional and is also accepted by version 1 manifests for backward-compatible asset description.
 
+## Packaged manifest identity
+
+Every staged package that contains `assets/manifest.json` also contains
+`stasis_asset_package.json` beside the asset root. Version 1 has exactly four
+fields: schema `stasis.asset_package`, version `1`, manifest path
+`assets/manifest.json`, and the lowercase SHA-256 of the exact packaged
+manifest bytes. It does not repeat asset rows: `assets/manifest.json` remains
+the sole asset inventory and retains its v1/v2 compatibility rules.
+
+Prepared bundles compute the identity after rewriting preparation hashes and
+dimensions, so the digest identifies the bytes consumers actually receive.
+Web runtime metadata carries the same identity, and package provenance
+verification rejects a sidecar whose manifest is missing or whose digest no
+longer matches.
+
 ## Prepared sprite example
 
 ```json

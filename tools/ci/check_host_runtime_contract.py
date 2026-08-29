@@ -165,9 +165,79 @@ def check(
                 failures.append(Failure(f"guest_entrypoints.{entrypoint}", path.as_posix(), pattern, "missing"))
 
     asset = registry["asset_package"]
-    expected_asset = {"schema": "stasis.asset_package", "version": 1, "manifest_path": "assets/manifest.json", "hash_algorithm": "sha256"}
+    expected_asset = {"schema": "stasis.asset_package", "version": 1, "identity_path": "stasis_asset_package.json", "manifest_path": "assets/manifest.json", "hash_algorithm": "sha256"}
     if asset != expected_asset:
         failures.append(Failure("asset_package", REGISTRY.as_posix(), expected_asset, asset))
+    assets_text = _read(ASSETS, overlays)
+    asset_source_values: dict[str, object] = {}
+    for field, constant in (
+        ("schema", "ASSET_PACKAGE_IDENTITY_SCHEMA"),
+        ("identity_path", "ASSET_PACKAGE_IDENTITY_PATH"),
+        ("manifest_path", "DEFAULT_ASSET_MANIFEST_PATH"),
+        ("hash_algorithm", "ASSET_PACKAGE_IDENTITY_HASH_ALGORITHM"),
+    ):
+        match = re.search(
+            rf'pub const {constant}: &str = "([^"]+)";', assets_text
+        )
+        asset_source_values[field] = match.group(1) if match else "missing"
+    version_match = re.search(
+        r"pub const ASSET_PACKAGE_IDENTITY_VERSION: u32 = (\d+);", assets_text
+    )
+    asset_source_values["version"] = (
+        int(version_match.group(1)) if version_match else "missing"
+    )
+    for field, expected in asset.items():
+        if asset_source_values.get(field) != expected:
+            failures.append(
+                Failure(
+                    f"asset_package.{field}",
+                    ASSETS.as_posix(),
+                    expected,
+                    asset_source_values.get(field, "missing"),
+                )
+            )
+    provenance_text = _read(abi.PACKAGE_PROVENANCE, overlays)
+    provenance_values: dict[str, object] = {}
+    for field, constant in (
+        ("schema", "ASSET_PACKAGE_IDENTITY_SCHEMA"),
+        ("identity_path", "ASSET_PACKAGE_IDENTITY_NAME"),
+        ("version", "ASSET_PACKAGE_IDENTITY_VERSION"),
+    ):
+        pattern = (
+            rf'{constant} = "([^"]+)"'
+            if field in ("schema", "identity_path")
+            else rf"{constant} = (\d+)"
+        )
+        match = re.search(pattern, provenance_text)
+        provenance_values[field] = (
+            (int(match.group(1)) if field == "version" else match.group(1))
+            if match
+            else "missing"
+        )
+    for field in ("schema", "identity_path", "version"):
+        if provenance_values[field] != asset[field]:
+            failures.append(
+                Failure(
+                    f"asset_package.provenance.{field}",
+                    abi.PACKAGE_PROVENANCE.as_posix(),
+                    asset[field],
+                    provenance_values[field],
+                )
+            )
+    toolchain_text = _read(abi.TOOLCHAIN, overlays)
+    for pattern in (
+        "write_asset_package_identity",
+        'runtime_config["asset_package"]',
+    ):
+        if pattern not in toolchain_text:
+            failures.append(
+                Failure(
+                    "asset_package.toolchain_consumer",
+                    abi.TOOLCHAIN.as_posix(),
+                    pattern,
+                    "missing",
+                )
+            )
 
     abi_failures, abi_evidence = abi.check(overlays={path: text for path, text in overlays.items() if path in abi.REQUIRED})
     for failure in abi_failures:

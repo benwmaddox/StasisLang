@@ -10,5 +10,5 @@ differences without pretending that every host implements the same machinery.
 
 Contract version 1 preserves HostFrame v3, render command versions 2 through
 6, graphics runtime ABI 3, and mobile runtime ABI 1. Unknown registry versions
-are rejected. Production diagnostic DTO migration and asset-package identity
-publication are completed in later #384 checkpoints.
+are rejected. Runner diagnostics retain their stable compiler codes, and
+packaged asset trees publish the versioned identity declared by the registry.

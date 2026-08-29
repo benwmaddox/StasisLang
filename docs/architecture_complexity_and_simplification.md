@@ -318,9 +318,9 @@ The canonical registry lives at `contracts/v1/host_runtime.json`. Host
 implementations remain handwritten; `tools/ci/check_host_runtime_contract.py`
 checks their Stasis, C, Rust, Java, and JavaScript copies against the registry.
 Platform-only lifecycle extensions are recorded explicitly instead of being
-forced into hosts that do not implement them. Production diagnostic DTO
-migration and publication of asset-package identity are separate checkpoints
-within this slice, so the registry cannot silently change runtime behavior.
+forced into hosts that do not implement them. Runner diagnostic versioning and
+asset-package identity publication land as separate checked checkpoints, so
+registry edits cannot silently change runtime behavior.
 
 Generate or validate constants and DTOs for Rust, C, Java, and JavaScript; do
 not generate implementations. Keep byte-for-byte contract fixtures consumed by

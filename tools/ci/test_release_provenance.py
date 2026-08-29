@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from tools.generate_release_provenance import RUNTIME_DIRS, RUNTIME_FILES, render_contract_version
+from tools.verify_package_provenance import verify_asset_package_identities
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -15,6 +16,31 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    def test_asset_package_identity_binds_exact_manifest_bytes(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary)
+            (package / "assets").mkdir()
+            manifest = b'{"schema":"stasis-assets","version":2,"assets":[]}'
+            (package / "assets/manifest.json").write_bytes(manifest)
+            identity = {
+                "schema": "stasis.asset_package",
+                "version": 1,
+                "manifest_path": "assets/manifest.json",
+                "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            }
+            (package / "stasis_asset_package.json").write_text(
+                json.dumps(identity), encoding="utf-8"
+            )
+            verify_asset_package_identities(Parser(), package)
+            (package / "assets/manifest.json").write_bytes(manifest + b"\n")
+            with self.assertRaisesRegex(ValueError, "manifest hash mismatch"):
+                verify_asset_package_identities(Parser(), package)
+
     def test_render_contract_version_resolves_current_header_alias(self):
         self.assertEqual(6, render_contract_version(ROOT))
 
