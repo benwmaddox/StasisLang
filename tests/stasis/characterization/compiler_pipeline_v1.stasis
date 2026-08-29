@@ -1,0 +1,29 @@
+global score: i32;
+global samples: i32[2];
+
+function helper(value: i32): i32 {
+    return value + 1;
+}
+
+function dead_function(): i32 {
+    return 99;
+}
+
+function main(): i32 {
+    score = helper(4);
+    samples[0] = score;
+    samples[1] = score + 1;
+    return score;
+}
+
+function tick(): i32 {
+    return score;
+}
+
+function render(): i32 {
+    return score;
+}
+
+function on_code_swap(): void {
+    score = score;
+}

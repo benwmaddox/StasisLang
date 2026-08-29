@@ -1,0 +1,7 @@
+{"case":"request_missing_id","protocol":"request","expect":"shape_invalid","payload":{"schema_version":1,"type":"status"}}
+{"case":"request_unknown_command","protocol":"request","expect":"shape_invalid","payload":{"schema_version":1,"request_id":7,"type":"not_a_command"}}
+{"case":"request_wrong_id_type","protocol":"request","expect":"shape_invalid","payload":{"schema_version":1,"request_id":"7","type":"status"}}
+{"case":"request_missing_type","protocol":"request","expect":"shape_invalid","payload":{"schema_version":1,"request_id":8}}
+{"case":"response_missing_kind","protocol":"response","expect":"shape_invalid","payload":{"schema_version":1,"request_id":9,"tick":1,"ok":true}}
+{"case":"response_wrong_ok_type","protocol":"response","expect":"shape_invalid","payload":{"schema_version":1,"request_id":10,"tick":1,"ok":"true","kind":"status"}}
+{"case":"response_unsupported_schema","protocol":"response","expect":"shape_invalid","payload":{"schema_version":99,"request_id":11,"tick":1,"ok":true,"kind":"status"}}

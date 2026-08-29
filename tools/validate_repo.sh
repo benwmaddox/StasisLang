@@ -21,6 +21,9 @@ python3 tools/ci/check_deterministic_live_simulation_roadmap.py
 python3 tools/ci/check_jit_generation_contract.py
 python3 tools/ci/check_runtime_abi_contract.py
 python3 tools/ci/check_unsafe_boundaries.py
+python3 tools/ci/run_architecture_characterization.py --check
+python3 -m unittest tools.ci.test_run_architecture_characterization
+python3 tools/ci/run_architecture_characterization.py --run-fast
 python3 -m unittest tools.ci.test_jit_generation_contract
 python3 -m unittest tools.ci.test_deterministic_live_simulation_roadmap
 python3 -m unittest tools.ci.test_runtime_abi_contract

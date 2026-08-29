@@ -47,6 +47,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install VS Code unit-test dependencies
+        run: npm ci --prefix vscode-stasis
+
       - name: Check Stasis src layout
         run: |
           python tools/ci/check_stasis_src_layout.py
@@ -99,6 +102,12 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Run architecture characterization fast lane
+        run: |
+          python tools/ci/run_architecture_characterization.py --check
+          python -m unittest tools.ci.test_run_architecture_characterization
+          python tools/ci/run_architecture_characterization.py --run-fast
 
       - name: Test HostFrame desktop JIT seam
         run: cargo test -p stasis_compiler --test host_frame_jit_seam -- --test-threads=1
