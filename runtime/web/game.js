@@ -49,6 +49,7 @@
     backingBytes: 0,
     fallback: "none",
     densityKey: "1",
+    rasterScaleKey: "1",
   };
   let resizeGenerationPending = true;
   let logicalExtentPending = false;
@@ -537,7 +538,9 @@
       || display.backingWidth !== backingWidth
       || display.backingHeight !== backingHeight
       || display.logicalWidth <= 0 || display.logicalHeight <= 0;
-    const densityChanged = display.densityKey !== String(densityTier);
+    const densityTierChanged = display.densityKey !== String(densityTier);
+    const rasterScaleKey = String(rasterScale);
+    const rasterScaleChanged = display.rasterScaleKey !== rasterScaleKey;
     display.cssWidth = extent.width;
     display.cssHeight = extent.height;
     display.rawDpr = rawDpr;
@@ -557,10 +560,13 @@
     } else if (extentChanged) {
       resized = true;
     }
-    if (densityChanged) {
-      display.densityKey = String(densityTier);
+    if (rasterScaleChanged) {
+      display.rasterScaleKey = rasterScaleKey;
       display.densityGeneration += 1;
       resized = true;
+    }
+    if (densityTierChanged) {
+      display.densityKey = String(densityTier);
       onDensityChange();
     }
     if (canvas.width !== backingWidth) canvas.width = backingWidth;

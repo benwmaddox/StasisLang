@@ -40,7 +40,7 @@ async function loadRuntime({ logical = [640, 360], css = logical, dpr = 1, inclu
       const f32 = new Float32Array(memory.buffer, hostF32.offset, hostF32.length);
       ticks.push({
         logical: [f32[50], f32[51]], css: [i32[22], i32[23]],
-        backing: [i32[24], i32[25]], generation: i32[30], density: i32[31],
+        backing: [i32[24], i32[25]], generation: i32[30], density: i32[31], resized: i32[11],
         pointer: [f32[0], f32[1]], normalized: [f32[4], f32[5]],
       });
     },
@@ -108,6 +108,21 @@ test("logical metadata remains authoritative through resize and DPR changes", as
   assert.equal(second.density, first.density + 1);
   assert.equal(runtime.body.dataset.logicalWidth, "320");
   assert.equal(runtime.canvas.dataset.logicalWidth, "320");
+});
+
+test("raster-scale changes advance density generation within one tier", async () => {
+  const runtime = await loadRuntime({ logical: [640, 360], css: [640, 360], dpr: 1.1 });
+  const first = runtime.ticks.at(-1);
+  const firstRasterScale = runtime.body.dataset.rasterScale;
+  assert.equal(runtime.body.dataset.densityTier, "1.25");
+
+  runtime.setDpr(1.2);
+  runtime.frame();
+  const second = runtime.ticks.at(-1);
+  assert.equal(runtime.body.dataset.densityTier, "1.25");
+  assert.notEqual(runtime.body.dataset.rasterScale, firstRasterScale);
+  assert.equal(second.density, first.density + 1);
+  assert.equal(second.resized, 1);
 });
 
 test("backing axis and byte caps are explicit and inspectable", async () => {

@@ -9,6 +9,7 @@ const source = fs.readFileSync(new URL("../game_minimal.js", import.meta.url), "
 async function loadMinimal({ logical = [640, 360], css = logical, dpr = 1 } = {}) {
   const transforms = [];
   const raf = [];
+  let currentDpr = dpr;
   const body = { dataset: {} };
   const canvas = {
     width: logical[0], height: logical[1], dataset: {}, style: {},
@@ -33,7 +34,7 @@ async function loadMinimal({ logical = [640, 360], css = logical, dpr = 1 } = {}
       },
       addEventListener() {},
     },
-    window: null, devicePixelRatio: dpr, performance: { now: () => 0 },
+    window: null, get devicePixelRatio() { return currentDpr; }, performance: { now: () => 0 },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     WebAssembly: { instantiate: async () => ({ instance }) },
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; },
@@ -46,7 +47,11 @@ async function loadMinimal({ logical = [640, 360], css = logical, dpr = 1 } = {}
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(body.dataset.ready, "true");
   raf.shift()();
-  return { body, canvas, transforms };
+  return {
+    body, canvas, transforms,
+    setDpr(value) { currentDpr = value; },
+    frame() { raf.shift()(); }
+  };
 }
 
 test("minimal runtime keeps logical layout and scales its physical backing", async () => {
@@ -68,4 +73,18 @@ test("minimal runtime exposes the same backing caps and fallback reason", async 
   assert.ok(Number(runtime.body.dataset.backingBytes) <= 64 * 1024 * 1024);
   assert.notEqual(runtime.body.dataset.backingFallback, "none");
   assert.equal(runtime.body.dataset.backingCap, "capped");
+});
+
+test("minimal runtime advances density generation within one stable tier", async () => {
+  const runtime = await loadMinimal({ logical: [640, 360], css: [640, 360], dpr: 1.1 });
+  const firstGeneration = Number(runtime.body.dataset.densityGeneration);
+  const firstTier = runtime.body.dataset.densityTier;
+  const firstRasterScale = runtime.body.dataset.rasterScale;
+
+  runtime.setDpr(1.2);
+  runtime.frame();
+
+  assert.equal(runtime.body.dataset.densityTier, firstTier);
+  assert.notEqual(runtime.body.dataset.rasterScale, firstRasterScale);
+  assert.equal(Number(runtime.body.dataset.densityGeneration), firstGeneration + 1);
 });

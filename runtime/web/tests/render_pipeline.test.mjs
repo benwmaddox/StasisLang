@@ -485,6 +485,8 @@ test("equivalent density scales reuse one stable requested-tier preparation", as
   assert.equal(runtime.body.dataset.assetPreparedTier, "1.25");
   assert.equal(runtime.body.dataset.assetPreparedWidth, "20");
   assert.equal(runtime.body.dataset.spriteRasterCount, "1");
+  const firstDensityGeneration = Number(runtime.body.dataset.densityGeneration);
+  const firstRasterScale = runtime.body.dataset.rasterScale;
   runtime.contextObject.devicePixelRatio = 1.2;
   runtime.frame();
   runtime.env.gfx_load_sprite(0, 16, 16);
@@ -492,6 +494,9 @@ test("equivalent density scales reuse one stable requested-tier preparation", as
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(runtime.body.dataset.spriteCacheHits, "1");
   assert.equal(runtime.body.dataset.spriteRasterCount, "1");
+  assert.equal(runtime.body.dataset.densityTier, "1.25");
+  assert.notEqual(runtime.body.dataset.rasterScale, firstRasterScale);
+  assert.equal(Number(runtime.body.dataset.densityGeneration), firstDensityGeneration + 1);
 });
 
 test("stale density preparation cannot overwrite a newer tier and closes its bitmap", async () => {
