@@ -641,11 +641,7 @@ function ui_scroll_clip_begin(): void {
     if (ui_scroll_current_slot < 0 || ui_scroll_clip_active != 0) {
         return;
     }
-    gfx_push_clip(
-        ui_scroll_current_x,
-        ui_scroll_current_y,
-        ui_scroll_current_w,
-        ui_scroll_current_h);
+    gfx_push_clip(ui_scroll_current_x, ui_scroll_current_y, ui_scroll_current_w, ui_scroll_current_h);
     ui_scroll_clip_active = 1;
 }
 
