@@ -1372,23 +1372,36 @@ fn resolve_self_host_repo_root(
     executable_path: Option<&Path>,
     compile_time_root: &Path,
 ) -> Result<PathBuf, String> {
-    let executable_parent = executable_path.and_then(Path::parent);
-    if let Some(parent) = executable_parent {
-        if self_host_inputs_are_complete(parent) {
-            return Ok(parent.to_path_buf());
+    let mut candidate_roots = Vec::with_capacity(3);
+    if let Some(executable_directory) = executable_path.and_then(Path::parent) {
+        candidate_roots.push(executable_directory.to_path_buf());
+        if executable_directory.file_name() == Some(std::ffi::OsStr::new("bin")) {
+            if let Some(bundle_root) = executable_directory.parent() {
+                candidate_roots.push(bundle_root.to_path_buf());
+            }
         }
     }
-    if self_host_inputs_are_complete(compile_time_root) {
-        return Ok(compile_time_root.to_path_buf());
+    if !candidate_roots
+        .iter()
+        .any(|candidate| candidate == compile_time_root)
+    {
+        candidate_roots.push(compile_time_root.to_path_buf());
     }
 
-    let executable_location = executable_parent
+    for candidate in &candidate_roots {
+        if self_host_inputs_are_complete(candidate) {
+            return Ok(candidate.to_path_buf());
+        }
+    }
+
+    let checked_roots = candidate_roots
+        .iter()
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "unavailable".to_string());
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(format!(
-        "unable to locate Stasis self-host repository inputs; checked executable directory {} and compile-time repository {}. Expected {} and {}",
-        executable_location,
-        compile_time_root.display(),
+        "unable to locate Stasis self-host repository inputs; checked root locations: {}. Expected regular files {} and {}",
+        checked_roots,
         SELF_HOST_RUNTIME_CMAKE,
         SELF_HOST_MOBILE_MAIN,
     ))
@@ -6926,7 +6939,34 @@ fn write_default_aot_cli_summary_sidecar(
 mod self_host_file_selection_tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempTestRoot(PathBuf);
+
+    impl TempTestRoot {
+        fn new(label: &str) -> Self {
+            let id = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "stasis_self_host_{label}_{}_{}",
+                std::process::id(),
+                id
+            ));
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTestRoot {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
 
     fn write_self_host_inputs(root: &Path) {
         fs::create_dir_all(root.join("runtime")).expect("create runtime directory");
@@ -6940,13 +6980,9 @@ mod self_host_file_selection_tests {
 
     #[test]
     fn self_host_repo_root_prefers_installed_executable_root() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("stasis_self_host_root_prefer_{stamp}"));
-        let compile_root = root.join("compile");
-        let installed_root = root.join("installed");
+        let root = TempTestRoot::new("root_prefer");
+        let compile_root = root.path().join("compile");
+        let installed_root = root.path().join("installed");
         write_self_host_inputs(&compile_root);
         write_self_host_inputs(&installed_root);
 
@@ -6954,19 +6990,28 @@ mod self_host_file_selection_tests {
         let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
             .expect("installed root should resolve");
         assert_eq!(resolved, installed_root);
+    }
 
-        fs::remove_dir_all(&root).ok();
+    #[test]
+    fn self_host_repo_root_resolves_published_bin_bundle_root() {
+        let root = TempTestRoot::new("bin_bundle");
+        let compile_root = root.path().join("compile");
+        let bundle_root = root.path().join("installed");
+        write_self_host_inputs(&compile_root);
+        write_self_host_inputs(&bundle_root);
+        fs::create_dir_all(bundle_root.join("bin")).expect("create bin directory");
+
+        let executable = bundle_root.join("bin/stasis");
+        let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect("bundle root should resolve");
+        assert_eq!(resolved, bundle_root);
     }
 
     #[test]
     fn self_host_repo_root_falls_back_when_installed_root_is_incomplete() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("stasis_self_host_root_fallback_{stamp}"));
-        let compile_root = root.join("compile");
-        let installed_root = root.join("installed");
+        let root = TempTestRoot::new("direct_fallback");
+        let compile_root = root.path().join("compile");
+        let installed_root = root.path().join("installed");
         write_self_host_inputs(&compile_root);
         fs::create_dir_all(installed_root.join("runtime")).expect("create partial runtime");
         fs::write(
@@ -6979,27 +7024,63 @@ mod self_host_file_selection_tests {
         let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
             .expect("compile root should resolve");
         assert_eq!(resolved, compile_root);
-
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn self_host_repo_root_reports_missing_layouts() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("stasis_self_host_root_missing_{stamp}"));
-        let compile_root = root.join("compile");
-        let executable = root.join("installed/stasis.exe");
+    fn self_host_repo_root_falls_back_when_installed_bin_layout_is_incomplete() {
+        let root = TempTestRoot::new("bin_fallback");
+        let compile_root = root.path().join("compile");
+        let bundle_root = root.path().join("installed");
+        let executable_directory = bundle_root.join("bin");
+        write_self_host_inputs(&compile_root);
+        fs::create_dir_all(executable_directory.join("runtime"))
+            .expect("create partial bin runtime");
+        fs::write(
+            executable_directory.join(SELF_HOST_RUNTIME_CMAKE),
+            "partial bin runtime\n",
+        )
+        .expect("write partial bin input");
+        fs::create_dir_all(bundle_root.join("mobile/shells/common"))
+            .expect("create partial bundle mobile shell");
+        fs::write(
+            bundle_root.join(SELF_HOST_MOBILE_MAIN),
+            "partial bundle mobile shell\n",
+        )
+        .expect("write partial bundle input");
+
+        let executable = executable_directory.join("stasis");
+        let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect("compile root should resolve");
+        assert_eq!(resolved, compile_root);
+    }
+
+    #[test]
+    fn self_host_repo_root_falls_back_when_executable_is_unavailable() {
+        let root = TempTestRoot::new("unavailable_fallback");
+        let compile_root = root.path().join("compile");
+        write_self_host_inputs(&compile_root);
+
+        let resolved = resolve_self_host_repo_root(None, &compile_root)
+            .expect("compile root should resolve without an executable");
+        assert_eq!(resolved, compile_root);
+    }
+
+    #[test]
+    fn self_host_repo_root_reports_all_checked_roots_and_markers() {
+        let root = TempTestRoot::new("missing");
+        let compile_root = root.path().join("compile");
+        let bundle_root = root.path().join("installed");
+        let executable_directory = bundle_root.join("bin");
+        let executable = executable_directory.join("stasis");
 
         let error = resolve_self_host_repo_root(Some(&executable), &compile_root)
             .expect_err("missing roots should report an actionable error");
+        assert!(error.contains("checked root locations"));
+        assert!(error.contains(&executable_directory.display().to_string()));
+        assert!(error.contains(&bundle_root.display().to_string()));
+        assert!(error.contains(&compile_root.display().to_string()));
         assert!(error.contains("runtime/CMakeLists.txt"));
         assert!(error.contains("mobile/shells/common/stasis_mobile_main.c"));
-        assert!(error.contains(&compile_root.display().to_string()));
-
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
