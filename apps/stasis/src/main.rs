@@ -3648,7 +3648,7 @@ function frame_width(): i32 { return 360; }
 }
 
 fn main() {
-    if !toolchain_cli::is_read_only_symbol_invocation() {
+    if !toolchain_cli::should_skip_stale_stasis_cache_cleanup() {
         maybe_cleanup_stale_stasis_cache();
     }
 

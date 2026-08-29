@@ -412,6 +412,20 @@ pub struct JitDebugFunctionMetadata {
     pub variables: BTreeMap<u32, String>,
 }
 
+/// Host-side extern bindings that are intentionally selected before a JIT
+/// generation is compiled.
+///
+/// The native JIT has no default implementation for the browser-only network
+/// mailbox ABI. Recording opts into the deterministic offline profile so an
+/// imported `network_client` module remains compilable without turning a
+/// capture into a network client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JitExternProfile {
+    #[default]
+    Default,
+    DeterministicOfflineWebNetwork,
+}
+
 pub struct JitProcess {
     compiler: Compiler,
     active_compiler: Option<Compiler>,
@@ -434,6 +448,7 @@ pub struct JitProcess {
     local_runtime_helper_trampolines: bool,
     debug_instrumentation: bool,
     profile_function_names: BTreeSet<String>,
+    extern_profile: JitExternProfile,
     debug_metadata: BTreeMap<FunctionId, JitDebugFunctionMetadata>,
     #[cfg(test)]
     _test_guard: Option<MutexGuard<'static, ()>>,
@@ -532,6 +547,7 @@ impl JitProcess {
             local_runtime_helper_trampolines: false,
             debug_instrumentation: false,
             profile_function_names: BTreeSet::new(),
+            extern_profile: JitExternProfile::Default,
             debug_metadata: BTreeMap::new(),
             #[cfg(test)]
             _test_guard,
@@ -567,6 +583,17 @@ impl JitProcess {
         Ok(())
     }
 
+    /// Select the native extern profile before the first compilation.
+    pub fn set_extern_profile(&mut self, profile: JitExternProfile) -> Result<(), String> {
+        if self.program_snapshot.is_some() || self.active_program_snapshot.is_some() {
+            return Err(
+                "JIT extern profile must be configured before the first compilation".to_string(),
+            );
+        }
+        self.extern_profile = profile;
+        Ok(())
+    }
+
     pub fn staged_candidate(&self) -> Self {
         let mut candidate = Self::new_inner(
             #[cfg(test)]
@@ -599,6 +626,7 @@ impl JitProcess {
         candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         candidate.debug_instrumentation = self.debug_instrumentation;
         candidate.profile_function_names = self.profile_function_names.clone();
+        candidate.extern_profile = self.extern_profile;
         candidate.debug_metadata = self.debug_metadata.clone();
         candidate
     }
@@ -2328,6 +2356,17 @@ impl JitProcess {
         if let Some(existing) = self.runtime_symbol_cache.get(symbol).copied() {
             return Some(existing);
         }
+        if let Some(address) = offline_web_network_symbol_address(self.extern_profile, symbol) {
+            self.runtime_symbol_cache
+                .insert(symbol.to_string(), address);
+            return Some(address);
+        }
+        // Browser-only imports are deliberately unresolved in the default
+        // native profile, even if a future runtime library happens to export a
+        // similarly named symbol. This keeps ordinary play/live fail-closed.
+        if is_web_network_symbol(symbol) {
+            return None;
+        }
         if let Some(address) = builtin_host_symbol_address(symbol) {
             self.runtime_symbol_cache
                 .insert(symbol.to_string(), address);
@@ -2831,6 +2870,54 @@ fn probe_disk_source(path: &Path) -> Option<SourceDiskProbe> {
 
 fn function_address(function: *const ()) -> usize {
     function as usize
+}
+
+fn is_web_network_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "stasis_web_network_supported"
+            | "stasis_web_network_connect"
+            | "stasis_web_network_status"
+            | "stasis_web_network_poll"
+            | "stasis_web_network_send"
+            | "stasis_web_network_resume_seat"
+            | "stasis_web_network_last_sequence"
+            | "stasis_web_network_checkpoint"
+    )
+}
+
+fn offline_web_network_symbol_address(profile: JitExternProfile, symbol: &str) -> Option<usize> {
+    if profile != JitExternProfile::DeterministicOfflineWebNetwork {
+        return None;
+    }
+    let address = match symbol {
+        "stasis_web_network_supported" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_supported as *const ())
+        }
+        "stasis_web_network_connect" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_connect as *const ())
+        }
+        "stasis_web_network_status" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_status as *const ())
+        }
+        "stasis_web_network_poll" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_poll as *const ())
+        }
+        "stasis_web_network_send" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_send as *const ())
+        }
+        "stasis_web_network_resume_seat" => function_address(
+            stasis_dynload::stasis_jit_offline_web_network_resume_seat as *const (),
+        ),
+        "stasis_web_network_last_sequence" => function_address(
+            stasis_dynload::stasis_jit_offline_web_network_last_sequence as *const (),
+        ),
+        "stasis_web_network_checkpoint" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_checkpoint as *const ())
+        }
+        _ => return None,
+    };
+    Some(address)
 }
 
 fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
@@ -3406,6 +3493,90 @@ mod tests {
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_take_handle").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_cancel").is_some());
     }
+
+    const WEB_NETWORK_EXTERN_FIXTURE: &str = r#"
+function @extern("stasis_web_network_supported") web_supported(): i32;
+function @extern("stasis_web_network_connect") web_connect(): i32;
+function @extern("stasis_web_network_status") web_status(): i32;
+function @extern("stasis_web_network_poll") web_poll(out: u8[], capacity: i32): i32;
+function @extern("stasis_web_network_send") web_send(payload: u8[], length: i32): i32;
+function @extern("stasis_web_network_resume_seat") web_resume_seat(): i32;
+function @extern("stasis_web_network_last_sequence") web_last_sequence(): i32;
+function @extern("stasis_web_network_checkpoint") web_checkpoint(seat: i32, last_sequence: i32): i32;
+global bytes: u8[4];
+function main(): i32 {
+    if (web_supported() != 0) { return 1; }
+    if (web_connect() != -4) { return 2; }
+    if (web_status() != -4) { return 3; }
+    if (web_poll(bytes, bytes.max_length) != -4) { return 4; }
+    if (web_send(bytes, bytes.max_length) != -4) { return 5; }
+    if (web_resume_seat() != -1) { return 6; }
+    if (web_last_sequence() != 0) { return 7; }
+    if (web_checkpoint(-1, 0) != -4) { return 8; }
+    return 0;
+}
+"#;
+
+    #[test]
+    fn default_native_jit_rejects_browser_only_network_externs() {
+        let mut process = JitProcess::new();
+        process.upsert_file("network_client.stasis", WEB_NETWORK_EXTERN_FIXTURE);
+        let error = process
+            .compile()
+            .expect_err("default native JIT must keep browser-only imports unresolved");
+        assert!(
+            format!("{error:?}").contains("stasis_web_network_supported"),
+            "unexpected unresolved extern diagnostic: {error:?}"
+        );
+    }
+
+    #[test]
+    fn deterministic_offline_web_network_profile_links_every_extern() {
+        let mut process = JitProcess::new();
+        process
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect("configure offline network profile before compile");
+        process.upsert_file("network_client.stasis", WEB_NETWORK_EXTERN_FIXTURE);
+        process.compile().expect("offline network externs compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute offline network extern fixture"),
+            0
+        );
+    }
+
+    #[test]
+    fn offline_web_network_profile_is_copied_to_staged_candidates() {
+        let mut active = JitProcess::new();
+        active
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect("configure offline network profile before compile");
+        active.upsert_file(
+            "network_client.stasis",
+            "function main(): i32 { return 0; }\n",
+        );
+        active.compile().expect("compile baseline");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file("network_client.stasis", WEB_NETWORK_EXTERN_FIXTURE);
+        candidate
+            .compile()
+            .expect("staged candidate keeps offline network profile");
+        assert_eq!(candidate.execute_i32_noarg_by_name("main"), Ok(0));
+    }
+
+    #[test]
+    fn extern_profile_cannot_change_after_compilation() {
+        let mut process = JitProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 0; }\n");
+        process.compile().expect("compile baseline");
+        assert!(process
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect_err("extern profile must be fixed before compilation")
+            .contains("before the first compilation"));
+    }
+
     use crate::backend::EngineEntrypoints;
 
     #[test]

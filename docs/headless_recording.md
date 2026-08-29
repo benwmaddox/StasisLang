@@ -22,6 +22,38 @@ frames. The loop has zero wall-clock pacing, so the frame sequence is driven by
 committed ticks and is repeatable for the same source, assets, backend, and input
 script. Capture starts after `main()` and excludes the loading frame.
 
+## Browser network imports during native recording
+
+The shipped `src/stdlib/network_client.stasis` module is a browser adapter. In
+generated Web builds, its eight `stasis_web_network_*` imports remain bound to
+the Web runtime's WebSocket, resume, and checkpoint adapter. The generated Web
+runtime is unchanged by native recording.
+
+When `stasis record` sees a capture configuration, the native JIT selects an
+opt-in deterministic offline profile before its initial compile. That profile
+exists only to make an imported browser module link while recording; it is not
+a native networking implementation. Ordinary native `play` and `live` keep
+the Web-only imports unresolved and fail closed.
+
+The offline profile never opens a socket, reads or creates credentials,
+accesses environment or storage, or mutates guest buffers. Its exact return
+contract is:
+
+| Import | Valid call | Invalid scalar arguments |
+| --- | ---: | ---: |
+| `stasis_web_network_supported` | `0` | n/a |
+| `stasis_web_network_connect` | `-4` | n/a |
+| `stasis_web_network_status` | `-4` | n/a |
+| `stasis_web_network_poll` | `-4` | `-1` for capacity outside `0..=65536` |
+| `stasis_web_network_send` | `-4` | `-1` for length outside `0..=65536` |
+| `stasis_web_network_resume_seat` | `-1` | n/a |
+| `stasis_web_network_last_sequence` | `0` | n/a |
+| `stasis_web_network_checkpoint` | `-4` | `-1` for seat outside `-1..7` or negative sequence |
+
+These values are deterministic and do not represent a connected native
+session. Record commands read the workspace and vendor sources only; they do
+not rewrite consumer files, vendored stdlib files, or generated Web assets.
+
 Add `--record-replay artifacts/run.replay.json` to publish the sparse HostFrame-diff session
 alongside the image output. To render a prior session instead of using live or scripted input, pass
 `--replay artifacts/run.replay.json`; the requested frame count must equal the replay tick count.

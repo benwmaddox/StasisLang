@@ -3703,8 +3703,7 @@ pub fn copy_jit_render_active(
         let clip_values = counts.clips * STASIS_RENDER_CLIP_STRIDE_F32;
         out_f32[STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values]
             .copy_from_slice(
-                &source_f32
-                    [STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values],
+                &source_f32[STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values],
             );
     }
     out_u8[..counts.text_bytes].copy_from_slice(&source_u8[..counts.text_bytes]);
@@ -3830,6 +3829,61 @@ pub extern "C" fn stasis_jit_network_supported() -> i32 {
     {
         0
     }
+}
+
+// The browser network-client ABI is intentionally unavailable to ordinary
+// native JIT sessions. Deterministic recording opts into these inert bridges
+// so a guest may import the shared stdlib without opening sockets, creating
+// credentials, reading storage, or mutating a payload buffer.
+const OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES: i32 = 64 * 1024;
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_supported() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_connect() -> i32 {
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_status() -> i32 {
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_poll(_out_id: i32, capacity: i32) -> i32 {
+    if !(0..=OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES).contains(&capacity) {
+        return -1;
+    }
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_send(_payload_id: i32, length: i32) -> i32 {
+    if !(0..=OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES).contains(&length) {
+        return -1;
+    }
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_resume_seat() -> i32 {
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_last_sequence() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_checkpoint(seat: i32, last_sequence: i32) -> i32 {
+    if !(-1..8).contains(&seat) || last_sequence < 0 {
+        return -1;
+    }
+    -4
 }
 
 #[no_mangle]
@@ -7057,6 +7111,54 @@ mod tests {
         assert_eq!(stasis_jit_audio_play_effect(101, 0.3), 404);
         assert_eq!(TEST_AUDIO_PATH_CALLS.load(Ordering::SeqCst), 3);
         assert_eq!(TEST_AUDIO_CALLBACKS.load(Ordering::SeqCst), 14);
+    }
+
+    #[test]
+    fn offline_web_network_bridges_are_inert_and_contractual() {
+        assert_eq!(stasis_jit_offline_web_network_supported(), 0);
+        assert_eq!(stasis_jit_offline_web_network_connect(), -4);
+        assert_eq!(stasis_jit_offline_web_network_status(), -4);
+        assert_eq!(stasis_jit_offline_web_network_poll(123, 0), -4);
+        assert_eq!(stasis_jit_offline_web_network_send(456, 0), -4);
+        assert_eq!(stasis_jit_offline_web_network_resume_seat(), -1);
+        assert_eq!(stasis_jit_offline_web_network_last_sequence(), 0);
+        assert_eq!(stasis_jit_offline_web_network_checkpoint(-1, 0), -4);
+
+        assert_eq!(
+            stasis_jit_offline_web_network_poll(123, -1),
+            -1,
+            "poll rejects negative capacity"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_poll(123, OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES + 1),
+            -1,
+            "poll rejects oversized capacity"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_send(456, -1),
+            -1,
+            "send rejects negative length"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_send(456, OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES + 1),
+            -1,
+            "send rejects oversized length"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_checkpoint(-2, 0),
+            -1,
+            "checkpoint rejects invalid seat"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_checkpoint(0, -1),
+            -1,
+            "checkpoint rejects invalid sequence"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_checkpoint(8, 0),
+            -1,
+            "checkpoint rejects out-of-range seat"
+        );
     }
 
     #[test]

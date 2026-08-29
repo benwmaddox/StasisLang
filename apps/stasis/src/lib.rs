@@ -54,7 +54,7 @@ use stasis_compiler::backend::development_swap::DevelopmentSwapStatus;
 use stasis_compiler::backend::development_swap::{
     commit_development_swap, DevelopmentSwapDescriptor, DevelopmentSwapHost, DevelopmentSwapReceipt,
 };
-use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
+use stasis_compiler::backend::jit::{JitEnginePackage, JitExternProfile, JitProcess};
 use stasis_compiler::backend::state_migration::{
     activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
     MAX_STATE_SNAPSHOT_BYTES,
@@ -2626,6 +2626,9 @@ fn run_play_in_process_inner(
     let mut jit = JitProcess::new();
     if let Some(profile) = profile.as_ref() {
         jit.set_profile_functions(profile.functions.clone())?;
+    }
+    if capture.is_some() {
+        jit.set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)?;
     }
     jit.set_project_root(project_root.to_string_lossy())?;
     if let Some(function) = capture

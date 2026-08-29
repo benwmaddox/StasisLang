@@ -1076,6 +1076,144 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
 }
 
 #[test]
+fn recording_imported_network_client_is_offline_repeatable_and_non_mutating() {
+    let root = repository_root();
+    let runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            let path = root.join("runtime/build/bin/Release/stasis_graphics.dll");
+            path.is_file().then_some(path)
+        });
+    let Some(runtime) = runtime else {
+        eprintln!("network-client recording integration skipped: graphics runtime is unavailable");
+        return;
+    };
+    if let Err(error) = Command::new(env!("CARGO_BIN_EXE_stasis"))
+        .arg("help")
+        .output()
+    {
+        if error.raw_os_error() == Some(4551) {
+            eprintln!(
+                "network-client recording integration skipped: Windows Application Control blocked the test CLI"
+            );
+            return;
+        }
+        panic!("probe stasis CLI for network-client recording: {error}");
+    }
+
+    let fixture = root.join("samples/windows_launch_smoke");
+    let test_tree = TestTree(temp_dir("network_client_recording"));
+    let project = test_tree.0.join("windows_launch_smoke");
+    copy_tree(&fixture, &project);
+
+    let vendor_file = project.join("vendor/stasis/stdlib/network_client.stasis");
+    fs::create_dir_all(vendor_file.parent().expect("vendor stdlib parent"))
+        .expect("create vendor stdlib directory");
+    let network_client = root.join("src/stdlib/network_client.stasis");
+    fs::copy(&network_client, &vendor_file).expect("copy network client stdlib");
+    let source_file = project.join("main.stasis");
+    let source = fs::read_to_string(&source_file)
+        .expect("read network-client recording fixture")
+        .replace("\r\n", "\n")
+        .replace(
+            "@link(\"stasis_graphics\");",
+            "@link(\"stasis_graphics\");\nimport \"/vendor/stasis/stdlib/network_client.stasis\";\nglobal network_probe: u8[4];",
+        )
+        + r#"
+
+function before_record(frame: i32): i32 {
+    if (frame < 0) { return 90; }
+    if (network_client_supported() != 0) { return 91; }
+    if (network_client_connect() != -4) { return 92; }
+    if (network_client_status() != -4) { return 93; }
+    if (network_client_poll(network_probe) != -4) { return 94; }
+    if (network_client_send(network_probe) != -4) { return 95; }
+    if (network_client_resume_seat() != -1) { return 96; }
+    if (network_client_last_sequence() != 0) { return 97; }
+    if (network_client_checkpoint(-1, 0) != -4) { return 98; }
+    return 0;
+}
+"#;
+    assert!(
+        source.contains("import \"/vendor/stasis/stdlib/network_client.stasis\";")
+            && source.contains("function before_record(frame: i32): i32"),
+        "network-client recording fixture injection did not match"
+    );
+    fs::write(&source_file, source).expect("write network-client recording fixture");
+
+    let source_before = fs::read(&source_file).expect("snapshot consumer source");
+    let vendor_before = fs::read(&vendor_file).expect("snapshot vendored network client");
+
+    for (width, height) in [(1280_u32, 720_u32), (844_u32, 390_u32)] {
+        let first = test_tree
+            .0
+            .join(format!("network-record-{width}x{height}-first"));
+        let second = test_tree
+            .0
+            .join(format!("network-record-{width}x{height}-second"));
+        for (output, label) in [(&first, "first"), (&second, "repeat")] {
+            let mut command = stasis_command(&project);
+            command.env("STASIS_RUNTIME_DLL_PATH", &runtime);
+            command.args([
+                "record",
+                "main.stasis",
+                "--output",
+                output.to_str().expect("record output path"),
+                "--width",
+                &width.to_string(),
+                "--height",
+                &height.to_string(),
+                "--fps",
+                "60",
+                "--frames",
+                "1",
+                "--before-tick",
+                "before_record",
+            ]);
+            let completed = launch(
+                command,
+                &format!("network-client recording {width}x{height} {label}"),
+            );
+            assert!(
+                completed.status.success(),
+                "network-client recording {width}x{height} {label} failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&completed.stdout),
+                String::from_utf8_lossy(&completed.stderr)
+            );
+            let frames = recording_frames(output);
+            assert_eq!(frames.len(), 1, "network-client recording frame count");
+            let frame = image::open(&frames[0])
+                .expect("network-client recording PNG")
+                .to_rgba8();
+            assert_eq!(frame.dimensions(), (width, height));
+            let visible_pixels = frame
+                .pixels()
+                .filter(|pixel| pixel.0 != [0, 0, 0, 255])
+                .count();
+            assert!(
+                visible_pixels > 100,
+                "network-client recording {width}x{height} did not render visible pixels: {visible_pixels}"
+            );
+        }
+        assert_eq!(
+            fs::read(&first.join("frame-000001.png")).expect("first network frame"),
+            fs::read(&second.join("frame-000001.png")).expect("repeat network frame"),
+            "network-client recording {width}x{height} must be byte-repeatable"
+        );
+    }
+
+    assert_eq!(
+        fs::read(&source_file).expect("consumer source after record"),
+        source_before
+    );
+    assert_eq!(
+        fs::read(&vendor_file).expect("vendored network client after record"),
+        vendor_before
+    );
+}
+
+#[test]
 fn recording_before_tick_hook_observes_input_and_failure_publishes_nothing() {
     let root = repository_root();
     let runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
