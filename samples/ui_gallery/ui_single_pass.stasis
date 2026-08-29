@@ -13,6 +13,11 @@ enum UiStackDirection {
     Reverse,
 }
 
+enum UiScopeKind {
+    Horizontal,
+    Vertical,
+}
+
 enum UiViewportFit {
     Stretch,
     Contain,
@@ -43,8 +48,8 @@ global ui_scope_overflow_count: i32;
 
 // Each scope stores its parent output plus the cursor for one axis.  Arrays
 // are fixed-size so a malformed screen cannot allocate or grow at runtime.
-global ui_scope_kind: i32[32];
-global ui_scope_direction: i32[32];
+global ui_scope_kind: UiScopeKind[32];
+global ui_scope_direction: UiStackDirection[32];
 global ui_scope_x: f32[32];
 global ui_scope_y: f32[32];
 global ui_scope_w: f32[32];
@@ -152,7 +157,7 @@ function ui_begin_frame(x: f32, y: f32, w: f32, h: f32): void {
     ui_scroll_clip_active = 0;
 }
 
-function ui_scope_begin(kind: i32, direction: UiStackDirection, x: f32, y: f32, w: f32, h: f32, spacing: f32): void {
+function ui_scope_begin(kind: UiScopeKind, direction: UiStackDirection, x: f32, y: f32, w: f32, h: f32, spacing: f32): void {
     if (ui_stack_depth >= UI_MAX_STACK_DEPTH) {
         ui_mark_status(UI_STATUS_STACK_OVERFLOW);
         ui_scope_overflow_count = ui_scope_overflow_count + 1;
@@ -162,10 +167,7 @@ function ui_scope_begin(kind: i32, direction: UiStackDirection, x: f32, y: f32, 
 
     let depth: i32 = ui_stack_depth;
     ui_scope_kind[depth] = kind;
-    ui_scope_direction[depth] = 0;
-    if (direction == UiStackDirection.Reverse) {
-        ui_scope_direction[depth] = 1;
-    }
+    ui_scope_direction[depth] = direction;
     ui_scope_x[depth] = x;
     ui_scope_y[depth] = y;
     ui_scope_w[depth] = w;
@@ -182,7 +184,7 @@ function ui_scope_begin(kind: i32, direction: UiStackDirection, x: f32, y: f32, 
         ui_mark_status(UI_STATUS_BAD_ARGUMENT);
     }
 
-    if (kind == 1) {
+    if (kind == UiScopeKind.Horizontal) {
         if (direction == UiStackDirection.Reverse) {
             ui_scope_cursor[depth] = x + w;
         } else {
@@ -201,11 +203,11 @@ function ui_scope_begin(kind: i32, direction: UiStackDirection, x: f32, y: f32, 
 }
 
 function ui_vstack_begin(x: f32, y: f32, w: f32, h: f32, spacing: f32, direction: UiStackDirection): void {
-    ui_scope_begin(2, direction, x, y, w, h, spacing);
+    ui_scope_begin(UiScopeKind.Vertical, direction, x, y, w, h, spacing);
 }
 
 function ui_hstack_begin(x: f32, y: f32, w: f32, h: f32, spacing: f32, direction: UiStackDirection): void {
-    ui_scope_begin(1, direction, x, y, w, h, spacing);
+    ui_scope_begin(UiScopeKind.Horizontal, direction, x, y, w, h, spacing);
 }
 
 function ui_scope_next_fixed(extent: f32): void {
@@ -227,8 +229,8 @@ function ui_scope_next_fixed(extent: f32): void {
     }
 
     let spacing: f32 = ui_scope_spacing[depth];
-    let reverse: bool = ui_scope_direction[depth] == 1;
-    if (ui_scope_kind[depth] == 1) {
+    let reverse: bool = ui_scope_direction[depth] == UiStackDirection.Reverse;
+    if (ui_scope_kind[depth] == UiScopeKind.Horizontal) {
         let x: f32 = ui_scope_cursor[depth];
         if (reverse) {
             x = x - size;
@@ -284,8 +286,8 @@ function ui_scope_next_rest(): void {
     }
     ui_scope_rest_used[depth] = 1;
 
-    let reverse: bool = ui_scope_direction[depth] == 1;
-    if (ui_scope_kind[depth] == 1) {
+    let reverse: bool = ui_scope_direction[depth] == UiStackDirection.Reverse;
+    if (ui_scope_kind[depth] == UiScopeKind.Horizontal) {
         let x: f32 = ui_scope_x[depth];
         let w: f32 = ui_scope_w[depth];
         if (reverse) {
@@ -641,11 +643,7 @@ function ui_scroll_clip_begin(): void {
     if (ui_scroll_current_slot < 0 || ui_scroll_clip_active != 0) {
         return;
     }
-    gfx_push_clip(
-        ui_scroll_current_x,
-        ui_scroll_current_y,
-        ui_scroll_current_w,
-        ui_scroll_current_h);
+    gfx_push_clip(ui_scroll_current_x, ui_scroll_current_y, ui_scroll_current_w, ui_scroll_current_h);
     ui_scroll_clip_active = 1;
 }
 

@@ -40,17 +40,17 @@ function gallery_button_current(id: i32, label: string, selected: bool): void {
     gallery_button(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), id, label, selected);
 }
 
-function gallery_page_name(page: i32): string {
-    if (page == GALLERY_PAGE_STACKS) {
+function gallery_page_name(page: GalleryPage): string {
+    if (page == GalleryPage.Stacks) {
         return "STACKS";
     }
-    if (page == GALLERY_PAGE_ANCHORS) {
+    if (page == GalleryPage.Anchors) {
         return "ANCHORS";
     }
-    if (page == GALLERY_PAGE_SCROLL) {
+    if (page == GalleryPage.Scroll) {
         return "SCROLL";
     }
-    if (page == GALLERY_PAGE_VIEWPORT) {
+    if (page == GalleryPage.Viewport) {
         return "VIEWPORT";
     }
     return "COMBINED";
@@ -84,19 +84,19 @@ function gallery_draw_navigation(): void {
     let h: f32 = ui_current_height();
     ui_hstack_begin(x, y, w, h, 6.0, UiStackDirection.Forward);
     ui_hstack_next_fixed(116.0);
-    let selected_stacks: bool = gallery.page == GALLERY_PAGE_STACKS;
+    let selected_stacks: bool = gallery.page == GalleryPage.Stacks;
     gallery_button_current(GALLERY_ID_STACKS, "STACKS", selected_stacks);
     ui_hstack_next_fixed(116.0);
-    let selected_anchors: bool = gallery.page == GALLERY_PAGE_ANCHORS;
+    let selected_anchors: bool = gallery.page == GalleryPage.Anchors;
     gallery_button_current(GALLERY_ID_ANCHORS, "ANCHORS", selected_anchors);
     ui_hstack_next_fixed(116.0);
-    let selected_scroll: bool = gallery.page == GALLERY_PAGE_SCROLL;
+    let selected_scroll: bool = gallery.page == GalleryPage.Scroll;
     gallery_button_current(GALLERY_ID_SCROLL, "SCROLL", selected_scroll);
     ui_hstack_next_fixed(116.0);
-    let selected_viewport: bool = gallery.page == GALLERY_PAGE_VIEWPORT;
+    let selected_viewport: bool = gallery.page == GalleryPage.Viewport;
     gallery_button_current(GALLERY_ID_VIEWPORT, "VIEWPORT", selected_viewport);
     ui_hstack_next_rest();
-    let selected_combined: bool = gallery.page == GALLERY_PAGE_COMBINED;
+    let selected_combined: bool = gallery.page == GalleryPage.Combined;
     gallery_button_current(GALLERY_ID_COMBINED, "COMBINED", selected_combined);
     ui_hstack_end();
 }

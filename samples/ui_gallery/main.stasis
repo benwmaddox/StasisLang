@@ -7,7 +7,7 @@ import "gallery_pages.stasis";
 function main(): i32 {
     init_window(1100, 720, "Stasis UI Gallery");
     gallery.font = load_font("assets/ui.ttf", 12);
-    gallery.page = GALLERY_PAGE_STACKS;
+    gallery.page = GalleryPage.Stacks;
     gallery.fit = UiViewportFit.Contain;
     gallery.modal_open = false;
     gallery.world_tick = 0;

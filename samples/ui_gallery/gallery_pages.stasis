@@ -177,7 +177,8 @@ function gallery_draw_viewport(): void {
         0.30,
         0.82,
         0.52,
-        1.0);
+        1.0
+    );
     fill_rect(
         world_x + gallery.world_x * world_scale_x,
         world_y + gallery.world_y * world_scale_y,
@@ -186,7 +187,8 @@ function gallery_draw_viewport(): void {
         0.94,
         0.64,
         0.22,
-        1.0);
+        1.0
+    );
     ui_anchor(world_x, world_y, world_w, world_h, 170.0, 28.0, UiHorizontal.Left, UiVertical.Top);
     fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.06, 0.14, 0.20, 0.94);
     gallery_label("viewport-local HUD", ui_current_x() + 8.0, ui_current_y() + 6.0, 0.76, 0.92, 1.0, 1.0);
@@ -233,7 +235,8 @@ function gallery_draw_combined(): void {
         0.30,
         0.82,
         0.52,
-        1.0);
+        1.0
+    );
     fill_rect(
         fitted_x + gallery.world_x * fitted_w / 320.0,
         fitted_y + gallery.world_y * fitted_h / 180.0,
@@ -242,7 +245,8 @@ function gallery_draw_combined(): void {
         0.94,
         0.64,
         0.22,
-        1.0);
+        1.0
+    );
     gallery_label("PLAYABLE WORLD", world_panel_x + 14.0, world_panel_y + 12.0, 0.84, 0.95, 1.0, 1.0);
     ui_anchor(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 172.0, 26.0, UiHorizontal.Left, UiVertical.Bottom);
     fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.04, 0.11, 0.16, 0.92);
@@ -270,13 +274,13 @@ function gallery_draw_combined(): void {
 }
 
 function gallery_tick_page(pointer_id: i32, pointer_x: f32, pointer_y: f32, pointer_down: bool, went_down: bool, went_up: bool): void {
-    if (gallery.page == GALLERY_PAGE_STACKS) {
+    if (gallery.page == GalleryPage.Stacks) {
         return;
     }
-    if (gallery.page == GALLERY_PAGE_ANCHORS) {
+    if (gallery.page == GalleryPage.Anchors) {
         return;
     }
-    if (gallery.page == GALLERY_PAGE_SCROLL) {
+    if (gallery.page == GalleryPage.Scroll) {
         let x: f32 = ui_current_x() + 16.0;
         let y: f32 = ui_current_y() + 72.0;
         let w: f32 = 418.0 - 32.0;
@@ -285,7 +289,7 @@ function gallery_tick_page(pointer_id: i32, pointer_x: f32, pointer_y: f32, poin
         ui_scroll_drag(pointer_id, pointer_x, pointer_y, went_down, pointer_down, went_up);
         return;
     }
-    if (gallery.page == GALLERY_PAGE_VIEWPORT) {
+    if (gallery.page == GalleryPage.Viewport) {
         let x: f32 = ui_current_x();
         let y: f32 = ui_current_y();
         let w: f32 = ui_current_width();
@@ -339,7 +343,7 @@ function gallery_tick_page(pointer_id: i32, pointer_x: f32, pointer_y: f32, poin
         ui_hstack_end();
         return;
     }
-    if (gallery.page == GALLERY_PAGE_COMBINED && !gallery.modal_open) {
+    if (gallery.page == GalleryPage.Combined && !gallery.modal_open) {
         let x: f32 = ui_current_x();
         let y: f32 = ui_current_y();
         let w: f32 = ui_current_width();
@@ -367,7 +371,7 @@ function gallery_tick_page(pointer_id: i32, pointer_x: f32, pointer_y: f32, poin
         ui_hstack_end();
         return;
     }
-    if (gallery.page == GALLERY_PAGE_COMBINED && gallery.modal_open) {
+    if (gallery.page == GalleryPage.Combined && gallery.modal_open) {
         let x: f32 = ui_current_x();
         let y: f32 = ui_current_y();
         let w: f32 = ui_current_width();
@@ -416,7 +420,7 @@ function gallery_tick_layout(pointer_id: i32, pointer_x: f32, pointer_y: f32, po
             went_up
         )
     ) {
-        gallery.page = GALLERY_PAGE_STACKS;
+        gallery.page = GalleryPage.Stacks;
     }
     ui_hstack_next_fixed(116.0);
     if (
@@ -435,7 +439,7 @@ function gallery_tick_layout(pointer_id: i32, pointer_x: f32, pointer_y: f32, po
             went_up
         )
     ) {
-        gallery.page = GALLERY_PAGE_ANCHORS;
+        gallery.page = GalleryPage.Anchors;
     }
     ui_hstack_next_fixed(116.0);
     if (
@@ -454,7 +458,7 @@ function gallery_tick_layout(pointer_id: i32, pointer_x: f32, pointer_y: f32, po
             went_up
         )
     ) {
-        gallery.page = GALLERY_PAGE_SCROLL;
+        gallery.page = GalleryPage.Scroll;
     }
     ui_hstack_next_fixed(116.0);
     if (
@@ -473,7 +477,7 @@ function gallery_tick_layout(pointer_id: i32, pointer_x: f32, pointer_y: f32, po
             went_up
         )
     ) {
-        gallery.page = GALLERY_PAGE_VIEWPORT;
+        gallery.page = GalleryPage.Viewport;
     }
     ui_hstack_next_rest();
     if (
@@ -492,7 +496,7 @@ function gallery_tick_layout(pointer_id: i32, pointer_x: f32, pointer_y: f32, po
             went_up
         )
     ) {
-        gallery.page = GALLERY_PAGE_COMBINED;
+        gallery.page = GalleryPage.Combined;
     }
     ui_hstack_end();
     ui_vstack_next_rest();
@@ -506,13 +510,13 @@ function gallery_render_layout(): void {
     ui_vstack_next_fixed(42.0);
     gallery_draw_navigation();
     ui_vstack_next_rest();
-    if (gallery.page == GALLERY_PAGE_STACKS) {
+    if (gallery.page == GalleryPage.Stacks) {
         gallery_draw_stacks();
-    } else if (gallery.page == GALLERY_PAGE_ANCHORS) {
+    } else if (gallery.page == GalleryPage.Anchors) {
         gallery_draw_anchors();
-    } else if (gallery.page == GALLERY_PAGE_SCROLL) {
+    } else if (gallery.page == GalleryPage.Scroll) {
         gallery_draw_scroll();
-    } else if (gallery.page == GALLERY_PAGE_VIEWPORT) {
+    } else if (gallery.page == GalleryPage.Viewport) {
         gallery_draw_viewport();
     } else {
         gallery_draw_combined();
