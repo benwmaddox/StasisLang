@@ -3932,11 +3932,14 @@ pub fn copy_jit_render_active(
     let text_values = counts.text * STASIS_RENDER_TEXT_STRIDE_F32;
     out_f32[STASIS_RENDER_TEXT_BASE_F32..STASIS_RENDER_TEXT_BASE_F32 + text_values]
         .copy_from_slice(&source_f32[source_text_base..source_text_base + text_values]);
-    let clip_values = counts.clips * STASIS_RENDER_CLIP_STRIDE_F32;
-    out_f32[STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values]
-        .copy_from_slice(
-            &source_f32[STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values],
-        );
+    if version >= STASIS_RENDER_V6_VERSION && counts.clips > 0 {
+        let clip_values = counts.clips * STASIS_RENDER_CLIP_STRIDE_F32;
+        out_f32[STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values]
+            .copy_from_slice(
+                &source_f32
+                    [STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values],
+            );
+    }
     out_u8[..counts.text_bytes].copy_from_slice(&source_u8[..counts.text_bytes]);
     Ok(counts)
 }
