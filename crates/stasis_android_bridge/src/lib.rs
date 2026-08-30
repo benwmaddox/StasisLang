@@ -4442,6 +4442,40 @@ function tick(): void {}
         root
     }
 
+    fn copy_tree(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).expect("create copied project directory");
+        for entry in fs::read_dir(source).expect("read copied project directory") {
+            let entry = entry.expect("read copied project entry");
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if source_path.is_dir() {
+                copy_tree(&source_path, &destination_path);
+            } else {
+                fs::copy(&source_path, &destination_path).expect("copy project file");
+            }
+        }
+    }
+
+    fn stage_android_aot_sample() -> PathBuf {
+        let root = temp_project("it017_aot_sample");
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples/android_aot_seam")
+            .canonicalize()
+            .expect("Android AOT sample root");
+        copy_tree(&sample, &root);
+
+        // The packaged Android sample resolves its canonical graphics import
+        // from the project-owned vendor mount.  Keep the test source and
+        // renderer exactly the checked-in sample while staging that mount in
+        // the temporary project used by the live bridge.
+        let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        copy_tree(&stdlib, &root.join("vendor/stasis/src/stdlib"));
+        root
+    }
+
     fn write_typed_sprite_project(name: &str, source: &str) -> (PathBuf, i32) {
         let root = temp_project(name);
         let stdlib_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/stdlib");
@@ -5511,6 +5545,99 @@ function tick(): void {}
     }
 
     #[test]
+    fn android_it017_aot_sample_runtime_trace_matches_manifest() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = stage_android_aot_sample();
+        let entry = Path::new("main.stasis");
+        let expectations: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/android_aot_seam/android_seam_expectations.json"
+        )))
+        .expect("decode IT-017 expectations");
+        assert_eq!(expectations["test_id"], "IT-017");
+        let stable_frame = expectations["stable_frame"]
+            .as_u64()
+            .expect("IT-017 stable frame") as usize;
+        let expected_checksum = expectations["state_checksum"]
+            .as_i64()
+            .expect("IT-017 state checksum") as i32;
+        let expected_trace = expectations["command_trace"]
+            .as_u64()
+            .expect("IT-017 command trace") as u32;
+        let logical_size = expectations["logical_size"]
+            .as_array()
+            .expect("IT-017 logical size");
+        let logical_w = logical_size[0].as_i64().expect("IT-017 logical width") as i32;
+        let logical_h = logical_size[1].as_i64().expect("IT-017 logical height") as i32;
+
+        let mut frame_i32 = vec![0_i32; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut frame_f32 = vec![0.0_f32; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut frame_u8 = vec![0_u8; ANDROID_RENDER_GFX_U8_CAPACITY];
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("main.stasis").expect("entry cstr");
+        for _ in 0..stable_frame {
+            let status = stasis_android_bridge_run_tick_frame_v2(
+                root_c.as_ptr(),
+                entry_c.as_ptr(),
+                0,
+                0,
+                0,
+                logical_w,
+                logical_h,
+                frame_i32.as_mut_ptr(),
+                frame_i32.len(),
+                frame_f32.as_mut_ptr(),
+                frame_f32.len(),
+                frame_u8.as_mut_ptr(),
+                frame_u8.len(),
+            );
+            assert_eq!(
+                status,
+                0,
+                "IT-017 sample frame failed: {:?}",
+                LAST_FRAME_ERROR.with(|slot| slot.borrow().clone())
+            );
+        }
+
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_state_checksum")
+                .expect("read IT-017 state checksum"),
+            expected_checksum,
+            "IT-017 stable frame must retain its checked-in state oracle"
+        );
+        assert_eq!(&frame_i32[0..5], &[1196967473, 6, 3, 0, 0]);
+        assert_eq!(frame_i32[7], 0, "IT-017 sample must not emit text");
+        assert_eq!(frame_i32[9], 0, "IT-017 sample must not emit text bytes");
+        assert_eq!(frame_i32[10], logical_w);
+        assert_eq!(frame_i32[11], logical_h);
+        assert_eq!(frame_i32[22], 3, "IT-017 sample rectangle order count");
+        assert_eq!(frame_i32[24], 3, "IT-017 sample rectangle count");
+        assert_eq!(
+            &frame_f32[79996..80004],
+            &[64.0, 72.0, 192.0, 216.0, 0.90, 0.12, 0.16, 1.0]
+        );
+        assert_eq!(
+            &frame_f32[79988..79996],
+            &[384.0, 72.0, 192.0, 216.0, 0.10, 0.78, 0.72, 1.0]
+        );
+        assert_eq!(
+            &frame_f32[79980..79988],
+            &[296.0, 156.0, 48.0, 48.0, 0.95, 0.90, 0.30, 1.0]
+        );
+        let trace = unsafe {
+            stasis_render_v2_trace_native(frame_i32.as_ptr(), frame_f32.as_ptr(), frame_u8.as_ptr())
+        };
+        assert_eq!(
+            trace, expected_trace,
+            "IT-017 runtime trace must match manifest"
+        );
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
     fn android_it027_render_parity_sample_real_jit_exports_marker_and_idle_trace() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
@@ -5519,6 +5646,21 @@ function tick(): void {}
             .canonicalize()
             .expect("render parity sample root");
         let entry = Path::new("main.stasis");
+        let capture_manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/render_parity/capture_manifest.json"
+        )))
+        .expect("decode render parity capture manifest");
+        assert_eq!(
+            capture_manifest["fixture"],
+            "samples/render_parity/main.stasis"
+        );
+        let expected_workshop_trace = capture_manifest["workshop_command_trace"]
+            .as_u64()
+            .expect("render parity Workshop trace") as u32;
+        let expected_state_checksum = capture_manifest["state_checksum"]
+            .as_i64()
+            .expect("render parity state checksum") as i32;
         let mut frame_i32 = vec![0_i32; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut frame_f32 = vec![0.0_f32; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut frame_u8 = vec![0_u8; ANDROID_RENDER_GFX_U8_CAPACITY];
@@ -5658,13 +5800,22 @@ function tick(): void {}
         );
 
         let idle_trace = run_frame(0, 0, 0, &mut frame_i32, &mut frame_f32, &mut frame_u8);
-        assert_eq!(idle_trace, 3_533_510_058);
+        assert_eq!(idle_trace, expected_workshop_trace);
         assert_eq!(frame_i32[RECT_COUNT], 1);
         assert_eq!(frame_i32[ORDER_COUNT], 10);
         assert_eq!(frame_i32[FRAME_TOKEN], 4);
         assert_eq!(
             get_android_workshop_i32_global(&root, entry, "seam_touch_marker_active").unwrap(),
             0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_state_checksum").unwrap(),
+            expected_state_checksum,
+            "render parity state oracle must stay linked to the capture manifest"
+        );
+        assert_eq!(
+            idle_trace, expected_workshop_trace,
+            "render parity idle trace must stay linked to the Workshop manifest"
         );
         clear_runtime_session_for_test();
     }
