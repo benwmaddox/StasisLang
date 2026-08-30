@@ -58,12 +58,22 @@ class RuntimeAbiContractTests(unittest.TestCase):
         mutations = (
             (
                 contract.ANDROID,
+                "pub extern \"C\" fn stasis_android_bridge_run_render_frame(",
                 "pub extern \"C\" fn stasis_android_bridge_run_tick_frame(",
+            ),
+            (
+                contract.ANDROID,
+                "pub extern \"C\" fn stasis_android_bridge_run_render_frame(",
                 "pub extern \"C\" fn stasis_android_bridge_run_tick_frame_v2(",
             ),
             (
                 contract.JNI,
+                'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_render_frame")',
                 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame")',
+            ),
+            (
+                contract.JNI,
+                'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_render_frame")',
                 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2")',
             ),
         )

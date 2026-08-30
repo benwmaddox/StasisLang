@@ -25,7 +25,7 @@ typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_ro
 typedef const char *(*stasis_android_bridge_version_fn)(void);
 typedef char *(*stasis_android_bridge_run_tests_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
-typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len);
+typedef int (*stasis_android_bridge_run_render_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len);
 typedef char *(*stasis_android_bridge_last_frame_error_fn)(void);
 typedef char *(*stasis_android_bridge_inspect_runtime_state_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
@@ -78,7 +78,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_compile_project_fn compile_project;
     stasis_android_bridge_run_tests_fn run_tests;
     stasis_android_bridge_run_tick_fn run_tick;
-    stasis_android_bridge_run_tick_frame_fn run_tick_frame;
+    stasis_android_bridge_run_render_frame_fn run_render_frame;
     stasis_android_bridge_last_frame_error_fn last_frame_error;
     stasis_android_bridge_inspect_runtime_state_fn inspect_runtime_state;
     stasis_android_bridge_set_i32_global_fn set_i32_global;
@@ -339,8 +339,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_run_tests_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tests");
     rust_bridge_api.run_tick =
             (stasis_android_bridge_run_tick_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick");
-    rust_bridge_api.run_tick_frame =
-            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame");
+    rust_bridge_api.run_render_frame =
+            (stasis_android_bridge_run_render_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_render_frame");
     rust_bridge_api.last_frame_error =
             (stasis_android_bridge_last_frame_error_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_last_frame_error");
     rust_bridge_api.inspect_runtime_state =
@@ -651,15 +651,15 @@ static void log_workshop_it025_marker(JNIEnv *env, const char *bridge_version,
 }
 
 #endif
-static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len) {
+static int try_rust_bridge_run_render_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len) {
     if (!stasis_audio_set_project_root(project_root)) {
         return -1;
     }
     RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->run_tick_frame == NULL) {
+    if (bridge == NULL || bridge->run_render_frame == NULL) {
         return -1;
     }
-    return bridge->run_tick_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active,
+    return bridge->run_render_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active,
             screen_w, screen_h, out_i32, out_i32_len, out_f32, out_f32_len,
             out_u8, out_u8_len);
 }
@@ -1064,7 +1064,7 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
         return -1;
     }
 
-    int status = try_rust_bridge_run_tick_frame(
+    int status = try_rust_bridge_run_render_frame(
             root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h,
             values_i32, STASIS_RENDER_I32_COUNT, values_f32, STASIS_RENDER_F32_COUNT,
             values_u8, STASIS_RENDER_U8_COUNT);

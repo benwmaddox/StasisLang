@@ -2824,7 +2824,7 @@ pub extern "C" fn stasis_android_bridge_get_i32_global(
         .into_raw()
 }
 #[no_mangle]
-pub extern "C" fn stasis_android_bridge_run_tick_frame(
+pub extern "C" fn stasis_android_bridge_run_render_frame(
     project_root: *const c_char,
     entry_file: *const c_char,
     touch_x: i32,
@@ -5559,7 +5559,7 @@ function tick(): void {}
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("main.stasis").expect("entry cstr");
         for _ in 0..stable_frame {
-            let status = stasis_android_bridge_run_tick_frame(
+            let status = stasis_android_bridge_run_render_frame(
                 root_c.as_ptr(),
                 entry_c.as_ptr(),
                 0,
@@ -5670,7 +5670,7 @@ function tick(): void {}
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("main.stasis").expect("entry cstr");
         for _ in 0..stable_frame {
-            let status = stasis_android_bridge_run_tick_frame(
+            let status = stasis_android_bridge_run_render_frame(
                 root_c.as_ptr(),
                 entry_c.as_ptr(),
                 0,
@@ -5992,7 +5992,7 @@ function tick(): void {}
                          frame_f32: &mut Vec<f32>,
                          frame_u8: &mut Vec<u8>|
          -> u32 {
-            let status = stasis_android_bridge_run_tick_frame(
+            let status = stasis_android_bridge_run_render_frame(
                 root_c.as_ptr(),
                 entry_c.as_ptr(),
                 x,
@@ -6656,7 +6656,7 @@ function on_code_swap(): void {}\n",
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame(
+        let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             0,
@@ -6721,7 +6721,7 @@ function on_code_swap(): void {}\n",
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame(
+        let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             0,
@@ -6761,7 +6761,7 @@ function on_code_swap(): void {}\n",
     }
 
     #[test]
-    fn c_bridge_run_tick_frame_copies_only_production_active_spans() {
+    fn c_bridge_run_render_frame_copies_only_production_active_spans() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("ffi_production_frame_tick");
@@ -6820,7 +6820,7 @@ function render(): void {
         let mut frame_i32 = vec![0i32; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut frame_u8 = vec![0u8; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame(
+        let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             540,
@@ -6879,7 +6879,7 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame(
+        let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             0,

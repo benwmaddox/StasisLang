@@ -89,7 +89,7 @@ LEGACY_RENDER_PATTERNS = (
     re.compile(r"\b(?:GFX_CMD|STASIS_RENDER)_(?:LEGACY|OLD)_[A-Z0-9_]+\b"),
     re.compile(r"\b(?:LEGACY|OLD)_(?:GFX|RENDER)_[A-Z0-9_]+\b"),
     re.compile(r"\bstasis_(?:render|jit_render)_v2_trace(?:_native)?\b"),
-    re.compile(r"\bstasis_android_bridge_run_tick_frame_v\d+\b"),
+    re.compile(r"\bstasis_android_bridge_run_tick_frame(?:_v\d+)?\b"),
     re.compile(r"\b(?:34608|108676|96388)\b"),
 )
 
@@ -496,12 +496,12 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                       "command_buffer.name", "gfx_cmd", 'COMMAND_BUFFER_NAME = "gfx_cmd"'),
         check_literal(RENDER_HEADER, ANDROID, sources[ANDROID],
                       "android_bridge.render_export",
-                      "stasis_android_bridge_run_tick_frame",
-                      "pub extern \"C\" fn stasis_android_bridge_run_tick_frame("),
+                      "stasis_android_bridge_run_render_frame",
+                      "pub extern \"C\" fn stasis_android_bridge_run_render_frame("),
         check_literal(RENDER_HEADER, JNI, sources[JNI],
                       "android_bridge.render_dlsym",
-                      "stasis_android_bridge_run_tick_frame",
-                      'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame")'),
+                      "stasis_android_bridge_run_render_frame",
+                      'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_render_frame")'),
     ):
         checks += 1
         if mismatch is not None:

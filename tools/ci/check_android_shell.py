@@ -1445,7 +1445,7 @@ def main() -> int:
     assert "ExceptionCheck" in native
     assert "NewGlobalRef" in native
     assert "clear_stasis_jni_frame_error" in native
-    assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame")' in native
+    assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_render_frame")' in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
     assert "scan_stasis_files" not in native
     assert "analyze_stasis_file" not in native
