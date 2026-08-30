@@ -44,6 +44,9 @@ DESKTOP_RENDER_RECOVERY = Path("apps/stasis/tests/desktop_render_recovery_seam.r
 DESKTOP_ERROR_TOAST = Path("apps/stasis/tests/desktop_error_toast_seam.rs")
 DESKTOP_HOT_SWAP_HARNESS = Path("apps/stasis/tests/desktop_hot_swap_generation_seam.rs")
 MOBILE_PACKAGED_ASSETS_HARNESS = Path("apps/stasis/tests/mobile_packaged_assets_seam.rs")
+MOBILE_PACKAGED_ASSETS_NATIVE = Path(
+    "runtime/tests/stasis_mobile_packaged_assets_integration.c"
+)
 PLAY_ERROR_TOASTS = Path("apps/stasis/src/play_error_toasts.rs")
 RENDER_PARITY_FRAME = Path("samples/render_parity/frame.stasis")
 RENDER_PARITY_TRACE = Path("samples/render_parity/trace.stasis")
@@ -70,7 +73,7 @@ RENDER_DOWNSTREAM = (
     DESKTOP_INPUT_FRAME_HARNESS, DESKTOP_DISPLAY_METRICS_HARNESS,
     GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
     DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, DESKTOP_HOT_SWAP_HARNESS,
-    MOBILE_PACKAGED_ASSETS_HARNESS,
+    MOBILE_PACKAGED_ASSETS_HARNESS, MOBILE_PACKAGED_ASSETS_NATIVE,
     PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
@@ -83,7 +86,8 @@ REQUIRED = (
     DESKTOP_MANIFEST_HARNESS, DESKTOP_INPUT_FRAME_HARNESS,
     DESKTOP_DISPLAY_METRICS_HARNESS, GENERATED_MOBILE_AOT_C,
     GENERATED_MOBILE_AOT_RUST, DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
-    DESKTOP_HOT_SWAP_HARNESS, MOBILE_PACKAGED_ASSETS_HARNESS, PLAY_ERROR_TOASTS,
+    DESKTOP_HOT_SWAP_HARNESS, MOBILE_PACKAGED_ASSETS_HARNESS,
+    MOBILE_PACKAGED_ASSETS_NATIVE, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
     WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
@@ -592,6 +596,9 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             ))
 
     mobile_packaged_assets_text = sources[MOBILE_PACKAGED_ASSETS_HARNESS]
+    mobile_packaged_assets_native = without_c_comments(
+        sources[MOBILE_PACKAGED_ASSETS_NATIVE]
+    )
     mobile_packaged_fixed_trace_patterns = (
         r"\bconst\s+[A-Z0-9_]*TRACE\s*:\s*u32\s*=\s*[0-9]",
         r"assert_eq!\s*\(\s*trace\s*,\s*(?:[A-Z][A-Z0-9_]*|[0-9][0-9_]*)",
@@ -603,6 +610,17 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             label(RENDER_HEADER), label(MOBILE_PACKAGED_ASSETS_HARNESS),
             "it015.render_trace.fixed_numeric_oracle",
             "parsed nonzero current trace", "fixed numeric trace",
+        ))
+    checks += 1
+    if any(re.search(pattern, mobile_packaged_assets_native, re.S) for pattern in (
+            r"\bIT015_EXPECTED_TRACE\b",
+            r"#define\s+[A-Z0-9_]*TRACE\s+[0-9]",
+            r"const\s+uint32_t\s+expected_trace\s*=\s*[0-9]",
+            r"actual_trace\s*==\s*[0-9][0-9A-Fa-f_xXuUlL]*")):
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(MOBILE_PACKAGED_ASSETS_NATIVE),
+            "it015.render_trace.fixed_numeric_oracle",
+            "semantic trace derived from canonical frame", "fixed numeric trace",
         ))
     mobile_packaged_trace_contract = {
         "parse": (
@@ -627,6 +645,68 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             failures.append(Mismatch(
                 label(RENDER_HEADER), label(MOBILE_PACKAGED_ASSETS_HARNESS),
                 f"it015.render_trace.{field}", expected, "missing",
+            ))
+
+    it015_semantic_oracle_patterns = {
+        "function": r"static\s+uint32_t\s+it015_expected_frame_trace\s*\(.*?sprite_handle.*?font_handle.*?cached_handle.*?\)",
+        "i32.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_I32_COUNT\s*,",
+        "f32.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_F32_COUNT\s*,",
+        "u8.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_U8_COUNT\s*,",
+        "magic": r"expected_i32\s*\[\s*STASIS_RENDER_I_MAGIC\s*\]\s*=\s*STASIS_RENDER_MAGIC",
+        "version": r"expected_i32\s*\[\s*STASIS_RENDER_I_VERSION\s*\]\s*=\s*STASIS_RENDER_VERSION",
+        "flags": r"STASIS_RENDER_FLAG_CLEAR\s*\|\s*STASIS_RENDER_FLAG_PRESENT",
+        "sprite.count": r"STASIS_RENDER_I_SPRITE_COUNT\s*\]\s*=\s*1",
+        "text.count": r"STASIS_RENDER_I_TEXT_COUNT\s*\]\s*=\s*2",
+        "text.bytes": r"STASIS_RENDER_I_TEXT_BYTES_USED\s*\]\s*=\s*7",
+        "order.count": r"STASIS_RENDER_I_ORDER_COUNT\s*\]\s*=\s*3",
+        "sprite.i32_base": r"sprite_i32_base\s*=\s*STASIS_RENDER_I_SPRITE_BASE",
+        "sprite.f32_base": r"sprite_f32_base\s*=\s*STASIS_RENDER_F_SPRITE_BASE",
+        "sprite.handle": r"expected_i32\s*\[\s*sprite_i32_base\s*\+\s*0\s*\]\s*=\s*sprite_handle",
+        "sprite.flags": r"expected_i32\s*\[\s*sprite_i32_base\s*\+\s*2\s*\]\s*=\s*255",
+        "direct_text.i32_base": r"direct_text_i32_base\s*=\s*STASIS_RENDER_I_TEXT_BASE",
+        "cached_text.i32_stride": r"cached_text_i32_base\s*=\s*STASIS_RENDER_I_TEXT_BASE\s*\+\s*STASIS_RENDER_TEXT_I32_STRIDE",
+        "direct_text.f32_base": r"direct_text_f32_base\s*=\s*STASIS_RENDER_F_TEXT_BASE",
+        "cached_text.f32_stride": r"cached_text_f32_base\s*=\s*STASIS_RENDER_F_TEXT_BASE\s*\+\s*STASIS_RENDER_TEXT_F32_STRIDE",
+        "direct_text.font": r"expected_i32\s*\[\s*direct_text_i32_base\s*\+\s*0\s*\]\s*=\s*font_handle",
+        "direct_text.span": r"direct_text_i32_base\s*\+\s*2\s*\]\s*=\s*6",
+        "cached_text.font": r"expected_i32\s*\[\s*cached_text_i32_base\s*\+\s*0\s*\]\s*=\s*font_handle",
+        "cached_text.handle": r"cached_text_i32_base\s*\+\s*1\s*\]\s*=\s*-cached_handle",
+        "bundle": r"memcpy\s*\(\s*expected_u8\s*,\s*\"BUNDLE\"\s*,\s*6\s*\)",
+        "order.sprite": r"STASIS_RENDER_ORDER_SPRITE\s*\*\s*STASIS_RENDER_ORDER_KIND_SCALE",
+        "order.text0": r"STASIS_RENDER_I_ORDER_BASE\s*\+\s*1\s*\]\s*=.*?STASIS_RENDER_ORDER_TEXT\s*\*\s*STASIS_RENDER_ORDER_KIND_SCALE",
+        "order.text1": r"STASIS_RENDER_I_ORDER_BASE\s*\+\s*2\s*\]\s*=.*?STASIS_RENDER_ORDER_TEXT\s*\*\s*STASIS_RENDER_ORDER_KIND_SCALE\s*\+\s*1",
+        "validation": r"stasis_render_validate\s*\(\s*expected_i32\s*,\s*expected_f32\s*\)",
+        "expected_trace": r"stasis_render_trace\s*\(\s*expected_i32\s*,\s*expected_f32\s*,\s*expected_u8\s*\)",
+        "actual_trace": r"actual_trace\s*=\s*stasis_render_trace\s*\(\s*gfx_i32\s*,\s*gfx_f32\s*,\s*gfx_u8\s*\)",
+        "comparison": r"CHECK\s*\(\s*actual_trace\s*==\s*expected_trace\s*\)",
+        "diagnostic": r"IT-015 semantic trace mismatch: expected=%u actual=%u",
+        "runtime_handles": r"it015_expected_frame_trace\s*\(\s*sprite_handle\s*,\s*font_handle\s*,\s*cached_handle\s*\)",
+        "i32.free": r"free\s*\(\s*expected_i32\s*\)",
+        "f32.free": r"free\s*\(\s*expected_f32\s*\)",
+        "u8.free": r"free\s*\(\s*expected_u8\s*\)",
+    }
+    for offset, value in enumerate(("0\\.04", "0\\.07", "0\\.12", "1\\.0")):
+        it015_semantic_oracle_patterns[f"clear.{offset}"] = (
+            rf"STASIS_RENDER_F_CLEAR_BASE\s*\+\s*{offset}\s*\]\s*=\s*{value}f"
+        )
+    for offset, value in enumerate(("52\\.0", "28\\.0", "64\\.0", "64\\.0", "0\\.0", "0\\.0", "1\\.0", "1\\.0")):
+        it015_semantic_oracle_patterns[f"sprite.payload.{offset}"] = (
+            rf"sprite_f32_base\s*\+\s*{offset}\s*\]\s*=\s*{value}f"
+        )
+    for prefix, values in (
+            ("direct_text", ("30\\.0", "112\\.0", "1\\.0", "0\\.8", "0\\.1", "1\\.0")),
+            ("cached_text", ("175\\.0", "112\\.0", "0\\.1", "0\\.9", "1\\.0", "1\\.0"))):
+        for offset, value in enumerate(values):
+            it015_semantic_oracle_patterns[f"{prefix}.payload.{offset}"] = (
+                rf"{prefix}_f32_base\s*\+\s*{offset}\s*\]\s*=\s*{value}f"
+            )
+    for field, pattern in it015_semantic_oracle_patterns.items():
+        checks += 1
+        if re.search(pattern, mobile_packaged_assets_native, re.S) is None:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(MOBILE_PACKAGED_ASSETS_NATIVE),
+                f"it015.semantic_oracle.{field}",
+                "independent canonical semantic frame", "missing",
             ))
 
     desktop_text = sources[DESKTOP]
