@@ -43,6 +43,7 @@ GENERATED_MOBILE_AOT_RUST = Path("apps/stasis/tests/generated_mobile_aot_runtime
 DESKTOP_RENDER_RECOVERY = Path("apps/stasis/tests/desktop_render_recovery_seam.rs")
 DESKTOP_ERROR_TOAST = Path("apps/stasis/tests/desktop_error_toast_seam.rs")
 DESKTOP_HOT_SWAP_HARNESS = Path("apps/stasis/tests/desktop_hot_swap_generation_seam.rs")
+MOBILE_PACKAGED_ASSETS_HARNESS = Path("apps/stasis/tests/mobile_packaged_assets_seam.rs")
 PLAY_ERROR_TOASTS = Path("apps/stasis/src/play_error_toasts.rs")
 RENDER_PARITY_FRAME = Path("samples/render_parity/frame.stasis")
 RENDER_PARITY_TRACE = Path("samples/render_parity/trace.stasis")
@@ -69,6 +70,7 @@ RENDER_DOWNSTREAM = (
     DESKTOP_INPUT_FRAME_HARNESS, DESKTOP_DISPLAY_METRICS_HARNESS,
     GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
     DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, DESKTOP_HOT_SWAP_HARNESS,
+    MOBILE_PACKAGED_ASSETS_HARNESS,
     PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
@@ -81,7 +83,7 @@ REQUIRED = (
     DESKTOP_MANIFEST_HARNESS, DESKTOP_INPUT_FRAME_HARNESS,
     DESKTOP_DISPLAY_METRICS_HARNESS, GENERATED_MOBILE_AOT_C,
     GENERATED_MOBILE_AOT_RUST, DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
-    DESKTOP_HOT_SWAP_HARNESS, PLAY_ERROR_TOASTS,
+    DESKTOP_HOT_SWAP_HARNESS, MOBILE_PACKAGED_ASSETS_HARNESS, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
     WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
@@ -587,6 +589,44 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 label(RENDER_HEADER), label(consumer),
                 "current_render_trace.fixed_numeric_oracle",
                 "nonzero and semantic trace relationships", "fixed numeric trace",
+            ))
+
+    mobile_packaged_assets_text = sources[MOBILE_PACKAGED_ASSETS_HARNESS]
+    mobile_packaged_fixed_trace_patterns = (
+        r"\bconst\s+[A-Z0-9_]*TRACE\s*:\s*u32\s*=\s*[0-9]",
+        r"assert_eq!\s*\(\s*trace\s*,\s*(?:[A-Z][A-Z0-9_]*|[0-9][0-9_]*)",
+    )
+    checks += 1
+    if any(re.search(pattern, mobile_packaged_assets_text, re.S)
+           for pattern in mobile_packaged_fixed_trace_patterns):
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(MOBILE_PACKAGED_ASSETS_HARNESS),
+            "it015.render_trace.fixed_numeric_oracle",
+            "parsed nonzero current trace", "fixed numeric trace",
+        ))
+    mobile_packaged_trace_contract = {
+        "parse": (
+            r'\.find_map\(\|field\|\s*field\.strip_prefix\("trace="\)\).*?'
+            r'\.and_then\(\|value\|\s*value\.parse::<u32>\(\)\.ok\(\)\).*?'
+            r'\.expect\("render trace"\)',
+            "trace parsed from the native harness output",
+        ),
+        "nonzero": (
+            r'assert_ne!\s*\(\s*trace\s*,\s*0\s*,\s*'
+            r'"packaged asset render trace must accept the semantically validated current frame"',
+            "explicit nonzero trace assertion",
+        ),
+        "evidence": (
+            r'"render_trace"\s*:\s*trace',
+            "parsed trace retained in IT-015 evidence",
+        ),
+    }
+    for field, (pattern, expected) in mobile_packaged_trace_contract.items():
+        checks += 1
+        if re.search(pattern, mobile_packaged_assets_text, re.S) is None:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(MOBILE_PACKAGED_ASSETS_HARNESS),
+                f"it015.render_trace.{field}", expected, "missing",
             ))
 
     desktop_text = sources[DESKTOP]

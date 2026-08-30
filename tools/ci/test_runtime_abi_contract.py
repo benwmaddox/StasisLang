@@ -336,6 +336,34 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
 
+    def test_it015_rejects_fixed_trace_oracle_and_requires_nonzero_trace(self):
+        mutations = (
+            (
+                "use serde_json::json;",
+                "use serde_json::json;\nconst EXPECTED_RENDER_TRACE: u32 = 158_004_337;",
+                "it015.render_trace.fixed_numeric_oracle",
+            ),
+            (
+                """    assert_ne!(
+        trace, 0,
+        "packaged asset render trace must accept the semantically validated current frame"
+    );""",
+                "    let _ = trace;",
+                "it015.render_trace.nonzero",
+            ),
+        )
+        for old, new, field in mutations:
+            with self.subTest(field=field):
+                failures, _ = self.run_with(
+                    contract.MOBILE_PACKAGED_ASSETS_HARNESS, old, new
+                )
+                failure = next(failure for failure in failures if failure.field == field)
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(
+                    "apps/stasis/tests/mobile_packaged_assets_seam.rs",
+                    failure.consumer,
+                )
+
     def test_it012_semantic_oracle_requires_current_abi_and_trace(self):
         mutations = (
             (
