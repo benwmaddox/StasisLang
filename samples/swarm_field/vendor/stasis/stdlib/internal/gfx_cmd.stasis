@@ -1,6 +1,6 @@
 import "../stdlib.stasis";
 
-// Graphics command buffer (v5)
+// Graphics command buffer (current schema)
 //
 // Policy:
 // - Ordering: line, rectangle, sprite, and text calls append to one bounded order stream.
@@ -10,7 +10,7 @@ import "../stdlib.stasis";
 
 const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 
-const GFX_CMD_VERSION: i32 = 5;
+const GFX_CMD_VERSION: i32 = 6;
 
 // i32 header indices
 const GFX_I_MAGIC: i32 = 0;
@@ -65,7 +65,7 @@ const GFX_TEXT_STRIDE_I32: i32 = 3; // font, byte_offset, byte_len
 const GFX_TEXT_STRIDE_F32: i32 = 6; // x,y,r,g,b,a
 
 const GFX_TEXT_MAX_BYTES: i32 = 65536;
-const GFX_MAX_ORDER: i32 = 16144;
+const GFX_MAX_ORDER: i32 = 16656;
 const GFX_ORDER_KIND_SCALE: i32 = 16384;
 const GFX_ORDER_LINE: i32 = 1;
 const GFX_ORDER_SPRITE: i32 = 2;
@@ -84,12 +84,12 @@ const GFX_F_TEXT_BASE: i32 = 112772;
 
 // NOTE: Array sizes must be integer literals in Stasis today.
 // Keep these in sync with the constants above:
-// - i32 count = 32 + (4096*3) + (2048*3) + 16144 = 34608
-// - f32 count = 4 + (10000*8) + (4096*8) + (2048*6) = 125060
+// - i32 count = 32 + (4096*3) + (2048*3) + 16656 = 35120
+// - f32 count = 4 + (10000*8) + (4096*8) + (2048*6) + (256*4) = 126084
 const GFX_I_TEXT_BASE: i32 = 12320;
 
-global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[125060];
+global gfx_cmd_i32: i32[35120];
+global gfx_cmd_f32: f32[126084];
 global gfx_cmd_u8: u8[65536];
 
 // Begin a new frame, resetting all counts (typical immediate-mode usage).

@@ -105,7 +105,7 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
     render: () => {
       if (timing) now += 3;
       if (!rects && !sprites && !clips.length) return;
-      i32[0] = MAGIC; i32[1] = clips.length ? 6 : sprites ? 5 : 4; i32[2] = 0; i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects; i32[27] = clips.length;
+      i32[0] = MAGIC; i32[1] = 6; i32[2] = 0; i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects; i32[27] = clips.length;
       if (ordered) {
         i32[3] = 1; i32[22] = ordered.length;
         ordered.forEach((encoded, index) => { i32[18464 + index] = encoded; });

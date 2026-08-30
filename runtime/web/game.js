@@ -286,12 +286,7 @@
   // Keep the production gfx_cmd decoder values named and mechanically checked
   // against runtime/stasis_render_contract.h by the ABI gate.
   const GFX_CMD_MAGIC = 0x47584631;
-  const GFX_CMD_V2_VERSION = 2;
-  const GFX_CMD_V3_VERSION = 3;
-  const GFX_CMD_V4_VERSION = 4;
-  const GFX_CMD_V5_VERSION = 5;
-  const GFX_CMD_V6_VERSION = 6;
-  const GFX_CMD_CURRENT_VERSION = GFX_CMD_V6_VERSION;
+  const GFX_CMD_VERSION = 6;
   const GFX_FLAG_CLEAR = 1;
   const GFX_FLAG_PRESENT = 2;
   const GFX_I_MAGIC = 0;
@@ -312,7 +307,6 @@
   const GFX_F_SPRITE_BASE = 80004;
   const GFX_F_RECT_REVERSE_BASE = 79996;
   const GFX_F_TEXT_BASE = 112772;
-  const GFX_F_LEGACY_TEXT_BASE = 96388;
   const GFX_F_CLIP_BASE = 125060;
   const GFX_MAX_GEOMETRY = 10000;
   const GFX_GEOMETRY_STRIDE_F32 = 8;
@@ -320,7 +314,6 @@
   const GFX_LINE_STRIDE_F32 = GFX_GEOMETRY_STRIDE_F32;
   const GFX_MAX_SPRITES = 4096;
   const GFX_SPRITE_STRIDE_I32 = 3;
-  const GFX_LEGACY_SPRITE_STRIDE_F32 = 4;
   const GFX_SPRITE_STRIDE_F32 = 8;
   const GFX_MAX_TEXT = 2048;
   const GFX_TEXT_STRIDE_I32 = 3;
@@ -2386,11 +2379,9 @@
     const f32 = new Float32Array(instance.exports.memory.buffer, fLayout.offset, fLayout.length);
     if (i32[GFX_I_MAGIC] !== GFX_CMD_MAGIC) return;
     const version = i32[GFX_I_VERSION];
-    if (version < GFX_CMD_V2_VERSION || version > GFX_CMD_CURRENT_VERSION) return;
-    const spriteStride = version >= GFX_CMD_V5_VERSION
-      ? GFX_SPRITE_STRIDE_F32 : GFX_LEGACY_SPRITE_STRIDE_F32;
-    const textBase = version >= GFX_CMD_V5_VERSION
-      ? GFX_F_TEXT_BASE : GFX_F_LEGACY_TEXT_BASE;
+    if (version !== GFX_CMD_VERSION) return;
+    const spriteStride = GFX_SPRITE_STRIDE_F32;
+    const textBase = GFX_F_TEXT_BASE;
     const flushGpuBatcher = () => {
       gpuBatcher?.flush?.();
     };
@@ -2480,10 +2471,10 @@
       const y = f32[baseF + 1];
       const width = f32[baseF + 2];
       const height = f32[baseF + 3];
-      const u0 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 4] : 0;
-      const v0 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 5] : 0;
-      const u1 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 6] : 1;
-      const v1 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 7] : 1;
+      const u0 = f32[baseF + 4];
+      const v0 = f32[baseF + 5];
+      const u1 = f32[baseF + 6];
+      const v1 = f32[baseF + 7];
       if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return null;
       const variant = spriteVariantFor(resource, u0 !== 0 || v0 !== 0 || u1 !== 1 || v1 !== 1);
       return { handle: i32[baseI], resource, variant, x, y, width, height, u0, v0, u1, v1,
@@ -2639,12 +2630,9 @@
     const lineCount = Math.max(0, Math.min(i32[GFX_I_LINE_COUNT], GFX_MAX_LINES));
     const spriteCount = Math.max(0, Math.min(i32[GFX_I_SPRITE_COUNT], GFX_MAX_SPRITES));
     const textCount = Math.max(0, Math.min(i32[GFX_I_TEXT_COUNT], GFX_MAX_TEXT));
-    const rectCount = version >= GFX_CMD_V4_VERSION
-      ? Math.max(0, Math.min(i32[GFX_I_RECT_COUNT], GFX_MAX_GEOMETRY - lineCount)) : 0;
-    const orderCount = version >= GFX_CMD_V3_VERSION
-      ? Math.max(0, Math.min(i32[GFX_I_ORDER_COUNT], GFX_MAX_ORDER)) : 0;
-    const clipCount = version >= GFX_CMD_V6_VERSION
-      ? Math.max(0, Math.min(i32[GFX_I_CLIP_COUNT], GFX_MAX_CLIPS)) : 0;
+    const rectCount = Math.max(0, Math.min(i32[GFX_I_RECT_COUNT], GFX_MAX_GEOMETRY - lineCount));
+    const orderCount = Math.max(0, Math.min(i32[GFX_I_ORDER_COUNT], GFX_MAX_ORDER));
+    const clipCount = Math.max(0, Math.min(i32[GFX_I_CLIP_COUNT], GFX_MAX_CLIPS));
     let clipDepth = 0;
     const pushClip = index => {
       if (index < 0 || index >= clipCount) return;

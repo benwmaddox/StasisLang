@@ -14,6 +14,8 @@ Projects created with `stasis new` recommend it and enable Stasis-only format-on
 
 It is built around a simple bargain: give up hidden allocation and invisible runtime work in exchange for explicit state, predictable layouts, deterministic ticks, and fast live iteration.
 
+The compatibility boundary is documented in [`docs/runtime_compatibility.md`](docs/runtime_compatibility.md). Source-language, standard-library, and compiler APIs are developer-facing; generated command buffers and runtime artifacts are rebuilt together against the single current downstream ABI.
+
 ## Why Stasis Exists
 
 Game code is easiest to reason about when the important facts are visible:

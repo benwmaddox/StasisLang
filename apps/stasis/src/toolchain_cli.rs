@@ -58,8 +58,7 @@ const MANIFEST_VERSION: u32 = 1;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
-const GFX_CMD_LEGACY_VERSION: i64 = 4;
-const GFX_CMD_CURRENT_VERSION: i64 = 6;
+const GFX_CMD_VERSION: i64 = 6;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",
@@ -5711,16 +5710,15 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
     })?;
     let command_buffer = &value["command_buffer"];
     let command_buffer_version = command_buffer["version"].as_i64();
-    let legacy_command_buffer = command_buffer_version == Some(GFX_CMD_LEGACY_VERSION);
-    let current_command_buffer = command_buffer_version == Some(GFX_CMD_CURRENT_VERSION);
+    let current_command_buffer = command_buffer_version == Some(GFX_CMD_VERSION);
     if value["schema"] != "stasis.release_provenance.v1"
         || value["development_build"] != false
         || value["dirty_state"] != false
         || command_buffer["name"] != GFX_CMD_NAME
-        || !(current_command_buffer || legacy_command_buffer)
+        || !current_command_buffer
     {
         return Err(
-            "release provenance is not a clean official gfx_cmd schema 4/6 build".to_string(),
+            "release provenance is not a clean official gfx_cmd schema 6 build".to_string(),
         );
     }
     let release_tag = provenance_string_field(&value, "release_tag")?;
@@ -5865,7 +5863,7 @@ fn local_provenance(development_build: bool) -> Result<Value, String> {
         },
         "runtime_sources": sources,
         "mobile_shell_sources": content_hashes(&mobile_shells, "mobile/shells")?,
-        "command_buffer": {"name": GFX_CMD_NAME, "version": GFX_CMD_CURRENT_VERSION},
+        "command_buffer": {"name": GFX_CMD_NAME, "version": GFX_CMD_VERSION},
         "backends": ["sdl3"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
         "dependencies": {
@@ -8595,10 +8593,7 @@ mod tests {
         assert_eq!(provenance["build_class"], "local_release");
         assert_eq!(provenance["development_build"], false);
         assert_eq!(provenance["command_buffer"]["name"], GFX_CMD_NAME);
-        assert_eq!(
-            provenance["command_buffer"]["version"],
-            GFX_CMD_CURRENT_VERSION
-        );
+        assert_eq!(provenance["command_buffer"]["version"], GFX_CMD_VERSION);
         assert!(provenance["release_tag"].is_null());
         assert!(provenance["compiler"]["sha256"].as_str().is_some());
 
@@ -8665,7 +8660,7 @@ mod tests {
             },
             "runtime_sources": runtime_sources,
             "mobile_shell_sources": mobile_shell_sources,
-            "command_buffer": {"name": "gfx_cmd", "version": 4},
+            "command_buffer": {"name": "gfx_cmd", "version": GFX_CMD_VERSION},
             "backends": ["sdl3"],
             "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
             "dependencies": {
@@ -8679,8 +8674,15 @@ mod tests {
         write_json_file(&manifest_path, &manifest).expect("write provenance fixture");
         verify_release_provenance(&manifest_path).expect("accept matching release");
 
+        let mut legacy_manifest = manifest.clone();
+        legacy_manifest["command_buffer"]["version"] = json!(4);
+        write_json_file(&manifest_path, &legacy_manifest).expect("write legacy provenance fixture");
+        let error =
+            verify_release_provenance(&manifest_path).expect_err("reject legacy render provenance");
+        assert!(error.contains("schema 6 build"));
+
         let mut current_manifest = manifest.clone();
-        current_manifest["command_buffer"]["version"] = json!(GFX_CMD_CURRENT_VERSION);
+        current_manifest["command_buffer"]["version"] = json!(GFX_CMD_VERSION);
         write_json_file(&manifest_path, &current_manifest)
             .expect("write current provenance fixture");
         verify_release_provenance(&manifest_path).expect("accept current release");
@@ -8689,7 +8691,7 @@ mod tests {
         wrong_family["command_buffer"]["name"] = json!("other_cmd");
         write_json_file(&manifest_path, &wrong_family).expect("write wrong-family fixture");
         let error = verify_release_provenance(&manifest_path).expect_err("reject wrong family");
-        assert!(error.contains("clean official gfx_cmd schema 4/6 build"));
+        assert!(error.contains("clean official gfx_cmd schema 6 build"));
         write_json_file(&manifest_path, &current_manifest).expect("restore current provenance");
 
         fs::write(

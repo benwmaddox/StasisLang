@@ -206,10 +206,11 @@ public final class StasisPreviewRendererSchemaTest {
         assertFalse(StasisPreviewRenderer.shouldPresent(frame));
         frame.put(StasisPreviewRenderer.I_FLAGS, StasisPreviewRenderer.FLAG_PRESENT);
         assertTrue(StasisPreviewRenderer.shouldPresent(frame));
-        frame.put(1, StasisPreviewRenderer.RENDER_V2_VERSION);
-        assertTrue(StasisPreviewRenderer.isValidFrame(frame));
-        frame.put(1, StasisPreviewRenderer.RENDER_V3_VERSION);
-        assertTrue(StasisPreviewRenderer.isValidFrame(frame));
+        for (int version = 2; version <= 5; version += 1) {
+            frame.put(1, version);
+            assertFalse(StasisPreviewRenderer.isValidFrame(frame));
+            assertFalse(StasisPreviewRenderer.shouldPresent(frame));
+        }
         frame.put(1, 1);
         assertFalse(StasisPreviewRenderer.isValidFrame(frame));
         assertFalse(StasisPreviewRenderer.shouldPresent(frame));
@@ -261,16 +262,11 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(StasisPreviewRenderer.MAX_LINES * StasisPreviewRenderer.LINE_F32_STRIDE,
                 StasisPreviewRenderer.activeLineF32Count(Integer.MAX_VALUE));
         assertEquals(8, StasisPreviewRenderer.activeRectF32Count(
-                StasisPreviewRenderer.RENDER_VERSION,
                 StasisPreviewRenderer.MAX_GEOMETRY - 1, Integer.MAX_VALUE));
-        assertEquals(0, StasisPreviewRenderer.activeRectF32Count(
-                StasisPreviewRenderer.RENDER_V3_VERSION, 0, 1));
-        assertEquals(0, StasisPreviewRenderer.clampedClipCount(
-                StasisPreviewRenderer.RENDER_V5_VERSION, 3));
-        assertEquals(3, StasisPreviewRenderer.clampedClipCount(
-                StasisPreviewRenderer.RENDER_VERSION, 3));
+        assertEquals(8, StasisPreviewRenderer.activeRectF32Count(0, 1));
+        assertEquals(3, StasisPreviewRenderer.clampedClipCount(3));
         assertEquals(StasisPreviewRenderer.MAX_CLIPS, StasisPreviewRenderer.clampedClipCount(
-                StasisPreviewRenderer.RENDER_VERSION, Integer.MAX_VALUE));
+                Integer.MAX_VALUE));
         assertEquals(StasisPreviewRenderer.MAX_TEXT * StasisPreviewRenderer.TEXT_F32_STRIDE,
                 StasisPreviewRenderer.activeTextF32Count(Integer.MAX_VALUE));
         assertEquals(StasisPreviewRenderer.TEXT_U8_CAPACITY,

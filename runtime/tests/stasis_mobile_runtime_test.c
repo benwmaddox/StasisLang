@@ -115,8 +115,8 @@ void stasis_gfx_submit_u8(
     assert(cmd_i32 == game_gfx_cmd_i32);
     assert(cmd_f32 == game_gfx_cmd_f32);
     assert(cmd_u8 == game_gfx_cmd_u8);
-    assert(cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_V2_MAGIC);
-    assert(cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V2_VERSION);
+    assert(cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_MAGIC);
+    assert(cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_VERSION);
     gfx_submit_calls += 1;
     stasis_begin_frame();
     stasis_end_frame();
@@ -273,8 +273,8 @@ static int32_t game_tick(void) {
 static int32_t game_render(void) {
     stasis_jit_profile_frame_enter(77);
     render_calls += 1;
-    game_gfx_cmd_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V2_MAGIC;
-    game_gfx_cmd_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V2_VERSION;
+    game_gfx_cmd_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
+    game_gfx_cmd_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
     stasis_jit_profile_frame_leave(77);
     return render_result;
 }

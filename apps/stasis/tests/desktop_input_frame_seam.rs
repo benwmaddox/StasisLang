@@ -132,7 +132,7 @@ fn run_guest_frame(
     assert_close(gfx_f32[79997], y, "render marker y");
 
     let trace = unsafe {
-        stasis_dynload::stasis_jit_render_v2_trace(
+        stasis_dynload::stasis_jit_render_trace(
             global_path_hash("gfx_cmd_i32"),
             gfx_i32.len() as i32,
             global_path_hash("gfx_cmd_f32"),

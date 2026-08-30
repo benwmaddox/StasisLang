@@ -5198,7 +5198,7 @@ static void stasis_render_pop_clip(void) {
 }
 
 /*
- * Command-buffer submission (v2-v6).
+ * Current command-buffer submission.
  *
  * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
  * Flush category-local batches before a later command category or clip state
@@ -5239,18 +5239,16 @@ static void flush_ordered_sprites(void) {
 static void stasis_draw_ordered_sprite(
     const int32_t* cmd_i32,
     const float* cmd_f32,
-    int32_t version,
     int32_t index
 ) {
     const int32_t* sprite_i32 = cmd_i32 + STASIS_RENDER_I_SPRITE_BASE;
     const float* sprite_f32 = cmd_f32 + STASIS_RENDER_F_SPRITE_BASE;
-    const int stride_f = stasis_render_sprite_f32_stride(version);
     const int base_i = index * STASIS_RENDER_SPRITE_I32_STRIDE;
-    const int base_f = index * stride_f;
-    const float src_u0 = version >= STASIS_RENDER_V5_VERSION ? sprite_f32[base_f + 4] : 0.0f;
-    const float src_v0 = version >= STASIS_RENDER_V5_VERSION ? sprite_f32[base_f + 5] : 0.0f;
-    const float src_u1 = version >= STASIS_RENDER_V5_VERSION ? sprite_f32[base_f + 6] : 1.0f;
-    const float src_v1 = version >= STASIS_RENDER_V5_VERSION ? sprite_f32[base_f + 7] : 1.0f;
+    const int base_f = index * STASIS_RENDER_SPRITE_F32_STRIDE;
+    const float src_u0 = sprite_f32[base_f + 4];
+    const float src_v0 = sprite_f32[base_f + 5];
+    const float src_u1 = sprite_f32[base_f + 6];
+    const float src_v1 = sprite_f32[base_f + 7];
     stasis_gfx_draw_sprite_internal(
         sprite_i32[base_i + 0],
         sprite_f32[base_f + 0],
@@ -5264,7 +5262,6 @@ static void stasis_draw_ordered_sprite(
 }
 static void stasis_draw_ordered_text(
     const int32_t* cmd_i32,
-    int32_t version,
     const float* cmd_f32,
     const uint8_t* cmd_u8,
     int32_t text_bytes_used,
@@ -5277,7 +5274,7 @@ static void stasis_draw_ordered_text(
     const int byte_len = cmd_i32[base_i + 2];
     if (font <= 0) return;
 
-    const int base_f = stasis_render_f_text_base(version) +
+    const int base_f = STASIS_RENDER_F_TEXT_BASE +
         index * STASIS_RENDER_TEXT_F32_STRIDE;
     const float x = cmd_f32[base_f + 0];
     const float y = cmd_f32[base_f + 1];
@@ -5343,7 +5340,7 @@ static bool stasis_render_trace_is_enabled(void) {
     return g_render_trace_enabled != 0;
 }
 
-static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     /* Start before validation so a valid frame's host replay includes command
      * validation and decoding. Rejected frames return before publishing a
      * performance sample. */
@@ -5428,17 +5425,10 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
     }
 
-    const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
-    const int32_t clip_count = version >= STASIS_RENDER_V6_VERSION
-        ? stasis_render_clamp_count(
-            cmd_i32[STASIS_RENDER_I_CLIP_COUNT], gfx_cmd_max_clips)
-        : 0;
-    const int32_t max_order = version >= STASIS_RENDER_V6_VERSION
-        ? STASIS_RENDER_MAX_ORDER : STASIS_RENDER_V5_MAX_ORDER;
-    const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
-        ? stasis_render_clamp_count(
-            cmd_i32[STASIS_RENDER_I_ORDER_COUNT], max_order)
-        : 0;
+    const int32_t clip_count = stasis_render_clamp_count(
+        cmd_i32[STASIS_RENDER_I_CLIP_COUNT], gfx_cmd_max_clips);
+    const int32_t order_count = stasis_render_clamp_count(
+        cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER);
     if (order_count > 0) {
         int32_t pending_kind = 0;
         for (int32_t order_index = 0; order_index < order_count; order_index++) {
@@ -5469,13 +5459,13 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
                 pending_kind = kind;
             } else if (kind == STASIS_RENDER_ORDER_SPRITE && index < sprite_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
-                stasis_draw_ordered_sprite(cmd_i32, cmd_f32, version, index);
+                stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
                 pending_kind = kind;
             } else if (kind == STASIS_RENDER_ORDER_TEXT && index < text_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
                 if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
                 stasis_draw_ordered_text(
-                    cmd_i32, version, cmd_f32, cmd_u8, text_bytes_used, index);
+                    cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
                 pending_kind = kind;
             } else if (kind == STASIS_RENDER_ORDER_RECT && index < rect_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
@@ -5495,11 +5485,11 @@ static void stasis_gfx_submit_v2(int32_t* cmd_i32, const float* cmd_f32, const u
             stasis_draw_ordered_rect(cmd_f32, index);
         }
         for (int32_t index = 0; index < sprite_count; index++) {
-            stasis_draw_ordered_sprite(cmd_i32, cmd_f32, version, index);
+            stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
         }
         if (sprite_count > 0) flush_ordered_sprites();
         for (int32_t index = 0; index < text_count; index++) {
-            stasis_draw_ordered_text(cmd_i32, version, cmd_f32, cmd_u8, text_bytes_used, index);
+            stasis_draw_ordered_text(cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
         }
     }
 
@@ -5548,11 +5538,11 @@ STASIS_EXPORT int stasis_test_get_sprite_state(int32_t handle, int32_t* out_i32,
 }
 
 STASIS_EXPORT void stasis_gfx_submit(int32_t* cmd_i32, const float* cmd_f32) {
-    stasis_gfx_submit_v2(cmd_i32, cmd_f32, NULL);
+    stasis_gfx_submit_frame(cmd_i32, cmd_f32, NULL);
 }
 
 STASIS_EXPORT void stasis_gfx_submit_u8(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
-    stasis_gfx_submit_v2(cmd_i32, cmd_f32, cmd_u8);
+    stasis_gfx_submit_frame(cmd_i32, cmd_f32, cmd_u8);
 }
 
 static SpriteEntry* sprite_get(int handle) {

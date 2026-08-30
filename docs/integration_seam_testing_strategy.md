@@ -30,7 +30,7 @@ Stasis source
   -> Rust parse/check/lower
   -> Cranelift JIT or AOT
   -> registered host/global ABI
-  -> gfx_cmd v5 buffers (legacy v2-v4 readers remain supported)
+  -> current gfx_cmd buffers (all downstream consumers advance in lockstep)
   -> native/Java command interpreter
   -> SDL or GLES platform adapter
   -> desktop window or Android surface

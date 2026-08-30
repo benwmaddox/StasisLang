@@ -329,7 +329,7 @@ fn run_frame(
     assert_metrics(sample, minimized, resized, host_i32, host_f32);
     assert_eq!(jit.execute_i32_noarg_by_name("render"), Ok(0));
     let trace = unsafe {
-        stasis_dynload::stasis_jit_render_v2_trace(
+        stasis_dynload::stasis_jit_render_trace(
             global_path_hash("gfx_cmd_i32"),
             gfx_i32.len() as i32,
             global_path_hash("gfx_cmd_f32"),

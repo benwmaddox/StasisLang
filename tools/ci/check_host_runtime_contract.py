@@ -115,7 +115,7 @@ def check(
     failures += _compare_map(
         "render_command.constants", render["constants"], render_actual, abi.RENDER_HEADER
     )
-    accepted = [render_actual[f"STASIS_RENDER_V{version}_VERSION"] for version in range(2, 7)]
+    accepted = [render_actual["STASIS_RENDER_VERSION"]]
     if render["accepted_versions"] != accepted:
         failures.append(Failure("render_command.accepted_versions", abi.RENDER_HEADER.as_posix(), accepted, render["accepted_versions"]))
 

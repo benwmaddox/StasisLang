@@ -1,13 +1,13 @@
 # GPU instancing for large Stasis scenes
 
-Status: investigation only. This report does not change the v5 graphics command
+Status: investigation only. This report does not change the current graphics command
 ABI or renderer behavior. It records current paths, a measured Web baseline,
 and a staged design for adjacent-compatible batching.
 
 ## Executive recommendation
 
 Use instancing first for long runs of rectangles or sprites that are already
-adjacent in the v5 order stream and have the same GPU state. Keep source order
+adjacent in the current order stream and have the same GPU state. Keep source order
 and source-over blending semantics; do not sort transparent instances in the
 first implementation. A batch key includes material, atlas page, sampler and
 filter, blend mode, clip/scissor, and shader variant. A different key, or any
@@ -15,20 +15,20 @@ intervening command, ends the run.
 
 The first production slice should add a private host-side GPU path behind the
 existing command interpreter. It accepts current typed lanes, builds a
-transient instance buffer, and falls back per run. The v5 layout remains the
+transient instance buffer, and falls back per run. The current layout remains the
 source of truth and no guest-to-GPU pointer ownership is introduced. Add an
 explicit opaque mode only in a later ABI version after it has a separate order
 contract; never infer opacity from alpha alone.
 
 ## What exists today
 
-The v5 command stream in `src/stdlib/internal/gfx_cmd.stasis` has a 32-i32
+The current command stream in `src/stdlib/internal/gfx_cmd.stasis` has a 32-i32
 header, separate typed arrays, and an order array at i32 18,464. Lines and
 rectangles share an 8-f32 geometry stride; sprites use three i32 values
 (`handle`, rotation degrees, alpha) and eight f32 values (`x`, `y`, `w`, `h`,
 normalized `u0`, `v0`, `u1`, `v1`). An empty order stream means category order
 line, rectangle, sprite, text. Otherwise the order array is authoritative.
-The order capacity is 16,144, shared line+rectangle geometry capacity is 10,000,
+The order capacity is 16,656, shared line+rectangle geometry capacity is 10,000,
 and sprite capacity is 4,096.
 
 The current implementations map as follows:

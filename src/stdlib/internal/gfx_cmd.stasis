@@ -1,17 +1,15 @@
 import "../stdlib.stasis";
 
-// Graphics command buffer (v6)
+// Graphics command buffer (current)
 //
 // Policy:
 // - Ordering: line, rectangle, sprite, text, and ordered clip calls append to one bounded order stream.
 // - Geometry: lines grow forward and rectangles grow backward in one fixed arena.
-// - Compatibility: an empty order stream uses lines -> rectangles -> sprites -> text order.
+// - Empty order streams use lines -> rectangles -> sprites -> text order.
 // - Coordinates: logical top-left pixels from the HostFrame display contract.
 
 const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 
-const GFX_CMD_V5_VERSION: i32 = 5;
-const GFX_CMD_V6_VERSION: i32 = 6;
 const GFX_CMD_VERSION: i32 = 6;
 
 // i32 header indices

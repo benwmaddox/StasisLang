@@ -238,7 +238,7 @@ fn manifest_assets_survive_wrong_cwd_and_render_sprite_direct_and_cached_text() 
     assert_eq!(gfx_i32[12322], 6, "direct text byte length");
     assert_eq!(gfx_i32[12324], -cached_handle, "cached text handle tag");
     let trace = unsafe {
-        stasis_dynload::stasis_jit_render_v2_trace(
+        stasis_dynload::stasis_jit_render_trace(
             global_path_hash("gfx_cmd_i32"),
             gfx_i32.len() as i32,
             global_path_hash("gfx_cmd_f32"),

@@ -66,7 +66,7 @@ def render_contract_version(root: pathlib.Path) -> int:
             re.MULTILINE,
         )
     )
-    current = "STASIS_RENDER_CURRENT_VERSION"
+    current = "STASIS_RENDER_VERSION"
     resolving: set[str] = set()
 
     def resolve(name: str) -> int:

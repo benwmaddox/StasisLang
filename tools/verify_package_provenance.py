@@ -11,7 +11,6 @@ import pathlib
 
 COMMAND_BUFFER_NAME = "gfx_cmd"
 CURRENT_COMMAND_BUFFER_VERSION = 6
-LEGACY_COMMAND_BUFFER_VERSION = 4
 ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
 ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
 ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
@@ -71,9 +70,7 @@ def verify_asset_package_identities(
             )
 
 
-def validate_command_buffer(
-    parser: argparse.ArgumentParser, manifest: dict, *, allow_legacy: bool
-) -> None:
+def validate_command_buffer(parser: argparse.ArgumentParser, manifest: dict) -> None:
     command_buffer = manifest.get("command_buffer")
     if not isinstance(command_buffer, dict):
         parser.error("provenance is missing command_buffer contract")
@@ -85,23 +82,9 @@ def validate_command_buffer(
     version = command_buffer.get("version")
     if type(version) is int and version == CURRENT_COMMAND_BUFFER_VERSION:
         return
-    if (
-        allow_legacy
-        and type(version) is int
-        and version == LEGACY_COMMAND_BUFFER_VERSION
-        and manifest.get("development_build") is False
-        and manifest.get("dirty_state") is False
-        and isinstance(manifest.get("release_tag"), str)
-        and (
-            manifest["release_tag"].startswith("v")
-            or manifest["release_tag"].startswith("nightly-")
-        )
-    ):
-        return
     parser.error(
         "unsupported gfx_cmd command_buffer schema: "
         f"expected current {CURRENT_COMMAND_BUFFER_VERSION}"
-        + (f" or official legacy {LEGACY_COMMAND_BUFFER_VERSION}" if allow_legacy else "")
         + f", found {version!r}"
     )
 
@@ -250,8 +233,8 @@ def main() -> int:
     packaged = json.loads(
         (args.package_root / "stasis_provenance.json").read_text(encoding="utf-8")
     )
-    validate_command_buffer(parser, release, allow_legacy=True)
-    validate_command_buffer(parser, packaged, allow_legacy=True)
+    validate_command_buffer(parser, release)
+    validate_command_buffer(parser, packaged)
     if release != packaged:
         parser.error("packaged provenance does not exactly match the release manifest")
     verify_asset_package_identities(parser, args.package_root)

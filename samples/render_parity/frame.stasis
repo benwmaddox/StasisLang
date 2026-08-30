@@ -1,7 +1,7 @@
 const PARITY_WINDOW_W: i32 = 640;
 const PARITY_WINDOW_H: i32 = 360;
 const PARITY_GFX_MAGIC: i32 = 1196967473;
-const PARITY_GFX_VERSION: i32 = 4;
+const PARITY_GFX_VERSION: i32 = 6;
 const PARITY_GFX_FLAG_CLEAR: i32 = 1;
 const PARITY_GFX_FLAG_PRESENT: i32 = 2;
 const PARITY_GFX_I_SPRITE_BASE: i32 = 32;
@@ -10,7 +10,7 @@ const PARITY_GFX_I_ORDER_BASE: i32 = 18464;
 const PARITY_GFX_ORDER_SCALE: i32 = 16384;
 const PARITY_GFX_F_SPRITE_BASE: i32 = 80004;
 const PARITY_GFX_F_RECT_REVERSE_BASE: i32 = 79996;
-const PARITY_GFX_F_TEXT_BASE: i32 = 96388;
+const PARITY_GFX_F_TEXT_BASE: i32 = 112772;
 
 function parity_add_sprite(cmd_i32: i32[], handle: i32, rotation: i32, alpha: i32): void {
     let index: i32 = cmd_i32[4];
@@ -22,11 +22,15 @@ function parity_add_sprite(cmd_i32: i32[], handle: i32, rotation: i32, alpha: i3
 }
 
 function parity_add_sprite_geometry(cmd_f32: f32[], index: i32, x: f32, y: f32, w: f32, h: f32): void {
-    let base_f: i32 = PARITY_GFX_F_SPRITE_BASE + index * 4;
+    let base_f: i32 = PARITY_GFX_F_SPRITE_BASE + index * 8;
     cmd_f32[base_f] = x;
     cmd_f32[base_f + 1] = y;
     cmd_f32[base_f + 2] = w;
     cmd_f32[base_f + 3] = h;
+    cmd_f32[base_f + 4] = 0.0;
+    cmd_f32[base_f + 5] = 0.0;
+    cmd_f32[base_f + 6] = 1.0;
+    cmd_f32[base_f + 7] = 1.0;
 }
 
 function parity_add_direct_label(cmd_i32: i32[], cmd_f32: f32[], cmd_u8: u8[], font: i32): void {
@@ -134,7 +138,7 @@ function build_parity_frame(
     parity_add_direct_label(cmd_i32, cmd_f32, cmd_u8, font);
     parity_add_cached_label(cmd_i32, cmd_f32, font, cached_label);
 
-    // Exercise every V4 category transition in one deterministic order stream.
+    // Exercise every category transition in one deterministic order stream.
     cmd_i32[22] = 10;
     cmd_i32[PARITY_GFX_I_ORDER_BASE + 0] = PARITY_GFX_ORDER_SCALE * 2 + 0;
     cmd_i32[PARITY_GFX_I_ORDER_BASE + 1] = PARITY_GFX_ORDER_SCALE * 4 + 0;

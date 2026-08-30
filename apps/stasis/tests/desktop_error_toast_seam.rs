@@ -4,9 +4,11 @@ use std::time::Instant;
 mod play_error_toasts;
 
 use play_error_toasts::{PlayErrorToasts, MAX_VISIBLE_TOASTS, TOAST_LIFETIME};
+use stasis_dynload::{
+    STASIS_RENDER_F32_COUNT, STASIS_RENDER_I32_COUNT, STASIS_RENDER_MAGIC, STASIS_RENDER_U8_COUNT,
+    STASIS_RENDER_VERSION,
+};
 
-const MAGIC: i32 = 0x4758_4631;
-const VERSION: i32 = 5;
 const I_LINE_COUNT: usize = 3;
 const I_SPRITE_COUNT: usize = 4;
 const I_TEXT_COUNT: usize = 7;
@@ -16,11 +18,15 @@ const I_ORDER_COUNT: usize = 22;
 const I_ORDER_BASE: usize = 18_464;
 
 fn valid_buffers() -> (Vec<i32>, Vec<f32>, Vec<u8>) {
-    let mut i32s = vec![0; 34_608];
-    i32s[0] = MAGIC;
-    i32s[1] = VERSION;
+    let mut i32s = vec![0; STASIS_RENDER_I32_COUNT];
+    i32s[0] = STASIS_RENDER_MAGIC;
+    i32s[1] = STASIS_RENDER_VERSION;
     i32s[I_LOGICAL_W] = 800;
-    (i32s, vec![0.0; 125_060], vec![0; 65_536])
+    (
+        i32s,
+        vec![0.0; STASIS_RENDER_F32_COUNT],
+        vec![0; STASIS_RENDER_U8_COUNT],
+    )
 }
 
 #[test]

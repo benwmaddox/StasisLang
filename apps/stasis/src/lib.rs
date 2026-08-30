@@ -5764,18 +5764,9 @@ mod tests {
     fn shipping_renderers_share_one_versioned_sdl_command_process() {
         let runtime_cmake = STASIS_RUNTIME_CMAKE.replace("\r\n", "\n");
         for required in [
-            "STASIS_RENDER_V2_MAGIC 0x47584631",
-            "STASIS_RENDER_V2_VERSION 2",
-            "STASIS_RENDER_V3_VERSION 3",
-            "STASIS_RENDER_V4_VERSION 4",
-            "STASIS_RENDER_V5_VERSION 5",
-            "STASIS_RENDER_V6_VERSION 6",
-            "STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V6_VERSION",
-            "STASIS_RENDER_V2_TRACE_VERSION 2",
-            "STASIS_RENDER_V3_TRACE_VERSION 3",
-            "STASIS_RENDER_V4_TRACE_VERSION 4",
-            "STASIS_RENDER_V5_TRACE_VERSION 5",
-            "STASIS_RENDER_V6_TRACE_VERSION 6",
+            "STASIS_RENDER_MAGIC 0x47584631",
+            "STASIS_RENDER_VERSION 6",
+            "STASIS_RENDER_TRACE_VERSION 6",
             "STASIS_RENDER_I_ORDER_BASE",
             "STASIS_RENDER_I_RECT_COUNT",
             "STASIS_RENDER_MAX_ORDER",
@@ -5789,7 +5780,6 @@ mod tests {
             "stasis_render_validation_name",
             "stasis_render_is_valid",
             "stasis_render_trace",
-            "stasis_render_v2_trace",
         ] {
             assert!(
                 STASIS_RENDER_CONTRACT_HEADER.contains(required),

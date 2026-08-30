@@ -41,6 +41,31 @@ class RuntimeAbiContractTests(unittest.TestCase):
         self.assertEqual("passed", evidence["status"])
         self.assertGreater(evidence["checks"], 100)
 
+    def test_downstream_legacy_render_token_is_rejected(self):
+        failures, _ = self.run_with(
+            contract.RENDER_PARITY_TRACE,
+            'function @extern("stasis_jit_render_trace")',
+            'function @extern("stasis_jit_render_v2_trace")',
+        )
+        failure = next(
+            failure for failure in failures
+            if failure.field == "render_abi.legacy_token"
+        )
+        self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+        self.assertEqual("samples/render_parity/trace.stasis", failure.consumer)
+
+    def test_replay_trace_requires_current_capacities(self):
+        failures, _ = self.run_with(
+            contract.JIT_AOT_REPLAY_FIXTURE,
+            "gfx_cmd_f32, 126084,",
+            "gfx_cmd_f32, 125060,",
+        )
+        failure = next(
+            failure for failure in failures
+            if failure.field == "render_trace.current_capacities"
+        )
+        self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+
     def test_desktop_manifest_fixture_requires_canonical_gfx_import(self):
         canonical = 'import "../../../src/stdlib/internal/gfx_cmd.stasis";'
         mutations = (
@@ -141,8 +166,8 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_it012_semantic_oracle_requires_current_abi_and_trace(self):
         mutations = (
             (
-                "STASIS_RENDER_CURRENT_VERSION;",
-                "STASIS_RENDER_V5_VERSION;",
+                "STASIS_RENDER_VERSION;",
+                "5;",
                 "it012.semantic_oracle.version",
             ),
             (
@@ -183,10 +208,10 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_java_version_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.JAVA_RENDERER,
-            "static final int RENDER_V6_VERSION = 6;",
-            "static final int RENDER_V6_VERSION = 5;",
+            "static final int RENDER_VERSION = 6;",
+            "static final int RENDER_VERSION = 5;",
         )
-        self.assertTrue(any(failure.field == "STASIS_RENDER_CURRENT_VERSION" for failure in failures))
+        self.assertTrue(any(failure.field == "STASIS_RENDER_VERSION" for failure in failures))
 
     def test_web_magic_drift_reports_contract_provenance(self):
         failures, _ = self.run_with(
@@ -197,7 +222,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
         message = "\n".join(map(str, failures))
         self.assertIn("producer=runtime/stasis_render_contract.h", message)
         self.assertIn("consumer=runtime/web/game.js", message)
-        self.assertIn("field=STASIS_RENDER_V2_MAGIC", message)
+        self.assertIn("field=STASIS_RENDER_MAGIC", message)
         self.assertIn("expected=1196967473 actual=1196967474", message)
 
     def test_web_layout_drift_reports_field_and_values(self):
@@ -214,9 +239,9 @@ class RuntimeAbiContractTests(unittest.TestCase):
 
     def test_web_current_version_capacity_stride_and_offset_drift(self):
         mutations = (
-            ("const GFX_CMD_CURRENT_VERSION = GFX_CMD_V6_VERSION;",
-             "const GFX_CMD_CURRENT_VERSION = GFX_CMD_V4_VERSION;",
-             "STASIS_RENDER_CURRENT_VERSION", 6, 4),
+            ("const GFX_CMD_VERSION = 6;",
+             "const GFX_CMD_VERSION = 4;",
+             "STASIS_RENDER_VERSION", 6, 4),
             ("const GFX_MAX_TEXT = 2048;", "const GFX_MAX_TEXT = 2047;",
              "STASIS_RENDER_MAX_TEXT", 2048, 2047),
             ("const GFX_SPRITE_STRIDE_F32 = 8;", "const GFX_SPRITE_STRIDE_F32 = 7;",
@@ -236,14 +261,14 @@ class RuntimeAbiContractTests(unittest.TestCase):
         mutations = (
             (contract.PACKAGE_PROVENANCE, "CURRENT_COMMAND_BUFFER_VERSION = 6",
              "CURRENT_COMMAND_BUFFER_VERSION = 5", "tools/verify_package_provenance.py"),
-            (contract.TOOLCHAIN, "GFX_CMD_CURRENT_VERSION: i64 = 6",
-             "GFX_CMD_CURRENT_VERSION: i64 = 5", "apps/stasis/src/toolchain_cli.rs"),
+            (contract.TOOLCHAIN, "GFX_CMD_VERSION: i64 = 6",
+             "GFX_CMD_VERSION: i64 = 5", "apps/stasis/src/toolchain_cli.rs"),
         )
         for path, old, new, consumer in mutations:
             failures, _ = self.run_with(path, old, new)
             failure = next(
                 failure for failure in failures
-                if failure.field == "STASIS_RENDER_CURRENT_VERSION"
+                if failure.field == "STASIS_RENDER_VERSION"
                 and failure.consumer == consumer
             )
             self.assertEqual(6, failure.expected)

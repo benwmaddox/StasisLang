@@ -1,7 +1,6 @@
 # Render parity gate
 
-`samples/render_parity` is the framework-owned legacy gfx_cmd schema-v4
-conformance scene. It
+`samples/render_parity` is the framework-owned current gfx_cmd conformance scene. It
 does not depend on a game. One frame contains a clear, two overlapping lines,
 one translucent filled rectangle, the procedural fallback sprite, opaque and translucent SVGs, a full-canvas SVG,
 a rotated/scaled sprite, direct UTF-8 text, cached text, and present.
@@ -27,8 +26,7 @@ cargo test -p stasis_compiler parity_corpus_covers_shared_lowering_shapes -- --n
 
 The `renderer_command_trace` case compiles
 `samples/render_parity/trace.stasis`. It intentionally asserts the exact
-legacy gfx_cmd v4 trace
-`1390729377` as the unsigned and Stasis `i32` trace result, links and executes the AOT object where the host linker is
+current gfx_cmd trace recorded in `capture_manifest.json` as the unsigned and Stasis `i32` trace result, links and executes the AOT object where the host linker is
 available, and requires both results to match. Display and density metadata are
 present in the fixture but intentionally excluded from the backend-independent
 trace.
@@ -99,6 +97,6 @@ current backend and generations in the same bounded operation. It never accepts
 an existing image to relabel after the fact.
 All app processes must be force-stopped after device testing.
 
-The optional legacy desktop GL build uses the same fixture and `portable`
+The optional desktop GL build uses the same fixture and `portable`
 profile. Any expected backend difference belongs in a separately named capture
 profile with an explicit reason; command traces must remain exact.

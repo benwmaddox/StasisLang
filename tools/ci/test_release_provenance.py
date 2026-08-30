@@ -46,31 +46,28 @@ class ReleaseProvenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "manifest hash mismatch"):
                 verify_asset_package_identities(Parser(), package)
 
-    def test_render_contract_version_resolves_current_header_alias(self):
+    def test_render_contract_version_reads_current_header_constant(self):
         self.assertEqual(6, render_contract_version(ROOT))
 
-    def test_render_contract_version_rejects_missing_or_non_numeric_alias(self):
+    def test_render_contract_version_rejects_missing_or_non_numeric_constant(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             runtime = root / "runtime"
             runtime.mkdir()
             header = runtime / "stasis_render_contract.h"
             header.write_text(
-                "#define STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V5_VERSION\n",
+                "#define STASIS_RENDER_CURRENT_VERSION 6\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "missing STASIS_RENDER_V5_VERSION"):
+            with self.assertRaisesRegex(ValueError, "missing STASIS_RENDER_VERSION"):
                 render_contract_version(root)
             header.write_text(
-                "#define STASIS_RENDER_V5_VERSION STASIS_RENDER_V6_VERSION\n"
-                "#define STASIS_RENDER_V6_VERSION 6\n"
-                "#define STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V5_VERSION\n",
+                "#define STASIS_RENDER_VERSION 6\n",
                 encoding="utf-8",
             )
             self.assertEqual(6, render_contract_version(root))
             header.write_text(
-                "#define STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V5_VERSION\n"
-                "#define STASIS_RENDER_V5_VERSION not_numeric\n",
+                "#define STASIS_RENDER_VERSION not_numeric\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "not a numeric alias"):
@@ -389,11 +386,9 @@ class ReleaseProvenanceTests(unittest.TestCase):
             (package / "stasis_provenance.json").write_text(
                 json.dumps(legacy), encoding="utf-8"
             )
-            self.assertEqual(
-                subprocess.run(command, check=False).returncode,
-                0,
-                "official legacy gfx_cmd schema 4 must remain accepted",
-            )
+            legacy_failed = subprocess.run(command, check=False, capture_output=True, text=True)
+            self.assertNotEqual(legacy_failed.returncode, 0)
+            self.assertIn("expected current 6", legacy_failed.stderr)
             unsupported = dict(legacy)
             unsupported["command_buffer"] = {"name": "other_cmd", "version": 9}
             (release / "stasis_release_provenance.json").write_text(

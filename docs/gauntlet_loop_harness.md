@@ -310,7 +310,7 @@ Primitive rendering remains appropriate for basic UI, simple icons,
 selection/range overlays, and deterministic fallbacks. ImageGen remains optional
 for work that is purely logic or basic interface geometry.
 
-The render-v3 command stream preserves game submission order across line
+The current render command stream preserves game submission order across line
 primitives, sprites, and text. An opaque full-board sprite should therefore be
 submitted before gameplay primitives and overlays when it is a background.
 Agents still request isolated foreground subjects on flat removable backgrounds
