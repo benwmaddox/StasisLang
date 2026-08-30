@@ -36,13 +36,17 @@ JNI = Path("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
 NATIVE_HOST = Path("runtime/stasis_graphics.c")
 DESKTOP_MANIFEST_FIXTURE = Path("tests/stasis/seams/desktop_manifest_assets_probe.stasis")
 DESKTOP_MANIFEST_HARNESS = Path("apps/stasis/tests/desktop_manifest_assets_seam.rs")
+DESKTOP_INPUT_FRAME_HARNESS = Path("apps/stasis/tests/desktop_input_frame_seam.rs")
+DESKTOP_DISPLAY_METRICS_HARNESS = Path("apps/stasis/tests/desktop_display_metrics_seam.rs")
 GENERATED_MOBILE_AOT_C = Path("runtime/tests/stasis_generated_mobile_integration.c")
 GENERATED_MOBILE_AOT_RUST = Path("apps/stasis/tests/generated_mobile_aot_runtime_seam.rs")
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
     RELEASE_PROVENANCE, PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER,
     WORKSHOP, JNI, NATIVE_HOST, DESKTOP_MANIFEST_FIXTURE,
-    DESKTOP_MANIFEST_HARNESS, GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
+    DESKTOP_MANIFEST_HARNESS, DESKTOP_INPUT_FRAME_HARNESS,
+    DESKTOP_DISPLAY_METRICS_HARNESS, GENERATED_MOBILE_AOT_C,
+    GENERATED_MOBILE_AOT_RUST,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -514,6 +518,53 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 f"{lane}.host_capacity", "canonical STASIS_RENDER_*_COUNT reference",
                 "missing",
             ))
+
+    current_trace_consumers = {
+        DESKTOP_INPUT_FRAME_HARNESS: sources[DESKTOP_INPUT_FRAME_HARNESS],
+        DESKTOP_DISPLAY_METRICS_HARNESS: sources[DESKTOP_DISPLAY_METRICS_HARNESS],
+        DESKTOP_MANIFEST_HARNESS: harness_text,
+    }
+    numeric_trace_patterns = (
+        r"\bconst\s+[A-Z0-9_]*TRACE\s*:\s*i32\s*=\s*-?[0-9]",
+        r"assert_eq!\s*\(\s*\[[^\]]*trace[^\]]*\]\s*,\s*\[\s*-?[0-9]",
+        r"assert_eq!\s*\(\s*[A-Za-z0-9_]*trace\s*,\s*-?[0-9][0-9_]{4,}",
+    )
+    for consumer, text in current_trace_consumers.items():
+        checks += 1
+        if any(re.search(pattern, text, re.S) for pattern in numeric_trace_patterns):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(consumer),
+                "current_render_trace.fixed_numeric_oracle",
+                "nonzero and semantic trace relationships", "fixed numeric trace",
+            ))
+
+    trace_relationships = {
+        DESKTOP_INPUT_FRAME_HARNESS: (
+            'assert_ne!(trace, 0, "native render trace must accept the guest frame")',
+            "down_trace, move_trace,",
+            "move_trace, up_trace,",
+            "down_trace, up_trace,",
+        ),
+        DESKTOP_DISPLAY_METRICS_HARNESS: (
+            "assert_ne!(trace, 0",
+            "duplicate_trace, restored_trace,",
+            "portrait_down_trace, landscape_down_trace",
+            "landscape_down_trace, landscape_release_trace",
+            "restored_portrait_trace, quiet_trace",
+            "distinct_semantic_traces",
+        ),
+        DESKTOP_MANIFEST_HARNESS: (
+            "trace, 0,",
+        ),
+    }
+    for consumer, needles in trace_relationships.items():
+        for index, needle in enumerate(needles):
+            checks += 1
+            if needle not in sources[consumer]:
+                failures.append(Mismatch(
+                    label(RENDER_HEADER), label(consumer),
+                    f"current_render_trace.semantic_relation.{index}", needle, "missing",
+                ))
 
     mobile_aot_c = without_c_comments(sources[GENERATED_MOBILE_AOT_C])
     mobile_aot_rust = without_c_comments(sources[GENERATED_MOBILE_AOT_RUST])

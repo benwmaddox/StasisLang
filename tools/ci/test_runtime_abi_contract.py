@@ -110,6 +110,34 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
 
+    def test_current_desktop_seams_reject_fixed_trace_oracles(self):
+        mutations = (
+            (
+                contract.DESKTOP_INPUT_FRAME_HARNESS,
+                "use serde_json::json;",
+                "use serde_json::json;\nconst INPUT_TRACE: i32 = 1845463013;",
+            ),
+            (
+                contract.DESKTOP_DISPLAY_METRICS_HARNESS,
+                "use serde_json::json;",
+                "use serde_json::json;\nconst ODD_TRACE: i32 = -1172930515;",
+            ),
+            (
+                contract.DESKTOP_MANIFEST_HARNESS,
+                "use serde_json::json;",
+                "use serde_json::json;\nconst RENDER_TRACE: i32 = 626372452;",
+            ),
+        )
+        for path, old, new in mutations:
+            with self.subTest(path=path):
+                failures, _ = self.run_with(path, old, new)
+                failure = next(
+                    failure for failure in failures
+                    if failure.field == "current_render_trace.fixed_numeric_oracle"
+                )
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(path.as_posix(), failure.consumer)
+
     def test_it012_semantic_oracle_requires_current_abi_and_trace(self):
         mutations = (
             (
