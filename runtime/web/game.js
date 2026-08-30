@@ -1015,9 +1015,19 @@
       rasterContext.clearRect?.(0, 0, targetWidth, targetHeight);
       rasterContext.imageSmoothingEnabled = true;
       if ("imageSmoothingQuality" in rasterContext) rasterContext.imageSmoothingQuality = "high";
-      const scale = Math.min(1, targetWidth / sourceWidth, targetHeight / sourceHeight);
-      const drawWidth = Math.max(1, Math.min(sourceWidth, Math.round(sourceWidth * scale)));
-      const drawHeight = Math.max(1, Math.min(sourceHeight, Math.round(sourceHeight * scale)));
+      const logicalWidth = finitePositive(request.logicalWidth, targetWidth);
+      const logicalHeight = finitePositive(request.logicalHeight, targetHeight);
+      const physicalPerLogical = Math.min(
+        targetWidth / logicalWidth,
+        targetHeight / logicalHeight
+      );
+      const scale = Math.min(
+        physicalPerLogical,
+        targetWidth / sourceWidth,
+        targetHeight / sourceHeight
+      );
+      const drawWidth = Math.max(1, Math.min(targetWidth, Math.round(sourceWidth * scale)));
+      const drawHeight = Math.max(1, Math.min(targetHeight, Math.round(sourceHeight * scale)));
       rasterContext.drawImage(image, (targetWidth - drawWidth) / 2, (targetHeight - drawHeight) / 2,
         drawWidth, drawHeight);
       rasterContext.restore?.();
@@ -1106,7 +1116,12 @@
     };
     cached.promise = rasterSprite(request).then(result => {
       cached.result = result;
-      cached.byteLength = (result.width || 0) * (result.height || 0) * 4;
+      cached.byteLength = (result.width || 0) * (result.height || 0) * 4
+        + (result.sourceDrawableOwned
+          && result.sourceDrawable
+          && result.sourceDrawable !== result.drawable
+          ? (result.sourceDrawableWidth || 0) * (result.sourceDrawableHeight || 0) * 4
+          : 0);
       spriteCacheBytes += cached.byteLength;
       disposeSpriteCacheEntry(cached);
       return result;

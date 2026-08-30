@@ -339,6 +339,7 @@ test("optimized sprite preparation resizes a Blob without constructing or decodi
   assert.equal(runtime.body.dataset.assetDecodedWidth, "16");
   assert.equal(runtime.body.dataset.assetDecodedHeight, "16");
   assert.equal(runtime.body.dataset.assetDecodedBytes, String(16 * 16 * 4));
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4));
   assert.equal(bitmaps[0].closed, false);
 });
 
@@ -402,9 +403,11 @@ test("optimized contained sprite sheets use the unpadded bitmap for Canvas2D par
   assert.equal(runtime.body.dataset.assetPreparedHeight, "16");
   assert.equal(runtime.body.dataset.assetDecodedWidth, "16");
   assert.equal(runtime.body.dataset.assetDecodedHeight, "8");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String((16 * 16 + 16 * 8) * 4));
 
   runtime.env.gfx_release_sprite(1);
   assert.equal(bitmap.closeCount, 1);
+  assert.equal(runtime.body.dataset.assetCacheBytes, "0");
   runtime.env.gfx_release_sprite(1);
   assert.equal(bitmap.closeCount, 1);
 });
@@ -683,6 +686,33 @@ test("raster source underprovision is explicit instead of browser upscaling", as
   assert.equal(runtime.body.dataset.assetDecodedBytes, String(8 * 4 * 4));
   assert.equal(runtime.body.dataset.assetSourceWidth, "8");
   assert.equal(runtime.body.dataset.assetSourceHeight, "4");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4));
+});
+
+test("underprovisioned raster content keeps logical size across density tiers", async () => {
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16], dpr: 1,
+    imageExtent: [8, 4], assets: { "": "density.png" },
+    assetMetadata: { "": { encoding: "png", prepared_width: 8, prepared_height: 4 } },
+    createImageBitmap: () => { throw new Error("PNG source must not be enlarged"); }
+  });
+  runtime.frame();
+  assert.deepEqual(runtime.rasterStats.images[0].slice(1), [4, 6, 8, 4]);
+  assert.equal(runtime.body.dataset.assetFallback, "source-underprovisioned");
+
+  runtime.rasterStats.images.length = 0;
+  runtime.contextObject.devicePixelRatio = 2;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(runtime.rasterStats.images[0].slice(1), [8, 12, 16, 8]);
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "32");
+  assert.equal(runtime.body.dataset.assetPreparedHeight, "32");
+  assert.equal(runtime.body.dataset.assetDecodedWidth, "8");
+  assert.equal(runtime.body.dataset.assetDecodedHeight, "4");
+  assert.equal(runtime.body.dataset.assetFallback, "source-underprovisioned");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(32 * 32 * 4));
 });
 
 test("underprovisioned sprite sheets use raw source regions for Canvas2D", async () => {
