@@ -46,6 +46,7 @@ PLAY_ERROR_TOASTS = Path("apps/stasis/src/play_error_toasts.rs")
 RENDER_PARITY_FRAME = Path("samples/render_parity/frame.stasis")
 RENDER_PARITY_TRACE = Path("samples/render_parity/trace.stasis")
 JIT_AOT_REPLAY_FIXTURE = Path("tests/stasis/seams/jit_aot_host_replay_probe.stasis")
+VSCODE_RENDER_FIXTURE = Path("vscode-stasis/test/fixture/src/main.stasis")
 RENDER_DOWNSTREAM = (
     GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN, RELEASE_PROVENANCE,
     PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER, JNI, NATIVE_HOST,
@@ -54,7 +55,7 @@ RENDER_DOWNSTREAM = (
     GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
     DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
-    JIT_AOT_REPLAY_FIXTURE,
+    JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE,
 )
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
@@ -65,7 +66,7 @@ REQUIRED = (
     GENERATED_MOBILE_AOT_RUST, DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
     PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
-    JIT_AOT_REPLAY_FIXTURE,
+    JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -420,6 +421,11 @@ def literal_array(text: str, name: str) -> int | str:
     return "missing"
 
 
+def literal_index_write(text: str, name: str, index: int) -> int | str:
+    match = re.search(rf"\b{name}\s*\[\s*{index}\s*\]\s*=\s*([0-9_]+)\s*;", text)
+    return int(match.group(1).replace("_", "")) if match else "missing"
+
+
 def array_matches(actual: int | str, expected: int, name: str) -> bool:
     if actual == expected:
         return True
@@ -575,6 +581,33 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             label(RENDER_HEADER), label(JIT_AOT_REPLAY_FIXTURE),
             "render_trace.current_capacities", "35120/126084/65536", "missing",
         ))
+
+    vscode_fixture_text = without_c_comments(sources[VSCODE_RENDER_FIXTURE])
+    for lane, render_name in (
+        ("gfx_cmd_i32", "STASIS_RENDER_I32_COUNT"),
+        ("gfx_cmd_f32", "STASIS_RENDER_F32_COUNT"),
+        ("gfx_cmd_u8", "STASIS_RENDER_U8_COUNT"),
+    ):
+        actual = literal_array(vscode_fixture_text, lane)
+        expected = render[render_name]
+        checks += 1
+        if not array_matches(actual, expected, lane):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(VSCODE_RENDER_FIXTURE),
+                f"{lane}.length", expected, actual,
+            ))
+    for field, index, render_name in (
+        ("STASIS_RENDER_MAGIC", 0, "STASIS_RENDER_MAGIC"),
+        ("STASIS_RENDER_VERSION", 1, "STASIS_RENDER_VERSION"),
+    ):
+        actual = literal_index_write(vscode_fixture_text, "gfx_cmd_i32", index)
+        expected = render[render_name]
+        checks += 1
+        if actual != expected:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(VSCODE_RENDER_FIXTURE),
+                field, expected, actual,
+            ))
 
     trace_relationships = {
         DESKTOP_INPUT_FRAME_HARNESS: (

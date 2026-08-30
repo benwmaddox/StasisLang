@@ -100,6 +100,26 @@ class RuntimeAbiContractTests(unittest.TestCase):
         )
         self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
 
+    def test_vscode_render_fixture_rejects_legacy_version_and_capacity(self):
+        mutations = (
+            ("gfx_cmd_i32[1] = 6;", "gfx_cmd_i32[1] = 2;", "STASIS_RENDER_VERSION"),
+            (
+                "global gfx_cmd_f32: f32[126084];",
+                "global gfx_cmd_f32: f32[125060];",
+                "gfx_cmd_f32.length",
+            ),
+        )
+        for current, stale, field in mutations:
+            with self.subTest(field=field):
+                failures, _ = self.run_with(
+                    contract.VSCODE_RENDER_FIXTURE, current, stale
+                )
+                failure = next(failure for failure in failures if failure.field == field)
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(
+                    "vscode-stasis/test/fixture/src/main.stasis", failure.consumer
+                )
+
     def test_desktop_manifest_fixture_requires_canonical_gfx_import(self):
         canonical = 'import "../../../src/stdlib/internal/gfx_cmd.stasis";'
         mutations = (
