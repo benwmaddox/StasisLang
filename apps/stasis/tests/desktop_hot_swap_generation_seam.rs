@@ -15,6 +15,7 @@ const INVALID: &str =
     include_str!("../../../tests/stasis/seams/desktop_hot_swap_generation_invalid.stasis");
 const REJECT: &str =
     include_str!("../../../tests/stasis/seams/desktop_hot_swap_generation_reject.stasis");
+const COMPILE_REJECTED_SWAP_REVISION: u64 = 2;
 
 #[derive(Clone, Debug, Deserialize)]
 struct FrameEvidence {
@@ -61,6 +62,36 @@ fn read_log(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
+fn is_aborted_swap_status(status: &str) -> bool {
+    let Some(details) = status.strip_prefix("aborted") else {
+        return false;
+    };
+    if details.is_empty() {
+        return true;
+    }
+    if let Some(reason) = details.strip_prefix(": ") {
+        return !reason.is_empty();
+    }
+    details
+        .strip_prefix(" (")
+        .and_then(|details| details.split_once("): "))
+        .is_some_and(|(metrics, reason)| !metrics.is_empty() && !reason.is_empty())
+}
+
+fn aborted_swap_revision_after(log: &str, minimum_revision: u64) -> Option<u64> {
+    log.lines()
+        .filter_map(|line| {
+            let remainder = line.trim().strip_prefix("[swap] revision ")?;
+            let (revision, status) = remainder.split_once(' ')?;
+            if !is_aborted_swap_status(status) {
+                return None;
+            }
+            revision.parse::<u64>().ok()
+        })
+        .filter(|revision| *revision > minimum_revision)
+        .max()
+}
+
 fn wait_for(
     description: &str,
     child: &mut Child,
@@ -96,6 +127,46 @@ fn sole_trace(frames: &[FrameEvidence], revision: u64) -> u32 {
         .collect::<BTreeSet<_>>();
     assert_eq!(traces.len(), 1, "revision {revision} emitted mixed traces");
     *traces.iter().next().expect("revision trace")
+}
+
+#[test]
+fn aborted_swap_revision_parser_is_strict_and_tolerates_superseded_events() {
+    assert_eq!(
+        aborted_swap_revision_after(
+            "[swap] revision 2 rejected: compile failure\n[swap] revision 3 aborted: hook requested rejection\n",
+            COMPILE_REJECTED_SWAP_REVISION,
+        ),
+        Some(3)
+    );
+
+    let superseded = "[swap] revision 3 queued\n\
+[swap] revision 4 queued, superseding in-flight revision 3\n\
+[swap] revision 3 discarded as superseded\n\
+[swap] revision 4 aborted (compile=6ms package=0ms commit=251ms): hook requested rejection\n";
+    assert_eq!(
+        aborted_swap_revision_after(superseded, COMPILE_REJECTED_SWAP_REVISION),
+        Some(4)
+    );
+
+    for malformed in [
+        "aborted",
+        "watch aborted revision 4",
+        "[swap] revision 2 aborted: stale rejection",
+        "[swap] revision three aborted",
+        "[swap] revision 4 rejected: hook requested rejection",
+        "[swap] revision 4 discarded as superseded",
+        "[swap] revision 4 aborted:missing reason separator",
+        "[swap] revision 4 aborted: ",
+        "[swap] revision 4 aborted (): missing metrics",
+        "[swap] revision 4 aborted (compile=6ms): ",
+        "[swap] revision 4 aborted later",
+    ] {
+        assert_eq!(
+            aborted_swap_revision_after(malformed, COMPILE_REJECTED_SWAP_REVISION),
+            None,
+            "malformed log must not satisfy hook abort: {malformed}"
+        );
+    }
 }
 
 #[test]
@@ -195,7 +266,7 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
         &log_path,
         &frames_path,
         |log, frames| {
-            log.contains("[swap] revision 3 aborted")
+            aborted_swap_revision_after(log, COMPILE_REJECTED_SWAP_REVISION).is_some()
                 && frames
                     .last()
                     .is_some_and(|frame| frame.frame >= failure_frame + 8)
@@ -206,6 +277,9 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
                     .all(|frame| frame.entry_revision == 2 && frame.trace == v2_trace)
         },
     );
+    let hook_rejection_revision =
+        aborted_swap_revision_after(&final_log, COMPILE_REJECTED_SWAP_REVISION)
+            .expect("later hook-aborted swap revision");
 
     child.kill().expect("stop completed seam runner");
     let _ = child.wait().expect("reap seam runner");
@@ -245,7 +319,8 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
             {"entry_revision": 1, "trace": v1_trace},
             {"entry_revision": 2, "trace": v2_trace}
         ],
-        "compile_failure_preserved_revision": 2,
+        "compile_failure_preserved_revision": COMPILE_REJECTED_SWAP_REVISION,
+        "hook_rejection_revision": hook_rejection_revision,
         "hook_rejection_preserved_revision": 2,
         "oracle": {"mixed_generation_frames": 0, "source_frames": frame_evidence_path}
     });
