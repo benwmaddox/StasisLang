@@ -34,10 +34,13 @@ WORKSHOP = Path(
 )
 JNI = Path("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
 NATIVE_HOST = Path("runtime/stasis_graphics.c")
+DESKTOP_MANIFEST_FIXTURE = Path("tests/stasis/seams/desktop_manifest_assets_probe.stasis")
+DESKTOP_MANIFEST_HARNESS = Path("apps/stasis/tests/desktop_manifest_assets_seam.rs")
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
     RELEASE_PROVENANCE, PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER,
-    WORKSHOP, JNI, NATIVE_HOST,
+    WORKSHOP, JNI, NATIVE_HOST, DESKTOP_MANIFEST_FIXTURE,
+    DESKTOP_MANIFEST_HARNESS,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -471,6 +474,44 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         checks += 1
         if mismatch is not None:
             failures.append(mismatch)
+
+    fixture_text = without_c_comments(sources[DESKTOP_MANIFEST_FIXTURE])
+    canonical_gfx_import = 'import "../../../src/stdlib/internal/gfx_cmd.stasis";'
+    checks += 1
+    if canonical_gfx_import not in fixture_text:
+        failures.append(Mismatch(
+            label(GFX_CMD), label(DESKTOP_MANIFEST_FIXTURE), "gfx_cmd.import",
+            canonical_gfx_import, "missing",
+        ))
+    for lane in ("i32", "f32", "u8"):
+        checks += 1
+        if re.search(rf"\bglobal\s+gfx_cmd_{lane}\s*:", fixture_text):
+            failures.append(Mismatch(
+                label(GFX_CMD), label(DESKTOP_MANIFEST_FIXTURE),
+                f"gfx_cmd_{lane}.declaration", "provided by canonical import",
+                "manual declaration",
+            ))
+        checks += 1
+        if re.search(rf"\bgfx_cmd_{lane}\s*\[[^\]]+\]\s*=", fixture_text):
+            failures.append(Mismatch(
+                label(GFX_CMD), label(DESKTOP_MANIFEST_FIXTURE),
+                f"gfx_cmd_{lane}.write", "canonical helper call", "manual ABI write",
+            ))
+
+    harness_text = sources[DESKTOP_MANIFEST_HARNESS]
+    harness_capacities = {
+        "gfx_cmd_i32": r"vec!\[\s*0\s*;\s*STASIS_RENDER_I32_COUNT\s*\]",
+        "gfx_cmd_f32": r"vec!\[\s*0(?:\.0)?\s*;\s*STASIS_RENDER_F32_COUNT\s*\]",
+        "gfx_cmd_u8": r"vec!\[\s*0\s*;\s*STASIS_RENDER_U8_COUNT\s*\]",
+    }
+    for lane, pattern in harness_capacities.items():
+        checks += 1
+        if not re.search(pattern, harness_text):
+            failures.append(Mismatch(
+                label(DYNLOAD), label(DESKTOP_MANIFEST_HARNESS),
+                f"{lane}.host_capacity", "canonical STASIS_RENDER_*_COUNT reference",
+                "missing",
+            ))
     for lane, pattern in DESCRIPTOR_PATTERNS.items():
         checks += 1
         if not re.search(pattern, sources[RENDER_HEADER]):

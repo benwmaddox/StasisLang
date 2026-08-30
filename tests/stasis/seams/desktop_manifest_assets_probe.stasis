@@ -1,5 +1,7 @@
 @link("stasis_graphics");
 
+import "../../../src/stdlib/internal/gfx_cmd.stasis";
+
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 extern function load_font(path: string, size: i32): i32;
 extern function measure_text(font: i32, text: string): f32;
@@ -7,9 +9,6 @@ extern function measure_text(font: i32, text: string): f32;
 function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
 function @extern("stasis_jit_gfx_measure_text_cached") gfx_measure_text_cached(handle: i32): f32;
 
-global gfx_cmd_i32: i32[35120];
-global gfx_cmd_f32: f32[126084];
-global gfx_cmd_u8: u8[65536];
 global seam_sprite_handle: i32;
 global seam_font_handle: i32;
 global seam_cached_handle: i32;
@@ -42,67 +41,12 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    gfx_cmd_i32[0] = 1196967473;
-    gfx_cmd_i32[1] = 5;
-    gfx_cmd_i32[2] = 3;
-    gfx_cmd_i32[3] = 0;
-    gfx_cmd_i32[4] = 1;
-    gfx_cmd_i32[5] = 0;
-    gfx_cmd_i32[6] = 0;
-    gfx_cmd_i32[7] = 2;
-    gfx_cmd_i32[8] = 0;
-    gfx_cmd_i32[9] = 7;
-    gfx_cmd_i32[22] = 3;
-    gfx_cmd_i32[23] = 0;
-    gfx_cmd_i32[24] = 0;
-    gfx_cmd_i32[25] = 0;
-    gfx_cmd_f32[0] = 0.04;
-    gfx_cmd_f32[1] = 0.07;
-    gfx_cmd_f32[2] = 0.12;
-    gfx_cmd_f32[3] = 1.0;
-
-    gfx_cmd_i32[32] = seam_sprite_handle;
-    gfx_cmd_i32[33] = 0;
-    gfx_cmd_i32[34] = 255;
-    gfx_cmd_f32[80004] = 52.0;
-    gfx_cmd_f32[80005] = 28.0;
-    gfx_cmd_f32[80006] = 64.0;
-    gfx_cmd_f32[80007] = 64.0;
-    gfx_cmd_f32[80008] = 0.0;
-    gfx_cmd_f32[80009] = 0.0;
-    gfx_cmd_f32[80010] = 1.0;
-    gfx_cmd_f32[80011] = 1.0;
-
-    gfx_cmd_i32[12320] = seam_font_handle;
-    gfx_cmd_i32[12321] = 0;
-    gfx_cmd_i32[12322] = 6;
-    gfx_cmd_f32[112772] = 30.0;
-    gfx_cmd_f32[112773] = 112.0;
-    gfx_cmd_f32[112774] = 1.0;
-    gfx_cmd_f32[112775] = 0.8;
-    gfx_cmd_f32[112776] = 0.1;
-    gfx_cmd_f32[112777] = 1.0;
-
-    gfx_cmd_i32[12323] = seam_font_handle;
-    gfx_cmd_i32[12324] = 0 - seam_cached_handle;
-    gfx_cmd_i32[12325] = 0;
-    gfx_cmd_f32[112778] = 175.0;
-    gfx_cmd_f32[112779] = 112.0;
-    gfx_cmd_f32[112780] = 0.1;
-    gfx_cmd_f32[112781] = 0.9;
-    gfx_cmd_f32[112782] = 1.0;
-    gfx_cmd_f32[112783] = 1.0;
-
-    gfx_cmd_u8[0] = 68;
-    gfx_cmd_u8[1] = 73;
-    gfx_cmd_u8[2] = 82;
-    gfx_cmd_u8[3] = 69;
-    gfx_cmd_u8[4] = 67;
-    gfx_cmd_u8[5] = 84;
-
-    gfx_cmd_i32[18464] = 32768;
-    gfx_cmd_i32[18465] = 49152;
-    gfx_cmd_i32[18466] = 49153;
+    gfx_cmd_begin();
+    gfx_cmd_clear(0.04, 0.07, 0.12, 1.0);
+    gfx_cmd_sprite(seam_sprite_handle, 52.0, 28.0, 64.0, 64.0, 0, 255);
+    gfx_cmd_text(seam_font_handle, "DIRECT", 30.0, 112.0, 1.0, 0.8, 0.1, 1.0);
+    gfx_cmd_text_cached(seam_font_handle, seam_cached_handle, 175.0, 112.0, 0.1, 0.9, 1.0, 1.0);
+    gfx_cmd_submit();
     return 0;
 }
 

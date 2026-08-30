@@ -41,6 +41,52 @@ class RuntimeAbiContractTests(unittest.TestCase):
         self.assertEqual("passed", evidence["status"])
         self.assertGreater(evidence["checks"], 100)
 
+    def test_desktop_manifest_fixture_requires_canonical_gfx_import(self):
+        canonical = 'import "../../../src/stdlib/internal/gfx_cmd.stasis";'
+        mutations = (
+            "",
+            'import "../../../src/stdlib/internal/host_frame.stasis";',
+        )
+        for replacement in mutations:
+            with self.subTest(replacement=replacement):
+                failures, _ = self.run_with(
+                    contract.DESKTOP_MANIFEST_FIXTURE, canonical, replacement
+                )
+                failure = next(
+                    failure for failure in failures
+                    if failure.field == "gfx_cmd.import"
+                )
+                self.assertEqual("src/stdlib/internal/gfx_cmd.stasis", failure.producer)
+                self.assertEqual(
+                    "tests/stasis/seams/desktop_manifest_assets_probe.stasis",
+                    failure.consumer,
+                )
+
+    def test_desktop_manifest_harness_requires_canonical_capacities(self):
+        mutations = (
+            ("vec![0; STASIS_RENDER_I32_COUNT]", "vec![0; 34608]", "gfx_cmd_i32"),
+            (
+                "vec![0.0; STASIS_RENDER_F32_COUNT]",
+                "vec![0.0; 125060]",
+                "gfx_cmd_f32",
+            ),
+            ("vec![0; STASIS_RENDER_U8_COUNT]", "vec![0; 65536]", "gfx_cmd_u8"),
+        )
+        for canonical, literal, lane in mutations:
+            with self.subTest(lane=lane):
+                failures, _ = self.run_with(
+                    contract.DESKTOP_MANIFEST_HARNESS, canonical, literal
+                )
+                failure = next(
+                    failure for failure in failures
+                    if failure.field == f"{lane}.host_capacity"
+                )
+                self.assertEqual("crates/stasis_dynload/src/lib.rs", failure.producer)
+                self.assertEqual(
+                    "apps/stasis/tests/desktop_manifest_assets_seam.rs",
+                    failure.consumer,
+                )
+
     def test_stasis_capacity_drift_names_both_sides(self):
         failures, _ = self.run_with(
             contract.GFX_CMD,
