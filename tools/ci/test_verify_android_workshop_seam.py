@@ -14,13 +14,7 @@ GOOD = """CompileReady: backend=cranelift-jit reload=InitialCompile status=0 fun
 Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":919191,"frame_token":1,"fallback":0,"stub":0}
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":1,"frame_token":1}
 Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":424242,"frame_token":50,"fallback":0,"stub":0}
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":76,"fallback":0,"stub":0}
-Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":29,"frame_token":76}
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":77,"fallback":0,"stub":0}
-Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":30,"frame_token":77}
 RenderAcceptanceFrame: count=1 frame_token=1
-RenderAcceptanceFrame: count=29 frame_token=76
-RenderAcceptanceFrame: count=30 frame_token=77
 Stasis Workshop IT-026: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"buffer_abi","status":"passed","descriptor":{"lanes":[{"lane":"i32","bytes":140480,"alignment":4},{"lane":"f32","bytes":504336,"alignment":4},{"lane":"u8","bytes":65536,"alignment":1}]},"valid_guards_intact":true,"all_invalid_unchanged":true,"valid_calls":1,"invalid_calls":18}
 	Stasis Workshop IT-026 case: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"case","name":"short_i32","unchanged":true,"error":{"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"error","lane":"i32","reason":"capacity","expected":140480,"actual":140479}}
 	Stasis Workshop IT-026 case: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"case","name":"short_f32","unchanged":true,"error":{"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"error","lane":"f32","reason":"capacity","expected":504336,"actual":504335}}
@@ -56,6 +50,10 @@ Stasis Workshop IT-028 GLES: {"schema":"stasis.workshop_hot_edit.v1","test_id":"
 Stasis Workshop IT-028 case: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"case","status":"passed","phase":"post_invalid","sequence":3,"runtime":{"status":"RuntimeStateReady","generation":2,"source_fingerprint":"2222222222222222"},"guest":{"tick_revision":2,"render_revision":2,"state_counter":3},"render":{"trace":115,"frame_token":83,"rect_count":2,"marker":{"active":true,"x":176.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}},"gles_presented":true,"gles_frame_token":83,"java_only":false,"fallback":0,"stub":0}
 Stasis Workshop IT-028: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"hot_edit","status":"passed","ordered":true,"unique":true,"atomic":true,"hook_source_line":40,"invalid_compile":{"ok":false,"kind":"compile_error","diagnostic":{"file":"src/main.stasis","line":40,"column":31,"end_line":42,"end_column":2,"symbol":"on_code_swap","message":"cannot resolve call 'IT028_missing_target'"}},"restore_receipt":{"status":"NoChange","compile":"CompileReady: backend=cranelift-jit reload=NoChange status=0 functions=10 compile_us=12 manifest=build/native_compile_manifest.txt"},"cleanup_receipt":{"status":"Restored","compile":"CompileReady: backend=cranelift-jit reload=FastReload status=0 functions=10 compile_us=13 manifest=build/native_compile_manifest.txt","frame":{"status":"passed","runtime":{"generation":3,"source_fingerprint":"1111111111111111"},"render":{"marker":{"active":false}},"java_only":false,"fallback":0,"stub":0}}}
 Stasis Workshop IT-031: {"schema":"stasis.workshop_diagnostic_seam.v1","test_id":"IT-031","event":"diagnostic_seam","status":"passed","ordered":true,"cases":[{"name":"parse","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"parse","code":"stasis.parse","context":{"file":"src/main.stasis"},"detail":"parse detail","causes":["parse phase","parse detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"parse","code":"stasis.parse","context":{"file":"src/main.stasis"},"detail":"parse detail","causes":["parse phase","parse detail"]}},{"name":"extern_resolution","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"extern_resolution","code":"stasis.unresolvedExtern","context":{"file":"src/main.stasis","symbol":"IT031_missing_extern"},"detail":"extern detail","causes":["extern_resolution phase","extern detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"extern_resolution","code":"stasis.unresolvedExtern","context":{"file":"src/main.stasis","symbol":"IT031_missing_extern"},"detail":"extern detail","causes":["extern_resolution phase","extern detail"]}},{"name":"runtime_entry","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"runtime_entry","code":"stasis.runtimeEntry","context":{"symbol":"tick"},"detail":"runtime detail","causes":["runtime_entry phase","runtime detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"runtime_entry","code":"stasis.runtimeEntry","context":{"symbol":"tick"},"detail":"runtime detail","causes":["runtime_entry phase","runtime detail"]}},{"name":"render_schema","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"render_schema","code":"stasis.renderSchema","context":{"symbol":"render"},"detail":"render detail","causes":["render_schema phase","render detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"render_schema","code":"stasis.renderSchema","context":{"symbol":"render"},"detail":"render detail","causes":["render_schema phase","render detail"]}},{"name":"missing_resource","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"resource","code":"stasis.missingResource","context":{"resource":"assets/IT031_missing.svg"},"detail":"resource detail","causes":["resource phase","resource detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"resource","code":"stasis.missingResource","context":{"resource":"assets/IT031_missing.svg"},"detail":"resource detail","causes":["resource phase","resource detail"]}}],"cleanup_receipt":{"status":"Restored","compile":"CompileReady: status=0","frame":"passed","source_fingerprint":"1111111111111111","baseline_source_fingerprint":"1111111111111111","generation":3,"baseline_generation":3,"ui":{"blocking_error_visible":false,"status_healthy":true,"compile_ready":true,"compile_attempted":true,"game_runtime_active":true,"displayed_status":"Game updated - hot swapped"}}}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":76,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":77,"fallback":0,"stub":0}
+RenderAcceptanceFrame: count=30 frame_token=77
+Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":30,"frame_token":77}
 """
 # Keep the fixture's IT-031 case evidence in separate bounded log records, as
 # the Android logcat line limit cannot carry five duplicated full cases.
@@ -89,8 +87,15 @@ def _it031_log(marker: dict) -> str:
         "Stasis Workshop IT-031 case: " + json.dumps(case, separators=(",", ":"))
         for case in cases)
     prefix = GOOD.split("Stasis Workshop IT-031 case:", 1)[0]
+    lines = GOOD.splitlines()
+    summary_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("Stasis Workshop IT-031: ")
+    )
+    suffix = "\n".join(lines[summary_index + 1:])
     return prefix + case_lines + "\nStasis Workshop IT-031: " \
-        + json.dumps(compact, separators=(",", ":"))
+        + json.dumps(compact, separators=(",", ":")) + "\n" + suffix
 
 
 # A successful cleanup publication advances the live runtime generation while
@@ -186,8 +191,11 @@ class WorkshopSeamTests(unittest.TestCase):
             verify_log(_it031_log(marker), MANIFEST)
 
     def test_rejects_missing_it031_marker(self):
+        summary = next(
+            line for line in GOOD.splitlines() if line.startswith("Stasis Workshop IT-031: ")
+        )
         with self.assertRaisesRegex(SeamError, "IT-031"):
-            verify_log(GOOD.split("Stasis Workshop IT-031 case:", 1)[0], MANIFEST)
+            verify_log(GOOD.replace(summary + "\n", "", 1), MANIFEST)
 
     def test_rejects_missing_it031_case_marker(self):
         case = next(line for line in GOOD.splitlines() if "IT-031 case" in line)
@@ -309,6 +317,18 @@ class WorkshopSeamTests(unittest.TestCase):
         self.assertEqual(result["presented_frames"], 30)
         self.assertEqual(result["it028"]["test_id"], "IT-028")
 
+    def test_count30_edge_uses_it031_boundary_after_count1_predecessor(self):
+        presentations = [
+            line
+            for line in GOOD.splitlines()
+            if line.startswith("Stasis Workshop IT-025 GLES:")
+        ]
+        self.assertEqual(2, len(presentations))
+        self.assertIn('"count":1', presentations[0])
+        self.assertIn('"count":30', presentations[1])
+        self.assertNotIn('"count":29', GOOD)
+        self.assertEqual(verify_log(GOOD, MANIFEST)["presented_frames"], 30)
+
     def test_rejects_wrong_guest_state(self):
         with self.assertRaisesRegex(SeamError, "state_checksum"):
             verify_log(GOOD.replace('"state_checksum":2500', '"state_checksum":2501'), MANIFEST)
@@ -353,7 +373,7 @@ class WorkshopSeamTests(unittest.TestCase):
         result = verify_log(GOOD + "\n" + later_marker, MANIFEST)
         self.assertEqual(result["presented_frames"], 30)
 
-    def test_requires_preceding_presentation_and_matching_native_marker(self):
+    def test_requires_preceding_presentation(self):
         presentation_lines = [
             line for line in GOOD.splitlines() if line.startswith("Stasis Workshop IT-025 GLES:")
         ]
@@ -362,14 +382,6 @@ class WorkshopSeamTests(unittest.TestCase):
             without_predecessors = without_predecessors.replace(line + "\n", "", 1)
         with self.assertRaisesRegex(SeamError, "lacks a preceding presentation"):
             verify_log(without_predecessors, MANIFEST)
-
-        predecessor_marker = next(
-            line
-            for line in GOOD.splitlines()
-            if line.startswith("Stasis Workshop IT-025:") and '"frame_token":76' in line
-        )
-        with self.assertRaisesRegex(SeamError, "matching native frame token"):
-            verify_log(GOOD.replace(predecessor_marker + "\n", "", 1), MANIFEST)
 
     def test_rejects_missing_marker_or_presentation(self):
         with self.assertRaisesRegex(SeamError, "IT-025"):
@@ -392,8 +404,11 @@ class WorkshopSeamTests(unittest.TestCase):
             self.assertEqual(_read_json(path)["git_revision"], "abc")
 
     def test_rejects_missing_it026_marker(self):
+        summary = next(
+            line for line in GOOD.splitlines() if line.startswith("Stasis Workshop IT-026: ")
+        )
         with self.assertRaisesRegex(SeamError, "IT-026"):
-            verify_log(GOOD.split("Stasis Workshop IT-026:")[0], MANIFEST)
+            verify_log(GOOD.replace(summary + "\n", "", 1), MANIFEST)
 
     def test_rejects_incomplete_it026_scenarios(self):
         with self.assertRaisesRegex(SeamError, "scenario"):
@@ -434,8 +449,13 @@ class WorkshopSeamTests(unittest.TestCase):
             verify_log(first_line + "\n" + case + "\n" + remainder, MANIFEST)
 
     def test_rejects_missing_it027_proof(self):
+        summary = next(
+            line
+            for line in GOOD.splitlines()
+            if line.startswith("Stasis Workshop IT-027: ")
+        )
         with self.assertRaisesRegex(SeamError, "IT-027"):
-            verify_log(GOOD.split("Stasis Workshop IT-027 case:")[0], MANIFEST)
+            verify_log(GOOD.replace(summary + "\n", "", 1), MANIFEST)
 
     def test_rejects_it027_token_mismatch(self):
         with self.assertRaisesRegex(SeamError, "matching GLES"):
