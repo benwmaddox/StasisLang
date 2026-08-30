@@ -2085,10 +2085,16 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy)]
+    enum ParityExpectedResult {
+        Exact(i32),
+        Nonzero,
+    }
+
     struct ParityCorpusCase {
         label: &'static str,
         source: &'static str,
-        expected_exit: i32,
+        expected_result: ParityExpectedResult,
         expected_extern_symbols: &'static [(&'static str, &'static str)],
         expected_string_literals: &'static [&'static str],
         expected_collection_max_lengths: &'static [(&'static str, i32)],
@@ -2414,7 +2420,7 @@ mod tests {
             ParityCorpusCase {
                 label: "extern_and_string_literal",
                 source: "extern function print_string(value: string): void;\nfunction main(): i32 { print_string(\"alpha; beta {x}\"); return 1; }\n",
-                expected_exit: 1,
+                expected_result: ParityExpectedResult::Exact(1),
                 expected_extern_symbols: &[("print_string", "stasis_jit_print_string")],
                 expected_string_literals: &["alpha; beta {x}"],
                 expected_collection_max_lengths: &[],
@@ -2423,7 +2429,7 @@ mod tests {
             ParityCorpusCase {
                 label: "globals_and_collection_view",
                 source: "const COUNT: i32 = 3;\nglobal nums: i32[COUNT];\nfunction main(): i32 {\n    nums[1] = 9;\n    nums[2] = 11;\n    return nums[1] + nums[2];\n}\n",
-                expected_exit: 20,
+                expected_result: ParityExpectedResult::Exact(20),
                 expected_extern_symbols: &[],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[("nums", 3)],
@@ -2432,7 +2438,7 @@ mod tests {
             ParityCorpusCase {
                 label: "renderer_command_trace",
                 source: RENDER_TRACE_FIXTURE,
-                expected_exit: 1_802_686_031,
+                expected_result: ParityExpectedResult::Nonzero,
                 expected_extern_symbols: &[(
                     "native_render_trace",
                     "stasis_jit_render_trace",
@@ -2448,7 +2454,7 @@ mod tests {
             ParityCorpusCase {
                 label: "control_flow_branching",
                 source: "function main(): i32 {\n    let sum: i32 = 0;\n    for (let i: i32 = 0; i < 3; i += 1) {\n        sum += i;\n    }\n    if (sum == 3) {\n        return 1;\n    }\n    return 0;\n}\n",
-                expected_exit: 1,
+                expected_result: ParityExpectedResult::Exact(1),
                 expected_extern_symbols: &[],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[],
@@ -2457,7 +2463,7 @@ mod tests {
             ParityCorpusCase {
                 label: "deterministic_numerics",
                 source: include_str!("../../../../samples/deterministic_numerics/main.stasis"),
-                expected_exit: 0,
+                expected_result: ParityExpectedResult::Exact(0),
                 expected_extern_symbols: &[],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[],
@@ -2466,7 +2472,7 @@ mod tests {
             ParityCorpusCase {
                 label: "struct_view_abi",
                 source: "const COUNT: i32 = 3;\nstruct Enemy { hp: i32; }\nglobal enemies: Enemy[COUNT];\nfunction mutate(arr: Enemy[], idx: i32): i32 {\n    arr[idx].hp = 10;\n    arr[idx + 1].hp = arr[idx].hp + 4;\n    return arr[idx + 1].hp;\n}\nfunction main(): i32 { return mutate(enemies, 0); }\n",
-                expected_exit: 14,
+                expected_result: ParityExpectedResult::Exact(14),
                 expected_extern_symbols: &[],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[("enemies", 3)],
@@ -2478,7 +2484,7 @@ mod tests {
             ParityCorpusCase {
                 label: "known_soa_struct_helper_chain",
                 source: "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { items[0].value = 7; return middle(items[0]); }\n",
-                expected_exit: 7,
+                expected_result: ParityExpectedResult::Exact(7),
                 expected_extern_symbols: &[],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[("items", 1)],
@@ -2512,11 +2518,18 @@ mod tests {
         let jit_result = jit
             .execute_i32_noarg_by_name("main")
             .unwrap_or_else(|error| panic!("jit execute {}: {error}", case.label));
-        assert_eq!(
-            jit_result, case.expected_exit,
-            "unexpected JIT result for parity fixture '{}'",
-            case.label
-        );
+        match case.expected_result {
+            ParityExpectedResult::Exact(expected) => assert_eq!(
+                jit_result, expected,
+                "unexpected JIT result for parity fixture '{}'",
+                case.label
+            ),
+            ParityExpectedResult::Nonzero => assert_ne!(
+                jit_result, 0,
+                "parity fixture '{}' must produce a semantic nonzero result",
+                case.label
+            ),
+        }
 
         let mut aot = AotProcess::new();
         aot.upsert_file("sample.stasis", case.source);

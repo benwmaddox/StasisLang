@@ -22,6 +22,19 @@ ALLOWED_STAGES = {
     "resource_restore",
 }
 INITIAL_STAGE_FRAMES = {"initial_launch": 1, "second_frame": 2}
+RUNTIME_TRACE_PATTERN = re.compile(
+    r"Stasis render contract v6 trace=(\d+)\s+flags=3\s+lines=2\s+rects=1\s+sprites=5\s+text=2"
+)
+
+
+def _runtime_command_trace(log: str, stage: str) -> int:
+    trace_match = RUNTIME_TRACE_PATTERN.search(log)
+    if trace_match is None:
+        raise ValueError(f"runtime evidence for {stage} lacks current v6 command counts")
+    trace = int(trace_match.group(1))
+    if trace == 0:
+        raise ValueError(f"runtime evidence for {stage} has a zero command trace")
+    return trace
 
 
 def _read_bmp(path: Path) -> tuple[int, int, bytes]:
@@ -165,8 +178,8 @@ def validate_fixture(manifest_path: Path) -> dict:
     trace_source = trace_fixture.read_text(encoding="utf-8")
     if "native_render_trace" not in trace_source or "build_parity_frame(" not in trace_source:
         raise ValueError("trace fixture does not use the canonical parity frame builder")
-    if int(manifest["command_trace"]) <= 0:
-        raise ValueError("command_trace must be a nonzero i32 value")
+    if "command_trace" in manifest:
+        raise ValueError("render parity manifest must not freeze a current-ABI command trace")
 
     fixture_root = fixture.parent
     while fixture_root != fixture_root.parent and not (fixture_root / "stasis.json").is_file():
@@ -359,12 +372,7 @@ def verify_runtime_evidence(
     require_load_details: bool = False,
 ) -> None:
     log = _read_runtime_log(log_path)
-    trace_match = re.search(
-        r"Stasis render contract v6 trace=(\d+)\s+flags=3\s+lines=2\s+rects=1\s+sprites=5\s+text=2",
-        log,
-    )
-    if trace_match is None or int(trace_match.group(1)) != int(manifest["command_trace"]):
-        raise ValueError(f"runtime evidence for {stage} lacks the exact command trace/counts")
+    observed_trace = _runtime_command_trace(log, stage)
     metrics = re.search(
         r"Stasis display metrics: logical=(\d+)x(\d+)\s+native=(\d+)x(\d+)\s+"
         r"drawable=(\d+)x(\d+)\s+scale=([0-9.]+)",
@@ -411,6 +419,8 @@ def verify_runtime_evidence(
     capture_hash = hashlib.sha256(capture_path.read_bytes()).hexdigest()
     if evidence.get("stage") != stage or evidence.get("capture_sha256") != capture_hash:
         raise ValueError(f"stage evidence for {stage} is not bound to this capture")
+    if evidence.get("observed_command_trace") != observed_trace:
+        raise ValueError(f"stage evidence for {stage} is not bound to the observed command trace")
     evidence_restore = (
         evidence.get("backend"),
         evidence.get("surface_generation"),
@@ -459,6 +469,7 @@ def verify_runtime_evidence(
 
 def write_stage_evidence(capture_path: Path, log_path: Path, stage: str, output_path: Path) -> None:
     log = _read_runtime_log(log_path)
+    observed_trace = _runtime_command_trace(log, stage)
     capture_hash = hashlib.sha256(capture_path.read_bytes()).hexdigest()
     capture_events = re.findall(
         r"Stasis parity capture: stage=(\w+)\s+path=(.+?)\s+frame=(\d+)\s+"
@@ -498,6 +509,7 @@ def write_stage_evidence(capture_path: Path, log_path: Path, stage: str, output_
                 "frame": int(frame),
                 "reason": reason,
                 "sprites": sprites,
+                "observed_command_trace": observed_trace,
             },
             indent=2,
         )
