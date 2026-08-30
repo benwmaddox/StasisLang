@@ -433,7 +433,21 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
     ]
     if not stable_presentations:
         raise SeamError("missing stable IT-025 GLES presentation marker")
-    presentation_match, presentation = max(stable_presentations, key=lambda item: item[1]["count"])
+    presentation_match, presentation = max(
+        stable_presentations,
+        key=lambda item: (item[1]["count"], item[0].start()),
+    )
+    presentation_index = next(
+        index
+        for index, (candidate_match, _) in enumerate(presentations)
+        if candidate_match.start() == presentation_match.start()
+    )
+    if presentation_index == 0:
+        raise SeamError("stable IT-025 GLES presentation lacks a preceding presentation")
+    predecessor_match, predecessor = presentations[presentation_index - 1]
+    predecessor_token = predecessor.get("frame_token")
+    if predecessor.get("event") != "present" or not isinstance(predecessor_token, int):
+        raise SeamError("preceding IT-025 GLES presentation is not a valid presentation")
     frames = [(int(count), int(token)) for count, token in FRAME.findall(log)]
     stable_count = presentation["count"]
     stable_token = presentation["frame_token"]
@@ -462,16 +476,6 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         raise SeamError("IT-025 marker lacks the JNI runtime version")
     if marker.get("fallback") != 0 or marker.get("stub") != 0:
         raise SeamError("IT-025 marker reports a fallback or stub")
-    idle_markers = [
-        candidate
-        for candidate_match, candidate in markers
-        if candidate_match.start() <= presentation_match.start()
-    ]
-    command_traces = [candidate.get("command_trace") for candidate in idle_markers]
-    if any(not isinstance(trace, int) or trace <= 0 for trace in command_traces):
-        raise SeamError("IT-025 idle command_trace must be a positive current-build diagnostic")
-    if len(set(command_traces)) != 1:
-        raise SeamError("IT-025 command_trace changed within the stable idle proof window")
     abi_markers = []
     for match in ABI_MARKER.finditer(log):
         try:
@@ -699,6 +703,36 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
     diagnostic_seam = verify_it031(log, hot_edit["_position"])
     if diagnostic_seam is None:
         raise SeamError("missing mandatory IT-031 diagnostic seam evidence")
+    diagnostic_boundary = next(DIAGNOSTIC_MARKER.finditer(log)).end()
+    idle_window_start = diagnostic_boundary
+    if predecessor_match.start() > diagnostic_boundary:
+        predecessor_native_match, _ = next(
+            (
+                (candidate_match, candidate)
+                for candidate_match, candidate in reversed(markers)
+                if candidate.get("frame_token") == predecessor_token
+                and diagnostic_boundary <= candidate_match.start()
+                < predecessor_match.start()
+            ),
+            (None, None),
+        )
+        if predecessor_native_match is None:
+            raise SeamError(
+                "preceding stable-runtime IT-025 presentation lacks a matching native frame"
+            )
+        idle_window_start = predecessor_native_match.start()
+    idle_markers = [
+        candidate
+        for candidate_match, candidate in markers
+        if idle_window_start <= candidate_match.start() <= presentation_match.start()
+    ]
+    if not idle_markers:
+        raise SeamError("stable IT-025 presentation lacks native markers after IT-031")
+    command_traces = [candidate.get("command_trace") for candidate in idle_markers]
+    if any(not isinstance(trace, int) or trace <= 0 for trace in command_traces):
+        raise SeamError("IT-025 idle command_trace must be a positive current-build diagnostic")
+    if len(set(command_traces)) != 1:
+        raise SeamError("IT-025 command_trace changed within the stable idle proof window")
     return {
         "compile_functions": max(map(int, compile_matches)),
         "presented_frames": stable_count,

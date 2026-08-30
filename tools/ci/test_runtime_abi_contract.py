@@ -161,6 +161,50 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
 
+    def test_desktop_guest_trace_oracle_rejects_order_schema_and_consumer_drift(self):
+        mutations = (
+            (
+                contract.DESKTOP,
+                '\\"guest_trace\\":{guest_trace},\\"trace\\":{}',
+                '\\"trace\\":{}',
+                "desktop_frame.guest_trace_evidence",
+            ),
+            (
+                contract.DESKTOP_HOT_SWAP_HARNESS,
+                ".map(|frame| frame.guest_trace)",
+                ".map(|frame| frame.trace)",
+                "desktop_hot_swap.generation_oracle",
+            ),
+            (
+                contract.DESKTOP_HOT_SWAP_HARNESS,
+                "frame.guest_trace != expected_guest_trace",
+                "frame.trace != expected_guest_trace",
+                "desktop_hot_swap.all_history_oracle",
+            ),
+        )
+        for path, old, new, field in mutations:
+            with self.subTest(field=field):
+                failures, _ = self.run_with(path, old, new)
+                self.assertTrue(any(failure.field == field for failure in failures))
+
+        desktop = self.sources[contract.DESKTOP]
+        capture_start = desktop.index("        let guest_trace = frame_evidence")
+        overlay_start = desktop.index("        play_error_toasts.append_to_buffers(")
+        overlay_end = desktop.index("        gfx.gfx_submit_u8", overlay_start)
+        capture = desktop[capture_start:overlay_start]
+        overlays = copy.deepcopy(self.sources)
+        overlays[contract.DESKTOP] = (
+            desktop[:capture_start]
+            + desktop[overlay_start:overlay_end]
+            + capture
+            + desktop[overlay_end:]
+        )
+        failures, _ = contract.check(overlays=overlays)
+        self.assertTrue(any(
+            failure.field == "desktop_frame.guest_trace_order"
+            for failure in failures
+        ))
+
     def test_render_parity_rejects_fixed_current_trace_oracles(self):
         mutations = (
             (

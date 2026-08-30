@@ -423,11 +423,12 @@ impl DesktopFrameEvidence {
         &mut self,
         frame: u64,
         entry_revision: u64,
+        guest_trace: u32,
         submission: [i32; 5],
     ) -> Result<(), String> {
         writeln!(
             self.file,
-            "{{\"schema\":\"stasis.desktop_frame.v1\",\"frame\":{frame},\"entry_revision\":{entry_revision},\"accepted\":{},\"rejected\":{},\"presented\":{},\"validation\":{},\"trace\":{}}}",
+            "{{\"schema\":\"stasis.desktop_frame.v1\",\"frame\":{frame},\"entry_revision\":{entry_revision},\"accepted\":{},\"rejected\":{},\"presented\":{},\"validation\":{},\"guest_trace\":{guest_trace},\"trace\":{}}}",
             submission[0], submission[1], submission[2], submission[3], submission[4] as u32
         )
         .and_then(|_| self.file.flush())
@@ -3083,6 +3084,9 @@ fn run_play_in_process_inner(
                 }
             }
         }
+        let guest_trace = frame_evidence
+            .as_ref()
+            .map(|_| stasis_dynload::current_render_trace(&gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8));
         play_error_toasts.append_to_buffers(
             &mut gfx_cmd_i32,
             &mut gfx_cmd_f32,
@@ -3117,7 +3121,12 @@ fn run_play_in_process_inner(
             let entry_revision = stasis_dynload::jit_host_entry_targets()
                 .map(|targets| targets.revision)
                 .ok_or_else(|| "desktop frame has no published JIT entry table".to_string())?;
-            evidence.record(ticks_executed.saturating_add(1), entry_revision, submission)?;
+            evidence.record(
+                ticks_executed.saturating_add(1),
+                entry_revision,
+                guest_trace.expect("frame evidence guest trace must be captured before overlays"),
+                submission,
+            )?;
         }
         if let Some(frame_pacer) = frame_pacer.as_mut() {
             frame_pacer.wait();

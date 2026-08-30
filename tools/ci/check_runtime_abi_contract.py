@@ -42,6 +42,7 @@ GENERATED_MOBILE_AOT_C = Path("runtime/tests/stasis_generated_mobile_integration
 GENERATED_MOBILE_AOT_RUST = Path("apps/stasis/tests/generated_mobile_aot_runtime_seam.rs")
 DESKTOP_RENDER_RECOVERY = Path("apps/stasis/tests/desktop_render_recovery_seam.rs")
 DESKTOP_ERROR_TOAST = Path("apps/stasis/tests/desktop_error_toast_seam.rs")
+DESKTOP_HOT_SWAP_HARNESS = Path("apps/stasis/tests/desktop_hot_swap_generation_seam.rs")
 PLAY_ERROR_TOASTS = Path("apps/stasis/src/play_error_toasts.rs")
 RENDER_PARITY_FRAME = Path("samples/render_parity/frame.stasis")
 RENDER_PARITY_TRACE = Path("samples/render_parity/trace.stasis")
@@ -67,7 +68,8 @@ RENDER_DOWNSTREAM = (
     DESKTOP_MANIFEST_FIXTURE, DESKTOP_MANIFEST_HARNESS,
     DESKTOP_INPUT_FRAME_HARNESS, DESKTOP_DISPLAY_METRICS_HARNESS,
     GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
-    DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, PLAY_ERROR_TOASTS,
+    DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, DESKTOP_HOT_SWAP_HARNESS,
+    PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
     WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
@@ -79,7 +81,7 @@ REQUIRED = (
     DESKTOP_MANIFEST_HARNESS, DESKTOP_INPUT_FRAME_HARNESS,
     DESKTOP_DISPLAY_METRICS_HARNESS, GENERATED_MOBILE_AOT_C,
     GENERATED_MOBILE_AOT_RUST, DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
-    PLAY_ERROR_TOASTS,
+    DESKTOP_HOT_SWAP_HARNESS, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
     WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
@@ -586,6 +588,67 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 "current_render_trace.fixed_numeric_oracle",
                 "nonzero and semantic trace relationships", "fixed numeric trace",
             ))
+
+    desktop_text = sources[DESKTOP]
+    hot_swap_text = sources[DESKTOP_HOT_SWAP_HARNESS]
+    guest_trace_call = re.search(
+        r"stasis_dynload::current_render_trace\s*\(\s*"
+        r"&gfx_cmd_i32\s*,\s*&gfx_cmd_f32\s*,\s*&gfx_cmd_u8\s*,?\s*\)",
+        desktop_text,
+        re.S,
+    )
+    overlay_position = desktop_text.find("play_error_toasts.append_to_buffers(")
+    checks += 1
+    if guest_trace_call is None:
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(DESKTOP),
+            "desktop_frame.guest_trace_capture",
+            "current render trace over canonical registered command buffers",
+            "missing",
+        ))
+    checks += 1
+    if (guest_trace_call is None or overlay_position < 0
+            or guest_trace_call.start() >= overlay_position):
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(DESKTOP),
+            "desktop_frame.guest_trace_order",
+            "guest trace capture before PlayErrorToasts composition",
+            "missing or out of order",
+        ))
+    checks += 1
+    if not re.search(
+        r'\\"guest_trace\\":\{guest_trace\}.*?\\"trace\\":\{\}',
+        desktop_text,
+        re.S,
+    ):
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(DESKTOP),
+            "desktop_frame.guest_trace_evidence",
+            "guest_trace recorded separately before submitted trace",
+            "missing",
+        ))
+    checks += 1
+    if not re.search(
+        r"fn\s+sole_trace\b.*?\.map\(\|frame\|\s*frame\.guest_trace\)",
+        hot_swap_text,
+        re.S,
+    ):
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(DESKTOP_HOT_SWAP_HARNESS),
+            "desktop_hot_swap.generation_oracle",
+            "sole_trace uses guest_trace", "missing or submitted trace used",
+        ))
+    checks += 1
+    if not re.search(
+        r"frame\.guest_trace\s*!=\s*expected_guest_trace",
+        hot_swap_text,
+    ):
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(DESKTOP_HOT_SWAP_HARNESS),
+            "desktop_hot_swap.all_history_oracle",
+            "all-history comparison uses guest_trace",
+            "missing or submitted trace used",
+        ))
 
     checks += 1
     replay_trace_call = re.search(

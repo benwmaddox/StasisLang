@@ -25,6 +25,7 @@ struct FrameEvidence {
     rejected: i32,
     presented: i32,
     validation: i32,
+    guest_trace: u32,
     trace: u32,
 }
 
@@ -123,10 +124,50 @@ fn sole_trace(frames: &[FrameEvidence], revision: u64) -> u32 {
     let traces = frames
         .iter()
         .filter(|frame| frame.entry_revision == revision)
-        .map(|frame| frame.trace)
+        .map(|frame| frame.guest_trace)
         .collect::<BTreeSet<_>>();
     assert_eq!(traces.len(), 1, "revision {revision} emitted mixed traces");
     *traces.iter().next().expect("revision trace")
+}
+
+fn frame_generation_error(frame: &FrameEvidence, v1_trace: u32, v2_trace: u32) -> Option<String> {
+    if frame.rejected != 0 || frame.validation != 0 || frame.accepted != frame.presented {
+        return Some(format!(
+            "submission counters invalid: accepted={} rejected={} presented={} validation={}",
+            frame.accepted, frame.rejected, frame.presented, frame.validation
+        ));
+    }
+    let expected_guest_trace = match frame.entry_revision {
+        1 => v1_trace,
+        2 => v2_trace,
+        revision => return Some(format!("unexpected entry revision {revision}")),
+    };
+    (frame.guest_trace != expected_guest_trace).then(|| {
+        format!(
+            "guest trace {} does not match revision {} trace {}; submitted trace was {}",
+            frame.guest_trace, frame.entry_revision, expected_guest_trace, frame.trace
+        )
+    })
+}
+
+#[test]
+fn generation_oracle_ignores_host_overlay_trace_but_rejects_wrong_guest_trace() {
+    let mut frame = FrameEvidence {
+        frame: 7,
+        entry_revision: 2,
+        accepted: 3,
+        rejected: 0,
+        presented: 3,
+        validation: 0,
+        guest_trace: 222,
+        trace: 999,
+    };
+    assert_eq!(frame_generation_error(&frame, 111, 222), None);
+
+    frame.guest_trace = 111;
+    assert!(frame_generation_error(&frame, 111, 222)
+        .expect("wrong guest trace must be rejected")
+        .contains("guest trace 111"));
 }
 
 #[test]
@@ -254,7 +295,7 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
                     .iter()
                     .rev()
                     .take(8)
-                    .all(|frame| frame.entry_revision == 2 && frame.trace == v2_trace)
+                    .all(|frame| frame.entry_revision == 2 && frame.guest_trace == v2_trace)
         },
     );
     let failure_frame = after_compile_failure.last().expect("failure frame").frame;
@@ -274,7 +315,7 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
                     .iter()
                     .rev()
                     .take(8)
-                    .all(|frame| frame.entry_revision == 2 && frame.trace == v2_trace)
+                    .all(|frame| frame.entry_revision == 2 && frame.guest_trace == v2_trace)
         },
     );
     let hook_rejection_revision =
@@ -288,16 +329,14 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
         final_log.contains("rejection"),
         "hook failure must be explicit"
     );
-    assert!(final_frames.iter().all(|frame| {
-        frame.rejected == 0
-            && frame.validation == 0
-            && frame.accepted == frame.presented
-            && match frame.entry_revision {
-                1 => frame.trace == v1_trace,
-                2 => frame.trace == v2_trace,
-                _ => false,
-            }
-    }));
+    if let Some((frame, error)) = final_frames.iter().find_map(|frame| {
+        frame_generation_error(frame, v1_trace, v2_trace).map(|error| (frame, error))
+    }) {
+        panic!(
+            "frame {} violated generation evidence: {error}: {frame:?}",
+            frame.frame
+        );
+    }
     assert!(
         final_frames
             .windows(2)
