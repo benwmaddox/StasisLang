@@ -52,7 +52,7 @@ function tick(): i32 {
 
 function render(): i32 {
     gfx_cmd_i32[0] = 1196967473;
-    gfx_cmd_i32[1] = 2;
+    gfx_cmd_i32[1] = 6;
     gfx_cmd_i32[2] = 3;
     gfx_cmd_i32[3] = 0;
     gfx_cmd_i32[4] = 2;
@@ -90,12 +90,12 @@ function render(): i32 {
     gfx_cmd_i32[12320] = smoke_font;
     gfx_cmd_i32[12321] = 0 - cached_label;
     gfx_cmd_i32[12322] = 0;
-    gfx_cmd_f32[96388] = 55.0;
-    gfx_cmd_f32[96389] = 126.0;
-    gfx_cmd_f32[96390] = 0.95;
-    gfx_cmd_f32[96391] = 0.82;
-    gfx_cmd_f32[96392] = 0.25;
-    gfx_cmd_f32[96393] = 1.0;
+    gfx_cmd_f32[112772] = 55.0;
+    gfx_cmd_f32[112773] = 126.0;
+    gfx_cmd_f32[112774] = 0.95;
+    gfx_cmd_f32[112775] = 0.82;
+    gfx_cmd_f32[112776] = 0.25;
+    gfx_cmd_f32[112777] = 1.0;
     return 0;
 }
 

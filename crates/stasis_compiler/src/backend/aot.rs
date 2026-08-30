@@ -2432,15 +2432,15 @@ mod tests {
             ParityCorpusCase {
                 label: "renderer_command_trace",
                 source: RENDER_TRACE_FIXTURE,
-                expected_exit: 1_390_729_377,
+                expected_exit: 1_802_686_031,
                 expected_extern_symbols: &[(
                     "native_render_trace",
-                    "stasis_jit_render_v2_trace",
+                    "stasis_jit_render_trace",
                 )],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[
-                    ("cmd_i32", 34_608),
-                    ("cmd_f32", 108_676),
+                    ("cmd_i32", 35_120),
+                    ("cmd_f32", 126_084),
                     ("cmd_u8", 65_536),
                 ],
                 expected_clif_markers: &[("main", &["call"])],

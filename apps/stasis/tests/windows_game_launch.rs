@@ -178,7 +178,7 @@ fn assert_launch(description: &str, completed: CompletedProcess, screenshot: &Pa
         "{description} did not load the smoke font: {log}"
     );
     assert!(
-        log.contains("Stasis render contract v2"),
+        log.contains("Stasis render contract v6"),
         "{description} did not submit a frame"
     );
     let image = image::open(screenshot)

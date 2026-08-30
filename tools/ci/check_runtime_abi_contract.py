@@ -36,11 +36,36 @@ JNI = Path("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
 NATIVE_HOST = Path("runtime/stasis_graphics.c")
 DESKTOP_MANIFEST_FIXTURE = Path("tests/stasis/seams/desktop_manifest_assets_probe.stasis")
 DESKTOP_MANIFEST_HARNESS = Path("apps/stasis/tests/desktop_manifest_assets_seam.rs")
+DESKTOP_INPUT_FRAME_HARNESS = Path("apps/stasis/tests/desktop_input_frame_seam.rs")
+DESKTOP_DISPLAY_METRICS_HARNESS = Path("apps/stasis/tests/desktop_display_metrics_seam.rs")
+GENERATED_MOBILE_AOT_C = Path("runtime/tests/stasis_generated_mobile_integration.c")
+GENERATED_MOBILE_AOT_RUST = Path("apps/stasis/tests/generated_mobile_aot_runtime_seam.rs")
+DESKTOP_RENDER_RECOVERY = Path("apps/stasis/tests/desktop_render_recovery_seam.rs")
+DESKTOP_ERROR_TOAST = Path("apps/stasis/tests/desktop_error_toast_seam.rs")
+PLAY_ERROR_TOASTS = Path("apps/stasis/src/play_error_toasts.rs")
+RENDER_PARITY_FRAME = Path("samples/render_parity/frame.stasis")
+RENDER_PARITY_TRACE = Path("samples/render_parity/trace.stasis")
+JIT_AOT_REPLAY_FIXTURE = Path("tests/stasis/seams/jit_aot_host_replay_probe.stasis")
+RENDER_DOWNSTREAM = (
+    GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN, RELEASE_PROVENANCE,
+    PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER, JNI, NATIVE_HOST,
+    DESKTOP_MANIFEST_FIXTURE, DESKTOP_MANIFEST_HARNESS,
+    DESKTOP_INPUT_FRAME_HARNESS, DESKTOP_DISPLAY_METRICS_HARNESS,
+    GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
+    DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, PLAY_ERROR_TOASTS,
+    RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
+    JIT_AOT_REPLAY_FIXTURE,
+)
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
     RELEASE_PROVENANCE, PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER,
     WORKSHOP, JNI, NATIVE_HOST, DESKTOP_MANIFEST_FIXTURE,
-    DESKTOP_MANIFEST_HARNESS,
+    DESKTOP_MANIFEST_HARNESS, DESKTOP_INPUT_FRAME_HARNESS,
+    DESKTOP_DISPLAY_METRICS_HARNESS, GENERATED_MOBILE_AOT_C,
+    GENERATED_MOBILE_AOT_RUST, DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
+    PLAY_ERROR_TOASTS,
+    RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
+    JIT_AOT_REPLAY_FIXTURE,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -52,6 +77,21 @@ IGNORED_SOURCE_DIRS = {
     "target",
     "vendor",
 }
+
+# These spellings represented compatibility layers for retired render-command
+# layouts. Keep rejection scoped to render consumers: other versioned
+# contracts (host frame, workshop projects, etc.) may retain their own
+# historical versions.
+LEGACY_RENDER_PATTERNS = (
+    re.compile(r"\bSTASIS_RENDER_V[2-6](?:_[A-Z0-9_]+)?\b"),
+    re.compile(r"\bGFX_CMD_V[2-6](?:_[A-Z0-9_]+)?\b"),
+    re.compile(r"\b(?:STASIS_RENDER|GFX_CMD)_CURRENT_VERSION\b"),
+    re.compile(r"\b(?:GFX_CMD|STASIS_RENDER)_(?:LEGACY|OLD)_[A-Z0-9_]+\b"),
+    re.compile(r"\b(?:LEGACY|OLD)_(?:GFX|RENDER)_[A-Z0-9_]+\b"),
+    re.compile(r"\bstasis_(?:render|jit_render)_v2_trace(?:_native)?\b"),
+    re.compile(r"\bstasis_android_bridge_run_tick_frame(?:_v\d+)?\b"),
+    re.compile(r"\b(?:34608|108676|96388)\b"),
+)
 
 
 def repository_stasis_sources(directory: Path) -> list[Path]:
@@ -173,10 +213,8 @@ def javascript_constants(text: str) -> dict[str, int]:
 
 
 RENDER_TO_GFX = {
-    "STASIS_RENDER_V2_MAGIC": "GFX_CMD_MAGIC",
-    "STASIS_RENDER_V5_VERSION": "GFX_CMD_V5_VERSION",
-    "STASIS_RENDER_V6_VERSION": "GFX_CMD_V6_VERSION",
-    "STASIS_RENDER_CURRENT_VERSION": "GFX_CMD_VERSION",
+    "STASIS_RENDER_MAGIC": "GFX_CMD_MAGIC",
+    "STASIS_RENDER_VERSION": "GFX_CMD_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "GFX_FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "GFX_FLAG_PRESENT",
     "STASIS_RENDER_I_MAGIC": "GFX_I_MAGIC",
@@ -239,22 +277,15 @@ RENDER_TO_GFX = {
 
 RENDER_TO_RUST = {
     "STASIS_RENDER_I32_COUNT": "STASIS_RENDER_I32_COUNT",
-    "STASIS_RENDER_V2_I32_COUNT": "STASIS_RENDER_V2_I32_COUNT",
     "STASIS_RENDER_F32_COUNT": "STASIS_RENDER_F32_COUNT",
     "STASIS_RENDER_U8_COUNT": "STASIS_RENDER_U8_COUNT",
-    "STASIS_RENDER_V2_MAGIC": "STASIS_RENDER_MAGIC",
-    "STASIS_RENDER_V2_VERSION": "STASIS_RENDER_V2_VERSION",
-    "STASIS_RENDER_V3_VERSION": "STASIS_RENDER_V3_VERSION",
-    "STASIS_RENDER_V4_VERSION": "STASIS_RENDER_V4_VERSION",
-    "STASIS_RENDER_V5_VERSION": "STASIS_RENDER_V5_VERSION",
-    "STASIS_RENDER_V6_VERSION": "STASIS_RENDER_V6_VERSION",
-    "STASIS_RENDER_CURRENT_VERSION": "STASIS_RENDER_VERSION",
+    "STASIS_RENDER_MAGIC": "STASIS_RENDER_MAGIC",
+    "STASIS_RENDER_VERSION": "STASIS_RENDER_VERSION",
     "STASIS_RENDER_I_ORDER_COUNT": "STASIS_RENDER_ORDER_COUNT_INDEX",
     "STASIS_RENDER_I_RECT_COUNT": "STASIS_RENDER_RECT_COUNT_INDEX",
     "STASIS_RENDER_I_CLIP_COUNT": "STASIS_RENDER_CLIP_COUNT_INDEX",
     "STASIS_RENDER_I_ORDER_BASE": "STASIS_RENDER_ORDER_BASE",
     "STASIS_RENDER_MAX_ORDER": "STASIS_RENDER_MAX_ORDER",
-    "STASIS_RENDER_V5_MAX_ORDER": "STASIS_RENDER_V5_MAX_ORDER",
     "STASIS_RENDER_MAX_CLIPS": "STASIS_RENDER_MAX_CLIPS",
     "STASIS_RENDER_CLIP_F32_STRIDE": "STASIS_RENDER_CLIP_STRIDE_F32",
     "STASIS_RENDER_I_SPRITE_BASE": "STASIS_RENDER_SPRITE_BASE",
@@ -266,11 +297,9 @@ RENDER_TO_RUST = {
     "STASIS_RENDER_SPRITE_I32_STRIDE": "STASIS_RENDER_SPRITE_STRIDE_I32",
     "STASIS_RENDER_F_SPRITE_BASE": "STASIS_RENDER_SPRITE_BASE_F32",
     "STASIS_RENDER_SPRITE_F32_STRIDE": "STASIS_RENDER_SPRITE_STRIDE_F32",
-    "STASIS_RENDER_LEGACY_SPRITE_F32_STRIDE": "STASIS_RENDER_LEGACY_SPRITE_STRIDE_F32",
     "STASIS_RENDER_F_CLEAR_BASE": "STASIS_RENDER_F_CLEAR_BASE",
     "STASIS_RENDER_F_LINE_BASE": "STASIS_RENDER_F_LINE_BASE",
     "STASIS_RENDER_F_RECT_REVERSE_BASE": "STASIS_RENDER_RECT_REVERSE_BASE_F32",
-    "STASIS_RENDER_LEGACY_F_TEXT_BASE": "STASIS_RENDER_LEGACY_TEXT_BASE_F32",
     "STASIS_RENDER_I_TEXT_BASE": "STASIS_RENDER_TEXT_BASE_I32",
     "STASIS_RENDER_F_TEXT_BASE": "STASIS_RENDER_TEXT_BASE_F32",
     "STASIS_RENDER_F_CLIP_BASE": "STASIS_RENDER_CLIP_BASE_F32",
@@ -281,13 +310,8 @@ RENDER_TO_RUST = {
 }
 
 RENDER_TO_WEB = {
-    "STASIS_RENDER_V2_MAGIC": "GFX_CMD_MAGIC",
-    "STASIS_RENDER_V2_VERSION": "GFX_CMD_V2_VERSION",
-    "STASIS_RENDER_V3_VERSION": "GFX_CMD_V3_VERSION",
-    "STASIS_RENDER_V4_VERSION": "GFX_CMD_V4_VERSION",
-    "STASIS_RENDER_V5_VERSION": "GFX_CMD_V5_VERSION",
-    "STASIS_RENDER_V6_VERSION": "GFX_CMD_V6_VERSION",
-    "STASIS_RENDER_CURRENT_VERSION": "GFX_CMD_CURRENT_VERSION",
+    "STASIS_RENDER_MAGIC": "GFX_CMD_MAGIC",
+    "STASIS_RENDER_VERSION": "GFX_CMD_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "GFX_FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "GFX_FLAG_PRESENT",
     "STASIS_RENDER_I_MAGIC": "GFX_I_MAGIC",
@@ -308,14 +332,12 @@ RENDER_TO_WEB = {
     "STASIS_RENDER_F_RECT_REVERSE_BASE": "GFX_F_RECT_REVERSE_BASE",
     "STASIS_RENDER_F_TEXT_BASE": "GFX_F_TEXT_BASE",
     "STASIS_RENDER_F_CLIP_BASE": "GFX_F_CLIP_BASE",
-    "STASIS_RENDER_LEGACY_F_TEXT_BASE": "GFX_F_LEGACY_TEXT_BASE",
     "STASIS_RENDER_MAX_GEOMETRY": "GFX_MAX_GEOMETRY",
     "STASIS_RENDER_GEOMETRY_F32_STRIDE": "GFX_GEOMETRY_STRIDE_F32",
     "STASIS_RENDER_MAX_LINES": "GFX_MAX_LINES",
     "STASIS_RENDER_LINE_F32_STRIDE": "GFX_LINE_STRIDE_F32",
     "STASIS_RENDER_MAX_SPRITES": "GFX_MAX_SPRITES",
     "STASIS_RENDER_SPRITE_I32_STRIDE": "GFX_SPRITE_STRIDE_I32",
-    "STASIS_RENDER_LEGACY_SPRITE_F32_STRIDE": "GFX_LEGACY_SPRITE_STRIDE_F32",
     "STASIS_RENDER_SPRITE_F32_STRIDE": "GFX_SPRITE_STRIDE_F32",
     "STASIS_RENDER_MAX_TEXT": "GFX_MAX_TEXT",
     "STASIS_RENDER_TEXT_I32_STRIDE": "GFX_TEXT_STRIDE_I32",
@@ -334,23 +356,16 @@ RENDER_TO_WEB = {
 }
 
 RENDER_TO_TOOLCHAIN_PROVENANCE = {
-    "STASIS_RENDER_CURRENT_VERSION": "GFX_CMD_CURRENT_VERSION",
-    "STASIS_RENDER_V4_VERSION": "GFX_CMD_LEGACY_VERSION",
+    "STASIS_RENDER_VERSION": "GFX_CMD_VERSION",
 }
 
 RENDER_TO_PACKAGE_PROVENANCE = {
-    "STASIS_RENDER_CURRENT_VERSION": "CURRENT_COMMAND_BUFFER_VERSION",
-    "STASIS_RENDER_V4_VERSION": "LEGACY_COMMAND_BUFFER_VERSION",
+    "STASIS_RENDER_VERSION": "CURRENT_COMMAND_BUFFER_VERSION",
 }
 
 RENDER_TO_JAVA = {
-    "STASIS_RENDER_V2_MAGIC": "RENDER_MAGIC",
-    "STASIS_RENDER_V2_VERSION": "RENDER_V2_VERSION",
-    "STASIS_RENDER_V3_VERSION": "RENDER_V3_VERSION",
-    "STASIS_RENDER_V4_VERSION": "RENDER_V4_VERSION",
-    "STASIS_RENDER_V5_VERSION": "RENDER_V5_VERSION",
-    "STASIS_RENDER_V6_VERSION": "RENDER_V6_VERSION",
-    "STASIS_RENDER_CURRENT_VERSION": "RENDER_VERSION",
+    "STASIS_RENDER_MAGIC": "RENDER_MAGIC",
+    "STASIS_RENDER_VERSION": "RENDER_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "FLAG_PRESENT",
     **{source: target.removeprefix("GFX_") for source, target in RENDER_TO_GFX.items()
@@ -365,7 +380,6 @@ RENDER_TO_JAVA = {
     "STASIS_RENDER_I32_COUNT": "FRAME_I32_CAPACITY",
     "STASIS_RENDER_F32_COUNT": "FRAME_F32_CAPACITY",
     "STASIS_RENDER_F_CLEAR_BASE": "F_CLEAR_BASE",
-    "STASIS_RENDER_LEGACY_F_TEXT_BASE": "LEGACY_F_TEXT_BASE",
 }
 
 
@@ -440,16 +454,26 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
     rust = rust_constants(sources[DYNLOAD], "STASIS_RENDER_")
     toolchain_provenance = rust_constants(sources[TOOLCHAIN], "GFX_CMD_")
     package_provenance = python_constants(sources[PACKAGE_PROVENANCE], "CURRENT_COMMAND_BUFFER_VERSION")
-    package_provenance.update(python_constants(sources[PACKAGE_PROVENANCE], "LEGACY_COMMAND_BUFFER_VERSION"))
     java = java_constants(sources[JAVA_RENDERER])
     web = javascript_constants(sources[WEB])
     failures = compare(label(RENDER_HEADER), label(GFX_CMD), render, gfx, RENDER_TO_GFX)
+    checks = 0
+    for consumer in RENDER_DOWNSTREAM:
+        text = sources[consumer]
+        for pattern in LEGACY_RENDER_PATTERNS:
+            match = pattern.search(text)
+            checks += 1
+            if match:
+                failures.append(Mismatch(
+                    label(RENDER_HEADER), label(consumer),
+                    "render_abi.legacy_token", "current-only render ABI", match.group(0),
+                ))
     failures += compare(label(RENDER_HEADER), label(DYNLOAD), render, rust, RENDER_TO_RUST)
     failures += compare(label(RENDER_HEADER), label(JAVA_RENDERER), render, java, RENDER_TO_JAVA)
     failures += compare(label(RENDER_HEADER), label(WEB), render, web, RENDER_TO_WEB)
     failures += compare(label(RENDER_HEADER), label(TOOLCHAIN), render, toolchain_provenance, RENDER_TO_TOOLCHAIN_PROVENANCE)
     failures += compare(label(RENDER_HEADER), label(PACKAGE_PROVENANCE), render, package_provenance, RENDER_TO_PACKAGE_PROVENANCE)
-    checks = (
+    checks += (
         len(RENDER_TO_GFX)
         + len(RENDER_TO_RUST)
         + len(RENDER_TO_JAVA)
@@ -470,6 +494,14 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                       "command_buffer.name", "gfx_cmd", 'GFX_CMD_NAME: &str = "gfx_cmd"'),
         check_literal(RENDER_HEADER, PACKAGE_PROVENANCE, sources[PACKAGE_PROVENANCE],
                       "command_buffer.name", "gfx_cmd", 'COMMAND_BUFFER_NAME = "gfx_cmd"'),
+        check_literal(RENDER_HEADER, ANDROID, sources[ANDROID],
+                      "android_bridge.render_export",
+                      "stasis_android_bridge_run_render_frame",
+                      "pub extern \"C\" fn stasis_android_bridge_run_render_frame("),
+        check_literal(RENDER_HEADER, JNI, sources[JNI],
+                      "android_bridge.render_dlsym",
+                      "stasis_android_bridge_run_render_frame",
+                      'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_render_frame")'),
     ):
         checks += 1
         if mismatch is not None:
@@ -511,6 +543,129 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 label(DYNLOAD), label(DESKTOP_MANIFEST_HARNESS),
                 f"{lane}.host_capacity", "canonical STASIS_RENDER_*_COUNT reference",
                 "missing",
+            ))
+
+    current_trace_consumers = {
+        DESKTOP_INPUT_FRAME_HARNESS: sources[DESKTOP_INPUT_FRAME_HARNESS],
+        DESKTOP_DISPLAY_METRICS_HARNESS: sources[DESKTOP_DISPLAY_METRICS_HARNESS],
+        DESKTOP_MANIFEST_HARNESS: harness_text,
+    }
+    numeric_trace_patterns = (
+        r"\bconst\s+[A-Z0-9_]*TRACE\s*:\s*i32\s*=\s*-?[0-9]",
+        r"assert_eq!\s*\(\s*\[[^\]]*trace[^\]]*\]\s*,\s*\[\s*-?[0-9]",
+        r"assert_eq!\s*\(\s*[A-Za-z0-9_]*trace\s*,\s*-?[0-9][0-9_]{4,}",
+    )
+    for consumer, text in current_trace_consumers.items():
+        checks += 1
+        if any(re.search(pattern, text, re.S) for pattern in numeric_trace_patterns):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(consumer),
+                "current_render_trace.fixed_numeric_oracle",
+                "nonzero and semantic trace relationships", "fixed numeric trace",
+            ))
+
+    checks += 1
+    replay_trace_call = re.search(
+        r"native_render_trace\s*\(\s*gfx_cmd_i32\s*,\s*35120\s*,\s*"
+        r"gfx_cmd_f32\s*,\s*126084\s*,\s*gfx_cmd_u8\s*,\s*65536\s*\)",
+        sources[JIT_AOT_REPLAY_FIXTURE], re.S,
+    )
+    if replay_trace_call is None:
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(JIT_AOT_REPLAY_FIXTURE),
+            "render_trace.current_capacities", "35120/126084/65536", "missing",
+        ))
+
+    trace_relationships = {
+        DESKTOP_INPUT_FRAME_HARNESS: (
+            'assert_ne!(trace, 0, "native render trace must accept the guest frame")',
+            "down_trace, move_trace,",
+            "move_trace, up_trace,",
+            "down_trace, up_trace,",
+        ),
+        DESKTOP_DISPLAY_METRICS_HARNESS: (
+            "assert_ne!(trace, 0",
+            "duplicate_trace, restored_trace,",
+            "portrait_down_trace, landscape_down_trace",
+            "landscape_down_trace, landscape_release_trace",
+            "restored_portrait_trace, quiet_trace",
+            "distinct_semantic_traces",
+        ),
+        DESKTOP_MANIFEST_HARNESS: (
+            "trace, 0,",
+        ),
+    }
+    for consumer, needles in trace_relationships.items():
+        for index, needle in enumerate(needles):
+            checks += 1
+            if needle not in sources[consumer]:
+                failures.append(Mismatch(
+                    label(RENDER_HEADER), label(consumer),
+                    f"current_render_trace.semantic_relation.{index}", needle, "missing",
+                ))
+
+    mobile_aot_c = without_c_comments(sources[GENERATED_MOBILE_AOT_C])
+    mobile_aot_rust = without_c_comments(sources[GENERATED_MOBILE_AOT_RUST])
+    fixed_trace_patterns = {
+        GENERATED_MOBILE_AOT_C: (
+            r"\bIT012_EXPECTED_TRACE\b",
+            r"(?:#define\s+[A-Z0-9_]*TRACE|const\s+uint32_t\s+[A-Za-z0-9_]*trace)\s+(?:=\s*)?[0-9]",
+            r"\bsubmitted_trace\s*==\s*[0-9][0-9A-Fa-f_xXuUlL]*\b",
+            r"\b2880741754[uUlL]*\b",
+        ),
+        GENERATED_MOBILE_AOT_RUST: (
+            r"\bEXPECTED_TRACE\b",
+            r"\bconst\s+[A-Z0-9_]*TRACE\s*:\s*u32\s*=\s*[0-9]",
+            r"assert_eq!\(\s*trace\s*,\s*[0-9][0-9_]*",
+            r"\b2_880_741_754\b",
+        ),
+    }
+    for consumer, patterns in fixed_trace_patterns.items():
+        text = mobile_aot_c if consumer == GENERATED_MOBILE_AOT_C else mobile_aot_rust
+        checks += 1
+        if any(re.search(pattern, text) for pattern in patterns):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(consumer), "it012.fixed_trace_oracle",
+                "semantic trace derived from canonical frame", "fixed numeric trace",
+            ))
+
+    semantic_oracle_patterns = {
+        "function": r"static\s+uint32_t\s+it012_expected_frame_trace\s*\(\s*void\s*\)",
+        "i32.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_I32_COUNT\s*,",
+        "f32.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_F32_COUNT\s*,",
+        "u8.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_U8_COUNT\s*,",
+        "magic": r"expected_i32\s*\[\s*STASIS_RENDER_I_MAGIC\s*\]\s*=\s*STASIS_RENDER_MAGIC",
+        "version": r"expected_i32\s*\[\s*STASIS_RENDER_I_VERSION\s*\]\s*=\s*STASIS_RENDER_VERSION",
+        "flags": r"STASIS_RENDER_FLAG_CLEAR\s*\|\s*STASIS_RENDER_FLAG_PRESENT",
+        "rect.payload": r"rect_base\s*=\s*STASIS_RENDER_F_RECT_REVERSE_BASE",
+        "text.metadata": r"text_i32_base\s*=\s*STASIS_RENDER_I_TEXT_BASE",
+        "text.payload": r"text_f32_base\s*=\s*STASIS_RENDER_F_TEXT_BASE",
+        "order.rect": r"STASIS_RENDER_ORDER_RECT\s*\*\s*STASIS_RENDER_ORDER_KIND_SCALE",
+        "order.text": r"STASIS_RENDER_ORDER_TEXT\s*\*\s*STASIS_RENDER_ORDER_KIND_SCALE",
+        "validation": r"stasis_render_validate\s*\(\s*expected_i32\s*,\s*expected_f32\s*\)",
+        "trace": r"stasis_render_trace\s*\(\s*expected_i32\s*,\s*expected_f32\s*,\s*expected_u8\s*\)",
+        "comparison": r"CHECK\s*\(\s*submitted_trace\s*==\s*expected_trace\s*\)",
+        "i32.free": r"free\s*\(\s*expected_i32\s*\)",
+        "f32.free": r"free\s*\(\s*expected_f32\s*\)",
+        "u8.free": r"free\s*\(\s*expected_u8\s*\)",
+    }
+    for field, pattern in semantic_oracle_patterns.items():
+        checks += 1
+        if not re.search(pattern, mobile_aot_c):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(GENERATED_MOBILE_AOT_C),
+                f"it012.semantic_oracle.{field}", "canonical semantic frame reference",
+                "missing",
+            ))
+    for field, needle in (
+        ("trace.parse", 'strip_prefix("trace=")'),
+        ("trace.evidence", '"trace": trace'),
+    ):
+        checks += 1
+        if needle not in mobile_aot_rust:
+            failures.append(Mismatch(
+                label(GENERATED_MOBILE_AOT_C), label(GENERATED_MOBILE_AOT_RUST),
+                f"it012.{field}", needle, "missing",
             ))
     for lane, pattern in DESCRIPTOR_PATTERNS.items():
         checks += 1
@@ -640,7 +795,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         "fixture_revision": digest,
         "checks": checks,
         "consumers": [label(path) for path in REQUIRED[2:]],
-        "contract": {**{key: render[key] for key in ("STASIS_RENDER_CURRENT_VERSION", "STASIS_RENDER_I32_COUNT", "STASIS_RENDER_F32_COUNT", "STASIS_RENDER_U8_COUNT")}, "HOST_I32_COUNT": host["HOST_I32_COUNT"], "HOST_F32_COUNT": host["HOST_F32_COUNT"]},
+        "contract": {**{key: render[key] for key in ("STASIS_RENDER_VERSION", "STASIS_RENDER_I32_COUNT", "STASIS_RENDER_F32_COUNT", "STASIS_RENDER_U8_COUNT")}, "HOST_I32_COUNT": host["HOST_I32_COUNT"], "HOST_F32_COUNT": host["HOST_F32_COUNT"]},
         "failures": [str(failure) for failure in failures],
     }
     return failures, evidence

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "fixture": "samples/render_parity/main.stasis",
   "trace_fixture": "samples/render_parity/trace.stasis",
-  "command_trace": 4006030063,
+  "command_trace": 1802686031,
   "workshop_command_trace": 3533510058,
   "state_checksum": 2500,
   "render_contract_version": 6,

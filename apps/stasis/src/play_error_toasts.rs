@@ -1,6 +1,6 @@
 //! Development-only error notifications for the in-process `stasis play` loop.
 //!
-//! This module intentionally owns no runtime or ABI state. It appends ordinary gfx_cmd v5/v6
+//! This module intentionally owns no runtime or ABI state. It appends ordinary current gfx_cmd
 //! rectangle and text commands to the buffers that the guest already submitted.
 
 use std::collections::VecDeque;
@@ -13,7 +13,6 @@ pub const MAX_VISIBLE_TOASTS: usize = 5;
 pub const MAX_MESSAGE_BYTES: usize = 160;
 
 const GFX_CMD_MAGIC: i32 = 0x4758_4631;
-const GFX_CMD_V5_VERSION: i32 = 5;
 const GFX_CMD_VERSION: i32 = 6;
 const GFX_I_VERSION: usize = 1;
 const GFX_I_LINE_COUNT: usize = 3;
@@ -28,7 +27,6 @@ const GFX_I_TEXT_BASE: usize = 12_320;
 const GFX_F_RECT_REVERSE_BASE: usize = 79_996;
 const GFX_F_TEXT_BASE: usize = 112_772;
 const GFX_MAX_GEOMETRY: usize = 10_000;
-const GFX_MAX_ORDER_V5: usize = 16_144;
 const GFX_MAX_ORDER: usize = 16_656;
 const GFX_MAX_TEXT: usize = 2_048;
 const GFX_TEXT_MAX_BYTES: usize = 65_536;
@@ -104,11 +102,7 @@ impl PlayErrorToasts {
             return 0;
         }
 
-        let max_order = if cmd_i32[GFX_I_VERSION] >= GFX_CMD_VERSION {
-            GFX_MAX_ORDER
-        } else {
-            GFX_MAX_ORDER_V5
-        };
+        let max_order = GFX_MAX_ORDER;
 
         let line_count = nonnegative_count(cmd_i32, GFX_I_LINE_COUNT, GFX_MAX_GEOMETRY);
         let mut rect_count = nonnegative_count(cmd_i32, GFX_I_RECT_COUNT, GFX_MAX_GEOMETRY);
@@ -125,7 +119,7 @@ impl PlayErrorToasts {
         let font_handle = self.font_handle;
         let mut appended = 0;
 
-        // An empty v5 order stream means the runtime uses the compatibility category order.
+        // An empty order stream means the runtime uses the category fallback order.
         // Materialize that order before appending so adding a toast never hides guest draws.
         if order_count == 0 {
             let guest_order_count = line_count
@@ -262,10 +256,7 @@ impl PlayErrorToasts {
 
 fn valid_header(cmd_i32: &[i32]) -> bool {
     cmd_i32.first().copied() == Some(GFX_CMD_MAGIC)
-        && matches!(
-            cmd_i32.get(GFX_I_VERSION).copied(),
-            Some(GFX_CMD_V5_VERSION | GFX_CMD_VERSION)
-        )
+        && cmd_i32.get(GFX_I_VERSION).copied() == Some(GFX_CMD_VERSION)
 }
 
 fn nonnegative_count(buffer: &[i32], index: usize, maximum: usize) -> usize {
@@ -350,7 +341,7 @@ mod tests {
     use super::*;
 
     fn buffers() -> (Vec<i32>, Vec<f32>, Vec<u8>) {
-        let mut i32s = vec![0; 34_608];
+        let mut i32s = vec![0; 35_120];
         i32s[0] = GFX_CMD_MAGIC;
         i32s[1] = GFX_CMD_VERSION;
         i32s[2] = 2;
@@ -358,7 +349,20 @@ mod tests {
         i32s[GFX_I_ORDER_COUNT] = 1;
         i32s[GFX_I_ORDER_BASE] = 16_384 + 0;
         i32s[GFX_I_LOGICAL_W] = 640;
-        (i32s, vec![0.0; 125_060], vec![0; 65_536])
+        (i32s, vec![0.0; 126_084], vec![0; 65_536])
+    }
+
+    #[test]
+    fn valid_header_accepts_only_the_current_command_version() {
+        let (mut i32s, _, _) = buffers();
+        assert!(valid_header(&i32s));
+        for version in 2..=5 {
+            i32s[GFX_I_VERSION] = version;
+            assert!(
+                !valid_header(&i32s),
+                "legacy version {version} must be rejected"
+            );
+        }
     }
 
     #[test]

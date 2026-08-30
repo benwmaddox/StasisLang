@@ -27,9 +27,8 @@ boundary. Counts are clamped to the contract capacities;
 invalid text ranges contribute metadata but never read outside the byte buffer.
 JIT and AOT traces must match exactly for the representative conformance frame.
 
-For compatibility, schema v2 and schema v3 frames with an empty order stream
-use the prior line -> sprite -> text order. Schemas v4 and v5 preserve the empty-order fallback
-line -> filled rectangle -> sprite -> text. This supports games that prebuild
+Current-schema frames with an empty order stream use the deterministic
+line -> filled rectangle -> sprite -> text fallback. This supports games that prebuild
 persistent category buffers with `gfx_cmd_set_*_at` and count setters. New calls
 to `gfx_cmd_line`, `gfx_cmd_rect`, `gfx_cmd_sprite`, `gfx_cmd_text`, their cached/bulk variants,
 append order entries automatically; games do not need a separate layer API.

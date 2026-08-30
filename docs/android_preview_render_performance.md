@@ -1,7 +1,7 @@
 # Android preview render performance
 
 The Android Workshop performance gate uses the canonical `samples/render_parity`
-scene. It is an explicitly retained legacy gfx_cmd schema-v4 fixture and
+scene. It uses the canonical current gfx_cmd schema and
 exercises every category transition through the real x86_64
 JIT, the embedded GLES renderer, and three pixel-verified captures. Timing starts
 inside `StasisPreviewRenderer.onDrawFrame`; work is not deferred outside the

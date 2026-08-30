@@ -1,6 +1,6 @@
 import "../../../src/stdlib/graphics.stasis";
 
-function @extern("stasis_jit_render_v2_trace") native_render_trace(
+function @extern("stasis_jit_render_trace") native_render_trace(
     cmd_i32: i32[],
     cmd_i32_len: i32,
     cmd_f32: f32[],
@@ -151,14 +151,7 @@ function render(): i32 {
     if (host_pointer_is_down(0)) {
         gfx_cmd_rect(30.0, 8.0, 9.0, 7.0, 0.8, 0.3, 0.1, 1.0);
     }
-    last_trace = native_render_trace(
-        gfx_cmd_i32,
-        34608,
-        gfx_cmd_f32,
-        125060,
-        gfx_cmd_u8,
-        65536
-    );
+    last_trace = native_render_trace(gfx_cmd_i32, 35120, gfx_cmd_f32, 126084, gfx_cmd_u8, 65536);
     return render_calls * 10 + gfx_cmd_i32[24];
 }
 

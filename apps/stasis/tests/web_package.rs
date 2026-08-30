@@ -598,8 +598,8 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "addEventListener(\"pointerdown\", () => { void enableWebAudio(); }",
         "void enableWebAudio();",
         "function sdlScancode",
-        "const spriteStride = version >= GFX_CMD_V5_VERSION",
-        "const GFX_CMD_V6_VERSION = 6;",
+        "const spriteStride = GFX_SPRITE_STRIDE_F32;",
+        "const GFX_CMD_VERSION = 6;",
         "const GFX_ORDER_CLIP_PUSH = 5;",
         "context.clip();",
         "while (clipDepth > 0)",
@@ -612,6 +612,10 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
             "missing web runtime data {expected}"
         );
     }
+    assert!(!runtime.contains("GFX_CMD_V2_VERSION"));
+    assert!(!runtime.contains("GFX_CMD_V3_VERSION"));
+    assert!(!runtime.contains("GFX_CMD_V4_VERSION"));
+    assert!(!runtime.contains("GFX_CMD_V5_VERSION"));
     assert!(!runtime.contains("render prep N/A"));
     assert!(!runtime.contains("GPU submit N/A"));
     assert!(!runtime.contains("present wait N/A"));

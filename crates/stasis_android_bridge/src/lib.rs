@@ -15,7 +15,7 @@ unsafe extern "C" {
     /// Keeping this declaration test-only prevents a second trace algorithm
     /// from entering the Android bridge while allowing the real sample test
     /// to validate the copied direct buffers.
-    fn stasis_render_v2_trace_native(
+    fn stasis_render_trace_native(
         cmd_i32: *const i32,
         cmd_f32: *const f32,
         cmd_u8: *const u8,
@@ -46,10 +46,6 @@ use stasis_compiler::frontend::workshop::{
 use stasis_dynload::StasisAudioHostApi;
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
-pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
-pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 13;
-pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER_SIZE
-    + ANDROID_RENDER_COMMAND_CAPACITY * ANDROID_RENDER_COMMAND_STRIDE;
 pub const ANDROID_RENDER_GFX_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_I32_COUNT;
 pub const ANDROID_RENDER_GFX_F32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_F32_COUNT;
 pub const ANDROID_RENDER_GFX_U8_CAPACITY: usize = stasis_dynload::STASIS_RENDER_U8_COUNT;
@@ -1431,7 +1427,7 @@ fn run_android_workshop_tick_internal(
     project_root: impl AsRef<Path>,
     entry_file: impl AsRef<Path>,
     input: AndroidBridgeTickInput,
-    read_legacy_render_commands: bool,
+    read_workshop_render_commands: bool,
 ) -> Result<AndroidBridgeRunTickResult, AndroidBridgeError> {
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
@@ -1475,7 +1471,7 @@ fn run_android_workshop_tick_internal(
             true
         };
         let metrics = write_production_host_frame(session, input)?;
-        if read_legacy_render_commands {
+        if read_workshop_render_commands {
             let (touch_x, touch_y) = metrics.native_to_logical(input.touch_x, input.touch_y);
             session
                 .jit
@@ -1501,12 +1497,12 @@ fn run_android_workshop_tick_internal(
             .map_err(|error| AndroidBridgeError::phase("runtime_entry", "render", error, None))?;
         take_embedded_resource_error().map_err(|error| resource_phase_error("render", error))?;
         let write_runtime_state = should_write_jit_runtime_state(initialized, recompiled);
-        let observed_game_tick_count = if read_legacy_render_commands || write_runtime_state {
+        let observed_game_tick_count = if read_workshop_render_commands || write_runtime_state {
             session.jit.read_i32_global_path("GameState.tick_count")
         } else {
             0
         };
-        let (render_command_count, render_commands) = if read_legacy_render_commands {
+        let (render_command_count, render_commands) = if read_workshop_render_commands {
             (
                 session.jit.read_i32_global_path("Render.command_count"),
                 read_render_commands(&session.jit),
@@ -2085,50 +2081,6 @@ fn render_command_state_lines(
         ));
     }
     lines
-}
-
-fn write_render_frame_i32s(
-    out: &mut [i32],
-    result: &AndroidBridgeRunTickResult,
-) -> Result<(), String> {
-    if out.len() < ANDROID_RENDER_FRAME_I32_CAPACITY {
-        return Err(format!(
-            "render frame output buffer too small: got {}, need {}",
-            out.len(),
-            ANDROID_RENDER_FRAME_I32_CAPACITY
-        ));
-    }
-    out[0] = 0;
-    out[1] = result.tick_count;
-    out[2] = result.observed_game_tick_count;
-    out[3] = if result.recompiled { 1 } else { 0 };
-    out[4] = if result.initialized { 1 } else { 0 };
-    out[5] = result
-        .render_command_count
-        .clamp(0, ANDROID_RENDER_COMMAND_CAPACITY as i32);
-    let count = out[5] as usize;
-    for index in 0..ANDROID_RENDER_COMMAND_CAPACITY {
-        let base = ANDROID_RENDER_FRAME_HEADER_SIZE + index * ANDROID_RENDER_COMMAND_STRIDE;
-        let command = if index < count {
-            result.render_commands[index]
-        } else {
-            AndroidBridgeRenderCommand::default()
-        };
-        out[base] = command.kind;
-        out[base + 1] = command.x;
-        out[base + 2] = command.y;
-        out[base + 3] = command.w;
-        out[base + 4] = command.h;
-        out[base + 5] = command.color;
-        out[base + 6] = command.asset;
-        out[base + 7] = command.rotation_degrees;
-        out[base + 8] = command.alpha;
-        out[base + 9] = command.clip_x;
-        out[base + 10] = command.clip_y;
-        out[base + 11] = command.clip_w;
-        out[base + 12] = command.clip_h;
-    }
-    Ok(())
 }
 
 fn render_command_message_fields(
@@ -2872,55 +2824,7 @@ pub extern "C" fn stasis_android_bridge_get_i32_global(
         .into_raw()
 }
 #[no_mangle]
-pub extern "C" fn stasis_android_bridge_run_tick_frame(
-    project_root: *const c_char,
-    entry_file: *const c_char,
-    touch_x: i32,
-    touch_y: i32,
-    touch_active: i32,
-    screen_w: i32,
-    screen_h: i32,
-    out_values: *mut i32,
-    out_len: usize,
-) -> i32 {
-    if out_values.is_null() {
-        return -1;
-    }
-    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-        run_tick_from_c(
-            project_root,
-            entry_file,
-            AndroidBridgeTickInput {
-                touch_x,
-                touch_y,
-                touch_active,
-                screen_w,
-                screen_h,
-            },
-        )
-    }));
-    let out = unsafe { std::slice::from_raw_parts_mut(out_values, out_len) };
-    match result {
-        Ok(Ok(result)) => match write_render_frame_i32s(out, &result) {
-            Ok(()) => 0,
-            Err(_) => {
-                if !out.is_empty() {
-                    out[0] = -1;
-                }
-                -1
-            }
-        },
-        Ok(Err(_)) | Err(_) => {
-            if !out.is_empty() {
-                out[0] = -1;
-            }
-            -1
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn stasis_android_bridge_run_tick_frame_v2(
+pub extern "C" fn stasis_android_bridge_run_render_frame(
     project_root: *const c_char,
     entry_file: *const c_char,
     touch_x: i32,
@@ -4550,7 +4454,7 @@ function tick(): void {}
         stasis_dynload::copy_jit_render_active(out_i32, out_f32, out_u8)?;
         write_android_display_metadata(out_i32)?;
         Ok(unsafe {
-            stasis_render_v2_trace_native(out_i32.as_ptr(), out_f32.as_ptr(), out_u8.as_ptr())
+            stasis_render_trace_native(out_i32.as_ptr(), out_f32.as_ptr(), out_u8.as_ptr())
         })
     }
 
@@ -5655,7 +5559,7 @@ function tick(): void {}
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("main.stasis").expect("entry cstr");
         for _ in 0..stable_frame {
-            let status = stasis_android_bridge_run_tick_frame_v2(
+            let status = stasis_android_bridge_run_render_frame(
                 root_c.as_ptr(),
                 entry_c.as_ptr(),
                 0,
@@ -5704,7 +5608,7 @@ function tick(): void {}
             &[296.0, 156.0, 48.0, 48.0, 0.95, 0.90, 0.30, 1.0]
         );
         let trace = unsafe {
-            stasis_render_v2_trace_native(frame_i32.as_ptr(), frame_f32.as_ptr(), frame_u8.as_ptr())
+            stasis_render_trace_native(frame_i32.as_ptr(), frame_f32.as_ptr(), frame_u8.as_ptr())
         };
         assert_eq!(
             trace, expected_trace,
@@ -5766,7 +5670,7 @@ function tick(): void {}
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("main.stasis").expect("entry cstr");
         for _ in 0..stable_frame {
-            let status = stasis_android_bridge_run_tick_frame_v2(
+            let status = stasis_android_bridge_run_render_frame(
                 root_c.as_ptr(),
                 entry_c.as_ptr(),
                 0,
@@ -5789,7 +5693,7 @@ function tick(): void {}
             );
         }
         let stable_trace = unsafe {
-            stasis_render_v2_trace_native(frame_i32.as_ptr(), frame_f32.as_ptr(), frame_u8.as_ptr())
+            stasis_render_trace_native(frame_i32.as_ptr(), frame_f32.as_ptr(), frame_u8.as_ptr())
         };
         assert_eq!(stable_trace, expected_trace);
         assert_eq!(
@@ -6088,7 +5992,7 @@ function tick(): void {}
                          frame_f32: &mut Vec<f32>,
                          frame_u8: &mut Vec<u8>|
          -> u32 {
-            let status = stasis_android_bridge_run_tick_frame_v2(
+            let status = stasis_android_bridge_run_render_frame(
                 root_c.as_ptr(),
                 entry_c.as_ptr(),
                 x,
@@ -6114,7 +6018,7 @@ function tick(): void {}
                 "render parity frame version must stay linked to the Workshop manifest"
             );
             let trace = unsafe {
-                stasis_render_v2_trace_native(
+                stasis_render_trace_native(
                     frame_i32.as_ptr(),
                     frame_f32.as_ptr(),
                     frame_u8.as_ptr(),
@@ -6752,7 +6656,7 @@ function on_code_swap(): void {}\n",
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame_v2(
+        let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             0,
@@ -6801,8 +6705,8 @@ function on_code_swap(): void {}\n",
         let root = temp_project("it031_render_schema");
         fs::write(
             root.join("src/main.stasis"),
-            "global gfx_cmd_i32: i32[34608];\n\
-global gfx_cmd_f32: f32[125060];\n\
+            "global gfx_cmd_i32: i32[35120];\n\
+global gfx_cmd_f32: f32[126084];\n\
 global gfx_cmd_u8: u8[65536];\n\
 function main(): void {}\n\
 function tick(): i32 { return 0; }\n\
@@ -6817,7 +6721,7 @@ function on_code_swap(): void {}\n",
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame_v2(
+        let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             0,
@@ -6857,54 +6761,7 @@ function on_code_swap(): void {}\n",
     }
 
     #[test]
-    fn c_bridge_run_tick_frame_writes_packed_render_data() {
-        let _guard = bridge_runtime_test_guard();
-        clear_runtime_session_for_test();
-        let root = temp_project("ffi_frame_tick");
-        fs::write(
-            root.join("src/main.stasis"),
-            "global GameState { tick_count: i32; }
-global Render { command_count: i32; command0_kind: i32; command0_x: i32; command0_y: i32; command0_w: i32; command0_h: i32; command0_color: i32; }
-function main(): void { GameState.tick_count = 4; }
-function tick(): void { GameState.tick_count += 1; }
-function render(): void { Render.command_count = 1; Render.command0_kind = 1; Render.command0_x = 9; Render.command0_y = 8; Render.command0_w = 7; Render.command0_h = 6; Render.command0_color = 5; }
-",
-        )
-        .expect("write source");
-        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
-        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
-        let mut frame = [0i32; ANDROID_RENDER_FRAME_I32_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame(
-            root_c.as_ptr(),
-            entry_c.as_ptr(),
-            72,
-            144,
-            1,
-            360,
-            640,
-            frame.as_mut_ptr(),
-            frame.len(),
-        );
-        assert_eq!(status, 0);
-        assert_eq!(frame[0], 0);
-        assert_eq!(frame[1], 1);
-        assert_eq!(frame[2], 5);
-        assert_eq!(frame[5], 1);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE], 1);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 1], 9);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 5], 5);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 6], 0);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 7], 0);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 8], 255);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 9], 0);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 10], 0);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 11], 0);
-        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 12], 0);
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn c_bridge_run_tick_frame_v2_copies_only_production_active_spans() {
+    fn c_bridge_run_render_frame_copies_only_production_active_spans() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("ffi_production_frame_tick");
@@ -6914,14 +6771,14 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
 global host_f32: f32[64];
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
-global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_i32: i32[35120];
+global gfx_cmd_f32: f32[126084];
 global gfx_cmd_u8: u8[65536];
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
 function render(): void {
   gfx_cmd_i32[0] = 1196967473;
-  gfx_cmd_i32[1] = 3;
+  gfx_cmd_i32[1] = 6;
   gfx_cmd_i32[2] = 3;
   gfx_cmd_i32[3] = 1;
   gfx_cmd_i32[4] = 1;
@@ -6947,7 +6804,11 @@ function render(): void {
   gfx_cmd_f32[80005] = 20.5;
   gfx_cmd_f32[80006] = 30.75;
   gfx_cmd_f32[80007] = 40.125;
-  gfx_cmd_f32[96388] = 12.0;
+  gfx_cmd_f32[80008] = 0.0;
+  gfx_cmd_f32[80009] = 0.0;
+  gfx_cmd_f32[80010] = 1.0;
+  gfx_cmd_f32[80011] = 1.0;
+  gfx_cmd_f32[112772] = 12.0;
   gfx_cmd_u8[0] = 65;
   gfx_cmd_u8[1] = 0;
 }
@@ -6959,7 +6820,7 @@ function render(): void {
         let mut frame_i32 = vec![0i32; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut frame_u8 = vec![0u8; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame_v2(
+        let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             540,
@@ -6975,7 +6836,7 @@ function render(): void {
             frame_u8.len(),
         );
         assert_eq!(status, 0);
-        // Legacy source frames are normalized to the canonical v6 destination layout.
+        // Current source frames copy into the canonical destination layout.
         assert_eq!(&frame_i32[..5], &[1196967473, 6, 3, 1, 1]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
@@ -7004,8 +6865,8 @@ function render(): void {
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 global host_i32: i32[768];
 global host_f32: f32[64];
-global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
+global gfx_cmd_i32: i32[35120];
+global gfx_cmd_f32: f32[126084];
 global gfx_cmd_u8: u8[65536];
 function main(): void {}
 function tick(): void {}
@@ -7018,7 +6879,7 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
-        let status = stasis_android_bridge_run_tick_frame_v2(
+        let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
             0,
@@ -7071,8 +6932,8 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
-global gfx_cmd_i32: i32[34608];\n\
-global gfx_cmd_f32: f32[108676];\n\
+global gfx_cmd_i32: i32[35120];\n\
+global gfx_cmd_f32: f32[126084];\n\
 global gfx_cmd_u8: u8[65536];\n\
 function main(): void {}\n\
 function tick(): void { gfx_load_sprite(\"assets/tick_missing.svg\", 32, 32); }\n\
@@ -7138,8 +6999,8 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
-global gfx_cmd_i32: i32[34608];\n\
-global gfx_cmd_f32: f32[108676];\n\
+global gfx_cmd_i32: i32[35120];\n\
+global gfx_cmd_f32: f32[126084];\n\
 global gfx_cmd_u8: u8[65536];\n\
 global GameState { tick_count: i32; }\n\
 function main(): void { GameState.tick_count = 7; }\n\

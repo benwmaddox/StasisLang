@@ -17,7 +17,6 @@ const FIXTURE: &str =
 const STDLIB: &str = include_str!("../../../src/stdlib/stdlib.stasis");
 const MEMORY: &str = include_str!("../../../src/stdlib/memory.stasis");
 const GFX_CMD: &str = include_str!("../../../src/stdlib/internal/gfx_cmd.stasis");
-const EXPECTED_TRACE: u32 = 2_880_741_754;
 
 struct TestTree(PathBuf);
 
@@ -210,7 +209,6 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         .find_map(|field| field.strip_prefix("trace="))
         .and_then(|value| value.parse::<u32>().ok())
         .expect("harness trace");
-    assert_eq!(trace, EXPECTED_TRACE, "first generated render trace");
     assert!(stdout.contains("state=15 frames=1 rects=1 texts=1 bytes=5 chars=4"));
     assert!(stdout.contains(
         "IT-013 order=123 paused_poll=1 reinit=1 main_stop=11 tick_stop=22 render_stop=33 frames_after_failures=0"

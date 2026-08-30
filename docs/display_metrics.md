@@ -95,7 +95,7 @@ the logical draw size remains unchanged.
 
 Desktop and packaged mobile builds perform this policy in
 `runtime/stasis_graphics.c`. Workshop and generated release apps receive
-the same logical/native/drawable metadata in reserved gfx_cmd v5 header slots,
+the same logical/native/drawable metadata in reserved current gfx_cmd header slots,
 use the same aspect-fit viewport, and replace SVG/font/text textures when the
 density generation changes. Those metadata slots are host-populated and are
 not part of the command trace, so JIT/AOT command parity is unchanged.

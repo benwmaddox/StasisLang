@@ -9,8 +9,8 @@ static void build_representative_frame(
     float *f32s,
     uint8_t *u8s
 ) {
-    i32s[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V2_MAGIC;
-    i32s[STASIS_RENDER_I_VERSION] = STASIS_RENDER_CURRENT_VERSION;
+    i32s[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
+    i32s[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
     i32s[STASIS_RENDER_I_FLAGS] =
         STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT;
     i32s[STASIS_RENDER_I_LINE_COUNT] = 1;
@@ -105,10 +105,14 @@ int main(void) {
     CHECK(first_trace == stasis_render_trace(second_i32, second_f32, second_u8));
 
     build_representative_frame(second_i32, second_f32, second_u8);
-    second_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V2_VERSION;
+    for (int legacy_version = 2; legacy_version <= 5; legacy_version++) {
+        second_i32[STASIS_RENDER_I_VERSION] = legacy_version;
+        CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_VERSION);
+        CHECK(stasis_render_trace(second_i32, second_f32, second_u8) == 0);
+    }
+    second_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
     CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_VALID);
     CHECK(stasis_render_trace(second_i32, second_f32, second_u8) != 0);
-    build_representative_frame(second_i32, second_f32, second_u8);
 
     second_i32[STASIS_RENDER_I_DRAWABLE_W] = 1920;
     second_i32[STASIS_RENDER_I_DRAWABLE_H] = 1080;

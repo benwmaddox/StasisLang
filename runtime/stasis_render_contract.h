@@ -6,18 +6,9 @@
 #include <string.h>
 
 /* Canonical guest-to-renderer command ABI used by JIT and AOT runtimes. */
-#define STASIS_RENDER_V2_MAGIC 0x47584631
-#define STASIS_RENDER_V2_VERSION 2
-#define STASIS_RENDER_V3_VERSION 3
-#define STASIS_RENDER_V4_VERSION 4
-#define STASIS_RENDER_V5_VERSION 5
-#define STASIS_RENDER_V6_VERSION 6
-#define STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V6_VERSION
-#define STASIS_RENDER_V2_TRACE_VERSION 2
-#define STASIS_RENDER_V3_TRACE_VERSION 3
-#define STASIS_RENDER_V4_TRACE_VERSION 4
-#define STASIS_RENDER_V5_TRACE_VERSION 5
-#define STASIS_RENDER_V6_TRACE_VERSION 6
+#define STASIS_RENDER_MAGIC 0x47584631
+#define STASIS_RENDER_VERSION 6
+#define STASIS_RENDER_TRACE_VERSION 6
 #define STASIS_GRAPHICS_RUNTIME_ABI_VERSION 3
 
 #define STASIS_RENDER_FLAG_CLEAR 1
@@ -51,7 +42,7 @@
 #define STASIS_RENDER_I_DROPPED_RECTS 25
 /* Reserved header slot carrying the monotonically increasing Android frame token. */
 #define STASIS_RENDER_I_FRAME_TOKEN 26
-/* V6 ordered clipping descriptor counts. V2-V5 leave these slots unused. */
+/* Ordered clipping descriptor counts. */
 #define STASIS_RENDER_I_CLIP_COUNT 27
 #define STASIS_RENDER_I_DROPPED_CLIPS 28
 #define STASIS_RENDER_I_SPRITE_BASE 32
@@ -65,7 +56,6 @@
 #define STASIS_RENDER_LINE_F32_STRIDE STASIS_RENDER_GEOMETRY_F32_STRIDE
 #define STASIS_RENDER_MAX_SPRITES 4096
 #define STASIS_RENDER_SPRITE_I32_STRIDE 3
-#define STASIS_RENDER_LEGACY_SPRITE_F32_STRIDE 4
 #define STASIS_RENDER_SPRITE_F32_STRIDE 8
 #define STASIS_RENDER_MAX_TEXT 2048
 #define STASIS_RENDER_TEXT_I32_STRIDE 3
@@ -73,10 +63,9 @@
 #define STASIS_RENDER_TEXT_MAX_BYTES 65536
 #define STASIS_RENDER_MAX_CLIPS 256
 #define STASIS_RENDER_CLIP_F32_STRIDE 4
-#define STASIS_RENDER_V5_MAX_ORDER \
-    (STASIS_RENDER_MAX_LINES + STASIS_RENDER_MAX_SPRITES + STASIS_RENDER_MAX_TEXT)
 #define STASIS_RENDER_MAX_ORDER \
-    (STASIS_RENDER_V5_MAX_ORDER + 2 * STASIS_RENDER_MAX_CLIPS)
+    (STASIS_RENDER_MAX_LINES + STASIS_RENDER_MAX_SPRITES + STASIS_RENDER_MAX_TEXT + \
+     2 * STASIS_RENDER_MAX_CLIPS)
 #define STASIS_RENDER_ORDER_KIND_SCALE 16384
 #define STASIS_RENDER_ORDER_LINE 1
 #define STASIS_RENDER_ORDER_SPRITE 2
@@ -88,10 +77,6 @@
 #define STASIS_RENDER_I_TEXT_BASE \
     (STASIS_RENDER_I_SPRITE_BASE + \
      STASIS_RENDER_MAX_SPRITES * STASIS_RENDER_SPRITE_I32_STRIDE)
-#define STASIS_RENDER_LEGACY_F_TEXT_BASE \
-    (STASIS_RENDER_F_LINE_BASE + \
-     STASIS_RENDER_MAX_LINES * STASIS_RENDER_LINE_F32_STRIDE + \
-     STASIS_RENDER_MAX_SPRITES * STASIS_RENDER_LEGACY_SPRITE_F32_STRIDE)
 #define STASIS_RENDER_F_TEXT_BASE \
     (STASIS_RENDER_F_LINE_BASE + \
      STASIS_RENDER_MAX_LINES * STASIS_RENDER_LINE_F32_STRIDE + \
@@ -107,14 +92,8 @@
 #define STASIS_RENDER_F_CLIP_BASE \
     (STASIS_RENDER_F_TEXT_BASE + \
      STASIS_RENDER_MAX_TEXT * STASIS_RENDER_TEXT_F32_STRIDE)
-#define STASIS_RENDER_V2_I32_COUNT STASIS_RENDER_I_ORDER_BASE
-#define STASIS_RENDER_V5_I32_COUNT \
-    (STASIS_RENDER_I_ORDER_BASE + STASIS_RENDER_V5_MAX_ORDER)
 #define STASIS_RENDER_I32_COUNT \
     (STASIS_RENDER_I_ORDER_BASE + STASIS_RENDER_MAX_ORDER)
-#define STASIS_RENDER_V5_F32_COUNT \
-    (STASIS_RENDER_F_TEXT_BASE + \
-     STASIS_RENDER_MAX_TEXT * STASIS_RENDER_TEXT_F32_STRIDE)
 #define STASIS_RENDER_F32_COUNT \
     (STASIS_RENDER_F_CLIP_BASE + \
      STASIS_RENDER_MAX_CLIPS * STASIS_RENDER_CLIP_F32_STRIDE)
@@ -124,18 +103,6 @@
     X(I32, "i32", STASIS_RENDER_I32_COUNT * sizeof(int32_t), _Alignof(int32_t)) \
     X(F32, "f32", STASIS_RENDER_F32_COUNT * sizeof(float), _Alignof(float)) \
     X(U8, "u8", STASIS_RENDER_U8_COUNT * sizeof(uint8_t), _Alignof(uint8_t))
-
-static inline int32_t stasis_render_sprite_f32_stride(int32_t version) {
-    return version >= STASIS_RENDER_V5_VERSION
-        ? STASIS_RENDER_SPRITE_F32_STRIDE
-        : STASIS_RENDER_LEGACY_SPRITE_F32_STRIDE;
-}
-
-static inline int32_t stasis_render_f_text_base(int32_t version) {
-    return version >= STASIS_RENDER_V5_VERSION
-        ? STASIS_RENDER_F_TEXT_BASE
-        : STASIS_RENDER_LEGACY_F_TEXT_BASE;
-}
 
 typedef enum StasisRenderValidation {
     STASIS_RENDER_VALID = 0,
@@ -166,41 +133,31 @@ static inline StasisRenderValidation stasis_render_validate(
 ) {
     if (cmd_i32 == NULL) return STASIS_RENDER_NULL_I32;
     if (cmd_f32 == NULL) return STASIS_RENDER_NULL_F32;
-    if (cmd_i32[STASIS_RENDER_I_MAGIC] != STASIS_RENDER_V2_MAGIC) {
+    if (cmd_i32[STASIS_RENDER_I_MAGIC] != STASIS_RENDER_MAGIC) {
         return STASIS_RENDER_BAD_MAGIC;
     }
-    if (cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_V2_VERSION &&
-        cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_V3_VERSION &&
-        cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_V4_VERSION &&
-        cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_V5_VERSION &&
-        cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_V6_VERSION) {
+    if (cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_VERSION) {
         return STASIS_RENDER_BAD_VERSION;
     }
-    const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
     const int32_t line_count = cmd_i32[STASIS_RENDER_I_LINE_COUNT];
     const int32_t sprite_count = cmd_i32[STASIS_RENDER_I_SPRITE_COUNT];
     const int32_t text_count = cmd_i32[STASIS_RENDER_I_TEXT_COUNT];
     const int32_t text_bytes_used = cmd_i32[STASIS_RENDER_I_TEXT_BYTES_USED];
-    const int32_t rect_count = version >= STASIS_RENDER_V4_VERSION
-        ? cmd_i32[STASIS_RENDER_I_RECT_COUNT] : 0;
-    const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
-        ? cmd_i32[STASIS_RENDER_I_ORDER_COUNT] : 0;
-    const int32_t clip_count = version >= STASIS_RENDER_V6_VERSION
-        ? cmd_i32[STASIS_RENDER_I_CLIP_COUNT] : 0;
+    const int32_t rect_count = cmd_i32[STASIS_RENDER_I_RECT_COUNT];
+    const int32_t order_count = cmd_i32[STASIS_RENDER_I_ORDER_COUNT];
+    const int32_t clip_count = cmd_i32[STASIS_RENDER_I_CLIP_COUNT];
     if (line_count < 0 || sprite_count < 0 || text_count < 0 ||
         text_bytes_used < 0 || rect_count < 0 || order_count < 0 ||
         clip_count < 0) {
         return STASIS_RENDER_NEGATIVE_COUNT;
     }
-    const int32_t max_order = version >= STASIS_RENDER_V6_VERSION
-        ? STASIS_RENDER_MAX_ORDER : STASIS_RENDER_V5_MAX_ORDER;
     if (line_count > STASIS_RENDER_MAX_LINES ||
         rect_count > STASIS_RENDER_MAX_GEOMETRY - line_count ||
         sprite_count > STASIS_RENDER_MAX_SPRITES ||
         text_count > STASIS_RENDER_MAX_TEXT ||
         text_bytes_used > STASIS_RENDER_TEXT_MAX_BYTES ||
         clip_count > STASIS_RENDER_MAX_CLIPS ||
-        order_count > max_order) {
+        order_count > STASIS_RENDER_MAX_ORDER) {
         return STASIS_RENDER_EXCESSIVE_COUNT;
     }
     for (int32_t index = 0; index < text_count; index++) {
@@ -228,19 +185,17 @@ static inline StasisRenderValidation stasis_render_validate(
             (kind == STASIS_RENDER_ORDER_RECT && index < rect_count) ||
             (kind == STASIS_RENDER_ORDER_SPRITE && index < sprite_count) ||
             (kind == STASIS_RENDER_ORDER_TEXT && index < text_count);
-        if (version >= STASIS_RENDER_V6_VERSION &&
-            kind == STASIS_RENDER_ORDER_CLIP_PUSH && index < clip_count) {
+        if (kind == STASIS_RENDER_ORDER_CLIP_PUSH && index < clip_count) {
             clip_depth++;
             valid = clip_depth <= STASIS_RENDER_MAX_CLIPS;
-        } else if (version >= STASIS_RENDER_V6_VERSION &&
-                   kind == STASIS_RENDER_ORDER_CLIP_POP && index == 0) {
+        } else if (kind == STASIS_RENDER_ORDER_CLIP_POP && index == 0) {
             if (clip_depth <= 0) return STASIS_RENDER_BAD_CLIP_STACK;
             clip_depth--;
             valid = 1;
         }
         if (!valid) return STASIS_RENDER_BAD_ORDER_REFERENCE;
     }
-    if (version >= STASIS_RENDER_V6_VERSION && clip_depth != 0) {
+    if (clip_depth != 0) {
         return STASIS_RENDER_BAD_CLIP_STACK;
     }
     return STASIS_RENDER_VALID;
@@ -294,28 +249,21 @@ static inline int32_t stasis_render_clamp_count(int32_t value, int32_t maximum) 
 
 static inline int stasis_render_is_valid(const int32_t *cmd_i32) {
     return cmd_i32 != NULL &&
-        cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_V2_MAGIC &&
-        (cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V2_VERSION ||
-         cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V3_VERSION ||
-         cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V4_VERSION ||
-         cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V5_VERSION ||
-         cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V6_VERSION);
+        cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_MAGIC &&
+        cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_VERSION;
 }
 
 static inline int32_t stasis_render_rect_count(
     const int32_t *cmd_i32,
     int32_t line_count
 ) {
-    if (cmd_i32[STASIS_RENDER_I_VERSION] < STASIS_RENDER_V4_VERSION) return 0;
     return stasis_render_clamp_count(
         cmd_i32[STASIS_RENDER_I_RECT_COUNT],
         STASIS_RENDER_MAX_GEOMETRY - line_count);
 }
 
 static inline int32_t stasis_render_clip_count(const int32_t *cmd_i32) {
-    if (cmd_i32 == NULL || cmd_i32[STASIS_RENDER_I_VERSION] < STASIS_RENDER_V6_VERSION) {
-        return 0;
-    }
+    if (cmd_i32 == NULL) return 0;
     return stasis_render_clamp_count(
         cmd_i32[STASIS_RENDER_I_CLIP_COUNT], STASIS_RENDER_MAX_CLIPS);
 }
@@ -363,7 +311,6 @@ static inline uint32_t stasis_render_trace_line(
 
 static inline uint32_t stasis_render_trace_sprite(
     uint32_t hash,
-    int32_t version,
     const int32_t *cmd_i32,
     const float *cmd_f32,
     int32_t index
@@ -371,13 +318,12 @@ static inline uint32_t stasis_render_trace_sprite(
     hash = stasis_render_trace_mix_u32(hash, 3u);
     const int32_t base_i = STASIS_RENDER_I_SPRITE_BASE +
         index * STASIS_RENDER_SPRITE_I32_STRIDE;
-    const int32_t sprite_stride = stasis_render_sprite_f32_stride(version);
     const int32_t base_f = STASIS_RENDER_F_SPRITE_BASE +
-        index * sprite_stride;
+        index * STASIS_RENDER_SPRITE_F32_STRIDE;
     for (int field = 0; field < STASIS_RENDER_SPRITE_I32_STRIDE; field++) {
         hash = stasis_render_trace_mix_u32(hash, (uint32_t)cmd_i32[base_i + field]);
     }
-    for (int field = 0; field < sprite_stride; field++) {
+    for (int field = 0; field < STASIS_RENDER_SPRITE_F32_STRIDE; field++) {
         hash = stasis_render_trace_mix_f32(hash, cmd_f32[base_f + field]);
     }
     return hash;
@@ -399,7 +345,6 @@ static inline uint32_t stasis_render_trace_rect(
 
 static inline uint32_t stasis_render_trace_text(
     uint32_t hash,
-    int32_t version,
     const int32_t *cmd_i32,
     const float *cmd_f32,
     const uint8_t *cmd_u8,
@@ -408,7 +353,7 @@ static inline uint32_t stasis_render_trace_text(
 ) {
     const int32_t meta_base = STASIS_RENDER_I_TEXT_BASE +
         index * STASIS_RENDER_TEXT_I32_STRIDE;
-    const int32_t float_base = stasis_render_f_text_base(version) +
+    const int32_t float_base = STASIS_RENDER_F_TEXT_BASE +
         index * STASIS_RENDER_TEXT_F32_STRIDE;
     const int32_t byte_offset = cmd_i32[meta_base + 1];
     const int32_t byte_length = cmd_i32[meta_base + 2];
@@ -445,11 +390,7 @@ static inline uint32_t stasis_render_trace_clip_pop(uint32_t hash) {
     return stasis_render_trace_mix_u32(hash, 9u);
 }
 
-/*
- * Returns a backend-independent trace of the interpreted frame. V3 and V4
- * consume the bounded cross-category order stream. V2, and ordered frames
- * with no order entries, retain their version-specific compatibility order.
- */
+/* Returns a backend-independent trace of the interpreted current frame. */
 static inline uint32_t stasis_render_trace(
     const int32_t *cmd_i32,
     const float *cmd_f32,
@@ -469,18 +410,7 @@ static inline uint32_t stasis_render_trace(
         cmd_i32[STASIS_RENDER_I_TEXT_BYTES_USED], STASIS_RENDER_TEXT_MAX_BYTES);
 
     uint32_t hash = 2166136261u;
-    const int32_t version = cmd_i32[STASIS_RENDER_I_VERSION];
-    hash = stasis_render_trace_mix_u32(
-        hash,
-        version == STASIS_RENDER_V6_VERSION
-            ? STASIS_RENDER_V6_TRACE_VERSION
-            : (version == STASIS_RENDER_V5_VERSION
-            ? STASIS_RENDER_V5_TRACE_VERSION
-            : (version == STASIS_RENDER_V4_VERSION
-                ? STASIS_RENDER_V4_TRACE_VERSION
-                : (version == STASIS_RENDER_V3_VERSION
-                ? STASIS_RENDER_V3_TRACE_VERSION
-                : STASIS_RENDER_V2_TRACE_VERSION))));
+    hash = stasis_render_trace_mix_u32(hash, STASIS_RENDER_TRACE_VERSION);
     if ((flags & STASIS_RENDER_FLAG_CLEAR) != 0) {
         hash = stasis_render_trace_mix_u32(hash, 1u);
         for (int index = 0; index < 4; index++) {
@@ -489,12 +419,8 @@ static inline uint32_t stasis_render_trace(
         }
     }
 
-    const int32_t order_count = version >= STASIS_RENDER_V3_VERSION
-        ? stasis_render_clamp_count(
-            cmd_i32[STASIS_RENDER_I_ORDER_COUNT],
-            version >= STASIS_RENDER_V6_VERSION
-                ? STASIS_RENDER_MAX_ORDER : STASIS_RENDER_V5_MAX_ORDER)
-        : 0;
+    const int32_t order_count = stasis_render_clamp_count(
+        cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER);
     if (order_count > 0) {
         for (int32_t order_index = 0; order_index < order_count; order_index++) {
             const int32_t entry = cmd_i32[STASIS_RENDER_I_ORDER_BASE + order_index];
@@ -504,10 +430,10 @@ static inline uint32_t stasis_render_trace(
             if (kind == STASIS_RENDER_ORDER_LINE && index < line_count) {
                 hash = stasis_render_trace_line(hash, cmd_f32, index);
             } else if (kind == STASIS_RENDER_ORDER_SPRITE && index < sprite_count) {
-                hash = stasis_render_trace_sprite(hash, version, cmd_i32, cmd_f32, index);
+                hash = stasis_render_trace_sprite(hash, cmd_i32, cmd_f32, index);
             } else if (kind == STASIS_RENDER_ORDER_TEXT && index < text_count) {
                 hash = stasis_render_trace_text(
-                    hash, version, cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
+                    hash, cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
             } else if (kind == STASIS_RENDER_ORDER_RECT && index < rect_count) {
                 hash = stasis_render_trace_rect(hash, cmd_f32, index);
             } else if (kind == STASIS_RENDER_ORDER_CLIP_PUSH &&
@@ -525,11 +451,11 @@ static inline uint32_t stasis_render_trace(
             hash = stasis_render_trace_rect(hash, cmd_f32, index);
         }
         for (int32_t index = 0; index < sprite_count; index++) {
-            hash = stasis_render_trace_sprite(hash, version, cmd_i32, cmd_f32, index);
+            hash = stasis_render_trace_sprite(hash, cmd_i32, cmd_f32, index);
         }
         for (int32_t index = 0; index < text_count; index++) {
             hash = stasis_render_trace_text(
-                hash, version, cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
+                hash, cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
         }
     }
 
@@ -537,15 +463,6 @@ static inline uint32_t stasis_render_trace(
         hash = stasis_render_trace_mix_u32(hash, 6u);
     }
     return hash;
-}
-
-/* Compatibility name retained for existing JIT/AOT host imports. */
-static inline uint32_t stasis_render_v2_trace(
-    const int32_t *cmd_i32,
-    const float *cmd_f32,
-    const uint8_t *cmd_u8
-) {
-    return stasis_render_trace(cmd_i32, cmd_f32, cmd_u8);
 }
 
 #endif

@@ -7,8 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IT012_EXPECTED_TRACE 2880741754u
-
 #define CHECK(condition) do { \
     if (!(condition)) { \
         fprintf(stderr, "IT-012 check failed at %s:%d: %s\n", __FILE__, __LINE__, #condition); \
@@ -197,6 +195,84 @@ static void reset_frame_observations(void) {
     memset(submitted_text_bytes, 0, sizeof(submitted_text_bytes));
 }
 
+static uint32_t it012_expected_frame_trace(void) {
+    int32_t *expected_i32 = calloc(
+        (size_t)STASIS_RENDER_I32_COUNT, sizeof(*expected_i32));
+    float *expected_f32 = calloc(
+        (size_t)STASIS_RENDER_F32_COUNT, sizeof(*expected_f32));
+    uint8_t *expected_u8 = calloc(
+        (size_t)STASIS_RENDER_U8_COUNT, sizeof(*expected_u8));
+    if (expected_i32 == NULL || expected_f32 == NULL || expected_u8 == NULL) {
+        fprintf(stderr, "IT-012 could not allocate semantic expected frame\n");
+        free(expected_i32);
+        free(expected_f32);
+        free(expected_u8);
+        exit(1);
+    }
+
+    expected_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
+    expected_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
+    expected_i32[STASIS_RENDER_I_FLAGS] =
+        STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT;
+    expected_i32[STASIS_RENDER_I_RECT_COUNT] = 1;
+    expected_i32[STASIS_RENDER_I_TEXT_COUNT] = 1;
+    expected_i32[STASIS_RENDER_I_TEXT_BYTES_USED] = 6;
+    expected_i32[STASIS_RENDER_I_ORDER_COUNT] = 2;
+
+    expected_f32[STASIS_RENDER_F_CLEAR_BASE + 0] = 0.05f;
+    expected_f32[STASIS_RENDER_F_CLEAR_BASE + 1] = 0.10f;
+    expected_f32[STASIS_RENDER_F_CLEAR_BASE + 2] = 0.15f;
+    expected_f32[STASIS_RENDER_F_CLEAR_BASE + 3] = 1.0f;
+
+    const int32_t rect_base = STASIS_RENDER_F_RECT_REVERSE_BASE;
+    expected_f32[rect_base + 0] = 12.0f;
+    expected_f32[rect_base + 1] = 14.0f;
+    expected_f32[rect_base + 2] = 30.0f;
+    expected_f32[rect_base + 3] = 18.0f;
+    expected_f32[rect_base + 4] = 0.8f;
+    expected_f32[rect_base + 5] = 0.2f;
+    expected_f32[rect_base + 6] = 0.1f;
+    expected_f32[rect_base + 7] = 1.0f;
+
+    const int32_t text_i32_base = STASIS_RENDER_I_TEXT_BASE;
+    expected_i32[text_i32_base + 0] = 7;
+    expected_i32[text_i32_base + 1] = 0;
+    expected_i32[text_i32_base + 2] = 5;
+    const int32_t text_f32_base = STASIS_RENDER_F_TEXT_BASE;
+    expected_f32[text_f32_base + 0] = 12.0f;
+    expected_f32[text_f32_base + 1] = 14.0f;
+    expected_f32[text_f32_base + 2] = 0.8f;
+    expected_f32[text_f32_base + 3] = 0.2f;
+    expected_f32[text_f32_base + 4] = 0.1f;
+    expected_f32[text_f32_base + 5] = 1.0f;
+    const uint8_t text_bytes[] = {'C', 'a', 'f', 0xc3u, 0xa9u, 0};
+    memcpy(expected_u8, text_bytes, sizeof(text_bytes));
+
+    expected_i32[STASIS_RENDER_I_ORDER_BASE + 0] =
+        STASIS_RENDER_ORDER_RECT * STASIS_RENDER_ORDER_KIND_SCALE;
+    expected_i32[STASIS_RENDER_I_ORDER_BASE + 1] =
+        STASIS_RENDER_ORDER_TEXT * STASIS_RENDER_ORDER_KIND_SCALE;
+
+    const StasisRenderValidation validation =
+        stasis_render_validate(expected_i32, expected_f32);
+    if (validation != STASIS_RENDER_VALID) {
+        fprintf(
+            stderr,
+            "IT-012 semantic expected frame is invalid: %s\n",
+            stasis_render_validation_name(validation));
+        free(expected_i32);
+        free(expected_f32);
+        free(expected_u8);
+        exit(1);
+    }
+    const uint32_t trace =
+        stasis_render_trace(expected_i32, expected_f32, expected_u8);
+    free(expected_i32);
+    free(expected_f32);
+    free(expected_u8);
+    return trace;
+}
+
 int main(void) {
     const StasisMobileRuntimeConfig config = {320, 180, "IT-012 generated mobile AOT"};
     const StasisMobileGameEntries entries = {
@@ -251,7 +327,15 @@ int main(void) {
     CHECK(submitted_text_bytes[5] == 0);
     CHECK(stasis_jit_global_i32_load(hash_path("forwarded_byte_length")) == 5);
     CHECK(stasis_jit_global_i32_load(hash_path("forwarded_char_length")) == 4);
-    CHECK(submitted_trace == IT012_EXPECTED_TRACE);
+    const uint32_t expected_trace = it012_expected_frame_trace();
+    if (submitted_trace != expected_trace) {
+        fprintf(
+            stderr,
+            "IT-012 semantic trace mismatch: expected=%u actual=%u\n",
+            expected_trace,
+            submitted_trace);
+    }
+    CHECK(submitted_trace == expected_trace);
     printf("stasis.seam_test.v1 IT-012 state=15 frames=1 rects=1 texts=1 bytes=5 chars=4 trace=%u\n", submitted_trace);
     printf("stasis.seam_test.v1 IT-014 order=123 marker=77 request=41:5:640:360 render_score=15 frames=1\n");
     stasis_mobile_runtime_shutdown();
