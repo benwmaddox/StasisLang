@@ -36,11 +36,13 @@ JNI = Path("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
 NATIVE_HOST = Path("runtime/stasis_graphics.c")
 DESKTOP_MANIFEST_FIXTURE = Path("tests/stasis/seams/desktop_manifest_assets_probe.stasis")
 DESKTOP_MANIFEST_HARNESS = Path("apps/stasis/tests/desktop_manifest_assets_seam.rs")
+GENERATED_MOBILE_AOT_C = Path("runtime/tests/stasis_generated_mobile_integration.c")
+GENERATED_MOBILE_AOT_RUST = Path("apps/stasis/tests/generated_mobile_aot_runtime_seam.rs")
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
     RELEASE_PROVENANCE, PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER,
     WORKSHOP, JNI, NATIVE_HOST, DESKTOP_MANIFEST_FIXTURE,
-    DESKTOP_MANIFEST_HARNESS,
+    DESKTOP_MANIFEST_HARNESS, GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -511,6 +513,70 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 label(DYNLOAD), label(DESKTOP_MANIFEST_HARNESS),
                 f"{lane}.host_capacity", "canonical STASIS_RENDER_*_COUNT reference",
                 "missing",
+            ))
+
+    mobile_aot_c = without_c_comments(sources[GENERATED_MOBILE_AOT_C])
+    mobile_aot_rust = without_c_comments(sources[GENERATED_MOBILE_AOT_RUST])
+    fixed_trace_patterns = {
+        GENERATED_MOBILE_AOT_C: (
+            r"\bIT012_EXPECTED_TRACE\b",
+            r"(?:#define\s+[A-Z0-9_]*TRACE|const\s+uint32_t\s+[A-Za-z0-9_]*trace)\s+(?:=\s*)?[0-9]",
+            r"\bsubmitted_trace\s*==\s*[0-9][0-9A-Fa-f_xXuUlL]*\b",
+            r"\b2880741754[uUlL]*\b",
+        ),
+        GENERATED_MOBILE_AOT_RUST: (
+            r"\bEXPECTED_TRACE\b",
+            r"\bconst\s+[A-Z0-9_]*TRACE\s*:\s*u32\s*=\s*[0-9]",
+            r"assert_eq!\(\s*trace\s*,\s*[0-9][0-9_]*",
+            r"\b2_880_741_754\b",
+        ),
+    }
+    for consumer, patterns in fixed_trace_patterns.items():
+        text = mobile_aot_c if consumer == GENERATED_MOBILE_AOT_C else mobile_aot_rust
+        checks += 1
+        if any(re.search(pattern, text) for pattern in patterns):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(consumer), "it012.fixed_trace_oracle",
+                "semantic trace derived from canonical frame", "fixed numeric trace",
+            ))
+
+    semantic_oracle_patterns = {
+        "function": r"static\s+uint32_t\s+it012_expected_frame_trace\s*\(\s*void\s*\)",
+        "i32.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_I32_COUNT\s*,",
+        "f32.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_F32_COUNT\s*,",
+        "u8.heap_capacity": r"calloc\s*\(\s*\(size_t\)STASIS_RENDER_U8_COUNT\s*,",
+        "magic": r"expected_i32\s*\[\s*STASIS_RENDER_I_MAGIC\s*\]\s*=\s*STASIS_RENDER_V2_MAGIC",
+        "version": r"expected_i32\s*\[\s*STASIS_RENDER_I_VERSION\s*\]\s*=\s*STASIS_RENDER_CURRENT_VERSION",
+        "flags": r"STASIS_RENDER_FLAG_CLEAR\s*\|\s*STASIS_RENDER_FLAG_PRESENT",
+        "rect.payload": r"rect_base\s*=\s*STASIS_RENDER_F_RECT_REVERSE_BASE",
+        "text.metadata": r"text_i32_base\s*=\s*STASIS_RENDER_I_TEXT_BASE",
+        "text.payload": r"text_f32_base\s*=\s*STASIS_RENDER_F_TEXT_BASE",
+        "order.rect": r"STASIS_RENDER_ORDER_RECT\s*\*\s*STASIS_RENDER_ORDER_KIND_SCALE",
+        "order.text": r"STASIS_RENDER_ORDER_TEXT\s*\*\s*STASIS_RENDER_ORDER_KIND_SCALE",
+        "validation": r"stasis_render_validate\s*\(\s*expected_i32\s*,\s*expected_f32\s*\)",
+        "trace": r"stasis_render_trace\s*\(\s*expected_i32\s*,\s*expected_f32\s*,\s*expected_u8\s*\)",
+        "comparison": r"CHECK\s*\(\s*submitted_trace\s*==\s*expected_trace\s*\)",
+        "i32.free": r"free\s*\(\s*expected_i32\s*\)",
+        "f32.free": r"free\s*\(\s*expected_f32\s*\)",
+        "u8.free": r"free\s*\(\s*expected_u8\s*\)",
+    }
+    for field, pattern in semantic_oracle_patterns.items():
+        checks += 1
+        if not re.search(pattern, mobile_aot_c):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(GENERATED_MOBILE_AOT_C),
+                f"it012.semantic_oracle.{field}", "canonical semantic frame reference",
+                "missing",
+            ))
+    for field, needle in (
+        ("trace.parse", 'strip_prefix("trace=")'),
+        ("trace.evidence", '"trace": trace'),
+    ):
+        checks += 1
+        if needle not in mobile_aot_rust:
+            failures.append(Mismatch(
+                label(GENERATED_MOBILE_AOT_C), label(GENERATED_MOBILE_AOT_RUST),
+                f"it012.{field}", needle, "missing",
             ))
     for lane, pattern in DESCRIPTOR_PATTERNS.items():
         checks += 1

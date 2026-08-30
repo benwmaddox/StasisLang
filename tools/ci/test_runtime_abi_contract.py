@@ -87,6 +87,59 @@ class RuntimeAbiContractTests(unittest.TestCase):
                     failure.consumer,
                 )
 
+    def test_it012_rejects_fixed_trace_oracles(self):
+        mutations = (
+            (
+                contract.GENERATED_MOBILE_AOT_C,
+                "#include <string.h>\n",
+                "#include <string.h>\n\n#define IT012_EXPECTED_TRACE 2880741754u\n",
+            ),
+            (
+                contract.GENERATED_MOBILE_AOT_RUST,
+                'const GFX_CMD: &str = include_str!("../../../src/stdlib/internal/gfx_cmd.stasis");',
+                'const GFX_CMD: &str = include_str!("../../../src/stdlib/internal/gfx_cmd.stasis");\nconst EXPECTED_TRACE: u32 = 2_880_741_754;',
+            ),
+        )
+        for path, old, new in mutations:
+            with self.subTest(path=path):
+                failures, _ = self.run_with(path, old, new)
+                failure = next(
+                    failure for failure in failures
+                    if failure.field == "it012.fixed_trace_oracle"
+                )
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(path.as_posix(), failure.consumer)
+
+    def test_it012_semantic_oracle_requires_current_abi_and_trace(self):
+        mutations = (
+            (
+                "STASIS_RENDER_CURRENT_VERSION;",
+                "STASIS_RENDER_V5_VERSION;",
+                "it012.semantic_oracle.version",
+            ),
+            (
+                "stasis_render_trace(expected_i32, expected_f32, expected_u8);",
+                "submitted_trace;",
+                "it012.semantic_oracle.trace",
+            ),
+            (
+                "CHECK(submitted_trace == expected_trace);",
+                "CHECK(submitted_trace != expected_trace);",
+                "it012.semantic_oracle.comparison",
+            ),
+        )
+        for old, new, field in mutations:
+            with self.subTest(field=field):
+                failures, _ = self.run_with(
+                    contract.GENERATED_MOBILE_AOT_C, old, new
+                )
+                failure = next(failure for failure in failures if failure.field == field)
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(
+                    "runtime/tests/stasis_generated_mobile_integration.c",
+                    failure.consumer,
+                )
+
     def test_stasis_capacity_drift_names_both_sides(self):
         failures, _ = self.run_with(
             contract.GFX_CMD,
