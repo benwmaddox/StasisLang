@@ -3,13 +3,13 @@
   "test_id": "IT-018",
   "stable_frame": 30,
   "state_checksum": 2000,
-  "command_trace": 1894625560,
+  "command_trace": 2627465271,
   "logical_size": [360, 720],
   "touch": {
     "completion_sequence": 5,
     "coordinate_tolerance": 16.0,
     "safe_viewport": [0, 0, 360, 720],
-    "final_command_trace": 3905660896,
+    "final_command_trace": 3512156903,
     "gestures": [
       {
         "name": "outside_letterbox",

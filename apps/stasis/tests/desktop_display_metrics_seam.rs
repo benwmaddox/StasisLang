@@ -4,7 +4,8 @@ use serde_json::json;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_dynload::{
     global_path_hash, register_global_f32_array, register_global_i32_array,
-    register_global_u8_array, Library, StasisGraphicsApi,
+    register_global_u8_array, Library, StasisGraphicsApi, STASIS_RENDER_F32_COUNT,
+    STASIS_RENDER_I32_COUNT, STASIS_RENDER_U8_COUNT,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,15 +20,15 @@ const POINTER_MOVE: i32 = 4;
 const POINTER_UP: i32 = 5;
 const TOUCH_ID: i32 = 91;
 const POINTER_SLOT_ID: i32 = 1;
-const ODD_TRACE: i32 = 896_184_146;
-const MINIMIZED_TRACE: i32 = -1_273_339_326;
-const RESTORED_TRACE: i32 = -1_200_835_344;
-const PORTRAIT_RELEASE_TRACE: i32 = 1_386_315_686;
-const PORTRAIT_DOWN_TRACE: i32 = 569_769_344;
-const LANDSCAPE_DOWN_TRACE: i32 = 569_769_344;
-const LANDSCAPE_RELEASE_TRACE: i32 = 569_769_344;
-const RESTORED_PORTRAIT_TRACE: i32 = 773_912_317;
-const QUIET_TRACE: i32 = 773_912_317;
+const ODD_TRACE: i32 = -1_172_930_515;
+const MINIMIZED_TRACE: i32 = 1_356_030_441;
+const RESTORED_TRACE: i32 = 1_602_469_683;
+const PORTRAIT_RELEASE_TRACE: i32 = -450_352_367;
+const PORTRAIT_DOWN_TRACE: i32 = -1_147_994_477;
+const LANDSCAPE_DOWN_TRACE: i32 = -1_147_994_477;
+const LANDSCAPE_RELEASE_TRACE: i32 = -1_147_994_477;
+const RESTORED_PORTRAIT_TRACE: i32 = 344_849_306;
+const QUIET_TRACE: i32 = 344_849_306;
 
 #[derive(Clone, Copy)]
 struct DisplaySample {
@@ -384,9 +385,9 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
 
     let mut host_i32 = vec![0; 768];
     let mut host_f32 = vec![0.0; 64];
-    let mut gfx_i32 = vec![0; 34608];
-    let mut gfx_f32 = vec![0.0; 125060];
-    let mut gfx_u8 = vec![0; 65536];
+    let mut gfx_i32 = vec![0; STASIS_RENDER_I32_COUNT];
+    let mut gfx_f32 = vec![0.0; STASIS_RENDER_F32_COUNT];
+    let mut gfx_u8 = vec![0; STASIS_RENDER_U8_COUNT];
     register_global_i32_array(
         global_path_hash("host_i32"),
         0,
