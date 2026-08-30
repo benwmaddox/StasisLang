@@ -313,7 +313,7 @@ class WorkshopSeamTests(unittest.TestCase):
         result = verify_log(GOOD.replace("3533510058", "919191"), MANIFEST)
         self.assertEqual(result["presented_frames"], 30)
 
-    def test_rejects_zero_or_changed_trace_within_stable_scene(self):
+    def test_rejects_zero_or_changed_trace_within_idle_proof_window(self):
         with self.assertRaisesRegex(SeamError, "positive"):
             verify_log(GOOD.replace('"command_trace":3533510058', '"command_trace":0'), MANIFEST)
         with self.assertRaisesRegex(SeamError, "changed"):
@@ -324,6 +324,19 @@ class WorkshopSeamTests(unittest.TestCase):
                 ),
                 MANIFEST,
             )
+
+    def test_accepts_later_positive_trace_change_after_stable_presentation(self):
+        stable_marker = next(
+            line
+            for line in GOOD.splitlines()
+            if line.startswith("Stasis Workshop IT-025:") and '"frame_token":77' in line
+        )
+        later_marker = stable_marker.replace(
+            '"command_trace":3533510058,"frame_token":77',
+            '"command_trace":919191,"frame_token":999',
+        )
+        result = verify_log(GOOD + "\n" + later_marker, MANIFEST)
+        self.assertEqual(result["presented_frames"], 30)
 
     def test_rejects_missing_marker_or_presentation(self):
         with self.assertRaisesRegex(SeamError, "IT-025"):

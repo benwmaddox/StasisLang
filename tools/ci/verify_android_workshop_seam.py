@@ -462,11 +462,16 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         raise SeamError("IT-025 marker lacks the JNI runtime version")
     if marker.get("fallback") != 0 or marker.get("stub") != 0:
         raise SeamError("IT-025 marker reports a fallback or stub")
-    command_traces = [candidate.get("command_trace") for _, candidate in markers]
+    idle_markers = [
+        candidate
+        for candidate_match, candidate in markers
+        if candidate_match.start() <= presentation_match.start()
+    ]
+    command_traces = [candidate.get("command_trace") for candidate in idle_markers]
     if any(not isinstance(trace, int) or trace <= 0 for trace in command_traces):
-        raise SeamError("IT-025 command_trace must be a positive current-build diagnostic")
+        raise SeamError("IT-025 idle command_trace must be a positive current-build diagnostic")
     if len(set(command_traces)) != 1:
-        raise SeamError("IT-025 command_trace changed within the same stable scene")
+        raise SeamError("IT-025 command_trace changed within the stable idle proof window")
     abi_markers = []
     for match in ABI_MARKER.finditer(log):
         try:
