@@ -88,7 +88,7 @@ test("shared web shell uses the visible viewport and preserves backing size", ()
   assert.equal(fit.windowListeners.get("orientationchange")?.length, 1);
   assert.equal(fit.mutationOptions.length, 1);
   assert.equal(fit.mutationOptions[0].attributes, true);
-  assert.deepEqual(Array.from(fit.mutationOptions[0].attributeFilter), ["width", "height"]);
+  assert.deepEqual(Array.from(fit.mutationOptions[0].attributeFilter), ["data-logical-width", "data-logical-height"]);
   assert.equal(parseFloat(fit.shellStyle.width) <= 393 && 592 <= 650 - 24 - 34, true);
   assert.equal(parseFloat(fit.shellStyle.width) <= 393 && 592 <= 844, true, "the VM models 393x844 layout and 393x650 visual viewports");
 });
@@ -177,6 +177,7 @@ function integratedRuntime() {
   const canvas = {
     width: 640,
     height: 360,
+    dataset: {},
     style: canvasStyle,
     parentElement: { style: shellStyle },
     listeners: new Map(),
@@ -326,9 +327,10 @@ test("integrated fitter and runtime share extent signaling and ordering", async 
   assert.equal(ticks.at(-1).resized, 0);
   assert.equal(ticks.at(-1).generation, 3);
 
-  canvas.width = 200;
-  canvas.height = 400;
-  mutations[0]();
+  request.host_req_seq.value = 2;
+  request.host_req_flags.value = 4;
+  request.host_req_window_w_px.value = 200;
+  request.host_req_window_h_px.value = 400;
   raf.shift()(80);
   assert.equal(ticks.at(-1).resized, 1);
   assert.equal(ticks.at(-1).generation, 4);

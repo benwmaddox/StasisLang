@@ -58,8 +58,8 @@ async function runSequence(first, second, options = {}) {
     },
     addEventListener(type, listener) { events.set(`document:${type}`, listener); },
   };
-  let screenWidth = first[0];
-  let screenHeight = first[1];
+  let screenWidth = options.desktop?.[0] ?? first[0];
+  let screenHeight = options.desktop?.[1] ?? first[1];
   const screen = { get width() { return screenWidth; }, get height() { return screenHeight; } };
   const visualViewport = {
     width: first[0],
@@ -76,7 +76,7 @@ async function runSequence(first, second, options = {}) {
         const f32 = new Float32Array(memory.buffer, 768 * 4, 64);
         if (i32[547]) actionCount += 1;
         ticks.push({
-          resized: i32[11], displayGeneration: i32[30], native: [i32[22], i32[23]], drawable: [i32[24], i32[25]],
+          resized: i32[11], displayGeneration: i32[30], desktop: [i32[12], i32[13]], native: [i32[22], i32[23]], drawable: [i32[24], i32[25]],
           logical: [f32[50], f32[51]], pointer: [f32[0], f32[1]], pointerCount: i32[7], wentDown: i32[546], wentUp: i32[547], actionCount
         });
       },
@@ -85,7 +85,7 @@ async function runSequence(first, second, options = {}) {
   };
   let actionCount = 0;
   const contextObject = {
-    document, screen, devicePixelRatio: 1, performance: { now: () => now },
+    document, screen, devicePixelRatio: options.dpr ?? 1, performance: { now: () => now },
     WebAssembly: { instantiate: async () => ({ instance }) },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; },
@@ -109,6 +109,7 @@ async function runSequence(first, second, options = {}) {
   assert.equal(raf.length, 1, `runtime schedules its first RAF: ${errorBox.textContent}`);
   const frame = () => { now += 16; raf.shift()(now); };
   frame();
+  if (options.desktopOnly) return ticks;
   const dispatch = (type, event = {}) => canvas.listeners.get(type)?.(event);
   dispatch("pointerdown", { pointerId: 7, clientX: first[0] - 1, clientY: first[1] - 1 });
   frame();
@@ -129,8 +130,8 @@ async function runSequence(first, second, options = {}) {
     const backingResize = ticks.at(-1);
     assert.equal(backingResize.resized, 1);
     assert.equal(backingResize.displayGeneration, 2);
-    assert.deepEqual(backingResize.drawable, second);
-    assert.deepEqual(backingResize.logical, second, "intentional backing resize reaches the same HostFrame");
+    assert.deepEqual(backingResize.drawable, first, "CSS extent remains the layout authority");
+    assert.deepEqual(backingResize.logical, second, "intentional logical resize reaches the same HostFrame");
     requestGlobals.host_req_seq.value = 2;
     frame();
     const unchangedRequest = ticks.at(-1);
@@ -162,6 +163,7 @@ async function runSequence(first, second, options = {}) {
     Math.round((second[1] - 1) * first[1] / second[1])
   ]);
   assert.equal(up.actionCount, 1, "release increments the action counter exactly once");
+  dispatch("pointerleave");
   frame();
   const quiet = ticks.at(-1);
   assert.equal(quiet.resized, 0);
@@ -182,4 +184,22 @@ test("web HostFrame landscape to portrait preserves actionable release", async (
 
 test("web HostFrame reports synchronous intentional backing resize", async () => {
   await runSequence([360, 720], [320, 640], { backingRequest: true });
+});
+
+test("web HostFrame keeps desktop physical size distinct from fitted canvas backing", async () => {
+  const ticks = await runSequence([960, 540], [960, 540], {
+    desktop: [1920, 1080], dpr: 2, desktopOnly: true
+  });
+  assert.deepEqual(ticks.at(-1).desktop, [3840, 2160]);
+  assert.deepEqual(ticks.at(-1).native, [960, 540]);
+  assert.deepEqual(ticks.at(-1).drawable, [1920, 1080]);
+});
+
+test("web HostFrame falls back to CSS extent when desktop screen metrics are invalid", async () => {
+  const ticks = await runSequence([960, 540], [960, 540], {
+    desktop: [NaN, Infinity], dpr: 2, desktopOnly: true
+  });
+  assert.deepEqual(ticks.at(-1).desktop, [960, 540]);
+  assert.deepEqual(ticks.at(-1).native, [960, 540]);
+  assert.deepEqual(ticks.at(-1).drawable, [1920, 1080]);
 });

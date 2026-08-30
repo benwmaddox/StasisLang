@@ -4319,6 +4319,7 @@ fn package_web_workspace(
             .map(normalize_web_loading_font_path)
             .transpose()?;
         let mut runtime_config = web_runtime_config(workspace, &process, development_build);
+        runtime_config["asset_metadata"] = staged_web_asset_metadata(&staging_root)?;
         let asset_identity_path = staging_root.join(ASSET_PACKAGE_IDENTITY_PATH);
         if asset_identity_path.is_file() {
             runtime_config["asset_package"] =
@@ -4774,6 +4775,96 @@ fn stage_workspace_assets(
         write_asset_package_identity(destination_root)?;
     }
     Ok(())
+}
+
+fn staged_web_asset_metadata(destination_root: &Path) -> Result<Value, String> {
+    let manifest_path = destination_root.join(DEFAULT_ASSET_MANIFEST_PATH);
+    if !manifest_path.is_file() {
+        return Ok(json!({}));
+    }
+    let bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "failed to read staged Web asset manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "failed to decode staged Web asset manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let mut metadata = serde_json::Map::new();
+    for entry in manifest
+        .get("assets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(path) = entry.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let format = entry.get("format").cloned().unwrap_or_else(|| json!({}));
+        let mut item = serde_json::Map::new();
+        item.insert("path".to_string(), Value::String(path.to_string()));
+        if let Some(encoding) = format.get("encoding").and_then(Value::as_str) {
+            item.insert("encoding".to_string(), Value::String(encoding.to_string()));
+        }
+        for (source, target) in [("width", "prepared_width"), ("height", "prepared_height")] {
+            if let Some(value) = format.get(source).and_then(Value::as_u64) {
+                item.insert(target.to_string(), Value::Number(value.into()));
+            }
+        }
+        let prepared_path = destination_root.join(path);
+        if let Ok(length) = fs::metadata(&prepared_path).map(|metadata| metadata.len()) {
+            item.insert("prepared_bytes".to_string(), Value::Number(length.into()));
+            if entry.get("prepared_from_sha256").is_none() && entry.get("source_bytes").is_none() {
+                // Copied masters retain their source byte length in the
+                // staged package; transformed assets intentionally expose
+                // only the prepared length unless the manifest carries a
+                // retained source length.
+                item.insert("source_bytes".to_string(), Value::Number(length.into()));
+            }
+        }
+        if let Some(value) = entry.get("source_bytes").and_then(Value::as_u64) {
+            item.insert("source_bytes".to_string(), Value::Number(value.into()));
+        }
+        if let Some(prepare) = entry.get("prepare") {
+            for (source, target) in [
+                ("max_logical_width", "logical_width"),
+                ("max_logical_height", "logical_height"),
+            ] {
+                if let Some(value) = prepare.get(source).and_then(Value::as_u64) {
+                    item.insert(target.to_string(), Value::Number(value.into()));
+                }
+            }
+        } else {
+            for (source, target) in [("width", "logical_width"), ("height", "logical_height")] {
+                if let Some(value) = format.get(source).and_then(Value::as_u64) {
+                    item.entry(target.to_string())
+                        .or_insert_with(|| Value::Number(value.into()));
+                }
+            }
+        }
+        if let Some(value) = entry
+            .get("prepared_from_sha256")
+            .and_then(Value::as_str)
+            .or_else(|| entry.get("content_sha256").and_then(Value::as_str))
+        {
+            item.insert(
+                "source_sha256".to_string(),
+                Value::String(value.to_string()),
+            );
+        }
+        if let Some(value) = entry.get("content_sha256").and_then(Value::as_str) {
+            item.insert(
+                "prepared_sha256".to_string(),
+                Value::String(value.to_string()),
+            );
+        }
+        metadata.insert(path.to_string(), Value::Object(item));
+    }
+    Ok(Value::Object(metadata))
 }
 
 fn network_guest_asset_mime(format: &AssetFormat) -> &'static str {

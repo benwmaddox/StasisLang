@@ -55,12 +55,15 @@ viewport as a fallback), refitting on window resize, orientation changes, and vi
 resize/scroll. The shell keeps the canvas aspect ratio centered inside the currently visible safe
 area; the body clip box moves with a nonzero visual-viewport origin so its overflow clip and canvas
 remain together. It changes CSS dimensions only and never rewrites the canvas `width`/`height`
-backing resolution. A `MutationObserver` refits after an intentional intrinsic backing-size change without
-observing the fitter's own style writes, so it cannot form a resize loop. Pointer coordinates remain
-guest-logical through `getBoundingClientRect()` in the runtime, including after a toolbar or
-orientation change. The runtime's private synchronous refit hook runs before an intentional
-backing resize is reported in HostFrame; extent events are coalesced into one generation, while
-origin-only scroll remains quiet. Consumers should not add post-processing resize or fullscreen controls.
+backing resolution. The runtime publishes `data-logical-width` and `data-logical-height` metadata;
+the fitter observes only those attributes and uses them for aspect fitting, so physical backing
+changes cannot alter layout or create a MutationObserver loop. The runtime then allocates the
+physical backing from the fitted CSS rectangle and effective DPR under explicit axis and 64 MiB
+caps. Pointer coordinates remain guest-logical through `getBoundingClientRect()` in the runtime,
+including after a toolbar or orientation change. The runtime's private synchronous refit hook runs
+before an intentional logical resize is reported in HostFrame; extent events are coalesced into one
+generation, while origin-only scroll remains quiet. Consumers should not add post-processing resize
+or fullscreen controls.
 
 Web packages do not render an audio-enable control. The runtime requests audio immediately and
 automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts
@@ -122,6 +125,13 @@ as desktop/mobile. Release asset validation and preparation retain only reachabl
 PNG, SVG, TTF, WAV, and MP3 files are placed under `assets/` and loaded as external package files.
 WebAudio playback requested during `main()` is queued until the audio context starts or a user
 gesture unlocks it.
+
+When a staged asset manifest is present, `game.js` also carries a compact
+`asset_metadata` table containing package-relative paths, encodings, prepared
+dimensions, prepared byte lengths, and source/prepared hashes. `game.assets` remains the explicit
+source-to-package override table. The runtime uses this metadata to select the
+smallest useful density tier for a declared logical sprite extent; it does not
+package alternate tiers or upscale a PNG master without an inspectable fallback.
 
 Large consecutive rectangle runs use a lazy WebGL2 instanced batcher in the full host, rendered to
 a transparent offscreen canvas and composited once at the run position. Non-rectangle commands
