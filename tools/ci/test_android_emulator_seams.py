@@ -426,6 +426,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def test_workshop_it025_isolated_from_release_shells(self):
         self.assertIn("[int]$StepTimeoutSeconds = 300", self.workshop_script)
 
+    def test_workshop_capture_uses_bounded_vertical_viewport_refinement(self):
+        self.assertIn("--viewport-y-search-radius=32", self.workshop_script)
+        self.assertEqual(1, self.workshop_script.count("--viewport-y-search-radius"))
+        self.assertIn("--profile android_emulator", self.workshop_script)
+        self.assertNotIn("--viewport-y-search-radius=0", self.workshop_script)
+        self.assertNotIn("--viewport-y-search-radius=1080", self.workshop_script)
+        self.assertNotIn("min_coverage", self.workshop_script)
+
     def test_workshop_fatal_scan_delegates_only_valid_it031_case_records(self):
         self.assertIn("ConvertFrom-Json -ErrorAction Stop", self.workshop_script)
         self.assertIn('$case.test_id -eq "IT-031"', self.workshop_script)

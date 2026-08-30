@@ -2,7 +2,6 @@
   "schema_version": 1,
   "fixture": "samples/render_parity/main.stasis",
   "trace_fixture": "samples/render_parity/trace.stasis",
-  "workshop_command_trace": 3533510058,
   "state_checksum": 2500,
   "render_contract_version": 6,
   "font_sha256": "17ec668bd0cd62e934f97563287ed72a4a8599ae716d20c1a93c82f1876dde47",

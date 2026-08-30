@@ -148,6 +148,19 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
 
+    def test_hot_swap_fixtures_require_complete_current_v6_header(self):
+        mutations = (
+            (contract.HOT_SWAP_V1_FIXTURE, "gfx_cmd_i32[1] = 6;", "gfx_cmd_i32[1] = 5;", "STASIS_RENDER_VERSION"),
+            (contract.HOT_SWAP_V2_FIXTURE, "gfx_cmd_i32[24] = 0;", "gfx_cmd_i32[24] = 1;", "current_v6_header[24]"),
+            (contract.HOT_SWAP_REJECT_FIXTURE, "gfx_cmd_i32[28] = 0;", "", "current_v6_header[28]"),
+        )
+        for path, current, stale, field in mutations:
+            with self.subTest(path=path, field=field):
+                failures, _ = self.run_with(path, current, stale)
+                failure = next(failure for failure in failures if failure.field == field)
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(path.as_posix(), failure.consumer)
+
     def test_render_parity_rejects_fixed_current_trace_oracles(self):
         mutations = (
             (
@@ -155,6 +168,17 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 '  "trace_fixture": "samples/render_parity/trace.stasis",',
                 '  "trace_fixture": "samples/render_parity/trace.stasis",\n'
                 '  "command_trace": 1853793133,',
+                "render_parity.fixed_numeric_trace",
+            ),
+            (
+                contract.RENDER_PARITY_MANIFEST,
+                '  "trace_fixture": "samples/render_parity/trace.stasis",',
+                (
+                    '  "trace_fixture": "samples/render_parity/trace.stasis",\n'
+                    + '  "'
+                    + "workshop_"
+                    + 'command_trace": 3533510058,'
+                ),
                 "render_parity.fixed_numeric_trace",
             ),
             (

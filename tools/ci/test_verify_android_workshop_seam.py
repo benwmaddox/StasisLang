@@ -9,7 +9,7 @@ except ImportError:
     from verify_android_workshop_seam import SeamError, _read_json, verify_log
 
 
-MANIFEST = {"state_checksum": 2500, "workshop_command_trace": 3533510058, "render_contract_version": 6}
+MANIFEST = {"state_checksum": 2500, "render_contract_version": 6}
 GOOD = """CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=7 compile_us=12 manifest=x
 Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":1,"fallback":0,"stub":0}
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":1,"frame_token":1}
@@ -308,6 +308,22 @@ class WorkshopSeamTests(unittest.TestCase):
     def test_rejects_wrong_guest_state(self):
         with self.assertRaisesRegex(SeamError, "state_checksum"):
             verify_log(GOOD.replace('"state_checksum":2500', '"state_checksum":2501'), MANIFEST)
+
+    def test_accepts_any_positive_stable_current_trace(self):
+        result = verify_log(GOOD.replace("3533510058", "919191"), MANIFEST)
+        self.assertEqual(result["presented_frames"], 30)
+
+    def test_rejects_zero_or_changed_trace_within_stable_scene(self):
+        with self.assertRaisesRegex(SeamError, "positive"):
+            verify_log(GOOD.replace('"command_trace":3533510058', '"command_trace":0'), MANIFEST)
+        with self.assertRaisesRegex(SeamError, "changed"):
+            verify_log(
+                GOOD.replace(
+                    '"command_trace":3533510058,"frame_token":77',
+                    '"command_trace":919191,"frame_token":77',
+                ),
+                MANIFEST,
+            )
 
     def test_rejects_missing_marker_or_presentation(self):
         with self.assertRaisesRegex(SeamError, "IT-025"):

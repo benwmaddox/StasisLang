@@ -449,7 +449,6 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         raise SeamError("stable GLES presentation did not consume a preceding native frame token")
     expected = {
         "state_checksum": manifest["state_checksum"],
-        "command_trace": manifest["workshop_command_trace"],
         "render_version": manifest["render_contract_version"],
     }
     for key, value in expected.items():
@@ -463,6 +462,11 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         raise SeamError("IT-025 marker lacks the JNI runtime version")
     if marker.get("fallback") != 0 or marker.get("stub") != 0:
         raise SeamError("IT-025 marker reports a fallback or stub")
+    command_traces = [candidate.get("command_trace") for _, candidate in markers]
+    if any(not isinstance(trace, int) or trace <= 0 for trace in command_traces):
+        raise SeamError("IT-025 command_trace must be a positive current-build diagnostic")
+    if len(set(command_traces)) != 1:
+        raise SeamError("IT-025 command_trace changed within the same stable scene")
     abi_markers = []
     for match in ABI_MARKER.finditer(log):
         try:
