@@ -433,7 +433,34 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
     ]
     if not stable_presentations:
         raise SeamError("missing stable IT-025 GLES presentation marker")
-    presentation_match, presentation = max(stable_presentations, key=lambda item: item[1]["count"])
+    presentation_match, presentation = max(
+        stable_presentations,
+        key=lambda item: (item[1]["count"], item[0].start()),
+    )
+    presentation_index = next(
+        index
+        for index, (candidate_match, _) in enumerate(presentations)
+        if candidate_match.start() == presentation_match.start()
+    )
+    if presentation_index == 0:
+        raise SeamError("stable IT-025 GLES presentation lacks a preceding presentation")
+    predecessor_match, predecessor = presentations[presentation_index - 1]
+    predecessor_token = predecessor.get("frame_token")
+    if predecessor.get("event") != "present" or not isinstance(predecessor_token, int):
+        raise SeamError("preceding IT-025 GLES presentation is not a valid presentation")
+    predecessor_native_match, _ = next(
+        (
+            (candidate_match, candidate)
+            for candidate_match, candidate in reversed(markers)
+            if candidate.get("frame_token") == predecessor_token
+            and candidate_match.start() < predecessor_match.start()
+        ),
+        (None, None),
+    )
+    if predecessor_native_match is None:
+        raise SeamError(
+            "preceding IT-025 GLES presentation did not consume a matching native frame token"
+        )
     frames = [(int(count), int(token)) for count, token in FRAME.findall(log)]
     stable_count = presentation["count"]
     stable_token = presentation["frame_token"]
@@ -465,7 +492,9 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
     idle_markers = [
         candidate
         for candidate_match, candidate in markers
-        if candidate_match.start() <= presentation_match.start()
+        if predecessor_native_match.start()
+        <= candidate_match.start()
+        <= presentation_match.start()
     ]
     command_traces = [candidate.get("command_trace") for candidate in idle_markers]
     if any(not isinstance(trace, int) or trace <= 0 for trace in command_traces):

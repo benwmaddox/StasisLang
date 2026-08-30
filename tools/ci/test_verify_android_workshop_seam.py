@@ -11,11 +11,15 @@ except ImportError:
 
 MANIFEST = {"state_checksum": 2500, "render_contract_version": 6}
 GOOD = """CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=7 compile_us=12 manifest=x
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":1,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":919191,"frame_token":1,"fallback":0,"stub":0}
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":1,"frame_token":1}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":424242,"frame_token":50,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":76,"fallback":0,"stub":0}
+Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":29,"frame_token":76}
 Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":77,"fallback":0,"stub":0}
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":30,"frame_token":77}
 RenderAcceptanceFrame: count=1 frame_token=1
+RenderAcceptanceFrame: count=29 frame_token=76
 RenderAcceptanceFrame: count=30 frame_token=77
 Stasis Workshop IT-026: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"buffer_abi","status":"passed","descriptor":{"lanes":[{"lane":"i32","bytes":140480,"alignment":4},{"lane":"f32","bytes":504336,"alignment":4},{"lane":"u8","bytes":65536,"alignment":1}]},"valid_guards_intact":true,"all_invalid_unchanged":true,"valid_calls":1,"invalid_calls":18}
 	Stasis Workshop IT-026 case: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"case","name":"short_i32","unchanged":true,"error":{"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"error","lane":"i32","reason":"capacity","expected":140480,"actual":140479}}
@@ -313,6 +317,17 @@ class WorkshopSeamTests(unittest.TestCase):
         result = verify_log(GOOD.replace("3533510058", "919191"), MANIFEST)
         self.assertEqual(result["presented_frames"], 30)
 
+    def test_accepts_deliberate_trace_changes_before_idle_proof_window(self):
+        earlier_changes = GOOD.replace(
+            '"command_trace":919191,"frame_token":1',
+            '"command_trace":111111,"frame_token":1',
+        ).replace(
+            '"command_trace":424242,"frame_token":50',
+            '"command_trace":222222,"frame_token":50',
+        )
+        result = verify_log(earlier_changes, MANIFEST)
+        self.assertEqual(result["presented_frames"], 30)
+
     def test_rejects_zero_or_changed_trace_within_idle_proof_window(self):
         with self.assertRaisesRegex(SeamError, "positive"):
             verify_log(GOOD.replace('"command_trace":3533510058', '"command_trace":0'), MANIFEST)
@@ -337,6 +352,24 @@ class WorkshopSeamTests(unittest.TestCase):
         )
         result = verify_log(GOOD + "\n" + later_marker, MANIFEST)
         self.assertEqual(result["presented_frames"], 30)
+
+    def test_requires_preceding_presentation_and_matching_native_marker(self):
+        presentation_lines = [
+            line for line in GOOD.splitlines() if line.startswith("Stasis Workshop IT-025 GLES:")
+        ]
+        without_predecessors = GOOD
+        for line in presentation_lines[:-1]:
+            without_predecessors = without_predecessors.replace(line + "\n", "", 1)
+        with self.assertRaisesRegex(SeamError, "lacks a preceding presentation"):
+            verify_log(without_predecessors, MANIFEST)
+
+        predecessor_marker = next(
+            line
+            for line in GOOD.splitlines()
+            if line.startswith("Stasis Workshop IT-025:") and '"frame_token":76' in line
+        )
+        with self.assertRaisesRegex(SeamError, "matching native frame token"):
+            verify_log(GOOD.replace(predecessor_marker + "\n", "", 1), MANIFEST)
 
     def test_rejects_missing_marker_or_presentation(self):
         with self.assertRaisesRegex(SeamError, "IT-025"):

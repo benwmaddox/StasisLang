@@ -3650,6 +3650,22 @@ unsafe extern "C" {
     ) -> u32;
 }
 
+/// Computes the command trace for the current render ABI from host-owned buffers.
+///
+/// This is an internal current-build seam: inputs with non-canonical capacities,
+/// magic, or version are rejected rather than interpreted as an older layout.
+pub fn current_render_trace(cmd_i32: &[i32], cmd_f32: &[f32], cmd_u8: &[u8]) -> u32 {
+    if cmd_i32.len() != STASIS_RENDER_I32_COUNT
+        || cmd_f32.len() != STASIS_RENDER_F32_COUNT
+        || cmd_u8.len() != STASIS_RENDER_U8_COUNT
+        || cmd_i32.first().copied() != Some(STASIS_RENDER_MAGIC)
+        || cmd_i32.get(1).copied() != Some(STASIS_RENDER_VERSION)
+    {
+        return 0;
+    }
+    unsafe { stasis_render_trace_native(cmd_i32.as_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr()) }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn stasis_jit_render_trace(
     cmd_i32_id: i32,
@@ -7409,6 +7425,34 @@ mod tests {
         assert_ne!(sprite_then_line, 0);
         assert_ne!(sprite_then_line, line_then_sprite);
         assert_eq!(line_then_sprite, fallback_without_order);
+    }
+
+    #[test]
+    fn current_render_trace_accepts_only_the_current_canonical_buffers() {
+        let mut i32s = vec![0i32; STASIS_RENDER_I32_COUNT];
+        let mut f32s = vec![0.0f32; STASIS_RENDER_F32_COUNT];
+        let u8s = vec![0u8; STASIS_RENDER_U8_COUNT];
+        i32s[0] = STASIS_RENDER_MAGIC;
+        i32s[1] = STASIS_RENDER_VERSION;
+        i32s[3] = 1;
+        f32s[4..12].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 0.5, 0.6, 0.7, 0.8]);
+
+        assert_ne!(current_render_trace(&i32s, &f32s, &u8s), 0);
+        assert_eq!(
+            current_render_trace(&i32s[..i32s.len() - 1], &f32s, &u8s),
+            0
+        );
+        assert_eq!(
+            current_render_trace(&i32s, &f32s[..f32s.len() - 1], &u8s),
+            0
+        );
+        assert_eq!(current_render_trace(&i32s, &f32s, &u8s[..u8s.len() - 1]), 0);
+
+        i32s[1] = STASIS_RENDER_VERSION - 1;
+        assert_eq!(current_render_trace(&i32s, &f32s, &u8s), 0);
+        i32s[1] = STASIS_RENDER_VERSION;
+        i32s[0] ^= 1;
+        assert_eq!(current_render_trace(&i32s, &f32s, &u8s), 0);
     }
 
     #[test]
