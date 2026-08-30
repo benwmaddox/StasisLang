@@ -4,7 +4,8 @@ use serde_json::json;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_dynload::{
     global_path_hash, register_global_f32_array, register_global_i32_array,
-    register_global_u8_array, Library, StasisGraphicsApi,
+    register_global_u8_array, Library, StasisGraphicsApi, STASIS_RENDER_F32_COUNT,
+    STASIS_RENDER_I32_COUNT, STASIS_RENDER_U8_COUNT,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -121,7 +122,7 @@ fn run_guest_frame(
     assert_close(scalar_f32("seam_pointer_x"), x, "guest pointer x");
     assert_close(scalar_f32("seam_pointer_y"), y, "guest pointer y");
 
-    assert_eq!(&gfx_i32[0..4], &[1196967473, 5, 3, 0]);
+    assert_eq!(&gfx_i32[0..4], &[1196967473, 6, 3, 0]);
     assert_eq!(gfx_i32[22], 1, "render order count");
     assert_eq!(gfx_i32[24], 1, "render rectangle count");
     for (index, expected) in clear.iter().enumerate() {
@@ -163,9 +164,16 @@ fn desktop_sdl_input_changes_jit_state_and_submitted_frame_on_the_intended_tick(
 
     let mut host_i32 = vec![0; 768];
     let mut host_f32 = vec![0.0; 64];
-    let mut gfx_i32 = vec![0; 34608];
-    let mut gfx_f32 = vec![0.0; 125060];
-    let mut gfx_u8 = vec![0; 65536];
+    // These host-owned buffers must stay exactly aligned with the canonical
+    // renderer ABI.  In particular, V6 adds the clip arena to both command
+    // lanes; using a pre-V6 capacity makes registration fail before the seam
+    // can exercise input behavior.
+    let mut gfx_i32 = vec![0; STASIS_RENDER_I32_COUNT];
+    let mut gfx_f32 = vec![0.0; STASIS_RENDER_F32_COUNT];
+    let mut gfx_u8 = vec![0; STASIS_RENDER_U8_COUNT];
+    assert_eq!(gfx_i32.len(), STASIS_RENDER_I32_COUNT);
+    assert_eq!(gfx_f32.len(), STASIS_RENDER_F32_COUNT);
+    assert_eq!(gfx_u8.len(), STASIS_RENDER_U8_COUNT);
     register_global_i32_array(
         global_path_hash("host_i32"),
         0,
@@ -274,7 +282,7 @@ fn desktop_sdl_input_changes_jit_state_and_submitted_frame_on_the_intended_tick(
     assert_eq!(&host_i32[548..552], &[1, 0, 0, 1]);
     assert_eq!(
         [down_trace, move_trace, up_trace],
-        [1530966022, 413668306, -939500466],
+        [1845463013, -947354335, -119375539],
         "guest state markers must produce the locked native frame traces"
     );
 

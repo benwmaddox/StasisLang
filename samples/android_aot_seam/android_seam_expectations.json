@@ -3,7 +3,7 @@
   "test_id": "IT-017",
   "stable_frame": 30,
   "state_checksum": 1210,
-  "command_trace": 1582127377,
+  "command_trace": 1106948190,
   "logical_size": [640, 360],
   "regions": [
     {"name": "left_red", "center": [160, 180], "rgb": [230, 31, 41], "tolerance": 30},
