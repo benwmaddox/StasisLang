@@ -75,6 +75,15 @@ test("minimal runtime exposes the same backing caps and fallback reason", async 
   assert.equal(runtime.body.dataset.backingCap, "capped");
 });
 
+test("minimal runtime retains requested DPR while capping its backing allocation", async () => {
+  const runtime = await loadMinimal({ logical: [640, 360], css: [640, 360], dpr: 5 });
+  assert.equal(runtime.body.dataset.devicePixelRatio, "5");
+  assert.equal(runtime.body.dataset.effectiveDpr, "4");
+  assert.equal(runtime.body.dataset.backingWidth, "2560");
+  assert.equal(runtime.body.dataset.backingHeight, "1440");
+  assert.match(runtime.body.dataset.backingFallback, /dpr/);
+});
+
 test("minimal runtime advances density generation within one stable tier", async () => {
   const runtime = await loadMinimal({ logical: [640, 360], css: [640, 360], dpr: 1.1 });
   const firstGeneration = Number(runtime.body.dataset.densityGeneration);

@@ -41,6 +41,7 @@ async function loadRuntime({ logical = [640, 360], css = logical, dpr = 1, inclu
       ticks.push({
         logical: [f32[50], f32[51]], css: [i32[22], i32[23]],
         backing: [i32[24], i32[25]], generation: i32[30], density: i32[31], resized: i32[11],
+        desktop: [i32[12], i32[13]],
         pointer: [f32[0], f32[1]], normalized: [f32[4], f32[5]],
       });
     },
@@ -135,10 +136,24 @@ test("backing axis and byte caps are explicit and inspectable", async () => {
 });
 
 test("DPR cap is explicit when the browser reports an extreme density", async () => {
-  const runtime = await loadRuntime({ logical: [640, 360], css: [640, 360], dpr: 8 });
-  assert.equal(runtime.body.dataset.devicePixelRatio, "4");
+  const runtime = await loadRuntime({ logical: [640, 360], css: [640, 360], dpr: 5 });
+  const frame = runtime.ticks.at(-1);
+  assert.equal(runtime.body.dataset.devicePixelRatio, "5");
+  assert.deepEqual(frame.desktop, [3200, 1800]);
+  assert.deepEqual(frame.backing, [2560, 1440]);
+  assert.equal(runtime.body.dataset.effectiveDpr, "4");
   assert.match(runtime.body.dataset.backingFallback, /dpr/);
   assert.equal(runtime.body.dataset.backingCap, "capped");
+});
+
+test("requested DPR remains visible when desktop metrics exceed the backing cap", async () => {
+  const runtime = await loadRuntime({ logical: [320, 180], css: [960, 540], dpr: 5 });
+  const frame = runtime.ticks.at(-1);
+  assert.equal(runtime.body.dataset.devicePixelRatio, "5");
+  assert.deepEqual(frame.desktop, [4800, 2700]);
+  assert.deepEqual(frame.backing, [3840, 2160]);
+  assert.ok(frame.backing[0] < frame.desktop[0]);
+  assert.ok(frame.backing[1] < frame.desktop[1]);
 });
 
 test("CSS pointer coordinates round trip into logical normalized coordinates", async () => {

@@ -489,9 +489,12 @@
     }
     const extent = displayCssExtent();
     const requestedDpr = finitePositive(globalThis.devicePixelRatio, 1);
-    const rawDpr = Math.max(DISPLAY_MIN_DPR, Math.min(DISPLAY_MAX_DPR, requestedDpr));
-    const requestedWidth = Math.max(1, Math.round(extent.width * rawDpr));
-    const requestedHeight = Math.max(1, Math.round(extent.height * rawDpr));
+    // Keep the browser's requested DPR observable for host metrics and
+    // receipts. Backing allocation has its own bounded DPR so an unusually
+    // dense display cannot bypass the physical-size and byte caps below.
+    const backingDpr = Math.max(DISPLAY_MIN_DPR, Math.min(DISPLAY_MAX_DPR, requestedDpr));
+    const requestedWidth = Math.max(1, Math.round(extent.width * backingDpr));
+    const requestedHeight = Math.max(1, Math.round(extent.height * backingDpr));
     const requestedBytes = requestedWidth * requestedHeight * 4;
     const dimensionScale = Math.min(
       1,
@@ -502,7 +505,7 @@
       ? Math.sqrt(DISPLAY_MAX_BACKING_BYTES / requestedBytes)
       : 1;
     const capScale = Math.min(1, dimensionScale, byteScale);
-    const effectiveDpr = rawDpr * capScale;
+    const effectiveDpr = backingDpr * capScale;
     let backingWidth = boundedInteger(
       extent.width * effectiveDpr, 1, DISPLAY_MAX_BACKING_WIDTH, 1
     );
@@ -528,7 +531,7 @@
     const rasterScale = Math.max(1, Math.min(8, contentScale));
     const densityTier = densityTierFor(rasterScale);
     const fallback = [
-      requestedDpr !== rawDpr ? "dpr" : "",
+      requestedDpr !== backingDpr ? "dpr" : "",
       dimensionScale < 1 ? "dimension" : "",
       byteScale < 1 ? "bytes" : ""
     ].filter(Boolean).join(",") || "none";
@@ -543,7 +546,7 @@
     const rasterScaleChanged = display.rasterScaleKey !== rasterScaleKey;
     display.cssWidth = extent.width;
     display.cssHeight = extent.height;
-    display.rawDpr = rawDpr;
+    display.rawDpr = requestedDpr;
     display.effectiveDpr = effectiveDpr;
     display.backingWidth = backingWidth;
     display.backingHeight = backingHeight;
@@ -900,14 +903,23 @@
     return Object.freeze(request);
   };
   const resultForSprite = (request, drawable, width, height, fallback,
-    sourceWidth, sourceHeight, decodedWidth = sourceWidth, decodedHeight = sourceHeight) => ({
+    sourceWidth, sourceHeight, decodedWidth = sourceWidth, decodedHeight = sourceHeight,
+    sourceDrawable = null, sourceDrawableWidth = 0, sourceDrawableHeight = 0) => ({
     drawable, width, height, fallback: fallback || "none",
+    sourceDrawable, sourceDrawableWidth, sourceDrawableHeight,
     sourceWidth, sourceHeight,
     sourceBytes: request.sourceBytes || 0,
     decodedWidth: decodedWidth || 0,
     decodedHeight: decodedHeight || 0,
     decodedBytes: (decodedWidth || 0) * (decodedHeight || 0) * 4,
   });
+  const spriteVariantFor = (resource, partial) =>
+    partial && resource.sourceDrawable && resource.sourceDrawableWidth && resource.sourceDrawableHeight
+      ? {
+          key: "source", drawable: resource.sourceDrawable,
+          width: resource.sourceDrawableWidth, height: resource.sourceDrawableHeight
+        }
+      : { key: "full", drawable: resource.drawable, width: resource.width, height: resource.height };
   const rasterSprite = async request => {
     const bitmapFactory = globalThis.createImageBitmap;
     const sourceDimensions = request.sourceDimensions;
@@ -1006,7 +1018,8 @@
         drawWidth, drawHeight);
       rasterContext.restore?.();
       return resultForSprite(request, raster, targetWidth, targetHeight,
-        "source-underprovisioned", sourceWidth, sourceHeight);
+        "source-underprovisioned", sourceWidth, sourceHeight,
+        sourceWidth, sourceHeight, image, sourceWidth, sourceHeight);
     }
     if (!request.hasDimensions) {
       return resultForSprite(request, image, sourceWidth, sourceHeight,
@@ -1171,6 +1184,9 @@
     resource.height = result.height;
     resource.fallback = result.fallback || "none";
     resource.sourceIdentity = request.sourceIdentity;
+    resource.sourceDrawable = result.sourceDrawable || null;
+    resource.sourceDrawableWidth = result.sourceDrawableWidth || 0;
+    resource.sourceDrawableHeight = result.sourceDrawableHeight || 0;
     resource.sourceWidth = result.sourceWidth || 0;
     resource.sourceHeight = result.sourceHeight || 0;
     resource.sourceBytes = result.sourceBytes || 0;
@@ -1258,7 +1274,8 @@
     const source = assetValue(pathId);
     const resource = {
       image: null, imagePromise: null, source, metadata: assetMetadata(pathId), sourceIdentity: source,
-      drawable: null, requested: spriteDimensions(width, height),
+      drawable: null, sourceDrawable: null, sourceDrawableWidth: 0, sourceDrawableHeight: 0,
+      requested: spriteDimensions(width, height),
       logicalWidth: 0, logicalHeight: 0, tier: 1, tierKey: "", pendingTierKey: "",
       width: 0, height: 0, sourceWidth: 0, sourceHeight: 0, sourceBytes: 0,
       decodedWidth: 0, decodedHeight: 0, decodedBytes: 0,
@@ -1383,6 +1400,9 @@
       trimSpriteCache(null);
       resource.ready = false;
       resource.drawable = null;
+      resource.sourceDrawable = null;
+      resource.sourceDrawableWidth = 0;
+      resource.sourceDrawableHeight = 0;
       resource.refreshing = false;
       resource.refreshError = null;
       resource.refreshFallback = "none";
@@ -2025,40 +2045,130 @@
         failIfBad();
         const page = {
           texture, size, cursorX: 0, cursorY: 0, rowHeight: 0,
-          entries: new Set()
+          entries: new Set(), freeRects: []
         };
         atlasPages.push(page);
         return page;
       };
-      const uploadAtlasEntry = (page, resource, entry) => {
+      const deleteAtlasPage = page => {
+        const index = atlasPages.indexOf(page);
+        if (index >= 0) atlasPages.splice(index, 1);
+        gl.deleteTexture?.(page.texture);
+        page.deleted = true;
+      };
+      const coalesceFreeRects = page => {
+        let merged = true;
+        while (merged) {
+          merged = false;
+          outer: for (let left = 0; left < page.freeRects.length; left += 1) {
+            for (let right = left + 1; right < page.freeRects.length; right += 1) {
+              const first = page.freeRects[left];
+              const second = page.freeRects[right];
+              if (first.y === second.y && first.height === second.height
+                  && (first.x + first.width === second.x || second.x + second.width === first.x)) {
+                const x = Math.min(first.x, second.x);
+                page.freeRects[left] = {
+                  x, y: first.y, width: Math.max(first.x + first.width, second.x + second.width) - x,
+                  height: first.height
+                };
+                page.freeRects.splice(right, 1);
+                merged = true;
+                break outer;
+              }
+              if (first.x === second.x && first.width === second.width
+                  && (first.y + first.height === second.y || second.y + second.height === first.y)) {
+                const y = Math.min(first.y, second.y);
+                page.freeRects[left] = {
+                  x: first.x, y, width: first.width,
+                  height: Math.max(first.y + first.height, second.y + second.height) - y
+                };
+                page.freeRects.splice(right, 1);
+                merged = true;
+                break outer;
+              }
+            }
+          }
+        }
+      };
+      const releaseAtlasEntry = entry => {
+        if (!entry || entry.released) return;
+        entry.released = true;
+        const page = entry.page;
+        page.entries.delete(entry);
+        if (entry.allocation && !page.deleted) {
+          page.freeRects.push({ ...entry.allocation });
+          coalesceFreeRects(page);
+        }
+        if (page.entries.size === 0 && !page.deleted) deleteAtlasPage(page);
+      };
+      const allocateAtlasRect = (page, width, height) => {
+        const previous = {
+          cursorX: page.cursorX, cursorY: page.cursorY, rowHeight: page.rowHeight,
+          freeRects: page.freeRects.map(rect => ({ ...rect }))
+        };
+        const freeIndex = page.freeRects.findIndex(rect =>
+          rect.width >= width && rect.height >= height);
+        if (freeIndex >= 0) {
+          const rect = page.freeRects.splice(freeIndex, 1)[0];
+          if (rect.width > width) {
+            page.freeRects.push({
+              x: rect.x + width, y: rect.y, width: rect.width - width, height: rect.height
+            });
+          }
+          if (rect.height > height) {
+            page.freeRects.push({
+              x: rect.x, y: rect.y + height, width, height: rect.height - height
+            });
+          }
+          return { x: rect.x, y: rect.y, width, height, previous, source: "free" };
+        }
+        let x = page.cursorX;
+        let y = page.cursorY;
+        if (x + width > page.size) {
+          x = 0;
+          y += page.rowHeight;
+        }
+        if (y + height > page.size) return null;
+        page.cursorX = x + width;
+        page.cursorY = y;
+        page.rowHeight = y === previous.cursorY
+          ? Math.max(previous.rowHeight, height) : height;
+        return { x, y, width, height, previous, source: "shelf" };
+      };
+      const rollbackAtlasAllocation = (page, allocation) => {
+        page.cursorX = allocation.previous.cursorX;
+        page.cursorY = allocation.previous.cursorY;
+        page.rowHeight = allocation.previous.rowHeight;
+        page.freeRects = allocation.previous.freeRects.map(rect => ({ ...rect }));
+      };
+      const uploadAtlasEntry = (page, variant, entry) => {
         stagingCanvas ||= document.createElement?.("canvas");
         stagingContext ||= stagingCanvas?.getContext?.("2d");
         if (!stagingCanvas || !stagingContext) throw new Error("sprite atlas staging unavailable");
-        const width = resource.width;
-        const height = resource.height;
+        const width = variant.width;
+        const height = variant.height;
         const paddedWidth = width + ATLAS_PADDING * 2;
         const paddedHeight = height + ATLAS_PADDING * 2;
         stagingCanvas.width = paddedWidth;
         stagingCanvas.height = paddedHeight;
         stagingContext.clearRect?.(0, 0, paddedWidth, paddedHeight);
         stagingContext.imageSmoothingEnabled = false;
-        stagingContext.drawImage(resource.drawable, ATLAS_PADDING, ATLAS_PADDING, width, height);
+        stagingContext.drawImage(variant.drawable, ATLAS_PADDING, ATLAS_PADDING, width, height);
         // Extrude each edge into the padding to keep LINEAR samples away from
-        // neighboring material. Released allocations are not reused in-place;
-        // the bounded page is discarded when its last live entry is released.
-        stagingContext.drawImage(resource.drawable, 0, 0, 1, height, 0, ATLAS_PADDING, ATLAS_PADDING, height);
-        stagingContext.drawImage(resource.drawable, width - 1, 0, 1, height,
+        // neighboring material, including allocations recycled after refresh.
+        stagingContext.drawImage(variant.drawable, 0, 0, 1, height, 0, ATLAS_PADDING, ATLAS_PADDING, height);
+        stagingContext.drawImage(variant.drawable, width - 1, 0, 1, height,
           ATLAS_PADDING + width, ATLAS_PADDING, ATLAS_PADDING, height);
-        stagingContext.drawImage(resource.drawable, 0, 0, width, 1, ATLAS_PADDING, 0, width, ATLAS_PADDING);
-        stagingContext.drawImage(resource.drawable, 0, height - 1, width, 1,
+        stagingContext.drawImage(variant.drawable, 0, 0, width, 1, ATLAS_PADDING, 0, width, ATLAS_PADDING);
+        stagingContext.drawImage(variant.drawable, 0, height - 1, width, 1,
           ATLAS_PADDING, ATLAS_PADDING + height, width, ATLAS_PADDING);
-        stagingContext.drawImage(resource.drawable, 0, 0, 1, 1,
+        stagingContext.drawImage(variant.drawable, 0, 0, 1, 1,
           0, 0, ATLAS_PADDING, ATLAS_PADDING);
-        stagingContext.drawImage(resource.drawable, width - 1, 0, 1, 1,
+        stagingContext.drawImage(variant.drawable, width - 1, 0, 1, 1,
           ATLAS_PADDING + width, 0, ATLAS_PADDING, ATLAS_PADDING);
-        stagingContext.drawImage(resource.drawable, 0, height - 1, 1, 1,
+        stagingContext.drawImage(variant.drawable, 0, height - 1, 1, 1,
           0, ATLAS_PADDING + height, ATLAS_PADDING, ATLAS_PADDING);
-        stagingContext.drawImage(resource.drawable, width - 1, height - 1, 1, 1,
+        stagingContext.drawImage(variant.drawable, width - 1, height - 1, 1, 1,
           ATLAS_PADDING + width, ATLAS_PADDING + height, ATLAS_PADDING, ATLAS_PADDING);
         gl.bindTexture(gl.TEXTURE_2D, page.texture);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, entry.x - ATLAS_PADDING, entry.y - ATLAS_PADDING,
@@ -2067,13 +2177,22 @@
         atlasUploadCount += 1;
         atlasUploadBytes += paddedWidth * paddedHeight * 4;
       };
-      const atlasFor = resource => {
-        const old = atlasByResource.get(resource);
+      const atlasFor = (resource, variant) => {
+        const selected = variant?.drawable ? variant : {
+          key: "full", drawable: resource.drawable, width: resource.width, height: resource.height
+        };
+        const variantKey = selected.key || "full";
+        let variants = atlasByResource.get(resource);
+        const old = variants?.get(variantKey);
         if (old && (old.generation === resource.generation
           || resource.refreshing || resource.refreshError)) return old;
-        if (!resource.ready || !resource.drawable || !resource.width || !resource.height) return null;
-        const paddedWidth = resource.width + ATLAS_PADDING * 2;
-        const paddedHeight = resource.height + ATLAS_PADDING * 2;
+        if (old) {
+          releaseAtlasEntry(old);
+          variants.delete(variantKey);
+        }
+        if (!resource.ready || !selected.drawable || !selected.width || !selected.height) return null;
+        const paddedWidth = selected.width + ATLAS_PADDING * 2;
+        const paddedHeight = selected.height + ATLAS_PADDING * 2;
         if (paddedWidth > ATLAS_PAGE_MAX || paddedHeight > ATLAS_PAGE_MAX) {
           document.body.dataset.atlasFallback = "dimension";
           return null;
@@ -2081,24 +2200,13 @@
         let pageSize = ATLAS_PAGE_SIZE;
         while (pageSize < paddedWidth || pageSize < paddedHeight) pageSize *= 2;
         let page = null;
-        let boxX = 0;
-        let boxY = 0;
-        let previousCursor = null;
+        let allocation = null;
         for (const candidate of atlasPages) {
           if (paddedWidth > candidate.size || paddedHeight > candidate.size) continue;
-          let x = candidate.cursorX;
-          let y = candidate.cursorY;
-          if (x + paddedWidth > candidate.size) {
-            x = 0;
-            y += candidate.rowHeight;
-          }
-          if (y + paddedHeight <= candidate.size) {
+          const candidateAllocation = allocateAtlasRect(candidate, paddedWidth, paddedHeight);
+          if (candidateAllocation) {
             page = candidate;
-            boxX = x;
-            boxY = y;
-            previousCursor = {
-              x: candidate.cursorX, y: candidate.cursorY, rowHeight: candidate.rowHeight
-            };
+            allocation = candidateAllocation;
             break;
           }
         }
@@ -2107,33 +2215,35 @@
           page = createAtlasPage(pageSize);
           if (!page) return null;
           createdPage = true;
-          boxX = 0;
-          boxY = 0;
-          previousCursor = { x: 0, y: 0, rowHeight: 0 };
+          allocation = allocateAtlasRect(page, paddedWidth, paddedHeight);
+          if (!allocation) {
+            deleteAtlasPage(page);
+            return null;
+          }
         }
         const entry = {
-          page, x: boxX + ATLAS_PADDING, y: boxY + ATLAS_PADDING,
-          width: resource.width, height: resource.height,
-          generation: resource.generation
+          page, x: allocation.x + ATLAS_PADDING, y: allocation.y + ATLAS_PADDING,
+          width: selected.width, height: selected.height,
+          generation: resource.generation, variantKey,
+          allocation: {
+            x: allocation.x, y: allocation.y, width: allocation.width, height: allocation.height
+          }
         };
-        page.cursorX = boxX + paddedWidth;
-        page.cursorY = boxY;
-        page.rowHeight = boxY === previousCursor.y
-          ? Math.max(previousCursor.rowHeight, paddedHeight) : paddedHeight;
         try {
-          uploadAtlasEntry(page, resource, entry);
+          uploadAtlasEntry(page, selected, entry);
         } catch (error) {
-          page.cursorX = previousCursor.x;
-          page.cursorY = previousCursor.y;
-          page.rowHeight = previousCursor.rowHeight;
+          rollbackAtlasAllocation(page, allocation);
           if (createdPage) {
-            atlasPages.splice(atlasPages.indexOf(page), 1);
-            gl.deleteTexture?.(page.texture);
+            deleteAtlasPage(page);
           }
           throw error;
         }
-        page.entries.add(resource);
-        atlasByResource.set(resource, entry);
+        page.entries.add(entry);
+        if (!variants) {
+          variants = new Map();
+          atlasByResource.set(resource, variants);
+        }
+        variants.set(variantKey, entry);
         return entry;
       };
       const draw = (values, count, stride, texture) => {
@@ -2196,15 +2306,10 @@
         atlasFor,
         drawSprites: (values, count, page) => draw(values, count, 16, page.texture),
         releaseResource: resource => {
-          const entry = atlasByResource.get(resource);
-          if (!entry) return;
+          const variants = atlasByResource.get(resource);
+          if (!variants) return;
           atlasByResource.delete(resource);
-          entry.page.entries.delete(resource);
-          if (entry.page.entries.size === 0) {
-            const index = atlasPages.indexOf(entry.page);
-            if (index >= 0) atlasPages.splice(index, 1);
-            gl.deleteTexture?.(entry.page.texture);
-          }
+          for (const entry of variants.values()) releaseAtlasEntry(entry);
         },
         metrics: () => ({
           pages: atlasPages.length,
@@ -2213,7 +2318,7 @@
           width: atlasPages.reduce((total, page) => total + page.size, 0),
           height: atlasPages.reduce((maximum, page) => Math.max(maximum, page.size), 0),
           generation: atlasPages.reduce((maximum, page) => Math.max(
-            maximum, ...Array.from(page.entries, resource => resource.generation || 0)
+            maximum, ...Array.from(page.entries, entry => entry.generation || 0)
           ), 0),
           uploadCount: atlasUploadCount,
           uploadBytes: atlasUploadBytes
@@ -2353,7 +2458,8 @@
       const u1 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 6] : 1;
       const v1 = version >= GFX_CMD_V5_VERSION ? f32[baseF + 7] : 1;
       if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return null;
-      return { handle: i32[baseI], resource, x, y, width, height, u0, v0, u1, v1,
+      const variant = spriteVariantFor(resource, u0 !== 0 || v0 !== 0 || u1 !== 1 || v1 !== 1);
+      return { handle: i32[baseI], resource, variant, x, y, width, height, u0, v0, u1, v1,
         alpha: Math.max(0, Math.min(1, i32[baseI + 2] / 255)),
         radians: i32[baseI + 1] * Math.PI / 180 };
     };
@@ -2362,12 +2468,12 @@
       performanceWorkload.drawCalls += 1;
       const info = spriteInfo(index);
       if (!info) return;
-      const { resource, x, y, width, height, u0, v0, u1, v1, alpha, radians } = info;
-      const image = resource.drawable;
-      const sourceX = u0 * resource.width;
-      const sourceY = v0 * resource.height;
-      const sourceWidth = (u1 - u0) * resource.width;
-      const sourceHeight = (v1 - v0) * resource.height;
+      const { x, y, width, height, u0, v0, u1, v1, alpha, radians, variant } = info;
+      const image = variant.drawable;
+      const sourceX = u0 * variant.width;
+      const sourceY = v0 * variant.height;
+      const sourceWidth = (u1 - u0) * variant.width;
+      const sourceHeight = (v1 - v0) * variant.height;
       context.save();
       context.globalAlpha = alpha;
       context.translate(x + width / 2, y + height / 2);
@@ -2418,7 +2524,7 @@
           if (!value) break;
           let atlas;
           try {
-            atlas = batcher.atlasFor(value.resource);
+            atlas = batcher.atlasFor(value.resource, value.variant);
           } catch (error) {
             document.body.dataset.gpuError = String(error);
             gpuBatcher = null;

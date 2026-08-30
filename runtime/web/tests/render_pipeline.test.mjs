@@ -40,17 +40,17 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
   return gl;
 }
 
-async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null } = {}) {
+async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, 35120);
   const f32 = new Float32Array(memory.buffer, 100000, 126084);
-  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], transforms: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], deletedTextures: 0 };
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], deletedTextures: 0 };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
     setTransform(...value) { stats.transforms.push(value); },
     fillRect() { stats.fills += 1; stats.events.push("fill"); if (timing) now += 4; },
-    fillText() {}, drawImage() { stats.images += 1; stats.events.push("image"); },
+    fillText() {}, drawImage(...args) { stats.images += 1; stats.imageArgs.push(args); stats.events.push("image"); },
     save() {}, restore() { stats.restores += 1; }, beginPath() {}, moveTo() {}, lineTo() {},
     rect(x, y, width, height) { stats.clipRects.push([x, y, width, height]); },
     clip() { stats.clipCalls += 1; },
@@ -96,7 +96,8 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
     main: () => {
       if (timing) env.web_draw_rect(1, 2, 3, 4, 10, 20, 30);
       for (let index = 0; index < Math.max(1, new Set(spriteHandles).size); index += 1) {
-        env.gfx_load_sprite(0, spriteSize?.[0], spriteSize?.[1]);
+        const dimensions = spriteSizes?.[index] || spriteSize;
+        env.gfx_load_sprite(0, dimensions?.[0], dimensions?.[1]);
       }
       return 0;
     },
@@ -121,7 +122,8 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
         i32[baseI + 1] = index * 10;
         i32[baseI + 2] = 180;
         f32[baseF] = index + 0.5; f32[baseF + 1] = 2; f32[baseF + 2] = 8; f32[baseF + 3] = 10;
-        f32[baseF + 4] = 0.1; f32[baseF + 5] = 0.2; f32[baseF + 6] = 0.9; f32[baseF + 7] = 0.8;
+        f32[baseF + 4] = spriteUv[0]; f32[baseF + 5] = spriteUv[1];
+        f32[baseF + 6] = spriteUv[2]; f32[baseF + 7] = spriteUv[3];
       }
       clips.forEach((clip, index) => {
         const base = 125060 + index * 4;
@@ -601,6 +603,163 @@ test("raster source underprovision is explicit instead of browser upscaling", as
   assert.equal(runtime.body.dataset.assetDecodedBytes, String(8 * 4 * 4));
   assert.equal(runtime.body.dataset.assetSourceWidth, "8");
   assert.equal(runtime.body.dataset.assetSourceHeight, "4");
+});
+
+test("underprovisioned sprite sheets use raw source regions for Canvas2D", async () => {
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [96, 96], spriteUv: [0, 0, 0.5, 0.5],
+    imageExtent: [2, 2], assets: { "": "sheet.png" },
+    assetMetadata: { "": { encoding: "png", prepared_width: 96, prepared_height: 96 } }
+  });
+  runtime.frame();
+  const draw = runtime.stats.imageArgs[0];
+  assert.deepEqual(draw.slice(1, 5), [0, 0, 1, 1]);
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "96");
+  assert.equal(runtime.body.dataset.assetPreparedHeight, "96");
+  assert.equal(runtime.body.dataset.assetDecodedWidth, "2");
+  assert.equal(runtime.body.dataset.assetDecodedHeight, "2");
+  assert.equal(runtime.body.dataset.assetFallback, "source-underprovisioned");
+});
+
+test("underprovisioned sprite sheets use raw source regions in the WebGL atlas", async () => {
+  const runtime = await loadRuntime({
+    sprites: 64, spriteHandles: Array(64).fill(1), spriteSize: [96, 96], spriteUv: [0, 0, 0.5, 0.5],
+    imageExtent: [2, 2], assets: { "": "sheet.png" },
+    assetMetadata: { "": { encoding: "png", prepared_width: 96, prepared_height: 96 } }
+  });
+  runtime.frame();
+  const uv = runtime.stats.uploads[0].slice(4, 8);
+  assert.deepEqual(uv.map(value => Math.round(value * 512)), [2, 2, 3, 3]);
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "1");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "96");
+  assert.equal(runtime.body.dataset.assetDecodedWidth, "2");
+});
+
+test("released atlas allocations are reused by a later sprite variant", async () => {
+  const handles = Array.from({ length: 64 }, (_, index) => (index % 4) + 1);
+  const runtime = await loadRuntime({ sprites: 64, spriteHandles: handles, spriteSize: [16, 16] });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "4");
+  const atlasBytes = runtime.body.dataset.assetAtlasBytes;
+  runtime.env.gfx_release_sprite(1);
+  const replacement = runtime.env.gfx_load_sprite(0, 16, 16);
+  assert.equal(replacement, 5);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  handles.fill(5);
+  runtime.frame();
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "4");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, atlasBytes);
+  assert.equal(runtime.body.dataset.assetAtlasFallback, "none");
+  assert.equal(runtime.stats.deletedTextures, 0);
+});
+
+test("staggered density refreshes recycle atlas space between separate commits", async () => {
+  const handles = Array.from({ length: 64 }, (_, index) => (index % 4) + 1);
+  const pending = [];
+  const makeBitmap = (width, height) => ({ width, height, close() {} });
+  const runtime = await loadRuntime({
+    sprites: 64, spriteHandles: handles,
+    spriteSizes: [[80, 80], [81, 80], [82, 80], [83, 80]],
+    assets: { "": "staggered.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 512, prepared_height: 512 } },
+    createImageBitmap: (_source, options, call) => {
+      if (call <= 4) return makeBitmap(options.resizeWidth, options.resizeHeight);
+      return new Promise(resolve => pending.push({ resolve, options }));
+    }
+  });
+  runtime.frame();
+  const stablePages = Number(runtime.body.dataset.atlasPages);
+  const stableBytes = runtime.body.dataset.assetAtlasBytes;
+  assert.equal(stablePages, 1);
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "4");
+  assert.equal(runtime.body.dataset.assetAtlasFallback, "none");
+
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  let transition = 0;
+  for (const dpr of [2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1]) {
+    transition += 1;
+    runtime.contextObject.devicePixelRatio = dpr;
+    runtime.frame();
+    await flush();
+    await flush();
+    assert.equal(pending.length, 4);
+    for (let index = 0; index < 4; index += 1) {
+      const replacement = pending.shift();
+      replacement.resolve(makeBitmap(
+        replacement.options.resizeWidth, replacement.options.resizeHeight
+      ));
+      await flush();
+      await flush();
+      const before = runtime.stats.instanced;
+      runtime.frame();
+      assert.ok(runtime.stats.instanced > before);
+      assert.equal(runtime.body.dataset.atlasLiveEntries, "4");
+      assert.ok(Number(runtime.body.dataset.atlasPages) <= stablePages);
+      assert.equal(runtime.body.dataset.assetAtlasFallback, "none");
+      assert.equal(runtime.body.dataset.backend, "Canvas2D + WebGL2");
+    }
+    assert.equal(runtime.body.dataset.atlasPages, String(stablePages));
+    assert.equal(runtime.body.dataset.assetAtlasBytes, stableBytes);
+    assert.equal(runtime.body.dataset.atlasLiveEntries, "4");
+    assert.equal(runtime.body.dataset.assetAtlasGeneration, String(transition + 1));
+  }
+});
+
+test("many staggered density refreshes keep mixed atlas pages bounded", async () => {
+  const resourceCount = 20;
+  const handles = Array.from({ length: resourceCount * 64 }, (_, index) => (Math.floor(index / 64) % resourceCount) + 1);
+  const sizes = Array.from({ length: resourceCount }, (_, index) => [60 + index, 60 + index]);
+  const pending = [];
+  const makeBitmap = (width, height) => ({ width, height, close() {} });
+  const runtime = await loadRuntime({
+    sprites: resourceCount * 64, spriteHandles: handles, spriteSizes: sizes,
+    assets: { "": "many-staggered.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 512, prepared_height: 512 } },
+    createImageBitmap: (_source, options, call) => {
+      if (call <= resourceCount) return makeBitmap(options.resizeWidth, options.resizeHeight);
+      return new Promise(resolve => pending.push({ resolve, options }));
+    }
+  });
+  runtime.frame();
+  let maximumPages = Number(runtime.body.dataset.atlasPages);
+  let maximumBytes = Number(runtime.body.dataset.assetAtlasBytes);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  let transition = 0;
+  for (const dpr of [2, 1, 2, 1, 2, 1, 2, 1]) {
+    transition += 1;
+    runtime.contextObject.devicePixelRatio = dpr;
+    runtime.frame();
+    await flush();
+    await flush();
+    assert.equal(pending.length, resourceCount);
+    for (let index = 0; index < resourceCount; index += 1) {
+      const replacement = pending.shift();
+      replacement.resolve(makeBitmap(
+        replacement.options.resizeWidth, replacement.options.resizeHeight
+      ));
+      await flush();
+      await flush();
+      const before = runtime.stats.instanced;
+      runtime.frame();
+      assert.ok(runtime.stats.instanced > before,
+        `GPU batch missing at transition ${transition}, resource ${index}, backend ${runtime.body.dataset.backend}, pages ${runtime.body.dataset.atlasPages}, images ${runtime.stats.images}`);
+      assert.equal(runtime.body.dataset.atlasLiveEntries, String(resourceCount));
+      assert.equal(runtime.body.dataset.assetAtlasFallback, "none");
+      assert.equal(runtime.body.dataset.backend, "Canvas2D + WebGL2");
+      maximumPages = Math.max(maximumPages, Number(runtime.body.dataset.atlasPages));
+      maximumBytes = Math.max(maximumBytes, Number(runtime.body.dataset.assetAtlasBytes));
+    }
+    assert.equal(runtime.body.dataset.atlasLiveEntries, String(resourceCount));
+    assert.equal(runtime.body.dataset.assetAtlasGeneration, String(transition + 1));
+  }
+  assert.ok(maximumPages <= 3, `atlas pages grew to ${maximumPages}`);
+  assert.ok(maximumBytes <= 3 * 512 * 512 * 4, `atlas bytes grew to ${maximumBytes}`);
+  assert.equal(runtime.body.dataset.assetAtlasFallback, "none");
+  assert.equal(runtime.body.dataset.backend, "Canvas2D + WebGL2");
 });
 
 test("releasing the latest Image fallback clears its retained resource receipt", async () => {
