@@ -266,6 +266,24 @@ test("density changes select one bounded sprite tier and reuse its cache", async
   assert.equal(runtime.body.dataset.spriteRasterCount, "2");
 });
 
+test("uncapped sprite tiers ceil logical coverage", async () => {
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [5, 5], dpr: 1.1,
+    assets: { "": "small.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 64 } },
+    createImageBitmap: (_source, options) => ({
+      width: options.resizeWidth, height: options.resizeHeight, close() {}
+    })
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetPreparedTier, "1.25");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "7");
+  assert.equal(runtime.body.dataset.assetPreparedHeight, "7");
+  assert.equal(runtime.stats.bitmapCalls[0].options.resizeWidth, 7);
+  assert.equal(runtime.stats.bitmapCalls[0].options.resizeHeight, 7);
+  assert.equal(runtime.body.dataset.assetFallback, "none");
+});
+
 test("large aspect-ratio sprite tiers use one uniform dimension cap", async () => {
   const runtime = await loadRuntime({
     webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [4000, 1000], dpr: 3,

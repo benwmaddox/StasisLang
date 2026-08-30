@@ -873,13 +873,14 @@
       : 1;
     const capped = dimensionScale < 1 || byteScale < 1;
     const finalScale = dimensionScale * byteScale;
+    const quantize = value => capped ? Math.floor(value) : Math.ceil(value);
     const width = boundedInteger(
-      uncappedWidth * finalScale, 1, DISPLAY_MAX_BACKING_WIDTH,
+      quantize(uncappedWidth * finalScale), 1, DISPLAY_MAX_BACKING_WIDTH,
       metadataDimensions?.width || 1,
       capped
     );
     const height = boundedInteger(
-      uncappedHeight * finalScale, 1, DISPLAY_MAX_BACKING_HEIGHT,
+      quantize(uncappedHeight * finalScale), 1, DISPLAY_MAX_BACKING_HEIGHT,
       metadataDimensions?.height || 1,
       capped
     );
