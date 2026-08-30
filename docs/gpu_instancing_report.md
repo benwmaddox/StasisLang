@@ -96,8 +96,8 @@ sprite count without reporting the composite separately.
 ### Sprite and mixed-order measurements
 
 To cover paths absent from Swarm Field, I used two disposable development
-packages importing the existing v5 graphics library, then deleted them after
-measurement. The first emitted 4,096 adjacent sprites (the v5 sprite limit),
+packages importing the then-current v5 graphics library, then deleted them after
+measurement. The first emitted 4,096 adjacent sprites (the v5 limit at the time),
 with per-sprite rotation and constant alpha 180. The second emitted 2,048 sprites and 2,048
 rectangles in alternating source order (4,096 order entries, 2,048 of each
 primitive), varied alpha and rotation, and used two normalized UV rectangles.
@@ -128,25 +128,25 @@ The four-page atlas case remains a source-derived projection: current native GL
 flushes on atlas page and other paths split on texture/filter, but this Web
 runtime does not expose atlas allocation/page metrics. A future atlas fixture
 must record page count, material-key runs, allocation bytes, and peak staging
-and GPU-buffer memory before that case can become a measured gate. Current v5
-limits are 4,096 sprites, 10,000 shared line+rectangle geometry entries, and
-16,144 order entries. 16,000 mixed order entries are therefore realizable
-under v5 when primitive capacities and the shared geometry limit are respected,
-but there is no 16k single-primitive sprite or rectangle v5 fixture. Any 16k
-single-primitive scale case below is explicitly future synthetic/ABI work, not
-a current benchmark.
+and GPU-buffer memory before that case can become a measured gate. At measurement
+time, v5 allowed 4,096 sprites, 10,000 shared line+rectangle geometry entries,
+and 16,144 order entries. The current v6 contract retains the first two limits
+and raises the order capacity to 16,656. The recorded 16,000 mixed-order scenario
+was therefore realizable then and remains realizable now, but there is no 16k
+single-primitive sprite or rectangle fixture. Any such scale case below is
+explicitly future synthetic ABI work, not a current benchmark.
 
 ## Compatible batch rules
 
 An instance may join the preceding instance only when all of these are equal:
 
-1. The entries are adjacent in the v5 order stream and are the same primitive
+1. The entries are adjacent in the current v6 order stream and are the same primitive
    family (rectangle or sprite).
 2. Material/shader variant, blend equation/factors, atlas texture page,
    sampler/filter, clip/scissor, and render target are equal.
 3. Coverage and color semantics are representable by the active shader.
    Rotation, UV rectangle, and alpha are per-instance data, not reasons to
-   split a batch. Tint is white under v5 and becomes per-instance data only
+   split a batch. Tint is white in the current contract and becomes per-instance data only
    with an explicit future ABI/material extension.
 4. The run remains within transient-buffer and API attribute limits.
 
@@ -159,7 +159,7 @@ source-over content remains adjacent-only.
 
 ## Candidate instance layouts
 
-These are host-private GPU records initially. They do not replace the v5 ABI.
+These are host-private GPU records initially. They do not replace the current v6 ABI.
 The byte counts are explicit so upload and bandwidth budgets can be measured.
 
 | Record | Fields | Raw size | Recommended stride |
@@ -169,12 +169,12 @@ The byte counts are explicit so upload and bandwidth budgets can be measured.
 | Candidate rectangle instance | `rect` vec4 plus `tint` vec4 | 32 B | 32 B |
 | Candidate sprite instance | `rect` vec4, `uv` vec4, `color_rgba` vec4, `rotation_sin,rotation_cos,page_or_flags,material_id` | 64 B | 64 B |
 
-The v5 sprite has no tint field. The 64 B private record is intentionally
-padded and stable: its initial color lane is `(1.0,1.0,1.0,v5_alpha)` (white
-RGB with the v5 per-sprite alpha), and its final lane can carry a material/page
+The current v6 sprite has no tint field. The 64 B private record is intentionally
+padded and stable: its initial color lane is `(1.0,1.0,1.0,current_alpha)` (white
+RGB with the current per-sprite alpha), and its final lane can carry a material/page
 selector and flags without changing attribute offsets. Varying RGB tint belongs
 to an explicit future ABI/material extension, not an interpretation of the
-current v5 payload.
+current v6 payload.
 The first shader can derive the rotated quad around its center from sin/cos.
 If arbitrary affine transforms become required, reserve the next version for a
 six-float transform and retain a 64 B or 80 B aligned stride after measuring
@@ -194,7 +194,7 @@ blend_mode, clip_rect, render_target, color_space)`. A material table can map a
 stable material ID to this tuple, but the key must still be resolved at flush
 time so a failed/reloaded resource cannot use stale GPU state. Atlas page
 changes flush. UVs remain normalized and are clamped/rejected using the same
-validation policy as v5.
+validation policy as the current v6 contract.
 
 Source-over alpha is order-dependent. Preserve the order stream and batch only
 adjacent compatible entries; do not depth-sort, atlas-sort, or globally sort
@@ -244,13 +244,13 @@ an independently validated instanced backend is available.
 
 ## Platform and ABI implications
 
-The v5 ABI remains unchanged for the first stages: the guest writes the same
-arrays, and each host translates them to private records. This keeps Web,
-Android, SDL, native GL, JIT, AOT, and replay tools on one contract. A future
-ABI version may add explicit material IDs, opaque-mode declarations, or a
-validated packed instance stream, but it must specify capacity, alignment,
-version rejection, and fallback behavior together. Existing v5 frames must
-continue to render identically.
+The current v6 ABI remains unchanged for the first stages: the guest writes the
+same arrays, and each host translates them to private records. This keeps Web,
+Android, SDL, native GL, JIT, AOT, and replay tools on one lockstep contract. A
+future ABI version may add explicit material IDs, opaque-mode declarations, or
+a validated packed instance stream, but it must specify capacity, alignment,
+version rejection, and fallback behavior together. Generated frames from older
+versions are rejected and must be rebuilt with their hosts.
 
 No guest-to-GPU direct ownership is allowed. Wasm linear memory remains guest
 owned; the host copies validated values into transient GPU memory. Resource
@@ -269,14 +269,14 @@ host replay, total frame work, and GPU timestamp availability.
 | Gate | Fixture | Required evidence | Initial quantitative target |
 | --- | --- | --- | --- |
 | Baseline | Swarm Field, 8,192 rectangles | Real browser sample and current fallback sample | WebGL2 remains one batch, with one instanced draw plus one reported composite; no >10% upper-p95 total-frame-work regression. |
-| Data parity | Rotated/UV/alpha sprites; future tint extension separately | Pixel/hash comparison against v5 replay | 100% sampled pixel/hash parity for source-over order; no dropped/invalid increase. |
+| Data parity | Rotated/UV/alpha sprites; future tint extension separately | Pixel/hash comparison against current v6 replay | 100% sampled pixel/hash parity for source-over order; no dropped/invalid increase. |
 | Split correctness | Interleaved rectangle/sprite/text and four atlas pages | Trace of flushes plus visual comparison | Every key/order transition creates expected boundary; zero cross-material merges. |
-| Sprite scale | 1k and 4k sprites (v5 max 4,096) | WebGL2, Canvas, Android GLES, native GL/SDL measurements | Instanced GPU draws are <= compatible runs; offscreen composites and total render submissions are reported separately; host replay upper p95 is >=25% lower than per-call fallback at 4k compatible sprites. |
+| Sprite scale | 1k and 4k sprites (current max 4,096) | WebGL2, Canvas, Android GLES, native GL/SDL measurements | Instanced GPU draws are <= compatible runs; offscreen composites and total render submissions are reported separately; host replay upper p95 is >=25% lower than per-call fallback at 4k compatible sprites. |
 | Geometry scale | 1k, 4k, and 8k rectangles/lines with shared total <=10,000 | Same backend matrix | No >10% upper-p95 total-work regression; upload/copy bytes and draw reduction are reported. |
-| Order scale | Mixed primitives up to 16,144 order entries | Same backend matrix | Every source-order boundary is retained; no cross-key merge. |
-| Future synthetic scale | 16k single-primitive sprites or rectangles only after a versioned capacity/ABI extension | Explicitly not a v5 fixture; 16k mixed order entries remain a valid v5 order-scale case | Must be labeled synthetic and cannot gate v5 shipping. |
+| Order scale | Mixed primitives up to 16,656 order entries | Same backend matrix | Every source-order boundary is retained; no cross-key merge. |
+| Future synthetic scale | 16k single-primitive sprites or rectangles only after a versioned capacity/ABI extension | Explicitly not a current fixture; 16k mixed order entries remain valid under v6 | Must be labeled synthetic and cannot gate current shipping. |
 | Recovery | Context/shader/resize/resource failure injection | Explicit loss/error detection, fallback render, and next-frame recovery | No crash, blank batch, stale texture, or order change; recovery within one frame after resource availability. |
-| Shipping | Development and release packages | Package tests and static inspection | v5 ABI unchanged; no generated artifacts; existing exports/assets behavior retained. |
+| Shipping | Development and release packages | Package tests and static inspection | Current v6 ABI unchanged; no stale generated artifacts; existing assets behavior retained. |
 
 The 25% and 10% thresholds are acceptance targets, not measured results. GPU
 time becomes a gate only when delayed timestamp queries are available without a
@@ -299,7 +299,7 @@ and peak decoded/atlas memory. Missing metrics are unavailable, never zero.
    per-run keys and metrics in a private experiment, plus deterministic tests
    for adjacent-only ordering, UV/rotation/alpha values, white-RGB parity, and
    fallback. Stop if
-   the metric path changes v5 output or adds allocations per command.
+   the metric path changes current v6 output or adds allocations per command.
 2. **Web rectangles.** Generalize the existing WebGL2 rectangle buffer to the
    candidate key, add explicit context-loss/error detection with transactional
    recovery, and keep Canvas 2D fallback. Ship only if parity, recovery, and
@@ -315,7 +315,7 @@ and peak decoded/atlas memory. Missing metrics are unavailable, never zero.
    less predictable than today.
 5. **Optional ABI extension.** Only after two shipping cycles and benchmark
    evidence consider a versioned opaque/material stream. Require explicit
-   version rejection, replay fixtures, and rollback to v5 before adoption.
+   version rejection, replay fixtures, and rollback of the implementation before adoption.
 
 Risks include transparent-order regressions, atlas bleeding, filter/color-space
 drift, context loss, buffer stalls, shader/compiler variance, mobile driver

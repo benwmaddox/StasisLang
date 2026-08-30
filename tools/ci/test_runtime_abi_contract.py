@@ -54,6 +54,30 @@ class RuntimeAbiContractTests(unittest.TestCase):
         self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
         self.assertEqual("samples/render_parity/trace.stasis", failure.consumer)
 
+    def test_android_bridge_versioned_render_api_is_rejected(self):
+        mutations = (
+            (
+                contract.ANDROID,
+                "pub extern \"C\" fn stasis_android_bridge_run_tick_frame(",
+                "pub extern \"C\" fn stasis_android_bridge_run_tick_frame_v2(",
+            ),
+            (
+                contract.JNI,
+                'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame")',
+                'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2")',
+            ),
+        )
+        for path, current, legacy in mutations:
+            with self.subTest(path=path):
+                failures, _ = self.run_with(path, current, legacy)
+                failure = next(
+                    failure
+                    for failure in failures
+                    if failure.field == "render_abi.legacy_token"
+                )
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(path.as_posix(), failure.consumer)
+
     def test_replay_trace_requires_current_capacities(self):
         failures, _ = self.run_with(
             contract.JIT_AOT_REPLAY_FIXTURE,

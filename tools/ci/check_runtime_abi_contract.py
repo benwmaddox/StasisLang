@@ -48,7 +48,7 @@ RENDER_PARITY_TRACE = Path("samples/render_parity/trace.stasis")
 JIT_AOT_REPLAY_FIXTURE = Path("tests/stasis/seams/jit_aot_host_replay_probe.stasis")
 RENDER_DOWNSTREAM = (
     GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN, RELEASE_PROVENANCE,
-    PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER, NATIVE_HOST,
+    PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER, JNI, NATIVE_HOST,
     DESKTOP_MANIFEST_FIXTURE, DESKTOP_MANIFEST_HARNESS,
     DESKTOP_INPUT_FRAME_HARNESS, DESKTOP_DISPLAY_METRICS_HARNESS,
     GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
@@ -89,6 +89,7 @@ LEGACY_RENDER_PATTERNS = (
     re.compile(r"\b(?:GFX_CMD|STASIS_RENDER)_(?:LEGACY|OLD)_[A-Z0-9_]+\b"),
     re.compile(r"\b(?:LEGACY|OLD)_(?:GFX|RENDER)_[A-Z0-9_]+\b"),
     re.compile(r"\bstasis_(?:render|jit_render)_v2_trace(?:_native)?\b"),
+    re.compile(r"\bstasis_android_bridge_run_tick_frame_v\d+\b"),
     re.compile(r"\b(?:34608|108676|96388)\b"),
 )
 
@@ -493,6 +494,14 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                       "command_buffer.name", "gfx_cmd", 'GFX_CMD_NAME: &str = "gfx_cmd"'),
         check_literal(RENDER_HEADER, PACKAGE_PROVENANCE, sources[PACKAGE_PROVENANCE],
                       "command_buffer.name", "gfx_cmd", 'COMMAND_BUFFER_NAME = "gfx_cmd"'),
+        check_literal(RENDER_HEADER, ANDROID, sources[ANDROID],
+                      "android_bridge.render_export",
+                      "stasis_android_bridge_run_tick_frame",
+                      "pub extern \"C\" fn stasis_android_bridge_run_tick_frame("),
+        check_literal(RENDER_HEADER, JNI, sources[JNI],
+                      "android_bridge.render_dlsym",
+                      "stasis_android_bridge_run_tick_frame",
+                      'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame")'),
     ):
         checks += 1
         if mismatch is not None:

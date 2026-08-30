@@ -340,7 +340,7 @@ static RustBridgeApi *load_rust_bridge_api(void) {
     rust_bridge_api.run_tick =
             (stasis_android_bridge_run_tick_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick");
     rust_bridge_api.run_tick_frame =
-            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2");
+            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame");
     rust_bridge_api.last_frame_error =
             (stasis_android_bridge_last_frame_error_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_last_frame_error");
     rust_bridge_api.inspect_runtime_state =
