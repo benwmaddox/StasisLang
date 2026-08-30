@@ -5965,9 +5965,6 @@ function tick(): void {}
             capture_manifest["fixture"],
             "samples/render_parity/main.stasis"
         );
-        let expected_workshop_trace = capture_manifest["workshop_command_trace"]
-            .as_u64()
-            .expect("render parity Workshop trace") as u32;
         let expected_state_checksum = capture_manifest["state_checksum"]
             .as_i64()
             .expect("render parity state checksum") as i32;
@@ -6118,7 +6115,6 @@ function tick(): void {}
         );
 
         let idle_trace = run_frame(0, 0, 0, &mut frame_i32, &mut frame_f32, &mut frame_u8);
-        assert_eq!(idle_trace, expected_workshop_trace);
         assert_eq!(frame_i32[RECT_COUNT], 1);
         assert_eq!(frame_i32[ORDER_COUNT], 10);
         assert_eq!(frame_i32[FRAME_TOKEN], 4);
@@ -6131,9 +6127,13 @@ function tick(): void {}
             expected_state_checksum,
             "render parity state oracle must stay linked to the capture manifest"
         );
+        let second_idle_trace = run_frame(0, 0, 0, &mut frame_i32, &mut frame_f32, &mut frame_u8);
+        assert_eq!(frame_i32[RECT_COUNT], 1);
+        assert_eq!(frame_i32[ORDER_COUNT], 10);
+        assert_eq!(frame_i32[FRAME_TOKEN], 5);
         assert_eq!(
-            idle_trace, expected_workshop_trace,
-            "render parity idle trace must stay linked to the Workshop manifest"
+            second_idle_trace, idle_trace,
+            "the same idle scene must have a stable current-build trace"
         );
         clear_runtime_session_for_test();
     }

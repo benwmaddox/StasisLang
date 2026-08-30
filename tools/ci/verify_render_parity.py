@@ -250,14 +250,67 @@ def verify_capture(
     capture_path: Path,
     profile_name: str,
     viewport: list[int] | None = None,
-) -> str:
-    width, height, rgba = read_capture(capture_path)
+    viewport_y_search_radius: int = 0,
+) -> tuple[str, list[int] | None]:
+    if viewport_y_search_radius < 0:
+        raise ValueError("viewport y search radius must be nonnegative")
+    if viewport_y_search_radius > 0 and viewport is None:
+        raise ValueError("viewport y search radius requires an explicit viewport")
+    capture_width, capture_height, capture_rgba = read_capture(capture_path)
     logical_width, logical_height = manifest["logical_size"]
     if viewport is not None:
-        rgba = _normalize_viewport(
-            rgba, width, height, viewport, logical_width, logical_height
+        _normalize_viewport(
+            capture_rgba,
+            capture_width,
+            capture_height,
+            viewport,
+            logical_width,
+            logical_height,
         )
-        width, height = logical_width, logical_height
+    candidates = [viewport]
+    if viewport is not None:
+        candidates.extend(
+            [viewport[0], viewport[1] + delta, viewport[2], viewport[3]]
+            for distance in range(1, viewport_y_search_radius + 1)
+            for delta in (-distance, distance)
+            if 0 <= viewport[1] + delta
+            and viewport[1] + delta + viewport[3] <= capture_height
+        )
+    failures = []
+    for candidate in candidates:
+        try:
+            rgba = capture_rgba
+            width, height = capture_width, capture_height
+            if candidate is not None:
+                rgba = _normalize_viewport(
+                    rgba,
+                    width,
+                    height,
+                    candidate,
+                    logical_width,
+                    logical_height,
+                )
+                width, height = logical_width, logical_height
+            digest = _verify_capture_rgba(
+                manifest, profile_name, rgba, width, height
+            )
+            return digest, candidate
+        except ValueError as error:
+            failures.append(str(error))
+    raise ValueError(
+        f"no viewport matched within y search radius {viewport_y_search_radius}; "
+        f"base failure: {failures[0]}"
+    )
+
+
+def _verify_capture_rgba(
+    manifest: dict,
+    profile_name: str,
+    rgba: bytes,
+    width: int,
+    height: int,
+) -> str:
+    logical_width, logical_height = manifest["logical_size"]
     if [width, height] != [logical_width, logical_height]:
         raise ValueError(
             f"capture dimensions are {width}x{height}; expected "
@@ -533,6 +586,12 @@ def main() -> int:
         "--viewport",
         help="physical x,y,width,height containing the logical scene",
     )
+    parser.add_argument(
+        "--viewport-y-search-radius",
+        type=int,
+        default=0,
+        help="bounded physical-pixel vertical refinement around --viewport",
+    )
     parser.add_argument("--runtime-log", type=Path)
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--write-evidence", action="store_true")
@@ -546,10 +605,14 @@ def main() -> int:
             if viewport is not None and len(viewport) != 4:
                 raise ValueError("--viewport requires x,y,width,height")
             if args.capture_only:
-                digest = verify_capture(
-                    manifest, args.capture.resolve(), args.profile, viewport
+                digest, selected_viewport = verify_capture(
+                    manifest, args.capture.resolve(), args.profile, viewport,
+                    args.viewport_y_search_radius,
                 )
-                print(f"render parity capture passed: sha256_rgba={digest}")
+                print(
+                    f"render parity capture passed: sha256_rgba={digest} "
+                    f"viewport={selected_viewport}"
+                )
                 return 0
             if not args.stage:
                 raise ValueError("--capture requires --stage")
@@ -572,10 +635,14 @@ def main() -> int:
                 args.stage,
                 args.require_load_details,
             )
-            digest = verify_capture(
-                manifest, args.capture.resolve(), args.profile, viewport
+            digest, selected_viewport = verify_capture(
+                manifest, args.capture.resolve(), args.profile, viewport,
+                args.viewport_y_search_radius,
             )
-            print(f"render parity capture passed: stage={args.stage} sha256_rgba={digest}")
+            print(
+                f"render parity capture passed: stage={args.stage} "
+                f"sha256_rgba={digest} viewport={selected_viewport}"
+            )
         else:
             print("render parity fixture passed")
         return 0

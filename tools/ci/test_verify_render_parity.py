@@ -53,7 +53,10 @@ class RenderParityGateTest(unittest.TestCase):
                     }
                 },
             }
-            self.assertEqual(verify_capture(manifest, capture, "exact"), manifest["capture_profiles"]["exact"]["sha256_rgba"])
+            self.assertEqual(
+                verify_capture(manifest, capture, "exact"),
+                (manifest["capture_profiles"]["exact"]["sha256_rgba"], None),
+            )
 
     def test_region_failure_names_the_stage_region(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -98,7 +101,75 @@ class RenderParityGateTest(unittest.TestCase):
                     }
                 },
             }
-            verify_capture(manifest, capture, "portable", [0, 2, 4, 2])
+            _, selected = verify_capture(
+                manifest, capture, "portable", [0, 2, 4, 2], 2
+            )
+            self.assertEqual(selected, [0, 2, 4, 2])
+
+    def test_bounded_vertical_search_recovers_offset_viewport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            black = bytes((0, 0, 0, 255))
+            green = bytes((20, 200, 80, 255))
+            write_bmp(capture, 4, 6, black * 12 + green * 8 + black * 4)
+            manifest = {
+                "logical_size": [2, 2],
+                "capture_profiles": {
+                    "portable": {
+                        "comparison": "regions",
+                        "regions": [{
+                            "name": "scene",
+                            "rect": [0, 0, 2, 2],
+                            "rgba": [20, 200, 80, 255],
+                            "max_channel_delta": 0,
+                            "min_coverage": 1.0,
+                        }],
+                    }
+                },
+            }
+            _, selected = verify_capture(
+                manifest, capture, "portable", [0, 1, 4, 2], 2
+            )
+            self.assertEqual(selected, [0, 3, 4, 2])
+
+    def test_bounded_vertical_search_rejects_out_of_radius_offset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            black = bytes((0, 0, 0, 255))
+            green = bytes((20, 200, 80, 255))
+            write_bmp(capture, 4, 6, black * 12 + green * 8 + black * 4)
+            manifest = {
+                "logical_size": [2, 2],
+                "capture_profiles": {
+                    "portable": {
+                        "comparison": "regions",
+                        "regions": [{
+                            "name": "scene",
+                            "rect": [0, 0, 2, 2],
+                            "rgba": [20, 200, 80, 255],
+                            "max_channel_delta": 0,
+                            "min_coverage": 1.0,
+                        }],
+                    }
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "no viewport matched"):
+                verify_capture(manifest, capture, "portable", [0, 0, 4, 2], 1)
+
+    def test_bounded_vertical_search_rejects_invalid_radius_and_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            write_bmp(capture, 2, 2, bytes((20, 200, 80, 255)) * 4)
+            manifest = {
+                "logical_size": [2, 2],
+                "capture_profiles": {
+                    "portable": {"comparison": "regions", "regions": []}
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "nonnegative"):
+                verify_capture(manifest, capture, "portable", [0, 0, 2, 2], -1)
+            with self.assertRaisesRegex(ValueError, "out of bounds"):
+                verify_capture(manifest, capture, "portable", [0, 1, 2, 2], 1)
 
     def test_bad_stage_matrix_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

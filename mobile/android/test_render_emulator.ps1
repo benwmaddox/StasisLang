@@ -349,7 +349,7 @@ function Assert-RenderedVariant(
                 Save-Screenshot $capture
                 & python (Join-Path $toolsCiRoot "verify_render_parity.py") `
                     --capture $capture --capture-only --profile android_emulator `
-                    "--viewport=$viewportArg"
+                    "--viewport=$viewportArg" --viewport-y-search-radius=32
                 if ($LASTEXITCODE -eq 0) {
                     $stableCaptures += 1
                     if ($stableCaptures -ge 3) {

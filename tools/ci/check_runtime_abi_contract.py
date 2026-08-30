@@ -51,6 +51,14 @@ WINDOWS_LAUNCH_FIXTURE = Path("samples/windows_launch_smoke/main.stasis")
 WORKSHOP_PREVIEW_ADAPTER = Path(
     "mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis"
 )
+HOT_SWAP_V1_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_v1.stasis")
+HOT_SWAP_V2_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_v2.stasis")
+HOT_SWAP_REJECT_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_reject.stasis")
+HOT_SWAP_FIXTURES = (
+    HOT_SWAP_V1_FIXTURE,
+    HOT_SWAP_V2_FIXTURE,
+    HOT_SWAP_REJECT_FIXTURE,
+)
 RENDER_PARITY_MANIFEST = Path("samples/render_parity/capture_manifest.json")
 COMPILER_AOT = Path("crates/stasis_compiler/src/backend/aot.rs")
 RENDER_DOWNSTREAM = (
@@ -62,7 +70,7 @@ RENDER_DOWNSTREAM = (
     DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
-    WORKSHOP_PREVIEW_ADAPTER,
+    WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
 )
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
@@ -74,7 +82,8 @@ REQUIRED = (
     PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
-    WORKSHOP_PREVIEW_ADAPTER, RENDER_PARITY_MANIFEST, COMPILER_AOT,
+    WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
+    RENDER_PARITY_MANIFEST, COMPILER_AOT,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -596,6 +605,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             VSCODE_RENDER_FIXTURE,
             WINDOWS_LAUNCH_FIXTURE,
             WORKSHOP_PREVIEW_ADAPTER,
+            *HOT_SWAP_FIXTURES,
         )
     }
     for fixture, fixture_text in manual_fixture_texts.items():
@@ -623,6 +633,23 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 failures.append(Mismatch(
                     label(RENDER_HEADER), label(fixture),
                     field, expected, actual,
+                ))
+
+    hot_swap_header = {
+        2: 3, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0,
+        10: 640, 11: 360, 12: 640, 13: 360, 14: 640, 15: 360,
+        16: 0, 17: 0, 18: 640, 19: 360, 20: 1, 21: 1,
+        22: 0, 23: 0, 24: 0, 25: 0, 26: 1, 27: 0, 28: 0,
+    }
+    for fixture in HOT_SWAP_FIXTURES:
+        fixture_text = manual_fixture_texts[fixture]
+        for index, expected in hot_swap_header.items():
+            actual = literal_index_write(fixture_text, "gfx_cmd_i32", index)
+            checks += 1
+            if actual != expected:
+                failures.append(Mismatch(
+                    label(RENDER_HEADER), label(fixture),
+                    f"current_v6_header[{index}]", expected, actual,
                 ))
 
     manual_sprite_layouts = {
@@ -677,7 +704,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
 
     parity_manifest_text = sources[RENDER_PARITY_MANIFEST]
     checks += 1
-    if re.search(r'"command_trace"\s*:\s*-?[0-9]', parity_manifest_text):
+    if re.search(r'"(?:workshop_)?command_trace"\s*:\s*-?[0-9]', parity_manifest_text):
         failures.append(Mismatch(
             label(RENDER_HEADER), label(RENDER_PARITY_MANIFEST),
             "render_parity.fixed_numeric_trace", "semantic counts and nonzero trace",
