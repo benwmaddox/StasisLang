@@ -9,11 +9,11 @@ except ImportError:
     from verify_android_workshop_seam import SeamError, _read_json, verify_log
 
 
-MANIFEST = {"state_checksum": 2500, "workshop_command_trace": 3533510058, "render_contract_version": 5}
+MANIFEST = {"state_checksum": 2500, "workshop_command_trace": 3533510058, "render_contract_version": 6}
 GOOD = """CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=7 compile_us=12 manifest=x
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":5,"state_checksum":2500,"command_trace":3533510058,"frame_token":1,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":1,"fallback":0,"stub":0}
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":1,"frame_token":1}
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":5,"state_checksum":2500,"command_trace":3533510058,"frame_token":77,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":6,"state_checksum":2500,"command_trace":3533510058,"frame_token":77,"fallback":0,"stub":0}
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":30,"frame_token":77}
 RenderAcceptanceFrame: count=1 frame_token=1
 RenderAcceptanceFrame: count=30 frame_token=77

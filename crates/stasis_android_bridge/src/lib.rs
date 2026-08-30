@@ -4456,12 +4456,13 @@ function tick(): void {}
         }
     }
 
-    fn stage_android_aot_sample() -> PathBuf {
-        let root = temp_project("it017_aot_sample");
+    fn stage_android_sample(sample_name: &str, project_name: &str) -> PathBuf {
+        let root = temp_project(project_name);
         let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../samples/android_aot_seam")
+            .join("../../samples")
+            .join(sample_name)
             .canonicalize()
-            .expect("Android AOT sample root");
+            .expect("Android seam sample root");
         copy_tree(&sample, &root);
 
         // The packaged Android sample resolves its canonical graphics import
@@ -4474,6 +4475,83 @@ function tick(): void {}
             .expect("canonical stdlib root");
         copy_tree(&stdlib, &root.join("vendor/stasis/src/stdlib"));
         root
+    }
+
+    fn stage_android_aot_sample() -> PathBuf {
+        stage_android_sample("android_aot_seam", "it017_aot_sample")
+    }
+
+    fn stage_android_touch_sample() -> PathBuf {
+        stage_android_sample("android_touch_seam", "it018_touch_sample")
+    }
+
+    fn run_android_touch_slot_frame(
+        project_root: &Path,
+        input: AndroidBridgeTickInput,
+        out_i32: &mut [i32],
+        out_f32: &mut [f32],
+        out_u8: &mut [u8],
+    ) -> Result<u32, String> {
+        RUNTIME_SESSION.with(|session_cell| -> Result<(), String> {
+            let mut session_slot = session_cell.borrow_mut();
+            let session = session_slot
+                .as_mut()
+                .filter(|session| session.project_root == project_root)
+                .ok_or_else(|| "Android touch runtime session is not initialized".to_string())?;
+            write_production_host_frame(session, input)?;
+
+            let host_i32_ptr = stasis_dynload::stasis_jit_global_i32_array_ptr(
+                hash_global_path("host_i32"),
+                0,
+                768,
+            );
+            let host_f32_ptr = stasis_dynload::stasis_jit_global_f32_array_ptr(
+                hash_global_path("host_f32"),
+                0,
+                64,
+            );
+            if host_i32_ptr.is_null() || host_f32_ptr.is_null() {
+                return Err("production host frame buffers were not registered".to_string());
+            }
+            unsafe {
+                let host_i32 = std::slice::from_raw_parts_mut(host_i32_ptr, 768);
+                let host_f32 = std::slice::from_raw_parts_mut(host_f32_ptr, 64);
+                let touch_i32 = [host_i32[545], host_i32[546], host_i32[547]];
+                let touch_f32 = [
+                    host_f32[0],
+                    host_f32[1],
+                    host_f32[2],
+                    host_f32[3],
+                    host_f32[4],
+                    host_f32[5],
+                ];
+
+                // Android reserves pointer slot zero for the mouse and reports
+                // touch contacts starting at slot one.  The production bridge
+                // API accepts one touch sample, so mirror the mobile host's
+                // frame layout here without changing the production path.
+                host_i32[7] = 2;
+                host_i32[544..548].copy_from_slice(&[0, 0, 0, 0]);
+                host_i32[548..552].copy_from_slice(&[1, touch_i32[0], touch_i32[1], touch_i32[2]]);
+                host_f32[0..6].fill(0.0);
+                host_f32[6..12].copy_from_slice(&touch_f32);
+            }
+
+            execute_lifecycle_noarg(&session.jit, "tick")?;
+            take_embedded_resource_error()
+                .map_err(|error| format!("touch tick resource error: {}", error.detail))?;
+            session.tick_count = session.tick_count.saturating_add(1);
+            execute_optional_lifecycle_noarg(&session.jit, "render")?;
+            take_embedded_resource_error()
+                .map_err(|error| format!("touch render resource error: {}", error.detail))?;
+            Ok(())
+        })?;
+
+        stasis_dynload::copy_jit_render_active(out_i32, out_f32, out_u8)?;
+        write_android_display_metadata(out_i32)?;
+        Ok(unsafe {
+            stasis_render_v2_trace_native(out_i32.as_ptr(), out_f32.as_ptr(), out_u8.as_ptr())
+        })
     }
 
     fn write_typed_sprite_project(name: &str, source: &str) -> (PathBuf, i32) {
@@ -5638,6 +5716,334 @@ function tick(): void {}
     }
 
     #[test]
+    fn android_it018_touch_sample_runtime_traces_match_manifest() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = stage_android_touch_sample();
+        let entry = Path::new("main.stasis");
+        let expectations: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/android_touch_seam/android_seam_expectations.json"
+        )))
+        .expect("decode IT-018 expectations");
+        assert_eq!(expectations["test_id"], "IT-018");
+        let stable_frame = expectations["stable_frame"]
+            .as_u64()
+            .expect("IT-018 stable frame") as usize;
+        let expected_checksum = expectations["state_checksum"]
+            .as_i64()
+            .expect("IT-018 state checksum") as i32;
+        let expected_trace = expectations["command_trace"]
+            .as_u64()
+            .expect("IT-018 stable command trace") as u32;
+        let logical_size = expectations["logical_size"]
+            .as_array()
+            .expect("IT-018 logical size");
+        let logical_w = logical_size[0].as_i64().expect("IT-018 logical width") as i32;
+        let logical_h = logical_size[1].as_i64().expect("IT-018 logical height") as i32;
+        let touch = expectations["touch"]
+            .as_object()
+            .expect("IT-018 touch contract");
+        let expected_completion_sequence = touch["completion_sequence"]
+            .as_i64()
+            .expect("IT-018 completion sequence") as i32;
+        let expected_final_trace = touch["final_command_trace"]
+            .as_u64()
+            .expect("IT-018 final command trace") as u32;
+        let safe_viewport = touch["safe_viewport"]
+            .as_array()
+            .expect("IT-018 safe viewport");
+        let safe_x = safe_viewport[0].as_f64().expect("IT-018 safe x") as f32;
+        let safe_y = safe_viewport[1].as_f64().expect("IT-018 safe y") as f32;
+        let safe_w = safe_viewport[2].as_f64().expect("IT-018 safe width") as f32;
+        let safe_h = safe_viewport[3].as_f64().expect("IT-018 safe height") as f32;
+
+        const NATIVE_W: i32 = 1080;
+        const NATIVE_H: i32 = 2400;
+        let mut frame_i32 = vec![0_i32; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut frame_f32 = vec![0.0_f32; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut frame_u8 = vec![0_u8; ANDROID_RENDER_GFX_U8_CAPACITY];
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("main.stasis").expect("entry cstr");
+        for _ in 0..stable_frame {
+            let status = stasis_android_bridge_run_tick_frame_v2(
+                root_c.as_ptr(),
+                entry_c.as_ptr(),
+                0,
+                0,
+                0,
+                NATIVE_W,
+                NATIVE_H,
+                frame_i32.as_mut_ptr(),
+                frame_i32.len(),
+                frame_f32.as_mut_ptr(),
+                frame_f32.len(),
+                frame_u8.as_mut_ptr(),
+                frame_u8.len(),
+            );
+            assert_eq!(
+                status,
+                0,
+                "IT-018 stable frame failed: {:?}",
+                LAST_FRAME_ERROR.with(|slot| slot.borrow().clone())
+            );
+        }
+        let stable_trace = unsafe {
+            stasis_render_v2_trace_native(frame_i32.as_ptr(), frame_f32.as_ptr(), frame_u8.as_ptr())
+        };
+        assert_eq!(stable_trace, expected_trace);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_state_checksum")
+                .expect("read IT-018 stable checksum"),
+            expected_checksum
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_sequence")
+                .expect("read IT-018 stable probe sequence"),
+            0
+        );
+        assert_eq!(&frame_i32[..5], &[1196967473, 6, 3, 0, 0]);
+        assert_eq!(
+            &frame_i32[10..16],
+            &[logical_w, logical_h, NATIVE_W, NATIVE_H, NATIVE_W, NATIVE_H]
+        );
+        assert_eq!(
+            &frame_i32[16..20],
+            &[safe_x as i32, safe_y as i32, safe_w as i32, safe_h as i32]
+        );
+        let global_f32 =
+            |path: &str| stasis_dynload::stasis_jit_global_f32_load(hash_global_path(path));
+
+        let outside_down = run_android_touch_slot_frame(
+            &root,
+            AndroidBridgeTickInput {
+                touch_x: 540,
+                touch_y: 60,
+                touch_active: 1,
+                screen_w: NATIVE_W,
+                screen_h: NATIVE_H,
+            },
+            &mut frame_i32,
+            &mut frame_f32,
+            &mut frame_u8,
+        )
+        .expect("run IT-018 outside-letterbox down");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_sequence").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_kind").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_pointer_is_down").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_pointer_went_down").unwrap(),
+            1
+        );
+        assert!((global_f32("seam_safe_x") - safe_x).abs() < 0.01);
+        assert!((global_f32("seam_safe_y") - safe_y).abs() < 0.01);
+        assert!((global_f32("seam_safe_w") - safe_w).abs() < 0.01);
+        assert!((global_f32("seam_safe_h") - safe_h).abs() < 0.01);
+        assert!((global_f32("seam_pointer_y") - 0.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_y_n") - 0.0).abs() < 0.01);
+
+        let outside_up = run_android_touch_slot_frame(
+            &root,
+            AndroidBridgeTickInput {
+                touch_x: 540,
+                touch_y: 60,
+                touch_active: 0,
+                screen_w: NATIVE_W,
+                screen_h: NATIVE_H,
+            },
+            &mut frame_i32,
+            &mut frame_f32,
+            &mut frame_u8,
+        )
+        .expect("run IT-018 outside-letterbox up");
+        assert_eq!(
+            outside_up, outside_down,
+            "outside-letterbox gesture must not change the rendered state"
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_sequence").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_kind").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_pointer_went_up").unwrap(),
+            1
+        );
+
+        let inside_down = run_android_touch_slot_frame(
+            &root,
+            AndroidBridgeTickInput {
+                touch_x: 270,
+                touch_y: 660,
+                touch_active: 1,
+                screen_w: NATIVE_W,
+                screen_h: NATIVE_H,
+            },
+            &mut frame_i32,
+            &mut frame_f32,
+            &mut frame_u8,
+        )
+        .expect("run IT-018 inside-drag down");
+        assert_ne!(inside_down, outside_up);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_sequence").unwrap(),
+            3
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_kind").unwrap(),
+            3
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_input_phase").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_state_transitions").unwrap(),
+            1
+        );
+        assert!((global_f32("seam_pointer_x") - 90.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_y") - 180.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_x_n") - 0.25).abs() < 0.01);
+        assert!((global_f32("seam_pointer_y_n") - 0.25).abs() < 0.01);
+
+        let inside_move = run_android_touch_slot_frame(
+            &root,
+            AndroidBridgeTickInput {
+                touch_x: 810,
+                touch_y: 1740,
+                touch_active: 1,
+                screen_w: NATIVE_W,
+                screen_h: NATIVE_H,
+            },
+            &mut frame_i32,
+            &mut frame_f32,
+            &mut frame_u8,
+        )
+        .expect("run IT-018 inside-drag move");
+        assert_ne!(inside_move, inside_down);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_sequence").unwrap(),
+            4
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_kind").unwrap(),
+            4
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_input_phase").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_state_transitions").unwrap(),
+            1
+        );
+        assert!((global_f32("seam_pointer_x") - 270.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_y") - 540.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_dx") - 180.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_dy") - 360.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_x_n") - 0.75).abs() < 0.01);
+        assert!((global_f32("seam_pointer_y_n") - 0.75).abs() < 0.01);
+
+        let final_trace = run_android_touch_slot_frame(
+            &root,
+            AndroidBridgeTickInput {
+                touch_x: 810,
+                touch_y: 1740,
+                touch_active: 0,
+                screen_w: NATIVE_W,
+                screen_h: NATIVE_H,
+            },
+            &mut frame_i32,
+            &mut frame_f32,
+            &mut frame_u8,
+        )
+        .expect("run IT-018 inside-drag up");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_sequence").unwrap(),
+            expected_completion_sequence
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_probe_kind").unwrap(),
+            5
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_input_phase").unwrap(),
+            3
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_state_transitions").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_state_checksum").unwrap(),
+            3215
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_down_count").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_move_count").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_up_count").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_pointer_is_down").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_pointer_went_up").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_pointer_count").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "seam_pointer_id").unwrap(),
+            1
+        );
+        assert!((global_f32("seam_pointer_x") - 270.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_y") - 540.0).abs() < 0.01);
+        assert!((global_f32("seam_pointer_x_n") - 0.75).abs() < 0.01);
+        assert!((global_f32("seam_pointer_y_n") - 0.75).abs() < 0.01);
+        assert_eq!(frame_i32[1], 6);
+        assert_eq!(frame_i32[22], 3, "IT-018 final render order count");
+        assert_eq!(frame_i32[24], 3, "IT-018 final render rectangle count");
+        assert_eq!(
+            &frame_f32[79996..80004],
+            &[20.0, 20.0, 320.0, 680.0, 0.10, 0.12, 0.16, 1.0]
+        );
+        assert_eq!(
+            &frame_f32[79988..79996],
+            &[60.0, 260.0, 240.0, 200.0, 0.12, 0.84, 0.36, 1.0]
+        );
+        assert_eq!(
+            &frame_f32[79980..79988],
+            &[252.0, 522.0, 36.0, 36.0, 0.95, 0.20, 0.80, 1.0]
+        );
+        assert_eq!(final_trace, expected_final_trace);
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
     fn android_it027_render_parity_sample_real_jit_exports_marker_and_idle_trace() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
@@ -5661,6 +6067,10 @@ function tick(): void {}
         let expected_state_checksum = capture_manifest["state_checksum"]
             .as_i64()
             .expect("render parity state checksum") as i32;
+        let expected_render_contract_version = capture_manifest["render_contract_version"]
+            .as_i64()
+            .expect("render parity render contract version")
+            as i32;
         let mut frame_i32 = vec![0_i32; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut frame_f32 = vec![0.0_f32; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut frame_u8 = vec![0_u8; ANDROID_RENDER_GFX_U8_CAPACITY];
@@ -5698,6 +6108,10 @@ function tick(): void {}
                 0,
                 "render parity frame failed: {:?}",
                 LAST_FRAME_ERROR.with(|slot| slot.borrow().clone())
+            );
+            assert_eq!(
+                frame_i32[1], expected_render_contract_version,
+                "render parity frame version must stay linked to the Workshop manifest"
             );
             let trace = unsafe {
                 stasis_render_v2_trace_native(
