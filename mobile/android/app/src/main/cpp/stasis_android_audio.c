@@ -47,6 +47,13 @@ static pthread_mutex_t audio_assets_lock = PTHREAD_MUTEX_INITIALIZER;
 static StasisAudioAssetStore audio_assets;
 static char audio_project_root[STASIS_AUDIO_PROJECT_ROOT_SIZE];
 
+static int audio_initialize(
+    int sample_rate,
+    int channels,
+    int target_latency_frames,
+    int reset_assets
+);
+
 static void audio_assets_reset_locked(int clear_project_root) {
     stasis_audio_assets_reset(&audio_assets);
     if (clear_project_root) audio_project_root[0] = '\0';
@@ -214,8 +221,19 @@ static int audio_should_run(void) {
 static void audio_update_running_state(void) {
     StasisAndroidAudioContext *context = audio_context_acquire();
     aaudio_result_t result;
+    int rate;
+    int channels;
+    int latency;
     if (context == NULL) return;
     if (audio_should_run()) {
+        if (atomic_load_explicit(&context->error, memory_order_acquire) != 0) {
+            rate = context->sample_rate;
+            channels = context->channels;
+            latency = context->target_latency;
+            audio_context_release(context);
+            audio_initialize(rate, channels, latency, 0);
+            return;
+        }
         if (!atomic_load_explicit(&context->retired, memory_order_acquire) &&
             !atomic_load_explicit(&context->started, memory_order_acquire)) {
             result = AAudioStream_requestStart(context->stream);
@@ -269,7 +287,12 @@ static void audio_close_context(void) {
     audio_retire_context(context);
 }
 
-int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) {
+static int audio_initialize(
+    int sample_rate,
+    int channels,
+    int target_latency_frames,
+    int reset_assets
+) {
     AAudioStreamBuilder *builder = NULL;
     StasisAndroidAudioContext *context = NULL;
     aaudio_result_t result = AAUDIO_ERROR_INTERNAL;
@@ -279,10 +302,8 @@ int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) 
         (channels != 1 && channels != 2) || target_latency_frames <= 0) {
         return 0;
     }
-    /* Reinitialization clears old decoded voices but preserves the project root
-     * installed immediately before the guest's main() calls audio_init(). */
     audio_close_context();
-    audio_assets_reset(0);
+    if (reset_assets) audio_assets_reset(0);
     atomic_store_explicit(&audio_attempted, 1, memory_order_release);
     context = calloc(1, sizeof(*context));
     if (context == NULL) goto fail;
@@ -343,6 +364,12 @@ fail:
     return 0;
 }
 
+int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) {
+    /* Explicit guest reinitialization clears decoded voices but preserves the
+     * project root installed immediately before main() calls audio_init(). */
+    return audio_initialize(sample_rate, channels, target_latency_frames, 1);
+}
+
 void stasis_audio_shutdown(void) {
     audio_close_context();
     audio_assets_reset(1);
@@ -366,7 +393,7 @@ int stasis_audio_is_available(void) {
     latency = context->target_latency;
     audio_context_release(context);
     if (error != 0 && audio_should_run()) {
-        return stasis_audio_init(rate, channels, latency);
+        return audio_initialize(rate, channels, latency, 0);
     }
     return 1;
 }
@@ -572,12 +599,16 @@ void stasis_android_audio_set_focus(int focused) {
 
 int stasis_android_audio_is_requested(void) {
     StasisAndroidAudioContext *context = audio_context_acquire();
-    int value = 0;
-    if (context != NULL) {
-        value = atomic_load_explicit(&context->error, memory_order_acquire) == 0;
-        audio_context_release(context);
-    }
-    return value;
+    if (context == NULL) return 0;
+    /* A device error does not cancel the guest's request for audio. Keeping
+     * this true lets Java reacquire focus, after which native maintenance
+     * recreates the failed stream. Shutdown and failed initialization have no
+     * context. */
+    audio_context_release(context);
+    /* MainActivity polls this once per frame. Maintain the device stream here
+     * so an error while focus is retained also recovers without guest polling. */
+    audio_update_running_state();
+    return 1;
 }
 
 int stasis_android_audio_is_running(void) {

@@ -1722,8 +1722,22 @@ def main() -> int:
         audio_native.index("int stasis_android_audio_is_requested(void)"):audio_native.index(
             "int stasis_android_audio_is_running(void)")]
     assert "audio_context_acquire" in audio_requested
-    assert "context->error" in audio_requested
+    assert "if (context == NULL) return 0;" in audio_requested
+    assert "context->error" not in audio_requested
     assert "audio_attempted" not in audio_requested
+    assert "audio_update_running_state();" in audio_requested
+    audio_recovery = audio_native[
+        audio_native.index("static void audio_update_running_state(void)"):audio_native.index(
+            "static void audio_retire_context")]
+    assert "audio_initialize(rate, channels, latency, 0);" in audio_recovery
+    availability = audio_native[
+        audio_native.index("int stasis_audio_is_available(void)"):audio_native.index(
+            "int stasis_audio_get_sample_rate(void)")]
+    assert "audio_initialize(rate, channels, latency, 0)" in availability
+    explicit_init = audio_native[
+        audio_native.index("int stasis_audio_init("):audio_native.index(
+            "void stasis_audio_shutdown(void)")]
+    assert "audio_initialize(sample_rate, channels, target_latency_frames, 1)" in explicit_init
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     assert "private void shutdownGameAudio()" in activity
     assert "if (audioFocus != null) audioFocus.pause();" in activity
