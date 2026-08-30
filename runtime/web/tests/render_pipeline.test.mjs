@@ -327,7 +327,7 @@ test("optimized sprite preparation resizes a Blob without constructing or decodi
 test("optimized sprite preparation preserves aspect ratio in a centered tier surface", async () => {
   const bitmaps = [];
   const runtime = await loadRuntime({
-    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16],
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16], spriteUv: [0, 0, 1, 1],
     assets: { "": "wide.svg" },
     assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 32 } },
     createImageBitmap: (_source, options) => {
@@ -348,12 +348,74 @@ test("optimized sprite preparation preserves aspect ratio in a centered tier sur
   ], [16, 8]);
   assert.deepEqual(runtime.rasterStats.clears[0], [0, 0, 16, 16]);
   assert.deepEqual(runtime.rasterStats.images[0].slice(1), [0, 4, 16, 8]);
-  assert.equal(bitmaps[0].closed, true);
+  assert.equal(runtime.stats.imageArgs[0][0], runtime.offscreen);
+  assert.equal(runtime.offscreen.width, 16);
+  assert.equal(runtime.offscreen.height, 16);
+  assert.deepEqual(runtime.stats.imageArgs[0].slice(1), [-4, -5, 8, 10]);
+  assert.equal(bitmaps[0].closed, false);
   assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
   assert.equal(runtime.body.dataset.assetPreparedHeight, "16");
   assert.equal(runtime.body.dataset.assetDecodedWidth, "16");
   assert.equal(runtime.body.dataset.assetDecodedHeight, "8");
   assert.equal(runtime.body.dataset.assetDecodedBytes, String(16 * 8 * 4));
+});
+
+test("optimized contained sprite sheets use the unpadded bitmap for Canvas2D partial UVs", async () => {
+  let bitmap;
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16], spriteUv: [0, 0, 0.5, 0.5],
+    assets: { "": "wide-sheet.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 32 } },
+    createImageBitmap: (_source, options) => {
+      bitmap = {
+        width: options.resizeWidth, height: options.resizeHeight, closeCount: 0,
+        close() { this.closeCount += 1; }
+      };
+      return bitmap;
+    }
+  });
+  runtime.frame();
+
+  const draw = runtime.stats.imageArgs[0];
+  assert.equal(draw[0], bitmap);
+  assert.deepEqual(draw.slice(1, 5), [0, 0, 8, 4]);
+  assert.equal(bitmap.closeCount, 0);
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
+  assert.equal(runtime.body.dataset.assetPreparedHeight, "16");
+  assert.equal(runtime.body.dataset.assetDecodedWidth, "16");
+  assert.equal(runtime.body.dataset.assetDecodedHeight, "8");
+
+  runtime.env.gfx_release_sprite(1);
+  assert.equal(bitmap.closeCount, 1);
+  runtime.env.gfx_release_sprite(1);
+  assert.equal(bitmap.closeCount, 1);
+});
+
+test("optimized contained sprite sheets use unpadded source dimensions in the WebGL atlas", async () => {
+  let bitmap;
+  const runtime = await loadRuntime({
+    sprites: 64, spriteHandles: Array(64).fill(1), spriteSize: [16, 16], spriteUv: [0, 0, 0.5, 0.5],
+    assets: { "": "wide-sheet.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 32 } },
+    createImageBitmap: (_source, options) => {
+      bitmap = {
+        width: options.resizeWidth, height: options.resizeHeight, closeCount: 0,
+        close() { this.closeCount += 1; }
+      };
+      return bitmap;
+    }
+  });
+  runtime.frame();
+
+  const uv = runtime.stats.uploads[0].slice(4, 8);
+  assert.deepEqual(uv.map(value => Math.round(value * 512)), [2, 2, 10, 6]);
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "1");
+  assert.equal(bitmap.closeCount, 0);
+
+  runtime.env.gfx_release_sprite(1);
+  assert.equal(bitmap.closeCount, 1);
+  assert.equal(runtime.stats.deletedTextures, 1);
 });
 
 test("density refresh keeps the old sprite drawable until the replacement commits", async () => {

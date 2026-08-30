@@ -904,9 +904,11 @@
   };
   const resultForSprite = (request, drawable, width, height, fallback,
     sourceWidth, sourceHeight, decodedWidth = sourceWidth, decodedHeight = sourceHeight,
-    sourceDrawable = null, sourceDrawableWidth = 0, sourceDrawableHeight = 0) => ({
+    sourceDrawable = null, sourceDrawableWidth = 0, sourceDrawableHeight = 0,
+    sourceDrawableOwned = false) => ({
     drawable, width, height, fallback: fallback || "none",
     sourceDrawable, sourceDrawableWidth, sourceDrawableHeight,
+    sourceDrawableOwned,
     sourceWidth, sourceHeight,
     sourceBytes: request.sourceBytes || 0,
     decodedWidth: decodedWidth || 0,
@@ -982,12 +984,13 @@
                 (targetHeight - decodedHeight) / 2,
                 decodedWidth, decodedHeight);
               surfaceContext.restore?.();
-            } finally {
+            } catch (error) {
               closeSpriteDrawable(bitmap);
+              throw error;
             }
             return resultForSprite(request, surface, targetWidth, targetHeight,
               request.fallback, sourceDimensions.width, sourceDimensions.height,
-              decodedWidth, decodedHeight);
+              decodedWidth, decodedHeight, bitmap, decodedWidth, decodedHeight, true);
           }
         }
       } catch (_) {
@@ -1053,6 +1056,11 @@
     }
     entry.closed = true;
     closeSpriteDrawable(entry.result.drawable);
+    if (entry.result.sourceDrawableOwned
+        && entry.result.sourceDrawable
+        && entry.result.sourceDrawable !== entry.result.drawable) {
+      closeSpriteDrawable(entry.result.sourceDrawable);
+    }
     spriteCacheBytes = Math.max(0, spriteCacheBytes - (entry.byteLength || 0));
     entry.byteLength = 0;
   };
@@ -1187,6 +1195,7 @@
     resource.sourceDrawable = result.sourceDrawable || null;
     resource.sourceDrawableWidth = result.sourceDrawableWidth || 0;
     resource.sourceDrawableHeight = result.sourceDrawableHeight || 0;
+    resource.sourceDrawableOwned = Boolean(result.sourceDrawableOwned);
     resource.sourceWidth = result.sourceWidth || 0;
     resource.sourceHeight = result.sourceHeight || 0;
     resource.sourceBytes = result.sourceBytes || 0;
@@ -1275,6 +1284,7 @@
     const resource = {
       image: null, imagePromise: null, source, metadata: assetMetadata(pathId), sourceIdentity: source,
       drawable: null, sourceDrawable: null, sourceDrawableWidth: 0, sourceDrawableHeight: 0,
+      sourceDrawableOwned: false,
       requested: spriteDimensions(width, height),
       logicalWidth: 0, logicalHeight: 0, tier: 1, tierKey: "", pendingTierKey: "",
       width: 0, height: 0, sourceWidth: 0, sourceHeight: 0, sourceBytes: 0,
@@ -1403,6 +1413,7 @@
       resource.sourceDrawable = null;
       resource.sourceDrawableWidth = 0;
       resource.sourceDrawableHeight = 0;
+      resource.sourceDrawableOwned = false;
       resource.refreshing = false;
       resource.refreshError = null;
       resource.refreshFallback = "none";
