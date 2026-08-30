@@ -46,6 +46,13 @@ PLAY_ERROR_TOASTS = Path("apps/stasis/src/play_error_toasts.rs")
 RENDER_PARITY_FRAME = Path("samples/render_parity/frame.stasis")
 RENDER_PARITY_TRACE = Path("samples/render_parity/trace.stasis")
 JIT_AOT_REPLAY_FIXTURE = Path("tests/stasis/seams/jit_aot_host_replay_probe.stasis")
+VSCODE_RENDER_FIXTURE = Path("vscode-stasis/test/fixture/src/main.stasis")
+WINDOWS_LAUNCH_FIXTURE = Path("samples/windows_launch_smoke/main.stasis")
+WORKSHOP_PREVIEW_ADAPTER = Path(
+    "mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis"
+)
+RENDER_PARITY_MANIFEST = Path("samples/render_parity/capture_manifest.json")
+COMPILER_AOT = Path("crates/stasis_compiler/src/backend/aot.rs")
 RENDER_DOWNSTREAM = (
     GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN, RELEASE_PROVENANCE,
     PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER, JNI, NATIVE_HOST,
@@ -54,7 +61,8 @@ RENDER_DOWNSTREAM = (
     GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
     DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
-    JIT_AOT_REPLAY_FIXTURE,
+    JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
+    WORKSHOP_PREVIEW_ADAPTER,
 )
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
@@ -65,7 +73,8 @@ REQUIRED = (
     GENERATED_MOBILE_AOT_RUST, DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
     PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
-    JIT_AOT_REPLAY_FIXTURE,
+    JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
+    WORKSHOP_PREVIEW_ADAPTER, RENDER_PARITY_MANIFEST, COMPILER_AOT,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -420,6 +429,11 @@ def literal_array(text: str, name: str) -> int | str:
     return "missing"
 
 
+def literal_index_write(text: str, name: str, index: int) -> int | str:
+    match = re.search(rf"\b{name}\s*\[\s*{index}\s*\]\s*=\s*([0-9_]+)\s*;", text)
+    return int(match.group(1).replace("_", "")) if match else "missing"
+
+
 def array_matches(actual: int | str, expected: int, name: str) -> bool:
     if actual == expected:
         return True
@@ -574,6 +588,114 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         failures.append(Mismatch(
             label(RENDER_HEADER), label(JIT_AOT_REPLAY_FIXTURE),
             "render_trace.current_capacities", "35120/126084/65536", "missing",
+        ))
+
+    manual_fixture_texts = {
+        path: without_c_comments(sources[path])
+        for path in (
+            VSCODE_RENDER_FIXTURE,
+            WINDOWS_LAUNCH_FIXTURE,
+            WORKSHOP_PREVIEW_ADAPTER,
+        )
+    }
+    for fixture, fixture_text in manual_fixture_texts.items():
+        for lane, render_name in (
+            ("gfx_cmd_i32", "STASIS_RENDER_I32_COUNT"),
+            ("gfx_cmd_f32", "STASIS_RENDER_F32_COUNT"),
+            ("gfx_cmd_u8", "STASIS_RENDER_U8_COUNT"),
+        ):
+            actual = literal_array(fixture_text, lane)
+            expected = render[render_name]
+            checks += 1
+            if not array_matches(actual, expected, lane):
+                failures.append(Mismatch(
+                    label(RENDER_HEADER), label(fixture),
+                    f"{lane}.length", expected, actual,
+                ))
+        for field, index, render_name in (
+            ("STASIS_RENDER_MAGIC", 0, "STASIS_RENDER_MAGIC"),
+            ("STASIS_RENDER_VERSION", 1, "STASIS_RENDER_VERSION"),
+        ):
+            actual = literal_index_write(fixture_text, "gfx_cmd_i32", index)
+            expected = render[render_name]
+            checks += 1
+            if actual != expected:
+                failures.append(Mismatch(
+                    label(RENDER_HEADER), label(fixture),
+                    field, expected, actual,
+                ))
+
+    manual_sprite_layouts = {
+        WINDOWS_LAUNCH_FIXTURE: (
+            (
+                r"gfx_cmd_i32\s*\[\s*32\s*\]\s*=\s*png_sprite\s*;",
+                r"gfx_cmd_i32\s*\[\s*35\s*\]\s*=\s*svg_sprite\s*;",
+                r"gfx_cmd_f32\s*\[\s*80004\s*\]\s*=\s*52\.0\s*;",
+            ),
+            r"gfx_cmd_f32\s*\[\s*80012\s*\]\s*=\s*204\.0\s*;",
+            tuple(
+                rf"gfx_cmd_f32\s*\[\s*{index}\s*\]\s*=\s*{value}\s*;"
+                for index, value in (
+                    (80008, "0\\.0"), (80009, "0\\.0"),
+                    (80010, "1\\.0"), (80011, "1\\.0"),
+                    (80016, "0\\.0"), (80017, "0\\.0"),
+                    (80018, "1\\.0"), (80019, "1\\.0"),
+                )
+            ),
+        ),
+        WORKSHOP_PREVIEW_ADAPTER: (
+            (
+                r"let\s+i_base\s*:\s*i32\s*=\s*32\s*\+\s*index\s*\*\s*3\s*;",
+                r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*8\s*;",
+            ),
+            r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*8\s*;",
+            tuple(
+                rf"gfx_cmd_f32\s*\[\s*f_base\s*\+\s*{offset}\s*\]\s*=\s*{value}\s*;"
+                for offset, value in ((4, "0\\.0"), (5, "0\\.0"), (6, "1\\.0"), (7, "1\\.0"))
+            ),
+        ),
+    }
+    for fixture, (base_patterns, stride_pattern, uv_patterns) in manual_sprite_layouts.items():
+        checks += 1
+        if not all(re.search(pattern, manual_fixture_texts[fixture]) for pattern in base_patterns):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture), "sprite_lane_bases",
+                "current v6 i32/f32 sprite bases", "missing",
+            ))
+        checks += 1
+        if re.search(stride_pattern, manual_fixture_texts[fixture]) is None:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture), "sprite_f32_stride",
+                "current v6 stride 8", "missing",
+            ))
+        checks += 1
+        if not all(re.search(pattern, manual_fixture_texts[fixture]) for pattern in uv_patterns):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture), "sprite_uv_defaults",
+                "explicit 0,0,1,1 UVs for every sprite", "missing",
+            ))
+
+    parity_manifest_text = sources[RENDER_PARITY_MANIFEST]
+    checks += 1
+    if re.search(r'"command_trace"\s*:\s*-?[0-9]', parity_manifest_text):
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(RENDER_PARITY_MANIFEST),
+            "render_parity.fixed_numeric_trace", "semantic counts and nonzero trace",
+            "fixed numeric command_trace",
+        ))
+    compiler_aot_text = sources[COMPILER_AOT]
+    renderer_nonzero = re.search(
+        r'label:\s*"renderer_command_trace".*?'
+        r'expected_result:\s*ParityExpectedResult::Nonzero',
+        compiler_aot_text,
+        re.S,
+    )
+    checks += 1
+    if renderer_nonzero is None:
+        failures.append(Mismatch(
+            label(RENDER_HEADER), label(COMPILER_AOT),
+            "render_parity.compiler_semantic_trace", "ParityExpectedResult::Nonzero",
+            "missing or fixed numeric expectation",
         ))
 
     trace_relationships = {

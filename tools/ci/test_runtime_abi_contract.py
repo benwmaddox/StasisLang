@@ -100,6 +100,77 @@ class RuntimeAbiContractTests(unittest.TestCase):
         )
         self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
 
+    def test_vscode_render_fixture_rejects_legacy_version_and_capacity(self):
+        mutations = (
+            ("gfx_cmd_i32[1] = 6;", "gfx_cmd_i32[1] = 2;", "STASIS_RENDER_VERSION"),
+            (
+                "global gfx_cmd_f32: f32[126084];",
+                "global gfx_cmd_f32: f32[125060];",
+                "gfx_cmd_f32.length",
+            ),
+        )
+        for current, stale, field in mutations:
+            with self.subTest(field=field):
+                failures, _ = self.run_with(
+                    contract.VSCODE_RENDER_FIXTURE, current, stale
+                )
+                failure = next(failure for failure in failures if failure.field == field)
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(
+                    "vscode-stasis/test/fixture/src/main.stasis", failure.consumer
+                )
+
+    def test_manual_sprite_fixtures_reject_legacy_version_and_stride(self):
+        mutations = (
+            (
+                contract.WINDOWS_LAUNCH_FIXTURE,
+                "gfx_cmd_f32[80012] = 204.0;",
+                "gfx_cmd_f32[80008] = 204.0;",
+                "sprite_f32_stride",
+            ),
+            (
+                contract.WORKSHOP_PREVIEW_ADAPTER,
+                "let f_base: i32 = 80004 + index * 8;",
+                "let f_base: i32 = 80004 + index * 4;",
+                "sprite_f32_stride",
+            ),
+            (
+                contract.WORKSHOP_PREVIEW_ADAPTER,
+                "gfx_cmd_i32[1] = 6;",
+                "gfx_cmd_i32[1] = 2;",
+                "STASIS_RENDER_VERSION",
+            ),
+        )
+        for path, current, stale, field in mutations:
+            with self.subTest(path=path, field=field):
+                failures, _ = self.run_with(path, current, stale)
+                failure = next(failure for failure in failures if failure.field == field)
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(path.as_posix(), failure.consumer)
+
+    def test_render_parity_rejects_fixed_current_trace_oracles(self):
+        mutations = (
+            (
+                contract.RENDER_PARITY_MANIFEST,
+                '  "trace_fixture": "samples/render_parity/trace.stasis",',
+                '  "trace_fixture": "samples/render_parity/trace.stasis",\n'
+                '  "command_trace": 1853793133,',
+                "render_parity.fixed_numeric_trace",
+            ),
+            (
+                contract.COMPILER_AOT,
+                "expected_result: ParityExpectedResult::Nonzero,",
+                "expected_result: ParityExpectedResult::Exact(1_853_793_133),",
+                "render_parity.compiler_semantic_trace",
+            ),
+        )
+        for path, current, stale, field in mutations:
+            with self.subTest(path=path):
+                failures, _ = self.run_with(path, current, stale)
+                failure = next(failure for failure in failures if failure.field == field)
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(path.as_posix(), failure.consumer)
+
     def test_desktop_manifest_fixture_requires_canonical_gfx_import(self):
         canonical = 'import "../../../src/stdlib/internal/gfx_cmd.stasis";'
         mutations = (

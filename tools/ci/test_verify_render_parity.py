@@ -109,14 +109,28 @@ class RenderParityGateTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "matrix"):
                 validate_fixture(temporary)
 
+    def test_runtime_evidence_rejects_zero_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = root / "capture.png"
+            log = root / "runtime.log"
+            evidence = root / "evidence.json"
+            capture.write_bytes(b"captured frame")
+            log.write_text(
+                "Stasis render contract v6 trace=0 flags=3 lines=2 rects=1 sprites=5 text=2\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "zero command trace"):
+                write_stage_evidence(capture, log, "initial_launch", evidence)
+
     def test_runtime_evidence_requires_generation_advance_and_foreground_restore(self):
-        manifest = {"command_trace": 1802686031}
+        manifest = {}
         log = """Stasis display metrics: logical=1280x720 native=2400x1080 drawable=2400x1080 scale=1.50
 gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=144x108 backend=sdl
 gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=144x108 backend=sdl
 gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=960x540 backend=sdl
 stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=36 scale=1.50 handle=1
-Stasis render contract v6 trace=1802686031 flags=3 lines=2 rects=1 sprites=5 text=2
+Stasis render contract v6 trace=1853793133 flags=3 lines=2 rects=1 sprites=5 text=2
 Stasis renderer resources restored: backend=sdl surface_generation=3 renderer_generation=1 reason=surface_changed sprites=3
 Stasis renderer resources restored: backend=sdl surface_generation=4 renderer_generation=1 reason=surface_changed sprites=3
 Stasis renderer resources restored: backend=sdl surface_generation=5 renderer_generation=2 reason=foreground sprites=3
@@ -149,13 +163,13 @@ Stasis renderer resources restored: backend=sdl surface_generation=5 renderer_ge
                 )
 
     def test_launch_stages_accept_initial_sdl3_resource_generation(self):
-        manifest = {"command_trace": 1802686031}
+        manifest = {}
         log = """Stasis display metrics: logical=800x600 native=800x600 drawable=800x600 scale=1.00
 gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=96x72 backend=sdl
 gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=96x72 backend=sdl
 gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=640x360 backend=sdl
 stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=24 scale=1.00 handle=1
-Stasis render contract v6 trace=1802686031 flags=3 lines=2 rects=1 sprites=5 text=2
+Stasis render contract v6 trace=123456789 flags=3 lines=2 rects=1 sprites=5 text=2
 """
         with tempfile.TemporaryDirectory() as directory:
             capture = Path(directory) / "capture.png"
