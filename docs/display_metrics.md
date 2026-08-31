@@ -54,7 +54,8 @@ The Stasis stdlib exposes these through `gfx_logical_*`, `gfx_native_*`,
 `gfx_available_height`, `gfx_content_scale`, `gfx_raster_scale`, and the two
 generation accessors. Available presentation values are scalar platform units:
 CSS pixels after safe-area accounting on Web, desktop usable-area units on
-native desktop, and platform surface units on Android. They are populated
+the native window's current display (with the primary display only as a
+fallback), and platform surface units on Android. They are populated
 before guest `main()` and every `tick()`. Native hosts can call
 `stasis_get_display_metrics` for the pre-existing display geometry.
 
