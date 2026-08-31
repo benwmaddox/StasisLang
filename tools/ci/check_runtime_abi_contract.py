@@ -1072,6 +1072,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         "HOST_I_DENSITY_GENERATION", "HOST_F_CONTENT_SCALE", "HOST_F_RASTER_SCALE",
         "HOST_F_LOGICAL_W", "HOST_F_LOGICAL_H", "HOST_F_SAFE_X", "HOST_F_SAFE_Y",
         "HOST_F_SAFE_W", "HOST_F_SAFE_H",
+        "HOST_F_AVAILABLE_W", "HOST_F_AVAILABLE_H",
     )
     for name in aot_fields:
         lane = "host_i32" if name.startswith("HOST_I_") else "host_f32"

@@ -33,6 +33,8 @@
   const display = {
     logicalWidth: Math.max(1, Number(canvas.width) || 640),
     logicalHeight: Math.max(1, Number(canvas.height) || 360),
+    availableWidth: 1,
+    availableHeight: 1,
     cssWidth: 0,
     cssHeight: 0,
     backingWidth: Math.max(1, Number(canvas.width) || 640),
@@ -397,6 +399,8 @@
     const data = document.body.dataset;
     data.logicalWidth = displayNumber(display.logicalWidth);
     data.logicalHeight = displayNumber(display.logicalHeight);
+    data.availableWidth = displayNumber(display.availableWidth);
+    data.availableHeight = displayNumber(display.availableHeight);
     data.cssWidth = displayNumber(display.cssWidth);
     data.cssHeight = displayNumber(display.cssHeight);
     data.backingWidth = String(display.backingWidth);
@@ -465,6 +469,33 @@
       || display.logicalHeight;
     return { width, height };
   };
+  const availablePresentationExtent = () => {
+    const published = window.STASIS_AVAILABLE_VIEWPORT;
+    const visual = window.visualViewport;
+    const styles = typeof getComputedStyle === "function" ? getComputedStyle(document.body) : null;
+    const inset = side => {
+      const value = styles && parseFloat(styles.getPropertyValue(`padding-${side}`));
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    };
+    const bounded = value => Math.max(1, Math.min(0x7fffffff, finitePositive(value, 1)));
+    const viewportWidth = finitePositive(published?.width)
+      || finitePositive(visual?.width)
+      || finitePositive(document.documentElement?.clientWidth)
+      || finitePositive(window.innerWidth)
+      || finitePositive(globalThis.screen?.width) / finitePositive(globalThis.devicePixelRatio, 1);
+    const viewportHeight = finitePositive(published?.height)
+      || finitePositive(visual?.height)
+      || finitePositive(document.documentElement?.clientHeight)
+      || finitePositive(window.innerHeight)
+      || finitePositive(globalThis.screen?.height) / finitePositive(globalThis.devicePixelRatio, 1);
+    if (finitePositive(published?.width) && finitePositive(published?.height)) {
+      return { width: bounded(published.width), height: bounded(published.height) };
+    }
+    return {
+      width: bounded(viewportWidth - inset("left") - inset("right")),
+      height: bounded(viewportHeight - inset("top") - inset("bottom"))
+    };
+  };
   const densityTierFor = scale =>
     DISPLAY_DENSITY_TIERS.find(tier => tier + 1e-9 >= scale) || DISPLAY_DENSITY_TIERS.at(-1);
   const requestDisplaySync = () => {
@@ -481,6 +512,7 @@
       logicalExtentPending = true;
     }
     const extent = displayCssExtent();
+    const available = availablePresentationExtent();
     const requestedDpr = finitePositive(globalThis.devicePixelRatio, 1);
     // Keep the browser's requested DPR observable for host metrics and
     // receipts. Backing allocation has its own bounded DPR so an unusually
@@ -531,6 +563,8 @@
     const extentChanged = logicalExtentPending
       || display.cssWidth !== extent.width
       || display.cssHeight !== extent.height
+      || display.availableWidth !== available.width
+      || display.availableHeight !== available.height
       || display.backingWidth !== backingWidth
       || display.backingHeight !== backingHeight
       || display.logicalWidth <= 0 || display.logicalHeight <= 0;
@@ -539,6 +573,8 @@
     const rasterScaleChanged = display.rasterScaleKey !== rasterScaleKey;
     display.cssWidth = extent.width;
     display.cssHeight = extent.height;
+    display.availableWidth = available.width;
+    display.availableHeight = available.height;
     display.rawDpr = requestedDpr;
     display.effectiveDpr = effectiveDpr;
     display.backingWidth = backingWidth;
@@ -591,6 +627,8 @@
   const displaySnapshot = () => ({
     logicalWidth: display.logicalWidth,
     logicalHeight: display.logicalHeight,
+    availableWidth: display.availableWidth,
+    availableHeight: display.availableHeight,
     cssWidth: display.cssWidth,
     cssHeight: display.cssHeight,
     backingWidth: display.backingWidth,
@@ -2743,7 +2781,7 @@
     i32[11] = resized ? 1 : 0;
     i32[12] = hostDesktopDimension(globalThis.screen?.width, display.cssWidth);
     i32[13] = hostDesktopDimension(globalThis.screen?.height, display.cssHeight);
-    i32[14] = 3;
+    i32[14] = 4;
     i32[15] = (focused ? 2 : 0) | (document.hidden ? 4 : 0) | (resized ? 8 : 0);
     i32[16] = 0;
     i32[17] = focused;
@@ -2785,8 +2823,8 @@
     f32[53] = 0;
     f32[54] = display.logicalWidth;
     f32[55] = display.logicalHeight;
-    f32[56] = display.cssWidth;
-    f32[57] = display.cssHeight;
+    f32[56] = display.availableWidth;
+    f32[57] = display.availableHeight;
     f32[58] = display.effectiveDpr;
     f32[59] = display.scaleX;
     f32[60] = display.scaleY;

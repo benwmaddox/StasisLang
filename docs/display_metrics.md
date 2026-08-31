@@ -16,6 +16,9 @@ The runtime tracks these values separately:
   surface; unused pixels are letterbox or pillarbox space
 - safe viewport: the platform-usable area intersected with the content viewport
   and reported in logical coordinates
+- available presentation extent: the platform's safe-area-adjusted space in
+  which a guest may choose a presentation size; it is independent of the
+  current logical canvas, native window/canvas, and drawable backing
 - content scale: drawable content pixels per logical pixel, including values
   below `1.0` when the canvas is downscaled
 - raster scale: the effective SVG/font cache density, clamped to `1.0..8.0` so
@@ -29,33 +32,47 @@ use the same aspect-fit values, including letterbox offsets.
 
 ## HostFrame API
 
-HostFrame version 2 keeps indices `1/2` as logical-width/logical-height
-compatibility aliases and adds explicit display fields at `host_i32[20..31]`:
+HostFrame version 4 keeps the canonical physical fields in `host_i32` and the
+logical/presentation fields in `host_f32`:
 
 | Indices | Meaning |
 | --- | --- |
-| `20, 21` | logical width, height |
 | `22, 23` | native width, height |
 | `24, 25` | drawable width, height |
-| `26..29` | safe logical x, y, width, height |
 | `30` | display generation |
 | `31` | density generation |
 
-`host_f32[48]` is content scale and `host_f32[49]` is raster scale. The Stasis
-stdlib exposes these through `gfx_logical_*`, `gfx_native_*`, `gfx_drawable_*`,
-`gfx_safe_viewport_*`, `gfx_content_scale`, `gfx_raster_scale`, and the two
-generation accessors. Native hosts can call `stasis_get_display_metrics`.
+| f32 indices | Meaning |
+| --- | --- |
+| `48, 49` | content scale, raster scale |
+| `50, 51` | logical width, height |
+| `52..55` | safe logical x, y, width, height |
+| `56, 57` | available presentation width, height |
 
-The display generation advances once when any logical, native, or drawable
-extent changes. The density generation advances only when the effective raster
-scale changes. Callers can therefore rebuild layout or surface state on display
+The Stasis stdlib exposes these through `gfx_logical_*`, `gfx_native_*`,
+`gfx_drawable_*`, `gfx_safe_viewport_*`, `gfx_available_width`,
+`gfx_available_height`, `gfx_content_scale`, `gfx_raster_scale`, and the two
+generation accessors. Available presentation values are scalar platform units:
+CSS pixels after safe-area accounting on Web, desktop usable-area units on
+native desktop, and platform surface units on Android. They are populated
+before guest `main()` and every `tick()`. Native hosts can call
+`stasis_get_display_metrics` for the pre-existing display geometry.
+
+The display generation advances once when any logical, native, drawable, or
+available-presentation extent changes. This includes safe visible viewport
+changes on Web even when the fitted CSS canvas remains pinned at the same size.
+The density generation advances only when the effective raster scale changes.
+Callers can therefore rebuild responsive layout or surface state on display
 generation while invalidating density-dependent resources exactly once per
 cache-key change.
 
 ## Web display boundary
 
-The browser host keeps three extents separate: the guest logical canvas, the
-CSS rectangle selected by the shell fitter, and the physical canvas backing.
+The browser host keeps four extents separate: the available safe visible
+viewport, the guest logical canvas, the CSS rectangle selected by the shell
+fitter, and the physical canvas backing. The shell publishes the available
+extent before its viewport-change event. The HostFrame never derives slots
+`56/57` from the fitted CSS rectangle, logical size, or backing allocation.
 `data-logical-width` and `data-logical-height` on the canvas are the shell's
 layout metadata; the shell never derives its aspect ratio from the physical
 `canvas.width` or `canvas.height`. The host allocates the physical backing as

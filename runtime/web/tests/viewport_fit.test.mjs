@@ -58,6 +58,7 @@ function runFitter({ layoutWidth = 393, layoutHeight = 844, visualWidth = 393, v
   };
   vm.runInNewContext(fitter, context, { filename: "runtime/web/index.html" });
   return {
+    window: context.window,
     canvas,
     shellStyle,
     rootStyle,
@@ -77,6 +78,7 @@ test("shared web shell uses the visible viewport and preserves backing size", ()
   assert.equal(fit.rootStyle.values["--stasis-visible-width"], "393px");
   assert.equal(fit.rootStyle.values["--stasis-visible-height"], "650px");
   assert.equal(fit.rootStyle.values["--stasis-visible-offset-top"], "0px");
+  assert.deepEqual({ ...fit.window.STASIS_AVAILABLE_VIEWPORT }, { width: 393, height: 592 });
   assert.ok(Math.abs(parseFloat(fit.shellStyle.width) - 105.24444444444444) < 1e-9);
   assert.equal(fit.shellStyle.height, "592px");
   assert.notStrictEqual(fit.shellStyle, fit.canvasStyle);
@@ -98,6 +100,7 @@ test("visual viewport and orientation changes refit once without duplicate liste
   fit.visualViewport.width = 393;
   fit.visualViewport.height = 650;
   fit.dispatchVisual("resize");
+  assert.deepEqual({ ...fit.window.STASIS_AVAILABLE_VIEWPORT }, { width: 393, height: 650 });
   assert.equal(fit.shellStyle.width, "393px");
   assert.equal(fit.shellStyle.height, "221.0625px");
   const beforeScroll = { ...fit.shellStyle };
@@ -108,6 +111,7 @@ test("visual viewport and orientation changes refit once without duplicate liste
   fit.visualViewport.height = 640;
   fit.dispatchVisual("scroll");
   assert.equal(fit.rootStyle.values["--stasis-visible-height"], "640px", "scroll can still refit when the visible extent changes");
+  assert.deepEqual({ ...fit.window.STASIS_AVAILABLE_VIEWPORT }, { width: 393, height: 640 });
   fit.dispatch("resize");
   fit.dispatch("orientationchange");
   assert.equal(fit.windowListeners.get("resize")?.length, 1);
@@ -163,7 +167,11 @@ test("index shell contract is safe-area aware and has one fitter", () => {
   assert.equal((html.match(/addEventListener\("orientationchange", fit\)/g) || []).length, 1);
 });
 
-function integratedRuntime() {
+function integratedRuntime({
+  logical = [640, 360], viewport = [393, 650], layout = [393, 844],
+  safe = { top: 24, bottom: 34, left: 0, right: 0 }, desktop = [393, 844],
+  dpr = 1, requestFromMain = null
+} = {}) {
   const listeners = new Map();
   const visualListeners = new Map();
   const raf = [];
@@ -175,8 +183,8 @@ function integratedRuntime() {
   const shellStyle = {};
   const canvasStyle = {};
   const canvas = {
-    width: 640,
-    height: 360,
+    width: logical[0],
+    height: logical[1],
     dataset: {},
     style: canvasStyle,
     parentElement: { style: shellStyle },
@@ -194,12 +202,18 @@ function integratedRuntime() {
     requestFullscreen: async () => {}
   };
   const visualViewport = {
-    width: 393,
-    height: 650,
+    width: viewport[0],
+    height: viewport[1],
     offsetLeft: 0,
     offsetTop: 0,
-    addEventListener(type, listener) { visualListeners.set(type, listener); },
-    dispatchEvent(event) { visualListeners.get(event.type)?.(event); }
+    addEventListener(type, listener) {
+      const values = visualListeners.get(type) || [];
+      values.push(listener);
+      visualListeners.set(type, values);
+    },
+    dispatchEvent(event) {
+      for (const listener of visualListeners.get(event.type) || []) listener(event);
+    }
   };
   const body = { dataset: {} };
   const errorBox = { textContent: "" };
@@ -211,19 +225,32 @@ function integratedRuntime() {
   const request = {
     host_req_seq: { value: 0 },
     host_req_flags: { value: 0 },
-    host_req_window_w_px: { value: 640 },
-    host_req_window_h_px: { value: 360 }
+    host_req_window_w_px: { value: logical[0] },
+    host_req_window_h_px: { value: logical[1] }
   };
   const ticks = [];
+  const mainFrames = [];
   const instance = { exports: {
     memory,
     ...request,
-    main: () => 0,
+    main: () => {
+      const i32 = new Int32Array(memory.buffer, 0, 768);
+      const f32 = new Float32Array(memory.buffer, 768 * 4, 64);
+      mainFrames.push({ version: i32[14], available: [f32[56], f32[57]], logical: [f32[50], f32[51]] });
+      if (requestFromMain) {
+        request.host_req_seq.value += 1;
+        request.host_req_flags.value = 4;
+        request.host_req_window_w_px.value = requestFromMain[0];
+        request.host_req_window_h_px.value = requestFromMain[1];
+      }
+      return 0;
+    },
     tick: () => {
       const i32 = new Int32Array(memory.buffer, 0, 768);
       const f32 = new Float32Array(memory.buffer, 768 * 4, 64);
       ticks.push({
-        resized: i32[11], generation: i32[30], drawable: [i32[24], i32[25]], logical: [f32[50], f32[51]]
+        resized: i32[11], generation: i32[30], drawable: [i32[24], i32[25]], logical: [f32[50], f32[51]],
+        available: [f32[56], f32[57]], pointer: [f32[0], f32[1]]
       });
     },
     render: () => 0
@@ -243,7 +270,7 @@ function integratedRuntime() {
     body,
     hidden: false,
     fullscreenElement: null,
-    documentElement: { clientWidth: 393, clientHeight: 844, style: rootStyle },
+    documentElement: { clientWidth: layout[0], clientHeight: layout[1], style: rootStyle },
     fonts: { ready: Promise.resolve(), add() {} },
     hasFocus: () => true,
     getElementById(id) {
@@ -256,16 +283,17 @@ function integratedRuntime() {
   const window = {
     STASIS_GAME: game,
     visualViewport,
-    innerWidth: 393,
-    innerHeight: 844,
+    innerWidth: layout[0],
+    innerHeight: layout[1],
     addEventListener: eventTarget.addEventListener,
     dispatchEvent: eventTarget.dispatchEvent
   };
+  let currentDpr = dpr;
   const context = {
     document,
     window,
-    screen: { width: 393, height: 844 },
-    devicePixelRatio: 1,
+    screen: { width: desktop[0], height: desktop[1] },
+    get devicePixelRatio() { return currentDpr; },
     performance: { now: () => 0 },
     WebAssembly: { instantiate: async () => ({ instance }) },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
@@ -274,9 +302,7 @@ function integratedRuntime() {
     addEventListener: eventTarget.addEventListener,
     dispatchEvent: eventTarget.dispatchEvent,
     Event: class { constructor(type) { this.type = type; } },
-    getComputedStyle: () => ({ getPropertyValue: name => ({
-      "padding-top": "24px", "padding-bottom": "34px", "padding-left": "0px", "padding-right": "0px"
-    }[name] || "0px") }),
+    getComputedStyle: () => ({ getPropertyValue: name => `${safe[name.slice("padding-".length)] || 0}px` }),
     MutationObserver: class {
       constructor(callback) { mutations.push(callback); }
       observe() {}
@@ -292,7 +318,10 @@ function integratedRuntime() {
   };
   vm.runInNewContext(fitter, context, { filename: "runtime/web/index.html" });
   vm.runInNewContext(runtime, context, { filename: "runtime/web/game.js" });
-  return { canvas, canvasStyle, shellStyle, rootStyle, visualViewport, request, ticks, raf, mutations, listeners, context };
+  return {
+    canvas, canvasStyle, shellStyle, rootStyle, visualViewport, request, ticks, mainFrames, raf, mutations, listeners, context,
+    setDpr(value) { currentDpr = value; context.dispatchEvent(new context.Event("resize")); }
+  };
 }
 
 async function startIntegratedRuntime() {
@@ -312,13 +341,14 @@ test("integrated fitter and runtime share extent signaling and ordering", async 
   request.host_req_window_w_px.value = 320;
   request.host_req_window_h_px.value = 640;
   raf.shift()(32);
-  assert.deepEqual(ticks.at(-1), { resized: 1, generation: 2, drawable: [296, 592], logical: [320, 640] });
+  assert.deepEqual(ticks.at(-1), { resized: 1, generation: 2, drawable: [296, 592], logical: [320, 640], available: [393, 592], pointer: [0, 0] });
 
   visualViewport.height = 600;
   visualViewport.dispatchEvent(new fixture.context.Event("scroll"));
   raf.shift()(48);
   assert.equal(ticks.at(-1).resized, 1);
   assert.equal(ticks.at(-1).generation, 3);
+  assert.deepEqual(ticks.at(-1).available, [393, 542]);
 
   visualViewport.offsetTop = 100;
   visualViewport.dispatchEvent(new fixture.context.Event("scroll"));
@@ -326,6 +356,7 @@ test("integrated fitter and runtime share extent signaling and ordering", async 
   assert.equal(rootStyle.values["--stasis-visible-offset-top"], "100px");
   assert.equal(ticks.at(-1).resized, 0);
   assert.equal(ticks.at(-1).generation, 3);
+  assert.deepEqual(ticks.at(-1).available, [393, 542]);
 
   request.host_req_seq.value = 2;
   request.host_req_flags.value = 4;
@@ -337,4 +368,53 @@ test("integrated fitter and runtime share extent signaling and ordering", async 
   assert.deepEqual(ticks.at(-1).logical, [200, 400]);
   assert.equal(parseFloat(shellStyle.height) > 0, true);
   assert.ok(fixture.listeners.get("stasis-viewport-extent")?.length, "runtime listens to the fitter extent event");
+});
+
+test("portrait guest observes landscape availability before main and settles without feedback", async () => {
+  const fixture = integratedRuntime({
+    logical: [360, 720], viewport: [1280, 720], layout: [1280, 720],
+    safe: {}, desktop: [2560, 1440], requestFromMain: [720, 360]
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(fixture.mainFrames, [{ version: 4, available: [1280, 720], logical: [360, 720] }]);
+  assert.equal(fixture.shellStyle.width, "960px");
+  assert.equal(fixture.shellStyle.height, "480px");
+  fixture.raf.shift()(16);
+  assert.deepEqual(fixture.ticks.at(-1), {
+    resized: 1, generation: 2, drawable: [960, 480], logical: [720, 360],
+    available: [1280, 720], pointer: [0, 0]
+  });
+
+  fixture.setDpr(2);
+  fixture.raf.shift()(32);
+  assert.deepEqual(fixture.ticks.at(-1).drawable, [1920, 960]);
+  const settledGeneration = fixture.ticks.at(-1).generation;
+  fixture.raf.shift()(48);
+  fixture.raf.shift()(64);
+  assert.equal(fixture.ticks.at(-1).generation, settledGeneration);
+  assert.equal(fixture.ticks.at(-1).resized, 0);
+  assert.deepEqual(fixture.ticks.at(-1).available, [1280, 720]);
+
+  const pinnedGeneration = fixture.ticks.at(-1).generation;
+  fixture.visualViewport.width = 1200;
+  fixture.visualViewport.height = 700;
+  fixture.visualViewport.dispatchEvent(new fixture.context.Event("resize"));
+  assert.equal(fixture.shellStyle.width, "960px");
+  assert.equal(fixture.shellStyle.height, "480px");
+  fixture.raf.shift()(72);
+  assert.equal(fixture.ticks.at(-1).generation, pinnedGeneration + 1);
+  assert.equal(fixture.ticks.at(-1).resized, 1);
+  assert.deepEqual(fixture.ticks.at(-1).drawable, [1920, 960]);
+  assert.deepEqual(fixture.ticks.at(-1).available, [1200, 700]);
+  fixture.raf.shift()(76);
+  assert.equal(fixture.ticks.at(-1).generation, pinnedGeneration + 1);
+  assert.equal(fixture.ticks.at(-1).resized, 0);
+
+  fixture.canvas.listeners.get("pointerdown")({
+    pointerId: 9, pointerType: "mouse", clientX: 480, clientY: 240
+  });
+  fixture.raf.shift()(80);
+  assert.deepEqual(fixture.ticks.at(-1).pointer, [360, 180], "CSS center maps to the landscape logical center");
 });

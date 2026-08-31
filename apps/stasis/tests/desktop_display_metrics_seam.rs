@@ -206,6 +206,7 @@ fn assert_pointer_release(
     expected_y_n: f32,
     expected_actions: i32,
 ) {
+    assert_eq!(host_i32[14], 4, "HostFrame version");
     assert_eq!(
         host_i32[7], 2,
         "touch release keeps slot 1 visible for this frame"
@@ -272,6 +273,24 @@ fn assert_metrics(
     for (index, expected) in sample.safe_logical.iter().enumerate() {
         assert_close(host_f32[52 + index], *expected, "safe logical viewport");
     }
+    assert_close(
+        host_f32[56],
+        (if host_i32[12] > 0 {
+            host_i32[12]
+        } else {
+            sample.native[0]
+        }) as f32,
+        "available width",
+    );
+    assert_close(
+        host_f32[57],
+        (if host_i32[13] > 0 {
+            host_i32[13]
+        } else {
+            sample.native[1]
+        }) as f32,
+        "available height",
+    );
     assert_close(host_f32[48], sample.content_scale, "content scale");
     assert_close(host_f32[49], sample.raster_scale, "raster scale");
 

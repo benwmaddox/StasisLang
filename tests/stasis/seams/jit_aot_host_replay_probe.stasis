@@ -38,7 +38,7 @@ function apply_snapshot(index: i32): void {
     host_i32[11] = 0;
     host_i32[12] = 320;
     host_i32[13] = 180;
-    host_i32[14] = 3;
+    host_i32[14] = 4;
     host_i32[16] = 60;
     host_i32[17] = 1;
     host_i32[18] = 0;
@@ -61,6 +61,8 @@ function apply_snapshot(index: i32): void {
     host_f32[53] = 0.0;
     host_f32[54] = 320.0;
     host_f32[55] = 180.0;
+    host_f32[56] = 1280.0;
+    host_f32[57] = 720.0;
 
     if (index == 0) {
         host_i32[32 + 44] = 1;

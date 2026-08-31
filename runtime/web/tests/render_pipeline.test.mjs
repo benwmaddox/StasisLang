@@ -155,6 +155,11 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
   assert.equal(body.dataset.ready, "true");
   return {
     stats, body, hud, rasterStats, offscreen, env, contextObject, frame: () => raf.shift()(now),
+    setPresentation(width, height, nextDpr = contextObject.devicePixelRatio) {
+      cssExtent[0] = width;
+      cssExtent[1] = height;
+      contextObject.devicePixelRatio = nextDpr;
+    },
     loseContext: () => { stats.contextLost = true; offscreenListeners.get("webglcontextlost")?.({ preventDefault() {} }); },
     restoreContext: () => { stats.contextLost = false; offscreenListeners.get("webglcontextrestored")?.({}); }
   };
@@ -264,6 +269,52 @@ test("density changes select one bounded sprite tier and reuse its cache", async
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(runtime.body.dataset.spriteCacheHits, "1");
   assert.equal(runtime.body.dataset.spriteRasterCount, "2");
+});
+
+test("orientation and DPR settlement reuse decoded sprite ownership without tier thrash", async () => {
+  const runtime = await loadRuntime({
+    webgl: false, sprites: 1, spriteHandles: [1], spriteSize: [16, 16],
+    cssExtent: [360, 720], dpr: 1, imageExtent: [64, 64],
+    assets: { "": "orientation.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 64 } }
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.spriteRasterCount, "1");
+  assert.equal(runtime.body.dataset.spriteDecodedCount, "1");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4));
+
+  runtime.setPresentation(960, 480, 1);
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.spriteRasterCount, "2");
+  assert.equal(runtime.body.dataset.spriteDecodedCount, "1");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(24 * 24 * 4));
+
+  runtime.setPresentation(960, 480, 2);
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.spriteRasterCount, "3");
+  assert.equal(runtime.body.dataset.spriteDecodedCount, "1");
+  const settledBytes = Number(runtime.body.dataset.assetCacheBytes);
+  assert.equal(settledBytes, 48 * 48 * 4, "only the current landscape DPR tier remains owned");
+  runtime.frame();
+  runtime.frame();
+  assert.equal(runtime.body.dataset.spriteRasterCount, "3", "settled frames do not create new tiers");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(settledBytes));
+
+  runtime.setPresentation(360, 720, 1);
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.spriteRasterCount, "4", "one real orientation transition prepares one tier");
+  assert.equal(runtime.body.dataset.spriteDecodedCount, "1");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4), "obsolete landscape tiers are released");
+  runtime.frame();
+  runtime.frame();
+  assert.equal(runtime.body.dataset.spriteRasterCount, "4", "portrait settlement does not thrash");
+  assert.equal(runtime.body.dataset.spriteStaleCount, "0");
 });
 
 test("uncapped sprite tiers ceil logical coverage", async () => {

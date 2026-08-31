@@ -124,6 +124,7 @@
         shell.style.width = `${width}px`;
         shell.style.height = `${height}px`;
         shell.style.aspectRatio = `${logical.width} / ${logical.height}`;
+        window.STASIS_AVAILABLE_VIEWPORT = { width: availableWidth, height: availableHeight };
         if (typeof window.dispatchEvent === "function" && typeof Event === "function") {
           window.dispatchEvent(new Event("stasis-viewport-extent"));
         }

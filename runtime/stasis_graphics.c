@@ -1449,7 +1449,7 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (!out_i32 || !out_f32) return;
 
     static int32_t g_host_tick_index = 0;
-    const int32_t host_version = 3;
+    const int32_t host_version = 4;
     const int i32_key_base = 32;
     const int i32_key_count = 512;
     const int should_quit = stasis_should_quit();
@@ -1542,6 +1542,8 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_f32[53] = g_display_metrics.safe_logical_viewport.y;
     out_f32[54] = g_display_metrics.safe_logical_viewport.w;
     out_f32[55] = g_display_metrics.safe_logical_viewport.h;
+    out_f32[56] = (float)(screen_w > 0 ? screen_w : g_display_metrics.native_w);
+    out_f32[57] = (float)(screen_h > 0 ? screen_h : g_display_metrics.native_h);
 }
 
 /* ============================================================

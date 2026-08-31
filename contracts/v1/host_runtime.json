@@ -2,7 +2,7 @@
   "schema": "stasis.host_runtime_contract",
   "version": 1,
   "host_frame": {
-    "version": 3,
+    "version": 4,
     "source": "src/stdlib/internal/host_frame.stasis",
     "constants": {
       "HOST_MAX_POINTERS": 8,
@@ -41,6 +41,8 @@
       "HOST_F_SAFE_Y": 53,
       "HOST_F_SAFE_W": 54,
       "HOST_F_SAFE_H": 55,
+      "HOST_F_AVAILABLE_W": 56,
+      "HOST_F_AVAILABLE_H": 57,
       "HOST_F32_COUNT": 64
     }
   },

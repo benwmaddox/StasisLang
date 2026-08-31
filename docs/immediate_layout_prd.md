@@ -613,7 +613,7 @@ let safe_w: f32 = gfx_safe_viewport_width();
 let safe_h: f32 = gfx_safe_viewport_height();
 ```
 
-These public layout-facing functions return `f32`. HostFrame v3 stores logical and safe viewport geometry directly in its `f32` lane; physical native and drawable pixel counts remain `i32` metadata. No `f32[4]` wrapper is required.
+These public layout-facing functions return `f32`. HostFrame v4 stores logical, safe viewport, and available presentation geometry directly in its `f32` lane; physical native and drawable pixel counts remain `i32` metadata. No `f32[4]` wrapper is required.
 
 Logical presentation dimensions use one canonical public API:
 

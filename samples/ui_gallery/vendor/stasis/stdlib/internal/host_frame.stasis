@@ -65,6 +65,9 @@ const HOST_F_SAFE_X: i32 = 52;
 const HOST_F_SAFE_Y: i32 = 53;
 const HOST_F_SAFE_W: i32 = 54;
 const HOST_F_SAFE_H: i32 = 55;
+// Platform-available presentation extent, independent of logical/native/drawable geometry.
+const HOST_F_AVAILABLE_W: i32 = 56;
+const HOST_F_AVAILABLE_H: i32 = 57;
 const HOST_F32_COUNT: i32 = 64;
 
 global host_i32: i32[768];
@@ -164,6 +167,14 @@ function host_safe_width(): f32 {
 
 function host_safe_height(): f32 {
     return host_f32[HOST_F_SAFE_H];
+}
+
+function host_available_width(): f32 {
+    return host_f32[HOST_F_AVAILABLE_W];
+}
+
+function host_available_height(): f32 {
+    return host_f32[HOST_F_AVAILABLE_H];
 }
 
 function host_display_generation(): i32 {
