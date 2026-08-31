@@ -115,7 +115,7 @@ fn world_camera_projection_and_clip_commands_match_jit_and_linked_aot() {
     aot.link_executable_for_i32_noarg_function(ROOT, &linked, &config)
         .expect("link world camera AOT fixture");
     let status = Command::new(root.join(".cargo/stasis-sign-and-run.cmd"))
-        .arg(&linked)
+        .arg(linked.file_name().expect("linked AOT executable name"))
         .current_dir(&output_dir.0)
         .status()
         .expect("run linked world camera AOT fixture");
