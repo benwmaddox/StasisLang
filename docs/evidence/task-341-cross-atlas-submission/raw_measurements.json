@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "captured_utc": "2026-08-31T16:13:56Z",
+  "host": "Windows x64, MSVC 19.44.35222, CPU and GPU model not collected",
+  "method": {
+    "samples": 31,
+    "iterations_per_sample": 1000,
+    "quantiles": "nearest rank after ascending sort: p50=index15, p95=index29",
+    "gpu_measurement": "unavailable"
+  },
+  "profiles": [
+    {
+      "profile": "desktop_native_bindless",
+      "binding": 3,
+      "fixture_instances": 4096,
+      "planner_ns": {"min": 42879, "p50": 43394, "p95": 43968, "max": 44432},
+      "raw_samples_ns": [43180,43450,43264,43085,43328,42879,43420,43425,43426,43900,43263,43083,43490,43380,43243,43053,43728,43165,43123,44432,43394,43214,43539,43179,43583,43467,43793,43968,43178,43408,43914],
+      "modeled": {"baseline_upload_calls":4096,"baseline_upload_bytes":327680,"baseline_texture_binds":4096,"baseline_draws":4096,"prototype_upload_calls":1,"prototype_upload_bytes":327680,"prototype_texture_binds":1,"prototype_draws":1,"queue_submissions":1},
+      "gpu_frame_time": null
+    },
+    {
+      "profile": "android_texture_array",
+      "binding": 2,
+      "fixture_instances": 4096,
+      "planner_ns": {"min": 43984, "p50": 44630, "p95": 45040, "max": 45383},
+      "raw_samples_ns": [44630,44805,44614,44228,44249,44758,43984,44568,44693,44490,45383,45040,44549,44622,44881,44790,44717,44575,44353,44495,44829,44488,44645,44639,44741,44804,44480,44813,44385,44300,44874],
+      "modeled": {"baseline_upload_calls":4096,"baseline_upload_bytes":327680,"baseline_texture_binds":4096,"baseline_draws":4096,"prototype_upload_calls":1,"prototype_upload_bytes":327680,"prototype_texture_binds":1,"prototype_draws":1,"queue_submissions":1},
+      "gpu_frame_time": null
+    },
+    {
+      "profile": "webgl2_texture_array",
+      "binding": 2,
+      "fixture_instances": 4096,
+      "planner_ns": {"min": 44410, "p50": 44686, "p95": 45242, "max": 45341},
+      "raw_samples_ns": [45341,44702,44775,44410,44742,44658,44608,45242,44714,44559,44623,44492,44494,44583,45056,44726,44680,44850,44834,44694,44542,44672,44753,44689,44698,44415,44493,44686,44476,44500,44806],
+      "modeled": {"baseline_upload_calls":4096,"baseline_upload_bytes":327680,"baseline_texture_binds":4096,"baseline_draws":4096,"prototype_upload_calls":1,"prototype_upload_bytes":327680,"prototype_texture_binds":1,"prototype_draws":4,"queue_submissions":1},
+      "gpu_frame_time": null
+    },
+    {
+      "profile": "canvas_conventional",
+      "binding": 0,
+      "fixture_instances": 4096,
+      "planner_ns": {"min": 45154, "p50": 45483, "p95": 46020, "max": 52551},
+      "raw_samples_ns": [45154,45597,45496,45472,45251,45377,45705,52551,45379,45313,45413,45433,45446,45287,45628,45546,45375,45510,45483,45658,45186,45513,45413,46020,45377,45538,45695,45487,45478,45755,45506],
+      "modeled": {"baseline_upload_calls":4096,"baseline_upload_bytes":327680,"baseline_texture_binds":4096,"baseline_draws":4096,"prototype_upload_calls":4096,"prototype_upload_bytes":327680,"prototype_texture_binds":4096,"prototype_draws":4096,"queue_submissions":null},
+      "gpu_frame_time": null
+    }
+  ]
+}
