@@ -13,6 +13,16 @@ void stasis_shutdown(void);
 int stasis_asset_request_sprite(const char* path, int max_w, int max_h);
 int stasis_asset_request_sprite_with_policy(
     const char* path, int max_w, int max_h, int atlas_eligible);
+int stasis_asset_request_sprite_with_policy_v3(
+    const char* path,
+    int max_w,
+    int max_h,
+    int atlas_eligible,
+    uint64_t group_id,
+    uint32_t member_count,
+    uint64_t logical_pixel_area,
+    uint32_t max_logical_width,
+    uint32_t max_logical_height);
 int stasis_asset_request_audio(const char* path);
 int stasis_asset_task_poll(int task);
 int stasis_asset_task_take_handle(int task);
@@ -75,40 +85,63 @@ int main(void) {
     CHECK(stasis_asset_task_poll(sprite_task) == 0);
     CHECK(stasis_asset_task_poll(audio_task) == 0);
 
-    int sprite_state[5] = {0};
+    int sprite_state[7] = {0};
     CHECK(stasis_test_get_sprite_state(sprite, sprite_state, 5) == 1);
     CHECK(sprite_state[0] == 1 && sprite_state[1] == 1 && sprite_state[3] >= 1);
     CHECK(sprite_state[4] == 0);
 
-    /* Policy is carried by each request, rather than shared one-shot state. */
+    /* The legacy boolean ABI is standalone-safe under the v3 contract. */
+    int legacy_task = stasis_asset_request_sprite_with_policy(
+        STASIS_TEST_SPRITE_PATH, 20, 20, 1);
+    CHECK(legacy_task > 0);
+    CHECK(wait_for_task(legacy_task) == 3);
+    int legacy_sprite = stasis_asset_task_take_handle(legacy_task);
+    CHECK(legacy_sprite > 0);
+    CHECK(stasis_test_get_sprite_state(legacy_sprite, sprite_state, 7) == 1);
+    CHECK(sprite_state[4] == 0 && sprite_state[5] == 0 && sprite_state[6] == 0);
+
+    /* Each async request owns its complete policy, even when requests interleave. */
+    const uint64_t hot_group = UINT64_C(0x12345678abcdef01);
     int hot_task = stasis_asset_request_sprite_with_policy(
-        STASIS_TEST_SPRITE_PATH, 24, 24, 1);
-    int cold_task = stasis_asset_request_sprite_with_policy(
-        STASIS_TEST_SPRITE_PATH, 28, 28, 0);
-    CHECK(hot_task > 0 && cold_task > 0);
+        STASIS_TEST_SPRITE_PATH, 22, 22, 1);
+    int cold_task = stasis_asset_request_sprite_with_policy_v3(
+        STASIS_TEST_SPRITE_PATH, 28, 28, 0, 99, 8, 8192, 32, 32);
+    int v3_hot_task = stasis_asset_request_sprite_with_policy_v3(
+        STASIS_TEST_SPRITE_PATH, 24, 24, 1, hot_group, 8, 8192, 32, 32);
+    CHECK(hot_task > 0 && cold_task > 0 && v3_hot_task > 0);
     CHECK(wait_for_task(hot_task) == 3);
     int hot_sprite = stasis_asset_task_take_handle(hot_task);
     CHECK(hot_sprite > 0);
-    CHECK(stasis_test_get_sprite_state(hot_sprite, sprite_state, 5) == 1);
-    CHECK(sprite_state[4] == 1);
+    CHECK(stasis_test_get_sprite_state(hot_sprite, sprite_state, 7) == 1);
+    CHECK(sprite_state[4] == 0);
     CHECK(wait_for_task(cold_task) == 3);
     int cold_sprite = stasis_asset_task_take_handle(cold_task);
     CHECK(cold_sprite > 0);
-    CHECK(stasis_test_get_sprite_state(cold_sprite, sprite_state, 5) == 1);
+    CHECK(stasis_test_get_sprite_state(cold_sprite, sprite_state, 7) == 1);
     CHECK(sprite_state[4] == 0);
+    CHECK(wait_for_task(v3_hot_task) == 3);
+    int v3_hot_sprite = stasis_asset_task_take_handle(v3_hot_task);
+    CHECK(v3_hot_sprite > 0);
+    CHECK(stasis_test_get_sprite_state(v3_hot_sprite, sprite_state, 7) == 1);
+    CHECK(sprite_state[4] == 1);
+    CHECK((uint32_t)sprite_state[5] == (uint32_t)hot_group);
+    CHECK((uint32_t)sprite_state[6] == (uint32_t)(hot_group >> 32));
 
     /* A changed accepted policy migrates the existing cache entry in place. */
-    int migrated_task = stasis_asset_request_sprite_with_policy(
-        STASIS_TEST_SPRITE_PATH, 24, 24, 0);
+    int migrated_task = stasis_asset_request_sprite_with_policy_v3(
+        STASIS_TEST_SPRITE_PATH, 24, 24, 1, hot_group + 1, 8, 8192, 32, 32);
     CHECK(migrated_task > 0);
     CHECK(wait_for_task(migrated_task) == 3);
     int migrated_sprite = stasis_asset_task_take_handle(migrated_task);
-    CHECK(migrated_sprite == hot_sprite);
-    CHECK(stasis_test_get_sprite_state(hot_sprite, sprite_state, 5) == 1);
-    CHECK(sprite_state[1] == 2 && sprite_state[4] == 0);
-    stasis_gfx_release_sprite(hot_sprite);
+    CHECK(migrated_sprite == v3_hot_sprite);
+    CHECK(stasis_test_get_sprite_state(v3_hot_sprite, sprite_state, 7) == 1);
+    CHECK(sprite_state[1] == 2 && sprite_state[4] == 1);
+    CHECK((uint32_t)sprite_state[5] == (uint32_t)(hot_group + 1));
+    stasis_gfx_release_sprite(v3_hot_sprite);
     stasis_gfx_release_sprite(migrated_sprite);
+    stasis_gfx_release_sprite(hot_sprite);
     stasis_gfx_release_sprite(cold_sprite);
+    stasis_gfx_release_sprite(legacy_sprite);
 
     int shared_task = stasis_asset_request_sprite(STASIS_TEST_SPRITE_PATH, 32, 32);
     CHECK(shared_task > 0);

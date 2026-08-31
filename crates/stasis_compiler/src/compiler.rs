@@ -1240,10 +1240,18 @@ impl Compiler {
 
     /// Returns the accepted shared HIR keyed by stable function identity for
     /// target-independent whole-program analyses.
-    pub(crate) fn analysis_hirs(&mut self) -> CompileResult<BTreeMap<FunctionId, FunctionHIR>> {
+    pub(crate) fn analysis_hirs(
+        &mut self,
+        required_emit_roots: &[String],
+    ) -> CompileResult<BTreeMap<FunctionId, FunctionHIR>> {
         let functions = self.functions.clone();
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            &functions,
+            required_emit_roots,
+        );
         functions
             .iter()
+            .filter(|function| reachable.contains(&function.id))
             .map(|function| {
                 self.lower_function_to_hir(function)
                     .map(|hir| (function.id, hir))
@@ -3578,6 +3586,28 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
             crate::backend::reachability::compute_reachable_function_ids(compiler.functions(), &[]);
         assert!(reachable.contains(&selected.id));
         assert!(!reachable.contains(&rejected.id));
+    }
+
+    #[test]
+    fn analysis_hirs_only_lowers_reachable_and_required_functions() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "function helper(): i32 { return 1; } function required_preview(): i32 { return 2; } function unused(): i32 { return 3; } function render(): i32 { return helper(); } function main(): i32 { return 0; }",
+        );
+        compiler.check().expect("accept program");
+
+        let required = vec!["required_preview".to_string()];
+        let hirs = compiler
+            .analysis_hirs(&required)
+            .expect("lower analysis HIRs");
+        let id = |name: &str| function_by_name(&compiler, name).id;
+
+        assert!(hirs.contains_key(&id("main")));
+        assert!(hirs.contains_key(&id("render")));
+        assert!(hirs.contains_key(&id("helper")));
+        assert!(hirs.contains_key(&id("required_preview")));
+        assert!(!hirs.contains_key(&id("unused")));
     }
 
     #[test]

@@ -202,7 +202,7 @@ impl AotProcess {
             .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         let mut force_reemit_reachable = false;
         if snapshot_miss {
-            let function_hirs = self.compiler.analysis_hirs()?;
+            let function_hirs = self.compiler.analysis_hirs(&self.required_emit_roots)?;
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
@@ -3548,10 +3548,7 @@ function on_code_swap(): void { return; }
         );
         assert_eq!(json["hot_render_images"][0]["max_renders_per_render"], 2);
         assert_eq!(json["hot_render_images"][0]["atlas_eligible"], false);
-        assert_eq!(
-            json["hot_render_images"][0]["grouping_key"],
-            "rgba8-premul:linear-filter"
-        );
+        assert_eq!(json["hot_render_images"][0]["grouping_key"], "");
         assert!(json.get("atlas_pixels").is_none());
 
         let _ = fs::remove_dir_all(&bundle_dir);

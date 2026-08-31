@@ -4,12 +4,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::backend::compile_analysis::{ConstantValue, ConstantValueMap};
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::ir::hir::{eval_const_i64, AssignOp, AssignTarget, FunctionHIR, SimpleExpr, SimpleStmt};
 
-pub const HOT_RENDER_METADATA_VERSION: u32 = 2;
+pub const HOT_RENDER_METADATA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HotRenderImageMetadata {
@@ -25,6 +26,11 @@ pub struct HotRenderImageMetadata {
     pub unknown_cause: Option<String>,
     pub atlas_eligible: bool,
     pub grouping_key: String,
+    pub estimated_distinct_transitions: u64,
+    pub group_member_count: u32,
+    pub group_logical_pixel_area: u64,
+    pub group_max_logical_width: u32,
+    pub group_max_logical_height: u32,
     pub backend_constraints: String,
     pub reason: String,
 }
@@ -107,15 +113,17 @@ pub(crate) fn analyze_hot_render_images(
             map
         },
     );
-    let mut counts = BTreeMap::new();
     let mut causes = BTreeMap::new();
+    let mut render_flow = FlowSummary::empty();
+    let mut has_render_root = false;
     let render_roots = functions
         .iter()
         .filter(|function| function.name == "render" && reachable.contains(&function.id));
     for root in render_roots {
+        has_render_root = true;
         let mut stack = BTreeSet::new();
         let env = BTreeMap::new();
-        let root_counts = analyze_function(
+        let root_flow = analyze_function(
             root,
             hirs,
             &by_name,
@@ -125,17 +133,21 @@ pub(crate) fn analyze_hot_render_images(
             &mut stack,
             &mut causes,
         );
-        add_counts(&mut counts, root_counts);
+        render_flow = render_flow.branch(root_flow);
+    }
+    if !has_render_root {
+        render_flow = FlowSummary::empty();
     }
 
     if let Some(cause) = loader_uncertainty {
-        poison_all(&mut counts, &all_images, &mut causes, &cause);
+        render_flow.poison_all(&all_images, &mut causes, &cause);
     }
 
     let mut records = images
         .into_values()
         .map(|image| {
-            let mut bound = counts
+            let mut bound = render_flow
+                .counts
                 .get(&image.identity)
                 .copied()
                 .unwrap_or(Bound::Finite(0));
@@ -182,73 +194,138 @@ pub(crate) fn analyze_hot_render_images(
                 max_renders_per_render: maximum,
                 unknown_cause: cause,
                 atlas_eligible: eligible,
-                grouping_key: "rgba8-premul:linear-filter".to_string(),
+                grouping_key: String::new(),
+                estimated_distinct_transitions: 0,
+                group_member_count: 0,
+                group_logical_pixel_area: 0,
+                group_max_logical_width: 0,
+                group_max_logical_height: 0,
                 backend_constraints: "rgba8-premultiplied;linear-filter;runtime-page-limits"
                     .to_string(),
                 reason,
             }
         })
         .collect::<Vec<_>>();
-    apply_profitability_policy(&mut records);
+    apply_profitability_policy(&mut records, &render_flow.transitions);
     records
 }
 
-fn apply_profitability_policy(records: &mut [HotRenderImageMetadata]) {
+fn apply_profitability_policy(
+    records: &mut [HotRenderImageMetadata],
+    transitions: &BTreeMap<(String, String), Bound>,
+) {
     const MAX_LOGICAL_EXTENT: u32 = 4096;
-    const MIN_GROUP_REUSE: u64 = 8;
-    const MIN_GROUP_LOGICAL_PIXELS: u64 = 65_536;
+    const MIN_DISTINCT_TRANSITIONS: u64 = 2;
 
-    let mut groups = BTreeMap::<(String, u32, u32), Vec<usize>>::new();
-    for (index, image) in records.iter().enumerate() {
-        if image.max_renders_per_render.is_some_and(|count| count > 1)
-            && image.logical_width > 0
-            && image.logical_height > 0
-            && image.logical_width <= MAX_LOGICAL_EXTENT
-            && image.logical_height <= MAX_LOGICAL_EXTENT
+    let eligible_identities = records
+        .iter()
+        .filter(|image| {
+            image.max_renders_per_render.is_some_and(|count| count > 1)
+                && image.logical_width > 0
+                && image.logical_height > 0
+                && image.logical_width <= MAX_LOGICAL_EXTENT
+                && image.logical_height <= MAX_LOGICAL_EXTENT
+        })
+        .map(|image| image.identity.clone())
+        .collect::<BTreeSet<_>>();
+    let mut adjacency = BTreeMap::<String, BTreeSet<String>>::new();
+    for ((left, right), weight) in transitions {
+        if left != right
+            && eligible_identities.contains(left)
+            && eligible_identities.contains(right)
+            && matches!(weight, Bound::Finite(value) if *value >= MIN_DISTINCT_TRANSITIONS)
         {
-            groups
-                .entry((
-                    image.grouping_key.clone(),
-                    image.logical_width,
-                    image.logical_height,
-                ))
+            adjacency
+                .entry(left.clone())
                 .or_default()
-                .push(index);
+                .insert(right.clone());
+            adjacency
+                .entry(right.clone())
+                .or_default()
+                .insert(left.clone());
         }
     }
 
-    for indices in groups.values() {
-        let reuse = indices.iter().try_fold(0_u64, |total, index| {
-            total.checked_add(
-                records[*index]
-                    .max_renders_per_render
-                    .unwrap_or(0)
-                    .saturating_sub(1),
-            )
-        });
+    let by_identity = records
+        .iter()
+        .enumerate()
+        .map(|(index, image)| (image.identity.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut visited = BTreeSet::new();
+    for seed in adjacency.keys() {
+        if !visited.insert(seed.clone()) {
+            continue;
+        }
+        let mut stack = vec![seed.clone()];
+        let mut members = BTreeSet::new();
+        while let Some(identity) = stack.pop() {
+            members.insert(identity.clone());
+            for neighbor in adjacency.get(&identity).into_iter().flatten() {
+                if visited.insert(neighbor.clone()) {
+                    stack.push(neighbor.clone());
+                }
+            }
+        }
+        let indices = members
+            .iter()
+            .filter_map(|identity| by_identity.get(identity).copied())
+            .collect::<Vec<_>>();
         let logical_pixels = indices.iter().try_fold(0_u64, |total, index| {
             let image = &records[*index];
             total.checked_add(u64::from(image.logical_width) * u64::from(image.logical_height))
         });
+        let distinct_transitions = transitions
+            .iter()
+            .try_fold(0_u64, |total, ((a, b), bound)| {
+                if a != b && members.contains(a) && members.contains(b) {
+                    match bound {
+                        Bound::Finite(value) => total.checked_add(*value),
+                        Bound::Unknown => None,
+                    }
+                } else {
+                    Some(total)
+                }
+            });
         let eligible = indices.len() >= 2
-            && reuse.is_some_and(|value| value >= MIN_GROUP_REUSE)
-            && logical_pixels.is_some_and(|value| value >= MIN_GROUP_LOGICAL_PIXELS);
-        for index in indices {
+            && distinct_transitions.is_some_and(|value| value >= MIN_DISTINCT_TRANSITIONS)
+            && logical_pixels.is_some();
+        let identities = members.iter().cloned().collect::<Vec<_>>();
+        let digest = Sha256::digest(identities.join("\n").as_bytes());
+        let group_key = format!("batch-v3:{:x}", digest);
+        let max_width = indices
+            .iter()
+            .map(|index| records[*index].logical_width)
+            .max()
+            .unwrap_or(0);
+        let max_height = indices
+            .iter()
+            .map(|index| records[*index].logical_height)
+            .max()
+            .unwrap_or(0);
+        for index in &indices {
             let image = &mut records[*index];
             image.atlas_eligible = eligible;
-            image.reason = if indices.len() < 2 {
-                "single hot image does not amortize an atlas page".to_string()
-            } else if reuse.is_none() || logical_pixels.is_none() {
+            image.grouping_key = group_key.clone();
+            image.estimated_distinct_transitions = distinct_transitions.unwrap_or(0);
+            image.group_member_count = u32::try_from(indices.len()).unwrap_or(u32::MAX);
+            image.group_logical_pixel_area = logical_pixels.unwrap_or(0);
+            image.group_max_logical_width = max_width;
+            image.group_max_logical_height = max_height;
+            image.reason = if distinct_transitions.is_none() || logical_pixels.is_none() {
                 "profitability arithmetic overflow".to_string()
-            } else if reuse.unwrap_or(0) < MIN_GROUP_REUSE {
-                "compatible group has insufficient aggregate reuse".to_string()
-            } else if logical_pixels.unwrap_or(0) < MIN_GROUP_LOGICAL_PIXELS {
-                "compatible group has insufficient logical occupancy".to_string()
+            } else if distinct_transitions.unwrap_or(0) < MIN_DISTINCT_TRANSITIONS {
+                "render order has insufficient avoidable texture transitions".to_string()
             } else {
-                "eligible candidate; runtime rechecks realized dimensions and device limits"
+                "eligible interleaved batch; runtime rechecks realized dimensions and device limits"
                     .to_string()
             };
         }
+    }
+
+    for image in records.iter_mut().filter(|image| {
+        image.max_renders_per_render.is_some_and(|count| count > 1) && image.group_member_count == 0
+    }) {
+        image.reason = "no repeated distinct-image render transition benefit".to_string();
     }
 
     for image in records.iter_mut().filter(|image| {
@@ -372,39 +449,200 @@ fn const_string(expr: &SimpleExpr, constants: &ConstantValueMap) -> Option<Strin
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IdentitySet {
+    Known(BTreeSet<String>),
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlowSummary {
+    counts: BTreeMap<String, Bound>,
+    first: BTreeSet<String>,
+    last: BTreeSet<String>,
+    may_be_empty: bool,
+    transitions: BTreeMap<(String, String), Bound>,
+}
+
+impl FlowSummary {
+    fn empty() -> Self {
+        Self {
+            counts: BTreeMap::new(),
+            first: BTreeSet::new(),
+            last: BTreeSet::new(),
+            may_be_empty: true,
+            transitions: BTreeMap::new(),
+        }
+    }
+
+    fn draw(identities: BTreeSet<String>) -> Self {
+        Self {
+            counts: identities
+                .iter()
+                .cloned()
+                .map(|identity| (identity, Bound::Finite(1)))
+                .collect(),
+            first: identities.clone(),
+            last: identities,
+            may_be_empty: false,
+            transitions: BTreeMap::new(),
+        }
+    }
+
+    fn sequential(mut self, next: Self) -> Self {
+        if self.counts.is_empty() && self.transitions.is_empty() && self.may_be_empty {
+            return next;
+        }
+        if next.counts.is_empty() && next.transitions.is_empty() && next.may_be_empty {
+            return self;
+        }
+        add_bound_maps(&mut self.counts, next.counts);
+        add_bound_maps(&mut self.transitions, next.transitions);
+        for left in &self.last {
+            for right in &next.first {
+                add_bound(
+                    &mut self.transitions,
+                    (left.clone(), right.clone()),
+                    Bound::Finite(1),
+                );
+            }
+        }
+        let previous_empty = self.may_be_empty;
+        let previous_first = self.first.clone();
+        let previous_last = self.last.clone();
+        self.first = if previous_empty {
+            previous_first.union(&next.first).cloned().collect()
+        } else {
+            previous_first
+        };
+        self.last = if next.may_be_empty {
+            previous_last.union(&next.last).cloned().collect()
+        } else {
+            next.last
+        };
+        self.may_be_empty = previous_empty && next.may_be_empty;
+        self
+    }
+
+    fn branch(self, other: Self) -> Self {
+        Self {
+            counts: branch_bound_maps(self.counts, other.counts),
+            first: self.first.union(&other.first).cloned().collect(),
+            last: self.last.union(&other.last).cloned().collect(),
+            may_be_empty: self.may_be_empty || other.may_be_empty,
+            transitions: branch_bound_maps(self.transitions, other.transitions),
+        }
+    }
+
+    fn repeat(mut self, count: u64) -> Self {
+        if count == 0 {
+            return Self::empty();
+        }
+        self.counts = multiply_bound_map(self.counts, count);
+        self.transitions = multiply_bound_map(self.transitions, count);
+        if count > 1 {
+            let repeat_edges = count - 1;
+            for left in &self.last {
+                for right in &self.first {
+                    add_bound(
+                        &mut self.transitions,
+                        (left.clone(), right.clone()),
+                        Bound::Finite(repeat_edges),
+                    );
+                }
+            }
+        }
+        self
+    }
+
+    fn poison_all(
+        &mut self,
+        all_images: &BTreeSet<String>,
+        causes: &mut BTreeMap<String, String>,
+        cause: &str,
+    ) {
+        for identity in all_images {
+            self.counts.insert(identity.clone(), Bound::Unknown);
+            causes
+                .entry(identity.clone())
+                .or_insert_with(|| cause.to_string());
+        }
+        self.transitions.clear();
+        self.first = all_images.clone();
+        self.last = all_images.clone();
+    }
+}
+
+fn add_bound<K: Ord>(out: &mut BTreeMap<K, Bound>, key: K, value: Bound) {
+    let next = out.remove(&key).unwrap_or(Bound::Finite(0)).add(value);
+    out.insert(key, next);
+}
+
+fn add_bound_maps<K: Ord>(out: &mut BTreeMap<K, Bound>, other: BTreeMap<K, Bound>) {
+    for (key, value) in other {
+        add_bound(out, key, value);
+    }
+}
+
+fn branch_bound_maps<K: Ord + Clone>(
+    left: BTreeMap<K, Bound>,
+    right: BTreeMap<K, Bound>,
+) -> BTreeMap<K, Bound> {
+    left.keys()
+        .chain(right.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|key| {
+            let value = left
+                .get(&key)
+                .copied()
+                .unwrap_or(Bound::Finite(0))
+                .branch(right.get(&key).copied().unwrap_or(Bound::Finite(0)));
+            (key, value)
+        })
+        .collect()
+}
+
+fn multiply_bound_map<K: Ord>(map: BTreeMap<K, Bound>, factor: u64) -> BTreeMap<K, Bound> {
+    map.into_iter()
+        .map(|(key, value)| (key, value.mul(factor)))
+        .collect()
+}
+
 fn analyze_function(
     function: &FunctionMeta,
     hirs: &BTreeMap<FunctionId, FunctionHIR>,
     by_name: &BTreeMap<(&str, usize), Vec<&FunctionMeta>>,
     capacities: &BTreeMap<String, i32>,
-    env: &BTreeMap<String, Option<String>>,
+    env: &BTreeMap<String, IdentitySet>,
     all_images: &BTreeSet<String>,
     stack: &mut BTreeSet<FunctionId>,
     causes: &mut BTreeMap<String, String>,
-) -> BTreeMap<String, Bound> {
+) -> FlowSummary {
     if !stack.insert(function.id) {
-        let mut unknown = BTreeMap::new();
-        for identity in all_images {
-            unknown.insert(identity.clone(), Bound::Unknown);
-            causes.insert(
-                identity.clone(),
-                format!("recursive call through {}", function.name),
-            );
-        }
+        let mut unknown = FlowSummary::empty();
+        unknown.poison_all(
+            all_images,
+            causes,
+            &format!("recursive call through {}", function.name),
+        );
         return unknown;
     }
-    let result = hirs.get(&function.id).map_or_else(BTreeMap::new, |hir| {
-        analyze_statements(
-            &hir.statements,
-            hirs,
-            by_name,
-            capacities,
-            env,
-            all_images,
-            stack,
-            causes,
-        )
-    });
+    let result = hirs
+        .get(&function.id)
+        .map_or_else(FlowSummary::empty, |hir| {
+            analyze_statements(
+                &hir.statements,
+                hirs,
+                by_name,
+                capacities,
+                env,
+                all_images,
+                stack,
+                causes,
+            )
+        });
     stack.remove(&function.id);
     result
 }
@@ -414,27 +652,24 @@ fn analyze_statements(
     hirs: &BTreeMap<FunctionId, FunctionHIR>,
     by_name: &BTreeMap<(&str, usize), Vec<&FunctionMeta>>,
     capacities: &BTreeMap<String, i32>,
-    env: &BTreeMap<String, Option<String>>,
+    env: &BTreeMap<String, IdentitySet>,
     all_images: &BTreeSet<String>,
     stack: &mut BTreeSet<FunctionId>,
     causes: &mut BTreeMap<String, String>,
-) -> BTreeMap<String, Bound> {
-    let mut out = BTreeMap::new();
+) -> FlowSummary {
+    let mut out = FlowSummary::empty();
     for statement in statements {
-        match statement {
+        let statement_flow = match statement {
             SimpleStmt::If {
                 condition,
                 then_statements,
                 else_statements,
                 ..
             } => {
-                visit_condition_exprs(condition, &mut |target, args| {
-                    analyze_call(
-                        target, args, &mut out, hirs, by_name, capacities, env, all_images, stack,
-                        causes,
-                    )
-                });
-                let then_counts = analyze_statements(
+                let condition_flow = analyze_condition_calls(
+                    condition, hirs, by_name, capacities, env, all_images, stack, causes,
+                );
+                let then_flow = analyze_statements(
                     then_statements,
                     hirs,
                     by_name,
@@ -444,14 +679,15 @@ fn analyze_statements(
                     stack,
                     causes,
                 );
-                let else_counts = else_statements
-                    .as_deref()
-                    .map_or_else(BTreeMap::new, |body| {
-                        analyze_statements(
-                            body, hirs, by_name, capacities, env, all_images, stack, causes,
-                        )
-                    });
-                add_counts(&mut out, branch_counts(then_counts, else_counts));
+                let else_flow =
+                    else_statements
+                        .as_deref()
+                        .map_or_else(FlowSummary::empty, |body| {
+                            analyze_statements(
+                                body, hirs, by_name, capacities, env, all_images, stack, causes,
+                            )
+                        });
+                condition_flow.sequential(then_flow.branch(else_flow))
             }
             SimpleStmt::For {
                 init,
@@ -459,52 +695,15 @@ fn analyze_statements(
                 step,
                 body_statements,
             } => {
-                let mut init_counts = BTreeMap::new();
-                visit_stmt_exprs(init, &mut |target, args| {
-                    analyze_call(
-                        target,
-                        args,
-                        &mut init_counts,
-                        hirs,
-                        by_name,
-                        capacities,
-                        env,
-                        all_images,
-                        stack,
-                        causes,
-                    )
-                });
-                add_counts(&mut out, init_counts);
-                let mut condition_counts = BTreeMap::new();
-                visit_condition_exprs(condition, &mut |target, args| {
-                    analyze_call(
-                        target,
-                        args,
-                        &mut condition_counts,
-                        hirs,
-                        by_name,
-                        capacities,
-                        env,
-                        all_images,
-                        stack,
-                        causes,
-                    )
-                });
-                let mut step_counts = BTreeMap::new();
-                visit_stmt_exprs(step, &mut |target, args| {
-                    analyze_call(
-                        target,
-                        args,
-                        &mut step_counts,
-                        hirs,
-                        by_name,
-                        capacities,
-                        env,
-                        all_images,
-                        stack,
-                        causes,
-                    )
-                });
+                let init_flow = analyze_statement_calls(
+                    init, hirs, by_name, capacities, env, all_images, stack, causes,
+                );
+                let condition_flow = analyze_condition_calls(
+                    condition, hirs, by_name, capacities, env, all_images, stack, causes,
+                );
+                let step_flow = analyze_statement_calls(
+                    step, hirs, by_name, capacities, env, all_images, stack, causes,
+                );
                 let body = analyze_statements(
                     body_statements,
                     hirs,
@@ -517,39 +716,32 @@ fn analyze_statements(
                 );
                 match fixed_for_iterations(init, condition, step) {
                     LoopBound::Finite(iterations) => {
-                        add_counts(&mut out, multiply_counts(body, iterations));
-                        add_counts(&mut out, multiply_counts(step_counts, iterations));
-                        match iterations.checked_add(1) {
-                            Some(executions) => {
-                                add_counts(&mut out, multiply_counts(condition_counts, executions))
-                            }
-                            None => mark_unknown(
-                                &mut out,
-                                condition_counts,
-                                causes,
-                                "for-loop condition execution count overflow",
-                            ),
-                        }
+                        let iteration = condition_flow
+                            .clone()
+                            .sequential(body)
+                            .sequential(step_flow)
+                            .repeat(iterations);
+                        init_flow.sequential(iteration).sequential(condition_flow)
                     }
                     LoopBound::Dynamic => {
-                        add_counts(&mut condition_counts, step_counts);
-                        add_counts(&mut condition_counts, body);
-                        mark_unknown(
-                            &mut out,
-                            condition_counts,
-                            causes,
-                            "unbounded or dynamic for loop",
-                        );
+                        let mut unknown = init_flow
+                            .sequential(condition_flow)
+                            .sequential(body)
+                            .sequential(step_flow);
+                        unknown.poison_all(all_images, causes, "unbounded or dynamic for loop");
+                        unknown
                     }
                     LoopBound::Overflow => {
-                        add_counts(&mut condition_counts, step_counts);
-                        add_counts(&mut condition_counts, body);
-                        mark_unknown(
-                            &mut out,
-                            condition_counts,
+                        let mut unknown = init_flow
+                            .sequential(condition_flow)
+                            .sequential(body)
+                            .sequential(step_flow);
+                        unknown.poison_all(
+                            all_images,
                             causes,
                             "for-loop bound arithmetic overflow",
                         );
+                        unknown
                     }
                 }
             }
@@ -572,18 +764,60 @@ fn analyze_statements(
                     .get(collection_path)
                     .and_then(|v| u64::try_from(*v).ok())
                 {
-                    Some(capacity) => add_counts(&mut out, multiply_counts(body, capacity)),
-                    None => mark_unknown(&mut out, body, causes, "unknown collection capacity"),
+                    Some(capacity) => body.repeat(capacity),
+                    None => {
+                        let mut unknown = body;
+                        unknown.poison_all(all_images, causes, "unknown collection capacity");
+                        unknown
+                    }
                 }
             }
-            _ => visit_stmt_exprs(statement, &mut |target, args| {
-                analyze_call(
-                    target, args, &mut out, hirs, by_name, capacities, env, all_images, stack,
-                    causes,
-                )
-            }),
-        }
+            _ => analyze_statement_calls(
+                statement, hirs, by_name, capacities, env, all_images, stack, causes,
+            ),
+        };
+        out = out.sequential(statement_flow);
     }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_statement_calls(
+    statement: &SimpleStmt,
+    hirs: &BTreeMap<FunctionId, FunctionHIR>,
+    by_name: &BTreeMap<(&str, usize), Vec<&FunctionMeta>>,
+    capacities: &BTreeMap<String, i32>,
+    env: &BTreeMap<String, IdentitySet>,
+    all_images: &BTreeSet<String>,
+    stack: &mut BTreeSet<FunctionId>,
+    causes: &mut BTreeMap<String, String>,
+) -> FlowSummary {
+    let mut out = FlowSummary::empty();
+    visit_stmt_exprs(statement, &mut |target, args| {
+        out = std::mem::replace(&mut out, FlowSummary::empty()).sequential(analyze_call(
+            target, args, hirs, by_name, capacities, env, all_images, stack, causes,
+        ));
+    });
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_condition_calls(
+    condition: &crate::ir::hir::SimpleCondition,
+    hirs: &BTreeMap<FunctionId, FunctionHIR>,
+    by_name: &BTreeMap<(&str, usize), Vec<&FunctionMeta>>,
+    capacities: &BTreeMap<String, i32>,
+    env: &BTreeMap<String, IdentitySet>,
+    all_images: &BTreeSet<String>,
+    stack: &mut BTreeSet<FunctionId>,
+    causes: &mut BTreeMap<String, String>,
+) -> FlowSummary {
+    let mut out = FlowSummary::empty();
+    visit_condition_exprs(condition, &mut |target, args| {
+        out = std::mem::replace(&mut out, FlowSummary::empty()).sequential(analyze_call(
+            target, args, hirs, by_name, capacities, env, all_images, stack, causes,
+        ));
+    });
     out
 }
 
@@ -591,61 +825,60 @@ fn analyze_statements(
 fn analyze_call(
     target: &str,
     args: &[SimpleExpr],
-    out: &mut BTreeMap<String, Bound>,
     hirs: &BTreeMap<FunctionId, FunctionHIR>,
     by_name: &BTreeMap<(&str, usize), Vec<&FunctionMeta>>,
     capacities: &BTreeMap<String, i32>,
-    env: &BTreeMap<String, Option<String>>,
+    env: &BTreeMap<String, IdentitySet>,
     all_images: &BTreeSet<String>,
     stack: &mut BTreeSet<FunctionId>,
     causes: &mut BTreeMap<String, String>,
-) {
+) -> FlowSummary {
     let leaf_target = target.rsplit('.').next().unwrap_or(target);
     if matches!(leaf_target, "draw" | "draw_frame" | "draw_frame_scaled") {
-        if let Some(identity) = args.first().and_then(|arg| stable_identity(arg, env)) {
-            add_one(out, identity);
-        } else {
-            poison_all(
-                out,
-                all_images,
-                causes,
-                &format!("dynamic render receiver in call to {leaf_target}"),
-            );
+        if let Some(receiver) = args.first() {
+            if let IdentitySet::Known(identities) = resolve_identities(receiver, env, all_images) {
+                if !identities.is_empty() {
+                    return FlowSummary::draw(identities);
+                }
+            }
         }
-        return;
+        let mut unknown = FlowSummary::empty();
+        unknown.poison_all(
+            all_images,
+            causes,
+            &format!("dynamic render receiver in call to {leaf_target}"),
+        );
+        return unknown;
     }
     let Some(candidates) = by_name.get(&(leaf_target, args.len())) else {
-        return;
+        return FlowSummary::empty();
     };
     if candidates.len() != 1 {
-        poison_all(
-            out,
+        let mut unknown = FlowSummary::empty();
+        unknown.poison_all(
             all_images,
             causes,
             &format!("ambiguous render-reachable call target {leaf_target}"),
         );
-        return;
+        return unknown;
     }
     let callee = candidates[0];
     let callee_env = callee
         .param_names
         .iter()
         .zip(args)
-        .map(|(name, arg)| (name.clone(), stable_identity(arg, env)))
+        .map(|(name, arg)| (name.clone(), resolve_identities(arg, env, all_images)))
         .collect();
-    add_counts(
-        out,
-        analyze_function(
-            callee,
-            hirs,
-            by_name,
-            capacities,
-            &callee_env,
-            all_images,
-            stack,
-            causes,
-        ),
-    );
+    analyze_function(
+        callee,
+        hirs,
+        by_name,
+        capacities,
+        &callee_env,
+        all_images,
+        stack,
+        causes,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -723,77 +956,48 @@ fn stable_identity(expr: &SimpleExpr, env: &BTreeMap<String, Option<String>>) ->
     }
 }
 
-fn add_one(out: &mut BTreeMap<String, Bound>, identity: String) {
-    let next = out
-        .remove(&identity)
-        .unwrap_or(Bound::Finite(0))
-        .add(Bound::Finite(1));
-    out.insert(identity, next);
-}
-
-fn add_counts(out: &mut BTreeMap<String, Bound>, other: BTreeMap<String, Bound>) {
-    for (key, value) in other {
-        let next = out.remove(&key).unwrap_or(Bound::Finite(0)).add(value);
-        out.insert(key, next);
-    }
-}
-
-fn branch_counts(
-    left: BTreeMap<String, Bound>,
-    right: BTreeMap<String, Bound>,
-) -> BTreeMap<String, Bound> {
-    let keys = left
-        .keys()
-        .chain(right.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    keys.into_iter()
-        .map(|key| {
-            let value = left
-                .get(&key)
-                .copied()
-                .unwrap_or(Bound::Finite(0))
-                .branch(right.get(&key).copied().unwrap_or(Bound::Finite(0)));
-            (key, value)
-        })
-        .collect()
-}
-
-fn multiply_counts(counts: BTreeMap<String, Bound>, factor: u64) -> BTreeMap<String, Bound> {
-    counts
-        .into_iter()
-        .map(|(key, value)| (key, value.mul(factor)))
-        .collect()
-}
-
-fn mark_unknown(
-    out: &mut BTreeMap<String, Bound>,
-    body: BTreeMap<String, Bound>,
-    causes: &mut BTreeMap<String, String>,
-    cause: &str,
-) {
-    for key in body.keys() {
-        causes
-            .entry(key.clone())
-            .or_insert_with(|| cause.to_string());
-    }
-    add_counts(
-        out,
-        body.into_keys().map(|key| (key, Bound::Unknown)).collect(),
-    );
-}
-
-fn poison_all(
-    out: &mut BTreeMap<String, Bound>,
+fn resolve_identities(
+    expr: &SimpleExpr,
+    env: &BTreeMap<String, IdentitySet>,
     all_images: &BTreeSet<String>,
-    causes: &mut BTreeMap<String, String>,
-    cause: &str,
-) {
-    for identity in all_images {
-        out.insert(identity.clone(), Bound::Unknown);
-        causes
-            .entry(identity.clone())
-            .or_insert_with(|| cause.to_string());
+) -> IdentitySet {
+    match expr {
+        SimpleExpr::Identifier(path) => env
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| IdentitySet::Known(BTreeSet::from([path.clone()]))),
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if let Some(index) = eval_const_i64(index) {
+                return IdentitySet::Known(BTreeSet::from([if suffix.is_empty() {
+                    format!("{collection_path}[{index}]")
+                } else {
+                    format!("{collection_path}[{index}].{suffix}")
+                }]));
+            }
+            let prefix = format!("{collection_path}[");
+            let suffix_pattern = if suffix.is_empty() {
+                "]".to_string()
+            } else {
+                format!("].{suffix}")
+            };
+            let aliases = all_images
+                .iter()
+                .filter(|identity| {
+                    identity.starts_with(&prefix) && identity.ends_with(&suffix_pattern)
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if aliases.is_empty() {
+                IdentitySet::Unknown
+            } else {
+                IdentitySet::Known(aliases)
+            }
+        }
+        _ => IdentitySet::Unknown,
     }
 }
 
@@ -910,8 +1114,30 @@ mod tests {
     }
 
     #[test]
+    fn ordered_flow_composes_optional_branch_and_loop_edges() {
+        let a = FlowSummary::draw(BTreeSet::from(["a".to_string()]));
+        let optional_b =
+            FlowSummary::draw(BTreeSet::from(["b".to_string()])).branch(FlowSummary::empty());
+        let repeated = a.sequential(optional_b).repeat(4);
+
+        assert_eq!(
+            repeated
+                .transitions
+                .get(&("a".to_string(), "b".to_string())),
+            Some(&Bound::Finite(4))
+        );
+        assert_eq!(
+            repeated
+                .transitions
+                .get(&("b".to_string(), "a".to_string())),
+            Some(&Bound::Finite(3))
+        );
+        assert_eq!(repeated.counts.get("a"), Some(&Bound::Finite(4)));
+        assert_eq!(repeated.counts.get("b"), Some(&Bound::Finite(4)));
+    }
+
+    #[test]
     fn dynamic_draw_receiver_poisons_every_declared_image() {
-        let mut out = BTreeMap::new();
         let hirs = BTreeMap::new();
         let by_name = BTreeMap::new();
         let capacities = BTreeMap::new();
@@ -919,7 +1145,7 @@ mod tests {
         let all_images = BTreeSet::from(["hero".to_string(), "enemy".to_string()]);
         let mut stack = BTreeSet::new();
         let mut causes = BTreeMap::new();
-        analyze_call(
+        let out = analyze_call(
             "draw",
             &[
                 SimpleExpr::Call {
@@ -928,7 +1154,6 @@ mod tests {
                 },
                 SimpleExpr::Int(0),
             ],
-            &mut out,
             &hirs,
             &by_name,
             &capacities,
@@ -937,8 +1162,8 @@ mod tests {
             &mut stack,
             &mut causes,
         );
-        assert_eq!(out.get("hero"), Some(&Bound::Unknown));
-        assert_eq!(out.get("enemy"), Some(&Bound::Unknown));
+        assert_eq!(out.counts.get("hero"), Some(&Bound::Unknown));
+        assert_eq!(out.counts.get("enemy"), Some(&Bound::Unknown));
         assert!(causes
             .values()
             .all(|cause| cause.contains("dynamic render receiver")));
@@ -975,12 +1200,10 @@ mod tests {
         let second = function(2);
         let mut by_name = BTreeMap::new();
         by_name.insert(("paint", 0), vec![&first, &second]);
-        let mut out = BTreeMap::new();
-        let mut causes = BTreeMap::new();
-        analyze_call(
+        let mut causes: BTreeMap<String, String> = BTreeMap::new();
+        let out = analyze_call(
             "paint",
             &[],
-            &mut out,
             &BTreeMap::new(),
             &by_name,
             &BTreeMap::new(),
@@ -989,36 +1212,51 @@ mod tests {
             &mut BTreeSet::new(),
             &mut causes,
         );
-        assert_eq!(out.get("hero"), Some(&Bound::Unknown));
+        assert_eq!(out.counts.get("hero"), Some(&Bound::Unknown));
         assert!(causes["hero"].contains("ambiguous"));
     }
 
     #[test]
-    fn profitability_rejects_cold_single_and_mixed_small_groups() {
+    fn profitability_rejects_cold_single_and_accepts_interleaved_mixed_sizes() {
         let mut records = vec![
             record("cold", 512, 512, Some(1)),
             record("single", 512, 512, Some(20)),
         ];
         records[0].grouping_key = "cold-format".to_string();
         records[1].grouping_key = "hot-format".to_string();
-        apply_profitability_policy(&mut records);
+        apply_profitability_policy(&mut records, &BTreeMap::new());
         assert!(!records[0].atlas_eligible);
         assert!(!records[1].atlas_eligible);
-        assert!(records[1].reason.contains("single hot image"));
+        assert!(records[1].reason.contains("no repeated distinct"));
 
         let mut compatible = vec![
             record("a", 256, 256, Some(5)),
             record("b", 256, 256, Some(5)),
         ];
-        apply_profitability_policy(&mut compatible);
+        let alternating = BTreeMap::from([
+            (("a".to_string(), "b".to_string()), Bound::Finite(5)),
+            (("b".to_string(), "a".to_string()), Bound::Finite(4)),
+        ]);
+        apply_profitability_policy(&mut compatible, &alternating);
         assert!(compatible.iter().all(|image| image.atlas_eligible));
 
         let mut mixed = vec![
             record("a", 256, 256, Some(20)),
             record("b", 512, 256, Some(20)),
         ];
-        apply_profitability_policy(&mut mixed);
-        assert!(mixed.iter().all(|image| !image.atlas_eligible));
+        apply_profitability_policy(&mut mixed, &alternating);
+        assert!(mixed.iter().all(|image| image.atlas_eligible));
+        assert_eq!(mixed[0].grouping_key, mixed[1].grouping_key);
+
+        let mut contiguous = vec![
+            record("a", 256, 256, Some(5)),
+            record("b", 256, 256, Some(5)),
+        ];
+        apply_profitability_policy(
+            &mut contiguous,
+            &BTreeMap::from([(("a".to_string(), "b".to_string()), Bound::Finite(1))]),
+        );
+        assert!(contiguous.iter().all(|image| !image.atlas_eligible));
     }
 
     fn record(
@@ -1039,7 +1277,12 @@ mod tests {
             max_renders_per_render: maximum,
             unknown_cause: None,
             atlas_eligible: false,
-            grouping_key: "rgba8-premul:linear-filter".to_string(),
+            grouping_key: String::new(),
+            estimated_distinct_transitions: 0,
+            group_member_count: 0,
+            group_logical_pixel_area: 0,
+            group_max_logical_width: 0,
+            group_max_logical_height: 0,
             backend_constraints: "rgba8-premultiplied;linear-filter;runtime-page-limits"
                 .to_string(),
             reason: String::new(),

@@ -400,7 +400,7 @@ fn canonical_layout_digest_with_root(
         resolve_preferred_extern_call_signatures,
     )?;
     let function_hirs = compiler
-        .analysis_hirs()
+        .analysis_hirs(&[])
         .map_err(|error| format!("canonical hot-render HIR failed: {error:?}"))?;
     ProgramSnapshot::build(
         revision,
@@ -514,7 +514,7 @@ function render(): void {
         assert!(!hero.atlas_eligible);
         assert_eq!(
             hero.reason,
-            "single hot image does not amortize an atlas page"
+            "no repeated distinct-image render transition benefit"
         );
     }
 
@@ -545,6 +545,99 @@ function render(): void { hero.draw(1.0, 2.0, 255, 0); hero.draw(3.0, 4.0, 255, 
     }
 
     #[test]
+    fn hot_render_dynamic_index_aliases_chess_td_piece_and_enemy_sets() {
+        let mut loads = String::new();
+        for index in 0..6 {
+            loads.push_str(&format!(
+                "pieces[{index}].load_sprite_from(\"assets/piece-{index}.png\", {}, {}); enemies[{index}].load_sprite_from(\"assets/enemy-{index}.png\", {}, {});",
+                32 + index * 2,
+                28 + index * 2,
+                36 + index * 2,
+                30 + index * 2,
+            ));
+        }
+        let source = format!(
+            r#"
+struct Sprite {{ handle: i32; width: i32; height: i32; }}
+global pieces: Sprite[6];
+global enemies: Sprite[6];
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
+function main(): void {{ {loads} }}
+function render(): void {{
+    for (let kind: i32 = 0; kind < 4; kind += 1) {{
+        pieces[kind].draw(0.0, 0.0, 255, 0);
+        enemies[kind].draw(0.0, 0.0, 255, 0);
+    }}
+}}
+"#
+        );
+        let mut aot = AotProcess::new();
+        aot.upsert_file("chess_td.stasis", source);
+        aot.compile().expect("compile ChessTD-shaped alias fixture");
+        let images = aot
+            .program_snapshot()
+            .expect("snapshot")
+            .hot_render_images();
+
+        assert_eq!(images.len(), 12);
+        assert!(images
+            .iter()
+            .all(|image| image.max_renders_per_render == Some(4)));
+        assert!(images.iter().all(|image| image.atlas_eligible));
+        assert!(images[0].group_logical_pixel_area < 65_536);
+        assert_eq!(images[0].group_member_count, 12);
+        assert!(images
+            .iter()
+            .all(|image| image.grouping_key == images[0].grouping_key));
+        assert!(images[0].estimated_distinct_transitions > 2);
+    }
+
+    #[test]
+    fn hot_render_profitability_distinguishes_contiguous_from_interleaved_order() {
+        fn snapshot(draws: &str) -> ProgramSnapshot {
+            let source = format!(
+                r#"
+struct Sprite {{ handle: i32; width: i32; height: i32; }}
+global a: Sprite;
+global b: Sprite;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
+function main(): void {{ a.load_sprite_from("a.png", 256, 256); b.load_sprite_from("b.png", 128, 256); }}
+function render(): void {{ {draws} }}
+"#
+            );
+            let mut aot = AotProcess::new();
+            aot.upsert_file("order.stasis", source);
+            aot.compile().expect("compile ordered render fixture");
+            aot.program_snapshot().expect("snapshot").clone()
+        }
+        let contiguous = snapshot(
+            "a.draw(0.0,0.0,255,0); a.draw(0.0,0.0,255,0); a.draw(0.0,0.0,255,0); a.draw(0.0,0.0,255,0); b.draw(0.0,0.0,255,0); b.draw(0.0,0.0,255,0); b.draw(0.0,0.0,255,0); b.draw(0.0,0.0,255,0);",
+        );
+        assert!(contiguous
+            .hot_render_images()
+            .iter()
+            .all(|image| !image.atlas_eligible));
+
+        let interleaved = snapshot(
+            "a.draw(0.0,0.0,255,0); b.draw(0.0,0.0,255,0); a.draw(0.0,0.0,255,0); b.draw(0.0,0.0,255,0); a.draw(0.0,0.0,255,0); b.draw(0.0,0.0,255,0); a.draw(0.0,0.0,255,0); b.draw(0.0,0.0,255,0);",
+        );
+        assert!(interleaved
+            .hot_render_images()
+            .iter()
+            .all(|image| image.atlas_eligible));
+        assert_ne!(
+            interleaved.hot_render_images()[0].logical_width,
+            interleaved.hot_render_images()[1].logical_width
+        );
+        assert_eq!(
+            interleaved.hot_render_images()[0].grouping_key,
+            interleaved.hot_render_images()[1].grouping_key
+        );
+    }
+
+    #[test]
     fn hot_render_metadata_multiplies_fixed_loops_through_helpers() {
         let snapshot = hot_render_snapshot(
             r#"
@@ -557,7 +650,7 @@ function render(): void {
         );
         let hero = &snapshot.hot_render_images()[0];
         assert_eq!(hero.max_renders_per_render, Some(4));
-        assert_eq!(hero.grouping_key, "rgba8-premul:linear-filter");
+        assert!(hero.grouping_key.is_empty());
     }
 
     #[test]
@@ -672,7 +765,7 @@ function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
         assert_eq!(sheet.sheet_rows, Some(2));
         assert_eq!(sheet.cell_width, Some(32));
         assert_eq!(sheet.cell_height, Some(32));
-        assert!(sheet.grouping_key.ends_with("linear-filter"));
+        assert!(sheet.grouping_key.is_empty());
     }
 
     #[test]
@@ -733,7 +826,7 @@ function render(): void {{ {draws} }}
     fn hot_render_compiler_microbenchmark() {
         use std::time::Instant;
 
-        fn source(draw_count: usize) -> String {
+        fn source(draw_count: usize, interleaved: bool) -> String {
             let globals = (0..8)
                 .map(|index| format!("global sprite{index}: Sprite;"))
                 .collect::<Vec<_>>()
@@ -744,10 +837,16 @@ function render(): void {{ {draws} }}
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let draws = (0..8)
-                .flat_map(|index| {
-                    (0..draw_count).map(move |_| format!("sprite{index}.draw(0.0, 0.0, 255, 0);"))
-                })
+            let order = if interleaved {
+                (0..draw_count).flat_map(|_| 0..8).collect::<Vec<_>>()
+            } else {
+                (0..8)
+                    .flat_map(|index| (0..draw_count).map(move |_| index))
+                    .collect::<Vec<_>>()
+            };
+            let draws = order
+                .into_iter()
+                .map(|index| format!("sprite{index}.draw(0.0, 0.0, 255, 0);"))
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
@@ -783,8 +882,8 @@ function render(): void {{ {draws} }}
             (samples[samples.len() / 2], metadata_bytes)
         }
 
-        let (standalone_us, standalone_bytes) = median_compile_us(&source(1));
-        let (atlas_us, atlas_bytes) = median_compile_us(&source(64));
+        let (standalone_us, standalone_bytes) = median_compile_us(&source(64, false));
+        let (atlas_us, atlas_bytes) = median_compile_us(&source(64, true));
         eprintln!(
             "hot-render benchmark: standalone_compile_us={standalone_us} atlas_compile_us={atlas_us} standalone_metadata_bytes={standalone_bytes} atlas_metadata_bytes={atlas_bytes}"
         );

@@ -130,6 +130,16 @@ struct EngineBundleManifestHotRenderImageRow {
     atlas_eligible: bool,
     grouping_key: String,
     #[serde(default)]
+    estimated_distinct_transitions: u64,
+    #[serde(default)]
+    group_member_count: u32,
+    #[serde(default)]
+    group_logical_pixel_area: u64,
+    #[serde(default)]
+    group_max_logical_width: u32,
+    #[serde(default)]
+    group_max_logical_height: u32,
+    #[serde(default)]
     backend_constraints: Option<String>,
 }
 
@@ -148,7 +158,42 @@ struct EngineBundleManifest {
     hot_render_images: Option<Vec<EngineBundleManifestHotRenderImageRow>>,
 }
 
-pub(crate) fn publish_snapshot_hot_render_metadata(snapshot: &ProgramSnapshot) {
+fn read_engine_bundle_manifest(path: &Path) -> Result<EngineBundleManifest, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read AOT engine bundle manifest {}: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "failed to parse AOT engine bundle manifest {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HotRenderRuntimePolicy {
+    version: u32,
+    images: Vec<stasis_dynload::HotRenderRuntimeImage>,
+}
+
+impl HotRenderRuntimePolicy {
+    #[cfg(test)]
+    pub(crate) fn for_test(images: Vec<stasis_dynload::HotRenderRuntimeImage>) -> Self {
+        Self {
+            version: stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            images,
+        }
+    }
+
+    pub(crate) fn publish(&self) {
+        stasis_dynload::replace_hot_render_metadata(self.version, &self.images);
+    }
+}
+
+pub(crate) fn snapshot_hot_render_policy(snapshot: &ProgramSnapshot) -> HotRenderRuntimePolicy {
     let images = snapshot
         .hot_render_images()
         .iter()
@@ -159,16 +204,21 @@ pub(crate) fn publish_snapshot_hot_render_metadata(snapshot: &ProgramSnapshot) {
             max_renders_per_render: image.max_renders_per_render,
             atlas_eligible: image.atlas_eligible,
             grouping_key: image.grouping_key.clone(),
+            estimated_distinct_transitions: image.estimated_distinct_transitions,
+            group_member_count: image.group_member_count,
+            group_logical_pixel_area: image.group_logical_pixel_area,
+            group_max_logical_width: image.group_max_logical_width,
+            group_max_logical_height: image.group_max_logical_height,
             backend_constraints: image.backend_constraints.clone(),
         })
         .collect::<Vec<_>>();
-    stasis_dynload::replace_hot_render_metadata(
-        stasis_compiler::backend::hot_render::HOT_RENDER_METADATA_VERSION,
-        &images,
-    );
+    HotRenderRuntimePolicy {
+        version: stasis_compiler::backend::hot_render::HOT_RENDER_METADATA_VERSION,
+        images,
+    }
 }
 
-fn publish_manifest_hot_render_metadata(manifest: &EngineBundleManifest) {
+fn manifest_hot_render_policy(manifest: &EngineBundleManifest) -> HotRenderRuntimePolicy {
     let images = manifest
         .hot_render_images
         .as_deref()
@@ -181,13 +231,24 @@ fn publish_manifest_hot_render_metadata(manifest: &EngineBundleManifest) {
             max_renders_per_render: image.max_renders_per_render,
             atlas_eligible: image.atlas_eligible && image.backend_constraints.is_some(),
             grouping_key: image.grouping_key.clone(),
+            estimated_distinct_transitions: image.estimated_distinct_transitions,
+            group_member_count: image.group_member_count,
+            group_logical_pixel_area: image.group_logical_pixel_area,
+            group_max_logical_width: image.group_max_logical_width,
+            group_max_logical_height: image.group_max_logical_height,
             backend_constraints: image.backend_constraints.clone().unwrap_or_default(),
         })
         .collect::<Vec<_>>();
-    stasis_dynload::replace_hot_render_metadata(
-        manifest.hot_render_metadata_version.unwrap_or_default(),
-        &images,
-    );
+    HotRenderRuntimePolicy {
+        version: manifest.hot_render_metadata_version.unwrap_or_default(),
+        images,
+    }
+}
+
+pub(crate) fn load_manifest_hot_render_policy(
+    path: &Path,
+) -> Result<HotRenderRuntimePolicy, String> {
+    read_engine_bundle_manifest(path).map(|manifest| manifest_hot_render_policy(&manifest))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -838,7 +899,6 @@ impl IncrementalCompilerBackend {
                         );
                     }
                 };
-                publish_manifest_hot_render_metadata(&manifest);
                 // Parsed for manifest forward-compatibility, but not used for behavior today.
                 let _ = manifest.optimization_profile.as_deref();
                 if let Some(literals) = manifest.string_literals.as_ref() {
@@ -1207,18 +1267,7 @@ impl IncrementalCompilerBackend {
     }
 
     fn read_engine_bundle_manifest(&self, path: &Path) -> Result<EngineBundleManifest, String> {
-        let text = std::fs::read_to_string(path).map_err(|error| {
-            format!(
-                "failed to read AOT engine bundle manifest {}: {error}",
-                path.display()
-            )
-        })?;
-        serde_json::from_str(&text).map_err(|error| {
-            format!(
-                "failed to parse AOT engine bundle manifest {}: {error}",
-                path.display()
-            )
-        })
+        read_engine_bundle_manifest(path)
     }
 
     fn layout_hash_from_snapshot(&self) -> LayoutHash {
@@ -4045,10 +4094,10 @@ mod tests {
             stasis_dynload::HOT_RENDER_METADATA_VERSION
         );
         let manifest: EngineBundleManifest = serde_json::from_str(
-            r#"{"functions":[],"hot_render_metadata_version":2,"hot_render_images":[{"logical_path":"assets/hero.png","logical_width":32,"logical_height":24,"max_renders_per_render":3,"atlas_eligible":true,"grouping_key":"rgba8-premul:linear-filter","backend_constraints":"desktop-gl"}]}"#,
+            r#"{"functions":[],"hot_render_metadata_version":3,"hot_render_images":[{"logical_path":"assets/hero.png","logical_width":32,"logical_height":24,"max_renders_per_render":3,"atlas_eligible":true,"grouping_key":"batch-v3:test","estimated_distinct_transitions":4,"group_member_count":2,"group_logical_pixel_area":1536,"group_max_logical_width":32,"group_max_logical_height":24,"backend_constraints":"desktop-gl"}]}"#,
         )
         .expect("parse hot-render manifest");
-        assert_eq!(manifest.hot_render_metadata_version, Some(2));
+        assert_eq!(manifest.hot_render_metadata_version, Some(3));
         let image = &manifest.hot_render_images.expect("image rows")[0];
         assert_eq!(image.max_renders_per_render, Some(3));
         assert!(image.atlas_eligible);

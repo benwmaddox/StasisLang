@@ -837,7 +837,7 @@ impl JitProcess {
             .as_ref()
             .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         if snapshot_miss {
-            let function_hirs = self.compiler.analysis_hirs()?;
+            let function_hirs = self.compiler.analysis_hirs(&self.required_emit_roots)?;
             let extern_signatures = collect_supported_extern_call_signatures(
                 self.compiler.files(),
                 &mut analysis_type_table,
