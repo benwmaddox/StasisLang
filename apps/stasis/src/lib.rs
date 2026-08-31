@@ -6243,7 +6243,7 @@ function render(): void {{ {draws} return; }}
             "static const unsigned char pixels[16]",
             "if (!e) e = sprite_fallback_get()",
             "SDL_CreateTexture(",
-            "atlas_alloc(2, 2, \"<fallback>\"",
+            "sprite_upload_standalone(&next, pixels, 2, 2)",
         ] {
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
