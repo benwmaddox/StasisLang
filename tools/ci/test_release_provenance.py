@@ -129,6 +129,62 @@ class ReleaseProvenanceTests(unittest.TestCase):
     def test_macos_retina_plist_is_part_of_release_provenance(self):
         self.assertIn("stasis_runner_macos.plist.in", RUNTIME_FILES)
 
+    def test_canonical_runtime_files_close_over_quoted_local_includes(self):
+        runtime = ROOT / "runtime"
+        canonical_files = set(RUNTIME_FILES)
+        canonical_directories = tuple(pathlib.PurePosixPath(path) for path in RUNTIME_DIRS)
+        source_suffixes = {".c", ".cc", ".cpp", ".h", ".hpp"}
+
+        for source_name in RUNTIME_FILES:
+            source = runtime / source_name
+            if source.suffix not in source_suffixes:
+                continue
+            includes = re.findall(
+                r'^\s*#\s*include\s+"([^"]+)"',
+                source.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            )
+            for include_name in includes:
+                include_path = pathlib.PurePosixPath(include_name.replace("\\", "/"))
+                direct = source.parent / pathlib.Path(*include_path.parts)
+                candidates = [direct] if direct.is_file() else []
+                if not candidates:
+                    for directory in RUNTIME_DIRS:
+                        subtree = runtime / directory
+                        candidates.extend(
+                            path
+                            for path in subtree.rglob(include_path.name)
+                            if pathlib.PurePosixPath(path.relative_to(subtree).as_posix()).as_posix().endswith(
+                                include_path.as_posix()
+                            )
+                        )
+                self.assertTrue(
+                    candidates,
+                    f'{source_name} quoted include "{include_name}" does not resolve inside the release runtime closure',
+                )
+                for candidate in candidates:
+                    relative = pathlib.PurePosixPath(candidate.relative_to(runtime).as_posix())
+                    self.assertTrue(
+                        relative.as_posix() in canonical_files
+                        or any(relative.is_relative_to(directory) for directory in canonical_directories),
+                        f'{source_name} quoted include "{include_name}" resolves to uncatalogued runtime file {relative}',
+                    )
+
+    def test_mobile_runtime_closure_matches_release_provenance(self):
+        toolchain = (ROOT / "apps/stasis/src/toolchain_cli.rs").read_text(encoding="utf-8")
+
+        def rust_string_slice(name):
+            match = re.search(
+                rf"const {name}: &\[&str\]\s*=\s*&\[(.*?)\];",
+                toolchain,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(match, name)
+            return tuple(re.findall(r'"([^"]+)"', match.group(1)))
+
+        self.assertEqual(RUNTIME_FILES, rust_string_slice("MOBILE_RUNTIME_FILES"))
+        self.assertEqual(RUNTIME_DIRS, rust_string_slice("MOBILE_RUNTIME_DIRS"))
+
     def test_release_workflows_assemble_every_provenance_runtime_file(self):
         for workflow_name in (
             ".github/workflows/nightly-release.yml",
@@ -150,17 +206,8 @@ class ReleaseProvenanceTests(unittest.TestCase):
 
             unix_files = {pathlib.Path(path).name for path in unix_matches[0].split()}
             windows_files = set(re.findall(r"'([^']+)'", windows_matches[0]))
-            for filename in RUNTIME_FILES:
-                self.assertIn(
-                    filename,
-                    unix_files,
-                    f"{filename} missing from Unix assembly in {workflow_name}",
-                )
-                self.assertIn(
-                    filename,
-                    windows_files,
-                    f"{filename} missing from Windows assembly in {workflow_name}",
-                )
+            self.assertEqual(set(RUNTIME_FILES), unix_files, workflow_name)
+            self.assertEqual(set(RUNTIME_FILES), windows_files, workflow_name)
             self.assertIn("cp -R runtime/third_party", workflow)
             self.assertIn('Copy-Item "runtime/third_party"', workflow)
 
