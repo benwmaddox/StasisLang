@@ -43,6 +43,7 @@ static _Atomic int audio_paused;
 static _Atomic int audio_focused;
 static _Atomic int audio_attempted;
 static _Atomic int audio_init_error;
+static pthread_mutex_t audio_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t audio_assets_lock = PTHREAD_MUTEX_INITIALIZER;
 static StasisAudioAssetStore audio_assets;
 static char audio_project_root[STASIS_AUDIO_PROJECT_ROOT_SIZE];
@@ -218,7 +219,7 @@ static int audio_should_run(void) {
         atomic_load_explicit(&audio_focused, memory_order_acquire);
 }
 
-static void audio_update_running_state(void) {
+static void audio_update_running_state_internal(int recover_errors) {
     StasisAndroidAudioContext *context = audio_context_acquire();
     aaudio_result_t result;
     int rate;
@@ -226,7 +227,8 @@ static void audio_update_running_state(void) {
     int latency;
     if (context == NULL) return;
     if (audio_should_run()) {
-        if (atomic_load_explicit(&context->error, memory_order_acquire) != 0) {
+        if (recover_errors &&
+            atomic_load_explicit(&context->error, memory_order_acquire) != 0) {
             rate = context->sample_rate;
             channels = context->channels;
             latency = context->target_latency;
@@ -259,6 +261,10 @@ static void audio_update_running_state(void) {
         }
     }
     audio_context_release(context);
+}
+
+static void audio_update_running_state(void) {
+    audio_update_running_state_internal(1);
 }
 
 static void audio_retire_context(StasisAndroidAudioContext *context) {
@@ -298,9 +304,25 @@ static int audio_initialize(
     aaudio_result_t result = AAUDIO_ERROR_INTERNAL;
     int32_t burst;
     uint32_t capacity;
+    StasisAndroidAudioContext *current;
     if (sample_rate < 8000 || sample_rate > 192000 ||
         (channels != 1 && channels != 2) || target_latency_frames <= 0) {
         return 0;
+    }
+    pthread_mutex_lock(&audio_lifecycle_lock);
+    if (!reset_assets) {
+        if (!atomic_load_explicit(&audio_attempted, memory_order_acquire)) {
+            pthread_mutex_unlock(&audio_lifecycle_lock);
+            return 0;
+        }
+        current = audio_context_acquire();
+        if (current != NULL &&
+            atomic_load_explicit(&current->error, memory_order_acquire) == 0) {
+            audio_context_release(current);
+            pthread_mutex_unlock(&audio_lifecycle_lock);
+            return 1;
+        }
+        if (current != NULL) audio_context_release(current);
     }
     audio_close_context();
     if (reset_assets) audio_assets_reset(0);
@@ -345,10 +367,12 @@ static int audio_initialize(
     audio_lock_context();
     atomic_store_explicit(&audio_context, context, memory_order_relaxed);
     audio_unlock_context();
-    audio_update_running_state();
+    /* Do not recurse into recovery while the lifecycle lock is held. */
+    audio_update_running_state_internal(0);
     __android_log_print(ANDROID_LOG_INFO, STASIS_AUDIO_LOG_TAG,
         "AAudio opened rate=%d channels=%d capacity_frames=%u",
         context->sample_rate, context->channels, capacity);
+    pthread_mutex_unlock(&audio_lifecycle_lock);
     return 1;
 
 fail:
@@ -361,6 +385,7 @@ fail:
     atomic_store_explicit(&audio_init_error, (int)result, memory_order_release);
     __android_log_print(ANDROID_LOG_ERROR, STASIS_AUDIO_LOG_TAG,
         "AAudio initialization failed: %s", AAudio_convertResultToText(result));
+    pthread_mutex_unlock(&audio_lifecycle_lock);
     return 0;
 }
 
@@ -371,9 +396,11 @@ int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) 
 }
 
 void stasis_audio_shutdown(void) {
+    pthread_mutex_lock(&audio_lifecycle_lock);
     audio_close_context();
     audio_assets_reset(1);
     atomic_store_explicit(&audio_attempted, 0, memory_order_release);
+    pthread_mutex_unlock(&audio_lifecycle_lock);
 }
 
 int stasis_audio_is_available(void) {
