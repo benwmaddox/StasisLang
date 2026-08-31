@@ -13,6 +13,216 @@ use std::time::{Duration, Instant};
 mod dynamic_library;
 pub use dynamic_library::{atomic_rename_no_replace, Library};
 
+pub const HOT_RENDER_METADATA_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotRenderRuntimeImage {
+    pub logical_path: String,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub max_renders_per_render: Option<u64>,
+    pub atlas_eligible: bool,
+    pub grouping_key: String,
+    pub estimated_distinct_transitions: u64,
+    pub group_member_count: u32,
+    pub group_logical_pixel_area: u64,
+    pub group_max_logical_width: u32,
+    pub group_max_logical_height: u32,
+    pub backend_constraints: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HotRenderAtlasPolicy {
+    pub eligible: bool,
+    pub group_id: u64,
+    pub member_count: u32,
+    pub logical_pixel_area: u64,
+    pub max_logical_width: u32,
+    pub max_logical_height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealizedHotRenderImage {
+    pub image: HotRenderRuntimeImage,
+    pub realized_width: u32,
+    pub realized_height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotRenderLoadPlan {
+    pub groups: Vec<(String, Vec<(String, u32, u32)>)>,
+    pub standalone: Vec<(String, u32, u32)>,
+}
+
+fn hot_render_runtime_images() -> &'static RwLock<HashMap<(String, u32, u32), HotRenderRuntimeImage>>
+{
+    static IMAGES: OnceLock<RwLock<HashMap<(String, u32, u32), HotRenderRuntimeImage>>> =
+        OnceLock::new();
+    IMAGES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn normalized_asset_key(path: &str, width: u32, height: u32) -> (String, u32, u32) {
+    (path.replace('\\', "/"), width, height)
+}
+
+/// Atomically replaces the runtime policy table. Unknown contract versions
+/// deliberately publish an empty table, preserving standalone-safe behavior.
+pub fn replace_hot_render_metadata(version: u32, images: &[HotRenderRuntimeImage]) {
+    let mut next = HashMap::new();
+    if version == HOT_RENDER_METADATA_VERSION {
+        for image in images {
+            next.insert(
+                normalized_asset_key(
+                    &image.logical_path,
+                    image.logical_width,
+                    image.logical_height,
+                ),
+                image.clone(),
+            );
+        }
+    }
+    *hot_render_runtime_images()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+}
+
+/// Captures the currently accepted policy for transactional host publication.
+pub fn snapshot_hot_render_metadata() -> Vec<HotRenderRuntimeImage> {
+    let mut images = hot_render_runtime_images()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    images.sort_by(|left, right| {
+        (&left.logical_path, left.logical_width, left.logical_height).cmp(&(
+            &right.logical_path,
+            right.logical_width,
+            right.logical_height,
+        ))
+    });
+    images
+}
+
+/// Missing, stale, unknown, and <=1 records are standalone by default.
+pub fn hot_render_atlas_eligible(path: &str, width: u32, height: u32) -> bool {
+    hot_render_atlas_policy(path, width, height).eligible
+}
+
+fn stable_group_id(key: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+pub fn hot_render_atlas_policy(path: &str, width: u32, height: u32) -> HotRenderAtlasPolicy {
+    hot_render_runtime_images()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&normalized_asset_key(path, width, height))
+        .filter(|image| {
+            image.atlas_eligible
+                && image.max_renders_per_render.is_some_and(|count| count > 1)
+                && image.group_member_count > 1
+                && !image.grouping_key.is_empty()
+        })
+        .map_or_else(HotRenderAtlasPolicy::default, |image| {
+            HotRenderAtlasPolicy {
+                eligible: true,
+                group_id: stable_group_id(&image.grouping_key),
+                member_count: image.group_member_count,
+                logical_pixel_area: image.group_logical_pixel_area,
+                max_logical_width: image.group_max_logical_width,
+                max_logical_height: image.group_max_logical_height,
+            }
+        })
+}
+
+/// Deterministic candidate grouping from compiler metadata. Render backends
+/// must refine this with realized dimensions before allocating pages.
+pub fn plan_hot_render_groups(
+    images: &[HotRenderRuntimeImage],
+) -> Vec<(String, Vec<(String, u32, u32)>)> {
+    let mut groups = std::collections::BTreeMap::<String, Vec<(String, u32, u32)>>::new();
+    for image in images.iter().filter(|image| {
+        image.atlas_eligible && image.max_renders_per_render.is_some_and(|count| count > 1)
+    }) {
+        let compatible_key = format!("{}:{}", image.grouping_key, image.backend_constraints);
+        groups
+            .entry(compatible_key)
+            .or_default()
+            .push(normalized_asset_key(
+                &image.logical_path,
+                image.logical_width,
+                image.logical_height,
+            ));
+    }
+    for entries in groups.values_mut() {
+        entries.sort();
+        entries.dedup();
+    }
+    groups.into_iter().collect()
+}
+
+/// Plans with device-realized raster extents. Logical dimensions in compiler
+/// metadata never stand in for decoded/device-scaled dimensions here.
+pub fn plan_realized_hot_render_loads(
+    images: &[RealizedHotRenderImage],
+    page_width: u32,
+    page_height: u32,
+    max_texture_extent: u32,
+) -> HotRenderLoadPlan {
+    let mut groups = std::collections::BTreeMap::<String, Vec<(String, u32, u32)>>::new();
+    let mut standalone = Vec::new();
+    let max_width = page_width.min(max_texture_extent);
+    let max_height = page_height.min(max_texture_extent);
+    for realized in images {
+        let key = normalized_asset_key(
+            &realized.image.logical_path,
+            realized.realized_width,
+            realized.realized_height,
+        );
+        let required_width = realized.realized_width.checked_add(4);
+        let required_height = realized.realized_height.checked_add(4);
+        let fits = realized.realized_width > 0
+            && realized.realized_height > 0
+            && required_width.is_some_and(|width| width <= max_width)
+            && required_height.is_some_and(|height| height <= max_height);
+        if fits
+            && realized.image.atlas_eligible
+            && realized
+                .image
+                .max_renders_per_render
+                .is_some_and(|count| count > 1)
+        {
+            let group = format!(
+                "{}:{}",
+                realized.image.grouping_key, realized.image.backend_constraints
+            );
+            groups.entry(group).or_default().push(key);
+        } else {
+            standalone.push(key);
+        }
+    }
+    for entries in groups.values_mut() {
+        entries.sort();
+        entries.dedup();
+    }
+    standalone.sort();
+    standalone.dedup();
+    HotRenderLoadPlan {
+        groups: groups.into_iter().collect(),
+        standalone,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitHostEntryTargets {
     pub revision: u64,
@@ -1455,6 +1665,8 @@ impl StasisGraphicsApi {
 struct StasisGraphicsAssetsApi {
     _lib: Library,
     stasis_gfx_load_sprite: usize,
+    stasis_gfx_set_next_sprite_atlas_policy_v3: Option<usize>,
+    stasis_asset_request_sprite_with_policy_v3: Option<usize>,
     stasis_asset_request_sprite: Option<usize>,
     stasis_asset_request_audio: Option<usize>,
     stasis_asset_task_poll: Option<usize>,
@@ -1526,6 +1738,12 @@ impl StasisGraphicsAssetsApi {
         verify_graphics_runtime_abi(&lib, path)?;
         Ok(Self {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
+            stasis_gfx_set_next_sprite_atlas_policy_v3: lib
+                .symbol_address("stasis_gfx_set_next_sprite_atlas_policy_v3")
+                .ok(),
+            stasis_asset_request_sprite_with_policy_v3: lib
+                .symbol_address("stasis_asset_request_sprite_with_policy_v3")
+                .ok(),
             stasis_asset_request_sprite: lib.symbol_address("stasis_asset_request_sprite").ok(),
             stasis_asset_request_audio: lib.symbol_address("stasis_asset_request_audio").ok(),
             stasis_asset_task_poll: lib.symbol_address("stasis_asset_task_poll").ok(),
@@ -4668,6 +4886,17 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
             0
         };
     }
+    let atlas_policy = if let Some(path) = jit_text_arg_bytes(path_id) {
+        let path_text = String::from_utf8_lossy(&path);
+        u32::try_from(max_w)
+            .ok()
+            .zip(u32::try_from(max_h).ok())
+            .map_or_else(HotRenderAtlasPolicy::default, |(width, height)| {
+                hot_render_atlas_policy(&path_text, width, height)
+            })
+    } else {
+        HotRenderAtlasPolicy::default()
+    };
     if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
         return (host.load_sprite)(&path, max_w, max_h);
     }
@@ -4682,6 +4911,22 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
             return 0;
         }
     };
+    if let Some(address) = api.stasis_gfx_set_next_sprite_atlas_policy_v3 {
+        #[cfg(windows)]
+        let set_policy: extern "system" fn(i32, u64, u32, u64, u32, u32) =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let set_policy: extern "C" fn(i32, u64, u32, u64, u32, u32) =
+            unsafe { std::mem::transmute(address) };
+        set_policy(
+            i32::from(atlas_policy.eligible),
+            atlas_policy.group_id,
+            atlas_policy.member_count,
+            atlas_policy.logical_pixel_area,
+            atlas_policy.max_logical_width,
+            atlas_policy.max_logical_height,
+        );
+    }
     #[cfg(windows)]
     let callback: extern "system" fn(*const c_char, i32, i32) -> i32 =
         unsafe { std::mem::transmute(api.stasis_gfx_load_sprite) };
@@ -4697,12 +4942,59 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_asset_request_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    let atlas_policy =
+        jit_text_arg_bytes(path_id).map_or_else(HotRenderAtlasPolicy::default, |path| {
+            let path_text = String::from_utf8_lossy(&path);
+            u32::try_from(max_w)
+                .ok()
+                .zip(u32::try_from(max_h).ok())
+                .map_or_else(HotRenderAtlasPolicy::default, |(width, height)| {
+                    hot_render_atlas_policy(&path_text, width, height)
+                })
+        });
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
+    if let Some(address) = api.stasis_asset_request_sprite_with_policy_v3 {
+        #[cfg(windows)]
+        let callback: extern "system" fn(
+            *const c_char,
+            i32,
+            i32,
+            i32,
+            u64,
+            u32,
+            u64,
+            u32,
+            u32,
+        ) -> i32 = unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(
+            *const c_char,
+            i32,
+            i32,
+            i32,
+            u64,
+            u32,
+            u64,
+            u32,
+            u32,
+        ) -> i32 = unsafe { std::mem::transmute(address) };
+        return callback(
+            path.as_ptr(),
+            max_w,
+            max_h,
+            i32::from(atlas_policy.eligible),
+            atlas_policy.group_id,
+            atlas_policy.member_count,
+            atlas_policy.logical_pixel_area,
+            atlas_policy.max_logical_width,
+            atlas_policy.max_logical_height,
+        );
+    }
     let Some(address) = api.stasis_asset_request_sprite else {
         return 0;
     };
@@ -6831,6 +7123,134 @@ fn jit_string_literal_table() -> &'static Mutex<JitStringLiteralMap> {
 mod tests {
     use super::*;
     use std::sync::MutexGuard;
+
+    fn hot_image(path: &str, count: Option<u64>, eligible: bool) -> HotRenderRuntimeImage {
+        HotRenderRuntimeImage {
+            logical_path: path.to_string(),
+            logical_width: 32,
+            logical_height: 24,
+            max_renders_per_render: count,
+            atlas_eligible: eligible,
+            grouping_key: "batch-v3:test".to_string(),
+            estimated_distinct_transitions: 8,
+            group_member_count: 2,
+            group_logical_pixel_area: 131_072,
+            group_max_logical_width: 32,
+            group_max_logical_height: 24,
+            backend_constraints: "desktop-gl".to_string(),
+        }
+    }
+
+    #[test]
+    fn hot_render_policy_falls_back_for_missing_stale_and_cold_metadata() {
+        let _guard = test_lock();
+        replace_hot_render_metadata(
+            HOT_RENDER_METADATA_VERSION,
+            &[
+                hot_image("assets/hot.png", Some(2), true),
+                hot_image("assets/cold.png", Some(1), false),
+                hot_image("assets/unknown.png", None, true),
+            ],
+        );
+        assert!(hot_render_atlas_eligible("assets\\hot.png", 32, 24));
+        let policy = hot_render_atlas_policy("assets/hot.png", 32, 24);
+        assert!(policy.eligible);
+        assert_ne!(policy.group_id, 0);
+        assert_eq!(policy.member_count, 2);
+        assert_eq!(policy.logical_pixel_area, 131_072);
+        assert_eq!(
+            (policy.max_logical_width, policy.max_logical_height),
+            (32, 24)
+        );
+        assert!(!hot_render_atlas_eligible("assets/cold.png", 32, 24));
+        assert!(!hot_render_atlas_eligible("assets/unknown.png", 32, 24));
+        assert!(!hot_render_atlas_eligible("assets/missing.png", 32, 24));
+        assert!(!hot_render_atlas_eligible("assets/hot.png", 33, 24));
+        replace_hot_render_metadata(
+            HOT_RENDER_METADATA_VERSION + 1,
+            &[hot_image("assets/hot.png", Some(2), true)],
+        );
+        assert!(!hot_render_atlas_eligible("assets/hot.png", 32, 24));
+    }
+
+    #[test]
+    fn hot_render_groups_are_deterministic_by_compiler_group_identity() {
+        let images = vec![
+            hot_image("z.png", Some(4), true),
+            hot_image("a.png", Some(2), true),
+            hot_image("cold.png", Some(1), false),
+        ];
+        let groups = plan_hot_render_groups(&images);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1[0].0, "a.png");
+        assert_eq!(groups[0].1[1].0, "z.png");
+    }
+
+    #[test]
+    fn realized_hot_render_planner_allows_mixed_sizes_and_uses_limit_fallback() {
+        let realized = vec![
+            RealizedHotRenderImage {
+                image: hot_image("b-2k.png", Some(8), true),
+                realized_width: 2048,
+                realized_height: 2048,
+            },
+            RealizedHotRenderImage {
+                image: hot_image("a-2k.png", Some(8), true),
+                realized_width: 2048,
+                realized_height: 2048,
+            },
+            RealizedHotRenderImage {
+                image: hot_image("4k.png", Some(8), true),
+                realized_width: 4096,
+                realized_height: 4096,
+            },
+        ];
+
+        let plan_8k = plan_realized_hot_render_loads(&realized, 8192, 8192, 8192);
+        assert_eq!(plan_8k.groups.len(), 1);
+        assert!(plan_8k.standalone.is_empty());
+        assert_eq!(plan_8k.groups[0].1[0].0, "4k.png");
+        assert_eq!(plan_8k.groups[0].1[1].0, "a-2k.png");
+        assert_eq!(plan_8k.groups[0].1[2].0, "b-2k.png");
+
+        let plan_4k = plan_realized_hot_render_loads(&realized, 4096, 4096, 4096);
+        assert_eq!(plan_4k.groups.len(), 1);
+        assert_eq!(plan_4k.standalone, vec![("4k.png".to_string(), 4096, 4096)]);
+
+        let plan_2k = plan_realized_hot_render_loads(&realized, 2048, 2048, 2048);
+        assert!(plan_2k.groups.is_empty());
+        assert_eq!(plan_2k.standalone.len(), 3);
+    }
+
+    #[test]
+    #[ignore = "representative timing report; run explicitly with --ignored"]
+    fn hot_render_planner_microbenchmark() {
+        let realized = (0..8)
+            .map(|index| RealizedHotRenderImage {
+                image: hot_image(&format!("sprite{index}.png"), Some(64), true),
+                realized_width: 512,
+                realized_height: 512,
+            })
+            .collect::<Vec<_>>();
+        let iterations = 10_000_u128;
+        let start = std::time::Instant::now();
+        let mut last = None;
+        for _ in 0..iterations {
+            last = Some(plan_realized_hot_render_loads(&realized, 2048, 2048, 4096));
+        }
+        let elapsed_ns = start.elapsed().as_nanos();
+        let plan = last.expect("load plan");
+        let standalone_bytes = 8_u64 * 512 * 512 * 4;
+        let atlas_bytes = 2048_u64 * 2048 * 4;
+        let live_bytes = standalone_bytes;
+        eprintln!(
+            "hot-render planner benchmark: iterations={iterations} mean_ns={} standalone_bytes={standalone_bytes} atlas_bytes={atlas_bytes} occupancy_percent={} standalone_binds=512 atlas_binds=1",
+            elapsed_ns / iterations,
+            live_bytes * 100 / atlas_bytes
+        );
+        assert_eq!(plan.groups.len(), 1);
+        assert!(plan.standalone.is_empty());
+    }
 
     #[test]
     fn recording_clock_uses_frame_index_without_accumulated_rounding() {

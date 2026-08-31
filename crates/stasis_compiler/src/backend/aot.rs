@@ -5,6 +5,7 @@ use crate::backend::compile_analysis::{
     NamedStructFieldTypeMap,
 };
 use crate::backend::emit::*;
+use crate::backend::hot_render::HotRenderImageMetadata;
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::state_layout::{is_named_scalar_state_path, StateLayout};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
@@ -201,6 +202,7 @@ impl AotProcess {
             .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         let mut force_reemit_reachable = false;
         if snapshot_miss {
+            let function_hirs = self.compiler.analysis_hirs(&self.required_emit_roots)?;
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
@@ -222,6 +224,7 @@ impl AotProcess {
                     &analysis_type_table,
                     self.compiler.data_flow_summaries_shared(),
                     &self.required_emit_roots,
+                    &function_hirs,
                     next_cache,
                 )
                 .map_err(crate::compiler::CompileError::Backend)?,
@@ -919,6 +922,9 @@ impl AotProcess {
             &manifest_rows,
             &self.string_literals,
             &self.collection_max_lengths,
+            self.program_snapshot
+                .as_ref()
+                .map_or(&[], |snapshot| snapshot.hot_render_images()),
         );
         fs::write(&manifest_path, manifest).map_err(|error| {
             format!(
@@ -1534,6 +1540,7 @@ fn build_engine_bundle_manifest(
     rows: &[(FunctionId, String, String, String, String, u16)],
     string_literals: &BTreeMap<i32, String>,
     collection_max_lengths: &BTreeMap<String, i32>,
+    hot_render_images: &[HotRenderImageMetadata],
 ) -> String {
     let mut out = String::new();
     out.push_str("{\n");
@@ -1599,7 +1606,17 @@ fn build_engine_bundle_manifest(
             comma
         ));
     }
-    out.push_str("  ]\n");
+    out.push_str("  ],\n");
+    out.push_str(&format!(
+        "  \"hot_render_metadata_version\": {},\n",
+        crate::backend::hot_render::HOT_RENDER_METADATA_VERSION
+    ));
+    out.push_str("  \"hot_render_images\": ");
+    out.push_str(
+        &serde_json::to_string(hot_render_images)
+            .expect("hot-render metadata contains only serializable compiler values"),
+    );
+    out.push('\n');
     out.push_str("}\n");
     out
 }
@@ -3490,6 +3507,49 @@ function end_frame(): void { return; }
             manifest.contains("\"path\":\"values\"") && manifest.contains("\"max_length\":12"),
             "manifest should include seeded max_length row"
         );
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_manifest_includes_hot_render_policy_without_pixels() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            r#"struct Sprite { handle: i32; width: i32; height: i32; }
+global hero: Sprite;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void { return; }
+function main(): void { hero.load_sprite_from("assets/hero.png", 32, 24); }
+function tick(): void { return; }
+function render(): void { hero.draw(0.0, 0.0, 255, 0); hero.draw(1.0, 1.0, 255, 0); }
+function on_code_swap(): void { return; }
+"#,
+        );
+        process.compile().expect("compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_hot_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write bundle");
+        let manifest = fs::read_to_string(&bundle.manifest_path).expect("read manifest");
+        let json: serde_json::Value = serde_json::from_str(&manifest).expect("valid manifest JSON");
+        assert_eq!(
+            json["hot_render_metadata_version"],
+            crate::backend::hot_render::HOT_RENDER_METADATA_VERSION
+        );
+        assert_eq!(
+            json["hot_render_images"][0]["logical_path"],
+            "assets/hero.png"
+        );
+        assert_eq!(json["hot_render_images"][0]["max_renders_per_render"], 2);
+        assert_eq!(json["hot_render_images"][0]["atlas_eligible"], false);
+        assert_eq!(json["hot_render_images"][0]["grouping_key"], "");
+        assert!(json.get("atlas_pixels").is_none());
 
         let _ = fs::remove_dir_all(&bundle_dir);
     }

@@ -201,6 +201,7 @@ impl WasmProcess {
             self.debug_symbols,
         )
         .map_err(CompileError::Backend)?;
+        let function_hirs = self.compiler.analysis_hirs(&self.required_roots)?;
         self.program_snapshot = Some(
             ProgramSnapshot::build(
                 source_revision,
@@ -210,6 +211,7 @@ impl WasmProcess {
                 &types,
                 self.compiler.data_flow_summaries_shared(),
                 &self.required_roots,
+                &function_hirs,
                 analysis,
             )
             .map_err(CompileError::Backend)?,

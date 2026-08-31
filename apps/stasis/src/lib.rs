@@ -521,6 +521,20 @@ struct PendingAotCompileMetadata {
     linked_image_path: Option<PathBuf>,
     linked_image_size_bytes: Option<u64>,
     function_symbols: Option<Vec<AotFunctionSymbol>>,
+    hot_render_policy: Option<crate::compiler_backend::HotRenderRuntimePolicy>,
+}
+
+fn publish_committed_aot_hot_render_policy(
+    target_mode: TargetMode,
+    status: &SwapCommitStatus,
+    metadata: Option<&PendingAotCompileMetadata>,
+) {
+    if target_mode != TargetMode::AotProd || *status != SwapCommitStatus::Success {
+        return;
+    }
+    if let Some(policy) = metadata.and_then(|metadata| metadata.hot_render_policy.as_ref()) {
+        policy.publish();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2644,6 +2658,7 @@ fn run_play_in_process_inner(
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
+    publish_jit_hot_render_policy(&jit)?;
     if let Some(function) = capture
         .as_ref()
         .and_then(|capture| capture.before_tick_function.as_deref())
@@ -3186,24 +3201,53 @@ struct PlayHostEntryPublication {
     candidate: stasis_dynload::JitHostEntryTargets,
 }
 
+fn publish_jit_hot_render_policy(jit: &JitProcess) -> Result<(), String> {
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "accepted JIT program is missing hot-render metadata".to_string())?;
+    crate::compiler_backend::snapshot_hot_render_policy(snapshot).publish();
+    Ok(())
+}
+
+struct StagedPlayHostPublication {
+    previous_targets: Option<stasis_dynload::JitHostEntryTargets>,
+    previous_hot_render_images: Vec<stasis_dynload::HotRenderRuntimeImage>,
+    candidate_hot_render_policy: crate::compiler_backend::HotRenderRuntimePolicy,
+}
+
 impl DevelopmentSwapHost for PlayHostEntryPublication {
-    type Staged = Option<stasis_dynload::JitHostEntryTargets>;
+    type Staged = StagedPlayHostPublication;
 
     fn stage(
         &mut self,
-        _candidate: &JitProcess,
+        candidate: &JitProcess,
         _descriptor: &DevelopmentSwapDescriptor,
     ) -> Result<Self::Staged, String> {
         stasis_dynload::validate_jit_host_entry_targets(&self.candidate)?;
-        Ok(stasis_dynload::jit_host_entry_targets())
+        let snapshot = candidate
+            .program_snapshot()
+            .ok_or_else(|| "candidate is missing hot-render metadata".to_string())?;
+        Ok(StagedPlayHostPublication {
+            previous_targets: stasis_dynload::jit_host_entry_targets(),
+            previous_hot_render_images: stasis_dynload::snapshot_hot_render_metadata(),
+            candidate_hot_render_policy: crate::compiler_backend::snapshot_hot_render_policy(
+                snapshot,
+            ),
+        })
     }
 
-    fn publish(&mut self, _staged: &mut Self::Staged) -> Result<(), String> {
-        stasis_dynload::publish_jit_host_entry_targets(self.candidate)
+    fn publish(&mut self, staged: &mut Self::Staged) -> Result<(), String> {
+        stasis_dynload::publish_jit_host_entry_targets(self.candidate)?;
+        staged.candidate_hot_render_policy.publish();
+        Ok(())
     }
 
     fn restore(&mut self, staged: Self::Staged) -> Result<(), String> {
-        if let Some(previous) = staged {
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &staged.previous_hot_render_images,
+        );
+        if let Some(previous) = staged.previous_targets {
             stasis_dynload::begin_jit_host_entry_session(previous)?;
         }
         Ok(())
@@ -3843,6 +3887,11 @@ fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
         if let Some((request_id, status)) = new_commit {
             let aot_metadata = pending_aot_metadata.remove(&request_id);
             pending_jit_code_ptr_overrides.remove(&request_id);
+            publish_committed_aot_hot_render_policy(
+                config.target_mode,
+                &status,
+                aot_metadata.as_ref(),
+            );
             if status == SwapCommitStatus::Success {
                 swap_indicator_armed_count += 1;
                 swap_flash_ticks_remaining = SWAP_FLASH_TICKS_MAX;
@@ -3978,6 +4027,11 @@ fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
         if let Some((request_id, status)) = new_commit {
             let aot_metadata = pending_aot_metadata.remove(&request_id);
             pending_jit_code_ptr_overrides.remove(&request_id);
+            publish_committed_aot_hot_render_policy(
+                config.target_mode,
+                &status,
+                aot_metadata.as_ref(),
+            );
             if status == SwapCommitStatus::Success {
                 swap_indicator_armed_count += 1;
                 swap_flash_ticks_remaining = SWAP_FLASH_TICKS_MAX;
@@ -4093,6 +4147,9 @@ fn capture_pending_aot_compile_metadata(
             linked_image_path: result.aot_linked_image_path.clone(),
             linked_image_size_bytes: result.aot_linked_image_size_bytes,
             function_symbols: result.aot_function_symbols.clone(),
+            hot_render_policy: result.aot_linked_image_path.as_deref().and_then(|path| {
+                crate::compiler_backend::load_manifest_hot_render_policy(path).ok()
+            }),
         });
 }
 
@@ -4188,14 +4245,33 @@ fn apply_prepared_jit_transaction(
     let mut preview =
         plan_state_migration(&active_layout, &incoming_layout, Vec::new(), false, None)?;
     finalize_runtime_preview(&candidate, &mut preview);
+    let previous_hot_render_images = stasis_dynload::snapshot_hot_render_metadata();
+    let candidate_hot_render_policy = candidate
+        .program_snapshot()
+        .map(crate::compiler_backend::snapshot_hot_render_policy);
     let result = activate_candidate_transactionally(
         active.as_ref(),
         &candidate,
         &preview,
         hook_may_mutate_state,
-        apply,
+        || {
+            if let Some(policy) = candidate_hot_render_policy.as_ref() {
+                policy.publish();
+            }
+            apply()
+        },
         |result| result.status == SwapCommitStatus::Success,
-    )?;
+    );
+    if !matches!(
+        result.as_ref(),
+        Ok(result) if result.status == SwapCommitStatus::Success
+    ) {
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &previous_hot_render_images,
+        );
+    }
+    let result = result?;
     if result.status == SwapCommitStatus::Success {
         *active = Some(candidate);
     }
@@ -4955,6 +5031,149 @@ mod tests {
     fn jit_global_table_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn hot_render_test_image(path: &str) -> stasis_dynload::HotRenderRuntimeImage {
+        stasis_dynload::HotRenderRuntimeImage {
+            logical_path: path.to_string(),
+            logical_width: 256,
+            logical_height: 256,
+            max_renders_per_render: Some(8),
+            atlas_eligible: true,
+            grouping_key: "batch-v3:test".to_string(),
+            estimated_distinct_transitions: 8,
+            group_member_count: 2,
+            group_logical_pixel_area: 131_072,
+            group_max_logical_width: 256,
+            group_max_logical_height: 256,
+            backend_constraints: "rgba8-premultiplied;linear-filter;runtime-page-limits"
+                .to_string(),
+        }
+    }
+
+    fn hot_render_test_jit(path_a: &str, path_b: &str) -> JitProcess {
+        let draws =
+            "sprites.a.draw(0.0, 0.0, 255, 0); sprites.b.draw(0.0, 0.0, 255, 0); ".repeat(8);
+        let source = format!(
+            r#"
+struct Sprite {{ handle: i32; width: i32; height: i32; }}
+global sprites {{ a: Sprite; b: Sprite; }}
+function load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool {{ return true; }}
+function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {{ return; }}
+function main(): i32 {{ sprites.a.load_sprite_from("{path_a}", 256, 256); sprites.b.load_sprite_from("{path_b}", 256, 256); return 0; }}
+function render(): void {{ {draws} return; }}
+"#
+        );
+        let mut jit = JitProcess::new();
+        jit.upsert_file("hot_render_policy.stasis", source);
+        jit.compile().expect("compile hot-render policy fixture");
+        jit
+    }
+
+    #[test]
+    fn initial_jit_policy_is_published_before_guest_startup() {
+        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &[],
+        );
+        let jit = hot_render_test_jit("assets/initial-a.png", "assets/initial-b.png");
+
+        publish_jit_hot_render_policy(&jit).expect("publish accepted initial policy");
+
+        assert!(stasis_dynload::hot_render_atlas_eligible(
+            "assets/initial-a.png",
+            256,
+            256
+        ));
+    }
+
+    #[test]
+    fn prepared_jit_hook_observes_candidate_policy_and_rejection_restores_previous() {
+        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        let previous = vec![hot_render_test_image("assets/previous.png")];
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &previous,
+        );
+        let candidate = hot_render_test_jit("assets/candidate-a.png", "assets/candidate-b.png");
+        let mut active = None;
+
+        let result = apply_prepared_jit_transaction(
+            RequestId(91),
+            Some(candidate),
+            &mut active,
+            false,
+            || {
+                assert!(stasis_dynload::hot_render_atlas_eligible(
+                    "assets/candidate-a.png",
+                    256,
+                    256
+                ));
+                SwapCommitResult::failed(RequestId(91), "reject candidate")
+            },
+        )
+        .expect("transaction returns coordinator rejection");
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert!(stasis_dynload::hot_render_atlas_eligible(
+            "assets/previous.png",
+            256,
+            256
+        ));
+        assert!(!stasis_dynload::hot_render_atlas_eligible(
+            "assets/candidate-a.png",
+            256,
+            256
+        ));
+    }
+
+    #[test]
+    fn aot_hot_render_policy_publishes_only_for_successful_commit() {
+        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        let previous = vec![hot_render_test_image("assets/aot-previous.png")];
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &previous,
+        );
+        let metadata = PendingAotCompileMetadata {
+            hot_render_policy: Some(crate::compiler_backend::HotRenderRuntimePolicy::for_test(
+                vec![hot_render_test_image("assets/aot-candidate.png")],
+            )),
+            ..PendingAotCompileMetadata::default()
+        };
+
+        publish_committed_aot_hot_render_policy(
+            TargetMode::AotProd,
+            &SwapCommitStatus::Failed,
+            Some(&metadata),
+        );
+        assert!(stasis_dynload::hot_render_atlas_eligible(
+            "assets/aot-previous.png",
+            256,
+            256
+        ));
+        assert!(!stasis_dynload::hot_render_atlas_eligible(
+            "assets/aot-candidate.png",
+            256,
+            256
+        ));
+
+        publish_committed_aot_hot_render_policy(
+            TargetMode::AotProd,
+            &SwapCommitStatus::Success,
+            Some(&metadata),
+        );
+        assert!(stasis_dynload::hot_render_atlas_eligible(
+            "assets/aot-candidate.png",
+            256,
+            256
+        ));
+        assert!(!stasis_dynload::hot_render_atlas_eligible(
+            "assets/aot-previous.png",
+            256,
+            256
+        ));
     }
 
     static REJECTING_HOOK_PATH_HASH: std::sync::atomic::AtomicI32 =
@@ -5912,6 +6131,53 @@ mod tests {
     }
 
     #[test]
+    fn sprite_runtime_uses_hot_render_policy_with_standalone_fallback() {
+        for required in [
+            "stasis_gfx_set_next_sprite_atlas_policy_v3",
+            "stasis_asset_request_sprite_with_policy_v3",
+            "task->atlas_policy",
+            "if (!e->atlas_policy.eligible)",
+            "sprite_upload_standalone(e, pixels, w, h)",
+            "g_sprite_batch_texture != texture",
+            "stasis_sprite_atlas_realized_group_compatible",
+            "stasis_sprite_atlas_page_size_v3",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "runtime hot-render policy should contain {required}"
+            );
+        }
+        let atlas_failure = STASIS_GRAPHICS_SOURCE
+            .find("if (!atlas_alloc(")
+            .expect("atlas allocation failure branch");
+        assert!(
+            STASIS_GRAPHICS_SOURCE[atlas_failure..]
+                .contains("sprite_upload_standalone(e, pixels, w, h)"),
+            "atlas overflow must fall back to a standalone texture"
+        );
+        let upload_failure = STASIS_GRAPHICS_SOURCE
+            .find("if (!atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels))")
+            .expect("atlas upload failure branch");
+        assert!(
+            STASIS_GRAPHICS_SOURCE[upload_failure..]
+                .contains("sprite_upload_standalone(e, pixels, w, h)"),
+            "atlas upload failure must fall back to a standalone texture"
+        );
+    }
+
+    #[test]
+    fn sprite_runtime_reuses_cached_entry_when_atlas_policy_changes() {
+        let lookup = STASIS_GRAPHICS_SOURCE
+            .find("const StasisSpriteAtlasPolicyV3 previous_atlas_policy = cached->atlas_policy;")
+            .expect("cached policy migration");
+        let tail = &STASIS_GRAPHICS_SOURCE[lookup..];
+        assert!(tail.contains("cached->atlas_policy = atlas_policy;"));
+        assert!(tail.contains("cached->needs_reraster = 1;"));
+        assert!(tail.contains("cached->atlas_policy = previous_atlas_policy;"));
+        assert!(tail.contains("cached->ref_count++;"));
+    }
+
+    #[test]
     fn sprite_runtime_bounds_decode_inputs_before_allocating_pixels() {
         for required in [
             "STASIS_GFX_MAX_SPRITE_DIMENSION",
@@ -5977,7 +6243,7 @@ mod tests {
             "static const unsigned char pixels[16]",
             "if (!e) e = sprite_fallback_get()",
             "SDL_CreateTexture(",
-            "atlas_alloc(2, 2, \"<fallback>\"",
+            "sprite_upload_standalone(&next, pixels, 2, 2)",
         ] {
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
@@ -8115,6 +8381,7 @@ mod tests {
                 linked_image_path: Some(linked_image.clone()),
                 linked_image_size_bytes: compiled.aot_linked_image_size_bytes,
                 function_symbols: Some(symbols),
+                hot_render_policy: None,
             },
         );
         let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =

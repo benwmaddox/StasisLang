@@ -81,7 +81,11 @@ EXPORTS
     stasis_test_get_sprite_state
     stasis_gfx_notify_file_changed
     stasis_gfx_load_sprite
+    stasis_gfx_set_next_sprite_atlas_eligible
+    stasis_gfx_set_next_sprite_atlas_policy_v3
     stasis_asset_request_sprite
+    stasis_asset_request_sprite_with_policy
+    stasis_asset_request_sprite_with_policy_v3
     stasis_asset_request_audio
     stasis_asset_task_poll
     stasis_asset_task_take_handle
