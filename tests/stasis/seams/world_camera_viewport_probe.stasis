@@ -22,7 +22,12 @@ function world_camera_viewport_probe(): i32 {
     if (probe_history.interpolated_x(0.5) != 310.0 || probe_history.interpolated_y(0.5) != 420.0) {
         return 3;
     }
-    if (probe_tiles.count <= 0 || probe_tiles.count > WORLD_CAMERA_MAX_RESIDENT_TILES) {
+    if (
+        probe_tiles.status != 0
+        || probe_tiles.effective_tile_world_size != 64.0
+        || probe_tiles.count <= 0
+        || probe_tiles.count > WORLD_CAMERA_MAX_RESIDENT_TILES
+    ) {
         return 4;
     }
     if (gfx_cmd_clip_count() != 1 || gfx_cmd_order_count() != 2) {

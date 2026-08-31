@@ -137,7 +137,7 @@ fn world_camera_projection_and_clip_commands_match_jit_and_linked_aot() {
 fn world_camera_stasis_tests_pass_in_the_production_jit_test_shape() {
     let (rewritten, tests) =
         rewrite_top_level_test_declarations(STASIS_TESTS).expect("discover Stasis tests");
-    assert_eq!(tests.len(), 7, "focused behavior test count");
+    assert_eq!(tests.len(), 8, "focused behavior test count");
     let mut process = JitProcess::new();
     process
         .set_project_root(repository_root().to_string_lossy())
@@ -179,22 +179,18 @@ fn world_camera_sample_advances_sixty_ticks_without_input_gating() {
     ]);
     process.upsert_file(SAMPLE_PATH, source);
     process.compile().expect("compile world camera sample");
-    assert_eq!(process.execute_i32_noarg_by_name("sample_reset"), Ok(0));
-    for tick in 1..=60 {
-        assert_eq!(
-            process.execute_i32_noarg_by_name("sample_simulation_step"),
-            Ok(0),
-            "simulation tick {tick}"
-        );
-    }
+    assert_eq!(
+        process.execute_i32_noarg_by_name("sample_cadence_probe"),
+        Ok(0),
+        "exact final position and control effect"
+    );
     assert_eq!(process.read_i32_global_path("sample_simulation_ticks"), 60);
     assert_eq!(
         process.read_i32_global_path("sample_control_transitions"),
         3
     );
     assert_eq!(
-        process.execute_i32_noarg_by_name("sample_cadence_probe"),
-        Ok(0),
-        "exact final position and control effect"
+        process.read_i32_global_path("sample_presentation_samples"),
+        120
     );
 }

@@ -35,6 +35,9 @@ struct WorldTileRange {
     end_x: i32;
     end_y: i32;
     count: i32;
+    effective_tile_world_size: f32;
+    coarsening_steps: i32;
+    status: i32;
 }
 
 function world_camera_clamp(value: f32, low: f32, high: f32): f32 {
@@ -214,6 +217,9 @@ function world_camera_tile_range_calculate(self: WorldTileRange, camera: WorldCa
     self.end_x = 0;
     self.end_y = 0;
     self.count = 0;
+    self.effective_tile_world_size = 0.0;
+    self.coarsening_steps = 0;
+    self.status = -1;
     if (tile_world_size <= 0.0) {
         return;
     }
@@ -224,31 +230,46 @@ function world_camera_tile_range_calculate(self: WorldTileRange, camera: WorldCa
     if (safe_padding > 2) {
         safe_padding = 2;
     }
-    let map_x: i32 = world_camera_ceil_positive((camera.world_max_x - camera.world_min_x) / tile_world_size);
-    let map_y: i32 = world_camera_ceil_positive((camera.world_max_y - camera.world_min_y) / tile_world_size);
-    self.first_x = world_camera_floor_positive((camera.visible_world_min_x() - camera.world_min_x) / tile_world_size) - safe_padding;
-    self.first_y = world_camera_floor_positive((camera.visible_world_min_y() - camera.world_min_y) / tile_world_size) - safe_padding;
-    self.end_x = world_camera_ceil_positive((camera.visible_world_max_x() - camera.world_min_x) / tile_world_size) + safe_padding;
-    self.end_y = world_camera_ceil_positive((camera.visible_world_max_y() - camera.world_min_y) / tile_world_size) + safe_padding;
-    if (self.first_x < 0) {
-        self.first_x = 0;
+    let effective: f32 = tile_world_size;
+    let attempt: i32 = 0;
+    for (attempt = 0; attempt < 64; attempt = attempt + 1) {
+        let map_x: i32 = world_camera_ceil_positive((camera.world_max_x - camera.world_min_x) / effective);
+        let map_y: i32 = world_camera_ceil_positive((camera.world_max_y - camera.world_min_y) / effective);
+        self.first_x = world_camera_floor_positive((camera.visible_world_min_x() - camera.world_min_x) / effective) - safe_padding;
+        self.first_y = world_camera_floor_positive((camera.visible_world_min_y() - camera.world_min_y) / effective) - safe_padding;
+        self.end_x = world_camera_ceil_positive((camera.visible_world_max_x() - camera.world_min_x) / effective) + safe_padding;
+        self.end_y = world_camera_ceil_positive((camera.visible_world_max_y() - camera.world_min_y) / effective) + safe_padding;
+        if (self.first_x < 0) {
+            self.first_x = 0;
+        }
+        if (self.first_y < 0) {
+            self.first_y = 0;
+        }
+        if (self.end_x > map_x) {
+            self.end_x = map_x;
+        }
+        if (self.end_y > map_y) {
+            self.end_y = map_y;
+        }
+        let count_x: i32 = self.end_x - self.first_x;
+        let count_y: i32 = self.end_y - self.first_y;
+        if (count_x <= WORLD_CAMERA_MAX_TILES_AXIS && count_y <= WORLD_CAMERA_MAX_TILES_AXIS) {
+            self.count = count_x * count_y;
+            self.effective_tile_world_size = effective;
+            self.coarsening_steps = attempt;
+            self.status = 0;
+            return;
+        }
+        effective = effective * 2.0;
     }
-    if (self.first_y < 0) {
-        self.first_y = 0;
-    }
-    if (self.end_x > map_x) {
-        self.end_x = map_x;
-    }
-    if (self.end_y > map_y) {
-        self.end_y = map_y;
-    }
-    if (self.end_x > self.first_x + WORLD_CAMERA_MAX_TILES_AXIS) {
-        self.end_x = self.first_x + WORLD_CAMERA_MAX_TILES_AXIS;
-    }
-    if (self.end_y > self.first_y + WORLD_CAMERA_MAX_TILES_AXIS) {
-        self.end_y = self.first_y + WORLD_CAMERA_MAX_TILES_AXIS;
-    }
-    self.count =(self.end_x - self.first_x) *(self.end_y - self.first_y);
+    self.first_x = 0;
+    self.first_y = 0;
+    self.end_x = 0;
+    self.end_y = 0;
+    self.count = 0;
+    self.effective_tile_world_size = effective;
+    self.coarsening_steps = 64;
+    self.status = -2;
 }
 
 function world_camera_raster_side(logical_tile_pixels: i32, density: i32, resident_tiles: i32): i32 {

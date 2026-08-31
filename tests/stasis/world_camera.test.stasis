@@ -90,6 +90,34 @@ test `tile coverage and high density residency stay bounded`(): bool {
     if (tiles.first_x != 775 || tiles.first_y != 777 || tiles.end_x != 788 || tiles.end_y != 786 || tiles.count != 117) {
         return false;
     }
+    if (tiles.status != 0 || tiles.effective_tile_world_size != 64.0 || tiles.coarsening_steps != 0) {
+        return false;
+    }
     let side: i32 = world_camera_raster_side(256, 4, 256);
     return side == 256 && world_camera_residency_bytes(side, 256) == WORLD_CAMERA_RESIDENCY_BUDGET_BYTES;
+}
+
+test `oversized spans coarsen without losing visible coverage`(): bool {
+    camera.world_camera_configure(0.0, 0.0, 100000.0, 100000.0, 0.0, 0.0, 4096.0, 2048.0, 1.0);
+    camera.world_camera_follow(50000.0, 50000.0);
+    tiles.world_camera_tile_range_calculate(camera, 64.0, 1);
+    if (tiles.status != 0 || tiles.effective_tile_world_size != 512.0 || tiles.coarsening_steps != 3) {
+        return false;
+    }
+    let count_x: i32 = tiles.end_x - tiles.first_x;
+    let count_y: i32 = tiles.end_y - tiles.first_y;
+    if (count_x != 11 || count_y != 7 || tiles.count != 77) {
+        return false;
+    }
+    let covered_min_x: f32 = i32_to_f32(tiles.first_x) * tiles.effective_tile_world_size;
+    let covered_min_y: f32 = i32_to_f32(tiles.first_y) * tiles.effective_tile_world_size;
+    let covered_max_x: f32 = i32_to_f32(tiles.end_x) * tiles.effective_tile_world_size;
+    let covered_max_y: f32 = i32_to_f32(tiles.end_y) * tiles.effective_tile_world_size;
+    if (count_x > WORLD_CAMERA_MAX_TILES_AXIS || count_y > WORLD_CAMERA_MAX_TILES_AXIS || tiles.count > WORLD_CAMERA_MAX_RESIDENT_TILES) {
+        return false;
+    }
+    if (covered_min_x > camera.visible_world_min_x() || covered_min_y > camera.visible_world_min_y()) {
+        return false;
+    }
+    return covered_max_x >= camera.visible_world_max_x() && covered_max_y >= camera.visible_world_max_y();
 }

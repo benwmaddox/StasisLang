@@ -465,6 +465,10 @@ Small worlds center in the viewport. Large worlds scroll at the immediately
 adjacent interior value and remain fixed at exact or exterior clamp values.
 Hosts and guests project the same supplied completed state through the same
 module rather than synchronizing camera state. Large maps use its bounded
-half-open tile range and density-aware 64 MiB residency contract, never a
-full-map texture. Detailed semantics, formulas, measured overdraw, and evidence
-are in [`world_camera_viewport.md`](world_camera_viewport.md).
+half-open tile range, which deterministically coarsens its effective tile size
+instead of truncating visible coverage, and its density-aware 64 MiB residency
+contract, never a full-map texture. The current host renders at the completed
+post-tick phase; a separate deterministic probe models two presentation phases
+per tick until host scheduling consumes the declared presentation rate.
+Detailed semantics, formulas, measured overdraw, and evidence are in
+[`world_camera_viewport.md`](world_camera_viewport.md).

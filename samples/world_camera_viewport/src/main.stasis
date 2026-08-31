@@ -20,6 +20,11 @@ global sample_simulation_ticks: i32;
 global sample_control_transitions: i32;
 global sample_sequence: i32;
 global sample_epoch: i32;
+global sample_presentation_samples: i32;
+global sample_last_midpoint_x: f32;
+global sample_last_midpoint_y: f32;
+global sample_last_endpoint_x: f32;
+global sample_last_endpoint_y: f32;
 
 function sample_schedule(axis_x: i32, axis_y: i32): i32 {
     let next_sequence: i32 = sample_sequence + 1;
@@ -78,7 +83,29 @@ function sample_simulation_step(): i32 {
     return 0;
 }
 
+function sample_probe_presentation_phases(): void {
+    sample_last_midpoint_x = sample_history.interpolated_x(0.5);
+    sample_last_midpoint_y = sample_history.interpolated_y(0.5);
+    sample_presentation_samples = sample_presentation_samples + 1;
+    sample_last_endpoint_x = sample_history.interpolated_x(1.0);
+    sample_last_endpoint_y = sample_history.interpolated_y(1.0);
+    sample_presentation_samples = sample_presentation_samples + 1;
+}
+
 function sample_cadence_probe(): i32 {
+    let reset_result: i32 = sample_reset();
+    if (reset_result != 0) {
+        return reset_result;
+    }
+    sample_presentation_samples = 0;
+    let i: i32 = 0;
+    for (i = 0; i < 60; i = i + 1) {
+        let step_result: i32 = sample_simulation_step();
+        if (step_result != 0) {
+            return step_result;
+        }
+        sample_probe_presentation_phases();
+    }
     if (sample_simulation_ticks != 60 || realtime_current_tick() != 60) {
         return 1;
     }
@@ -88,6 +115,15 @@ function sample_cadence_probe(): i32 {
     if (sample_player_x != 324.0 || sample_player_y != 400.0) {
         return 3;
     }
+    if (sample_presentation_samples != 120) {
+        return 4;
+    }
+    if (sample_last_midpoint_x != 326.0 || sample_last_midpoint_y != 400.0) {
+        return 5;
+    }
+    if (sample_last_endpoint_x != 324.0 || sample_last_endpoint_y != 400.0) {
+        return 6;
+    }
     return 0;
 }
 
@@ -96,13 +132,17 @@ function sample_draw_world(alpha: f32): void {
     let presentation_y: f32 = sample_history.interpolated_y(alpha);
     sample_camera.world_camera_follow(presentation_x, presentation_y);
     sample_tiles.world_camera_tile_range_calculate(sample_camera, SAMPLE_TILE_SIZE, 1);
+    if (sample_tiles.status != 0) {
+        return;
+    }
+    let tile_size: f32 = sample_tiles.effective_tile_world_size;
     sample_camera.world_camera_clip_begin();
     let tile_y: i32 = sample_tiles.first_y;
     for (tile_y = sample_tiles.first_y; tile_y < sample_tiles.end_y; tile_y = tile_y + 1) {
         let tile_x: i32 = sample_tiles.first_x;
         for (tile_x = sample_tiles.first_x; tile_x < sample_tiles.end_x; tile_x = tile_x + 1) {
-            let world_x: f32 = i32_to_f32(tile_x) * SAMPLE_TILE_SIZE;
-            let world_y: f32 = i32_to_f32(tile_y) * SAMPLE_TILE_SIZE;
+            let world_x: f32 = i32_to_f32(tile_x) * tile_size;
+            let world_y: f32 = i32_to_f32(tile_y) * tile_size;
             let shade: f32 = 0.10;
             if ((tile_x + tile_y) % 2 == 0) {
                 shade = 0.15;
@@ -110,8 +150,8 @@ function sample_draw_world(alpha: f32): void {
             fill_rect(
                 sample_camera.world_to_view_x(world_x),
                 sample_camera.world_to_view_y(world_y),
-                SAMPLE_TILE_SIZE - 1.0,
-                SAMPLE_TILE_SIZE - 1.0,
+                tile_size - 1.0,
+                tile_size - 1.0,
                 shade,
                 shade + 0.08,
                 shade + 0.12,
@@ -148,7 +188,9 @@ function tick(): i32 {
 function render(): i32 {
     begin_frame();
     clear(0.02, 0.03, 0.06, 1.0);
-    sample_draw_world(0.5);
+    // The current host renders immediately after each tick, so the live phase
+    // is the completed endpoint. The cadence test models future 120 Hz phases.
+    sample_draw_world(1.0);
     // Screen-anchored HUD: simulation progress, delivered controls, and bounds.
     fill_rect(0.0, 0.0, 640.0, 40.0, 0.03, 0.05, 0.10, 1.0);
     fill_rect(12.0, 11.0, i32_to_f32(sample_simulation_ticks % 120) * 3.0, 8.0, 0.20, 0.80, 0.95, 1.0);

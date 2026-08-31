@@ -43,16 +43,25 @@ Interpolation never manufactures a simulation tick. With
 persistent intent. Each 60 Hz simulation tick still calls `realtime_advance`,
 reads that intent, advances authoritative world state, and updates history.
 Presentation can run at another rate and interpolate the two completed
-endpoints. The `world_camera_viewport` sample proves 60 simulation advances
-with only three scheduled control transitions in the first second.
+endpoints. The current desktop host invokes one render immediately after each
+tick; it does not yet consume `presentation_hz`, so the live sample uses alpha
+`1.0` and displays the completed endpoint without adding midpoint lag. The
+sample's deterministic cadence probe separately models a future 120 Hz host by
+sampling alpha `0.5` then `1.0` for each of 60 simulation ticks. It proves 120
+presentation samples alongside only three accepted 20 Hz control transitions.
 
 ## Bounded tile residency
 
 `WorldTileRange` computes a half-open visible tile rectangle. Padding is
 clamped to two tiles, each axis is capped at 16 tiles, and the total is capped
-by construction at 256. Invalid tile size produces an empty range. This makes
-procedural or chunked rendering proportional to the viewport rather than the
-map dimensions; a full-map raster is neither required nor appropriate.
+by construction at 256. If the requested tile size cannot cover the padded
+visible span within those bounds, calculation doubles the effective tile world
+size until the complete span fits. The result exposes that effective size and
+coarsening count; renderers must position and size tiles with it. Invalid tile
+size produces status `-1`, while exhausting the bounded 64-step coarsening
+search produces status `-2` and an empty range rather than partial coverage.
+This makes procedural or chunked rendering proportional to the viewport rather
+than the map dimensions; a full-map raster is neither required nor appropriate.
 
 The density helper requests `logical_tile_pixels * density`, then applies a
 resident-count tier so RGBA residency remains at or below 64 MiB:
@@ -69,6 +78,8 @@ Measured deterministic representative: a 256 logical-pixel tile requested at
 67,108,864 bytes. A central 640x320 viewport over 64-unit tiles with one tile
 of padding submits 12x7 tiles: 84 tile rectangles and 1.68x geometric overdraw.
 Density changes raster detail and byte residency, not the bounded tile count.
+A 4096x2048 visible span requested at 64-unit tiles coarsens three times to
+512-unit tiles and returns an 11x7 range whose edges cover the complete span.
 
 ## Evidence
 
@@ -77,5 +88,6 @@ Density changes raster detail and byte residency, not the bounded tile count.
   supplied-state parity, clipping, tiling, and the high-density budget.
 - `world_camera_viewport_seam` runs the projection and ordered clip result
   through both JIT and a linked AOT executable.
-- `samples/world_camera_viewport` demonstrates independent 60/120/20 Hz
-  simulation, presentation, and control rates with an anchored HUD.
+- `samples/world_camera_viewport` demonstrates 60 Hz simulation and delayed
+  20 Hz controls with an anchored HUD. Its cadence probe models the 120 Hz
+  presentation phases that a future host cadence consumer can supply.
