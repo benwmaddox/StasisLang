@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 mod dynamic_library;
 pub use dynamic_library::{atomic_rename_no_replace, Library};
 
+#[cfg(feature = "cross-atlas-research")]
+mod cross_atlas_research;
+#[cfg(feature = "cross-atlas-research")]
+pub use cross_atlas_research::*;
+
 pub const HOT_RENDER_METADATA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

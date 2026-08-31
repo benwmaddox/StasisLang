@@ -15,9 +15,20 @@ queue submission where supported, with one or more ordered draws. It means one
 literal draw only when all instances share pass, clip, material, blend/filter,
 capacity, and a binding domain visible to one shader invocation.
 
-This is research code only. `runtime/stasis_cross_atlas_prototype.*` is linked
-only into its opt-in test and measurement targets. No production renderer, game
-rule, render ABI version, capacity, or art changed.
+This is research code only. `crates/stasis_dynload/src/cross_atlas_research.rs`
+is compiled only by the default-off `cross-atlas-research` Cargo feature. The
+module contains plain owned/value data and deterministic planning: no loaded
+library, JIT function pointer, renderer handle, or platform API. `stasis_dynload`
+also ships as `rlib`, `cdylib`, and `staticlib`, so this is an incubation seam for
+one future standard renderer-core planner shared by JIT, linked AOT, Android, and
+Web hosts. No production wiring, render ABI version, capacity, game rule, or art
+changed.
+
+This Rust placement resolves PR #628's language-ownership review: portable
+runtime policy belongs in Rust and only unavoidable backend GPU calls belong in
+C/platform shims. The measurement example uses `std::time::Instant::elapsed`,
+then bounds the `u128` nanosecond result before conversion. It never multiplies
+an absolute Windows QPC counter by one billion, resolving the overflow review.
 
 ## Current behavior and prior work
 
@@ -60,7 +71,8 @@ the merged grouping/sizing evidence; it does not duplicate compiler analysis.
 
 ## Portable frame record
 
-`StasisCrossAtlasInstance` is compile-time asserted to exactly 80 bytes:
+`CrossAtlasInstance` uses `#[repr(C)]` and is compile-time asserted to exactly
+80 bytes:
 
 | Bytes | Field | Meaning |
 | ---: | --- | --- |
@@ -119,6 +131,48 @@ rules. A mega-atlas allows mixed image dimensions but needs padding and UV inset
 to prevent filtering bleed. Bindless keeps separate allocations but requires
 descriptor residency and a backend beyond the current legacy native GL path.
 
+## Atlas construction policy
+
+Choose co-residency primarily by interleaving affinity, not by asset name, load
+order, or dimensions alone. The implementable policy is a deterministic weighted
+graph followed by capacity-constrained clustering:
+
+1. Create one node per compatible realized sprite. Reject edges across format,
+   sampler, color-space, backend, or other binding-domain constraints.
+2. Weight each edge by predicted plus observed adjacent transitions between its
+   two sprites. Add a smaller deterministic co-occurrence weight when both appear
+   in the same frame but are not adjacent. Predicted evidence comes from the
+   compiler's ordered-flow analysis; observed evidence may be a bounded,
+   versioned runtime histogram. Task #335 v3 currently provides stable groups and
+   conservative transition evidence; a future per-pair table can refine edges
+   without changing this policy.
+3. Process edges by descending weight, with stable resource identity as the tie
+   break. Merge clusters only when the realized members still fit one concrete
+   atlas/array binding domain. Treat the highest-affinity clusters as protected:
+   a lower-weight merge cannot evict a member, force an extra page, or cut a
+   heavier transition edge.
+4. After the protected clusters are placed, opportunistically fill reasonable
+   spare capacity with format/sampler-compatible sprites. Fill candidates use
+   descending residual affinity, then stable identity. A filler is accepted only
+   when it uses already allocated capacity and does not displace, repack, or split
+   a protected cluster. Otherwise it remains standalone or starts its own domain
+   only when its independent evidence justifies that allocation.
+5. Publish the complete assignment transactionally for one renderer generation.
+   Record total transition weight, weight cut by domain boundaries, occupancy,
+   spill count, allocation bytes, and migration overlap. A failed construction or
+   migration retains the prior complete assignment.
+
+This is intentionally a policy, not an atlas-packer implementation. Rectangle
+placement still needs a deterministic padding-aware packer, and texture arrays
+still require compatible allocated layer dimensions. The existing research
+planner begins after assignment: it consumes realized `binding_domain_id` values
+and proves the ordered draw consequences. Its fixtures show the objective. An
+interleaved eight-resource group drops from 4,096 binds to one when co-resident;
+asset-major order starts at only eight binds; deterministic two-domain spill cuts
+the same high-affinity sequence into 1,024 ordered domain runs. Therefore scarce
+capacity should protect interleaved affinity first, while opportunistic fill is a
+secondary occupancy optimization.
+
 ## Backend capability matrix
 
 | Backend profile | Resident cross-image binding | Achievable submission | Unavoidable qualification |
@@ -134,47 +188,40 @@ Multi-draw can reduce API calls where an optional backend extension exists, but
 it remains multiple draws and must not be called one literal draw. No current
 production backend is changed or claimed to support it here.
 
-## Reproducible fixture and measurements
+## Reproducible fixtures and measurements
 
-The fixture constructs 4,096 sprites in exact source order, alternating eight
-resource IDs that are layers/regions inside binding domain 1. Geometry, UV,
-scale, tint, and order are populated. Four
-profiles use identical input: desktop bindless (capacity 65,535), Android array
-(4,096), WebGL2 array (1,024), and Canvas conventional (4,096). Baseline and
-prototype call/byte/bind/draw/submission counters are exact planner-model outputs.
-They are not driver counters. The baseline models one record preparation/upload
-call and one draw per sprite; it is a comparison model, not a claim that SDL
-uploads an 80-byte hardware record today.
+Each fixture has 4,096 sprites and eight resources. The interleaved fixture is
+`A B C D E F G H` repeated inside binding domain 1. The asset-major fixture has
+512 consecutive uses of each resource in the same domain. The spill fixture
+retains interleaved order but resources A-D realize in domain 1 and E-H in domain
+2. Geometry, UV, scale, tint, and order otherwise match.
 
-On the recorded Windows x64 MSVC host, 31 samples each ran 1,000 planner calls.
-The reported sample is integer nanoseconds per call. Samples are sorted only for
-nearest-rank quantiles: p50 index 15 and p95 index 29. Raw invocation-order
-samples are checked in at
-`docs/evidence/task-341-cross-atlas-submission/raw_measurements.json`.
+| Fixture | Baseline binds/draws | Bindless | Mega/array | WebGL2 array (1,024 capacity) | Conventional adjacent |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Interleaved, one domain | 4,096 / 4,096 | 1 / 1 | 1 / 1 | 1 / 4 | 4,096 / 4,096 |
+| Asset-major, one domain | 8 / 4,096 | 1 / 1 | 1 / 1 | 1 / 4 | 8 / 8 |
+| Interleaved, two-domain spill | 4,096 / 4,096 | 1 / 1 | 1,024 / 1,024 | 1,024 / 1,024 | 4,096 / 4,096 |
 
-| Profile | Planner p50 / p95 | Prototype upload | Binds | Draws | Queue submissions | GPU/frame time |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Desktop bindless model | 43.394 / 43.968 us | 1 / 327,680 B | 1 | 1 | 1 | unavailable |
-| Android array model | 44.630 / 45.040 us | 1 / 327,680 B | 1 | 1 | 1 | unavailable |
-| WebGL2 array model | 44.686 / 45.242 us | 1 / 327,680 B | 1 | 4 | 1 | unavailable |
-| Canvas conventional model | 45.483 / 46.020 us | 4,096 / 327,680 B | 4,096 | 4,096 | unavailable | unavailable |
+These are exact planner counters, not GPU measurements. They make the Task #335
+selector concrete: repeated distinct transitions create the largest avoidable
+bind/draw surface; asset-major order is already cheap for adjacent conventional
+batching; deterministic page spill reintroduces every ordered domain transition.
+Bindless remains one domain-independent run, but no current backend claim follows
+from that model.
 
-The profile names are modeled capability configurations executed by the same
-Windows CPU binary. No Android device, browser GPU, queue timestamp, GPU memory,
-frame-time, energy, or mobile thermal measurement was collected. `null` means
-unavailable; none of those values is inferred as zero.
+The Rust release example recorded 31 samples of 1,000 plans per fixture/profile.
+Representative mega-atlas p50/p95 planner times were 38.173/38.633 us
+(interleaved), 38.670/39.226 us (asset-major), and 39.299/40.376 us (spill).
+Raw invocation-order samples and the complete exact modeled matrix are checked in
+at `docs/evidence/task-341-cross-atlas-submission/raw_measurements.json`.
+No Android device, browser GPU, queue timestamp, GPU memory, frame-time, energy,
+or mobile thermal measurement was collected. `null` means unavailable.
 
-Reproduce from a Visual Studio developer shell:
+Reproduce with repository-owned Cargo caching:
 
 ```text
-cmake -S runtime -B .build/task-341-cross-atlas -G Ninja \
-  -DSTASIS_CROSS_ATLAS_RESEARCH_TESTS=ON \
-  -DSTASIS_GRAPHICS_BUILD_SHARED=OFF -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
-  -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF \
-  -DSTASIS_BUILD_MOBILE_RUNTIME=OFF
-cmake --build .build/task-341-cross-atlas
-ctest --test-dir .build/task-341-cross-atlas --output-on-failure
-.build/task-341-cross-atlas/stasis_cross_atlas_measurement_fixture.exe
+python tools/cargo_cache.py run -- cargo test -p stasis_dynload --features cross-atlas-research
+python tools/cargo_cache.py run -- cargo run -p stasis_dynload --features cross-atlas-research --example cross_atlas_benchmark --release
 ```
 
 Capture stdout and compare fixture/profile identities and exact modeled counters.
@@ -183,7 +230,7 @@ method rather than requiring byte-identical times.
 
 ## Correctness evidence
 
-The deterministic C contract covers exact size and key offsets; transparent
+The deterministic Rust contract covers exact size and key offsets; transparent
 overlap with intentionally non-monotonic order; crop, rotation, pivot,
 scale/flip, tint/alpha preservation; clip/material/blend/filter/pass boundaries;
 alternating resources in one domain; array and mega-atlas domain changes;
@@ -191,23 +238,34 @@ bindless cross-domain behavior; capacity overflow; unsupported-feature fallback;
 injected upload/device failure; insufficient output; and the safe maximum count.
 The fallback tests require zero exposed prototype runs and baseline-equivalent
 counters, preventing double draw and prefix reorder.
+Compile-level trait checks require the input/profile/run/counter records to be
+`Copy + Send + Sync + 'static`, and a handle-free plan is constructed from owned
+numeric identities. This is the portability boundary for JIT, linked AOT,
+Android bridge, and future Web consumers.
 
 ## Staged adoption recommendation
 
-1. Land only instrumentation and the versioned portable frame record after a
-   production ABI design review; keep the prototype isolated until then.
+1. Keep the default-off feature as incubation only. After production ABI design
+   review, promote the record and planner into the standard shared renderer-core
+   path consumed by both JIT and linked AOT hosts; do not fork planner semantics.
 2. Consume merged Task #335 v3 group keys, transition evidence, and sizing data to
-   prototype residency and mega-atlas placement behind a runtime capability flag.
+   prototype the affinity-first clustering policy and mega-atlas placement behind
+   a runtime capability flag. Fill spare capacity only after high-affinity groups
+   are protected.
    Assign a runtime binding-domain ID per realized page/array object; never treat
    the compiler group key as proof that one draw can bind every spilled page. Add
    frame hashes, seam/filter/color-space tests, allocation/peak-memory counters,
    and forced-loss recovery.
-3. Prototype Android GLES and WebGL2 texture arrays with queried limits. Gate on
+3. Wire AOT only after its host can populate the same 80-byte values and resolved
+   domain IDs without dynamic-library handles. Require compile/link checks for
+   `rlib`/`staticlib`, identical JIT/AOT plan traces, generation-safe resource
+   publication, and complete transactional fallback before changing any ABI.
+4. Prototype Android GLES and WebGL2 texture arrays with queried limits. Gate on
    exact-order traces, no visual mismatch, bounded peak memory, and measured
    device/browser p95 improvement. Several ordered draws are an acceptable result.
-4. Keep SDL and Canvas conventional. Consider a new desktop GPU backend only if
+5. Keep SDL and Canvas conventional. Consider a new desktop GPU backend only if
    device measurements justify bindless/descriptor complexity.
-5. Promote a backend independently. Never make one backend's literal-one-draw
+6. Promote backend-specific GPU shims independently. Never make one backend's literal-one-draw
    ability a portable semantic promise.
 
 The stop conditions are any transparent-order change, atlas seam or color-space

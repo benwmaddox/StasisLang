@@ -1,49 +1,52 @@
 {
-  "schema": 1,
-  "captured_utc": "2026-08-31T16:13:56Z",
-  "host": "Windows x64, MSVC 19.44.35222, CPU and GPU model not collected",
+  "schema": 2,
+  "captured_utc": "2026-08-31T16:40:00Z",
+  "host": "Windows x64, rustc release profile, CPU and GPU model not collected",
   "method": {
     "samples": 31,
     "iterations_per_sample": 1000,
     "quantiles": "nearest rank after ascending sort: p50=index15, p95=index29",
+    "timer": "std::time::Instant elapsed",
     "gpu_measurement": "unavailable"
   },
-  "profiles": [
+  "cpu_samples": [
     {
-      "profile": "desktop_native_bindless",
-      "binding": 3,
-      "fixture_instances": 4096,
-      "planner_ns": {"min": 42879, "p50": 43394, "p95": 43968, "max": 44432},
-      "raw_samples_ns": [43180,43450,43264,43085,43328,42879,43420,43425,43426,43900,43263,43083,43490,43380,43243,43053,43728,43165,43123,44432,43394,43214,43539,43179,43583,43467,43793,43968,43178,43408,43914],
-      "modeled": {"baseline_upload_calls":4096,"baseline_upload_bytes":327680,"baseline_texture_binds":4096,"baseline_draws":4096,"prototype_upload_calls":1,"prototype_upload_bytes":327680,"prototype_texture_binds":1,"prototype_draws":1,"queue_submissions":1},
-      "gpu_frame_time": null
+      "fixture": "interleaved_single_domain",
+      "profile": "native_mega_atlas",
+      "planner_ns": {"min":37906,"p50":38173,"p95":38633,"max":44984},
+      "raw_samples_ns": [38270,38107,37928,38247,38153,38158,38125,38124,44984,38172,38286,38382,38296,37981,38136,38073,38243,38105,38321,38146,38358,38247,38230,38633,38506,38512,37906,38173,37919,38068,38187]
     },
     {
-      "profile": "android_texture_array",
-      "binding": 2,
-      "fixture_instances": 4096,
-      "planner_ns": {"min": 43984, "p50": 44630, "p95": 45040, "max": 45383},
-      "raw_samples_ns": [44630,44805,44614,44228,44249,44758,43984,44568,44693,44490,45383,45040,44549,44622,44881,44790,44717,44575,44353,44495,44829,44488,44645,44639,44741,44804,44480,44813,44385,44300,44874],
-      "modeled": {"baseline_upload_calls":4096,"baseline_upload_bytes":327680,"baseline_texture_binds":4096,"baseline_draws":4096,"prototype_upload_calls":1,"prototype_upload_bytes":327680,"prototype_texture_binds":1,"prototype_draws":1,"queue_submissions":1},
-      "gpu_frame_time": null
+      "fixture": "asset_major_single_domain",
+      "profile": "native_mega_atlas",
+      "planner_ns": {"min":38317,"p50":38670,"p95":39226,"max":45638},
+      "raw_samples_ns": [38734,38901,38594,38550,38924,38498,38605,39226,38441,38515,38699,38814,38317,38819,38802,38320,45638,38663,38754,38670,38882,38522,38932,38615,38989,38662,38584,38836,38751,38555,38550]
     },
     {
-      "profile": "webgl2_texture_array",
-      "binding": 2,
-      "fixture_instances": 4096,
-      "planner_ns": {"min": 44410, "p50": 44686, "p95": 45242, "max": 45341},
-      "raw_samples_ns": [45341,44702,44775,44410,44742,44658,44608,45242,44714,44559,44623,44492,44494,44583,45056,44726,44680,44850,44834,44694,44542,44672,44753,44689,44698,44415,44493,44686,44476,44500,44806],
-      "modeled": {"baseline_upload_calls":4096,"baseline_upload_bytes":327680,"baseline_texture_binds":4096,"baseline_draws":4096,"prototype_upload_calls":1,"prototype_upload_bytes":327680,"prototype_texture_binds":1,"prototype_draws":4,"queue_submissions":1},
-      "gpu_frame_time": null
-    },
-    {
-      "profile": "canvas_conventional",
-      "binding": 0,
-      "fixture_instances": 4096,
-      "planner_ns": {"min": 45154, "p50": 45483, "p95": 46020, "max": 52551},
-      "raw_samples_ns": [45154,45597,45496,45472,45251,45377,45705,52551,45379,45313,45413,45433,45446,45287,45628,45546,45375,45510,45483,45658,45186,45513,45413,46020,45377,45538,45695,45487,45478,45755,45506],
-      "modeled": {"baseline_upload_calls":4096,"baseline_upload_bytes":327680,"baseline_texture_binds":4096,"baseline_draws":4096,"prototype_upload_calls":4096,"prototype_upload_bytes":327680,"prototype_texture_binds":4096,"prototype_draws":4096,"queue_submissions":null},
-      "gpu_frame_time": null
+      "fixture": "interleaved_two_domain_spill",
+      "profile": "native_mega_atlas",
+      "planner_ns": {"min":38829,"p50":39299,"p95":40376,"max":40400},
+      "raw_samples_ns": [40217,39055,39352,39431,39212,39086,39164,39916,39558,39544,40400,40376,39170,39083,39299,39546,39228,39242,39338,39172,39512,39822,38829,39322,38970,39188,39386,39080,39122,39471,39166]
     }
-  ]
+  ],
+  "modeled_matrix": [
+    {"fixture":"interleaved_single_domain","profile":"baseline","texture_binds":4096,"draws":4096},
+    {"fixture":"interleaved_single_domain","profile":"bindless","texture_binds":1,"draws":1},
+    {"fixture":"interleaved_single_domain","profile":"mega_atlas","texture_binds":1,"draws":1},
+    {"fixture":"interleaved_single_domain","profile":"texture_array","texture_binds":1,"draws":1},
+    {"fixture":"interleaved_single_domain","profile":"webgl2_array_capacity_1024","texture_binds":1,"draws":4},
+    {"fixture":"interleaved_single_domain","profile":"conventional","texture_binds":4096,"draws":4096},
+    {"fixture":"asset_major_single_domain","profile":"baseline","texture_binds":8,"draws":4096},
+    {"fixture":"asset_major_single_domain","profile":"bindless","texture_binds":1,"draws":1},
+    {"fixture":"asset_major_single_domain","profile":"mega_atlas","texture_binds":1,"draws":1},
+    {"fixture":"asset_major_single_domain","profile":"texture_array","texture_binds":1,"draws":1},
+    {"fixture":"asset_major_single_domain","profile":"webgl2_array_capacity_1024","texture_binds":1,"draws":4},
+    {"fixture":"asset_major_single_domain","profile":"conventional","texture_binds":8,"draws":8},
+    {"fixture":"interleaved_two_domain_spill","profile":"baseline","texture_binds":4096,"draws":4096},
+    {"fixture":"interleaved_two_domain_spill","profile":"bindless","texture_binds":1,"draws":1},
+    {"fixture":"interleaved_two_domain_spill","profile":"mega_atlas","texture_binds":1024,"draws":1024},
+    {"fixture":"interleaved_two_domain_spill","profile":"texture_array","texture_binds":1024,"draws":1024},
+    {"fixture":"interleaved_two_domain_spill","profile":"conventional","texture_binds":4096,"draws":4096}
+  ],
+  "note": "The executable emits raw samples for every fixture/profile pair; this checked-in file retains one timing series per fixture and every exact modeled bind/draw result."
 }

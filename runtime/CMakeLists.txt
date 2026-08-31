@@ -48,54 +48,6 @@ option(
 )
 option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" OFF)
 option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke tests" OFF)
-option(STASIS_CROSS_ATLAS_RESEARCH_TESTS "Build the isolated cross-atlas research prototype" OFF)
-
-if(STASIS_CROSS_ATLAS_RESEARCH_TESTS)
-    enable_testing()
-    add_executable(
-        stasis_cross_atlas_contract_test
-        tests/stasis_cross_atlas_prototype_test.c
-        stasis_cross_atlas_prototype.c
-    )
-    target_include_directories(stasis_cross_atlas_contract_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    set_property(TARGET stasis_cross_atlas_contract_test PROPERTY C_STANDARD 11)
-    add_test(NAME stasis_cross_atlas_prototype_contract COMMAND stasis_cross_atlas_contract_test)
-    add_executable(
-        stasis_cross_atlas_measurement_fixture
-        tests/stasis_cross_atlas_benchmark.c
-        stasis_cross_atlas_prototype.c
-    )
-    target_include_directories(stasis_cross_atlas_measurement_fixture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    set_property(TARGET stasis_cross_atlas_measurement_fixture PROPERTY C_STANDARD 11)
-    add_executable(
-        stasis_cross_atlas_render_contract_baseline
-        tests/stasis_render_contract_test.c
-    )
-    target_include_directories(
-        stasis_cross_atlas_render_contract_baseline PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    set_property(TARGET stasis_cross_atlas_render_contract_baseline PROPERTY C_STANDARD 11)
-    add_test(
-        NAME stasis_cross_atlas_render_contract_baseline
-        COMMAND stasis_cross_atlas_render_contract_baseline
-    )
-    add_executable(
-        stasis_cross_atlas_atlas_policy_baseline
-        tests/stasis_sprite_atlas_policy_test.c
-    )
-    target_include_directories(
-        stasis_cross_atlas_atlas_policy_baseline PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    set_property(TARGET stasis_cross_atlas_atlas_policy_baseline PROPERTY C_STANDARD 11)
-    add_test(
-        NAME stasis_cross_atlas_atlas_policy_baseline
-        COMMAND stasis_cross_atlas_atlas_policy_baseline
-    )
-    add_test(
-        NAME stasis_cross_atlas_atlas_v3_exports_baseline
-        COMMAND ${CMAKE_COMMAND}
-            -DDEF_FILE=${CMAKE_CURRENT_SOURCE_DIR}/stasis_graphics.def
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/stasis_sprite_atlas_exports_test.cmake
-    )
-endif()
 
 if(STASIS_BUILD_MONOLITH)
     set(STASIS_GRAPHICS_BUNDLE_SDL ON CACHE BOOL "" FORCE)
