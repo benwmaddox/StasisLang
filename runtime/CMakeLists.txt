@@ -349,6 +349,12 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     endif()
     add_test(NAME stasis_display_scale_contract COMMAND stasis_display_scale_test)
     add_executable(
+        stasis_sprite_atlas_policy_test
+        tests/stasis_sprite_atlas_policy_test.c
+    )
+    target_include_directories(stasis_sprite_atlas_policy_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_sprite_atlas_policy_contract COMMAND stasis_sprite_atlas_policy_test)
+    add_executable(
         stasis_renderer_lifecycle_test
         tests/stasis_renderer_lifecycle_test.c
     )

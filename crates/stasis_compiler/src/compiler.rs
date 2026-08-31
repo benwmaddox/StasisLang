@@ -1238,6 +1238,19 @@ impl Compiler {
         })
     }
 
+    /// Returns the accepted shared HIR keyed by stable function identity for
+    /// target-independent whole-program analyses.
+    pub(crate) fn analysis_hirs(&mut self) -> CompileResult<BTreeMap<FunctionId, FunctionHIR>> {
+        let functions = self.functions.clone();
+        functions
+            .iter()
+            .map(|function| {
+                self.lower_function_to_hir(function)
+                    .map(|hir| (function.id, hir))
+            })
+            .collect()
+    }
+
     fn function_index(&self, id: FunctionId) -> CompileResult<usize> {
         self.function_index_by_id
             .get(&id)

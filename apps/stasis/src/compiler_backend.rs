@@ -122,6 +122,18 @@ struct EngineBundleManifestCollectionMaxLengthRow {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct EngineBundleManifestHotRenderImageRow {
+    logical_path: String,
+    logical_width: u32,
+    logical_height: u32,
+    max_renders_per_render: Option<u64>,
+    atlas_eligible: bool,
+    grouping_key: String,
+    #[serde(default)]
+    backend_constraints: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifest {
     #[serde(default)]
     optimization_profile: Option<String>,
@@ -130,6 +142,52 @@ struct EngineBundleManifest {
     string_literals: Option<Vec<EngineBundleManifestStringLiteralRow>>,
     #[serde(default)]
     collection_max_lengths: Option<Vec<EngineBundleManifestCollectionMaxLengthRow>>,
+    #[serde(default)]
+    hot_render_metadata_version: Option<u32>,
+    #[serde(default)]
+    hot_render_images: Option<Vec<EngineBundleManifestHotRenderImageRow>>,
+}
+
+pub(crate) fn publish_snapshot_hot_render_metadata(snapshot: &ProgramSnapshot) {
+    let images = snapshot
+        .hot_render_images()
+        .iter()
+        .map(|image| stasis_dynload::HotRenderRuntimeImage {
+            logical_path: image.logical_path.clone(),
+            logical_width: image.logical_width,
+            logical_height: image.logical_height,
+            max_renders_per_render: image.max_renders_per_render,
+            atlas_eligible: image.atlas_eligible,
+            grouping_key: image.grouping_key.clone(),
+            backend_constraints: image.backend_constraints.clone(),
+        })
+        .collect::<Vec<_>>();
+    stasis_dynload::replace_hot_render_metadata(
+        stasis_compiler::backend::hot_render::HOT_RENDER_METADATA_VERSION,
+        &images,
+    );
+}
+
+fn publish_manifest_hot_render_metadata(manifest: &EngineBundleManifest) {
+    let images = manifest
+        .hot_render_images
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|image| stasis_dynload::HotRenderRuntimeImage {
+            logical_path: image.logical_path.clone(),
+            logical_width: image.logical_width,
+            logical_height: image.logical_height,
+            max_renders_per_render: image.max_renders_per_render,
+            atlas_eligible: image.atlas_eligible && image.backend_constraints.is_some(),
+            grouping_key: image.grouping_key.clone(),
+            backend_constraints: image.backend_constraints.clone().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    stasis_dynload::replace_hot_render_metadata(
+        manifest.hot_render_metadata_version.unwrap_or_default(),
+        &images,
+    );
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -780,6 +838,7 @@ impl IncrementalCompilerBackend {
                         );
                     }
                 };
+                publish_manifest_hot_render_metadata(&manifest);
                 // Parsed for manifest forward-compatibility, but not used for behavior today.
                 let _ = manifest.optimization_profile.as_deref();
                 if let Some(literals) = manifest.string_literals.as_ref() {
@@ -3978,6 +4037,23 @@ fn package_engine_bundle_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_manifest_accepts_versioned_hot_render_metadata() {
+        assert_eq!(
+            stasis_compiler::backend::hot_render::HOT_RENDER_METADATA_VERSION,
+            stasis_dynload::HOT_RENDER_METADATA_VERSION
+        );
+        let manifest: EngineBundleManifest = serde_json::from_str(
+            r#"{"functions":[],"hot_render_metadata_version":2,"hot_render_images":[{"logical_path":"assets/hero.png","logical_width":32,"logical_height":24,"max_renders_per_render":3,"atlas_eligible":true,"grouping_key":"rgba8-premul:linear-filter","backend_constraints":"desktop-gl"}]}"#,
+        )
+        .expect("parse hot-render manifest");
+        assert_eq!(manifest.hot_render_metadata_version, Some(2));
+        let image = &manifest.hot_render_images.expect("image rows")[0];
+        assert_eq!(image.max_renders_per_render, Some(3));
+        assert!(image.atlas_eligible);
+        assert_eq!(image.backend_constraints.as_deref(), Some("desktop-gl"));
+    }
 
     #[test]
     fn macos_packaged_runner_keeps_executable_and_retina_plist_in_app_bundle() {

@@ -11,6 +11,7 @@ use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compute_files_fingerprint,
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
 };
+use crate::backend::hot_render::{analyze_hot_render_images, HotRenderImageMetadata};
 use crate::backend::reachability::compute_reachable_function_ids;
 use crate::backend::state_layout::{build_state_layout, state_layout_digest, StateLayout};
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
@@ -22,6 +23,7 @@ use crate::frontend::{
     parser::parse_string_literal_text,
 };
 use crate::identity::SymbolId;
+use crate::ir::hir::FunctionHIR;
 use sha2::{Digest, Sha256};
 use std::ops::Range;
 
@@ -95,6 +97,7 @@ pub struct ProgramSnapshot {
     functions: Vec<ProgramFunction>,
     reachable_function_ids: BTreeSet<FunctionId>,
     asset_references: Vec<AssetReference>,
+    hot_render_images: Vec<HotRenderImageMetadata>,
     state_layout: StateLayout,
     layout_digest: [u8; 32],
     compiler_layout_digest: [u8; 32],
@@ -167,6 +170,7 @@ impl ProgramSnapshot {
         types: &TypeTable,
         data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
         required_emit_roots: &[String],
+        function_hirs: &BTreeMap<FunctionId, FunctionHIR>,
         analysis: CompileAnalysisCache,
     ) -> Result<Self, String> {
         let state_layout = build_state_layout(
@@ -176,7 +180,7 @@ impl ProgramSnapshot {
         );
         let layout_digest = state_layout_digest(&state_layout)?;
         let compiler_layout_digest = compiler_layout_digest(&analysis, functions, types);
-        let collections = analysis
+        let collections: Vec<ProgramCollectionMetadata> = analysis
             .collection_infos
             .iter()
             .map(|(path, info)| ProgramCollectionMetadata {
@@ -194,6 +198,17 @@ impl ProgramSnapshot {
             &reachable_function_ids,
             &analysis.constant_values,
         )?;
+        let collection_capacities = collections
+            .iter()
+            .map(|collection| (collection.path.clone(), collection.capacity))
+            .collect();
+        let hot_render_images = analyze_hot_render_images(
+            functions,
+            function_hirs,
+            &reachable_function_ids,
+            &collection_capacities,
+            &analysis.constant_values,
+        );
         Ok(Self {
             source_revision,
             files: files.to_vec(),
@@ -201,6 +216,7 @@ impl ProgramSnapshot {
             functions: functions.iter().map(ProgramFunction::from).collect(),
             reachable_function_ids,
             asset_references,
+            hot_render_images,
             state_layout,
             layout_digest,
             compiler_layout_digest,
@@ -240,6 +256,9 @@ impl ProgramSnapshot {
     }
     pub fn asset_references(&self) -> &[AssetReference] {
         &self.asset_references
+    }
+    pub fn hot_render_images(&self) -> &[HotRenderImageMetadata] {
+        &self.hot_render_images
     }
     pub fn state_layout(&self) -> &StateLayout {
         &self.state_layout
@@ -380,6 +399,9 @@ fn canonical_layout_digest_with_root(
         revision,
         resolve_preferred_extern_call_signatures,
     )?;
+    let function_hirs = compiler
+        .analysis_hirs()
+        .map_err(|error| format!("canonical hot-render HIR failed: {error:?}"))?;
     ProgramSnapshot::build(
         revision,
         compiler.files(),
@@ -388,6 +410,7 @@ fn canonical_layout_digest_with_root(
         &types,
         compiler.data_flow_summaries_shared(),
         &[],
+        &function_hirs,
         analysis,
     )
     .map(|snapshot| snapshot.layout_digest())
@@ -452,6 +475,357 @@ mod tests {
 
     const SOURCE: &str = "global score: i32;\nfunction main(): i32 { return score; }\n";
 
+    const HOT_RENDER_PRELUDE: &str = r#"
+struct Sprite { handle: i32; width: i32; height: i32; }
+global hero: Sprite;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
+"#;
+
+    fn hot_render_snapshot(body: &str) -> ProgramSnapshot {
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", format!("{HOT_RENDER_PRELUDE}\n{body}"));
+        aot.compile().expect("compile hot-render fixture");
+        aot.program_snapshot().expect("snapshot").clone()
+    }
+
+    #[test]
+    fn hot_render_metadata_counts_sequential_and_exclusive_draws() {
+        let snapshot = hot_render_snapshot(
+            r#"
+function main(): void { hero.load_sprite_from("assets/hero.png", 32, 24); }
+function render(): void {
+    hero.draw(1.0, 2.0, 255, 0);
+    if (true) { hero.draw(3.0, 4.0, 255, 0); }
+    else { hero.draw(5.0, 6.0, 255, 0); }
+}
+"#,
+        );
+        let [hero] = snapshot.hot_render_images() else {
+            panic!(
+                "expected one image record: {:?}",
+                snapshot.hot_render_images()
+            );
+        };
+        assert_eq!(hero.identity, "hero");
+        assert_eq!(hero.logical_path, "assets/hero.png");
+        assert_eq!((hero.logical_width, hero.logical_height), (32, 24));
+        assert_eq!(hero.max_renders_per_render, Some(2));
+        assert!(!hero.atlas_eligible);
+        assert_eq!(
+            hero.reason,
+            "single hot image does not amortize an atlas page"
+        );
+    }
+
+    #[test]
+    fn hot_render_metadata_matches_between_jit_and_aot() {
+        let source = r#"
+struct Sprite { handle: i32; width: i32; height: i32; }
+global hero: Sprite;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void { return; }
+function main(): void { hero.load_sprite_from("assets/hero.png", 32, 24); }
+function render(): void { hero.draw(1.0, 2.0, 255, 0); hero.draw(3.0, 4.0, 255, 0); }
+"#;
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile().expect("compile JIT hot-render fixture");
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", source);
+        aot.compile().expect("compile AOT hot-render fixture");
+        assert_eq!(
+            jit.program_snapshot()
+                .expect("JIT snapshot")
+                .hot_render_images(),
+            aot.program_snapshot()
+                .expect("AOT snapshot")
+                .hot_render_images()
+        );
+    }
+
+    #[test]
+    fn hot_render_metadata_multiplies_fixed_loops_through_helpers() {
+        let snapshot = hot_render_snapshot(
+            r#"
+function paint(sprite: Sprite): void { sprite.draw(1.0, 2.0, 255, 0); }
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void {
+    for (let i: i32 = 0; i < 4; i += 1) { paint(hero); }
+}
+"#,
+        );
+        let hero = &snapshot.hot_render_images()[0];
+        assert_eq!(hero.max_renders_per_render, Some(4));
+        assert_eq!(hero.grouping_key, "rgba8-premul:linear-filter");
+    }
+
+    #[test]
+    fn hot_render_metadata_preserves_exact_zero_and_one() {
+        let zero = hot_render_snapshot(
+            r#"
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void { return; }
+"#,
+        );
+        assert_eq!(zero.hot_render_images()[0].max_renders_per_render, Some(0));
+
+        let one = hot_render_snapshot(
+            r#"
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void { hero.draw(1.0, 2.0, 255, 0); }
+"#,
+        );
+        assert_eq!(one.hot_render_images()[0].max_renders_per_render, Some(1));
+        assert!(!one.hot_render_images()[0].atlas_eligible);
+    }
+
+    #[test]
+    fn hot_render_metadata_substitutes_helper_parameters_and_repeated_calls() {
+        let snapshot = hot_render_snapshot(
+            r#"
+function paint(sprite: Sprite): void { sprite.draw(1.0, 2.0, 255, 0); }
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void { paint(hero); paint(hero); paint(hero); }
+"#,
+        );
+        assert_eq!(
+            snapshot.hot_render_images()[0].max_renders_per_render,
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn hot_render_metadata_multiplies_nested_and_zero_or_one_loops() {
+        let nested = hot_render_snapshot(
+            r#"
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void {
+    for (let i: i32 = 0; i < 2; i += 1) {
+        for (let j: i32 = 0; j <= 2; j += 1) {
+            if (true) { hero.draw(1.0, 2.0, 255, 0); }
+        }
+    }
+}
+"#,
+        );
+        assert_eq!(
+            nested.hot_render_images()[0].max_renders_per_render,
+            Some(6)
+        );
+
+        let zero = hot_render_snapshot(
+            r#"
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void {
+    for (let i: i32 = 1; i < 1; i += 1) { hero.draw(1.0, 2.0, 255, 0); }
+}
+"#,
+        );
+        assert_eq!(zero.hot_render_images()[0].max_renders_per_render, Some(0));
+    }
+
+    #[test]
+    fn hot_render_metadata_marks_recursive_global_draw_unknown() {
+        let snapshot = hot_render_snapshot(
+            r#"
+function recursive_paint(depth: i32): void {
+    hero.draw(1.0, 2.0, 255, 0);
+    recursive_paint(depth);
+}
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void { recursive_paint(1); }
+"#,
+        );
+        let hero = &snapshot.hot_render_images()[0];
+        assert_eq!(hero.max_renders_per_render, None);
+        assert!(hero
+            .unknown_cause
+            .as_deref()
+            .is_some_and(|cause| cause.contains("recursive")));
+    }
+
+    #[test]
+    fn hot_render_metadata_uses_constant_loader_geometry_and_sheet_extent() {
+        let source = r#"
+struct SpriteSheet { handle: i32; columns: i32; rows: i32; cell_width: i32; cell_height: i32; }
+global sheet: SpriteSheet;
+const PATH: string = "assets/sheet.png";
+const COLUMNS: i32 = 4;
+const ROWS: i32 = 2;
+const CELL: i32 = 32;
+function @extern("stasis_jit_sprite_load_from") load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool;
+function @extern("stasis_jit_sprite_draw_frame") draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void;
+function main(): void { sheet.load_sprite_sheet_from(PATH, COLUMNS, ROWS, CELL, CELL); }
+function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
+"#;
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", source);
+        aot.compile().expect("compile sheet fixture");
+        let sheet = &aot
+            .program_snapshot()
+            .expect("snapshot")
+            .hot_render_images()[0];
+        assert_eq!(sheet.logical_path, "assets/sheet.png");
+        assert_eq!((sheet.logical_width, sheet.logical_height), (128, 64));
+        assert_eq!(sheet.sheet_columns, Some(4));
+        assert_eq!(sheet.sheet_rows, Some(2));
+        assert_eq!(sheet.cell_width, Some(32));
+        assert_eq!(sheet.cell_height, Some(32));
+        assert!(sheet.grouping_key.ends_with("linear-filter"));
+    }
+
+    #[test]
+    fn hot_render_metadata_reports_overflowing_sheet_geometry() {
+        let source = r#"
+struct SpriteSheet { handle: i32; columns: i32; rows: i32; cell_width: i32; cell_height: i32; }
+global sheet: SpriteSheet;
+function @extern("stasis_jit_sprite_load_from") load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool;
+function @extern("stasis_jit_sprite_draw_frame") draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void;
+function main(): void { sheet.load_sprite_sheet_from("assets/sheet.png", 2147483647, 2, 3, 32); }
+function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
+"#;
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", source);
+        aot.compile().expect("compile overflowing sheet fixture");
+        let sheet = &aot
+            .program_snapshot()
+            .expect("snapshot")
+            .hot_render_images()[0];
+        assert_eq!(sheet.max_renders_per_render, None);
+        assert!(sheet
+            .unknown_cause
+            .as_deref()
+            .is_some_and(|cause| cause.contains("overflowing raster dimensions")));
+        assert!(!sheet.atlas_eligible);
+    }
+
+    #[test]
+    fn hot_render_profitability_requires_compatible_aggregate_value() {
+        let source = format!(
+            r#"
+struct Sprite {{ handle: i32; width: i32; height: i32; }}
+global a: Sprite;
+global b: Sprite;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
+function main(): void {{ a.load_sprite_from("a.png", 256, 256); b.load_sprite_from("b.png", 256, 256); }}
+function render(): void {{ {draws} }}
+"#,
+            draws = "a.draw(0.0, 0.0, 255, 0); b.draw(0.0, 0.0, 255, 0); ".repeat(5)
+        );
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", source);
+        aot.compile().expect("compile profitable group fixture");
+        let images = aot
+            .program_snapshot()
+            .expect("snapshot")
+            .hot_render_images();
+        assert_eq!(images.len(), 2);
+        assert!(images.iter().all(|image| image.atlas_eligible));
+        assert!(images
+            .windows(2)
+            .all(|pair| pair[0].identity < pair[1].identity));
+    }
+
+    #[test]
+    #[ignore = "representative timing report; run explicitly with --ignored"]
+    fn hot_render_compiler_microbenchmark() {
+        use std::time::Instant;
+
+        fn source(draw_count: usize) -> String {
+            let globals = (0..8)
+                .map(|index| format!("global sprite{index}: Sprite;"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let loads = (0..8)
+                .map(|index| {
+                    format!("sprite{index}.load_sprite_from(\"sprite{index}.png\", 512, 512);")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let draws = (0..8)
+                .flat_map(|index| {
+                    (0..draw_count).map(move |_| format!("sprite{index}.draw(0.0, 0.0, 255, 0);"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                r#"
+struct Sprite {{ handle: i32; width: i32; height: i32; }}
+{globals}
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
+function main(): void {{ {loads} }}
+function render(): void {{ {draws} }}
+"#
+            )
+        }
+
+        fn median_compile_us(source: &str) -> (u128, usize) {
+            let mut samples = Vec::new();
+            let mut metadata_bytes = 0;
+            for _ in 0..7 {
+                let start = Instant::now();
+                let mut aot = AotProcess::new();
+                aot.upsert_file("benchmark.stasis", source);
+                aot.compile().expect("compile benchmark fixture");
+                samples.push(start.elapsed().as_micros());
+                metadata_bytes = serde_json::to_vec(
+                    aot.program_snapshot()
+                        .expect("snapshot")
+                        .hot_render_images(),
+                )
+                .expect("serialize metadata")
+                .len();
+            }
+            samples.sort_unstable();
+            (samples[samples.len() / 2], metadata_bytes)
+        }
+
+        let (standalone_us, standalone_bytes) = median_compile_us(&source(1));
+        let (atlas_us, atlas_bytes) = median_compile_us(&source(64));
+        eprintln!(
+            "hot-render benchmark: standalone_compile_us={standalone_us} atlas_compile_us={atlas_us} standalone_metadata_bytes={standalone_bytes} atlas_metadata_bytes={atlas_bytes}"
+        );
+        assert!(standalone_bytes > 0);
+        assert!(atlas_bytes >= standalone_bytes);
+    }
+
+    #[test]
+    fn hot_render_metadata_uses_capacity_and_rejects_dynamic_loop_bounds() {
+        let finite = hot_render_snapshot(
+            r#"
+global values: i32[3];
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void {
+    foreach (let value in values) { hero.draw(1.0, 2.0, 255, 0); }
+}
+"#,
+        );
+        assert_eq!(
+            finite.hot_render_images()[0].max_renders_per_render,
+            Some(3)
+        );
+
+        let unknown = hot_render_snapshot(
+            r#"
+global limit: i32;
+function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function render(): void {
+    for (let i: i32 = 0; i < limit; i += 1) { hero.draw(1.0, 2.0, 255, 0); }
+}
+"#,
+        );
+        let hero = &unknown.hot_render_images()[0];
+        assert_eq!(hero.max_renders_per_render, None);
+        assert_eq!(
+            hero.unknown_cause.as_deref(),
+            Some("unbounded or dynamic for loop")
+        );
+        assert!(!hero.atlas_eligible);
+    }
+
     #[test]
     fn jit_and_aot_publish_matching_immutable_semantic_snapshots() {
         let mut jit = JitProcess::new();
@@ -466,6 +840,10 @@ mod tests {
 
         assert_eq!(jit_snapshot.layout_digest(), aot_snapshot.layout_digest());
         assert_eq!(jit_snapshot.functions(), aot_snapshot.functions());
+        assert_eq!(
+            jit_snapshot.hot_render_images(),
+            aot_snapshot.hot_render_images()
+        );
         assert_eq!(
             jit_snapshot.global_type_ids(),
             aot_snapshot.global_type_ids()

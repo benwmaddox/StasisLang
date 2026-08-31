@@ -837,6 +837,7 @@ impl JitProcess {
             .as_ref()
             .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         if snapshot_miss {
+            let function_hirs = self.compiler.analysis_hirs()?;
             let extern_signatures = collect_supported_extern_call_signatures(
                 self.compiler.files(),
                 &mut analysis_type_table,
@@ -877,6 +878,7 @@ impl JitProcess {
                     &analysis_type_table,
                     self.compiler.data_flow_summaries_shared(),
                     &self.required_emit_roots,
+                    &function_hirs,
                     next_cache,
                 )
                 .map_err(crate::compiler::CompileError::Backend)?,

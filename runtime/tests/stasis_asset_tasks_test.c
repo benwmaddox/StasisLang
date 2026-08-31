@@ -11,6 +11,8 @@
 int stasis_init_window(int width, int height, const char* title);
 void stasis_shutdown(void);
 int stasis_asset_request_sprite(const char* path, int max_w, int max_h);
+int stasis_asset_request_sprite_with_policy(
+    const char* path, int max_w, int max_h, int atlas_eligible);
 int stasis_asset_request_audio(const char* path);
 int stasis_asset_task_poll(int task);
 int stasis_asset_task_take_handle(int task);
@@ -73,9 +75,40 @@ int main(void) {
     CHECK(stasis_asset_task_poll(sprite_task) == 0);
     CHECK(stasis_asset_task_poll(audio_task) == 0);
 
-    int sprite_state[4] = {0};
-    CHECK(stasis_test_get_sprite_state(sprite, sprite_state, 4) == 1);
+    int sprite_state[5] = {0};
+    CHECK(stasis_test_get_sprite_state(sprite, sprite_state, 5) == 1);
     CHECK(sprite_state[0] == 1 && sprite_state[1] == 1 && sprite_state[3] >= 1);
+    CHECK(sprite_state[4] == 0);
+
+    /* Policy is carried by each request, rather than shared one-shot state. */
+    int hot_task = stasis_asset_request_sprite_with_policy(
+        STASIS_TEST_SPRITE_PATH, 24, 24, 1);
+    int cold_task = stasis_asset_request_sprite_with_policy(
+        STASIS_TEST_SPRITE_PATH, 28, 28, 0);
+    CHECK(hot_task > 0 && cold_task > 0);
+    CHECK(wait_for_task(hot_task) == 3);
+    int hot_sprite = stasis_asset_task_take_handle(hot_task);
+    CHECK(hot_sprite > 0);
+    CHECK(stasis_test_get_sprite_state(hot_sprite, sprite_state, 5) == 1);
+    CHECK(sprite_state[4] == 1);
+    CHECK(wait_for_task(cold_task) == 3);
+    int cold_sprite = stasis_asset_task_take_handle(cold_task);
+    CHECK(cold_sprite > 0);
+    CHECK(stasis_test_get_sprite_state(cold_sprite, sprite_state, 5) == 1);
+    CHECK(sprite_state[4] == 0);
+
+    /* A changed accepted policy migrates the existing cache entry in place. */
+    int migrated_task = stasis_asset_request_sprite_with_policy(
+        STASIS_TEST_SPRITE_PATH, 24, 24, 0);
+    CHECK(migrated_task > 0);
+    CHECK(wait_for_task(migrated_task) == 3);
+    int migrated_sprite = stasis_asset_task_take_handle(migrated_task);
+    CHECK(migrated_sprite == hot_sprite);
+    CHECK(stasis_test_get_sprite_state(hot_sprite, sprite_state, 5) == 1);
+    CHECK(sprite_state[1] == 2 && sprite_state[4] == 0);
+    stasis_gfx_release_sprite(hot_sprite);
+    stasis_gfx_release_sprite(migrated_sprite);
+    stasis_gfx_release_sprite(cold_sprite);
 
     int shared_task = stasis_asset_request_sprite(STASIS_TEST_SPRITE_PATH, 32, 32);
     CHECK(shared_task > 0);

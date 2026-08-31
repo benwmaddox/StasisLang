@@ -3230,6 +3230,9 @@ fn commit_play_candidate_between_ticks(
             })
         })
         .map_err(|failure| failure.error)?;
+    if let Some(snapshot) = active.program_snapshot() {
+        crate::compiler_backend::publish_snapshot_hot_render_metadata(snapshot);
+    }
     Ok(PlayEntrypoints {
         tick_code_ptr: stasis_dynload::jit_host_tick_trampoline_ptr() as u64,
         render_code_ptr: stasis_dynload::jit_host_render_trampoline_ptr() as u64,
@@ -4198,6 +4201,9 @@ fn apply_prepared_jit_transaction(
     )?;
     if result.status == SwapCommitStatus::Success {
         *active = Some(candidate);
+        if let Some(snapshot) = active.as_ref().and_then(JitProcess::program_snapshot) {
+            crate::compiler_backend::publish_snapshot_hot_render_metadata(snapshot);
+        }
     }
     Ok(result)
 }
@@ -5909,6 +5915,52 @@ mod tests {
             ),
             "runtime sprite upload should clear padded texels before updating the sprite interior and regenerating mipmaps"
         );
+    }
+
+    #[test]
+    fn sprite_runtime_uses_hot_render_policy_with_standalone_fallback() {
+        for required in [
+            "stasis_gfx_set_next_sprite_atlas_eligible",
+            "stasis_asset_request_sprite_with_policy",
+            "task->atlas_eligible",
+            "if (!e->atlas_eligible)",
+            "sprite_upload_standalone(e, pixels, w, h)",
+            "g_sprite_batch_texture != texture",
+            "stasis_sprite_atlas_realized_group_compatible",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "runtime hot-render policy should contain {required}"
+            );
+        }
+        let atlas_failure = STASIS_GRAPHICS_SOURCE
+            .find("if (!atlas_alloc(w, h, path")
+            .expect("atlas allocation failure branch");
+        assert!(
+            STASIS_GRAPHICS_SOURCE[atlas_failure..]
+                .contains("sprite_upload_standalone(e, pixels, w, h)"),
+            "atlas overflow must fall back to a standalone texture"
+        );
+        let upload_failure = STASIS_GRAPHICS_SOURCE
+            .find("if (!atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels))")
+            .expect("atlas upload failure branch");
+        assert!(
+            STASIS_GRAPHICS_SOURCE[upload_failure..]
+                .contains("sprite_upload_standalone(e, pixels, w, h)"),
+            "atlas upload failure must fall back to a standalone texture"
+        );
+    }
+
+    #[test]
+    fn sprite_runtime_reuses_cached_entry_when_atlas_policy_changes() {
+        let lookup = STASIS_GRAPHICS_SOURCE
+            .find("const int previous_atlas_eligible = cached->atlas_eligible;")
+            .expect("cached policy migration");
+        let tail = &STASIS_GRAPHICS_SOURCE[lookup..];
+        assert!(tail.contains("cached->atlas_eligible = atlas_eligible;"));
+        assert!(tail.contains("cached->needs_reraster = 1;"));
+        assert!(tail.contains("cached->atlas_eligible = previous_atlas_eligible;"));
+        assert!(tail.contains("cached->ref_count++;"));
     }
 
     #[test]
