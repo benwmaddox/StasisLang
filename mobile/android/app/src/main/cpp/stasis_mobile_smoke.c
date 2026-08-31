@@ -470,6 +470,9 @@ static CodexBridgeApi *load_codex_bridge_api(void) {
         codex_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG,
                 "Phone-native Codex bridge missing required symbols");
+        dlclose(codex_bridge_api.handle);
+        memset(&codex_bridge_api, 0, sizeof(codex_bridge_api));
+        codex_bridge_api.attempted = 1;
         return NULL;
     }
     return &codex_bridge_api;

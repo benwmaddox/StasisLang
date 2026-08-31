@@ -299,6 +299,28 @@ class WorkshopSeamTests(unittest.TestCase):
         self.assertIn('bridge->compile_project(root, "src/main.stasis")', compile_native)
         self.assertIn("jstring result = (*env)->NewStringUTF(env, message);", compile_native)
         self.assertIn("bridge->free_string(message);", compile_native)
+
+    def test_codex_bridge_missing_symbols_invalidate_partial_api(self):
+        native = (Path(__file__).resolve().parents[2]
+                  / "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c").read_text()
+        start = native.index("static CodexBridgeApi *load_codex_bridge_api(void)")
+        end = native.index("static jstring call_codex_bridge", start)
+        loader = native[start:end]
+        required_failure = loader.index("if (codex_bridge_api.initialize == NULL")
+        close = loader.index("dlclose(codex_bridge_api.handle);", required_failure)
+        clear = loader.index(
+            "memset(&codex_bridge_api, 0, sizeof(codex_bridge_api));", close)
+        attempted = loader.index("codex_bridge_api.attempted = 1;", clear)
+        unavailable = loader.index("return NULL;", attempted)
+
+        self.assertLess(close, clear)
+        self.assertLess(clear, attempted)
+        self.assertLess(attempted, unavailable)
+        self.assertIn(
+            "return codex_bridge_api.handle == NULL ? NULL : &codex_bridge_api;",
+            loader,
+        )
+
     def test_native_diagnostic_envelope_has_a_full_string_transport_contract(self):
         bridge = (Path(__file__).resolve().parents[2]
                   / "crates/stasis_android_bridge/src/lib.rs").read_text()
