@@ -174,6 +174,8 @@ static bool g_recording_config_pending = false;
 static StasisDisplayMetrics g_display_metrics;
 static int g_display_generation = 0;
 static int g_density_generation = 0;
+static int g_available_width = 0;
+static int g_available_height = 0;
 static bool g_window_resized = false;
 static bool g_window_minimized = false;
 static uint32_t g_render_accepted_frames = 0;
@@ -194,6 +196,8 @@ typedef struct {
     int native_h;
     int drawable_w;
     int drawable_h;
+    int available_w;
+    int available_h;
     StasisDisplayViewport safe_native;
 } StasisTestDisplayOverride;
 static StasisTestDisplayOverride g_test_display_override;
@@ -629,6 +633,38 @@ static void stasis_mark_density_resources_dirty(void) {
     }
 }
 
+static SDL_DisplayID stasis_select_presentation_display(
+    SDL_DisplayID window_display, SDL_DisplayID primary_display) {
+    return window_display != 0 ? window_display : primary_display;
+}
+
+static void stasis_query_available_presentation(
+    int fallback_w, int fallback_h, int* width, int* height) {
+    int available_w = 0;
+    int available_h = 0;
+    if (SDL_WasInit(SDL_INIT_VIDEO) != 0) {
+        const SDL_DisplayID window_display =
+            g_window ? SDL_GetDisplayForWindow(g_window) : 0;
+        const SDL_DisplayID display = stasis_select_presentation_display(
+            window_display, SDL_GetPrimaryDisplay());
+        SDL_Rect bounds;
+        if (display != 0 && SDL_GetDisplayUsableBounds(display, &bounds)) {
+            available_w = bounds.w;
+            available_h = bounds.h;
+        } else if (display != 0) {
+            const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(display);
+            if (mode) {
+                available_w = mode->w;
+                available_h = mode->h;
+            }
+        }
+    }
+    if (available_w <= 0) available_w = fallback_w > 0 ? fallback_w : 1;
+    if (available_h <= 0) available_h = fallback_h > 0 ? fallback_h : 1;
+    if (width) *width = available_w;
+    if (height) *height = available_h;
+}
+
 static void stasis_sync_display_metrics(void) {
     if (!g_window) return;
 
@@ -672,6 +708,16 @@ static void stasis_sync_display_metrics(void) {
 
     if (drawable_w <= 0) drawable_w = g_window_width;
     if (drawable_h <= 0) drawable_h = g_window_height;
+    int available_w = 0;
+    int available_h = 0;
+    if (g_test_display_override.active) {
+        available_w = g_test_display_override.available_w;
+        available_h = g_test_display_override.available_h;
+    } else {
+        stasis_query_available_presentation(
+            g_native_window_width, g_native_window_height,
+            &available_w, &available_h);
+    }
     StasisDisplayViewport safe_native = {
         0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
     StasisDisplayMetrics next = stasis_display_metrics(
@@ -684,7 +730,9 @@ static void stasis_sync_display_metrics(void) {
         next.drawable_w != g_display_metrics.drawable_w ||
         next.drawable_h != g_display_metrics.drawable_h ||
         next.logical_w != g_display_metrics.logical_w ||
-        next.logical_h != g_display_metrics.logical_h;
+        next.logical_h != g_display_metrics.logical_h ||
+        available_w != g_available_width ||
+        available_h != g_available_height;
     const int density_changed =
         g_density_generation == 0 || fabsf(next.raster_scale - g_pixel_scale) > 0.001f;
     if (density_changed) {
@@ -696,6 +744,8 @@ static void stasis_sync_display_metrics(void) {
         g_window_resized = true;
     }
     g_display_metrics = next;
+    g_available_width = available_w;
+    g_available_height = available_h;
     g_drawable_width = drawable_w;
     g_drawable_height = drawable_h;
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -743,6 +793,8 @@ STASIS_EXPORT int stasis_test_push_display_event(
     int native_h,
     int drawable_w,
     int drawable_h,
+    int available_w,
+    int available_h,
     int safe_x,
     int safe_y,
     int safe_w,
@@ -750,7 +802,8 @@ STASIS_EXPORT int stasis_test_push_display_event(
     const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
     if (!g_window || !enabled || enabled[0] != '1' || enabled[1] != '\0' ||
         logical_w <= 0 || logical_h <= 0 || native_w <= 0 || native_h <= 0 ||
-        drawable_w <= 0 || drawable_h <= 0 || safe_x < 0 || safe_y < 0 ||
+        drawable_w <= 0 || drawable_h <= 0 || available_w <= 0 ||
+        available_h <= 0 || safe_x < 0 || safe_y < 0 ||
         safe_w <= 0 || safe_h <= 0 || safe_x + safe_w > native_w ||
         safe_y + safe_h > native_h || kind < 1 || kind > 3) {
         return 0;
@@ -763,6 +816,8 @@ STASIS_EXPORT int stasis_test_push_display_event(
     g_test_display_override.native_h = native_h;
     g_test_display_override.drawable_w = drawable_w;
     g_test_display_override.drawable_h = drawable_h;
+    g_test_display_override.available_w = available_w;
+    g_test_display_override.available_h = available_h;
     g_test_display_override.safe_native = (StasisDisplayViewport){
         (float)safe_x, (float)safe_y, (float)safe_w, (float)safe_h};
 
@@ -772,6 +827,14 @@ STASIS_EXPORT int stasis_test_push_display_event(
         (kind == 2 ? SDL_EVENT_WINDOW_MINIMIZED : SDL_EVENT_WINDOW_RESTORED);
     event.window.windowID = SDL_GetWindowID(g_window);
     return SDL_PushEvent(&event) ? 1 : 0;
+}
+
+STASIS_EXPORT uint32_t stasis_test_select_presentation_display(
+    uint32_t window_display, uint32_t primary_display) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!enabled || enabled[0] != '1' || enabled[1] != '\0') return 0;
+    return (uint32_t)stasis_select_presentation_display(
+        (SDL_DisplayID)window_display, (SDL_DisplayID)primary_display);
 }
 
 /*
@@ -1449,7 +1512,7 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (!out_i32 || !out_f32) return;
 
     static int32_t g_host_tick_index = 0;
-    const int32_t host_version = 3;
+    const int32_t host_version = 4;
     const int i32_key_base = 32;
     const int i32_key_count = 512;
     const int should_quit = stasis_should_quit();
@@ -1466,11 +1529,8 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[11] = g_window_resized ? 1 : 0;
     g_window_resized = false;
 
-    int screen_w = 0;
-    int screen_h = 0;
-    stasis_get_desktop_size(&screen_w, &screen_h);
-    out_i32[12] = screen_w;
-    out_i32[13] = screen_h;
+    out_i32[12] = g_available_width;
+    out_i32[13] = g_available_height;
 
     /* vNext */
     out_i32[14] = host_version;
@@ -1542,6 +1602,8 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_f32[53] = g_display_metrics.safe_logical_viewport.y;
     out_f32[54] = g_display_metrics.safe_logical_viewport.w;
     out_f32[55] = g_display_metrics.safe_logical_viewport.h;
+    out_f32[56] = (float)g_available_width;
+    out_f32[57] = (float)g_available_height;
 }
 
 /* ============================================================
@@ -4465,30 +4527,13 @@ STASIS_EXPORT void stasis_get_display_metrics(
  * Note: Requires SDL video to be initialized (typically via stasis_init_window).
  */
 STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
-    int w = 0;
-    int h = 0;
-
     if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
         if (width) *width = 0;
         if (height) *height = 0;
         return;
     }
-
-    SDL_Rect bounds;
-    SDL_DisplayID display = SDL_GetPrimaryDisplay();
-    if (display != 0 && SDL_GetDisplayUsableBounds(display, &bounds)) {
-        w = bounds.w;
-        h = bounds.h;
-    } else {
-        const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(display);
-        if (mode) {
-            w = mode->w;
-            h = mode->h;
-        }
-    }
-
-    if (width) *width = w;
-    if (height) *height = h;
+    stasis_query_available_presentation(
+        g_native_window_width, g_native_window_height, width, height);
 }
 
 static void stasis_set_logical_size(int width, int height) {
@@ -7277,6 +7322,8 @@ STASIS_EXPORT void stasis_shutdown(void) {
     SDL_Quit();
     memset(&g_resource_lifecycle, 0, sizeof(g_resource_lifecycle));
     memset(&g_test_display_override, 0, sizeof(g_test_display_override));
+    g_available_width = 0;
+    g_available_height = 0;
     g_window_minimized = false;
     g_render_accepted_frames = 0;
     g_render_rejected_frames = 0;

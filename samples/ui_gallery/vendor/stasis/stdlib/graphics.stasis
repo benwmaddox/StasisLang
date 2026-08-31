@@ -345,6 +345,16 @@ function gfx_safe_viewport_height(): f32 {
     return host_safe_height();
 }
 
+// Platform-available presentation units. These are not logical coordinates,
+// the current native window/canvas, or drawable backing pixels.
+function gfx_available_width(): f32 {
+    return host_available_width();
+}
+
+function gfx_available_height(): f32 {
+    return host_available_height();
+}
+
 function gfx_content_scale(): f32 {
     return host_content_scale();
 }

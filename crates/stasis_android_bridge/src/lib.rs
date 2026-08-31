@@ -1616,7 +1616,7 @@ fn write_production_host_frame(
     host_i32[11] = i32::from(resized);
     host_i32[12] = metrics.native_w;
     host_i32[13] = metrics.native_h;
-    host_i32[14] = 3;
+    host_i32[14] = 4;
     host_i32[15] = 0;
     host_i32[16] = 60;
     host_i32[17] = 1;
@@ -1646,6 +1646,8 @@ fn write_production_host_frame(
     host_f32[53] = 0.0;
     host_f32[54] = metrics.logical_w as f32;
     host_f32[55] = metrics.logical_h as f32;
+    host_f32[56] = input.screen_w.max(1) as f32;
+    host_f32[57] = input.screen_h.max(1) as f32;
     session.previous_input = Some(input);
     Ok(metrics)
 }
@@ -5442,7 +5444,7 @@ function tick(): void {}
         fs::write(
             root.join("src/main.stasis"),
             "global host_i32: i32[768];\nglobal host_f32: f32[64];\n\
-             global Input { x: i32; y: i32; dx: i32; dy: i32; xn: i32; yn: i32; active: i32; down: i32; up: i32; checksum: i32; }\n\
+             global Input { x: i32; y: i32; dx: i32; dy: i32; xn: i32; yn: i32; active: i32; down: i32; up: i32; available_w: i32; available_h: i32; host_version: i32; checksum: i32; }\n\
              global Render { command_count: i32; command0_kind: i32; command0_x: i32; command0_y: i32; command0_w: i32; command0_h: i32; }\n\
              function main(): void { return; }\n\
              function tick(): void {\n\
@@ -5450,6 +5452,7 @@ function tick(): void {}
                  Input.dx.from_f32(host_f32[2]); Input.dy.from_f32(host_f32[3]);\n\
                  Input.xn.from_f32(host_f32[4] * 1000.0); Input.yn.from_f32(host_f32[5] * 1000.0);\n\
                  Input.active = host_i32[545]; Input.down = host_i32[546]; Input.up = host_i32[547];\n\
+                 Input.available_w.from_f32(host_f32[56]); Input.available_h.from_f32(host_f32[57]); Input.host_version = host_i32[14];\n\
                  Input.checksum = Input.x + Input.y * 3 + Input.dx * 5 + Input.dy * 7 + Input.xn * 11 + Input.yn * 13 + Input.active * 17 + Input.down * 19 + Input.up * 23;\n\
              }\n\
              function render(): void {\n\
@@ -5483,6 +5486,18 @@ function tick(): void {}
         assert_eq!(
             get_android_workshop_i32_global(&root, entry, "Input.down").unwrap(),
             1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.available_w").unwrap(),
+            640
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.available_h").unwrap(),
+            360
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "Input.host_version").unwrap(),
+            4
         );
         assert_eq!(
             get_android_workshop_i32_global(&root, entry, "Input.checksum").unwrap(),

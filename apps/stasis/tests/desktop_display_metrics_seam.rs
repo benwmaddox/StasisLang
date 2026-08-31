@@ -99,11 +99,14 @@ const RESTORED_SCALE: DisplaySample = DisplaySample {
     density_generation: 3,
 };
 
-type PushDisplay = extern "system" fn(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) -> i32;
+type PushDisplay =
+    extern "system" fn(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) -> i32;
+type SelectDisplay = extern "system" fn(u32, u32) -> u32;
 
 struct NativeSurfaceHarness {
     _library: Library,
     push_display: PushDisplay,
+    select_display: SelectDisplay,
     push_input: extern "system" fn(i32, i32, f32, f32) -> i32,
     get_lifecycle: extern "system" fn(*mut i32, i32) -> i32,
 }
@@ -125,6 +128,13 @@ impl NativeSurfaceHarness {
                     .expect("resolve gated input-event seam"),
             )
         };
+        let select_display = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_test_select_presentation_display")
+                    .expect("resolve presentation-display selection seam"),
+            )
+        };
         let get_lifecycle = unsafe {
             std::mem::transmute(
                 library
@@ -135,12 +145,17 @@ impl NativeSurfaceHarness {
         Self {
             _library: library,
             push_display,
+            select_display,
             push_input,
             get_lifecycle,
         }
     }
 
     fn display(&self, kind: i32, sample: DisplaySample) {
+        self.display_available(kind, sample, sample.native);
+    }
+
+    fn display_available(&self, kind: i32, sample: DisplaySample, available: [i32; 2]) {
         assert_eq!(
             (self.push_display)(
                 kind,
@@ -150,6 +165,8 @@ impl NativeSurfaceHarness {
                 sample.native[1],
                 sample.drawable[0],
                 sample.drawable[1],
+                available[0],
+                available[1],
                 sample.safe_native[0],
                 sample.safe_native[1],
                 sample.safe_native[2],
@@ -158,6 +175,10 @@ impl NativeSurfaceHarness {
             1,
             "native display event injection failed"
         );
+    }
+
+    fn selected_display(&self, window_display: u32, primary_display: u32) -> u32 {
+        (self.select_display)(window_display, primary_display)
     }
 
     fn pointer(&self, kind: i32, x: f32, y: f32) {
@@ -206,6 +227,7 @@ fn assert_pointer_release(
     expected_y_n: f32,
     expected_actions: i32,
 ) {
+    assert_eq!(host_i32[14], 4, "HostFrame version");
     assert_eq!(
         host_i32[7], 2,
         "touch release keeps slot 1 visible for this frame"
@@ -272,6 +294,24 @@ fn assert_metrics(
     for (index, expected) in sample.safe_logical.iter().enumerate() {
         assert_close(host_f32[52 + index], *expected, "safe logical viewport");
     }
+    assert_close(
+        host_f32[56],
+        (if host_i32[12] > 0 {
+            host_i32[12]
+        } else {
+            sample.native[0]
+        }) as f32,
+        "available width",
+    );
+    assert_close(
+        host_f32[57],
+        (if host_i32[13] > 0 {
+            host_i32[13]
+        } else {
+            sample.native[1]
+        }) as f32,
+        "available height",
+    );
     assert_close(host_f32[48], sample.content_scale, "content scale");
     assert_close(host_f32[49], sample.raster_scale, "raster scale");
 
@@ -371,6 +411,8 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
         .init_window(400, 300, "Stasis IT-007 display metrics seam")
         .expect("initialize native window"));
     let native = NativeSurfaceHarness::load(&runtime_path);
+    assert_eq!(native.selected_display(27, 3), 27);
+    assert_eq!(native.selected_display(0, 3), 3);
     let initial_lifecycle = native.lifecycle();
     assert_eq!(&initial_lifecycle[0..3], &[1, 1, 1]);
 
@@ -661,6 +703,42 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
     assert_eq!(portrait_down_trace, landscape_down_trace);
     assert_eq!(landscape_down_trace, landscape_release_trace);
     assert_eq!(restored_portrait_trace, quiet_trace);
+
+    let availability_only = DisplaySample {
+        display_generation: 7,
+        ..RESTORED_PORTRAIT
+    };
+    native.display_available(DISPLAY_CHANGED, availability_only, [340, 700]);
+    let availability_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        availability_only,
+        false,
+        true,
+    );
+    assert_eq!(&host_i32[12..14], &[340, 700]);
+    assert_close(host_f32[56], 340.0, "availability-only width");
+    assert_close(host_f32[57], 700.0, "availability-only height");
+    native.display_available(DISPLAY_CHANGED, availability_only, [340, 700]);
+    let availability_quiet_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        availability_only,
+        false,
+        false,
+    );
+    assert_eq!(availability_trace, availability_quiet_trace);
+    assert_eq!(host_i32[30], 7);
     let distinct_semantic_traces = [
         odd_trace,
         minimized_trace,

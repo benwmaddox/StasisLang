@@ -41,7 +41,7 @@ const I32_FIELDS: [&str; 31] = [
     "host_pointer_went_up(7)",
 ];
 
-const F32_FIELDS: [&str; 20] = [
+const F32_FIELDS: [&str; 22] = [
     "host_logical_width",
     "host_logical_height",
     "host_safe_x",
@@ -50,6 +50,8 @@ const F32_FIELDS: [&str; 20] = [
     "host_safe_height",
     "host_content_scale",
     "host_raster_scale",
+    "host_available_width",
+    "host_available_height",
     "host_pointer_x_logical(0)",
     "host_pointer_y_logical(0)",
     "host_pointer_dx_logical(0)",
@@ -82,7 +84,7 @@ fn representative_host_frame() -> (Vec<i32>, Vec<f32>) {
         (11, 1),
         (12, 640),
         (13, 360),
-        (14, 3),
+        (14, 4),
         (15, 11),
         (16, 60),
         (17, 1),
@@ -127,6 +129,8 @@ fn representative_host_frame() -> (Vec<i32>, Vec<f32>) {
         (53, 5.0),
         (54, 300.0),
         (55, 170.0),
+        (56, 1920.0),
+        (57, 1040.0),
     ] {
         f32s[index] = value;
     }
@@ -136,12 +140,12 @@ fn representative_host_frame() -> (Vec<i32>, Vec<f32>) {
 fn expected_outputs() -> (Vec<i32>, Vec<f32>) {
     (
         vec![
-            17, 101, 8, 2, 1, 1, 640, 360, 3, 11, 60, 1, 0, 1001, 1280, 720, 1920, 1080, 7, 9, 1,
+            17, 101, 8, 2, 1, 1, 640, 360, 4, 11, 60, 1, 0, 1001, 1280, 720, 1920, 1080, 7, 9, 1,
             0, 0, 100, 1, 1, 0, 107, 0, 0, 1,
         ],
         vec![
-            320.0, 180.0, 10.0, 5.0, 300.0, 170.0, 1.5, 2.0, 12.5, 20.25, 1.5, -2.25, 0.25, 0.5,
-            70.5, 71.25, 3.5, -4.25, 0.75, 0.875,
+            320.0, 180.0, 10.0, 5.0, 300.0, 170.0, 1.5, 2.0, 1920.0, 1040.0, 12.5, 20.25, 1.5,
+            -2.25, 0.25, 0.5, 70.5, 71.25, 3.5, -4.25, 0.75, 0.875,
         ],
     )
 }

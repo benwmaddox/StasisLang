@@ -37,6 +37,8 @@ int stasis_test_push_display_event(
     int native_h,
     int drawable_w,
     int drawable_h,
+    int available_w,
+    int available_h,
     int safe_x,
     int safe_y,
     int safe_w,
@@ -177,11 +179,13 @@ int main(void) {
     /* A display lifecycle round-trip must not restore a released generation. */
     int32_t host_i32[768] = {0};
     float host_f32[64] = {0};
-    CHECK(stasis_test_push_display_event(2, 64, 64, 64, 64, 64, 64, 0, 0, 64, 64) == 1);
+    CHECK(stasis_test_push_display_event(
+              2, 64, 64, 64, 64, 64, 64, 64, 64, 0, 0, 64, 64) == 1);
     CHECK(stasis_mobile_poll_events() == 0);
     stasis_host_get_frame(host_i32, host_f32);
     CHECK(host_i32[18] == 1);
-    CHECK(stasis_test_push_display_event(3, 64, 64, 64, 64, 64, 64, 0, 0, 64, 64) == 1);
+    CHECK(stasis_test_push_display_event(
+              3, 64, 64, 64, 64, 64, 64, 64, 64, 0, 0, 64, 64) == 1);
     CHECK(stasis_mobile_poll_events() == 0);
     stasis_host_get_frame(host_i32, host_f32);
     CHECK(host_i32[18] == 0);

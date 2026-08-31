@@ -1,7 +1,7 @@
 import "host_frame.stasis";
 
 global probe_i32: i32[31];
-global probe_f32: f32[20];
+global probe_f32: f32[22];
 
 function bool_i32(value: bool): i32 {
     if (value) {
@@ -51,27 +51,29 @@ function probe_host_frame(): i32 {
     probe_f32[5] = host_safe_height();
     probe_f32[6] = host_content_scale();
     probe_f32[7] = host_raster_scale();
-    probe_f32[8] = host_pointer_x_logical(0);
-    probe_f32[9] = host_pointer_y_logical(0);
-    probe_f32[10] = host_pointer_dx_logical(0);
-    probe_f32[11] = host_pointer_dy_logical(0);
-    probe_f32[12] = host_pointer_x_n(0);
-    probe_f32[13] = host_pointer_y_n(0);
-    probe_f32[14] = host_pointer_x_logical(7);
-    probe_f32[15] = host_pointer_y_logical(7);
-    probe_f32[16] = host_pointer_dx_logical(7);
-    probe_f32[17] = host_pointer_dy_logical(7);
-    probe_f32[18] = host_pointer_x_n(7);
-    probe_f32[19] = host_pointer_y_n(7);
+    probe_f32[8] = host_available_width();
+    probe_f32[9] = host_available_height();
+    probe_f32[10] = host_pointer_x_logical(0);
+    probe_f32[11] = host_pointer_y_logical(0);
+    probe_f32[12] = host_pointer_dx_logical(0);
+    probe_f32[13] = host_pointer_dy_logical(0);
+    probe_f32[14] = host_pointer_x_n(0);
+    probe_f32[15] = host_pointer_y_n(0);
+    probe_f32[16] = host_pointer_x_logical(7);
+    probe_f32[17] = host_pointer_y_logical(7);
+    probe_f32[18] = host_pointer_dx_logical(7);
+    probe_f32[19] = host_pointer_dy_logical(7);
+    probe_f32[20] = host_pointer_x_n(7);
+    probe_f32[21] = host_pointer_y_n(7);
 
     let checksum: i32 = 0;
     for (let i: i32 = 0; i < 31; i += 1) {
-        checksum += probe_i32[i] * (i + 1);
+        checksum += probe_i32[i] *(i + 1);
     }
-    for (let i: i32 = 0; i < 20; i += 1) {
+    for (let i: i32 = 0; i < 22; i += 1) {
         let scaled: i32 = 0;
         scaled.from_f32(probe_f32[i] * 8.0);
-        checksum += scaled * (i + 32);
+        checksum += scaled *(i + 32);
     }
     return checksum;
 }

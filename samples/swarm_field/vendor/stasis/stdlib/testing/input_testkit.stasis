@@ -58,6 +58,8 @@ function input_testkit_set_display_snapshot_with_logical(native_w_px: i32, nativ
     host_f32[HOST_F_SAFE_Y] = 0.0;
     host_f32[HOST_F_SAFE_W] = i32_to_f32(logical_w_px);
     host_f32[HOST_F_SAFE_H] = i32_to_f32(logical_h_px);
+    host_f32[HOST_F_AVAILABLE_W] = i32_to_f32(native_w_px);
+    host_f32[HOST_F_AVAILABLE_H] = i32_to_f32(native_h_px);
 }
 
 function input_testkit_set_display_snapshot(width_px: i32, height_px: i32, generation: i32): void {
