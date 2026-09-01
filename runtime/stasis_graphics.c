@@ -4417,11 +4417,10 @@ static void stasis_mixed_add_rect(const float* cmd_f32, int index, int quad, int
     SDL_FColor color = {cmd_f32[base + 4], cmd_f32[base + 5],
         cmd_f32[base + 6], cmd_f32[base + 7]};
     const StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
-    const float u0 = (float)page->white_x / (float)page->width;
-    const float v0 = (float)page->white_y / (float)page->height;
-    const float u1 = (float)(page->white_x + STASIS_SDL_ATLAS_WHITE_SIZE) / (float)page->width;
-    const float v1 = (float)(page->white_y + STASIS_SDL_ATLAS_WHITE_SIZE) / (float)page->height;
-    stasis_mixed_set_quad(quad, points, color, u0, v0, u1, v1);
+    const float white_u = ((float)page->white_x + 0.5f) / (float)page->width;
+    const float white_v = ((float)page->white_y + 0.5f) / (float)page->height;
+    stasis_mixed_set_quad(
+        quad, points, color, white_u, white_v, white_u, white_v);
 }
 
 static int stasis_mixed_add_sprite(
@@ -4586,7 +4585,8 @@ static int stasis_sprite_atlas_create_page(int width, int height, uint64_t group
     static const unsigned char placeholder[16] = {
         255,0,255,255, 24,24,24,255,
         24,24,24,255, 255,0,255,255};
-    SDL_Rect white_rect = {page->white_x, page->white_y, 2, 2};
+    SDL_Rect white_rect = {page->white_x, page->white_y,
+        STASIS_SDL_ATLAS_WHITE_SIZE, STASIS_SDL_ATLAS_WHITE_SIZE};
     SDL_Rect placeholder_rect = {page->placeholder_x, page->placeholder_y, 2, 2};
     if (!SDL_UpdateTexture(page->texture, &white_rect, white, 8) ||
         !SDL_UpdateTexture(page->texture, &placeholder_rect, placeholder, 8)) {

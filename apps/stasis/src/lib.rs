@@ -6214,6 +6214,36 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
+    fn mixed_solids_sample_one_white_texel_while_sprites_keep_ranged_uvs() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let rect_start = graphics_source
+            .find("static void stasis_mixed_add_rect(")
+            .expect("mixed solid helper");
+        let rect_end = graphics_source[rect_start..]
+            .find("static int stasis_mixed_add_sprite(")
+            .expect("mixed solid helper boundary")
+            + rect_start;
+        let rect_source = &graphics_source[rect_start..rect_end];
+        assert!(rect_source
+            .contains("const float white_u = ((float)page->white_x + 0.5f) / (float)page->width;"));
+        assert!(rect_source.contains(
+            "const float white_v = ((float)page->white_y + 0.5f) / (float)page->height;"
+        ));
+        assert!(rect_source.contains("quad, points, color, white_u, white_v, white_u, white_v"));
+
+        let sprite_start = rect_end;
+        let sprite_end = graphics_source[sprite_start..]
+            .find("static int stasis_draw_mixed_order_span(")
+            .expect("mixed sprite helper boundary")
+            + sprite_start;
+        let sprite_source = &graphics_source[sprite_start..sprite_end];
+        assert!(sprite_source.contains("entry->atlas_x + crop.x"));
+        assert!(sprite_source.contains("entry->atlas_x + crop.x + crop.w"));
+        assert!(sprite_source.contains("entry->atlas_y + crop.y"));
+        assert!(sprite_source.contains("entry->atlas_y + crop.y + crop.h"));
+    }
+
+    #[test]
     fn live_runtime_exposes_repeatable_pre_present_png_capture() {
         assert!(
             STASIS_GRAPHICS_SOURCE

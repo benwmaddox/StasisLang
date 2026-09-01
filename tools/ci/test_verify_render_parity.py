@@ -15,6 +15,8 @@ from tools.ci.verify_render_parity import (
     write_stage_evidence,
 )
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 def write_bmp(path: Path, width: int, height: int, rgba: bytes) -> None:
     row_bytes = width * 4
@@ -34,6 +36,22 @@ def write_bmp(path: Path, width: int, height: int, rgba: bytes) -> None:
 
 
 class RenderParityGateTest(unittest.TestCase):
+    def test_windows_workflow_does_not_mask_parity_verifier_failure(self):
+        lines = (ROOT / ".github/workflows/pr-ci.yml").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        verifier = next(
+            index
+            for index, line in enumerate(lines)
+            if line.strip().startswith(
+                "python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png"
+            )
+        )
+        self.assertEqual(
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+            lines[verifier + 1].strip(),
+        )
+
     def test_checked_in_fixture_is_complete(self):
         manifest = validate_fixture(DEFAULT_MANIFEST)
         self.assertEqual(manifest["logical_size"], [640, 360])
