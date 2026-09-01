@@ -69,16 +69,18 @@ function Assert-In-Time([string]$Step) {
 }
 
 function Resolve-Gradle {
-    if ($env:ChocolateyInstall) {
+    $gradleName = if ($runningOnWindows) { "gradle.bat" } else { "gradle" }
+    if ($runningOnWindows -and $env:ChocolateyInstall) {
         $installed = Get-ChildItem (Join-Path $env:ChocolateyInstall "lib\gradle\tools") `
             -Recurse -Filter gradle.bat -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending | Select-Object -First 1
         if ($installed) { return $installed.FullName }
     }
-    $command = Get-Command gradle.bat -ErrorAction SilentlyContinue
-    if (-not $command) { $command = Get-Command gradle -ErrorAction SilentlyContinue }
+    $command = Get-Command $gradleName -CommandType Application -All -ErrorAction SilentlyContinue |
+        Where-Object { [System.IO.Path]::GetFileName($_.Source) -eq $gradleName } |
+        Select-Object -First 1
     if ($command) { return $command.Source }
-    throw "Gradle was not found; install Gradle 8.9 or newer"
+    throw "$gradleName was not found; install Gradle 8.9 or newer"
 }
 
 $abiOutput = @(& $adb -s $Serial shell getprop ro.product.cpu.abi)
