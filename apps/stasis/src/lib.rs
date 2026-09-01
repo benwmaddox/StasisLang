@@ -5751,7 +5751,7 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
-    fn windows_runtime_uses_physical_drawable_pixels_at_monitor_density() {
+    fn desktop_runtime_uses_physical_drawable_pixels_at_monitor_density() {
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("SDL_WINDOW_HIGH_PIXEL_DENSITY")
                 && STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowSizeInPixels("),
@@ -5806,6 +5806,11 @@ function render(): void {{ {draws} return; }}
                     "A regular screenshot captures the fitted logical content returned by"
                 ),
             "resource preparation and capture extents must derive from the full backing without float-tier drift"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("usable=%dx%d display_generation=%d density_generation=%d"),
+            "desktop presentation receipts must join display and density generations"
         );
         assert!(
             STASIS_RUNTIME_CMAKE

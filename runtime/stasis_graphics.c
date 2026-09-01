@@ -4662,14 +4662,14 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
             g_window, &border_top, &border_left, &border_bottom, &border_right);
         if (display != 0 && SDL_GetDisplayUsableBounds(display, &usable)) {
             SDL_Log(
-                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d density_generation=%d",
+                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d display_generation=%d density_generation=%d",
                 maximized ? "maximized" : "windowed",
                 g_window_width, g_window_height,
                 native_w, native_h,
                 g_drawable_width, g_drawable_height,
                 native_w + border_left + border_right,
                 native_h + border_top + border_bottom,
-                usable.w, usable.h, g_density_generation);
+                usable.w, usable.h, g_display_generation, g_density_generation);
         }
     }
     return result ? 1 : 0;

@@ -127,6 +127,9 @@ pixels, not 49 due to binary float drift. With `STASIS_GFX_LOG_SPRITES=1`, each
 successful initial or replacement preparation emits a current-resource receipt
 containing its handle, source bytes, logical and raster extents, and density
 generation; font receipts also include the live atlas extent.
+Window presentation receipts name both the display generation and density
+generation so acceptance evidence can reject resource receipts from an older
+backing.
 
 Desktop and packaged mobile builds perform this policy in
 `runtime/stasis_graphics.c`. Workshop and generated release apps receive
@@ -189,6 +192,12 @@ Regular SDL framebuffer captures remain fitted-content captures. Their extent
 is derived from the full backing and logical canvas, while framebuffer memory
 and density preparation continue to use the complete backing. Recording targets
 retain their explicitly requested physical extent.
+
+On Linux, X11 tests may set `SDL_VIDEO_X11_SCALING_FACTOR` before SDL video
+initialization to exercise deterministic 1x, fractional, and 2x backing tiers.
+This is an SDL/X11 acceptance control, not a game-owned scale. Wayland remains
+compositor-owned. Both backends feed the same full-backing metrics, fitted
+content, pointer transform, density generation, and bounded preparation path.
 
 On macOS, the release toolchain ships `stasis_runner.app`, and generated
 desktop packages preserve the same app-bundle contract with a game-specific

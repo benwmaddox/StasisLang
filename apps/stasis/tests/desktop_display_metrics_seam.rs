@@ -1,4 +1,4 @@
-#![cfg(windows)]
+#![cfg(any(target_os = "windows", target_os = "linux"))]
 
 use serde_json::json;
 use stasis_compiler::backend::jit::JitProcess;
@@ -930,7 +930,7 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
         "schema": "stasis.seam_test.v1",
         "test_id": "IT-007",
         "status": "passed",
-        "target": "windows-sdl-jit",
+        "target": "desktop-sdl-jit",
         "samples": [
             {"stage": "odd_fractional", "logical": ODD_FRACTIONAL.logical, "native": ODD_FRACTIONAL.native, "drawable": ODD_FRACTIONAL.drawable, "safe": ODD_FRACTIONAL.safe_logical, "display_generation": 2, "density_generation": 2, "trace": odd_trace},
             {"stage": "minimized", "display_generation": 2, "density_generation": 2, "trace": minimized_trace},

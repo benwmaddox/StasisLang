@@ -71,7 +71,7 @@ static void test_fractional_and_downscale_metrics_are_distinct(void) {
     CHECK(stasis_display_scaled_extent(96, downscale.raster_scale) == 96);
 }
 
-static void test_windows_density_tiers_preserve_logical_geometry(void) {
+static void test_desktop_density_tiers_preserve_logical_geometry(void) {
     const int scales[] = {100, 125, 150, 200};
     const int drawable_widths[] = {800, 1000, 1200, 1600};
     const int drawable_heights[] = {600, 750, 900, 1200};
@@ -216,7 +216,7 @@ int main(void) {
     test_phone_scale_preserves_logical_canvas();
     test_pointer_mapping_round_trips_through_letterbox();
     test_fractional_and_downscale_metrics_are_distinct();
-    test_windows_density_tiers_preserve_logical_geometry();
+    test_desktop_density_tiers_preserve_logical_geometry();
     test_full_backing_and_fitted_content_remain_distinct();
     test_orientation_change_keeps_logical_dimensions();
     test_odd_fractional_viewport_uses_renderer_rounding();
