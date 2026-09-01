@@ -1,0 +1,68 @@
+import "../../../src/stdlib/graphics.stasis";
+
+global probe_writer: SpriteRunWriter;
+global blocker_writer: SpriteRunWriter;
+
+function probe_writer_lifecycle(): i32 {
+    begin_frame();
+    if (probe_writer.reserve(0, -1, 0, 0, 0, 0, 0)) {
+        return 1;
+    }
+    if (probe_writer.cancel()) {
+        return 2;
+    }
+    if (!blocker_writer.reserve(1, -1, 0, 0, 0, 0, 0)) {
+        return 3;
+    }
+    if (probe_writer.reserve(1, -1, 0, 0, 0, 0, 0)) {
+        return 4;
+    }
+    if (probe_writer.cancel()) {
+        return 5;
+    }
+    if (!blocker_writer.cancel()) {
+        return 6;
+    }
+    if (!probe_writer.reserve(2, -1, 0, 0, 0, 0, 0)) {
+        return 7;
+    }
+    if (!probe_writer.write(303, -3, 0, 1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 5.0, 6.0, 1.0, 2.0, 1.0, 1.0, 7.0)) {
+        return 8;
+    }
+    if (probe_writer.finalize(2)) {
+        return 9;
+    }
+    if (!probe_writer.cancel()) {
+        return 10;
+    }
+    if (probe_writer.cancel()) {
+        return 11;
+    }
+    return 0;
+}
+
+function sprite_run_writer_public_probe(): i32 {
+    let lifecycle: i32 = probe_writer_lifecycle();
+    if (lifecycle != 0) {
+        return lifecycle;
+    }
+    begin_frame();
+    if (!probe_writer.reserve(2, -1, 0, 0, 0, 0, 0)) {
+        return 12;
+    }
+    if (!probe_writer.write(101, -1430532899, 0, 10.0, 20.0, 30.0, 40.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.5, 2.5, 15.0)) {
+        probe_writer.cancel();
+        return 13;
+    }
+    if (!probe_writer.write(202, 287454020, 0, 50.0, 60.0, 70.0, 80.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, -1.0, 0.5, -30.0)) {
+        probe_writer.cancel();
+        return 14;
+    }
+    if (!probe_writer.finalize(2)) {
+        probe_writer.cancel();
+        return 15;
+    }
+    draw_line(100.0, 101.0, 102.0, 103.0, 0.1, 0.2, 0.3, 0.4);
+    end_frame();
+    return 0;
+}
