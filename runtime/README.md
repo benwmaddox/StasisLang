@@ -16,7 +16,9 @@ optionally set the 1-based `STASIS_SCREENSHOT_FRAME` and
 `STASIS_EXIT_AFTER_SCREENSHOT=1`. Scheduled capture occurs after queued drawing
 and post-effects and before the frame is presented. A `.png` suffix selects PNG;
 other suffixes use BMP. PNG bytes are deterministic for identical framebuffer
-pixels, though pixels can vary across backends, drivers, and platforms.
+pixels, though pixels can vary across backends, drivers, and platforms. Ordinary
+captures use the actual fitted readback surface dimensions returned by SDL;
+fixed recording targets continue to require their configured physical extent.
 
 ## High-density displays
 
@@ -32,7 +34,8 @@ replaces their device raster while preserving the game-facing sprite handle.
 TrueType atlases use the same scale, but text measurement and glyph placement
 remain in logical pixels. A drawable-density change invalidates the affected
 sprite and font caches so they are rebuilt before their next draw. Framebuffer
-captures use the drawable resolution.
+captures use the actual SDL readback resolution, which can be a fitted subset of
+the complete drawable backing.
 
 SVG parsing and CPU rasterization use the vendored ThorVG 1.2.0 CPU/SVG build
 pinned in `third_party/thorvg/STASIS_PROVENANCE.md`. The bridge initializes four
@@ -106,9 +109,12 @@ shipping build. See `docs/sdl3_migration.md` for the compatibility boundary.
 
 Sprites are placed in renderer-private, bounded SDL texture pages using the
 compiler-provided logical grouping policy. Pages reserve padded opaque-white
-and missing-image regions; oversized or standalone images receive a dedicated
-SDL texture domain with the same reserved regions. Padding is edge-extruded at
-load, density-change, or renderer-generation rebuild time.
+and missing-image regions. Ordinary sprites that fit share bounded `512 x 512`
+group-0 cold pages, matching the Web atlas's initial page extent; this keeps
+direct and pre-policy loads bounded without mixing them into compiler-eligible
+groups. Larger standalone images receive a dedicated SDL texture domain with
+the same reserved regions. Padding is edge-extruded at load, density-change, or
+renderer-generation rebuild time.
 
 The v7 order stream remains declarative. Adjacent sprite runs and solid
 rectangles are lowered in exact painter order to fixed reusable

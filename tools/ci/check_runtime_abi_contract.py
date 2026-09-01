@@ -668,13 +668,19 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         "version": r"expected_i32\s*\[\s*STASIS_RENDER_I_VERSION\s*\]\s*=\s*STASIS_RENDER_VERSION",
         "flags": r"STASIS_RENDER_FLAG_CLEAR\s*\|\s*STASIS_RENDER_FLAG_PRESENT",
         "sprite.count": r"STASIS_RENDER_I_SPRITE_COUNT\s*\]\s*=\s*1",
+        "sprite_run.count": r"STASIS_RENDER_I_SPRITE_RUN_COUNT\s*\]\s*=\s*1",
         "text.count": r"STASIS_RENDER_I_TEXT_COUNT\s*\]\s*=\s*2",
         "text.bytes": r"STASIS_RENDER_I_TEXT_BYTES_USED\s*\]\s*=\s*7",
         "order.count": r"STASIS_RENDER_I_ORDER_COUNT\s*\]\s*=\s*3",
         "sprite.i32_base": r"sprite_i32_base\s*=\s*STASIS_RENDER_I_SPRITE_BASE",
         "sprite.f32_base": r"sprite_f32_base\s*=\s*STASIS_RENDER_F_SPRITE_BASE",
+        "sprite_run.i32_base": r"sprite_run_i32_base\s*=\s*STASIS_RENDER_I_SPRITE_RUN_BASE",
         "sprite.handle": r"expected_i32\s*\[\s*sprite_i32_base\s*\+\s*0\s*\]\s*=\s*sprite_handle",
-        "sprite.flags": r"expected_i32\s*\[\s*sprite_i32_base\s*\+\s*2\s*\]\s*=\s*255",
+        "sprite.tint": r"expected_i32\s*\[\s*sprite_i32_base\s*\+\s*1\s*\]\s*=\s*-1",
+        "sprite.clip": r"expected_i32\s*\[\s*sprite_i32_base\s*\+\s*2\s*\]\s*=\s*0",
+        "sprite_run.first": r"expected_i32\s*\[\s*sprite_run_i32_base\s*\+\s*0\s*\]\s*=\s*0",
+        "sprite_run.members": r"expected_i32\s*\[\s*sprite_run_i32_base\s*\+\s*1\s*\]\s*=\s*1",
+        "sprite_run.clip": r"expected_i32\s*\[\s*sprite_run_i32_base\s*\+\s*2\s*\]\s*=\s*STASIS_RENDER_SPRITE_CLIP_ORDERED",
         "direct_text.i32_base": r"direct_text_i32_base\s*=\s*STASIS_RENDER_I_TEXT_BASE",
         "cached_text.i32_stride": r"cached_text_i32_base\s*=\s*STASIS_RENDER_I_TEXT_BASE\s*\+\s*STASIS_RENDER_TEXT_I32_STRIDE",
         "direct_text.f32_base": r"direct_text_f32_base\s*=\s*STASIS_RENDER_F_TEXT_BASE",
@@ -701,7 +707,9 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         it015_semantic_oracle_patterns[f"clear.{offset}"] = (
             rf"STASIS_RENDER_F_CLEAR_BASE\s*\+\s*{offset}\s*\]\s*=\s*{value}f"
         )
-    for offset, value in enumerate(("52\\.0", "28\\.0", "64\\.0", "64\\.0", "0\\.0", "0\\.0", "1\\.0", "1\\.0")):
+    for offset, value in enumerate((
+            "52\\.0", "28\\.0", "64\\.0", "64\\.0", "0\\.0", "0\\.0", "0\\.0",
+            "0\\.0", "32\\.0", "32\\.0", "1\\.0", "1\\.0", "0\\.0")):
         it015_semantic_oracle_patterns[f"sprite.payload.{offset}"] = (
             rf"sprite_f32_base\s*\+\s*{offset}\s*\]\s*=\s*{value}f"
         )

@@ -296,17 +296,20 @@ fn assert_maximized_portrait(description: &str, completed: CompletedProcess, scr
         .unwrap_or_else(|error| panic!("{description} did not capture a PNG: {error}"))
         .to_rgba8();
     let drawable = parse_dimensions(presentation, "drawable=");
-    assert_eq!(
-        image.height(),
-        drawable.1,
-        "{description} portrait content should use the full drawable height"
+    let capture = image.dimensions();
+    assert!(
+        capture.0 > 0
+            && capture.1 > 0
+            && capture.0 <= drawable.0
+            && capture.1 <= drawable.1,
+        "{description} fitted capture should be contained within the full drawable backing: capture={capture:?} drawable={drawable:?}"
     );
-    let aspect_error = (image.width() * 720).abs_diff(image.height() * 360);
+    let aspect_error = (capture.0 * 720).abs_diff(capture.1 * 360);
     assert!(
         aspect_error <= 360,
         "{description} capture should preserve the 360x720 logical aspect within half a physical pixel: capture={}x{} error={aspect_error}",
-        image.width(),
-        image.height()
+        capture.0,
+        capture.1
     );
     let last_x = image.width() - 1;
     let last_y = image.height() - 1;

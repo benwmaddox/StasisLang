@@ -365,6 +365,7 @@ static int g_sprite_max_file_bytes = -1;
 static SpriteEntry g_sprite_fallback;
 
 #define STASIS_SDL_ATLAS_PAGE_SIZE 2048
+#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512
 #define STASIS_SDL_ATLAS_MAX_PAGES 256
 #define STASIS_SDL_ATLAS_PADDING 1
 #define STASIS_SDL_ATLAS_WHITE_SIZE 2
@@ -2647,79 +2648,69 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
         out_path = resolved;
     }
 
-    int w = g_recording_presentation ? g_recording_width : g_drawable_width;
-    int h = g_recording_presentation ? g_recording_height : g_drawable_height;
-    if (g_renderer && !g_recording_presentation) {
-        /* A regular screenshot captures the fitted logical content returned by
-         * SDL readback, not the complete renderer backing used by density and
-         * framebuffer accounting. Derive that extent from the full backing;
-         * SDL_GetCurrentRenderOutputSize can itself report stale presentation
-         * state during the same logical-canvas transition. */
-        w = stasis_current_scaled_extent(g_window_width);
-        h = stasis_current_scaled_extent(g_window_height);
-    }
-    const size_t bytes = (size_t)w * (size_t)h * 4u;
-
-    uint8_t* pixels = (uint8_t*)malloc(bytes);
-    if (!pixels) return 0;
-
     int ok = 0;
+    if (!g_renderer) return 0;
 
-    if (true) {
-        if (g_renderer) {
-            if (render_queued_lines) {
-                /* Direct API calls may happen before end_frame(), so flush pending lines once. */
-                SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-                SDL_Color color;
-                for (int i = 0; i < g_line_count; i++) {
-                    color.r = (Uint8)(g_lines[i].r * 255.0f);
-                    color.g = (Uint8)(g_lines[i].g * 255.0f);
-                    color.b = (Uint8)(g_lines[i].b * 255.0f);
-                    color.a = (Uint8)(g_lines[i].a * 255.0f);
-                    SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-                    SDL_RenderLine(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
-                }
-                g_line_count = 0;
-            }
-
-            /* Read the fixed physical recording target, not the logical viewport. */
-            if (g_recording_presentation) {
-                SDL_SetRenderLogicalPresentation(
-                    g_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
-            }
-            /* SDL3 returns an owned surface for renderer readback. */
-            SDL_Surface* readback = SDL_RenderReadPixels(g_renderer, NULL);
-            SDL_Surface* bgra = readback
-                ? SDL_ConvertSurface(readback, SDL_PIXELFORMAT_BGRA32)
-                : NULL;
-            if (bgra && bgra->w == w && bgra->h == h) {
-                for (int row = 0; row < h; row++) {
-                    SDL_memcpy(
-                        pixels + (size_t)row * (size_t)w * 4u,
-                        (const uint8_t*)bgra->pixels + (size_t)row * (size_t)bgra->pitch,
-                        (size_t)w * 4u);
-                }
-                ok = png ? stasis_image_writer_write_png_bgra32(out_path, w, h, pixels, 0)
-                         : stasis_image_writer_write_bmp_bgra32(out_path, w, h, pixels, 0);
-            } else {
-                SDL_Log("recording readback dimensions mismatch: got=%dx%d expected=%dx%d",
-                    bgra ? bgra->w : 0, bgra ? bgra->h : 0, w, h);
-            }
-            SDL_DestroySurface(bgra);
-            SDL_DestroySurface(readback);
-            if (g_recording_presentation) {
-                SDL_SetRenderLogicalPresentation(
-                    g_renderer, g_window_width, g_window_height,
-                    SDL_LOGICAL_PRESENTATION_LETTERBOX);
-            }
+    if (render_queued_lines) {
+        /* Direct API calls may happen before end_frame(), so flush pending lines once. */
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_Color color;
+        for (int i = 0; i < g_line_count; i++) {
+            color.r = (Uint8)(g_lines[i].r * 255.0f);
+            color.g = (Uint8)(g_lines[i].g * 255.0f);
+            color.b = (Uint8)(g_lines[i].b * 255.0f);
+            color.a = (Uint8)(g_lines[i].a * 255.0f);
+            SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
+            SDL_RenderLine(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
-        free(pixels);
-        return ok;
+        g_line_count = 0;
     }
 
+    /* Read the fixed physical recording target, not the logical viewport. */
+    if (g_recording_presentation) {
+        SDL_SetRenderLogicalPresentation(
+            g_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    }
 
-    free(pixels);
-    return 0;
+    /* SDL3 returns an owned surface for renderer readback. Ordinary captures
+     * use this actual surface extent because it is the authoritative result of
+     * the platform's fitted logical-presentation readback. */
+    SDL_Surface* readback = SDL_RenderReadPixels(g_renderer, NULL);
+    SDL_Surface* bgra = readback
+        ? SDL_ConvertSurface(readback, SDL_PIXELFORMAT_BGRA32)
+        : NULL;
+    int w = bgra ? bgra->w : 0;
+    int h = bgra ? bgra->h : 0;
+
+    if (g_recording_presentation &&
+        (w != g_recording_width || h != g_recording_height)) {
+        SDL_Log("recording readback dimensions mismatch: got=%dx%d expected=%dx%d",
+            w, h, g_recording_width, g_recording_height);
+    } else if (bgra && w > 0 && h > 0 &&
+               (size_t)w <= SIZE_MAX / 4u / (size_t)h) {
+        const size_t bytes = (size_t)w * (size_t)h * 4u;
+        uint8_t* pixels = (uint8_t*)malloc(bytes);
+        if (pixels) {
+            for (int row = 0; row < h; row++) {
+                SDL_memcpy(
+                    pixels + (size_t)row * (size_t)w * 4u,
+                    (const uint8_t*)bgra->pixels + (size_t)row * (size_t)bgra->pitch,
+                    (size_t)w * 4u);
+            }
+            ok = png ? stasis_image_writer_write_png_bgra32(out_path, w, h, pixels, 0)
+                     : stasis_image_writer_write_bmp_bgra32(out_path, w, h, pixels, 0);
+            free(pixels);
+        }
+    }
+
+    SDL_DestroySurface(bgra);
+    SDL_DestroySurface(readback);
+    if (g_recording_presentation) {
+        SDL_SetRenderLogicalPresentation(
+            g_renderer, g_window_width, g_window_height,
+            SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    }
+    return ok;
 }
 
 STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
@@ -4426,11 +4417,10 @@ static void stasis_mixed_add_rect(const float* cmd_f32, int index, int quad, int
     SDL_FColor color = {cmd_f32[base + 4], cmd_f32[base + 5],
         cmd_f32[base + 6], cmd_f32[base + 7]};
     const StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
-    const float u0 = (float)page->white_x / (float)page->width;
-    const float v0 = (float)page->white_y / (float)page->height;
-    const float u1 = (float)(page->white_x + STASIS_SDL_ATLAS_WHITE_SIZE) / (float)page->width;
-    const float v1 = (float)(page->white_y + STASIS_SDL_ATLAS_WHITE_SIZE) / (float)page->height;
-    stasis_mixed_set_quad(quad, points, color, u0, v0, u1, v1);
+    const float white_u = ((float)page->white_x + 0.5f) / (float)page->width;
+    const float white_v = ((float)page->white_y + 0.5f) / (float)page->height;
+    stasis_mixed_set_quad(
+        quad, points, color, white_u, white_v, white_u, white_v);
 }
 
 static int stasis_mixed_add_sprite(
@@ -4595,7 +4585,8 @@ static int stasis_sprite_atlas_create_page(int width, int height, uint64_t group
     static const unsigned char placeholder[16] = {
         255,0,255,255, 24,24,24,255,
         24,24,24,255, 255,0,255,255};
-    SDL_Rect white_rect = {page->white_x, page->white_y, 2, 2};
+    SDL_Rect white_rect = {page->white_x, page->white_y,
+        STASIS_SDL_ATLAS_WHITE_SIZE, STASIS_SDL_ATLAS_WHITE_SIZE};
     SDL_Rect placeholder_rect = {page->placeholder_x, page->placeholder_y, 2, 2};
     if (!SDL_UpdateTexture(page->texture, &white_rect, white, 8) ||
         !SDL_UpdateTexture(page->texture, &placeholder_rect, placeholder, 8)) {
@@ -4732,6 +4723,22 @@ static int stasis_sprite_atlas_reserve_on_page(
     return 1;
 }
 
+static int stasis_sprite_atlas_is_cold_page(const StasisSdlAtlasPage* page) {
+    return page && page->texture && !page->dedicated && page->group_id == 0 &&
+           page->width == STASIS_SDL_ATLAS_COLD_PAGE_SIZE &&
+           page->height == STASIS_SDL_ATLAS_COLD_PAGE_SIZE;
+}
+
+static int stasis_sprite_atlas_fits_cold_page(int w, int h) {
+    /* Shared cold pages retain the reserved white/placeholder header at y=1.
+     * Account for that header, the initial cursor inset, and edge padding. */
+    return w > 0 && h > 0 &&
+           w <= STASIS_SDL_ATLAS_COLD_PAGE_SIZE -
+                    (STASIS_SDL_ATLAS_PADDING * 2 + 1) &&
+           h <= STASIS_SDL_ATLAS_COLD_PAGE_SIZE -
+                    (STASIS_SDL_ATLAS_PADDING * 2 + 6);
+}
+
 static int stasis_sprite_atlas_allocate(
     const StasisSpriteAtlasPolicyV3* policy, int logical_w, int logical_h,
     int w, int h, int* out_x, int* out_y
@@ -4756,6 +4763,21 @@ static int stasis_sprite_atlas_allocate(
         if (page_h < h + 8) page_h = stasis_sprite_atlas_next_extent(
             h + 8, STASIS_SDL_ATLAS_PAGE_SIZE);
         const int page_index = stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0);
+        if (page_index < 0) return -1;
+        return stasis_sprite_atlas_reserve_on_page(
+            &g_sprite_atlas_pages[page_index], w, h, out_x, out_y) ? page_index : -1;
+    }
+    if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h)) {
+        for (int i = 0; i < g_sprite_atlas_page_count; i++) {
+            StasisSdlAtlasPage* page = &g_sprite_atlas_pages[i];
+            if (!stasis_sprite_atlas_is_cold_page(page)) continue;
+            if (stasis_sprite_atlas_reserve_on_page(page, w, h, out_x, out_y)) return i;
+        }
+        const int page_index = stasis_sprite_atlas_create_page(
+            STASIS_SDL_ATLAS_COLD_PAGE_SIZE,
+            STASIS_SDL_ATLAS_COLD_PAGE_SIZE,
+            0,
+            0);
         if (page_index < 0) return -1;
         return stasis_sprite_atlas_reserve_on_page(
             &g_sprite_atlas_pages[page_index], w, h, out_x, out_y) ? page_index : -1;
@@ -4846,7 +4868,9 @@ static int sprite_publish_pixels_into_entry(
             e->sdl_tex == g_sprite_atlas_pages[page_index].texture &&
             ((e->atlas_policy.eligible && !g_sprite_atlas_pages[page_index].dedicated &&
               g_sprite_atlas_pages[page_index].group_id == e->atlas_policy.group_id) ||
-             (!e->atlas_policy.eligible && g_sprite_atlas_pages[page_index].dedicated));
+             (!e->atlas_policy.eligible &&
+              (g_sprite_atlas_pages[page_index].dedicated ||
+               stasis_sprite_atlas_is_cold_page(&g_sprite_atlas_pages[page_index]))));
         int allocated_new = 0;
         if (!page_compatible || e->alloc_w < w + 2 || e->alloc_h < h + 2) {
             page_index = stasis_sprite_atlas_allocate(

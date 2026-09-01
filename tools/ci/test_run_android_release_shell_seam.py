@@ -1149,10 +1149,10 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         ]
         markers = []
         for sequence, kind, tick, generation, width, height, trace in stages:
-            native_scale = min(width / 360, height / 720)
-            drawable_width = int(360 * native_scale)
-            drawable_height = int(720 * native_scale)
-            scale = min(drawable_width / 360, drawable_height / 720)
+            fitted_scale = min(width / 360, height / 720)
+            fitted_width = max(1, int(360 * fitted_scale + 0.5))
+            fitted_height = max(1, int(720 * fitted_scale + 0.5))
+            scale = min(fitted_width / 360, fitted_height / 720)
             markers.append(
                 {
                     "event": "probe",
@@ -1174,8 +1174,8 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                     "logical_h": 720.0,
                     "native_w": width,
                     "native_h": height,
-                    "drawable_w": drawable_width,
-                    "drawable_h": drawable_height,
+                    "drawable_w": width,
+                    "drawable_h": height,
                     "display_generation": generation,
                     "density_generation": generation,
                     "frame_display_generation": generation,
@@ -1211,6 +1211,19 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             },
         )
         self.assertEqual([1, 2, 3], [item["probe_sequence"] for item in observed])
+        self.assertEqual([801, 1601], observed[0]["fitted_content_extent"])
+        fitted_drawable_markers = [dict(item) for item in markers]
+        fitted_drawable_markers[0]["drawable_w"] = 801
+        with self.assertRaisesRegex(seam.SeamError, "drawable size mismatch"):
+            seam.validate_orientation_markers(
+                fitted_drawable_markers,
+                expectations,
+                {
+                    "portrait": (1001, 1601),
+                    "landscape": (1601, 1001),
+                    "restored_portrait": (1001, 1601),
+                },
+            )
         with self.assertRaisesRegex(seam.SeamError, "configured size mismatch"):
             seam.validate_orientation_markers(
                 markers,
@@ -1266,14 +1279,14 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             "logical_h": 720.0,
             "native_w": 1001,
             "native_h": 1601,
-            "drawable_w": 800,
+            "drawable_w": 1001,
             "drawable_h": 1601,
             "display_generation": 2,
             "density_generation": 1,
             "frame_display_generation": 2,
             "frame_density_generation": 1,
-            "content_scale": 800 / 360,
-            "raster_scale": 800 / 360,
+            "content_scale": 1601 / 720,
+            "raster_scale": 1601 / 720,
             "command_trace": 1,
         }
         markers = []

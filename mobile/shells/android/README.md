@@ -84,8 +84,9 @@ landscape, and restored portrait. Each stage waits for the AOT guest to observe
 the new HostFrame display generation during `tick`, injects a logical-coordinate
 touch, and verifies the same frame's guest metrics, pointer transform, command
 trace, and named pixel regions. Native dimensions must match the configured
-surface; drawable dimensions must match the fitted 360 x 720 SDL letterbox
-viewport:
+surface; native and drawable dimensions must match the complete renderer
+backing. The driver independently derives and validates the fitted 360 x 720
+SDL letterbox viewport and its content/raster scale:
 
 ```powershell
 mobile/android/test_release_shell.ps1 -Serial <device-serial> `

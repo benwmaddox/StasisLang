@@ -5819,11 +5819,29 @@ function render(): void {{ {draws} return; }}
             "successful replacements must publish current preparation receipts"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)")
-                && STASIS_GRAPHICS_SOURCE.contains(
-                    "A regular screenshot captures the fitted logical content returned by"
-                ),
-            "resource preparation and capture extents must derive from the full backing without float-tier drift"
+            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)"),
+            "resource preparation must derive from the full-backing density scale"
+        );
+        let capture_start = graphics_source
+            .find("static int stasis_gfx_dump_image(")
+            .expect("framebuffer capture helper");
+        let capture_end = graphics_source[capture_start..]
+            .find("STASIS_EXPORT int stasis_gfx_dump_bmp(")
+            .expect("framebuffer capture helper boundary")
+            + capture_start;
+        let capture_source = &graphics_source[capture_start..capture_end];
+        assert!(
+            capture_source.contains("SDL_RenderReadPixels(g_renderer, NULL)")
+                && capture_source.contains("SDL_ConvertSurface(readback, SDL_PIXELFORMAT_BGRA32)")
+                && capture_source.contains("int w = bgra ? bgra->w : 0;")
+                && capture_source.contains("int h = bgra ? bgra->h : 0;"),
+            "ordinary capture dimensions must come from the converted SDL readback surface"
+        );
+        assert!(
+            capture_source.contains("w != g_recording_width || h != g_recording_height")
+                && capture_source
+                    .contains("recording readback dimensions mismatch: got=%dx%d expected=%dx%d"),
+            "fixed recording targets must reject readbacks outside their configured extent"
         );
         assert!(
             STASIS_GRAPHICS_SOURCE
@@ -6196,6 +6214,36 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
+    fn mixed_solids_sample_one_white_texel_while_sprites_keep_ranged_uvs() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let rect_start = graphics_source
+            .find("static void stasis_mixed_add_rect(")
+            .expect("mixed solid helper");
+        let rect_end = graphics_source[rect_start..]
+            .find("static int stasis_mixed_add_sprite(")
+            .expect("mixed solid helper boundary")
+            + rect_start;
+        let rect_source = &graphics_source[rect_start..rect_end];
+        assert!(rect_source
+            .contains("const float white_u = ((float)page->white_x + 0.5f) / (float)page->width;"));
+        assert!(rect_source.contains(
+            "const float white_v = ((float)page->white_y + 0.5f) / (float)page->height;"
+        ));
+        assert!(rect_source.contains("quad, points, color, white_u, white_v, white_u, white_v"));
+
+        let sprite_start = rect_end;
+        let sprite_end = graphics_source[sprite_start..]
+            .find("static int stasis_draw_mixed_order_span(")
+            .expect("mixed sprite helper boundary")
+            + sprite_start;
+        let sprite_source = &graphics_source[sprite_start..sprite_end];
+        assert!(sprite_source.contains("entry->atlas_x + crop.x"));
+        assert!(sprite_source.contains("entry->atlas_x + crop.x + crop.w"));
+        assert!(sprite_source.contains("entry->atlas_y + crop.y"));
+        assert!(sprite_source.contains("entry->atlas_y + crop.y + crop.h"));
+    }
+
+    #[test]
     fn live_runtime_exposes_repeatable_pre_present_png_capture() {
         assert!(
             STASIS_GRAPHICS_SOURCE
@@ -6270,15 +6318,18 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
-    fn sprite_runtime_uses_grouped_and_dedicated_atlas_pages() {
+    fn sprite_runtime_uses_grouped_cold_and_dedicated_atlas_pages() {
         for required in [
             "stasis_gfx_set_next_sprite_atlas_policy_v3",
             "stasis_asset_request_sprite_with_policy_v3",
             "task->atlas_policy",
             "stasis_sprite_atlas_page_size_v3",
+            "#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512",
             "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
             "if (!page->texture || page->dedicated || page->group_id != group_id) continue;",
             "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
+            "if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))",
+            "if (!stasis_sprite_atlas_is_cold_page(page)) continue;",
             "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
         ] {
             assert!(
@@ -6286,6 +6337,27 @@ function render(): void {{ {draws} return; }}
                 "runtime hot-render policy should contain {required}"
             );
         }
+        let allocation_start = STASIS_GRAPHICS_SOURCE
+            .find("static int stasis_sprite_atlas_allocate(")
+            .expect("sprite atlas allocation helper");
+        let allocation_end = STASIS_GRAPHICS_SOURCE[allocation_start..]
+            .find("static int stasis_sprite_atlas_upload(")
+            .expect("sprite atlas allocation helper boundary")
+            + allocation_start;
+        let allocation_source = &STASIS_GRAPHICS_SOURCE[allocation_start..allocation_end];
+        let eligible_branch = allocation_source
+            .find("if (eligible &&")
+            .expect("compiler-eligible group allocation");
+        let cold_branch = allocation_source
+            .find("if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))")
+            .expect("standalone cold-page allocation");
+        let dedicated_branch = allocation_source
+            .find("stasis_sprite_atlas_create_page(width, height, group_id, 1)")
+            .expect("oversized standalone allocation");
+        assert!(
+            eligible_branch < cold_branch && cold_branch < dedicated_branch,
+            "eligible groups must keep v3 sizing, fitting standalone sprites must use cold pages, and oversized standalone sprites must remain dedicated"
+        );
         let publish_start = STASIS_GRAPHICS_SOURCE
             .find("static int sprite_publish_pixels_into_entry(")
             .expect("sprite publication helper");
@@ -6294,6 +6366,10 @@ function render(): void {{ {draws} return; }}
             .expect("sprite publication helper boundary")
             + publish_start;
         let publish_source = &STASIS_GRAPHICS_SOURCE[publish_start..publish_end];
+        assert!(
+            publish_source.contains("stasis_sprite_atlas_is_cold_page("),
+            "standalone reloads must retain compatible shared cold or dedicated allocations"
+        );
         let failure = publish_source
             .find("if (page_index < 0 ||")
             .expect("atlas allocation/upload failure branch");
