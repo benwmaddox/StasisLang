@@ -139,6 +139,19 @@ static void test_x11_content_scale_selects_window_backing(void) {
     CHECK(stasis_display_scaled_window_extent(10000, 20.0f) == 65536);
 }
 
+static void test_x11_scale_control_requires_an_explicit_valid_factor(void) {
+    CHECK(stasis_display_scale_control_is_valid("1.0"));
+    CHECK(stasis_display_scale_control_is_valid("1.25"));
+    CHECK(stasis_display_scale_control_is_valid("1.5"));
+    CHECK(stasis_display_scale_control_is_valid("2.0"));
+    CHECK(!stasis_display_scale_control_is_valid(NULL));
+    CHECK(!stasis_display_scale_control_is_valid(""));
+    CHECK(!stasis_display_scale_control_is_valid("0"));
+    CHECK(!stasis_display_scale_control_is_valid("-1"));
+    CHECK(!stasis_display_scale_control_is_valid("not-a-scale"));
+    CHECK(!stasis_display_scale_control_is_valid("1.25x"));
+}
+
 static void test_explicit_window_extent_survives_stale_maximized_state(void) {
     CHECK(stasis_display_should_apply_windowed_extent(1, 0, 1, 0));
     CHECK(stasis_display_should_apply_windowed_extent(1, 0, 0, 1));
@@ -264,6 +277,7 @@ int main(void) {
     test_desktop_density_tiers_preserve_logical_geometry();
     test_preparation_scale_is_exact_and_bounded();
     test_x11_content_scale_selects_window_backing();
+    test_x11_scale_control_requires_an_explicit_valid_factor();
     test_explicit_window_extent_survives_stale_maximized_state();
     test_full_backing_and_fitted_content_remain_distinct();
     test_orientation_change_keeps_logical_dimensions();

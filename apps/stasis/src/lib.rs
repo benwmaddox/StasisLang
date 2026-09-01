@@ -5872,6 +5872,9 @@ function render(): void {{ {draws} return; }}
         let desktop_maximized = graphics_source
             .find("window_flags |= SDL_WINDOW_MAXIMIZED;")
             .expect("desktop window creation should request a maximized window");
+        let scale_control_guard = graphics_source[..desktop_maximized]
+            .rfind("if (!g_recording_presentation && !g_x11_scale_controlled_window) {")
+            .expect("desktop maximization should exclude explicit X11 scale control");
         let platform_guard_end = graphics_source[desktop_maximized..]
             .find("#endif")
             .expect("desktop window policy should remain platform guarded")
@@ -5881,6 +5884,27 @@ function render(): void {{ {draws} return; }}
             mobile_fullscreen < desktop_maximized && desktop_maximized < platform_guard_end,
             "desktop maximization must be the non-mobile branch of window creation"
         );
+        assert!(
+            mobile_fullscreen < scale_control_guard && scale_control_guard < desktop_maximized,
+            "ordinary desktop launch should maximize unless explicit X11 scale control owns a windowed backing"
+        );
+    }
+
+    #[test]
+    fn explicit_x11_scale_control_owns_a_windowed_launch() {
+        for required in [
+            "SDL_VIDEO_X11_SCALING_FACTOR",
+            "stasis_display_scale_control_is_valid(",
+            "g_x11_scale_controlled_window = stasis_x11_scale_controlled_launch();",
+            "if (!g_recording_presentation && !g_x11_scale_controlled_window)",
+            "if (g_x11_scale_controlled_window) {\n        maximized = 0;",
+            "stasis_apply_x11_window_scale(1);",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "scale-controlled X11 launch should contain {required}"
+            );
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 typedef struct {
     float x;
@@ -251,6 +252,13 @@ static int stasis_display_scaled_window_extent(int logical_extent, float display
     }
     const double scaled = ceil((double)logical_extent * (double)display_scale);
     return scaled > 65536.0 ? 65536 : (int)scaled;
+}
+
+static int stasis_display_scale_control_is_valid(const char* value) {
+    if (!value || !*value) return 0;
+    char* end = NULL;
+    const double parsed = strtod(value, &end);
+    return end != value && *end == 0 && isfinite(parsed) && parsed > 0.0;
 }
 
 static int stasis_display_should_apply_windowed_extent(

@@ -198,6 +198,11 @@ initialization to exercise deterministic 1x, fractional, and 2x backing tiers.
 This is an SDL/X11 acceptance control, not a game-owned scale. Wayland remains
 compositor-owned. Both backends feed the same full-backing metrics, fitted
 content, pointer transform, density generation, and bounded preparation path.
+When that X11 control is explicitly present and valid, Stasis launches in a
+scale-controlled window instead of requesting the window-manager work area;
+maximize requests retain the latest logical canvas but keep that deterministic
+scaled backing. Without the control, desktop launch and maximize behavior are
+unchanged.
 X11 itself uses pixel window coordinates, so Stasis queries SDL's window/display
 content scale and applies it when creating or resizing a windowed presentation.
 `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED` reapplies that physical extent without

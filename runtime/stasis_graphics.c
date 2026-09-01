@@ -167,6 +167,7 @@ static int g_drawable_width = 800;
 static int g_drawable_height = 600;
 static float g_pixel_scale = 1.0f;
 static bool g_recording_presentation = false;
+static bool g_x11_scale_controlled_window = false;
 static int g_recording_width = 0;
 static int g_recording_height = 0;
 static uint32_t g_recording_fps = 0;
@@ -657,6 +658,17 @@ static float stasis_x11_window_scale(void) {
     return scale > 8.0f ? 8.0f : scale;
 #else
     return 1.0f;
+#endif
+}
+
+static bool stasis_x11_scale_controlled_launch(void) {
+#if defined(__linux__) && !defined(__ANDROID__)
+    const char* driver = SDL_GetCurrentVideoDriver();
+    return driver && strcmp(driver, "x11") == 0 &&
+        stasis_display_scale_control_is_valid(
+            SDL_getenv("SDL_VIDEO_X11_SCALING_FACTOR"));
+#else
+    return false;
 #endif
 }
 
@@ -4205,6 +4217,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 0;
     }
+    g_x11_scale_controlled_window = stasis_x11_scale_controlled_launch();
 
     /* Optional screenshot automation via environment variables. */
     g_screenshot_taken = false;
@@ -4332,7 +4345,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
     /* Let the desktop window manager fill its usable work area without
        covering taskbars, docks, or panels. */
-    if (!g_recording_presentation) {
+    if (!g_recording_presentation && !g_x11_scale_controlled_window) {
         window_flags |= SDL_WINDOW_MAXIMIZED;
     }
 #endif
@@ -4694,12 +4707,18 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
     stasis_sync_display_metrics();
     return 1;
 #else
+    if (g_x11_scale_controlled_window) {
+        maximized = 0;
+    }
     bool result = SDL_SetWindowFullscreen(g_window, false);
     if (result) {
         result = maximized ? SDL_MaximizeWindow(g_window) : SDL_RestoreWindow(g_window);
     }
     if (result) {
         SDL_SyncWindow(g_window);
+        if (g_x11_scale_controlled_window) {
+            stasis_apply_x11_window_scale(1);
+        }
         stasis_sync_display_metrics();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -7468,6 +7487,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
     memset(&g_test_display_override, 0, sizeof(g_test_display_override));
     g_available_width = 0;
     g_available_height = 0;
+    g_x11_scale_controlled_window = false;
     g_window_minimized = false;
     g_render_accepted_frames = 0;
     g_render_rejected_frames = 0;
