@@ -3,7 +3,7 @@
   "fixture": "samples/render_parity/main.stasis",
   "trace_fixture": "samples/render_parity/trace.stasis",
   "state_checksum": 2500,
-  "render_contract_version": 6,
+  "render_contract_version": 7,
   "font_sha256": "17ec668bd0cd62e934f97563287ed72a4a8599ae716d20c1a93c82f1876dde47",
   "logical_size": [640, 360],
   "required_commands": {
@@ -36,7 +36,7 @@
       "comparison": "regions",
       "regions": [
         {"name": "background", "rect": [12, 12, 12, 12], "rgba": [18, 30, 48, 255], "max_channel_delta": 28, "min_coverage": 0.80},
-        {"name": "fallback", "rect": [44, 60, 40, 40], "rgba": [255, 0, 255, 255], "max_channel_delta": 36, "min_coverage": 0.08},
+        {"name": "atlas_canvas_sprite", "rect": [44, 60, 40, 40], "predicate": "atlas_canvas", "min_coverage": 0.40},
         {"name": "opaque_svg", "rect": [146, 54, 76, 52], "rgba": [49, 209, 124, 255], "max_channel_delta": 32, "min_coverage": 0.35},
         {"name": "translucent_svg", "rect": [282, 54, 76, 52], "rgba": [108, 78, 91, 255], "max_channel_delta": 36, "min_coverage": 0.18},
         {"name": "rotated_scaled_sprite", "rect": [440, 36, 112, 84], "predicate": "green_sprite", "min_coverage": 0.20},
@@ -50,7 +50,7 @@
       "comparison": "regions",
       "regions": [
         {"name": "background", "rect": [12, 12, 12, 12], "rgba": [18, 30, 48, 255], "max_channel_delta": 28, "min_coverage": 0.80},
-        {"name": "fallback", "rect": [44, 60, 40, 40], "rgba": [255, 0, 255, 255], "max_channel_delta": 36, "min_coverage": 0.08},
+        {"name": "atlas_canvas_sprite", "rect": [44, 60, 40, 40], "predicate": "atlas_canvas", "min_coverage": 0.40},
         {"name": "opaque_svg", "rect": [146, 54, 76, 52], "rgba": [49, 209, 124, 255], "max_channel_delta": 32, "min_coverage": 0.35},
         {"name": "translucent_svg", "rect": [282, 54, 76, 52], "non_background_fraction": 0.50},
         {"name": "rotated_scaled_sprite", "rect": [440, 36, 112, 84], "predicate": "green_sprite", "min_coverage": 0.20},

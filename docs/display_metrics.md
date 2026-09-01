@@ -91,11 +91,12 @@ and reduced as one scale when the 8192-axis or 64 MiB backing cap would be
 exceeded. `data-*` receipts expose logical, CSS, backing, DPR, scale, cap, and
 generation values for inspection.
 
-Canvas2D receives one logical-unit transform per frame. Private WebGL2 targets
-are allocated in backing pixels and receive logical dimensions in their shader
-uniform; their completed image is composited into the main backing under an
-identity transform. This keeps rectangles, lines, text, sprites, clips, and
-intermediate targets from applying density twice. Pointer coordinates use the
+The visible canvas is WebGL2. Its viewport uses backing pixels while shader
+uniforms retain logical dimensions; logical clips are converted once to GL
+scissors. Rectangles, lines, prepared text textures, and sprites all use the
+same textured-quad path, with no Canvas frame replay or intermediate
+composite. Offscreen Canvas2D is limited to image and text resource raster
+preparation before texture upload. Pointer coordinates use the
 CSS bounding rectangle and map back to the logical canvas, including after a
 resize, orientation change, or DPR change.
 

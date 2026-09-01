@@ -47,7 +47,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 verify_asset_package_identities(Parser(), package)
 
     def test_render_contract_version_reads_current_header_constant(self):
-        self.assertEqual(6, render_contract_version(ROOT))
+        self.assertEqual(7, render_contract_version(ROOT))
 
     def test_render_contract_version_rejects_missing_or_non_numeric_constant(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -371,7 +371,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "source_commit": "0123456789012345678901234567890123456789",
                 "development_build": False,
                 "dirty_state": False,
-                "command_buffer": {"name": "gfx_cmd", "version": 6},
+                "command_buffer": {"name": "gfx_cmd", "version": 7},
                 "runtime_sources": {"runtime/stasis_graphics.c": expected},
                 "mobile_shell_sources": {
                     "mobile/shells/common/main.c": hashlib.sha256(common_shell).hexdigest(),
@@ -435,7 +435,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             )
             legacy_failed = subprocess.run(command, check=False, capture_output=True, text=True)
             self.assertNotEqual(legacy_failed.returncode, 0)
-            self.assertIn("expected current 6", legacy_failed.stderr)
+            self.assertIn("expected current 7", legacy_failed.stderr)
             unsupported = dict(legacy)
             unsupported["command_buffer"] = {"name": "other_cmd", "version": 9}
             (release / "stasis_release_provenance.json").write_text(
@@ -450,7 +450,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertNotEqual(contract_failed.returncode, 0)
             self.assertIn("command_buffer family must be gfx_cmd", contract_failed.stderr)
             numeric_type = dict(manifest)
-            numeric_type["command_buffer"] = {"name": "gfx_cmd", "version": 6.0}
+            numeric_type["command_buffer"] = {"name": "gfx_cmd", "version": 7.0}
             (release / "stasis_release_provenance.json").write_text(
                 json.dumps(numeric_type), encoding="utf-8"
             )

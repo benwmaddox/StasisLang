@@ -1,5 +1,5 @@
-global gfx_cmd_i32: i32[35120];
-global gfx_cmd_f32: f32[126084];
+global gfx_cmd_i32: i32[67888];
+global gfx_cmd_f32: f32[146564];
 global gfx_cmd_u8: u8[65536];
 global tick_generation: i32;
 

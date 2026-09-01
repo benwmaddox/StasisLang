@@ -58,7 +58,7 @@ const MANIFEST_VERSION: u32 = 1;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
-const GFX_CMD_VERSION: i64 = 6;
+const GFX_CMD_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",
@@ -75,6 +75,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",
+    "stasis_mixed_quad_planner.h",
     "stasis_sprite_atlas_policy.h",
     "stasis_image_writer.c",
     "stasis_image_writer.h",
@@ -4145,7 +4146,6 @@ fn package_workspace(
 
 const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
 const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
-const WEB_MINIMAL_RUNTIME_JS: &str = include_str!("../../../runtime/web/game_minimal.js");
 
 struct WebWasmArtifact {
     bytes: Vec<u8>,
@@ -4341,7 +4341,7 @@ fn package_web_workspace(
             .imported_symbols()
             .iter()
             .any(|symbol| symbol.starts_with("stasis_web_network_"));
-        let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled);
+        let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled)?;
         let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
@@ -4556,41 +4556,77 @@ fn web_index_html(title: &str, development_build: bool, loading_font: Option<&st
         .replace("__STASIS_LOADING_FONT_FAMILY__", &loading_font_family)
 }
 
-fn lean_web_runtime(process: &WasmProcess) -> Option<String> {
-    if WEB_RUNTIME_BUFFERS
-        .iter()
-        .any(|path| process.memory_layout().contains_key(*path))
-        || WEB_HOST_GLOBALS
-            .iter()
-            .any(|path| process.global_types().contains_key(*path))
-    {
-        return None;
-    }
-    let snippets = BTreeMap::from([
-        ("cos_fast", "    cos_fast: value => Math.cos(value),"),
-        ("print_char", "    print_char: value => console.log(String.fromCodePoint(value)),"),
-        ("print_i32", "    print_i32: value => console.log(value),"),
-        ("print_int", "    print_int: value => console.log(value),"),
-        ("print_string", "    print_string: value => console.log(stringValue(value)),"),
-        ("sin_fast", "    sin_fast: value => Math.sin(value),"),
-        ("web_begin_frame", "    web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },"),
-        ("web_draw_rect", "    web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),"),
-        ("web_draw_text", "    web_draw_text: (x, y, value) => commands.push([2, x, y, value]),"),
-    ]);
-    let imports = process
-        .imported_symbols()
-        .iter()
-        .map(|symbol| snippets.get(symbol.as_str()).copied())
-        .collect::<Option<Vec<_>>>()?;
-    Some(WEB_MINIMAL_RUNTIME_JS.replace("__STASIS_IMPORTS__", &imports.join("\n")))
+fn link_web_runtime(
+    process: &WasmProcess,
+    audio_enabled: bool,
+    network_enabled: bool,
+) -> Result<String, String> {
+    let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled);
+    let runtime = strip_web_runtime_feature(&runtime, "network", network_enabled);
+    strip_web_runtime_imports(&runtime, process.imported_symbols())
 }
 
-fn link_web_runtime(process: &WasmProcess, audio_enabled: bool, network_enabled: bool) -> String {
-    if let Some(runtime) = lean_web_runtime(process) {
-        return runtime;
+fn strip_web_runtime_imports(
+    source: &str,
+    imported_symbols: &BTreeSet<String>,
+) -> Result<String, String> {
+    const PREFIX: &str = "// @stasis-import ";
+    let mut active: Option<(String, bool)> = None;
+    let mut output = Vec::new();
+
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(marker) = trimmed.strip_prefix(PREFIX) {
+            if let Some(symbol) = marker.strip_suffix(" begin") {
+                if symbol.is_empty() || symbol.split_whitespace().count() != 1 {
+                    return Err(format!(
+                        "invalid Web runtime import marker on line {}: {trimmed}",
+                        index + 1
+                    ));
+                }
+                if let Some((active_symbol, _)) = active.as_ref() {
+                    return Err(format!(
+                        "nested Web runtime import marker for {symbol} inside {active_symbol} on line {}",
+                        index + 1
+                    ));
+                }
+                active = Some((symbol.to_string(), imported_symbols.contains(symbol)));
+                continue;
+            }
+            if let Some(symbol) = marker.strip_suffix(" end") {
+                match active.take() {
+                    Some((active_symbol, _)) if active_symbol == symbol => continue,
+                    Some((active_symbol, _)) => {
+                        return Err(format!(
+                            "mismatched Web runtime import marker for {symbol}; expected {active_symbol} on line {}",
+                            index + 1
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "unmatched Web runtime import end marker for {symbol} on line {}",
+                            index + 1
+                        ));
+                    }
+                }
+            }
+            return Err(format!(
+                "invalid Web runtime import marker on line {}: {trimmed}",
+                index + 1
+            ));
+        }
+
+        if active.as_ref().is_none_or(|(_, retain)| *retain) {
+            output.push(line);
+        }
     }
-    let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled);
-    strip_web_runtime_feature(&runtime, "network", network_enabled)
+
+    if let Some((symbol, _)) = active {
+        return Err(format!(
+            "unterminated Web runtime import marker for {symbol}"
+        ));
+    }
+    Ok(output.join("\n"))
 }
 
 fn strip_web_runtime_feature(source: &str, feature: &str, enabled: bool) -> String {
@@ -5719,7 +5755,7 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
         || !current_command_buffer
     {
         return Err(
-            "release provenance is not a clean official gfx_cmd schema 6 build".to_string(),
+            "release provenance is not a clean official gfx_cmd schema 7 build".to_string(),
         );
     }
     let release_tag = provenance_string_field(&value, "release_tag")?;
@@ -5985,7 +6021,7 @@ fn write_ios_object_config(
     fs::write(
         output,
         format!(
-            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited) STASIS_GRAPHICS_SDL_ONLY=1{network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
+            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited){network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
             network_flags = network_flags,
             network_headers = network_headers,
             network_library = network_library,
@@ -7345,22 +7381,6 @@ mod tests {
     }
 
     #[test]
-    fn lean_web_runtime_defers_window_mailbox_games_to_full_host() {
-        let mut process = WasmProcess::new();
-        process.set_required_emit_roots(&[
-            "main".to_string(),
-            "tick".to_string(),
-            "render".to_string(),
-        ]);
-        process.upsert_file(
-            "window.stasis",
-            "global host_req_seq: i32; global host_req_flags: i32; global host_req_window_w_px: i32; global host_req_window_h_px: i32; function main(): i32 { host_req_flags = 1; host_req_window_w_px = 640; host_req_window_h_px = 360; host_req_seq += 1; return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
-        );
-        process.compile().expect("compile window mailbox game");
-        assert!(lean_web_runtime(&process).is_none());
-    }
-
-    #[test]
     fn sprite_asset_tasks_survive_audio_feature_stripping() {
         let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", false);
         assert!(runtime.contains("const assetTasks = new Map()"));
@@ -7486,9 +7506,35 @@ mod tests {
         }
         assert!(!memory.contains_key("unrelated"));
 
-        let runtime = link_web_runtime(&process, false, false);
+        let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
         assert!(runtime.contains("const sysMemcpyU8 ="));
         assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+    }
+
+    #[test]
+    fn web_runtime_import_markers_follow_imports_and_reject_malformed_layout() {
+        let source = "before\n// @stasis-import web_input_axis begin\naxis\n// @stasis-import web_input_axis end\nmiddle\n// @stasis-import web_input_fire begin\nfire\n// @stasis-import web_input_fire end\nafter";
+        let imports = BTreeSet::from(["web_input_fire".to_string()]);
+        let stripped = strip_web_runtime_imports(source, &imports).expect("strip imports");
+        assert_eq!(stripped, "before\nmiddle\nfire\nafter");
+
+        let runtime = strip_web_runtime_imports(WEB_RUNTIME_JS, &imports)
+            .expect("strip optional imports from runtime");
+        assert!(runtime.contains("web_input_fire: () =>"));
+        assert!(!runtime.contains("web_input_axis: () =>"));
+        assert!(!runtime.contains("@stasis-import"));
+
+        for malformed in [
+            "// @stasis-import a begin\n// @stasis-import b begin\nvalue",
+            "// @stasis-import a begin\nvalue\n// @stasis-import b end",
+            "// @stasis-import a end",
+            "// @stasis-import a begin\nvalue",
+        ] {
+            assert!(
+                strip_web_runtime_imports(malformed, &BTreeSet::new()).is_err(),
+                "accepted malformed marker layout: {malformed}"
+            );
+        }
     }
 
     #[test]
@@ -8680,7 +8726,7 @@ mod tests {
         write_json_file(&manifest_path, &legacy_manifest).expect("write legacy provenance fixture");
         let error =
             verify_release_provenance(&manifest_path).expect_err("reject legacy render provenance");
-        assert!(error.contains("schema 6 build"));
+        assert!(error.contains("schema 7 build"));
 
         let mut current_manifest = manifest.clone();
         current_manifest["command_buffer"]["version"] = json!(GFX_CMD_VERSION);
@@ -8692,7 +8738,7 @@ mod tests {
         wrong_family["command_buffer"]["name"] = json!("other_cmd");
         write_json_file(&manifest_path, &wrong_family).expect("write wrong-family fixture");
         let error = verify_release_provenance(&manifest_path).expect_err("reject wrong family");
-        assert!(error.contains("clean official gfx_cmd schema 6 build"));
+        assert!(error.contains("clean official gfx_cmd schema 7 build"));
         write_json_file(&manifest_path, &current_manifest).expect("restore current provenance");
 
         fs::write(
@@ -9028,7 +9074,6 @@ mod tests {
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
         assert!(!project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
-        assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
         assert!(ios.join("runtime/stasis_asset_path.h").is_file());
         assert!(ios.join("runtime/stasis_render_contract.h").is_file());

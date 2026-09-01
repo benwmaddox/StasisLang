@@ -1,7 +1,7 @@
 extern function reject_code_swap(): void;
 
-global gfx_cmd_i32: i32[35120];
-global gfx_cmd_f32: f32[126084];
+global gfx_cmd_i32: i32[67888];
+global gfx_cmd_f32: f32[146564];
 global gfx_cmd_u8: u8[65536];
 global tick_generation: i32;
 
@@ -17,7 +17,7 @@ function tick(): i32 {
 
 function render(): i32 {
     gfx_cmd_i32[0] = 1196967473;
-    gfx_cmd_i32[1] = 6;
+    gfx_cmd_i32[1] = 7;
     gfx_cmd_i32[2] = 3;
     gfx_cmd_i32[3] = 0;
     gfx_cmd_i32[4] = 0;
@@ -45,6 +45,8 @@ function render(): i32 {
     gfx_cmd_i32[26] = 1;
     gfx_cmd_i32[27] = 0;
     gfx_cmd_i32[28] = 0;
+    gfx_cmd_i32[29] = 0;
+    gfx_cmd_i32[30] = 0;
     if (tick_generation == 303) {
         gfx_cmd_f32[0] = 0.33;
         gfx_cmd_f32[1] = 0.63;

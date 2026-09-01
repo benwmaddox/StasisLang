@@ -61,7 +61,6 @@ EXPORTS
     stasis_audio_play_effect
     stasis_get_startup_test_error
     stasis_get_startup_test_success
-    stasis_set_postfx
     stasis_input_pointer_count
     stasis_input_pointer_id
     stasis_input_pointer_is_down

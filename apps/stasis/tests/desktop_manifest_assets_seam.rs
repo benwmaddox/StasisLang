@@ -169,7 +169,6 @@ fn manifest_assets_survive_wrong_cwd_and_render_sprite_direct_and_cached_text() 
             .expect("canonical configured runtime"),
         "explicit runtime must outrank repository development fallbacks"
     );
-    std::env::set_var("STASIS_USE_SDL", "1");
     std::env::set_var("STASIS_GFX_LOG_SPRITES", "1");
     let gfx = StasisGraphicsApi::load(&runtime_path).expect("load graphics runtime");
     assert!(gfx

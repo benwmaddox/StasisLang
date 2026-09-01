@@ -122,7 +122,7 @@ fn run_guest_frame(
     assert_close(scalar_f32("seam_pointer_x"), x, "guest pointer x");
     assert_close(scalar_f32("seam_pointer_y"), y, "guest pointer y");
 
-    assert_eq!(&gfx_i32[0..4], &[1196967473, 6, 3, 0]);
+    assert_eq!(&gfx_i32[0..4], &[1196967473, 7, 3, 0]);
     assert_eq!(gfx_i32[22], 1, "render order count");
     assert_eq!(gfx_i32[24], 1, "render rectangle count");
     for (index, expected) in clear.iter().enumerate() {
@@ -154,7 +154,6 @@ fn desktop_sdl_input_changes_jit_state_and_submitted_frame_on_the_intended_tick(
             .expect("STASIS_RUNTIME_DLL_PATH must name the CI-built SDL runtime"),
     );
     std::env::set_var("STASIS_ENABLE_TEST_INPUT", "1");
-    std::env::set_var("STASIS_USE_SDL", "1");
 
     let gfx = StasisGraphicsApi::load(&runtime_path).expect("load graphics runtime");
     assert!(gfx

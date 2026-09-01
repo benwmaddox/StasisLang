@@ -197,7 +197,7 @@ jobs:
             -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
             -no-boot-anim -camera-back none
           script: |
-            pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 -Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90
+            pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 -Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90 -MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94
 
       - name: Upload Android Workshop IT-025 evidence
         if: always()

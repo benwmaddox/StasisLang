@@ -90,6 +90,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "github.event_name == 'workflow_call' && inputs.run_slow_seams",
             self.pr_workflow,
         )
+
         slow_jobs = (
             "bootstrap-smoke-windows",
             "vscode-extension-e2e",
@@ -112,6 +113,11 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
                         "run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture"
                     ),
                 )
+
+    def test_workshop_benchmark_identity_tolerates_missing_console_avd_name(self):
+        self.assertIn('Invoke-Adb @("emu", "avd", "name")', self.workshop_script)
+        self.assertIn('getprop", "ro.boot.qemu.avd_name', self.workshop_script)
+        self.assertIn('$observedAvd -ne $AvdName', self.workshop_script)
 
     def test_nightly_grants_reusable_ci_read_permissions(self):
         self.assertIn("  contents: write", self.nightly_workflow)
@@ -156,11 +162,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         release_script = "pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1"
         workshop_script = (
             "pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 "
-            "-Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90"
+            "-Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90 "
+            "-MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94"
         )
         self.assertEqual(1, release_body.count(release_script))
         self.assertNotIn("test_render_emulator.ps1", release_body)
         self.assertEqual(1, workshop_body.count(workshop_script))
+        self.assertEqual(1, self.workflow.count("-MaxRenderP50Millis 1.05"))
+        self.assertEqual(1, self.workflow.count("-MaxRenderP95Millis 8.94"))
         self.assertNotIn("test_release_shell_emulator.ps1", workshop_body)
         release_artifacts = re.findall(r"(?m)^\s+name: (android-[^\s]+)$", release_body)
         workshop_artifacts = re.findall(r"(?m)^\s+name: (android-[^\s]+)$", workshop_body)

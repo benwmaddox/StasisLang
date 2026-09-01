@@ -1,5 +1,13 @@
 # Cross-atlas GPU submission research
 
+> Historical research baseline. Task #397 superseded its backend recommendation:
+> native targets now use only atlas-backed SDL geometry, Web uses only the visible
+> WebGL2 renderer, and Android Workshop uses its embedded atlas-backed GLES
+> renderer. Canvas frame replay and the native GL/GLEW renderer were deleted.
+> The modeled binding-domain constraints and measurements below remain useful;
+> references to keeping conventional or fallback renderers are not current
+> implementation guidance.
+
 ## Decision
 
 Stasis can make every scene-active image GPU-resident and can build one ordered
@@ -30,7 +38,7 @@ C/platform shims. The measurement example uses `std::time::Instant::elapsed`,
 then bounds the `u128` nanosecond result before conversion. It never multiplies
 an absolute Windows QPC counter by one billion, resolving the overflow review.
 
-## Current behavior and prior work
+## Historical behavior and prior work
 
 The shipping desktop/mobile path is SDL. Each SDL sprite call applies modulation
 and calls `SDL_RenderTextureRotated`; SDL exposes no portable cross-texture
@@ -53,8 +61,8 @@ composite. Its 4,096-sprite Canvas sample reported 4,096 draws and 16.5/17.5/28.
 ms browser replay p50/p95/max. Sprite instance/batch/upload metrics on that
 historical Canvas path were unavailable, not zero. The current Web test contract
 now additionally proves same-page cross-handle batching, page-boundary splits,
-64-byte sprite uploads, and whole-run Canvas fallback without partial GPU
-submission.
+64-byte sprite uploads, dedicated same-backend oversize domains, deterministic
+missing-resource atlas regions, and context restoration without another renderer.
 
 Merged Task #335 (`docs/hot_render_metadata.md`, v3) addresses a different stage.
 Compiler snapshots and AOT manifests publish a stable group key, conservative
@@ -243,7 +251,7 @@ Compile-level trait checks require the input/profile/run/counter records to be
 numeric identities. This is the portability boundary for JIT, linked AOT,
 Android bridge, and future Web consumers.
 
-## Staged adoption recommendation
+## Historical staged adoption recommendation
 
 1. Keep the default-off feature as incubation only. After production ABI design
    review, promote the record and planner into the standard shared renderer-core

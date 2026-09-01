@@ -10,7 +10,7 @@ import pathlib
 
 
 COMMAND_BUFFER_NAME = "gfx_cmd"
-CURRENT_COMMAND_BUFFER_VERSION = 6
+CURRENT_COMMAND_BUFFER_VERSION = 7
 ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
 ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
 ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"

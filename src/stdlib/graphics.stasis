@@ -59,6 +59,66 @@ struct SpriteSheet {
     cell_height: i32;
 }
 
+// Frame-local capability for one direct canonical sprite run. Do not retain it
+// in application state or across begin_frame/code-swap generations.
+struct SpriteRunWriter {
+    token: i32;
+}
+
+function @effects(graphics) gfx_reserve_sprite_run(max_count: i32, clip: i32, material: i32, blend: i32, filter: i32, pass: i32, flags: i32): SpriteRunWriter {
+    let writer: SpriteRunWriter;
+    writer.token = gfx_cmd_sprite_run_reserve(max_count, clip, material, blend, filter, pass, flags);
+    return writer;
+}
+
+function @effects(graphics) write(
+    self: SpriteRunWriter,
+    handle: i32,
+    tint_rgba: i32,
+    instance_flags: i32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    src_x: f32,
+    src_y: f32,
+    src_width: f32,
+    src_height: f32,
+    pivot_x: f32,
+    pivot_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    rotation: f32
+): bool {
+    return gfx_cmd_sprite_run_write(
+        self.token,
+        handle,
+        tint_rgba,
+        instance_flags,
+        x,
+        y,
+        width,
+        height,
+        src_x,
+        src_y,
+        src_width,
+        src_height,
+        pivot_x,
+        pivot_y,
+        scale_x,
+        scale_y,
+        rotation
+    );
+}
+
+function @effects(graphics) finalize(self: SpriteRunWriter, actual_count: i32): bool {
+    return gfx_cmd_sprite_run_finalize(self.token, actual_count);
+}
+
+function @effects(graphics) cancel(self: SpriteRunWriter): bool {
+    return gfx_cmd_sprite_run_cancel(self.token);
+}
+
 function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(
     self: Sprite,
     path: string,
@@ -149,20 +209,34 @@ function draw_frame_scaled(self: SpriteSheet, frame: i32, x: f32, y: f32, width:
     }
     let column: i32 = frame % self.columns;
     let row: i32 = frame / self.columns;
-    let inv_columns: f32 = 1.0;
-    let inv_rows: f32 = 1.0;
-    inv_columns = inv_columns / self.columns;
-    inv_rows = inv_rows / self.rows;
-    let u0: f32 = 0.0;
-    let v0: f32 = 0.0;
-    let u1: f32 = 0.0;
-    let v1: f32 = 0.0;
-    u0 = i32_to_f32(column) * inv_columns;
-    v0 = i32_to_f32(row) * inv_rows;
-    u1 = i32_to_f32(column + 1) * inv_columns;
-    v1 = i32_to_f32(row + 1) * inv_rows;
-    gfx_cmd_sprite(self.handle, x, y, width, height, rotation, alpha);
-    gfx_cmd_set_last_sprite_uv(u0, v0, u1, v1);
+    let safe_alpha: i32 = alpha;
+    if (safe_alpha < 0) {
+        safe_alpha = 0;
+    }
+    if (safe_alpha > 255) {
+        safe_alpha = 255;
+    }
+    let source_x: f32 = i32_to_f32(column * self.cell_width);
+    let source_y: f32 = i32_to_f32(row * self.cell_height);
+    let source_width: f32 = i32_to_f32(self.cell_width);
+    let source_height: f32 = i32_to_f32(self.cell_height);
+    gfx_cmd_sprite_semantic(
+        self.handle,
+        x,
+        y,
+        width,
+        height,
+        source_x,
+        source_y,
+        source_width,
+        source_height,
+        width * 0.5,
+        height * 0.5,
+        1.0,
+        1.0,
+        i32_to_f32(rotation),
+        -256 + safe_alpha
+    );
 }
 
 function animation_frame_at(first_frame: i32, frame_count: i32, ticks_per_frame: i32, playback_mode: i32, elapsed_ticks: i32): i32 {
@@ -295,10 +369,6 @@ function gfx_clip_pop(): void {
 
 function draw_lines(lines: f32[], count: i32): void {
     gfx_cmd_lines_from(lines, count);
-}
-
-function gfx_draw_sprites(cmd_i32: i32[], cmd_f32: f32[], count: i32): void {
-    gfx_cmd_sprites_from(cmd_i32, cmd_f32, count);
 }
 
 function gfx_window_resized(): bool {

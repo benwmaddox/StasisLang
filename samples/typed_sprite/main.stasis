@@ -64,10 +64,10 @@ function main(): i32 {
     if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 0] != 41) {
         return 9;
     }
-    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 1] != 17) {
+    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 1] != 0 - 45) {
         return 10;
     }
-    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 2] != 211) {
+    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 2] != 0) {
         return 11;
     }
     if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 0] != 12.5) {
@@ -81,6 +81,9 @@ function main(): i32 {
     }
     if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] != 92.0) {
         return 15;
+    }
+    if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 12] != 17.0) {
+        return 23;
     }
     if (gfx_cmd_text_count() != 1) {
         return 16;

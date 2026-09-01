@@ -11,7 +11,9 @@ REPORT = (
     "08-12 StasisRenderer: RenderPerformance: schema=1 warmup=60 samples=180 "
     "total_p50_us=410 total_p95_us=620 resource_p50_us=120 resource_p95_us=180 "
     "draw_p50_us=270 draw_p95_us=410 draw_calls_min=4 draw_calls_max=4 "
-    "lines=2 rects=1 sprites=3 text=2 order=8"
+    "lines=2 rects=1 sprites=3 text=2 order=8 mixed_runs=2 texture_binds=3 "
+    "submitted_quads=4 atlas_pages=1 atlas_page_creates=1 atlas_live_regions=3 "
+    "atlas_upload_bytes=2802768"
 )
 
 
@@ -21,6 +23,8 @@ class VerifyAndroidRenderPerformanceTest(unittest.TestCase):
         self.assertEqual(410, metrics["total_p50_us"])
         self.assertEqual(180, metrics["samples"])
         self.assertEqual(4, metrics["draw_calls_max"])
+        self.assertEqual(2, metrics["mixed_runs"])
+        self.assertEqual(2_802_768, metrics["atlas_upload_bytes"])
 
     def test_requires_exactly_one_complete_report(self):
         with self.assertRaisesRegex(ValueError, "expected one"):
@@ -34,6 +38,8 @@ class VerifyAndroidRenderPerformanceTest(unittest.TestCase):
                 "total_p50_us=410", "total_p50_us=9999 total_p50_us=410"))
         with self.assertRaisesRegex(ValueError, "unexpected.*invented"):
             parse_report(REPORT + " invented=1")
+        with self.assertRaisesRegex(ValueError, "atlas metrics must be positive.*mixed_runs"):
+            parse_report(REPORT.replace("mixed_runs=2", "mixed_runs=0"))
 
     def test_evidence_requires_device_and_build_identity(self):
         metadata = {

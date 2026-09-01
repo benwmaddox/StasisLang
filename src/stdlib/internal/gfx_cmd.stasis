@@ -10,7 +10,7 @@ import "../stdlib.stasis";
 
 const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 
-const GFX_CMD_VERSION: i32 = 6;
+const GFX_CMD_VERSION: i32 = 7;
 
 // i32 header indices
 const GFX_I_MAGIC: i32 = 0;
@@ -44,8 +44,10 @@ const GFX_I_RECT_COUNT: i32 = 24;
 const GFX_I_DROPPED_RECTS: i32 = 25;
 const GFX_I_CLIP_COUNT: i32 = 27;
 const GFX_I_DROPPED_CLIPS: i32 = 28;
+const GFX_I_SPRITE_RUN_COUNT: i32 = 29;
+const GFX_I_DROPPED_SPRITE_RUNS: i32 = 30;
 const GFX_I_SPRITE_BASE: i32 = 32;
-const GFX_I_ORDER_BASE: i32 = 18464;
+const GFX_I_ORDER_BASE: i32 = 51232;
 
 // flags
 const GFX_FLAG_CLEAR: i32 = 1;
@@ -57,10 +59,12 @@ const GFX_GEOMETRY_STRIDE_F32: i32 = 8;
 const GFX_MAX_LINES: i32 = 10000;
 const GFX_LINE_STRIDE_F32: i32 = 8;
 const GFX_MAX_SPRITES: i32 = 4096;
-const GFX_SPRITE_STRIDE_I32: i32 = 3; // handle,rot_deg,a
+const GFX_SPRITE_STRIDE_I32: i32 = 3; // logical handle, packed RGBA8 tint, feature flags
 
-// x,y,w,h,u0,v0,u1,v1. UVs are normalized source coordinates.
-const GFX_SPRITE_STRIDE_F32: i32 = 8;
+// dst x/y/w/h, logical source x/y/w/h, pivot x/y, scale x/y, rotation degrees.
+const GFX_SPRITE_STRIDE_F32: i32 = 13;
+const GFX_MAX_SPRITE_RUNS: i32 = 4096;
+const GFX_SPRITE_RUN_STRIDE_I32: i32 = 8;
 const GFX_MAX_TEXT: i32 = 2048;
 const GFX_TEXT_STRIDE_I32: i32 = 3; // font, byte_offset, byte_len
 
@@ -86,21 +90,42 @@ const GFX_F_CLEAR_A: i32 = 3;
 const GFX_F_LINE_BASE: i32 = 4;
 const GFX_F_SPRITE_BASE: i32 = 80004;
 const GFX_F_RECT_REVERSE_BASE: i32 = 79996;
-const GFX_F_TEXT_BASE: i32 = 112772;
-const GFX_F_CLIP_BASE: i32 = 125060;
+const GFX_F_TEXT_BASE: i32 = 133252;
+const GFX_F_CLIP_BASE: i32 = 145540;
 
 // NOTE: Array sizes must be integer literals in Stasis today.
 // Keep these in sync with the constants above:
-// - i32 count = 32 + (4096*3) + (2048*3) + 16656 = 35120
-// - f32 count = 4 + (10000*8) + (4096*8) + (2048*6) + (256*4) = 126084
+// - i32 count = 32 + (4096*3) + (2048*3) + (4096*8) + 16656 = 67888
+// - f32 count = 4 + (10000*8) + (4096*13) + (2048*6) + (256*4) = 146564
 const GFX_I_TEXT_BASE: i32 = 12320;
+const GFX_I_SPRITE_RUN_BASE: i32 = 18464;
 
-global gfx_cmd_i32: i32[35120];
-global gfx_cmd_f32: f32[126084];
+global gfx_cmd_i32: i32[67888];
+global gfx_cmd_f32: f32[146564];
 global gfx_cmd_u8: u8[65536];
+
+// One unpublished generation-scoped reservation may exist at a time. These
+// globals are writer ownership metadata, not published frame state.
+global gfx_sprite_writer_frame_generation: i32;
+global gfx_sprite_writer_next_token: i32;
+global gfx_sprite_writer_token: i32;
+global gfx_sprite_writer_start: i32;
+global gfx_sprite_writer_capacity: i32;
+global gfx_sprite_writer_written: i32;
+global gfx_sprite_writer_clip: i32;
+global gfx_sprite_writer_material: i32;
+global gfx_sprite_writer_blend: i32;
+global gfx_sprite_writer_filter: i32;
+global gfx_sprite_writer_pass: i32;
+global gfx_sprite_writer_flags: i32;
 
 // Begin a new frame, resetting all counts (typical immediate-mode usage).
 function @inline gfx_cmd_begin(): void {
+    gfx_sprite_writer_frame_generation = gfx_sprite_writer_frame_generation + 1;
+    if (gfx_sprite_writer_frame_generation <= 0) {
+        gfx_sprite_writer_frame_generation = 1;
+    }
+    gfx_sprite_writer_token = 0;
     gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;
     gfx_cmd_i32[GFX_I_VERSION] = GFX_CMD_VERSION;
     gfx_cmd_i32[GFX_I_FLAGS] = 0;
@@ -117,6 +142,8 @@ function @inline gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_DROPPED_RECTS] = 0;
     gfx_cmd_i32[GFX_I_CLIP_COUNT] = 0;
     gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = 0;
+    gfx_cmd_i32[GFX_I_SPRITE_RUN_COUNT] = 0;
+    gfx_cmd_i32[GFX_I_DROPPED_SPRITE_RUNS] = 0;
 }
 
 // Begin a new frame without clearing counts/streams (persistent-mode usage).
@@ -125,6 +152,11 @@ function @inline gfx_cmd_begin(): void {
 // - Prebuild streams once (set counts + write entries).
 // - Each tick call `gfx_cmd_begin_persistent()`, patch only changed entries, and `gfx_cmd_mark_present()`.
 function @inline gfx_cmd_begin_persistent(): void {
+    gfx_sprite_writer_frame_generation = gfx_sprite_writer_frame_generation + 1;
+    if (gfx_sprite_writer_frame_generation <= 0) {
+        gfx_sprite_writer_frame_generation = 1;
+    }
+    gfx_sprite_writer_token = 0;
     gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;
     gfx_cmd_i32[GFX_I_VERSION] = GFX_CMD_VERSION;
     gfx_cmd_i32[GFX_I_FLAGS] = 0;
@@ -134,6 +166,7 @@ function @inline gfx_cmd_begin_persistent(): void {
     gfx_cmd_i32[GFX_I_DROPPED_ORDER] = 0;
     gfx_cmd_i32[GFX_I_DROPPED_RECTS] = 0;
     gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = 0;
+    gfx_cmd_i32[GFX_I_DROPPED_SPRITE_RUNS] = 0;
 }
 
 function @inline gfx_cmd_append_order(kind: i32, index: i32): bool {
@@ -231,60 +264,211 @@ function gfx_cmd_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a:
     gfx_cmd_i32[GFX_I_RECT_COUNT] = i + 1;
 }
 
-function gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
-    let i: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
-    if (i >= GFX_MAX_SPRITES || !gfx_cmd_append_order(GFX_ORDER_SPRITE, i)) {
-        gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] + 1;
-        return;
+// Reserve one unpublished semantic sprite run. Returns an opaque frame-local
+// token, or zero when any required capacity is unavailable.
+function gfx_cmd_sprite_run_reserve(max_count: i32, clip: i32, material: i32, blend: i32, filter: i32, pass: i32, flags: i32): i32 {
+    let start: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
+    let run: i32 = gfx_cmd_i32[GFX_I_SPRITE_RUN_COUNT];
+    let order: i32 = gfx_cmd_i32[GFX_I_ORDER_COUNT];
+    if (
+        max_count <= 0
+        || gfx_sprite_writer_token != 0
+        || start < 0
+        || start > GFX_MAX_SPRITES
+        || max_count > GFX_MAX_SPRITES - start
+        || run < 0
+        || run >= GFX_MAX_SPRITE_RUNS
+        || order < 0
+        || order >= GFX_MAX_ORDER
+        || clip < -1
+        || material != 0
+        || blend != 0
+        || filter != 0
+        || pass != 0
+        || flags != 0
+    ) {
+        if (max_count > 0) {
+            gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] + max_count;
+            gfx_cmd_i32[GFX_I_DROPPED_SPRITE_RUNS] = gfx_cmd_i32[GFX_I_DROPPED_SPRITE_RUNS] + 1;
+        }
+        return 0;
     }
-    let base_i: i32 = GFX_I_SPRITE_BASE + i * GFX_SPRITE_STRIDE_I32;
-    let base_f: i32 = GFX_F_SPRITE_BASE + i * GFX_SPRITE_STRIDE_F32;
-    gfx_cmd_i32[base_i + 0] = handle;
-    gfx_cmd_i32[base_i + 1] = rot_deg;
-    gfx_cmd_i32[base_i + 2] = a;
-    gfx_cmd_f32[base_f + 0] = x;
-    gfx_cmd_f32[base_f + 1] = y;
-    gfx_cmd_f32[base_f + 2] = w;
-    gfx_cmd_f32[base_f + 3] = h;
-    gfx_cmd_f32[base_f + 4] = 0.0;
-    gfx_cmd_f32[base_f + 5] = 0.0;
-    gfx_cmd_f32[base_f + 6] = 1.0;
-    gfx_cmd_f32[base_f + 7] = 1.0;
-    gfx_cmd_i32[GFX_I_SPRITE_COUNT] = i + 1;
+    gfx_sprite_writer_next_token = gfx_sprite_writer_next_token + 1;
+    if (gfx_sprite_writer_next_token <= 0) {
+        gfx_sprite_writer_next_token = 1;
+    }
+    gfx_sprite_writer_token = gfx_sprite_writer_next_token;
+    gfx_sprite_writer_start = start;
+    gfx_sprite_writer_capacity = max_count;
+    gfx_sprite_writer_written = 0;
+    gfx_sprite_writer_clip = clip;
+    gfx_sprite_writer_material = material;
+    gfx_sprite_writer_blend = blend;
+    gfx_sprite_writer_filter = filter;
+    gfx_sprite_writer_pass = pass;
+    gfx_sprite_writer_flags = flags;
+    return gfx_sprite_writer_token;
 }
 
-function gfx_cmd_set_last_sprite_uv(u0: f32, v0: f32, u1: f32, v1: f32): void {
-    if (u0 < 0.0 || v0 < 0.0 || u1 > 1.0 || v1 > 1.0 || u0 >= u1 || v0 >= v1) {
-        return;
+// Checked sequential direct store into the canonical instance lanes.
+function gfx_cmd_sprite_run_write(
+    token: i32,
+    handle: i32,
+    tint_rgba: i32,
+    instance_flags: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    src_x: f32,
+    src_y: f32,
+    src_w: f32,
+    src_h: f32,
+    pivot_x: f32,
+    pivot_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    rotation: f32
+): bool {
+    if (
+        token <= 0
+        || token != gfx_sprite_writer_token
+        || gfx_sprite_writer_written < 0
+        || gfx_sprite_writer_written >= gfx_sprite_writer_capacity
+        || handle == 0
+        || instance_flags != 0
+        || w <= 0.0
+        || h <= 0.0
+        || src_x < 0.0
+        || src_y < 0.0
+        || src_w < 0.0
+        || src_h < 0.0
+        ||(src_w == 0.0 && src_h != 0.0)
+        ||(src_w != 0.0 && src_h == 0.0)
+        || scale_x == 0.0
+        || scale_y == 0.0
+    ) {
+        return false;
     }
-    let count: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
-    if (count <= 0 || count > GFX_MAX_SPRITES) {
-        return;
-    }
-    let base_f: i32 = GFX_F_SPRITE_BASE +(count - 1) * GFX_SPRITE_STRIDE_F32;
-    gfx_cmd_f32[base_f + 4] = u0;
-    gfx_cmd_f32[base_f + 5] = v0;
-    gfx_cmd_f32[base_f + 6] = u1;
-    gfx_cmd_f32[base_f + 7] = v1;
-}
-
-function gfx_cmd_set_sprite_at(index: i32, handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
-    if (index < 0 || index >= GFX_MAX_SPRITES) {
-        return;
-    }
+    let index: i32 = gfx_sprite_writer_start + gfx_sprite_writer_written;
     let base_i: i32 = GFX_I_SPRITE_BASE + index * GFX_SPRITE_STRIDE_I32;
     let base_f: i32 = GFX_F_SPRITE_BASE + index * GFX_SPRITE_STRIDE_F32;
     gfx_cmd_i32[base_i + 0] = handle;
-    gfx_cmd_i32[base_i + 1] = rot_deg;
-    gfx_cmd_i32[base_i + 2] = a;
+    gfx_cmd_i32[base_i + 1] = tint_rgba;
+    gfx_cmd_i32[base_i + 2] = instance_flags;
     gfx_cmd_f32[base_f + 0] = x;
     gfx_cmd_f32[base_f + 1] = y;
     gfx_cmd_f32[base_f + 2] = w;
     gfx_cmd_f32[base_f + 3] = h;
-    gfx_cmd_f32[base_f + 4] = 0.0;
-    gfx_cmd_f32[base_f + 5] = 0.0;
-    gfx_cmd_f32[base_f + 6] = 1.0;
-    gfx_cmd_f32[base_f + 7] = 1.0;
+    gfx_cmd_f32[base_f + 4] = src_x;
+    gfx_cmd_f32[base_f + 5] = src_y;
+    gfx_cmd_f32[base_f + 6] = src_w;
+    gfx_cmd_f32[base_f + 7] = src_h;
+    gfx_cmd_f32[base_f + 8] = pivot_x;
+    gfx_cmd_f32[base_f + 9] = pivot_y;
+    gfx_cmd_f32[base_f + 10] = scale_x;
+    gfx_cmd_f32[base_f + 11] = scale_y;
+    gfx_cmd_f32[base_f + 12] = rotation;
+    gfx_sprite_writer_written = gfx_sprite_writer_written + 1;
+    return true;
+}
+
+function gfx_cmd_sprite_run_finalize(token: i32, actual_count: i32): bool {
+    if (token <= 0 || token != gfx_sprite_writer_token || actual_count < 0 || actual_count > gfx_sprite_writer_written) {
+        return false;
+    }
+    if (actual_count == 0) {
+        gfx_sprite_writer_token = 0;
+        return true;
+    }
+    let run: i32 = gfx_cmd_i32[GFX_I_SPRITE_RUN_COUNT];
+    let order: i32 = gfx_cmd_i32[GFX_I_ORDER_COUNT];
+    if (run < 0 || run >= GFX_MAX_SPRITE_RUNS || order < 0 || order >= GFX_MAX_ORDER) {
+        return false;
+    }
+    let base: i32 = GFX_I_SPRITE_RUN_BASE + run * GFX_SPRITE_RUN_STRIDE_I32;
+    gfx_cmd_i32[base + 0] = gfx_sprite_writer_start;
+    gfx_cmd_i32[base + 1] = actual_count;
+    gfx_cmd_i32[base + 2] = gfx_sprite_writer_clip;
+    gfx_cmd_i32[base + 3] = gfx_sprite_writer_material;
+    gfx_cmd_i32[base + 4] = gfx_sprite_writer_blend;
+    gfx_cmd_i32[base + 5] = gfx_sprite_writer_filter;
+    gfx_cmd_i32[base + 6] = gfx_sprite_writer_pass;
+    gfx_cmd_i32[base + 7] = gfx_sprite_writer_flags;
+    gfx_cmd_i32[GFX_I_ORDER_BASE + order] = GFX_ORDER_SPRITE * GFX_ORDER_KIND_SCALE + run;
+    // Publish spans only after every instance and header store is complete.
+    gfx_cmd_i32[GFX_I_SPRITE_COUNT] = gfx_sprite_writer_start + actual_count;
+    gfx_cmd_i32[GFX_I_SPRITE_RUN_COUNT] = run + 1;
+    gfx_cmd_i32[GFX_I_ORDER_COUNT] = order + 1;
+    gfx_sprite_writer_token = 0;
+    return true;
+}
+
+function gfx_cmd_sprite_run_cancel(token: i32): bool {
+    if (token <= 0 || token != gfx_sprite_writer_token) {
+        return false;
+    }
+    gfx_sprite_writer_token = 0;
+    return true;
+}
+
+function gfx_cmd_sprite_semantic(
+    handle: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    src_x: f32,
+    src_y: f32,
+    src_w: f32,
+    src_h: f32,
+    pivot_x: f32,
+    pivot_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    rotation: f32,
+    tint_rgba: i32
+): void {
+    let token: i32 = gfx_cmd_sprite_run_reserve(1, -1, 0, 0, 0, 0, 0);
+    if (token == 0) {
+        return;
+    }
+    if (
+        !gfx_cmd_sprite_run_write(
+            token,
+            handle,
+            tint_rgba,
+            0,
+            x,
+            y,
+            w,
+            h,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
+            pivot_x,
+            pivot_y,
+            scale_x,
+            scale_y,
+            rotation
+        )
+    ) {
+        gfx_cmd_sprite_run_cancel(token);
+        return;
+    }
+    gfx_cmd_sprite_run_finalize(token, 1);
+}
+
+function gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
+    let alpha: i32 = a;
+    if (alpha < 0) {
+        alpha = 0;
+    }
+    if (alpha > 255) {
+        alpha = 255;
+    }
+    gfx_cmd_sprite_semantic(handle, x, y, w, h, 0.0, 0.0, 0.0, 0.0, w * 0.5, h * 0.5, 1.0, 1.0, i32_to_f32(rot_deg), -256 + alpha);
 }
 
 function gfx_cmd_lines_from(lines: f32[], count: i32): void {
@@ -319,38 +503,6 @@ function gfx_cmd_lines_from(lines: f32[], count: i32): void {
         }
     }
     gfx_cmd_i32[GFX_I_LINE_COUNT] = start + n;
-}
-
-function gfx_cmd_sprites_from(cmd_i32: i32[], cmd_f32: f32[], count: i32): void {
-    if (count <= 0) {
-        return;
-    }
-
-    let start: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
-    let avail: i32 = GFX_MAX_SPRITES - start;
-    let n: i32 = count;
-    if (n > avail) {
-        n = avail;
-        gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] +(count - n);
-    }
-    if (n <= 0) {
-        return;
-    }
-
-    let dst_i: i32 = GFX_I_SPRITE_BASE + start * GFX_SPRITE_STRIDE_I32;
-    let total_i: i32 = n * GFX_SPRITE_STRIDE_I32;
-    sys_memcpy_i32(gfx_cmd_i32, dst_i, cmd_i32, 0, total_i);
-    let dst_f: i32 = GFX_F_SPRITE_BASE + start * GFX_SPRITE_STRIDE_F32;
-    let total_f: i32 = n * GFX_SPRITE_STRIDE_F32;
-    sys_memcpy_f32(gfx_cmd_f32, dst_f, cmd_f32, 0, total_f);
-    let order_i: i32 = 0;
-    for (order_i = 0; order_i < n; order_i = order_i + 1) {
-        if (!gfx_cmd_append_order(GFX_ORDER_SPRITE, start + order_i)) {
-            gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] +(n - order_i);
-            n = order_i;
-        }
-    }
-    gfx_cmd_i32[GFX_I_SPRITE_COUNT] = start + n;
 }
 
 function gfx_cmd_set_line_at(index: i32, x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
@@ -496,16 +648,6 @@ function gfx_cmd_set_rect_count(count: i32): void {
     gfx_cmd_i32[GFX_I_RECT_COUNT] = count;
 }
 
-function gfx_cmd_set_sprite_count(count: i32): void {
-    if (count < 0) {
-        count = 0;
-    }
-    if (count > GFX_MAX_SPRITES) {
-        count = GFX_MAX_SPRITES;
-    }
-    gfx_cmd_i32[GFX_I_SPRITE_COUNT] = count;
-}
-
 function gfx_cmd_set_text_count(count: i32): void {
     if (count < 0) {
         count = 0;
@@ -544,6 +686,10 @@ function @inline gfx_cmd_line_count(): i32 {
 
 function @inline gfx_cmd_sprite_count(): i32 {
     return gfx_cmd_i32[GFX_I_SPRITE_COUNT];
+}
+
+function @inline gfx_cmd_sprite_run_count(): i32 {
+    return gfx_cmd_i32[GFX_I_SPRITE_RUN_COUNT];
 }
 
 function @inline gfx_cmd_rect_count(): i32 {

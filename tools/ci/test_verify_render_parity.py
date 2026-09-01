@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 
 from tools.ci.verify_render_parity import (
+    ATLAS_SPRITE_HANDLES,
     DEFAULT_MANIFEST,
+    _atlas_sprite_handles,
     read_capture,
     validate_fixture,
     verify_capture,
@@ -37,6 +39,12 @@ class RenderParityGateTest(unittest.TestCase):
         self.assertEqual(manifest["logical_size"], [640, 360])
         self.assertEqual(len(manifest["stages"]), 4)
         self.assertIn("android_emulator", manifest["capture_profiles"])
+
+    def test_fixture_uses_only_canonical_resolved_atlas_resources(self):
+        frame = (DEFAULT_MANIFEST.parent / "frame.stasis").read_text(encoding="utf-8")
+        self.assertEqual(_atlas_sprite_handles(frame), ATLAS_SPRITE_HANDLES)
+        mutated = frame.replace("canvas_sprite, 0, 96", "missing_sprite, 0, 96", 1)
+        self.assertNotEqual(_atlas_sprite_handles(mutated), ATLAS_SPRITE_HANDLES)
 
     def test_bmp_reader_and_exact_capture_hash(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -79,6 +87,27 @@ class RenderParityGateTest(unittest.TestCase):
             }
             with self.assertRaisesRegex(ValueError, "sprite_upload"):
                 verify_capture(manifest, capture, "portable")
+
+    def test_atlas_canvas_region_requires_blue_gradient_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "frame.bmp"
+            blue_gradient = bytes((31, 45, 60, 255))
+            write_bmp(capture, 2, 1, blue_gradient * 2)
+            manifest = {
+                "logical_size": [2, 1],
+                "capture_profiles": {
+                    "portable": {
+                        "comparison": "regions",
+                        "regions": [{
+                            "name": "atlas_canvas_sprite",
+                            "rect": [0, 0, 2, 1],
+                            "predicate": "atlas_canvas",
+                            "min_coverage": 1.0,
+                        }],
+                    }
+                },
+            }
+            verify_capture(manifest, capture, "portable")
 
     def test_letterboxed_capture_uses_explicit_viewport(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -188,7 +217,7 @@ class RenderParityGateTest(unittest.TestCase):
             evidence = root / "evidence.json"
             capture.write_bytes(b"captured frame")
             log.write_text(
-                "Stasis render contract v6 trace=0 flags=3 lines=2 rects=1 sprites=5 text=2\n",
+                "Stasis render contract v7 trace=0 flags=3 lines=2 rects=1 sprites=5 text=2\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "zero command trace"):
@@ -201,7 +230,7 @@ gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=144x108 b
 gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=144x108 backend=sdl
 gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=960x540 backend=sdl
 stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=36 scale=1.50 handle=1
-Stasis render contract v6 trace=1853793133 flags=3 lines=2 rects=1 sprites=5 text=2
+Stasis render contract v7 trace=1853793133 flags=3 lines=2 rects=1 sprites=5 text=2
 Stasis renderer resources restored: backend=sdl surface_generation=3 renderer_generation=1 reason=surface_changed sprites=3
 Stasis renderer resources restored: backend=sdl surface_generation=4 renderer_generation=1 reason=surface_changed sprites=3
 Stasis renderer resources restored: backend=sdl surface_generation=5 renderer_generation=2 reason=foreground sprites=3
@@ -240,7 +269,7 @@ gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=96x72 bac
 gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=96x72 backend=sdl
 gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=640x360 backend=sdl
 stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=24 scale=1.00 handle=1
-Stasis render contract v6 trace=123456789 flags=3 lines=2 rects=1 sprites=5 text=2
+Stasis render contract v7 trace=123456789 flags=3 lines=2 rects=1 sprites=5 text=2
 """
         with tempfile.TemporaryDirectory() as directory:
             capture = Path(directory) / "capture.png"

@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+#include "../stasis_render_contract.h"
+
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -28,7 +30,17 @@ int stasis_asset_task_poll(int task);
 int stasis_asset_task_take_handle(int task);
 void stasis_asset_task_cancel(int task);
 void stasis_gfx_release_sprite(int handle);
+int stasis_gfx_load_sprite(const char* path, int max_w, int max_h);
+void stasis_gfx_set_next_sprite_atlas_policy_v3(
+    int eligible,
+    uint64_t group_id,
+    uint32_t member_count,
+    uint64_t logical_pixel_area,
+    uint32_t max_logical_width,
+    uint32_t max_logical_height);
 int stasis_test_get_sprite_state(int handle, int* out_i32, int capacity);
+int stasis_test_get_render_submission_state(int32_t* out_i32, int32_t capacity);
+void stasis_gfx_submit(int32_t* cmd_i32, const float* cmd_f32);
 int stasis_test_push_display_event(
     int kind,
     int logical_w,
@@ -175,6 +187,83 @@ int main(void) {
     stasis_gfx_release_sprite(reused_sprite);
     CHECK(stasis_test_get_sprite_state(reused_sprite, sprite_state, 4) == 1);
     CHECK(sprite_state[0] == 0 && sprite_state[1] == 0 && sprite_state[3] == 0);
+
+    /* Released shared regions are reused instead of advancing the shelf forever. */
+    const uint64_t reuse_group = UINT64_C(0xfedcba9876543210);
+    int atlas_state[18] = {0};
+    stasis_gfx_set_next_sprite_atlas_policy_v3(1, reuse_group, 4, 1024, 16, 16);
+    int reuse_anchor = stasis_gfx_load_sprite(STASIS_TEST_SPRITE_PATH, 12, 12);
+    CHECK(reuse_anchor > 0);
+    stasis_gfx_set_next_sprite_atlas_policy_v3(1, reuse_group, 4, 1024, 16, 16);
+    int first_reuse = stasis_gfx_load_sprite(STASIS_TEST_SPRITE_PATH, 16, 16);
+    CHECK(first_reuse > 0);
+    CHECK(stasis_test_get_sprite_state(first_reuse, atlas_state, 18) == 1);
+    const int reused_page = atlas_state[12];
+    const int reused_x = atlas_state[13];
+    const int reused_y = atlas_state[14];
+    stasis_gfx_release_sprite(first_reuse);
+    stasis_gfx_set_next_sprite_atlas_policy_v3(1, reuse_group, 4, 1024, 16, 16);
+    int second_reuse = stasis_gfx_load_sprite(STASIS_TEST_SPRITE_PATH, 16, 16);
+    CHECK(second_reuse > 0);
+    CHECK(stasis_test_get_sprite_state(second_reuse, atlas_state, 18) == 1);
+    CHECK(atlas_state[12] == reused_page);
+    CHECK(atlas_state[13] == reused_x && atlas_state[14] == reused_y);
+
+    /* An explicit sprite-run clip intersects the ordered parent and is restored. */
+    int32_t* frame_i32 = (int32_t*)calloc(STASIS_RENDER_I32_COUNT, sizeof(int32_t));
+    float* frame_f32 = (float*)calloc(STASIS_RENDER_F32_COUNT, sizeof(float));
+    CHECK(frame_i32 != NULL && frame_f32 != NULL);
+    frame_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
+    frame_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
+    frame_i32[STASIS_RENDER_I_SPRITE_COUNT] = 1;
+    frame_i32[STASIS_RENDER_I_ORDER_COUNT] = 3;
+    frame_i32[STASIS_RENDER_I_CLIP_COUNT] = 2;
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT] = 1;
+    frame_i32[STASIS_RENDER_I_SPRITE_BASE] = second_reuse;
+    frame_i32[STASIS_RENDER_I_SPRITE_BASE + 1] = (int32_t)UINT32_C(0xffffffff);
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 0] = 0;
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 1] = 1;
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 2] = 1;
+    frame_i32[STASIS_RENDER_I_ORDER_BASE + 0] =
+        STASIS_RENDER_ORDER_CLIP_PUSH * STASIS_RENDER_ORDER_KIND_SCALE;
+    frame_i32[STASIS_RENDER_I_ORDER_BASE + 1] =
+        STASIS_RENDER_ORDER_SPRITE * STASIS_RENDER_ORDER_KIND_SCALE;
+    frame_i32[STASIS_RENDER_I_ORDER_BASE + 2] =
+        STASIS_RENDER_ORDER_CLIP_POP * STASIS_RENDER_ORDER_KIND_SCALE;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 2] = 8.0f;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 3] = 8.0f;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 10] = 1.0f;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 11] = 1.0f;
+    frame_f32[STASIS_RENDER_F_CLIP_BASE + 0] = 0.0f;
+    frame_f32[STASIS_RENDER_F_CLIP_BASE + 1] = 0.0f;
+    frame_f32[STASIS_RENDER_F_CLIP_BASE + 2] = 10.0f;
+    frame_f32[STASIS_RENDER_F_CLIP_BASE + 3] = 10.0f;
+    frame_f32[STASIS_RENDER_F_CLIP_BASE + 4] = 5.0f;
+    frame_f32[STASIS_RENDER_F_CLIP_BASE + 5] = 5.0f;
+    frame_f32[STASIS_RENDER_F_CLIP_BASE + 6] = 10.0f;
+    frame_f32[STASIS_RENDER_F_CLIP_BASE + 7] = 10.0f;
+    stasis_gfx_submit(frame_i32, frame_f32);
+    int32_t render_state[19] = {0};
+    CHECK(stasis_test_get_render_submission_state(render_state, 19) == 1);
+    CHECK(render_state[12] == 1 && render_state[13] == 1);
+    CHECK(render_state[14] == 5 && render_state[15] == 5);
+    CHECK(render_state[16] == 5 && render_state[17] == 5);
+    CHECK(render_state[18] == 1);
+    free(frame_i32);
+    free(frame_f32);
+
+    stasis_gfx_release_sprite(second_reuse);
+    stasis_gfx_release_sprite(reuse_anchor);
+
+    /* Dedicated page slots are destroyed and reused under churn past the cap. */
+    for (int cycle = 0; cycle < 260; cycle++) {
+        stasis_gfx_set_next_sprite_atlas_policy_v3(0, 0, 0, 0, 0, 0);
+        int churned = stasis_gfx_load_sprite(STASIS_TEST_SPRITE_PATH, 8, 8);
+        CHECK(churned > 0);
+        CHECK(stasis_test_get_sprite_state(churned, atlas_state, 18) == 1);
+        CHECK(atlas_state[17] <= 256);
+        stasis_gfx_release_sprite(churned);
+    }
 
     /* A display lifecycle round-trip must not restore a released generation. */
     int32_t host_i32[768] = {0};

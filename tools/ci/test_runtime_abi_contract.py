@@ -91,7 +91,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_replay_trace_requires_current_capacities(self):
         failures, _ = self.run_with(
             contract.JIT_AOT_REPLAY_FIXTURE,
-            "gfx_cmd_f32, 126084,",
+            "gfx_cmd_f32, 146564,",
             "gfx_cmd_f32, 125060,",
         )
         failure = next(
@@ -102,9 +102,9 @@ class RuntimeAbiContractTests(unittest.TestCase):
 
     def test_vscode_render_fixture_rejects_legacy_version_and_capacity(self):
         mutations = (
-            ("gfx_cmd_i32[1] = 6;", "gfx_cmd_i32[1] = 2;", "STASIS_RENDER_VERSION"),
+            ("gfx_cmd_i32[1] = 7;", "gfx_cmd_i32[1] = 6;", "STASIS_RENDER_VERSION"),
             (
-                "global gfx_cmd_f32: f32[126084];",
+                "global gfx_cmd_f32: f32[146564];",
                 "global gfx_cmd_f32: f32[125060];",
                 "gfx_cmd_f32.length",
             ),
@@ -124,20 +124,20 @@ class RuntimeAbiContractTests(unittest.TestCase):
         mutations = (
             (
                 contract.WINDOWS_LAUNCH_FIXTURE,
+                "gfx_cmd_f32[80017] = 204.0;",
                 "gfx_cmd_f32[80012] = 204.0;",
-                "gfx_cmd_f32[80008] = 204.0;",
                 "sprite_f32_stride",
             ),
             (
                 contract.WORKSHOP_PREVIEW_ADAPTER,
+                "let f_base: i32 = 80004 + index * 13;",
                 "let f_base: i32 = 80004 + index * 8;",
-                "let f_base: i32 = 80004 + index * 4;",
                 "sprite_f32_stride",
             ),
             (
                 contract.WORKSHOP_PREVIEW_ADAPTER,
+                "gfx_cmd_i32[1] = 7;",
                 "gfx_cmd_i32[1] = 6;",
-                "gfx_cmd_i32[1] = 2;",
                 "STASIS_RENDER_VERSION",
             ),
         )
@@ -148,11 +148,11 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
 
-    def test_hot_swap_fixtures_require_complete_current_v6_header(self):
+    def test_hot_swap_fixtures_require_complete_current_v7_header(self):
         mutations = (
-            (contract.HOT_SWAP_V1_FIXTURE, "gfx_cmd_i32[1] = 6;", "gfx_cmd_i32[1] = 5;", "STASIS_RENDER_VERSION"),
-            (contract.HOT_SWAP_V2_FIXTURE, "gfx_cmd_i32[24] = 0;", "gfx_cmd_i32[24] = 1;", "current_v6_header[24]"),
-            (contract.HOT_SWAP_REJECT_FIXTURE, "gfx_cmd_i32[28] = 0;", "", "current_v6_header[28]"),
+            (contract.HOT_SWAP_V1_FIXTURE, "gfx_cmd_i32[1] = 7;", "gfx_cmd_i32[1] = 6;", "STASIS_RENDER_VERSION"),
+            (contract.HOT_SWAP_V2_FIXTURE, "gfx_cmd_i32[24] = 0;", "gfx_cmd_i32[24] = 1;", "current_v7_header[24]"),
+            (contract.HOT_SWAP_REJECT_FIXTURE, "gfx_cmd_i32[28] = 0;", "", "current_v7_header[28]"),
         )
         for path, current, stale, field in mutations:
             with self.subTest(path=path, field=field):
@@ -406,19 +406,19 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_stasis_capacity_drift_names_both_sides(self):
         failures, _ = self.run_with(
             contract.GFX_CMD,
-            "global gfx_cmd_i32: i32[35120];",
+            "global gfx_cmd_i32: i32[67888];",
             "global gfx_cmd_i32: i32[35121];",
         )
         message = "\n".join(map(str, failures))
         self.assertIn("producer=runtime/stasis_render_contract.h", message)
         self.assertIn("consumer=src/stdlib/internal/gfx_cmd.stasis", message)
         self.assertIn("field=gfx_cmd_i32.length", message)
-        self.assertIn("expected=35120 actual=35121", message)
+        self.assertIn("expected=67888 actual=35121", message)
 
     def test_java_version_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.JAVA_RENDERER,
-            "static final int RENDER_VERSION = 6;",
+            "static final int RENDER_VERSION = 7;",
             "static final int RENDER_VERSION = 5;",
         )
         self.assertTrue(any(failure.field == "STASIS_RENDER_VERSION" for failure in failures))
@@ -438,26 +438,26 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_web_layout_drift_reports_field_and_values(self):
         failures, _ = self.run_with(
             contract.WEB,
-            "const GFX_F_TEXT_BASE = 112772;",
-            "const GFX_F_TEXT_BASE = 112773;",
+            "const GFX_F_TEXT_BASE = 133252;",
+            "const GFX_F_TEXT_BASE = 133253;",
         )
         failure = next(
             failure for failure in failures if failure.field == "STASIS_RENDER_F_TEXT_BASE"
         )
-        self.assertEqual(112772, failure.expected)
-        self.assertEqual(112773, failure.actual)
+        self.assertEqual(133252, failure.expected)
+        self.assertEqual(133253, failure.actual)
 
     def test_web_current_version_capacity_stride_and_offset_drift(self):
         mutations = (
-            ("const GFX_CMD_VERSION = 6;",
-             "const GFX_CMD_VERSION = 4;",
-             "STASIS_RENDER_VERSION", 6, 4),
+            ("const GFX_CMD_VERSION = 7;",
+             "const GFX_CMD_VERSION = 6;",
+             "STASIS_RENDER_VERSION", 7, 6),
             ("const GFX_MAX_TEXT = 2048;", "const GFX_MAX_TEXT = 2047;",
              "STASIS_RENDER_MAX_TEXT", 2048, 2047),
-            ("const GFX_SPRITE_STRIDE_F32 = 8;", "const GFX_SPRITE_STRIDE_F32 = 7;",
-             "STASIS_RENDER_SPRITE_F32_STRIDE", 8, 7),
-            ("const GFX_I_ORDER_BASE = 18464;", "const GFX_I_ORDER_BASE = 18465;",
-             "STASIS_RENDER_I_ORDER_BASE", 18464, 18465),
+            ("const GFX_SPRITE_STRIDE_F32 = 13;", "const GFX_SPRITE_STRIDE_F32 = 12;",
+             "STASIS_RENDER_SPRITE_F32_STRIDE", 13, 12),
+            ("const GFX_I_ORDER_BASE = 51232;", "const GFX_I_ORDER_BASE = 51233;",
+             "STASIS_RENDER_I_ORDER_BASE", 51232, 51233),
         )
         for old, new, field, expected, actual in mutations:
             failures, _ = self.run_with(contract.WEB, old, new)
@@ -469,10 +469,10 @@ class RuntimeAbiContractTests(unittest.TestCase):
 
     def test_provenance_current_version_drift_reports_values(self):
         mutations = (
-            (contract.PACKAGE_PROVENANCE, "CURRENT_COMMAND_BUFFER_VERSION = 6",
-             "CURRENT_COMMAND_BUFFER_VERSION = 5", "tools/verify_package_provenance.py"),
-            (contract.TOOLCHAIN, "GFX_CMD_VERSION: i64 = 6",
-             "GFX_CMD_VERSION: i64 = 5", "apps/stasis/src/toolchain_cli.rs"),
+            (contract.PACKAGE_PROVENANCE, "CURRENT_COMMAND_BUFFER_VERSION = 7",
+             "CURRENT_COMMAND_BUFFER_VERSION = 6", "tools/verify_package_provenance.py"),
+            (contract.TOOLCHAIN, "GFX_CMD_VERSION: i64 = 7",
+             "GFX_CMD_VERSION: i64 = 6", "apps/stasis/src/toolchain_cli.rs"),
         )
         for path, old, new, consumer in mutations:
             failures, _ = self.run_with(path, old, new)
@@ -481,14 +481,14 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 if failure.field == "STASIS_RENDER_VERSION"
                 and failure.consumer == consumer
             )
-            self.assertEqual(6, failure.expected)
-            self.assertEqual(5, failure.actual)
+            self.assertEqual(7, failure.expected)
+            self.assertEqual(6, failure.actual)
 
     def test_rust_offset_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.DYNLOAD,
-            "const STASIS_RENDER_ORDER_BASE: usize = 18_464;",
-            "const STASIS_RENDER_ORDER_BASE: usize = 18_465;",
+            "const STASIS_RENDER_ORDER_BASE: usize = 51_232;",
+            "const STASIS_RENDER_ORDER_BASE: usize = 51_233;",
         )
         self.assertTrue(any(failure.field == "STASIS_RENDER_I_ORDER_BASE" for failure in failures))
 
@@ -503,7 +503,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_generated_aot_registration_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.AOT,
-            "gfx_cmd_f32, 126084);",
+            "gfx_cmd_f32, 146564);",
             "gfx_cmd_f32, 126083);",
         )
         self.assertTrue(any(failure.field == "gfx_cmd_f32.registration_length" for failure in failures))

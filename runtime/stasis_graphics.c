@@ -1,18 +1,11 @@
 /*
  * Stasis Graphics Runtime Library
- * SDL3 + OpenGL backend for vector graphics rendering
+ * SDL3 renderer for vector graphics rendering
  */
 
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
-#if defined(__ANDROID__) && !defined(STASIS_GRAPHICS_SDL_ONLY)
-#define STASIS_GRAPHICS_SDL_ONLY 1
-#endif
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-#include <GL/glew.h>
-#include <SDL3/SDL_opengl.h>
-#endif
 #include <stdbool.h>
 #include <string.h>
 #include "stasis_asset_path.h"
@@ -35,6 +28,7 @@
 #include "stasis_performance_metrics.h"
 #include "stasis_image_writer.h"
 #include "stasis_sprite_atlas_policy.h"
+#include "stasis_mixed_quad_planner.h"
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -51,10 +45,6 @@
 
 #include "stasis_svg.h"
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static void flush_sprites(void);
-static void render_postfx(void);
-#endif
 static void stasis_render_reset_clip(void);
 static void stasis_render_push_clip(float x, float y, float w, float h);
 static void stasis_render_pop_clip(void);
@@ -154,9 +144,7 @@ STASIS_EXPORT const char* stasis_graphics_build_fingerprint(void) {
 static SDL_SpinLock g_runtime_error_lock;
 static char g_runtime_error[512];
 static SDL_Window* g_window = NULL;
-static SDL_GLContext g_gl_context = NULL;
 static SDL_Renderer* g_renderer = NULL;
-static bool g_use_sdl_renderer = false;
 static bool g_should_quit = false;
 static const bool* g_keyboard_state = NULL;
 static int g_window_width = 800;
@@ -190,6 +178,14 @@ static int32_t g_render_last_density_generation = 0;
 static uint32_t g_render_logged_validation_mask = 0;
 static bool g_render_contract_logged = false;
 static int g_render_trace_enabled = -1;
+static uint32_t g_native_draw_submissions = 0;
+static uint32_t g_native_page_transitions = 0;
+static uint32_t g_native_mixed_runs = 0;
+static uint64_t g_native_submitted_bytes = 0;
+static uint32_t g_native_run_clip_applies = 0;
+static uint32_t g_native_run_clip_restores = 0;
+static float g_native_last_run_clip[4];
+static int g_native_last_run_clip_restore_depth = 0;
 typedef struct {
     int active;
     int logical_w;
@@ -207,25 +203,10 @@ static StasisRendererLifecycle g_resource_lifecycle;
 static bool g_resource_frame_ready = false;
 static bool g_force_debug_overlay = false;
 static SDL_AtomicInt g_performance_metrics_requested;
-static bool g_postfx_enabled = false;
-static bool g_postfx_applied_this_frame = false;
 static bool g_screenshot_taken = false;
 static char g_screenshot_path[1024] = {0};
 static int g_screenshot_exit_after = 0;
 static int g_screenshot_frame = 1;
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static GLuint g_postfx_program = 0;
-static GLint g_postfx_time_loc = -1;
-static GLint g_postfx_depth_loc = -1;
-static GLint g_postfx_intensity_loc = -1;
-static GLint g_postfx_surface_loc = -1;
-static GLint g_postfx_color_loc = -1;
-#endif
-static float g_postfx_strength = 0.0f;
-static float g_postfx_phase = 0.0f;
-static float g_postfx_speed = 0.0f;
-static float g_postfx_color[3] = {0.05f, 0.85f, 0.78f};
-static bool g_postfx_force_disable = false;
 
 #define STASIS_PERF_SAMPLE_CAPACITY 1200
 typedef struct {
@@ -322,7 +303,9 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 typedef struct SpriteEntry SpriteEntry;
 static SpriteEntry* sprite_get(int handle);
 static SpriteEntry* sprite_fallback_get(void);
-static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float w, float h, int rot_degrees, int a, float src_u0, float src_v0, float src_u1, float src_v1, int do_hash);
+static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float w, float h,
+    float rot_degrees, uint32_t tint_rgba, float src_x, float src_y, float src_w, float src_h,
+    float pivot_x, float pivot_y, float scale_x, float scale_y, int do_hash);
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
 static void stasis_sync_display_metrics(void);
 static void stasis_set_logical_size(int width, int height);
@@ -331,13 +314,12 @@ static void stasis_invalidate_renderer_resources(int discard_gpu_handles);
 static int stasis_restore_renderer_resources(void);
 static void stasis_present_gpu_loading(void);
 static void stasis_asset_tasks_shutdown(void);
+static void stasis_sprite_atlas_reset(int destroy_textures);
+static int stasis_draw_mixed_order_span(
+    const int32_t* cmd_i32, const float* cmd_f32, int start, int order_count,
+    int rect_count, int sprite_run_count);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static void setup_ortho(void);
-static void reset_line_program(void);
-static void reset_sprite_program(void);
-#endif
 static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter);
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
@@ -362,9 +344,6 @@ typedef struct SpriteEntry {
     float u0, v0, u1, v1;
     uint64_t mtime;
     SDL_Texture* sdl_tex;
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    GLuint gl_texture;   /* standalone fallback or compiler-policy exclusion */
-#endif
     StasisSpriteAtlasPolicyV3 atlas_policy;
     int used;
     int ref_count;       /* callers sharing this raster cache entry */
@@ -384,6 +363,37 @@ static int g_sprite_max_dimension = -1;
 static int g_sprite_max_pixels = -1;
 static int g_sprite_max_file_bytes = -1;
 static SpriteEntry g_sprite_fallback;
+
+#define STASIS_SDL_ATLAS_PAGE_SIZE 2048
+#define STASIS_SDL_ATLAS_MAX_PAGES 256
+#define STASIS_SDL_ATLAS_PADDING 1
+#define STASIS_SDL_ATLAS_WHITE_SIZE 2
+#define STASIS_SDL_ATLAS_MAX_FREE_RECTS 256
+typedef struct {
+    int x;
+    int y;
+    int w;
+    int h;
+} StasisSdlAtlasFreeRect;
+typedef struct {
+    SDL_Texture* texture;
+    int width;
+    int height;
+    int cursor_x;
+    int cursor_y;
+    int row_h;
+    int white_x;
+    int white_y;
+    int placeholder_x;
+    int placeholder_y;
+    uint64_t group_id;
+    int dedicated;
+    int live_allocations;
+    int free_rect_count;
+    StasisSdlAtlasFreeRect free_rects[STASIS_SDL_ATLAS_MAX_FREE_RECTS];
+} StasisSdlAtlasPage;
+static StasisSdlAtlasPage g_sprite_atlas_pages[STASIS_SDL_ATLAS_MAX_PAGES];
+static int g_sprite_atlas_page_count = 0;
 #if defined(_MSC_VER)
 __declspec(thread) static StasisSpriteAtlasPolicyV3 g_next_sprite_atlas_policy_v3;
 #else
@@ -461,9 +471,6 @@ typedef struct {
     int ascent, descent, line_gap;
 
     /* Baked bitmap atlas */
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    GLuint atlas_texture;
-#endif
     SDL_Texture* sdl_texture;
     stbtt_bakedchar char_data[FONT_NUM_CHARS];
     int font_size;       /* requested logical pixel height */
@@ -485,12 +492,6 @@ static void stasis_release_font(StasisFont* font) {
         SDL_DestroyTexture(font->sdl_texture);
         font->sdl_texture = NULL;
     }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (font->atlas_texture) {
-        glDeleteTextures(1, &font->atlas_texture);
-        font->atlas_texture = 0;
-    }
-#endif
     if (font->ttf_buffer) {
         free(font->ttf_buffer);
         font->ttf_buffer = NULL;
@@ -510,16 +511,12 @@ static const char* stasis_renderer_reason_name(StasisRendererResourceReason reas
 }
 
 static void stasis_invalidate_renderer_resources(int discard_gpu_handles) {
-    if (!g_use_sdl_renderer) return;
+    stasis_sprite_atlas_reset(!discard_gpu_handles);
     for (int i = 0; i < g_sprite_capacity; i++) {
         SpriteEntry* entry = &g_sprites[i];
         if (!entry->used) continue;
-        if (entry->sdl_tex && !discard_gpu_handles) SDL_DestroyTexture(entry->sdl_tex);
         entry->sdl_tex = NULL;
         entry->needs_reraster = 1;
-    }
-    if (g_sprite_fallback.sdl_tex && !discard_gpu_handles) {
-        SDL_DestroyTexture(g_sprite_fallback.sdl_tex);
     }
     memset(&g_sprite_fallback, 0, sizeof(g_sprite_fallback));
     g_sprite_fallback.page_index = -1;
@@ -544,7 +541,7 @@ static void stasis_present_gpu_loading(void) {
     const int origin_x = (g_window_width - columns * cell) / 2;
     const int origin_y = (g_window_height - rows * cell) / 2;
 
-    if (g_use_sdl_renderer && g_renderer) {
+    if (g_renderer) {
         SDL_SetRenderTarget(g_renderer, NULL);
         SDL_SetRenderLogicalPresentation(
             g_renderer, g_window_width, g_window_height,
@@ -569,51 +566,11 @@ static void stasis_present_gpu_loading(void) {
         }
         SDL_RenderPresent(g_renderer);
     }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    else if (g_gl_context) {
-        glPushAttrib(GL_ALL_ATTRIB_BITS);
-        glViewport(0, 0, g_drawable_width, g_drawable_height);
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_BLEND);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_SCISSOR_TEST);
-        glMatrixMode(GL_PROJECTION);
-        glPushMatrix();
-        glLoadIdentity();
-        glOrtho(0.0, (double)g_window_width, (double)g_window_height, 0.0, -1.0, 1.0);
-        glMatrixMode(GL_MODELVIEW);
-        glPushMatrix();
-        glLoadIdentity();
-        glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glColor4ub(66, 153, 225, 255);
-        glBegin(GL_QUADS);
-        for (int row = 0; row < rows; row++) {
-            const char* pixels = g_restore_label[row];
-            for (int column = 0; column < columns; column++) {
-                if (pixels[column] != '1') continue;
-                const int x = origin_x + column * cell;
-                const int y = origin_y + row * cell;
-                glVertex2i(x, y);
-                glVertex2i(x + cell, y);
-                glVertex2i(x + cell, y + cell);
-                glVertex2i(x, y + cell);
-            }
-        }
-        glEnd();
-        SDL_GL_SwapWindow(g_window);
-        glMatrixMode(GL_MODELVIEW);
-        glPopMatrix();
-        glMatrixMode(GL_PROJECTION);
-        glPopMatrix();
-        glPopAttrib();
-    }
-#endif
     else {
         return;
     }
     SDL_Log("Stasis renderer loading screen presented: backend=%s reason=%s surface_generation=%u renderer_generation=%u",
-        g_use_sdl_renderer ? "sdl" : "gl",
+        "sdl",
         stasis_renderer_reason_name(g_resource_lifecycle.reason),
         g_resource_lifecycle.surface_generation,
         g_resource_lifecycle.renderer_generation);
@@ -738,12 +695,12 @@ static void stasis_sync_display_metrics(void) {
     if (g_test_display_override.active) {
         drawable_w = g_test_display_override.drawable_w;
         drawable_h = g_test_display_override.drawable_h;
-        if (g_use_sdl_renderer && g_renderer) {
+        if (g_renderer) {
             SDL_SetRenderLogicalPresentation(
                 g_renderer, g_window_width, g_window_height,
                 SDL_LOGICAL_PRESENTATION_LETTERBOX);
         }
-    } else if (g_use_sdl_renderer && g_renderer) {
+    } else if (g_renderer) {
         /* The display contract owns the complete renderer backing here.  The
          * "current" output is adjusted by SDL logical presentation and can
          * still describe the previous fitted viewport while a logical canvas
@@ -756,11 +713,6 @@ static void stasis_sync_display_metrics(void) {
             g_renderer, g_window_width, g_window_height,
             SDL_LOGICAL_PRESENTATION_LETTERBOX);
     }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    else if (g_gl_context) {
-        SDL_GetWindowSizeInPixels(g_window, &drawable_w, &drawable_h);
-    }
-#endif
 
     if (drawable_w <= 0) drawable_w = g_window_width;
     if (drawable_h <= 0) drawable_h = g_window_height;
@@ -809,32 +761,8 @@ static void stasis_sync_display_metrics(void) {
     g_available_height = available_h;
     g_drawable_width = drawable_w;
     g_drawable_height = drawable_h;
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (!g_use_sdl_renderer && g_gl_context) {
-        glViewport(
-            (int)floorf(next.drawable_viewport.x),
-            stasis_display_bottom_origin_y(
-                next.drawable_h, next.drawable_viewport),
-            (int)ceilf(next.drawable_viewport.w),
-            (int)ceilf(next.drawable_viewport.h));
-        setup_ortho();
-    }
-#endif
 }
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static void stasis_gl_clear_drawable(void) {
-    /*
-     * Clear the complete drawable before the logical viewport is rendered.
-     * The viewport can be transiently stale while Android rotates or
-     * recreates its surface; clearing four bars from the previous metrics can
-     * leave newly exposed pixels uninitialized (or show old surface contents).
-     */
-    glDisable(GL_SCISSOR_TEST);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-}
-#endif
 
 static void stasis_window_to_logical(float native_x, float native_y, float* logical_x, float* logical_y) {
     if (!logical_x || !logical_y) return;
@@ -1129,12 +1057,6 @@ static void stasis_pump_events(void) {
             case SDL_EVENT_WINDOW_RESIZED:
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
                 stasis_sync_display_metrics();
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-                    if (!g_use_sdl_renderer) {
-                        reset_line_program();
-                        reset_sprite_program();
-                    }
-#endif
                 g_input_frame.viewport_w_px = g_window_width;
                 g_input_frame.viewport_h_px = g_window_height;
                 stasis_update_safe_viewport();
@@ -1463,7 +1385,7 @@ STASIS_EXPORT void stasis_host_set_performance_metrics_enabled(int enabled)
     g_perf_latest_metrics.texture_switches = STASIS_PERF_UNAVAILABLE;
     g_perf_latest_metrics.uploaded_bytes = STASIS_PERF_UNAVAILABLE;
     snprintf(g_perf_latest_metrics.backend, sizeof(g_perf_latest_metrics.backend), "%s",
-        g_use_sdl_renderer ? "SDL" : "OpenGL");
+        "SDL");
     SDL_UnlockSpinlock(&g_perf_metrics_lock);
 }
 
@@ -1868,16 +1790,10 @@ static int stasis_audio_ensure_init(void) {
 
 /* Line batching for efficient rendering */
 #define MAX_LINES 10000
-typedef struct {
-    float x, y;
-    float r, g, b, a;
-} LineVertex;
-static LineVertex g_sdl_line_vertices[MAX_LINES * 2];
 static struct {
     float x1, y1, x2, y2;
     float r, g, b, a;
 } g_lines[MAX_LINES];
-static LineVertex g_line_vertices[MAX_LINES * 2];
 static int g_line_count = 0;
 static int g_debug_frame_counter = 0;
 
@@ -1891,13 +1807,6 @@ static StasisRenderClip g_render_clip_stack[STASIS_RENDER_MAX_CLIPS];
 static int g_render_clip_depth = 0;
 
 /* Simple shader + buffer for line rendering */
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static GLuint g_line_program = 0;
-static GLuint g_line_vbo = 0;
-static GLuint g_line_vao = 0;
-static GLint g_line_pos_loc = -1;
-static GLint g_line_color_loc = -1;
-#endif
 static char g_asset_base[512] = {0};
 static char g_asset_env[512] = {0};
 
@@ -1910,221 +1819,11 @@ STASIS_EXPORT int stasis_set_asset_root(const char* path) {
     return 1;
 }
 
-/* Sprite atlas + batching (baked from SVG sources) */
-#define SPRITE_ATLAS_DEFAULT_W 2048
-#define SPRITE_ATLAS_DEFAULT_H 2048
-#define SPRITE_ATLAS_PAD 2
-#define MAX_SPRITE_VERTS (6 * 4096)
-
-typedef struct {
-    float x, y;
-    float u, v;
-    float r, g, b, a;
-} SpriteVertex;
-
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-typedef struct {
-    int x;
-    int y;
-    int w;
-    int h;
-} AtlasFreeRect;
-
-typedef struct {
-    GLuint texture;
-    int w;
-    int h;
-    uint64_t group_id;
-    AtlasFreeRect* free_rects;
-    int free_rect_count;
-    int free_rect_capacity;
-    int used_pixels;
-} SpriteAtlasPage;
-
-static GLuint g_sprite_program = 0;
-static GLuint g_sprite_vbo = 0;
-static GLuint g_sprite_vao = 0;
-static GLint g_sprite_pos_loc = -1;
-static GLint g_sprite_uv_loc = -1;
-static GLint g_sprite_color_loc = -1;
-static GLint g_sprite_tex_loc = -1;
-
-static SpriteAtlasPage* g_sprite_atlas_pages = NULL;
-static int g_sprite_atlas_page_count = 0;
-static int g_sprite_atlas_page_capacity = 0;
-static int g_sprite_atlas_page_w = 0;
-static int g_sprite_atlas_page_h = 0;
-static int g_sprite_atlas_gl_max_size = 0;
-static int g_sprite_batch_page = -1;
-static GLuint g_sprite_batch_texture = 0;
-#endif
-
-static SpriteVertex g_sprite_vertices[MAX_SPRITE_VERTS];
-static int g_sprite_vert_count = 0;
-
-/* Convert screen coords to OpenGL NDC (-1 to 1) */
-static float screen_to_ndc_x(float x) {
-    return (x / g_window_width) * 2.0f - 1.0f;
-}
-
-static float screen_to_ndc_y(float y) {
-    /* Flip Y so 0 is at top */
-    return 1.0f - (y / g_window_height) * 2.0f;
-}
-
 STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
                                     float r, float g, float b, float a);
 STASIS_EXPORT void stasis_fill_rect(float x, float y, float w, float h,
                                     float r, float g, float b, float a);
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static void setup_ortho(void) {
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glOrtho(0.0, (double)g_window_width, (double)g_window_height, 0.0, -1.0, 1.0);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-}
-
-static GLuint compile_simple_shader(GLenum type, const char* source) {
-    GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, NULL);
-    glCompileShader(shader);
-    GLint status = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
-    if (status != GL_TRUE) {
-        char log[512];
-        glGetShaderInfoLog(shader, sizeof(log), NULL, log);
-        SDL_Log("Simple shader compile error: %s", log);
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
-}
-
-static void ensure_line_program(void) {
-    if (g_line_program != 0) return;
-
-    const char* vs_src =
-        "#version 120\n"
-        "attribute vec2 a_pos;\n"
-        "attribute vec4 a_color;\n"
-        "varying vec4 v_color;\n"
-        "void main(){ float x = (a_pos.x / %f) * 2.0 - 1.0; float y = 1.0 - (a_pos.y / %f) * 2.0; gl_Position = vec4(x, y, 0.0, 1.0); v_color = a_color; }\n";
-    const char* fs_src =
-        "#version 120\n"
-        "varying vec4 v_color;\n"
-        "void main(){ gl_FragColor = v_color; }\n";
-
-    char vs_buf[256];
-    snprintf(vs_buf, sizeof(vs_buf), vs_src, (float)g_window_width, (float)g_window_height);
-
-    GLuint vs = compile_simple_shader(GL_VERTEX_SHADER, vs_buf);
-    GLuint fs = compile_simple_shader(GL_FRAGMENT_SHADER, fs_src);
-    if (vs == 0 || fs == 0) {
-        if (vs) glDeleteShader(vs);
-        if (fs) glDeleteShader(fs);
-        return;
-    }
-
-    g_line_program = glCreateProgram();
-    glAttachShader(g_line_program, vs);
-    glAttachShader(g_line_program, fs);
-    glBindAttribLocation(g_line_program, 0, "a_pos");
-    glBindAttribLocation(g_line_program, 1, "a_color");
-    glLinkProgram(g_line_program);
-    GLint linked = 0;
-    glGetProgramiv(g_line_program, GL_LINK_STATUS, &linked);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    if (linked != GL_TRUE) {
-        char log[512];
-        glGetProgramInfoLog(g_line_program, sizeof(log), NULL, log);
-        SDL_Log("Simple program link error: %s", log);
-        glDeleteProgram(g_line_program);
-        g_line_program = 0;
-        return;
-    }
-
-    g_line_pos_loc = 0;
-    g_line_color_loc = 1;
-
-    if (g_line_vao == 0) {
-        glGenVertexArrays(1, &g_line_vao);
-    }
-    if (g_line_vbo == 0) {
-        glGenBuffers(1, &g_line_vbo);
-    }
-}
-
-static void reset_line_program(void) {
-    if (g_line_program != 0) {
-        glDeleteProgram(g_line_program);
-        g_line_program = 0;
-    }
-}
-
-static void reset_sprite_program(void) {
-    if (g_sprite_program != 0) {
-        glDeleteProgram(g_sprite_program);
-        g_sprite_program = 0;
-    }
-}
-
-/* Flush all batched lines to OpenGL */
-static void flush_lines(void) {
-    if (g_line_count == 0) return;
-
-    glUseProgram(0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDrawBuffer(GL_BACK);
-
-    /* Build vertex buffer */
-    int vtx_count = g_line_count * 2;
-    for (int i = 0; i < g_line_count; i++) {
-        g_line_vertices[i * 2 + 0].x = g_lines[i].x1;
-        g_line_vertices[i * 2 + 0].y = g_lines[i].y1;
-        g_line_vertices[i * 2 + 0].r = g_lines[i].r;
-        g_line_vertices[i * 2 + 0].g = g_lines[i].g;
-        g_line_vertices[i * 2 + 0].b = g_lines[i].b;
-        g_line_vertices[i * 2 + 0].a = g_lines[i].a;
-
-        g_line_vertices[i * 2 + 1].x = g_lines[i].x2;
-        g_line_vertices[i * 2 + 1].y = g_lines[i].y2;
-        g_line_vertices[i * 2 + 1].r = g_lines[i].r;
-        g_line_vertices[i * 2 + 1].g = g_lines[i].g;
-        g_line_vertices[i * 2 + 1].b = g_lines[i].b;
-        g_line_vertices[i * 2 + 1].a = g_lines[i].a;
-    }
-
-    ensure_line_program();
-    if (g_line_program != 0) {
-        glUseProgram(g_line_program);
-        glBindVertexArray(g_line_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, g_line_vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(LineVertex) * vtx_count, g_line_vertices, GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray((GLuint)g_line_pos_loc);
-        glVertexAttribPointer((GLuint)g_line_pos_loc, 2, GL_FLOAT, GL_FALSE, sizeof(LineVertex), (void*)offsetof(LineVertex, x));
-        glEnableVertexAttribArray((GLuint)g_line_color_loc);
-        glVertexAttribPointer((GLuint)g_line_color_loc, 4, GL_FLOAT, GL_FALSE, sizeof(LineVertex), (void*)offsetof(LineVertex, r));
-        glDrawArrays(GL_LINES, 0, vtx_count);
-        glDisableVertexAttribArray((GLuint)g_line_pos_loc);
-        glDisableVertexAttribArray((GLuint)g_line_color_loc);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
-        glUseProgram(0);
-    }
-
-    if (g_debug_frame_counter < 5) {
-        GLenum err = glGetError();
-        if (err != GL_NO_ERROR) {
-            SDL_Log("GL error after flush_lines frame %d: 0x%x", g_debug_frame_counter, err);
-        }
-    }
-
-    g_line_count = 0;
-}
-#endif
 
 static void ensure_asset_base(void) {
     if (g_asset_base[0] != 0) return;
@@ -2361,76 +2060,6 @@ STASIS_EXPORT void stasis_gfx_notify_file_changed(const char* path) {
 #endif
 }
 
-static char* read_text_file(const char* path) {
-    ensure_asset_base();
-
-    FILE* f = fopen(path, "rb");
-    char resolved[1024];
-
-    if (!f) {
-        if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
-            fprintf(stderr, "read_text_file: failed %s\n", path);
-            return NULL;
-        }
-        f = fopen(resolved, "rb");
-        if (!f) {
-            fprintf(stderr, "read_text_file: failed %s (also %s)\n", path, resolved);
-            return NULL;
-        }
-    }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len <= 0) {
-        fclose(f);
-        return NULL;
-    }
-    char* data = (char*)malloc((size_t)len + 1);
-    if (!data) {
-        fclose(f);
-        return NULL;
-    }
-    size_t read = fread(data, 1, (size_t)len, f);
-    fclose(f);
-    data[read] = 0;
-    return data;
-}
-
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static GLuint compile_shader(GLenum type, const char* source) {
-    GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, NULL);
-    glCompileShader(shader);
-    GLint status = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
-    if (status != GL_TRUE) {
-        char log[512];
-        glGetShaderInfoLog(shader, sizeof(log), NULL, log);
-        SDL_Log("Shader compile error: %s", log);
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
-}
-
-static GLuint link_program(GLuint vs, GLuint fs) {
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    GLint status = 0;
-    glGetProgramiv(prog, GL_LINK_STATUS, &status);
-    if (status != GL_TRUE) {
-        char log[512];
-        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
-        SDL_Log("Program link error: %s", log);
-        glDeleteProgram(prog);
-        return 0;
-    }
-    return prog;
-}
-#endif
-
 static uint64_t get_file_mtime(const char* path) {
     char resolved[1024];
     const char* probe = path;
@@ -2572,617 +2201,6 @@ static int ensure_sprite_table_capacity(int min_capacity) {
     return 1;
 }
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static int atlas_page_required_extent(int sprite_extent) {
-    if (sprite_extent <= 0) return 0;
-    if (sprite_extent > INT_MAX - SPRITE_ATLAS_PAD * 2) return 0;
-    return sprite_extent + SPRITE_ATLAS_PAD * 2;
-}
-
-static int atlas_page_free_area(const SpriteAtlasPage* page) {
-    int total = 0;
-    if (!page) return 0;
-    for (int i = 0; i < page->free_rect_count; i++) {
-        total += page->free_rects[i].w * page->free_rects[i].h;
-    }
-    return total;
-}
-
-static void atlas_page_remove_rect(SpriteAtlasPage* page, int index) {
-    if (!page || index < 0 || index >= page->free_rect_count) return;
-    page->free_rects[index] = page->free_rects[page->free_rect_count - 1];
-    page->free_rect_count--;
-}
-
-static int atlas_page_reserve_rects(SpriteAtlasPage* page, int additional) {
-    if (!page || additional <= 0) return 1;
-    if (page->free_rect_count + additional <= page->free_rect_capacity) return 1;
-
-    int new_capacity = page->free_rect_capacity > 0 ? page->free_rect_capacity : 8;
-    while (new_capacity < page->free_rect_count + additional) {
-        if (new_capacity > INT_MAX / 2) {
-            return 0;
-        }
-        new_capacity *= 2;
-    }
-
-    AtlasFreeRect* resized = (AtlasFreeRect*)realloc(page->free_rects, sizeof(AtlasFreeRect) * (size_t)new_capacity);
-    if (!resized) {
-        return 0;
-    }
-    page->free_rects = resized;
-    page->free_rect_capacity = new_capacity;
-    return 1;
-}
-
-static int atlas_page_push_rect(SpriteAtlasPage* page, AtlasFreeRect rect) {
-    if (!page || rect.w <= 0 || rect.h <= 0) return 1;
-    if (!atlas_page_reserve_rects(page, 1)) {
-        return 0;
-    }
-    page->free_rects[page->free_rect_count++] = rect;
-    return 1;
-}
-
-static int atlas_rect_contains(AtlasFreeRect a, AtlasFreeRect b) {
-    return b.x >= a.x && b.y >= a.y &&
-           b.x + b.w <= a.x + a.w &&
-           b.y + b.h <= a.y + a.h;
-}
-
-static int atlas_try_merge_rects(AtlasFreeRect* a, AtlasFreeRect* b) {
-    if (!a || !b) return 0;
-
-    if (a->x == b->x && a->w == b->w) {
-        if (a->y + a->h == b->y) {
-            a->h += b->h;
-            return 1;
-        }
-        if (b->y + b->h == a->y) {
-            a->y = b->y;
-            a->h += b->h;
-            return 1;
-        }
-    }
-
-    if (a->y == b->y && a->h == b->h) {
-        if (a->x + a->w == b->x) {
-            a->w += b->w;
-            return 1;
-        }
-        if (b->x + b->w == a->x) {
-            a->x = b->x;
-            a->w += b->w;
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-static void atlas_page_coalesce(SpriteAtlasPage* page) {
-    if (!page) return;
-
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        for (int i = 0; i < page->free_rect_count; i++) {
-            for (int j = i + 1; j < page->free_rect_count; j++) {
-                if (atlas_rect_contains(page->free_rects[i], page->free_rects[j])) {
-                    atlas_page_remove_rect(page, j);
-                    changed = 1;
-                    goto restart;
-                }
-                if (atlas_rect_contains(page->free_rects[j], page->free_rects[i])) {
-                    atlas_page_remove_rect(page, i);
-                    changed = 1;
-                    goto restart;
-                }
-                if (atlas_try_merge_rects(&page->free_rects[i], &page->free_rects[j])) {
-                    atlas_page_remove_rect(page, j);
-                    changed = 1;
-                    goto restart;
-                }
-            }
-        }
-restart:
-        ;
-    }
-}
-
-static void atlas_init_config(void) {
-    if (g_sprite_atlas_page_w > 0 && g_sprite_atlas_page_h > 0) return;
-
-    if (g_sprite_atlas_gl_max_size <= 0) {
-        GLint gl_limit = 0;
-        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl_limit);
-        if (gl_limit <= 0) gl_limit = SPRITE_ATLAS_DEFAULT_W;
-        g_sprite_atlas_gl_max_size = (int)gl_limit;
-    }
-
-    g_sprite_atlas_page_w = parse_env_i32("STASIS_GFX_ATLAS_W",
-                                          SPRITE_ATLAS_DEFAULT_W,
-                                          64,
-                                          g_sprite_atlas_gl_max_size);
-    g_sprite_atlas_page_h = parse_env_i32("STASIS_GFX_ATLAS_H",
-                                          SPRITE_ATLAS_DEFAULT_H,
-                                          64,
-                                          g_sprite_atlas_gl_max_size);
-}
-
-static int atlas_page_upload_region(SpriteAtlasPage* page, int x, int y, int w, int h, const void* pixels) {
-    if (!page || page->texture == 0 || w <= 0 || h <= 0) return 0;
-    while (glGetError() != GL_NO_ERROR) {
-        /* Clear stale errors so this upload has a deterministic result. */
-    }
-    glBindTexture(GL_TEXTURE_2D, page->texture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    GLenum upload_error = glGetError();
-    if (upload_error != GL_NO_ERROR) {
-        SDL_Log("gfx_load_sprite: sprite_gpu_upload_failed gl_error=%u", (unsigned int)upload_error);
-        return 0;
-    }
-    return 1;
-}
-
-static void atlas_page_clear_region(SpriteAtlasPage* page, int x, int y, int w, int h) {
-    if (!page || page->texture == 0 || w <= 0 || h <= 0) return;
-    size_t pixel_count = (size_t)w * (size_t)h;
-    unsigned char* clear_pixels = (unsigned char*)calloc(pixel_count, 4);
-    if (!clear_pixels) return;
-    atlas_page_upload_region(page, x, y, w, h, clear_pixels);
-    free(clear_pixels);
-}
-
-static int atlas_add_page(
-    const StasisSpriteAtlasPolicyV3* policy,
-    int logical_width,
-    int logical_height,
-    int realized_width,
-    int realized_height) {
-    atlas_init_config();
-
-    int page_width = 0;
-    int page_height = 0;
-    if (!stasis_sprite_atlas_page_size_v3(
-            policy,
-            logical_width,
-            logical_height,
-            realized_width,
-            realized_height,
-            g_sprite_atlas_page_w,
-            g_sprite_atlas_page_h,
-            g_sprite_atlas_gl_max_size,
-            SPRITE_ATLAS_PAD,
-            &page_width,
-            &page_height)) {
-        return -1;
-    }
-
-    if (g_sprite_atlas_page_count == g_sprite_atlas_page_capacity) {
-        int new_capacity = g_sprite_atlas_page_capacity > 0 ? g_sprite_atlas_page_capacity * 2 : 4;
-        SpriteAtlasPage* resized =
-            (SpriteAtlasPage*)realloc(g_sprite_atlas_pages, sizeof(SpriteAtlasPage) * (size_t)new_capacity);
-        if (!resized) {
-            return -1;
-        }
-        memset(resized + g_sprite_atlas_page_capacity, 0,
-               sizeof(SpriteAtlasPage) * (size_t)(new_capacity - g_sprite_atlas_page_capacity));
-        g_sprite_atlas_pages = resized;
-        g_sprite_atlas_page_capacity = new_capacity;
-    }
-
-    SpriteAtlasPage* page = &g_sprite_atlas_pages[g_sprite_atlas_page_count];
-    memset(page, 0, sizeof(*page));
-    page->w = page_width;
-    page->h = page_height;
-    page->group_id = policy->group_id;
-
-    glGenTextures(1, &page->texture);
-    if (page->texture == 0) {
-        return -1;
-    }
-
-    size_t pixel_count = (size_t)page->w * (size_t)page->h;
-    unsigned char* initial_pixels = (unsigned char*)calloc(pixel_count, 4);
-    if (!initial_pixels) {
-        glDeleteTextures(1, &page->texture);
-        page->texture = 0;
-        return -1;
-    }
-
-    glBindTexture(GL_TEXTURE_2D, page->texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, page->w, page->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, initial_pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    free(initial_pixels);
-
-    if (!atlas_page_push_rect(page, (AtlasFreeRect){ 0, 0, page->w, page->h })) {
-        glDeleteTextures(1, &page->texture);
-        page->texture = 0;
-        free(page->free_rects);
-        page->free_rects = NULL;
-        page->free_rect_capacity = 0;
-        return -1;
-    }
-
-    return g_sprite_atlas_page_count++;
-}
-
-static int atlas_page_alloc_rect(SpriteAtlasPage* page, int sprite_w, int sprite_h,
-                                 int* out_sprite_x, int* out_sprite_y,
-                                 int* out_alloc_x, int* out_alloc_y,
-                                 int* out_alloc_w, int* out_alloc_h) {
-    if (!page) return 0;
-
-    const int need_w = atlas_page_required_extent(sprite_w);
-    const int need_h = atlas_page_required_extent(sprite_h);
-    if (need_w <= 0 || need_h <= 0) return 0;
-    if (need_w > page->w || need_h > page->h) return 0;
-
-    int best_index = -1;
-    int best_area = INT_MAX;
-    for (int i = 0; i < page->free_rect_count; i++) {
-        AtlasFreeRect rect = page->free_rects[i];
-        if (rect.w < need_w || rect.h < need_h) continue;
-        int area = rect.w * rect.h;
-        if (best_index < 0 || area < best_area) {
-            best_index = i;
-            best_area = area;
-        }
-    }
-    if (best_index < 0) return 0;
-
-    AtlasFreeRect slot = page->free_rects[best_index];
-    if (!atlas_page_reserve_rects(page, 2)) {
-        return 0;
-    }
-    atlas_page_remove_rect(page, best_index);
-
-    if (!atlas_page_push_rect(page, (AtlasFreeRect){ slot.x + need_w, slot.y, slot.w - need_w, need_h }) ||
-        !atlas_page_push_rect(page, (AtlasFreeRect){ slot.x, slot.y + need_h, slot.w, slot.h - need_h })) {
-        return 0;
-    }
-
-    page->used_pixels += need_w * need_h;
-    *out_alloc_x = slot.x;
-    *out_alloc_y = slot.y;
-    *out_alloc_w = need_w;
-    *out_alloc_h = need_h;
-    *out_sprite_x = slot.x + SPRITE_ATLAS_PAD;
-    *out_sprite_y = slot.y + SPRITE_ATLAS_PAD;
-    return 1;
-}
-
-static void atlas_release_rect(int page_index, int alloc_x, int alloc_y, int alloc_w, int alloc_h) {
-    if (page_index < 0 || page_index >= g_sprite_atlas_page_count) return;
-    if (alloc_w <= 0 || alloc_h <= 0) return;
-
-    SpriteAtlasPage* page = &g_sprite_atlas_pages[page_index];
-    atlas_page_clear_region(page, alloc_x, alloc_y, alloc_w, alloc_h);
-    if (atlas_page_push_rect(page, (AtlasFreeRect){ alloc_x, alloc_y, alloc_w, alloc_h })) {
-        page->used_pixels -= alloc_w * alloc_h;
-        if (page->used_pixels < 0) page->used_pixels = 0;
-        atlas_page_coalesce(page);
-    }
-}
-
-static void atlas_log_failure(const char* reason, const char* path, int sprite_w, int sprite_h) {
-    int best_w = 0;
-    int best_h = 0;
-    int best_area = 0;
-    int free_regions = 0;
-    int free_pixels = 0;
-
-    for (int i = 0; i < g_sprite_atlas_page_count; i++) {
-        SpriteAtlasPage* page = &g_sprite_atlas_pages[i];
-        free_regions += page->free_rect_count;
-        free_pixels += atlas_page_free_area(page);
-        for (int j = 0; j < page->free_rect_count; j++) {
-            int area = page->free_rects[j].w * page->free_rects[j].h;
-            if (area > best_area) {
-                best_area = area;
-                best_w = page->free_rects[j].w;
-                best_h = page->free_rects[j].h;
-            }
-        }
-    }
-
-    SDL_Log(
-        "gfx_load_sprite: %s for %s raster=%dx%d pages=%d page=%dx%d gl_max=%d sprites=%d/%d free_pixels=%d free_regions=%d largest_free=%dx%d",
-        reason,
-        path ? path : "(null)",
-        sprite_w,
-        sprite_h,
-        g_sprite_atlas_page_count,
-        g_sprite_atlas_page_w,
-        g_sprite_atlas_page_h,
-        g_sprite_atlas_gl_max_size,
-        g_sprite_count,
-        g_sprite_capacity,
-        free_pixels,
-        free_regions,
-        best_w,
-        best_h);
-}
-
-static int atlas_alloc(
-                       const StasisSpriteAtlasPolicyV3* policy,
-                       int logical_width, int logical_height,
-                       int sprite_w, int sprite_h, const char* path,
-                       int* out_page_index, int* out_sprite_x, int* out_sprite_y,
-                       int* out_alloc_x, int* out_alloc_y, int* out_alloc_w, int* out_alloc_h) {
-    atlas_init_config();
-
-    const int need_w = atlas_page_required_extent(sprite_w);
-    const int need_h = atlas_page_required_extent(sprite_h);
-    if (need_w <= 0 || need_h <= 0) {
-        atlas_log_failure("invalid sprite extent", path, sprite_w, sprite_h);
-        return 0;
-    }
-    if (!policy || !policy->eligible ||
-        !stasis_sprite_atlas_extent_fits(
-            sprite_w, sprite_h, g_sprite_atlas_page_w, g_sprite_atlas_page_h,
-            g_sprite_atlas_gl_max_size, SPRITE_ATLAS_PAD)) {
-        atlas_log_failure("sprite exceeds atlas page size", path, sprite_w, sprite_h);
-        return 0;
-    }
-
-    for (int i = 0; i < g_sprite_atlas_page_count; i++) {
-        if (!stasis_sprite_atlas_realized_group_compatible(
-                g_sprite_atlas_pages[i].group_id, policy->group_id, 1, 1, 1)) continue;
-        if (atlas_page_alloc_rect(&g_sprite_atlas_pages[i], sprite_w, sprite_h,
-                                  out_sprite_x, out_sprite_y,
-                                  out_alloc_x, out_alloc_y,
-                                  out_alloc_w, out_alloc_h)) {
-            *out_page_index = i;
-            return 1;
-        }
-    }
-
-    int page_index = atlas_add_page(
-        policy, logical_width, logical_height, sprite_w, sprite_h);
-    if (page_index < 0) {
-        atlas_log_failure("failed to create atlas page", path, sprite_w, sprite_h);
-        return 0;
-    }
-
-    if (!atlas_page_alloc_rect(&g_sprite_atlas_pages[page_index], sprite_w, sprite_h,
-                               out_sprite_x, out_sprite_y,
-                               out_alloc_x, out_alloc_y,
-                               out_alloc_w, out_alloc_h)) {
-        atlas_log_failure("new atlas page could not fit sprite", path, sprite_w, sprite_h);
-        return 0;
-    }
-
-    *out_page_index = page_index;
-    return 1;
-}
-
-static void ensure_sprite_program(void) {
-    if (g_sprite_program != 0) return;
-
-    const char* vs_src =
-        "#version 120\n"
-        "attribute vec2 a_pos;\n"
-        "attribute vec2 a_uv;\n"
-        "attribute vec4 a_color;\n"
-        "varying vec2 v_uv;\n"
-        "varying vec4 v_color;\n"
-        "void main(){ float x = (a_pos.x / %f) * 2.0 - 1.0; float y = 1.0 - (a_pos.y / %f) * 2.0; gl_Position = vec4(x, y, 0.0, 1.0); v_uv = a_uv; v_color = a_color; }\n";
-    const char* fs_src =
-        "#version 120\n"
-        "uniform sampler2D u_tex;\n"
-        "varying vec2 v_uv;\n"
-        "varying vec4 v_color;\n"
-        "void main(){ gl_FragColor = texture2D(u_tex, v_uv) * v_color; }\n";
-
-    char vs_buf[512];
-    snprintf(vs_buf, sizeof(vs_buf), vs_src, (float)g_window_width, (float)g_window_height);
-
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_buf);
-    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src);
-    if (!vs || !fs) {
-        if (vs) glDeleteShader(vs);
-        if (fs) glDeleteShader(fs);
-        return;
-    }
-
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glBindAttribLocation(prog, 0, "a_pos");
-    glBindAttribLocation(prog, 1, "a_uv");
-    glBindAttribLocation(prog, 2, "a_color");
-    glLinkProgram(prog);
-
-    GLint linked = 0;
-    glGetProgramiv(prog, GL_LINK_STATUS, &linked);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    if (linked != GL_TRUE) {
-        char log[512];
-        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
-        SDL_Log("Sprite program link error: %s", log);
-        glDeleteProgram(prog);
-        return;
-    }
-
-    g_sprite_program = prog;
-    g_sprite_pos_loc = 0;
-    g_sprite_uv_loc = 1;
-    g_sprite_color_loc = 2;
-    g_sprite_tex_loc = glGetUniformLocation(g_sprite_program, "u_tex");
-
-    if (g_sprite_vao == 0) {
-        glGenVertexArrays(1, &g_sprite_vao);
-    }
-    if (g_sprite_vbo == 0) {
-        glGenBuffers(1, &g_sprite_vbo);
-    }
-}
-#endif
-
-static void blend_px_premult(unsigned char* dst, int sr, int sg, int sb, int sa) {
-    int inv = 255 - sa;
-    dst[0] = (unsigned char)(sr + (dst[0] * inv) / 255);
-    dst[1] = (unsigned char)(sg + (dst[1] * inv) / 255);
-    dst[2] = (unsigned char)(sb + (dst[2] * inv) / 255);
-    dst[3] = (unsigned char)(sa + (dst[3] * inv) / 255);
-}
-
-static void draw_rect_rgba(unsigned char* buf, int w, int h, int x, int y, int rw, int rh, float r, float g, float b, float a) {
-    if (!buf) return;
-    if (rw <= 0 || rh <= 0) return;
-    int x0 = x;
-    int y0 = y;
-    int x1 = x + rw;
-    int y1 = y + rh;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > w) x1 = w;
-    if (y1 > h) y1 = h;
-
-    int sa = (int)(a * 255.0f + 0.5f);
-    if (sa <= 0) return;
-    if (sa > 255) sa = 255;
-    int sr = (int)(r * (float)sa + 0.5f);
-    int sg = (int)(g * (float)sa + 0.5f);
-    int sb = (int)(b * (float)sa + 0.5f);
-    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
-    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
-    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
-
-    for (int py = y0; py < y1; py++) {
-        unsigned char* row = buf + (py * w * 4);
-        for (int px = x0; px < x1; px++) {
-            blend_px_premult(row + px * 4, sr, sg, sb, sa);
-        }
-    }
-}
-
-static void draw_circle_rgba(unsigned char* buf, int w, int h, float cx, float cy, float radius, float r, float g, float b, float a) {
-    if (!buf) return;
-    if (radius <= 0.0f) return;
-
-    int sa = (int)(a * 255.0f + 0.5f);
-    if (sa <= 0) return;
-    if (sa > 255) sa = 255;
-    int sr = (int)(r * (float)sa + 0.5f);
-    int sg = (int)(g * (float)sa + 0.5f);
-    int sb = (int)(b * (float)sa + 0.5f);
-    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
-    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
-    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
-
-    float rr = radius * radius;
-    int x0 = (int)floorf(cx - radius - 1.0f);
-    int y0 = (int)floorf(cy - radius - 1.0f);
-    int x1 = (int)ceilf(cx + radius + 1.0f);
-    int y1 = (int)ceilf(cy + radius + 1.0f);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > w) x1 = w;
-    if (y1 > h) y1 = h;
-
-    for (int py = y0; py < y1; py++) {
-        unsigned char* row = buf + (py * w * 4);
-        for (int px = x0; px < x1; px++) {
-            float fx = (float)px + 0.5f;
-            float fy = (float)py + 0.5f;
-            float dx = fx - cx;
-            float dy = fy - cy;
-            if (dx * dx + dy * dy <= rr) {
-                blend_px_premult(row + px * 4, sr, sg, sb, sa);
-            }
-        }
-    }
-}
-
-static float dist2_point_segment(float px, float py, float ax, float ay, float bx, float by) {
-    float abx = bx - ax;
-    float aby = by - ay;
-    float apx = px - ax;
-    float apy = py - ay;
-    float ab2 = abx * abx + aby * aby;
-    float t = 0.0f;
-    if (ab2 > 0.0f) {
-        t = (apx * abx + apy * aby) / ab2;
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
-    }
-    float cx = ax + abx * t;
-    float cy = ay + aby * t;
-    float dx = px - cx;
-    float dy = py - cy;
-    return dx * dx + dy * dy;
-}
-
-static void draw_line_rgba(unsigned char* buf, int w, int h, float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a) {
-    if (!buf) return;
-    if (thickness <= 0.0f) return;
-
-    int sa = (int)(a * 255.0f + 0.5f);
-    if (sa <= 0) return;
-    if (sa > 255) sa = 255;
-    int sr = (int)(r * (float)sa + 0.5f);
-    int sg = (int)(g * (float)sa + 0.5f);
-    int sb = (int)(b * (float)sa + 0.5f);
-    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
-    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
-    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
-
-    float rad = thickness * 0.5f;
-    float rr = rad * rad;
-    float minx = fminf(x1, x2) - rad - 1.0f;
-    float miny = fminf(y1, y2) - rad - 1.0f;
-    float maxx = fmaxf(x1, x2) + rad + 1.0f;
-    float maxy = fmaxf(y1, y2) + rad + 1.0f;
-    int ix0 = (int)floorf(minx);
-    int iy0 = (int)floorf(miny);
-    int ix1 = (int)ceilf(maxx);
-    int iy1 = (int)ceilf(maxy);
-    if (ix0 < 0) ix0 = 0;
-    if (iy0 < 0) iy0 = 0;
-    if (ix1 > w) ix1 = w;
-    if (iy1 > h) iy1 = h;
-
-    for (int py = iy0; py < iy1; py++) {
-        unsigned char* row = buf + (py * w * 4);
-        for (int px = ix0; px < ix1; px++) {
-            float fx = (float)px + 0.5f;
-            float fy = (float)py + 0.5f;
-            float d2 = dist2_point_segment(fx, fy, x1, y1, x2, y2);
-            if (d2 <= rr) {
-                blend_px_premult(row + px * 4, sr, sg, sb, sa);
-            }
-        }
-    }
-}
-
-static void downsample_2x(unsigned char* out_buf, int out_w, int out_h, const unsigned char* in_buf, int in_w, int in_h) {
-    for (int y = 0; y < out_h; y++) {
-        for (int x = 0; x < out_w; x++) {
-            int sx = x * 2;
-            int sy = y * 2;
-            const unsigned char* p0 = in_buf + ((sy + 0) * in_w + (sx + 0)) * 4;
-            const unsigned char* p1 = in_buf + ((sy + 0) * in_w + (sx + 1)) * 4;
-            const unsigned char* p2 = in_buf + ((sy + 1) * in_w + (sx + 0)) * 4;
-            const unsigned char* p3 = in_buf + ((sy + 1) * in_w + (sx + 1)) * 4;
-            unsigned char* o = out_buf + (y * out_w + x) * 4;
-            o[0] = (unsigned char)(((int)p0[0] + (int)p1[0] + (int)p2[0] + (int)p3[0]) / 4);
-            o[1] = (unsigned char)(((int)p0[1] + (int)p1[1] + (int)p2[1] + (int)p3[1]) / 4);
-            o[2] = (unsigned char)(((int)p0[2] + (int)p1[2] + (int)p2[2] + (int)p3[2]) / 4);
-            o[3] = (unsigned char)(((int)p0[3] + (int)p1[3] + (int)p2[3] + (int)p3[3]) / 4);
-        }
-    }
-}
 
 static uint32_t fnv1a_32(const unsigned char* data, size_t len) {
     uint32_t h = 2166136261u;
@@ -3631,7 +2649,7 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
 
     int w = g_recording_presentation ? g_recording_width : g_drawable_width;
     int h = g_recording_presentation ? g_recording_height : g_drawable_height;
-    if (g_use_sdl_renderer && g_renderer && !g_recording_presentation) {
+    if (g_renderer && !g_recording_presentation) {
         /* A regular screenshot captures the fitted logical content returned by
          * SDL readback, not the complete renderer backing used by density and
          * framebuffer accounting. Derive that extent from the full backing;
@@ -3647,7 +2665,7 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
 
     int ok = 0;
 
-    if (g_use_sdl_renderer) {
+    if (true) {
         if (g_renderer) {
             if (render_queued_lines) {
                 /* Direct API calls may happen before end_frame(), so flush pending lines once. */
@@ -3699,33 +2717,6 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
         return ok;
     }
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (g_gl_context) {
-        /* Ensure buffered draws are applied so the screenshot matches what end_frame() will present. */
-        flush_lines();
-        flush_sprites();
-        if (!g_postfx_applied_this_frame) {
-            render_postfx();
-            g_postfx_applied_this_frame = true;
-        }
-        glFlush();
-        glFinish();
-
-        /* Read the back buffer (origin bottom-left). Call before stasis_end_frame(). */
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glReadBuffer(GL_BACK);
-        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
-        GLenum err = glGetError();
-        if (err == GL_NO_ERROR) {
-            /* glReadPixels returns rows from the bottom of the framebuffer first. */
-            ok = png ? stasis_image_writer_write_png_bgra32(out_path, w, h, pixels, 1)
-                     : stasis_image_writer_write_bmp_bgra32(out_path, w, h, pixels, 1);
-        }
-        free(pixels);
-        return ok;
-    }
-#endif
 
     free(pixels);
     return 0;
@@ -3771,149 +2762,14 @@ static void capture_scheduled_screenshot(void) {
             parity_stage,
             g_screenshot_path,
             g_screenshot_frame,
-            g_use_sdl_renderer ? "sdl" : "gl",
+            "sdl",
             g_resource_lifecycle.surface_generation,
             g_resource_lifecycle.renderer_generation);
     }
     if (g_screenshot_exit_after) g_should_quit = true;
 }
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static void flush_sprites(void) {
-    if (g_sprite_vert_count == 0) return;
-    ensure_sprite_program();
-    if (g_sprite_program == 0 || g_sprite_batch_texture == 0) {
-        g_sprite_vert_count = 0;
-        g_sprite_batch_page = -1;
-        g_sprite_batch_texture = 0;
-        return;
-    }
 
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-
-    glUseProgram(g_sprite_program);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_sprite_batch_texture);
-    if (g_sprite_tex_loc >= 0) glUniform1i(g_sprite_tex_loc, 0);
-
-    glBindVertexArray(g_sprite_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, g_sprite_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(SpriteVertex) * (size_t)g_sprite_vert_count, g_sprite_vertices, GL_DYNAMIC_DRAW);
-
-    glEnableVertexAttribArray((GLuint)g_sprite_pos_loc);
-    glVertexAttribPointer((GLuint)g_sprite_pos_loc, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVertex), (void*)offsetof(SpriteVertex, x));
-    glEnableVertexAttribArray((GLuint)g_sprite_uv_loc);
-    glVertexAttribPointer((GLuint)g_sprite_uv_loc, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVertex), (void*)offsetof(SpriteVertex, u));
-    glEnableVertexAttribArray((GLuint)g_sprite_color_loc);
-    glVertexAttribPointer((GLuint)g_sprite_color_loc, 4, GL_FLOAT, GL_FALSE, sizeof(SpriteVertex), (void*)offsetof(SpriteVertex, r));
-
-    glDrawArrays(GL_TRIANGLES, 0, g_sprite_vert_count);
-
-    glDisableVertexAttribArray((GLuint)g_sprite_pos_loc);
-    glDisableVertexAttribArray((GLuint)g_sprite_uv_loc);
-    glDisableVertexAttribArray((GLuint)g_sprite_color_loc);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glUseProgram(0);
-
-    g_sprite_vert_count = 0;
-    g_sprite_batch_page = -1;
-    g_sprite_batch_texture = 0;
-}
-#endif
-
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static const char* kFallbackPostfxVert =
-"#version 120\n"
-"varying vec2 v_uv;\n"
-"void main(){ v_uv = gl_MultiTexCoord0.xy; gl_Position = gl_Vertex; }\n";
-
-static const char* kFallbackPostfxFrag =
-"#version 120\n"
-"varying vec2 v_uv;\n"
-"uniform float u_time;\n"
-"uniform float u_depth_scale;\n"
-"uniform float u_intensity;\n"
-"uniform float u_surface_jitter;\n"
-"uniform vec3 u_biolume_color;\n"
-"float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\n"
-"float noise(vec2 p){ vec2 i=floor(p); vec2 f=fract(p); float a=hash(i); float b=hash(i+vec2(1.0,0.0)); float c=hash(i+vec2(0.0,1.0)); float d=hash(i+vec2(1.0,1.0)); vec2 u=f*f*(3.0-2.0*f); return mix(a,b,u.x)+(c-a)*u.y*(1.0-u.x)+(d-b)*u.x*u.y; }\n"
-"void main(){ float depth=clamp(v_uv.y*u_depth_scale,0.0,1.0); float ripple=noise(v_uv*6.0+u_time*0.25); float wave=sin((v_uv.y*8.0)+(u_time*0.6)+ripple*u_surface_jitter); float c=0.5+0.5*wave; vec3 deep=vec3(0.02,0.08,0.12); vec3 mid=vec3(0.00,0.16,0.22); vec3 base=mix(deep,mid,depth); vec3 color=base+u_intensity*c*u_biolume_color; float atten=mix(1.0,0.25,depth); gl_FragColor=vec4(color*atten,0.18); }\n";
-
-static void init_postfx_shader(void) {
-    const char* fragSource = kFallbackPostfxFrag;
-
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, kFallbackPostfxVert);
-    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragSource);
-    if (vs == 0 || fs == 0) {
-        if (vs) glDeleteShader(vs);
-        if (fs) glDeleteShader(fs);
-        g_postfx_program = 0;
-        return;
-    }
-
-    g_postfx_program = link_program(vs, fs);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-
-    if (g_postfx_program != 0) {
-        g_postfx_time_loc = glGetUniformLocation(g_postfx_program, "u_time");
-        g_postfx_depth_loc = glGetUniformLocation(g_postfx_program, "u_depth_scale");
-        g_postfx_intensity_loc = glGetUniformLocation(g_postfx_program, "u_intensity");
-        g_postfx_surface_loc = glGetUniformLocation(g_postfx_program, "u_surface_jitter");
-        g_postfx_color_loc = glGetUniformLocation(g_postfx_program, "u_biolume_color");
-        /* Don't enable by default - wait for explicit set_postfx() call */
-        g_postfx_enabled = false;
-        SDL_Log("Post-effects shader compiled (not enabled until set_postfx called)");
-    }
-}
-
-static void render_postfx(void) {
-    if (g_postfx_force_disable) {
-        return;
-    }
-
-    /* Allow disabling via environment variable for debugging */
-    static int checked_env = 0;
-    static int env_disable = 0;
-    if (!checked_env) {
-        const char* val = SDL_getenv("STASIS_DISABLE_POSTFX");
-        env_disable = (val && strcmp(val, "0") != 0);
-        checked_env = 1;
-        if (env_disable) {
-            SDL_Log("Post-effects disabled via STASIS_DISABLE_POSTFX");
-        }
-    }
-    if (env_disable) {
-        return;
-    }
-
-    if (!g_postfx_enabled || g_postfx_program == 0) {
-        return;
-    }
-
-    /* Ensure blending is enabled for the overlay effect */
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glUseProgram(g_postfx_program);
-    if (g_postfx_time_loc >= 0) glUniform1f(g_postfx_time_loc, g_postfx_phase);
-    if (g_postfx_depth_loc >= 0) glUniform1f(g_postfx_depth_loc, 1.6f);
-    if (g_postfx_intensity_loc >= 0) glUniform1f(g_postfx_intensity_loc, g_postfx_strength);
-    if (g_postfx_surface_loc >= 0) glUniform1f(g_postfx_surface_loc, 1.1f + g_postfx_speed * 0.5f);
-    if (g_postfx_color_loc >= 0) glUniform3f(g_postfx_color_loc, g_postfx_color[0], g_postfx_color[1], g_postfx_color[2]);
-
-    glBegin(GL_TRIANGLES);
-    glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f, -1.0f);
-    glTexCoord2f(2.0f, 0.0f); glVertex2f( 3.0f, -1.0f);
-    glTexCoord2f(0.0f, 2.0f); glVertex2f(-1.0f,  3.0f);
-    glEnd();
-
-    glUseProgram(0);
-}
-#endif
 
 /*
  * Startup Render Verification
@@ -3927,123 +2783,11 @@ typedef struct {
     int pixels_tested;
     int pixels_correct;
     char error_message[512];
-    char gl_vendor[128];
-    char gl_renderer[128];
-    char gl_version[128];
-    int gl_error_code;
+    char renderer[128];
+    char version[128];
 } RenderTestResult;
 
 static RenderTestResult g_last_test_result = {0};
-
-/* Test OpenGL rendering by drawing a known pattern and reading it back */
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static int verify_opengl_rendering(int width, int height) {
-    RenderTestResult* result = &g_last_test_result;
-    memset(result, 0, sizeof(*result));
-
-    /* Store GL info for diagnostics */
-    const char* vendor = (const char*)glGetString(GL_VENDOR);
-    const char* renderer = (const char*)glGetString(GL_RENDERER);
-    const char* version = (const char*)glGetString(GL_VERSION);
-
-    if (vendor) strncpy(result->gl_vendor, vendor, sizeof(result->gl_vendor) - 1);
-    if (renderer) strncpy(result->gl_renderer, renderer, sizeof(result->gl_renderer) - 1);
-    if (version) strncpy(result->gl_version, version, sizeof(result->gl_version) - 1);
-
-    /* Clear any pending errors */
-    while (glGetError() != GL_NO_ERROR) {}
-
-    /* Render a bright magenta quad to the center of the screen */
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDrawBuffer(GL_BACK);
-
-    /* Clear to black first */
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    GLenum err = glGetError();
-    if (err != GL_NO_ERROR) {
-        result->gl_error_code = (int)err;
-        snprintf(result->error_message, sizeof(result->error_message),
-            "OpenGL error during clear: 0x%04X", err);
-        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
-        return 0;
-    }
-
-    /* Draw a test quad using immediate mode */
-    setup_ortho();
-
-    /* Draw magenta (255, 0, 255) quad in center region */
-    int cx = width / 2;
-    int cy = height / 2;
-    int size = 50;
-
-    glBegin(GL_QUADS);
-    glColor4f(1.0f, 0.0f, 1.0f, 1.0f);  /* Magenta */
-    glVertex2f((float)(cx - size), (float)(cy - size));
-    glVertex2f((float)(cx + size), (float)(cy - size));
-    glVertex2f((float)(cx + size), (float)(cy + size));
-    glVertex2f((float)(cx - size), (float)(cy + size));
-    glEnd();
-
-    err = glGetError();
-    if (err != GL_NO_ERROR) {
-        result->gl_error_code = (int)err;
-        snprintf(result->error_message, sizeof(result->error_message),
-            "OpenGL error during quad draw: 0x%04X", err);
-        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
-        return 0;
-    }
-
-    /* Ensure rendering completed before reading back pixels */
-    glFlush();
-    glFinish();
-
-    /* Read back pixels from the center of the quad */
-    unsigned char pixels[4] = {0, 0, 0, 0};
-    glReadBuffer(GL_BACK);
-    glReadPixels(cx, height - cy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-
-    err = glGetError();
-    if (err != GL_NO_ERROR) {
-        result->gl_error_code = (int)err;
-        snprintf(result->error_message, sizeof(result->error_message),
-            "OpenGL error during pixel readback: 0x%04X", err);
-        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
-        return 0;
-    }
-
-    result->pixels_tested = 1;
-
-    /* Verify we got magenta (or close to it) */
-    /* Allow some tolerance for driver differences */
-    int r_ok = (pixels[0] >= 200);  /* Should be ~255 */
-    int g_ok = (pixels[1] <= 55);   /* Should be ~0 */
-    int b_ok = (pixels[2] >= 200);  /* Should be ~255 */
-
-    if (r_ok && g_ok && b_ok) {
-        result->pixels_correct = 1;
-        result->success = 1;
-        SDL_Log("STARTUP TEST PASSED: OpenGL rendering verified");
-        SDL_Log("  Test pixel readback: R=%d G=%d B=%d A=%d (expected ~255,0,255,255)",
-            pixels[0], pixels[1], pixels[2], pixels[3]);
-        /* Clear so the test pattern can't leak into the first presented frame. */
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        return 1;
-    } else {
-        snprintf(result->error_message, sizeof(result->error_message),
-            "Pixel verification failed: got R=%d G=%d B=%d A=%d, expected ~255,0,255,255. "
-            "This may indicate a driver issue or headless environment.",
-            pixels[0], pixels[1], pixels[2], pixels[3]);
-        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
-        SDL_Log("  GL_VENDOR: %s", result->gl_vendor);
-        SDL_Log("  GL_RENDERER: %s", result->gl_renderer);
-        SDL_Log("  GL_VERSION: %s", result->gl_version);
-        return 0;
-    }
-}
-#endif
 
 /* Test SDL renderer by drawing a known pattern and reading it back */
 static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
@@ -4051,9 +2795,9 @@ static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
     memset(result, 0, sizeof(*result));
 
     const char* renderer_name = SDL_GetRendererName(renderer);
-    strncpy(result->gl_renderer, renderer_name ? renderer_name : "unknown",
-        sizeof(result->gl_renderer) - 1);
-    snprintf(result->gl_version, sizeof(result->gl_version), "SDL3 renderer");
+    strncpy(result->renderer, renderer_name ? renderer_name : "unknown",
+        sizeof(result->renderer) - 1);
+    snprintf(result->version, sizeof(result->version), "SDL3 renderer");
 
     /* Clear to black */
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -4161,7 +2905,7 @@ static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
             "Rendering may not be working.",
             pixels[3]);
         SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
-        SDL_Log("  SDL_Renderer: %s", result->gl_renderer);
+        SDL_Log("  SDL_Renderer: %s", result->renderer);
         return 0;
     } else {
         /* Got something unexpected but not black - likely a format issue, allow it */
@@ -4290,12 +3034,6 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         }
     }
 
-    const char* force_sdl = SDL_getenv("STASIS_USE_SDL");
-    bool want_sdl = (force_sdl && strcmp(force_sdl, "0") != 0);
-#if defined(STASIS_GRAPHICS_SDL_ONLY)
-    want_sdl = true;
-#endif
-
     g_window_width = width;
     g_window_height = height;
     g_native_window_width = width;
@@ -4306,21 +3044,10 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_density_preparation_scale.numerator = 0;
     g_density_preparation_scale.denominator = 0;
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (!want_sdl) {
-        /* Request OpenGL 2.1 compatibility profile for immediate mode */
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
-        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    }
-#endif
 
     int native_request_width = width;
     int native_request_height = height;
-    SDL_WindowFlags window_flags = (want_sdl ? 0 : SDL_WINDOW_OPENGL) |
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (g_recording_presentation) {
         window_flags &= ~SDL_WINDOW_RESIZABLE;
         window_flags |= SDL_WINDOW_HIDDEN;
@@ -4375,89 +3102,31 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         }
     }
 
-    /* Try GL first unless overridden */
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (!want_sdl) {
-        g_gl_context = SDL_GL_CreateContext(g_window);
-        if (g_gl_context) {
-            glewExperimental = GL_TRUE;
-            GLenum glew_status = glewInit();
-            if (glew_status != GLEW_OK) {
-                SDL_Log("glewInit failed: %s", (const char*)glewGetErrorString(glew_status));
-                SDL_GL_DestroyContext(g_gl_context);
-                g_gl_context = NULL;
-            } else {
-                int want_vsync = 1;
-                const char* vsync_env = getenv("STASIS_GFX_VSYNC");
-                if (vsync_env && vsync_env[0] == '0') {
-                    want_vsync = 0;
-                }
-                bool swap_ok = SDL_GL_SetSwapInterval(want_vsync ? 1 : 0);
-                if (!swap_ok) {
-                    SDL_Log("SDL_GL_SetSwapInterval failed (vsync=%d): %s", want_vsync, SDL_GetError());
-                }
-                glViewport(0, 0, width, height);
-                glDisable(GL_SCISSOR_TEST);
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                glDisable(GL_DEPTH_TEST);
-                glDisable(GL_CULL_FACE);
-                glLineWidth(1.0f);
-
-                g_window_width = width;
-                g_window_height = height;
-                glBindFramebuffer(GL_FRAMEBUFFER, 0);
-                glDrawBuffer(GL_BACK);
-                glReadBuffer(GL_BACK);
-                setup_ortho();
-                ensure_line_program();
-                init_postfx_shader();
-
-                SDL_Log("Stasis graphics initialized: %dx%d", width, height);
-                SDL_Log("GL_VENDOR: %s", (const char*)glGetString(GL_VENDOR));
-                SDL_Log("GL_RENDERER: %s", (const char*)glGetString(GL_RENDERER));
-                SDL_Log("GL_VERSION: %s", (const char*)glGetString(GL_VERSION));
-            }
-        }
+    g_renderer = SDL_CreateRenderer(g_window, NULL);
+    if (!g_renderer) {
+        stasis_report_runtime_errorf("Renderer creation failed: %s", SDL_GetError());
+        SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
+        SDL_DestroyWindow(g_window);
+        g_window = NULL;
+        SDL_Quit();
+        return 0;
     }
-#endif
-
-    if (g_gl_context == NULL) {
-        g_use_sdl_renderer = true;
-        g_postfx_force_disable = true;
-        g_renderer = SDL_CreateRenderer(g_window, NULL);
-        if (!g_renderer) {
-            stasis_report_runtime_errorf("Renderer creation failed: %s", SDL_GetError());
-            SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
-            SDL_DestroyWindow(g_window);
-            g_window = NULL;
-            g_use_sdl_renderer = false;
-            SDL_Quit();
-            return 0;
-        }
-        if (!SDL_SetRenderVSync(g_renderer, g_recording_presentation ? 0 : 1)) {
-            SDL_Log("SDL_SetRenderVSync failed (recording=%d): %s",
-                g_recording_presentation ? 1 : 0, SDL_GetError());
-        }
-        SDL_SetDefaultTextureScaleMode(g_renderer, SDL_SCALEMODE_LINEAR);
-        SDL_SetRenderLogicalPresentation(
-            g_renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-        const char* renderer_name = SDL_GetRendererName(g_renderer);
-        SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d name=%s",
-            width, height, renderer_name ? renderer_name : "?");
-    } else {
-        g_use_sdl_renderer = false;
+    if (!SDL_SetRenderVSync(g_renderer, g_recording_presentation ? 0 : 1)) {
+        SDL_Log("SDL_SetRenderVSync failed (recording=%d): %s",
+            g_recording_presentation ? 1 : 0, SDL_GetError());
     }
+    SDL_SetDefaultTextureScaleMode(g_renderer, SDL_SCALEMODE_LINEAR);
+    SDL_SetRenderLogicalPresentation(
+        g_renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    const char* renderer_name = SDL_GetRendererName(g_renderer);
+    SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d name=%s",
+        width, height, renderer_name ? renderer_name : "?");
 
     stasis_sync_display_metrics();
     g_window_minimized = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_MINIMIZED) != 0;
     stasis_renderer_lifecycle_initialize(&g_resource_lifecycle);
     g_resource_frame_ready = true;
-    /*
-     * Windows OpenGL drivers can block the first swap until the new window has
-     * processed its initial messages. Pump first, then present the same
-     * asset-free loading frame on SDL and OpenGL on every platform.
-     */
+    /* Pump once before presenting the asset-free loading frame. */
     SDL_PumpEvents();
     stasis_present_gpu_loading();
     SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.3f display_scale=%.3f display_generation=%d density_generation=%d",
@@ -4484,20 +3153,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     int should_skip_test = (skip_test && strcmp(skip_test, "0") != 0);
     if (should_run_test && !should_skip_test) {
         int test_ok;
-#if defined(STASIS_GRAPHICS_SDL_ONLY)
-        if (!g_use_sdl_renderer) {
-            fprintf(stderr, "error: SDL-only build requires an SDL renderer.\n");
-            SDL_Quit();
-            return 0;
-        }
         test_ok = verify_sdl_rendering(g_renderer, width, height);
-#else
-        if (g_use_sdl_renderer) {
-            test_ok = verify_sdl_rendering(g_renderer, width, height);
-        } else {
-            test_ok = verify_opengl_rendering(width, height);
-        }
-#endif
 
         if (!test_ok) {
             /* Print detailed diagnostics to stderr */
@@ -4506,19 +3162,9 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             fprintf(stderr, "Error: %s\n", g_last_test_result.error_message);
             fprintf(stderr, "\n");
             fprintf(stderr, "Diagnostics:\n");
-            if (g_use_sdl_renderer) {
-                fprintf(stderr, "  Mode: SDL Renderer\n");
-                fprintf(stderr, "  Renderer: %s\n", g_last_test_result.gl_renderer);
-                fprintf(stderr, "  Info: %s\n", g_last_test_result.gl_version);
-            } else {
-                fprintf(stderr, "  Mode: OpenGL\n");
-                fprintf(stderr, "  GL_VENDOR: %s\n", g_last_test_result.gl_vendor);
-                fprintf(stderr, "  GL_RENDERER: %s\n", g_last_test_result.gl_renderer);
-                fprintf(stderr, "  GL_VERSION: %s\n", g_last_test_result.gl_version);
-                if (g_last_test_result.gl_error_code != 0) {
-                    fprintf(stderr, "  GL Error Code: 0x%04X\n", g_last_test_result.gl_error_code);
-                }
-            }
+            fprintf(stderr, "  Mode: SDL Renderer\n");
+            fprintf(stderr, "  Renderer: %s\n", g_last_test_result.renderer);
+            fprintf(stderr, "  Info: %s\n", g_last_test_result.version);
             fprintf(stderr, "  Pixels Tested: %d\n", g_last_test_result.pixels_tested);
             fprintf(stderr, "  Pixels Correct: %d\n", g_last_test_result.pixels_correct);
             fprintf(stderr, "\n");
@@ -4529,15 +3175,10 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             fprintf(stderr, "  - Incompatible graphics hardware\n");
             fprintf(stderr, "\n");
             fprintf(stderr, "To disable this test, unset: STASIS_RUN_RENDER_TEST (or set to 0)\n");
-            fprintf(stderr, "To force SDL renderer, set: STASIS_USE_SDL=1\n");
             fprintf(stderr, "================================================\n");
             fprintf(stderr, "\n");
 
             /* Cleanup and return failure */
-            if (g_gl_context) {
-                SDL_GL_DestroyContext(g_gl_context);
-                g_gl_context = NULL;
-            }
             if (g_renderer) {
                 SDL_DestroyRenderer(g_renderer);
                 g_renderer = NULL;
@@ -4551,16 +3192,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         }
 
         /* Clear the test pattern before returning to caller */
-        if (g_use_sdl_renderer) {
-            SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
-            SDL_RenderClear(g_renderer);
-        }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        else {
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-        }
-#endif
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+        SDL_RenderClear(g_renderer);
     }
 
     gfx_asset_watch_init();
@@ -4673,13 +3306,6 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         stasis_x11_window_scale(), g_display_generation, g_density_generation);
 #endif
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (!g_use_sdl_renderer) {
-        setup_ortho();
-        reset_line_program();
-        reset_sprite_program();
-    }
-#endif
 }
 
 /*
@@ -4721,13 +3347,6 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
         }
         stasis_sync_display_metrics();
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        if (!g_use_sdl_renderer) {
-            setup_ortho();
-            reset_line_program();
-            reset_sprite_program();
-        }
-#endif
 
         SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
         SDL_Rect usable = {0, 0, 0, 0};
@@ -4782,13 +3401,6 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
         SDL_Log("Stasis window presentation: mode=%s", fullscreen ? "fullscreen" : "windowed");
 #endif
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        if (!g_use_sdl_renderer) {
-            setup_ortho();
-            reset_line_program();
-            reset_sprite_program();
-        }
-#endif
     }
 
     return result ? 1 : 0;
@@ -4800,7 +3412,6 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
 STASIS_EXPORT void stasis_begin_frame(void) {
     gfx_debug_hash_reset_if_enabled();
     gfx_asset_watch_apply_pending_changes();
-    g_postfx_applied_this_frame = false;
     if (!g_events_pumped_this_frame) {
         stasis_pump_events();
         g_events_pumped_this_frame = 1;
@@ -4808,16 +3419,8 @@ STASIS_EXPORT void stasis_begin_frame(void) {
     g_resource_frame_ready = stasis_restore_renderer_resources() != 0;
     g_line_count = 0;
     stasis_render_reset_clip();
-    if (g_use_sdl_renderer) {
-        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderClipRect(g_renderer, NULL);
-    } else {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        stasis_gl_clear_drawable();
-#else
-        (void)g_force_debug_overlay;
-#endif
-    }
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderClipRect(g_renderer, NULL);
 }
 
 static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter) {
@@ -4870,7 +3473,7 @@ static void stasis_perf_finish_render_sample(uint64_t host_replay_us,
     sample->metrics.texture_switches = STASIS_PERF_UNAVAILABLE;
     sample->metrics.uploaded_bytes = STASIS_PERF_UNAVAILABLE;
     snprintf(sample->metrics.backend, sizeof(sample->metrics.backend), "%s",
-        g_use_sdl_renderer ? "SDL" : "OpenGL");
+        "SDL");
     SDL_LockSpinlock(&g_perf_metrics_lock);
     g_perf_latest_metrics = sample->metrics;
     SDL_UnlockSpinlock(&g_perf_metrics_lock);
@@ -4916,63 +3519,6 @@ static void stasis_perf_append_count(char* output, size_t capacity, uint32_t cou
     else snprintf(output, capacity, "%u", (unsigned int)count);
 }
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-/* Tiny runtime-owned fallback for OpenGL builds. It deliberately uses no font
- * asset, allocation, or system API, so the diagnostic HUD remains visible on
- * macOS/iOS/Linux even when a game has not loaded a font. */
-static uint8_t stasis_perf_glyph_row(char character, int row) {
-    static const uint8_t glyphs[36][7] = {
-        {0x0e,0x11,0x13,0x15,0x19,0x11,0x0e}, {0x04,0x0c,0x04,0x04,0x04,0x04,0x0e},
-        {0x0e,0x11,0x01,0x02,0x04,0x08,0x1f}, {0x1e,0x01,0x01,0x0e,0x01,0x01,0x1e},
-        {0x02,0x06,0x0a,0x12,0x1f,0x02,0x02}, {0x1f,0x10,0x10,0x1e,0x01,0x01,0x1e},
-        {0x06,0x08,0x10,0x1e,0x11,0x11,0x0e}, {0x1f,0x01,0x02,0x04,0x08,0x08,0x08},
-        {0x0e,0x11,0x11,0x0e,0x11,0x11,0x0e}, {0x0e,0x11,0x11,0x0f,0x01,0x02,0x1c},
-        {0x0e,0x11,0x11,0x1f,0x11,0x11,0x11}, {0x1e,0x11,0x11,0x1e,0x11,0x11,0x1e},
-        {0x0e,0x11,0x10,0x10,0x10,0x11,0x0e}, {0x1e,0x11,0x11,0x11,0x11,0x11,0x1e},
-        {0x1f,0x10,0x10,0x1e,0x10,0x10,0x1f}, {0x1f,0x10,0x10,0x1e,0x10,0x10,0x10},
-        {0x0e,0x11,0x10,0x17,0x11,0x11,0x0f}, {0x11,0x11,0x11,0x1f,0x11,0x11,0x11},
-        {0x0e,0x04,0x04,0x04,0x04,0x04,0x0e}, {0x01,0x01,0x01,0x01,0x11,0x11,0x0e},
-        {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, {0x10,0x10,0x10,0x10,0x10,0x10,0x1f},
-        {0x11,0x1b,0x15,0x15,0x11,0x11,0x11}, {0x11,0x19,0x19,0x15,0x13,0x13,0x11},
-        {0x0e,0x11,0x11,0x11,0x11,0x11,0x0e}, {0x1e,0x11,0x11,0x1e,0x10,0x10,0x10},
-        {0x0e,0x11,0x11,0x11,0x15,0x12,0x0d}, {0x1e,0x11,0x11,0x1e,0x14,0x12,0x11},
-        {0x0f,0x10,0x10,0x0e,0x01,0x01,0x1e}, {0x1f,0x04,0x04,0x04,0x04,0x04,0x04},
-        {0x11,0x11,0x11,0x11,0x11,0x11,0x0e}, {0x11,0x11,0x11,0x11,0x11,0x0a,0x04},
-        {0x11,0x11,0x11,0x15,0x15,0x1b,0x11}, {0x11,0x11,0x0a,0x04,0x0a,0x11,0x11},
-        {0x11,0x11,0x0a,0x04,0x04,0x04,0x04}, {0x1f,0x01,0x02,0x04,0x08,0x10,0x1f}
-    };
-    const int upper = toupper((unsigned char)character);
-    if (upper >= '0' && upper <= '9') return glyphs[upper - '0'][row];
-    if (upper >= 'A' && upper <= 'Z') return glyphs[10 + upper - 'A'][row];
-    if (character == ':') return (row == 1 || row == 5) ? 0x04 : 0;
-    if (character == '.') return row == 6 ? 0x04 : 0;
-    if (character == '-') return row == 3 ? 0x1f : 0;
-    if (character == '%') return row == 1 ? 0x19 : (row == 5 ? 0x13 : 0);
-    if (character == '[' || character == ']') return (row == 0 || row == 6) ? 0x1e : 0x10;
-    return 0;
-}
-
-static void stasis_perf_draw_builtin_gl(const char* text, float x, float y,
-                                        float r, float g, float b) {
-    if (!text || !*text) return;
-    glDisable(GL_TEXTURE_2D);
-    glColor4f(r, g, b, 1.0f);
-    glBegin(GL_QUADS);
-    for (const char* cursor = text; *cursor; cursor++, x += 12.0f) {
-        for (int row = 0; row < 7; row++) {
-            const uint8_t bits = stasis_perf_glyph_row(*cursor, row);
-            for (int column = 0; column < 5; column++) {
-                if ((bits & (1u << (4 - column))) == 0) continue;
-                const float left = x + (float)column * 2.0f;
-                const float top = y + (float)row * 2.0f;
-                glVertex2f(left, top); glVertex2f(left + 2.0f, top);
-                glVertex2f(left + 2.0f, top + 2.0f); glVertex2f(left, top + 2.0f);
-            }
-        }
-    }
-    glEnd();
-}
-#endif
 
 static void stasis_perf_draw_overlay(void) {
     if (!g_force_debug_overlay) return;
@@ -5051,33 +3597,13 @@ static void stasis_perf_draw_overlay(void) {
 
     const int background_width = g_window_width > 760 ? 750 : g_window_width - 16;
     const float background_height = 18.0f + 18.0f * 5.0f;
-    if (g_use_sdl_renderer) {
-        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(g_renderer, 20, 28, 38, 170);
-        SDL_FRect background = { 8.0f, 8.0f, (float)background_width, background_height };
-        if (background.w > 0) SDL_RenderFillRect(g_renderer, &background);
-        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), 255);
-        for (int line = 0; line < 5; line++) {
-            if (text[line][0]) SDL_RenderDebugText(g_renderer, 12.0f, 11.0f + (float)line * 18.0f, text[line]);
-        }
-    } else {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        flush_lines();
-        flush_sprites();
-        if (background_width > 0) {
-            glDisable(GL_TEXTURE_2D);
-            glColor4f(0.08f, 0.11f, 0.15f, 0.67f);
-            glBegin(GL_QUADS);
-            glVertex2f(8.0f, 8.0f);
-            glVertex2f(8.0f + (float)background_width, 8.0f);
-            glVertex2f(8.0f + (float)background_width, 8.0f + background_height);
-            glVertex2f(8.0f, 8.0f + background_height);
-            glEnd();
-        }
-        for (int line = 0; line < 5; line++) {
-            stasis_perf_draw_builtin_gl(text[line], 12.0f, 11.0f + (float)line * 18.0f, r, g, b);
-        }
-#endif
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(g_renderer, 20, 28, 38, 170);
+    SDL_FRect background = { 8.0f, 8.0f, (float)background_width, background_height };
+    if (background.w > 0) SDL_RenderFillRect(g_renderer, &background);
+    SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), 255);
+    for (int line = 0; line < 5; line++) {
+        if (text[line][0]) SDL_RenderDebugText(g_renderer, 12.0f, 11.0f + (float)line * 18.0f, text[line]);
     }
 }
 
@@ -5091,7 +3617,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
         g_events_pumped_this_frame = 0;
         return;
     }
-    if (g_use_sdl_renderer) {
+    if (true) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_Color color;
         /* Render lines one by one; could be grouped by color if needed */
@@ -5119,32 +3645,6 @@ STASIS_EXPORT void stasis_end_frame(void) {
             SDL_RenderPresent(g_renderer);
         }
         g_line_count = 0;
-    } else {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        flush_lines();
-        flush_sprites();
-        if (!g_postfx_applied_this_frame) {
-            render_postfx();
-            g_postfx_applied_this_frame = true;
-        }
-        /* Capture after all draws (including postfx) but before swap. */
-        capture_scheduled_screenshot();
-        const int measure_frame = stasis_host_performance_metrics_enabled();
-        if (measure_frame) {
-            const uint64_t host_finished = SDL_GetPerformanceCounter();
-            const uint64_t present_started = SDL_GetPerformanceCounter();
-            SDL_GL_SwapWindow(g_window);
-            const uint64_t present_finished = SDL_GetPerformanceCounter();
-            stasis_perf_finish_render_sample(stasis_perf_elapsed_us(
-                g_perf_render_started_counter, host_finished),
-                stasis_perf_elapsed_us(present_started, present_finished));
-        } else {
-            SDL_GL_SwapWindow(g_window);
-        }
-#else
-        /* STASIS_GRAPHICS_SDL_ONLY should never create a GL context. */
-        g_line_count = 0;
-#endif
     }
 
     g_debug_frame_counter++;
@@ -5159,32 +3659,14 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
     gfx_debug_hash_f32(g);
     gfx_debug_hash_f32(b);
     gfx_debug_hash_f32(a);
-    if (g_use_sdl_renderer) {
-        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
-        SDL_RenderClear(g_renderer);
-        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
-        SDL_FRect logical_canvas = {
-            0.0f, 0.0f, (float)g_window_width, (float)g_window_height};
-        SDL_RenderFillRect(g_renderer, &logical_canvas);
-        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-    } else {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(
-            (int)viewport.x,
-            stasis_display_bottom_origin_y(
-                g_display_metrics.drawable_h, viewport),
-            (int)viewport.w,
-            (int)viewport.h);
-        glClearColor(r, g, b, a);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glDisable(GL_SCISSOR_TEST);
-#else
-        (void)r; (void)g; (void)b; (void)a;
-#endif
-    }
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+    SDL_RenderClear(g_renderer);
+    SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
+    SDL_FRect logical_canvas = {
+        0.0f, 0.0f, (float)g_window_width, (float)g_window_height};
+    SDL_RenderFillRect(g_renderer, &logical_canvas);
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
 }
 
 /*
@@ -5201,28 +3683,10 @@ STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
     gfx_debug_hash_f32(g);
     gfx_debug_hash_f32(b);
     gfx_debug_hash_f32(a);
-    if (g_use_sdl_renderer) {
-        if (g_line_count >= MAX_LINES) {
-            /* Cap silently */
-            return;
-        }
-        g_lines[g_line_count].x1 = x1;
-        g_lines[g_line_count].y1 = y1;
-        g_lines[g_line_count].x2 = x2;
-        g_lines[g_line_count].y2 = y2;
-        g_lines[g_line_count].r = r;
-        g_lines[g_line_count].g = g;
-        g_lines[g_line_count].b = b;
-        g_lines[g_line_count].a = a;
-        g_line_count++;
+    if (g_line_count >= MAX_LINES) {
+        /* Cap silently */
         return;
     }
-
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (g_line_count >= MAX_LINES) {
-        flush_lines();
-    }
-
     g_lines[g_line_count].x1 = x1;
     g_lines[g_line_count].y1 = y1;
     g_lines[g_line_count].x2 = x2;
@@ -5232,10 +3696,6 @@ STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
     g_lines[g_line_count].b = b;
     g_lines[g_line_count].a = a;
     g_line_count++;
-#else
-    (void)x1; (void)y1; (void)x2; (void)y2;
-    (void)r; (void)g; (void)b; (void)a;
-#endif
 }
 
 /*
@@ -5269,100 +3729,38 @@ STASIS_EXPORT void stasis_fill_rect(float x, float y, float w, float h,
     gfx_debug_hash_f32(b);
     gfx_debug_hash_f32(a);
     if (w <= 0.0f || h <= 0.0f) return;
-    if (g_use_sdl_renderer) {
-        SDL_FRect rect = {x, y, w, h};
-        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(
-            g_renderer,
-            (Uint8)(r * 255.0f),
-            (Uint8)(g * 255.0f),
-            (Uint8)(b * 255.0f),
-            (Uint8)(a * 255.0f));
-        SDL_RenderFillRect(g_renderer, &rect);
-        return;
-    }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_TEXTURE_2D);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glColor4f(r, g, b, a);
-    glBegin(GL_QUADS);
-    glVertex2f(x, y);
-    glVertex2f(x + w, y);
-    glVertex2f(x + w, y + h);
-    glVertex2f(x, y + h);
-    glEnd();
-    glColor4f(1, 1, 1, 1);
-#endif
+    SDL_FRect rect = {x, y, w, h};
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(
+        g_renderer,
+        (Uint8)(r * 255.0f),
+        (Uint8)(g * 255.0f),
+        (Uint8)(b * 255.0f),
+        (Uint8)(a * 255.0f));
+    SDL_RenderFillRect(g_renderer, &rect);
 }
 
 static void stasis_render_set_clip(StasisRenderClip clip) {
     if (clip.w < 0.0f) clip.w = 0.0f;
     if (clip.h < 0.0f) clip.h = 0.0f;
-    if (g_use_sdl_renderer) {
-        if (!g_renderer) return;
-        SDL_Rect rect = {
-            (int)floorf(clip.x),
-            (int)floorf(clip.y),
-            (int)ceilf(clip.w),
-            (int)ceilf(clip.h)};
-        SDL_SetRenderClipRect(g_renderer, &rect);
-        return;
-    }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    const int logical_w = g_display_metrics.logical_w > 0
-        ? g_display_metrics.logical_w : g_window_width;
-    const int logical_h = g_display_metrics.logical_h > 0
-        ? g_display_metrics.logical_h : g_window_height;
-    const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
-    const float scale_x = logical_w > 0 ? viewport.w / (float)logical_w : 1.0f;
-    const float scale_y = logical_h > 0 ? viewport.h / (float)logical_h : 1.0f;
-    const int left = (int)floorf(viewport.x + clip.x * scale_x);
-    const int top = (int)floorf(viewport.y + clip.y * scale_y);
-    const int right = (int)ceilf(viewport.x + (clip.x + clip.w) * scale_x);
-    const int bottom = (int)ceilf(viewport.y + (clip.y + clip.h) * scale_y);
-    int scissor_left = left;
-    int scissor_top = top;
-    int scissor_right = right;
-    int scissor_bottom = bottom;
-    const int viewport_left = (int)floorf(viewport.x);
-    const int viewport_top = (int)floorf(viewport.y);
-    const int viewport_right = (int)ceilf(viewport.x + viewport.w);
-    const int viewport_bottom = (int)ceilf(viewport.y + viewport.h);
-    if (scissor_left < viewport_left) scissor_left = viewport_left;
-    if (scissor_top < viewport_top) scissor_top = viewport_top;
-    if (scissor_right > viewport_right) scissor_right = viewport_right;
-    if (scissor_bottom > viewport_bottom) scissor_bottom = viewport_bottom;
-    if (scissor_right < scissor_left) scissor_right = scissor_left;
-    if (scissor_bottom < scissor_top) scissor_bottom = scissor_top;
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(
-        scissor_left,
-        g_display_metrics.drawable_h - scissor_bottom,
-        scissor_right - scissor_left,
-        scissor_bottom - scissor_top);
-#else
-    (void)clip;
-#endif
+    if (!g_renderer) return;
+    SDL_Rect rect = {
+        (int)floorf(clip.x),
+        (int)floorf(clip.y),
+        (int)ceilf(clip.w),
+        (int)ceilf(clip.h)};
+    SDL_SetRenderClipRect(g_renderer, &rect);
 }
 
 static void stasis_render_reset_clip(void) {
     g_render_clip_depth = 0;
     memset(g_render_clip_stack, 0, sizeof(g_render_clip_stack));
-    if (g_use_sdl_renderer) {
-        if (g_renderer) SDL_SetRenderClipRect(g_renderer, NULL);
-        return;
-    }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    glDisable(GL_SCISSOR_TEST);
-#endif
+    if (g_renderer) SDL_SetRenderClipRect(g_renderer, NULL);
 }
 
-static void stasis_render_push_clip(float x, float y, float w, float h) {
-    if (g_render_clip_depth >= STASIS_RENDER_MAX_CLIPS) return;
-    StasisRenderClip clip = {x, y, w, h};
+static StasisRenderClip stasis_render_resolve_clip(
+    StasisRenderClip clip, const StasisRenderClip* parent
+) {
     const float logical_w = g_display_metrics.logical_w > 0
         ? (float)g_display_metrics.logical_w : (float)g_window_width;
     const float logical_h = g_display_metrics.logical_h > 0
@@ -5377,19 +3775,27 @@ static void stasis_render_push_clip(float x, float y, float w, float h) {
     clip.y = top;
     clip.w = right_limit > left ? right_limit - left : 0.0f;
     clip.h = bottom_limit > top ? bottom_limit - top : 0.0f;
-    if (g_render_clip_depth > 0) {
-        const StasisRenderClip parent = g_render_clip_stack[g_render_clip_depth - 1];
-        const float parent_right = parent.x + parent.w;
-        const float parent_bottom = parent.y + parent.h;
+    if (parent) {
+        const float parent_right = parent->x + parent->w;
+        const float parent_bottom = parent->y + parent->h;
         const float clipped_right = clip.x + clip.w < parent_right
             ? clip.x + clip.w : parent_right;
         const float clipped_bottom = clip.y + clip.h < parent_bottom
             ? clip.y + clip.h : parent_bottom;
-        if (clip.x < parent.x) clip.x = parent.x;
-        if (clip.y < parent.y) clip.y = parent.y;
+        if (clip.x < parent->x) clip.x = parent->x;
+        if (clip.y < parent->y) clip.y = parent->y;
         clip.w = clipped_right > clip.x ? clipped_right - clip.x : 0.0f;
         clip.h = clipped_bottom > clip.y ? clipped_bottom - clip.y : 0.0f;
     }
+    return clip;
+}
+
+static void stasis_render_push_clip(float x, float y, float w, float h) {
+    if (g_render_clip_depth >= STASIS_RENDER_MAX_CLIPS) return;
+    const StasisRenderClip requested = {x, y, w, h};
+    const StasisRenderClip* parent = g_render_clip_depth > 0
+        ? &g_render_clip_stack[g_render_clip_depth - 1] : NULL;
+    const StasisRenderClip clip = stasis_render_resolve_clip(requested, parent);
     g_render_clip_stack[g_render_clip_depth++] = clip;
     stasis_render_set_clip(clip);
 }
@@ -5398,17 +3804,37 @@ static void stasis_render_pop_clip(void) {
     if (g_render_clip_depth <= 0) return;
     g_render_clip_depth--;
     if (g_render_clip_depth == 0) {
-        if (g_use_sdl_renderer) {
-            if (g_renderer) SDL_SetRenderClipRect(g_renderer, NULL);
-        }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        else {
-            glDisable(GL_SCISSOR_TEST);
-        }
-#endif
+        if (g_renderer) SDL_SetRenderClipRect(g_renderer, NULL);
         return;
     }
     stasis_render_set_clip(g_render_clip_stack[g_render_clip_depth - 1]);
+}
+
+static void stasis_render_apply_run_clip(const float* cmd_f32, int clip_index) {
+    const int base = STASIS_RENDER_F_CLIP_BASE +
+        clip_index * STASIS_RENDER_CLIP_F32_STRIDE;
+    const StasisRenderClip requested = {
+        cmd_f32[base + 0], cmd_f32[base + 1],
+        cmd_f32[base + 2], cmd_f32[base + 3]};
+    const StasisRenderClip* parent = g_render_clip_depth > 0
+        ? &g_render_clip_stack[g_render_clip_depth - 1] : NULL;
+    const StasisRenderClip resolved = stasis_render_resolve_clip(requested, parent);
+    g_native_run_clip_applies++;
+    g_native_last_run_clip[0] = resolved.x;
+    g_native_last_run_clip[1] = resolved.y;
+    g_native_last_run_clip[2] = resolved.w;
+    g_native_last_run_clip[3] = resolved.h;
+    stasis_render_set_clip(resolved);
+}
+
+static void stasis_render_restore_ordered_clip(void) {
+    g_native_run_clip_restores++;
+    g_native_last_run_clip_restore_depth = g_render_clip_depth;
+    if (g_render_clip_depth > 0) {
+        stasis_render_set_clip(g_render_clip_stack[g_render_clip_depth - 1]);
+    } else if (g_renderer) {
+        SDL_SetRenderClipRect(g_renderer, NULL);
+    }
 }
 
 /*
@@ -5420,34 +3846,25 @@ static void stasis_render_pop_clip(void) {
  */
 static void flush_ordered_lines(void) {
     if (g_line_count == 0) return;
-    if (g_use_sdl_renderer) {
-        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-        for (int i = 0; i < g_line_count; i++) {
-            SDL_SetRenderDrawColor(
-                g_renderer,
-                (Uint8)(g_lines[i].r * 255.0f),
-                (Uint8)(g_lines[i].g * 255.0f),
-                (Uint8)(g_lines[i].b * 255.0f),
-                (Uint8)(g_lines[i].a * 255.0f));
-            SDL_RenderLine(
-                g_renderer,
-                g_lines[i].x1,
-                g_lines[i].y1,
-                g_lines[i].x2,
-                g_lines[i].y2);
-        }
-        g_line_count = 0;
-        return;
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    for (int i = 0; i < g_line_count; i++) {
+        SDL_SetRenderDrawColor(
+            g_renderer,
+            (Uint8)(g_lines[i].r * 255.0f),
+            (Uint8)(g_lines[i].g * 255.0f),
+            (Uint8)(g_lines[i].b * 255.0f),
+            (Uint8)(g_lines[i].a * 255.0f));
+        SDL_RenderLine(
+            g_renderer,
+            g_lines[i].x1,
+            g_lines[i].y1,
+            g_lines[i].x2,
+            g_lines[i].y2);
     }
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    flush_lines();
-#endif
+    g_line_count = 0;
 }
 
 static void flush_ordered_sprites(void) {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (!g_use_sdl_renderer) flush_sprites();
-#endif
 }
 
 static void stasis_draw_ordered_sprite(
@@ -5459,19 +3876,18 @@ static void stasis_draw_ordered_sprite(
     const float* sprite_f32 = cmd_f32 + STASIS_RENDER_F_SPRITE_BASE;
     const int base_i = index * STASIS_RENDER_SPRITE_I32_STRIDE;
     const int base_f = index * STASIS_RENDER_SPRITE_F32_STRIDE;
-    const float src_u0 = sprite_f32[base_f + 4];
-    const float src_v0 = sprite_f32[base_f + 5];
-    const float src_u1 = sprite_f32[base_f + 6];
-    const float src_v1 = sprite_f32[base_f + 7];
     stasis_gfx_draw_sprite_internal(
         sprite_i32[base_i + 0],
         sprite_f32[base_f + 0],
         sprite_f32[base_f + 1],
         sprite_f32[base_f + 2],
         sprite_f32[base_f + 3],
-        sprite_i32[base_i + 1],
-        sprite_i32[base_i + 2],
-        src_u0, src_v0, src_u1, src_v1,
+        sprite_f32[base_f + 12],
+        (uint32_t)sprite_i32[base_i + 1],
+        sprite_f32[base_f + 4], sprite_f32[base_f + 5],
+        sprite_f32[base_f + 6], sprite_f32[base_f + 7],
+        sprite_f32[base_f + 8], sprite_f32[base_f + 9],
+        sprite_f32[base_f + 10], sprite_f32[base_f + 11],
         g_debug_hash_enabled);
 }
 static void stasis_draw_ordered_text(
@@ -5572,7 +3988,7 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
                 stasis_render_validation_name(validation),
                 cmd_i32 ? cmd_i32[STASIS_RENDER_I_MAGIC] : 0,
                 cmd_i32 ? cmd_i32[STASIS_RENDER_I_VERSION] : 0,
-                g_use_sdl_renderer ? "sdl" : "gl",
+                "sdl",
                 g_resource_lifecycle.surface_generation,
                 g_resource_lifecycle.renderer_generation);
             g_render_logged_validation_mask |= validation_mask;
@@ -5619,6 +4035,14 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
     g_perf_pending_sprites = (uint32_t)sprite_count;
     g_perf_pending_text = (uint32_t)text_count;
     g_perf_pending_commands = (uint32_t)(line_count + rect_count + sprite_count + text_count);
+    g_native_draw_submissions = 0;
+    g_native_page_transitions = 0;
+    g_native_mixed_runs = 0;
+    g_native_submitted_bytes = 0;
+    g_native_run_clip_applies = 0;
+    g_native_run_clip_restores = 0;
+    memset(g_native_last_run_clip, 0, sizeof(g_native_last_run_clip));
+    g_native_last_run_clip_restore_depth = 0;
 
     if (!g_render_contract_logged) {
         SDL_Log(
@@ -5643,11 +4067,13 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
         cmd_i32[STASIS_RENDER_I_CLIP_COUNT], gfx_cmd_max_clips);
     const int32_t order_count = stasis_render_clamp_count(
         cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER);
+    const int32_t sprite_run_count = stasis_render_clamp_count(
+        cmd_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT], STASIS_RENDER_MAX_SPRITE_RUNS);
     if (order_count > 0) {
         int32_t pending_kind = 0;
-        for (int32_t order_index = 0; order_index < order_count; order_index++) {
+        for (int32_t order_index = 0; order_index < order_count;) {
             const int32_t entry = cmd_i32[STASIS_RENDER_I_ORDER_BASE + order_index];
-            if (entry < 0) continue;
+            if (entry < 0) { order_index++; continue; }
             const int32_t kind = entry / STASIS_RENDER_ORDER_KIND_SCALE;
             const int32_t index = entry % STASIS_RENDER_ORDER_KIND_SCALE;
             if (kind == STASIS_RENDER_ORDER_CLIP_PUSH && index < clip_count) {
@@ -5659,11 +4085,13 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
                     cmd_f32[base + 0], cmd_f32[base + 1],
                     cmd_f32[base + 2], cmd_f32[base + 3]);
                 pending_kind = 0;
+                order_index++;
             } else if (kind == STASIS_RENDER_ORDER_CLIP_POP && index == 0) {
                 flush_ordered_lines();
                 flush_ordered_sprites();
                 stasis_render_pop_clip();
                 pending_kind = 0;
+                order_index++;
             } else if (kind == STASIS_RENDER_ORDER_LINE && index < line_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
                 stasis_draw_lines_f32(
@@ -5671,21 +4099,22 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
                         index * STASIS_RENDER_LINE_F32_STRIDE,
                     1);
                 pending_kind = kind;
-            } else if (kind == STASIS_RENDER_ORDER_SPRITE && index < sprite_count) {
+                order_index++;
+            } else if ((kind == STASIS_RENDER_ORDER_SPRITE && index < sprite_run_count) ||
+                       (kind == STASIS_RENDER_ORDER_RECT && index < rect_count)) {
                 if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
-                stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
-                pending_kind = kind;
+                order_index = stasis_draw_mixed_order_span(
+                    cmd_i32, cmd_f32, order_index, order_count, rect_count, sprite_run_count);
+                pending_kind = 0;
             } else if (kind == STASIS_RENDER_ORDER_TEXT && index < text_count) {
                 if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
                 if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
                 stasis_draw_ordered_text(
                     cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index);
                 pending_kind = kind;
-            } else if (kind == STASIS_RENDER_ORDER_RECT && index < rect_count) {
-                if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
-                if (pending_kind == STASIS_RENDER_ORDER_SPRITE) flush_ordered_sprites();
-                stasis_draw_ordered_rect(cmd_f32, index);
-                pending_kind = kind;
+                order_index++;
+            } else {
+                order_index++;
             }
         }
         if (pending_kind == STASIS_RENDER_ORDER_LINE) flush_ordered_lines();
@@ -5698,8 +4127,23 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
         for (int32_t index = 0; index < rect_count; index++) {
             stasis_draw_ordered_rect(cmd_f32, index);
         }
-        for (int32_t index = 0; index < sprite_count; index++) {
-            stasis_draw_ordered_sprite(cmd_i32, cmd_f32, index);
+        for (int32_t run = 0; run < sprite_run_count; run++) {
+            const int32_t run_base = STASIS_RENDER_I_SPRITE_RUN_BASE +
+                run * STASIS_RENDER_SPRITE_RUN_I32_STRIDE;
+            const int32_t first = cmd_i32[run_base + 0];
+            const int32_t count = cmd_i32[run_base + 1];
+            const int32_t run_clip = cmd_i32[run_base + 2];
+            if (run_clip != STASIS_RENDER_SPRITE_CLIP_ORDERED) {
+                flush_ordered_sprites();
+                stasis_render_apply_run_clip(cmd_f32, run_clip);
+            }
+            for (int32_t offset = 0; offset < count; offset++) {
+                stasis_draw_ordered_sprite(cmd_i32, cmd_f32, first + offset);
+            }
+            if (run_clip != STASIS_RENDER_SPRITE_CLIP_ORDERED) {
+                flush_ordered_sprites();
+                stasis_render_restore_ordered_clip();
+            }
         }
         if (sprite_count > 0) flush_ordered_sprites();
         for (int32_t index = 0; index < text_count; index++) {
@@ -5707,7 +4151,7 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
         }
     }
 
-    /* A valid v6 stream is balanced; reset defensively before postfx/present so
+    /* A valid v7 stream is balanced; reset defensively before postfx/present so
      * a malformed host-side sequence cannot leak clipping into the next frame. */
     stasis_render_reset_clip();
 
@@ -5735,6 +4179,22 @@ STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int3
         out_i32[5] = g_render_last_display_generation;
         out_i32[6] = g_render_last_density_generation;
     }
+    if (capacity >= 12) {
+        out_i32[7] = (int32_t)g_native_draw_submissions;
+        out_i32[8] = (int32_t)g_native_page_transitions;
+        out_i32[9] = (int32_t)g_native_mixed_runs;
+        out_i32[10] = (int32_t)(uint32_t)g_native_submitted_bytes;
+        out_i32[11] = (int32_t)(uint32_t)(g_native_submitted_bytes >> 32);
+    }
+    if (capacity >= 19) {
+        out_i32[12] = (int32_t)g_native_run_clip_applies;
+        out_i32[13] = (int32_t)g_native_run_clip_restores;
+        out_i32[14] = (int32_t)g_native_last_run_clip[0];
+        out_i32[15] = (int32_t)g_native_last_run_clip[1];
+        out_i32[16] = (int32_t)g_native_last_run_clip[2];
+        out_i32[17] = (int32_t)g_native_last_run_clip[3];
+        out_i32[18] = g_native_last_run_clip_restore_depth;
+    }
     return 1;
 }
 
@@ -5760,6 +4220,14 @@ STASIS_EXPORT int stasis_test_get_sprite_state(int32_t handle, int32_t* out_i32,
         out_i32[9] = entry != NULL ? entry->needs_reraster : 0;
         out_i32[10] = entry != NULL ? entry->max_w : 0;
         out_i32[11] = entry != NULL ? entry->max_h : 0;
+    }
+    if (capacity >= 18) {
+        out_i32[12] = entry != NULL ? entry->page_index : -1;
+        out_i32[13] = entry != NULL ? entry->alloc_x : 0;
+        out_i32[14] = entry != NULL ? entry->alloc_y : 0;
+        out_i32[15] = entry != NULL ? entry->alloc_w : 0;
+        out_i32[16] = entry != NULL ? entry->alloc_h : 0;
+        out_i32[17] = g_sprite_atlas_page_count;
     }
     return 1;
 }
@@ -5855,73 +4323,480 @@ static void stasis_log_font_preparation(const StasisFont* font, int replaces_exi
         (unsigned long long)font->source_size, g_density_generation);
 }
 
-static void sprite_set_gl_region(SpriteEntry* e, int page_index, int sprite_x, int sprite_y,
-                                 int alloc_x, int alloc_y, int alloc_w, int alloc_h,
-                                 int sprite_w, int sprite_h) {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    SpriteAtlasPage* page = &g_sprite_atlas_pages[page_index];
-    e->page_index = page_index;
-    e->atlas_x = sprite_x;
-    e->atlas_y = sprite_y;
-    e->alloc_x = alloc_x;
-    e->alloc_y = alloc_y;
-    e->alloc_w = alloc_w;
-    e->alloc_h = alloc_h;
-    e->u0 = (float)sprite_x / (float)page->w;
-    e->v0 = (float)sprite_y / (float)page->h;
-    e->u1 = (float)(sprite_x + sprite_w) / (float)page->w;
-    e->v1 = (float)(sprite_y + sprite_h) / (float)page->h;
-#else
-    (void)e;
-    (void)page_index;
-    (void)sprite_x;
-    (void)sprite_y;
-    (void)alloc_x;
-    (void)alloc_y;
-    (void)alloc_w;
-    (void)alloc_h;
-    (void)sprite_w;
-    (void)sprite_h;
-#endif
+static void stasis_sprite_atlas_reset(int destroy_textures) {
+    for (int i = 0; i < g_sprite_atlas_page_count; i++) {
+        if (destroy_textures && g_sprite_atlas_pages[i].texture) {
+            SDL_DestroyTexture(g_sprite_atlas_pages[i].texture);
+        }
+    }
+    memset(g_sprite_atlas_pages, 0, sizeof(g_sprite_atlas_pages));
+    g_sprite_atlas_page_count = 0;
 }
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-static int sprite_upload_standalone(SpriteEntry* e, const unsigned char* pixels, int w, int h) {
-    GLuint texture = 0;
-    glGenTextures(1, &texture);
-    if (texture == 0) return 0;
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    while (glGetError() != GL_NO_ERROR) {}
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    GLenum upload_error = glGetError();
-    glBindTexture(GL_TEXTURE_2D, 0);
-    if (upload_error != GL_NO_ERROR) {
-        glDeleteTextures(1, &texture);
-        return 0;
+#define STASIS_MIXED_GEOMETRY_BATCH_QUADS 2048
+static SDL_Vertex g_mixed_geometry_vertices[STASIS_MIXED_GEOMETRY_BATCH_QUADS * 4];
+static int g_mixed_geometry_indices[STASIS_MIXED_GEOMETRY_BATCH_QUADS * 6];
+static int g_mixed_geometry_indices_ready = 0;
+
+static void stasis_prepare_mixed_geometry_indices(void) {
+    if (g_mixed_geometry_indices_ready) return;
+    for (int i = 0; i < STASIS_MIXED_GEOMETRY_BATCH_QUADS; i++) {
+        const int v = i * 4;
+        const int n = i * 6;
+        g_mixed_geometry_indices[n + 0] = v + 0;
+        g_mixed_geometry_indices[n + 1] = v + 1;
+        g_mixed_geometry_indices[n + 2] = v + 2;
+        g_mixed_geometry_indices[n + 3] = v + 0;
+        g_mixed_geometry_indices[n + 4] = v + 2;
+        g_mixed_geometry_indices[n + 5] = v + 3;
     }
-    if (e->page_index >= 0 && e->alloc_w > 0 && e->alloc_h > 0) {
-        atlas_release_rect(e->page_index, e->alloc_x, e->alloc_y, e->alloc_w, e->alloc_h);
+    g_mixed_geometry_indices_ready = 1;
+}
+
+static void stasis_submit_mixed_geometry(SDL_Texture* texture, int quad_count) {
+    if (!g_renderer || !texture || quad_count <= 0) return;
+    SDL_SetTextureColorMod(texture, 255, 255, 255);
+    SDL_SetTextureAlphaMod(texture, 255);
+    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+    SDL_RenderGeometry(g_renderer, texture, g_mixed_geometry_vertices,
+        quad_count * 4, g_mixed_geometry_indices, quad_count * 6);
+    g_native_draw_submissions++;
+    g_native_submitted_bytes += (uint64_t)quad_count *
+        (uint64_t)(sizeof(SDL_Vertex) * 4u + sizeof(int) * 6u);
+}
+
+static void stasis_mixed_set_quad(
+    int quad, const SDL_FPoint points[4], SDL_FColor color,
+    float u0, float v0, float u1, float v1
+) {
+    SDL_Vertex* v = &g_mixed_geometry_vertices[quad * 4];
+    static const int uv_x[4] = {0, 1, 1, 0};
+    static const int uv_y[4] = {0, 0, 1, 1};
+    for (int i = 0; i < 4; i++) {
+        v[i].position = points[i];
+        v[i].color = color;
+        v[i].tex_coord.x = uv_x[i] ? u1 : u0;
+        v[i].tex_coord.y = uv_y[i] ? v1 : v0;
     }
-    if (e->gl_texture) glDeleteTextures(1, &e->gl_texture);
-    e->gl_texture = texture;
-    e->page_index = -1;
-    e->atlas_x = 0;
-    e->atlas_y = 0;
-    e->alloc_x = 0;
-    e->alloc_y = 0;
-    e->alloc_w = 0;
-    e->alloc_h = 0;
-    e->u0 = 0.0f;
-    e->v0 = 0.0f;
-    e->u1 = 1.0f;
-    e->v1 = 1.0f;
+}
+
+static SpriteEntry* stasis_mixed_sprite_entry(const int32_t* cmd_i32, int sprite_index) {
+    const int32_t* lane = cmd_i32 + STASIS_RENDER_I_SPRITE_BASE;
+    SpriteEntry* entry = sprite_get(lane[sprite_index * STASIS_RENDER_SPRITE_I32_STRIDE]);
+    if (!entry) entry = sprite_fallback_get();
+    if (entry && entry->needs_reraster && entry->path) {
+        sprite_build_into_entry_sized(entry, entry->path, entry->max_w, entry->max_h);
+    }
+    if (!entry || !entry->sdl_tex || entry->page_index < 0 ||
+        entry->surface_generation != g_resource_lifecycle.surface_generation ||
+        entry->renderer_generation != g_resource_lifecycle.renderer_generation) return NULL;
+    return entry;
+}
+
+static int stasis_mixed_lookahead_page(
+    const int32_t* cmd_i32, int order_index, int order_count, int sprite_run_count
+) {
+    const int limit = order_index + STASIS_MIXED_GEOMETRY_BATCH_QUADS < order_count
+        ? order_index + STASIS_MIXED_GEOMETRY_BATCH_QUADS : order_count;
+    for (int i = order_index; i < limit; i++) {
+        const int32_t order = cmd_i32[STASIS_RENDER_I_ORDER_BASE + i];
+        if (order < 0) break;
+        const int kind = order / STASIS_RENDER_ORDER_KIND_SCALE;
+        const int index = order % STASIS_RENDER_ORDER_KIND_SCALE;
+        if (kind == STASIS_RENDER_ORDER_RECT) continue;
+        if (kind != STASIS_RENDER_ORDER_SPRITE || index >= sprite_run_count) break;
+        const int run_base = STASIS_RENDER_I_SPRITE_RUN_BASE +
+            index * STASIS_RENDER_SPRITE_RUN_I32_STRIDE;
+        if (cmd_i32[run_base + 1] <= 0) continue;
+        SpriteEntry* entry = stasis_mixed_sprite_entry(cmd_i32, cmd_i32[run_base + 0]);
+        return entry ? entry->page_index : -1;
+    }
+    SpriteEntry* fallback = sprite_fallback_get();
+    return fallback ? fallback->page_index : -1;
+}
+
+static void stasis_mixed_add_rect(const float* cmd_f32, int index, int quad, int page_index) {
+    const int base = STASIS_RENDER_F_RECT_REVERSE_BASE -
+        index * STASIS_RENDER_GEOMETRY_F32_STRIDE;
+    const float x = cmd_f32[base + 0];
+    const float y = cmd_f32[base + 1];
+    const float w = cmd_f32[base + 2];
+    const float h = cmd_f32[base + 3];
+    SDL_FPoint points[4] = {{x,y}, {x+w,y}, {x+w,y+h}, {x,y+h}};
+    SDL_FColor color = {cmd_f32[base + 4], cmd_f32[base + 5],
+        cmd_f32[base + 6], cmd_f32[base + 7]};
+    const StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
+    const float u0 = (float)page->white_x / (float)page->width;
+    const float v0 = (float)page->white_y / (float)page->height;
+    const float u1 = (float)(page->white_x + STASIS_SDL_ATLAS_WHITE_SIZE) / (float)page->width;
+    const float v1 = (float)(page->white_y + STASIS_SDL_ATLAS_WHITE_SIZE) / (float)page->height;
+    stasis_mixed_set_quad(quad, points, color, u0, v0, u1, v1);
+}
+
+static int stasis_mixed_add_sprite(
+    const int32_t* cmd_i32, const float* cmd_f32, int index, int quad, SpriteEntry* entry
+) {
+    const int base_i = STASIS_RENDER_I_SPRITE_BASE +
+        index * STASIS_RENDER_SPRITE_I32_STRIDE;
+    const int base_f = STASIS_RENDER_F_SPRITE_BASE +
+        index * STASIS_RENDER_SPRITE_F32_STRIDE;
+    const float x = cmd_f32[base_f + 0], y = cmd_f32[base_f + 1];
+    const float w = cmd_f32[base_f + 2], h = cmd_f32[base_f + 3];
+    const float sx = cmd_f32[base_f + 4], sy = cmd_f32[base_f + 5];
+    const float sw = cmd_f32[base_f + 6], sh = cmd_f32[base_f + 7];
+    const float px = cmd_f32[base_f + 8], py = cmd_f32[base_f + 9];
+    const float scale_x = cmd_f32[base_f + 10], scale_y = cmd_f32[base_f + 11];
+    StasisRasterCrop crop;
+    if (w <= 0 || h <= 0 || scale_x == 0 || scale_y == 0 ||
+        !stasis_logical_crop_to_raster(sx, sy, sw, sh,
+            (float)entry->max_w, (float)entry->max_h,
+            (float)entry->w, (float)entry->h, &crop)) return 0;
+    float transformed[8];
+    stasis_mixed_quad_transform(x, y, w, h, px, py, scale_x, scale_y,
+        cmd_f32[base_f + 12], transformed);
+    SDL_FPoint points[4];
+    for (int i = 0; i < 4; i++) {
+        points[i].x = transformed[i * 2];
+        points[i].y = transformed[i * 2 + 1];
+    }
+    const uint32_t tint = (uint32_t)cmd_i32[base_i + 1];
+    SDL_FColor color = {(float)((tint >> 24) & 255u) / 255.0f,
+        (float)((tint >> 16) & 255u) / 255.0f,
+        (float)((tint >> 8) & 255u) / 255.0f, (float)(tint & 255u) / 255.0f};
+    const StasisSdlAtlasPage* page = &g_sprite_atlas_pages[entry->page_index];
+    stasis_mixed_set_quad(quad, points, color,
+        (entry->atlas_x + crop.x) / page->width,
+        (entry->atlas_y + crop.y) / page->height,
+        (entry->atlas_x + crop.x + crop.w) / page->width,
+        (entry->atlas_y + crop.y + crop.h) / page->height);
     return 1;
 }
-#endif
+
+static int stasis_draw_mixed_order_span(
+    const int32_t* cmd_i32, const float* cmd_f32, int start, int order_count,
+    int rect_count, int sprite_run_count
+) {
+    stasis_prepare_mixed_geometry_indices();
+    int order_index = start;
+    int quad_count = 0;
+    int page_index = -1;
+    g_native_mixed_runs++;
+    while (order_index < order_count) {
+        const int32_t order = cmd_i32[STASIS_RENDER_I_ORDER_BASE + order_index];
+        if (order < 0) break;
+        const int kind = order / STASIS_RENDER_ORDER_KIND_SCALE;
+        const int index = order % STASIS_RENDER_ORDER_KIND_SCALE;
+        if (kind != STASIS_RENDER_ORDER_RECT && kind != STASIS_RENDER_ORDER_SPRITE) break;
+        if (kind == STASIS_RENDER_ORDER_RECT) {
+            if (index >= rect_count) { order_index++; continue; }
+            int desired_page = page_index;
+            if (desired_page < 0) desired_page = stasis_mixed_lookahead_page(
+                cmd_i32, order_index + 1, order_count, sprite_run_count);
+            if (desired_page < 0) { stasis_draw_ordered_rect(cmd_f32, index); order_index++; continue; }
+            if (page_index < 0) page_index = desired_page;
+            stasis_mixed_add_rect(cmd_f32, index, quad_count++, page_index);
+        } else {
+            if (index >= sprite_run_count) { order_index++; continue; }
+            const int run_base = STASIS_RENDER_I_SPRITE_RUN_BASE +
+                index * STASIS_RENDER_SPRITE_RUN_I32_STRIDE;
+            const int first = cmd_i32[run_base + 0];
+            const int count = cmd_i32[run_base + 1];
+            const int run_clip = cmd_i32[run_base + 2];
+            const int has_explicit_clip =
+                run_clip != STASIS_RENDER_SPRITE_CLIP_ORDERED;
+            if (has_explicit_clip) {
+                if (quad_count > 0 && page_index >= 0) {
+                    stasis_submit_mixed_geometry(
+                        g_sprite_atlas_pages[page_index].texture, quad_count);
+                    quad_count = 0;
+                }
+                stasis_render_apply_run_clip(cmd_f32, run_clip);
+                page_index = -1;
+            }
+            for (int offset = 0; offset < count; offset++) {
+                SpriteEntry* entry = stasis_mixed_sprite_entry(cmd_i32, first + offset);
+                if (!entry) continue;
+                if (page_index >= 0 && entry->page_index != page_index) {
+                    stasis_submit_mixed_geometry(g_sprite_atlas_pages[page_index].texture, quad_count);
+                    quad_count = 0;
+                    g_native_page_transitions++;
+                }
+                page_index = entry->page_index;
+                if (stasis_mixed_add_sprite(cmd_i32, cmd_f32, first + offset, quad_count, entry)) quad_count++;
+                if (quad_count == STASIS_MIXED_GEOMETRY_BATCH_QUADS) {
+                    stasis_submit_mixed_geometry(g_sprite_atlas_pages[page_index].texture, quad_count);
+                    quad_count = 0;
+                }
+            }
+            if (has_explicit_clip) {
+                if (quad_count > 0 && page_index >= 0) {
+                    stasis_submit_mixed_geometry(
+                        g_sprite_atlas_pages[page_index].texture, quad_count);
+                    quad_count = 0;
+                }
+                stasis_render_restore_ordered_clip();
+                page_index = -1;
+            }
+        }
+        order_index++;
+        if (quad_count == STASIS_MIXED_GEOMETRY_BATCH_QUADS) {
+            stasis_submit_mixed_geometry(g_sprite_atlas_pages[page_index].texture, quad_count);
+            quad_count = 0;
+        }
+    }
+    if (quad_count > 0 && page_index >= 0) {
+        stasis_submit_mixed_geometry(g_sprite_atlas_pages[page_index].texture, quad_count);
+    }
+    return order_index;
+}
+
+static int stasis_sprite_atlas_create_page(int width, int height, uint64_t group_id, int dedicated) {
+    if (!g_renderer || width <= 0 || height <= 0) return -1;
+    int page_index = -1;
+    for (int i = 0; i < g_sprite_atlas_page_count; i++) {
+        if (!g_sprite_atlas_pages[i].texture) {
+            page_index = i;
+            break;
+        }
+    }
+    if (page_index < 0) {
+        if (g_sprite_atlas_page_count >= STASIS_SDL_ATLAS_MAX_PAGES) return -1;
+        page_index = g_sprite_atlas_page_count;
+    }
+    const size_t bytes = (size_t)width * (size_t)height * 4u;
+    if (bytes / 4u != (size_t)width * (size_t)height) return -1;
+    unsigned char* initial = (unsigned char*)calloc(bytes, 1u);
+    if (!initial) return -1;
+    StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
+    page->texture = SDL_CreateTexture(
+        g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, width, height);
+    if (!page->texture || !SDL_UpdateTexture(page->texture, NULL, initial, width * 4)) {
+        if (page->texture) SDL_DestroyTexture(page->texture);
+        free(initial);
+        memset(page, 0, sizeof(*page));
+        return -1;
+    }
+    free(initial);
+    SDL_SetTextureBlendMode(page->texture, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(page->texture, SDL_SCALEMODE_LINEAR);
+    page->width = width;
+    page->height = height;
+    page->white_x = 1;
+    page->white_y = 1;
+    page->placeholder_x = 5;
+    page->placeholder_y = 1;
+    page->cursor_x = 1;
+    page->cursor_y = 6;
+    page->group_id = group_id;
+    page->dedicated = dedicated;
+    static const unsigned char white[16] = {
+        255,255,255,255, 255,255,255,255,
+        255,255,255,255, 255,255,255,255};
+    static const unsigned char placeholder[16] = {
+        255,0,255,255, 24,24,24,255,
+        24,24,24,255, 255,0,255,255};
+    SDL_Rect white_rect = {page->white_x, page->white_y, 2, 2};
+    SDL_Rect placeholder_rect = {page->placeholder_x, page->placeholder_y, 2, 2};
+    if (!SDL_UpdateTexture(page->texture, &white_rect, white, 8) ||
+        !SDL_UpdateTexture(page->texture, &placeholder_rect, placeholder, 8)) {
+        SDL_DestroyTexture(page->texture);
+        memset(page, 0, sizeof(*page));
+        return -1;
+    }
+    if (page_index == g_sprite_atlas_page_count) g_sprite_atlas_page_count++;
+    return page_index;
+}
+
+static void stasis_sprite_atlas_trim_empty_tail(void) {
+    while (g_sprite_atlas_page_count > 0 &&
+           !g_sprite_atlas_pages[g_sprite_atlas_page_count - 1].texture) {
+        g_sprite_atlas_page_count--;
+    }
+}
+
+static int stasis_sprite_atlas_add_free_rect(
+    StasisSdlAtlasPage* page, int x, int y, int w, int h
+) {
+    if (!page || w <= 0 || h <= 0) return 1;
+    for (;;) {
+        int merged = 0;
+        for (int i = 0; i < page->free_rect_count; i++) {
+            StasisSdlAtlasFreeRect* free_rect = &page->free_rects[i];
+            if (free_rect->y == y && free_rect->h == h &&
+                (free_rect->x + free_rect->w == x || x + w == free_rect->x)) {
+                const int left = free_rect->x < x ? free_rect->x : x;
+                const int right = free_rect->x + free_rect->w > x + w
+                    ? free_rect->x + free_rect->w : x + w;
+                x = left;
+                w = right - left;
+            } else if (free_rect->x == x && free_rect->w == w &&
+                       (free_rect->y + free_rect->h == y || y + h == free_rect->y)) {
+                const int top = free_rect->y < y ? free_rect->y : y;
+                const int bottom = free_rect->y + free_rect->h > y + h
+                    ? free_rect->y + free_rect->h : y + h;
+                y = top;
+                h = bottom - top;
+            } else {
+                continue;
+            }
+            page->free_rects[i] = page->free_rects[--page->free_rect_count];
+            merged = 1;
+            break;
+        }
+        if (!merged) break;
+    }
+    if (page->free_rect_count >= STASIS_SDL_ATLAS_MAX_FREE_RECTS) {
+        int smallest = 0;
+        int smallest_area = page->free_rects[0].w * page->free_rects[0].h;
+        for (int i = 1; i < page->free_rect_count; i++) {
+            const int area = page->free_rects[i].w * page->free_rects[i].h;
+            if (area < smallest_area) {
+                smallest = i;
+                smallest_area = area;
+            }
+        }
+        if (w * h <= smallest_area) return 0;
+        page->free_rects[smallest] = (StasisSdlAtlasFreeRect){x, y, w, h};
+        return 1;
+    }
+    page->free_rects[page->free_rect_count++] = (StasisSdlAtlasFreeRect){x, y, w, h};
+    return 1;
+}
+
+static void stasis_sprite_atlas_release_allocation(
+    int page_index, int x, int y, int w, int h
+) {
+    if (page_index < 0 || page_index >= g_sprite_atlas_page_count || w <= 0 || h <= 0) return;
+    StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
+    if (!page->texture) return;
+    if (page->dedicated) {
+        SDL_DestroyTexture(page->texture);
+        memset(page, 0, sizeof(*page));
+        stasis_sprite_atlas_trim_empty_tail();
+        return;
+    }
+    if (page->live_allocations > 0) page->live_allocations--;
+    if (page->live_allocations == 0) {
+        page->cursor_x = 1;
+        page->cursor_y = 6;
+        page->row_h = 0;
+        page->free_rect_count = 0;
+        return;
+    }
+    (void)stasis_sprite_atlas_add_free_rect(page, x, y, w, h);
+}
+
+static int stasis_sprite_atlas_reserve_on_page(
+    StasisSdlAtlasPage* page, int w, int h, int* out_x, int* out_y
+) {
+    const int alloc_w = w + STASIS_SDL_ATLAS_PADDING * 2;
+    const int alloc_h = h + STASIS_SDL_ATLAS_PADDING * 2;
+    int best = -1;
+    int best_area = INT_MAX;
+    for (int i = 0; i < page->free_rect_count; i++) {
+        const StasisSdlAtlasFreeRect free_rect = page->free_rects[i];
+        if (alloc_w > free_rect.w || alloc_h > free_rect.h) continue;
+        const int area = free_rect.w * free_rect.h;
+        if (area < best_area) {
+            best = i;
+            best_area = area;
+        }
+    }
+    if (best >= 0) {
+        const StasisSdlAtlasFreeRect free_rect = page->free_rects[best];
+        page->free_rects[best] = page->free_rects[--page->free_rect_count];
+        (void)stasis_sprite_atlas_add_free_rect(
+            page, free_rect.x + alloc_w, free_rect.y,
+            free_rect.w - alloc_w, alloc_h);
+        (void)stasis_sprite_atlas_add_free_rect(
+            page, free_rect.x, free_rect.y + alloc_h,
+            free_rect.w, free_rect.h - alloc_h);
+        page->live_allocations++;
+        *out_x = free_rect.x + STASIS_SDL_ATLAS_PADDING;
+        *out_y = free_rect.y + STASIS_SDL_ATLAS_PADDING;
+        return 1;
+    }
+    int x = page->cursor_x;
+    int y = page->cursor_y;
+    if (x + alloc_w > page->width) {
+        x = 1;
+        y += page->row_h;
+        page->row_h = 0;
+    }
+    if (y + alloc_h > page->height) return 0;
+    page->cursor_x = x + alloc_w;
+    if (alloc_h > page->row_h) page->row_h = alloc_h;
+    page->live_allocations++;
+    *out_x = x + STASIS_SDL_ATLAS_PADDING;
+    *out_y = y + STASIS_SDL_ATLAS_PADDING;
+    return 1;
+}
+
+static int stasis_sprite_atlas_allocate(
+    const StasisSpriteAtlasPolicyV3* policy, int logical_w, int logical_h,
+    int w, int h, int* out_x, int* out_y
+) {
+    const int eligible = policy && policy->eligible;
+    const uint64_t group_id = eligible ? policy->group_id : 0;
+    if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE &&
+        h + 8 <= STASIS_SDL_ATLAS_PAGE_SIZE) {
+        for (int i = 0; i < g_sprite_atlas_page_count; i++) {
+            StasisSdlAtlasPage* page = &g_sprite_atlas_pages[i];
+            if (!page->texture || page->dedicated || page->group_id != group_id) continue;
+            if (stasis_sprite_atlas_reserve_on_page(page, w, h, out_x, out_y)) return i;
+        }
+        int page_w = STASIS_SDL_ATLAS_PAGE_SIZE;
+        int page_h = STASIS_SDL_ATLAS_PAGE_SIZE;
+        if (!stasis_sprite_atlas_page_size_v3(policy, logical_w, logical_h, w, h,
+                STASIS_SDL_ATLAS_PAGE_SIZE, STASIS_SDL_ATLAS_PAGE_SIZE,
+                STASIS_SDL_ATLAS_PAGE_SIZE, STASIS_SDL_ATLAS_PADDING, &page_w, &page_h)) {
+            return -1;
+        }
+        if (page_w < 8) page_w = 8;
+        if (page_h < h + 8) page_h = stasis_sprite_atlas_next_extent(
+            h + 8, STASIS_SDL_ATLAS_PAGE_SIZE);
+        const int page_index = stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0);
+        if (page_index < 0) return -1;
+        return stasis_sprite_atlas_reserve_on_page(
+            &g_sprite_atlas_pages[page_index], w, h, out_x, out_y) ? page_index : -1;
+    }
+    const int width = w + 10;
+    const int height = h + 8;
+    const int page_index = stasis_sprite_atlas_create_page(width, height, group_id, 1);
+    if (page_index < 0) return -1;
+    return stasis_sprite_atlas_reserve_on_page(
+        &g_sprite_atlas_pages[page_index], w, h, out_x, out_y) ? page_index : -1;
+}
+
+static int stasis_sprite_atlas_upload(
+    int page_index, int x, int y, const unsigned char* pixels, int w, int h,
+    int alloc_w, int alloc_h
+) {
+    if (page_index < 0 || page_index >= g_sprite_atlas_page_count) return 0;
+    const int padded_w = alloc_w;
+    const int padded_h = alloc_h;
+    if (padded_w < w + 2 || padded_h < h + 2) return 0;
+    unsigned char* padded = (unsigned char*)malloc((size_t)padded_w * (size_t)padded_h * 4u);
+    if (!padded) return 0;
+    for (int py = 0; py < padded_h; py++) {
+        int sy = py - 1;
+        if (sy < 0) sy = 0;
+        if (sy >= h) sy = h - 1;
+        for (int px = 0; px < padded_w; px++) {
+            int sx = px - 1;
+            if (sx < 0) sx = 0;
+            if (sx >= w) sx = w - 1;
+            memcpy(padded + ((size_t)py * padded_w + px) * 4u,
+                pixels + ((size_t)sy * w + sx) * 4u, 4u);
+        }
+    }
+    SDL_Rect rect = {x - 1, y - 1, padded_w, padded_h};
+    const int ok = SDL_UpdateTexture(
+        g_sprite_atlas_pages[page_index].texture, &rect, padded, padded_w * 4);
+    free(padded);
+    return ok;
+}
+
 
 /*
  * Build sprite at specified max size. Used for sized loading and re-rasterization.
@@ -5936,11 +4811,10 @@ static int sprite_publish_pixels_into_entry(
     int h
 ) {
     const int replaces_existing = e->w > 0 && e->h > 0;
-    if (g_use_sdl_renderer) {
-        if (!g_renderer) {
-            free(pixels);
-            return 0;
-        }
+    if (!g_renderer) {
+        free(pixels);
+        return 0;
+    }
 
         /* SDL expects straight alpha; convert from premultiplied. */
         for (int i = 0; i < w * h; i++) {
@@ -5958,147 +4832,70 @@ static int sprite_publish_pixels_into_entry(
             p[2] = (unsigned char)((b * 255 + (a / 2)) / a);
         }
 
-        SDL_Texture* tex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
-        if (!tex) {
-            SDL_Log("gfx_load_sprite: SDL_CreateTexture failed: %s", SDL_GetError());
-            free(pixels);
-            return 0;
+        const int old_page_index = e->page_index;
+        const int old_alloc_x = e->alloc_x;
+        const int old_alloc_y = e->alloc_y;
+        const int old_alloc_w = e->alloc_w;
+        const int old_alloc_h = e->alloc_h;
+        const int old_allocation_live = e->sdl_tex != NULL;
+        int atlas_x = e->atlas_x;
+        int atlas_y = e->atlas_y;
+        int page_index = e->page_index;
+        const int page_compatible = page_index >= 0 && page_index < g_sprite_atlas_page_count &&
+            g_sprite_atlas_pages[page_index].texture &&
+            e->sdl_tex == g_sprite_atlas_pages[page_index].texture &&
+            ((e->atlas_policy.eligible && !g_sprite_atlas_pages[page_index].dedicated &&
+              g_sprite_atlas_pages[page_index].group_id == e->atlas_policy.group_id) ||
+             (!e->atlas_policy.eligible && g_sprite_atlas_pages[page_index].dedicated));
+        int allocated_new = 0;
+        if (!page_compatible || e->alloc_w < w + 2 || e->alloc_h < h + 2) {
+            page_index = stasis_sprite_atlas_allocate(
+                &e->atlas_policy, max_w, max_h, w, h, &atlas_x, &atlas_y);
+            allocated_new = page_index >= 0;
         }
-        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-        if (!SDL_UpdateTexture(tex, NULL, pixels, w * 4)) {
-            SDL_Log("gfx_load_sprite: SDL_UpdateTexture failed: %s", SDL_GetError());
-            SDL_DestroyTexture(tex);
-            free(pixels);
-            return 0;
-        }
-
-        free(pixels);
-        SDL_Texture* previous = e->sdl_tex;
-        e->w = w;
-        e->h = h;
-        e->max_w = max_w;
-        e->max_h = max_h;
-        e->page_index = -1;
-        e->atlas_x = 0;
-        e->atlas_y = 0;
-        e->alloc_x = 0;
-        e->alloc_y = 0;
-        e->alloc_w = 0;
-        e->alloc_h = 0;
-        e->sdl_tex = tex;
-        e->mtime = get_file_mtime(path);
-        e->needs_reraster = 0;
-        e->surface_generation = g_resource_lifecycle.surface_generation;
-        e->renderer_generation = g_resource_lifecycle.renderer_generation;
-        if (previous) SDL_DestroyTexture(previous);
-        stasis_log_sprite_preparation(e, path, replaces_existing);
-        return 1;
-    }
-
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (g_sprite_vert_count > 0) {
-        flush_sprites();
-    }
-
-    if (!e->atlas_policy.eligible) {
-        if (!sprite_upload_standalone(e, pixels, w, h)) {
-            free(pixels);
-            return 0;
-        }
-        free(pixels);
-        e->w = w;
-        e->h = h;
-        e->max_w = max_w;
-        e->max_h = max_h;
-        e->mtime = get_file_mtime(path);
-        e->needs_reraster = 0;
-        e->surface_generation = g_resource_lifecycle.surface_generation;
-        e->renderer_generation = g_resource_lifecycle.renderer_generation;
-        stasis_log_sprite_preparation(e, path, replaces_existing);
-        return 1;
-    }
-
-    const int can_reuse_existing = 0;
-
-    int page_index = e->page_index;
-    int sprite_x = e->atlas_x;
-    int sprite_y = e->atlas_y;
-    int alloc_x = e->alloc_x;
-    int alloc_y = e->alloc_y;
-    int alloc_w = e->alloc_w;
-    int alloc_h = e->alloc_h;
-
-    if (!can_reuse_existing) {
-        if (!atlas_alloc(
-                &e->atlas_policy, max_w, max_h, w, h, path,
-                &page_index, &sprite_x, &sprite_y,
-                &alloc_x, &alloc_y, &alloc_w, &alloc_h)) {
-            if (!sprite_upload_standalone(e, pixels, w, h)) {
-                free(pixels);
-                return 0;
+        const int uploaded_alloc_w = allocated_new ? w + 2 : old_alloc_w;
+        const int uploaded_alloc_h = allocated_new ? h + 2 : old_alloc_h;
+        if (page_index < 0 ||
+            !stasis_sprite_atlas_upload(
+                page_index, atlas_x, atlas_y, pixels, w, h,
+                uploaded_alloc_w, uploaded_alloc_h)) {
+            if (allocated_new) {
+                stasis_sprite_atlas_release_allocation(
+                    page_index, atlas_x - 1, atlas_y - 1, w + 2, h + 2);
             }
-            free(pixels);
-            e->w = w;
-            e->h = h;
-            e->max_w = max_w;
-            e->max_h = max_h;
-            e->mtime = get_file_mtime(path);
-            e->needs_reraster = 0;
-            e->surface_generation = g_resource_lifecycle.surface_generation;
-            e->renderer_generation = g_resource_lifecycle.renderer_generation;
-            stasis_log_sprite_preparation(e, path, replaces_existing);
-            return 1;
-        }
-    }
-
-    SpriteAtlasPage* page = &g_sprite_atlas_pages[page_index];
-    atlas_page_clear_region(page, alloc_x, alloc_y, alloc_w, alloc_h);
-    if (!atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels)) {
-        if (!can_reuse_existing) {
-            atlas_release_rect(page_index, alloc_x, alloc_y, alloc_w, alloc_h);
-        }
-        if (!sprite_upload_standalone(e, pixels, w, h)) {
+            SDL_Log("gfx_load_sprite: SDL atlas allocation/upload failed: %s", SDL_GetError());
             free(pixels);
             return 0;
         }
+
         free(pixels);
+        if (allocated_new && old_allocation_live && old_page_index >= 0) {
+            stasis_sprite_atlas_release_allocation(
+                old_page_index, old_alloc_x, old_alloc_y, old_alloc_w, old_alloc_h);
+        }
+        StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
         e->w = w;
         e->h = h;
         e->max_w = max_w;
         e->max_h = max_h;
+        e->page_index = page_index;
+        e->atlas_x = atlas_x;
+        e->atlas_y = atlas_y;
+        e->alloc_x = allocated_new ? atlas_x - 1 : old_alloc_x;
+        e->alloc_y = allocated_new ? atlas_y - 1 : old_alloc_y;
+        e->alloc_w = uploaded_alloc_w;
+        e->alloc_h = uploaded_alloc_h;
+        e->u0 = (float)atlas_x / (float)page->width;
+        e->v0 = (float)atlas_y / (float)page->height;
+        e->u1 = (float)(atlas_x + w) / (float)page->width;
+        e->v1 = (float)(atlas_y + h) / (float)page->height;
+        e->sdl_tex = page->texture;
         e->mtime = get_file_mtime(path);
         e->needs_reraster = 0;
         e->surface_generation = g_resource_lifecycle.surface_generation;
         e->renderer_generation = g_resource_lifecycle.renderer_generation;
         stasis_log_sprite_preparation(e, path, replaces_existing);
         return 1;
-    }
-
-    free(pixels);
-
-    if (!can_reuse_existing && e->page_index >= 0 && e->alloc_w > 0 && e->alloc_h > 0) {
-        atlas_release_rect(e->page_index, e->alloc_x, e->alloc_y, e->alloc_w, e->alloc_h);
-    }
-
-    e->w = w;
-    e->h = h;
-    e->max_w = max_w;
-    e->max_h = max_h;
-    sprite_set_gl_region(e, page_index, sprite_x, sprite_y, alloc_x, alloc_y, alloc_w, alloc_h, w, h);
-    if (e->gl_texture) {
-        glDeleteTextures(1, &e->gl_texture);
-        e->gl_texture = 0;
-    }
-    e->mtime = get_file_mtime(path);
-    e->needs_reraster = 0;
-    e->surface_generation = g_resource_lifecycle.surface_generation;
-    e->renderer_generation = g_resource_lifecycle.renderer_generation;
-    stasis_log_sprite_preparation(e, path, replaces_existing);
-    return 1;
-#else
-    free(pixels);
-    return 0;
-#endif
 }
 
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h) {
@@ -6212,8 +5009,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     g_next_sprite_atlas_policy_v3 = stasis_sprite_atlas_policy_v3_standalone();
     if (!path || !*path) return 0;
     if (!g_window) return 0;
-    if (!g_use_sdl_renderer && !g_gl_context) return 0;
-    if (g_use_sdl_renderer && !g_renderer) return 0;
+    if (!g_renderer) return 0;
     if (max_w <= 0 || max_h <= 0) return 0;
 
     char resolved[1024];
@@ -6301,14 +5097,10 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
 
     g_sprite_count++;
     if (gfx_should_log_sprite_loads()) {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        const int page_count_for_log = g_use_sdl_renderer ? 0 : g_sprite_atlas_page_count;
-#else
         const int page_count_for_log = 0;
-#endif
         SDL_Log("gfx_load_sprite: %s (%dx%d) -> handle=%d raster=%dx%d backend=%s page=%d pages=%d sprites=%d/%d",
                 resolved, max_w, max_h, sprite_handle_for_slot(slot), e->w, e->h,
-                g_use_sdl_renderer ? "sdl" : "gl",
+                "sdl",
                 e->page_index,
                 page_count_for_log,
                 g_sprite_count,
@@ -6554,10 +5346,6 @@ static SpriteEntry* sprite_fallback_get(void) {
     if (g_sprite_fallback.used) return &g_sprite_fallback;
     if (!g_window) return NULL;
 
-    static const unsigned char pixels[16] = {
-        255, 0, 255, 255, 24, 24, 24, 255,
-        24, 24, 24, 255, 255, 0, 255, 255
-    };
     SpriteEntry next;
     memset(&next, 0, sizeof(next));
     next.page_index = -1;
@@ -6566,25 +5354,26 @@ static SpriteEntry* sprite_fallback_get(void) {
     next.max_w = 2;
     next.max_h = 2;
 
-    if (g_use_sdl_renderer) {
-        if (!g_renderer) return NULL;
-        next.sdl_tex = SDL_CreateTexture(
-            g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, 2, 2);
-        if (!next.sdl_tex) return NULL;
-        SDL_SetTextureBlendMode(next.sdl_tex, SDL_BLENDMODE_BLEND);
-        if (!SDL_UpdateTexture(next.sdl_tex, NULL, pixels, 2 * 4)) {
-            SDL_DestroyTexture(next.sdl_tex);
-            return NULL;
+    if (!g_renderer) return NULL;
+    int page_index = -1;
+    for (int i = 0; i < g_sprite_atlas_page_count; i++) {
+        if (g_sprite_atlas_pages[i].texture && !g_sprite_atlas_pages[i].dedicated) {
+            page_index = i;
+            break;
         }
-    } else {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        if (!sprite_upload_standalone(&next, pixels, 2, 2)) {
-            return NULL;
-        }
-#else
-        return NULL;
-#endif
     }
+    if (page_index < 0) page_index = stasis_sprite_atlas_create_page(
+        STASIS_SDL_ATLAS_PAGE_SIZE, STASIS_SDL_ATLAS_PAGE_SIZE, 0, 0);
+    if (page_index < 0) return NULL;
+    StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
+    next.page_index = page_index;
+    next.atlas_x = page->placeholder_x;
+    next.atlas_y = page->placeholder_y;
+    next.u0 = (float)page->placeholder_x / (float)page->width;
+    next.v0 = (float)page->placeholder_y / (float)page->height;
+    next.u1 = (float)(page->placeholder_x + 2) / (float)page->width;
+    next.v1 = (float)(page->placeholder_y + 2) / (float)page->height;
+    next.sdl_tex = page->texture;
     next.used = 1;
     next.surface_generation = g_resource_lifecycle.surface_generation;
     next.renderer_generation = g_resource_lifecycle.renderer_generation;
@@ -6601,23 +5390,13 @@ STASIS_EXPORT void stasis_gfx_release_sprite(int handle) {
         return;
     }
 
-    if (g_use_sdl_renderer) {
-        if (e->sdl_tex) SDL_DestroyTexture(e->sdl_tex);
-    } else {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        if (g_sprite_vert_count > 0) flush_sprites();
-        if (e->gl_texture) {
-            glDeleteTextures(1, &e->gl_texture);
-            e->gl_texture = 0;
-        }
-        if (e->page_index >= 0 && e->alloc_w > 0 && e->alloc_h > 0) {
-            atlas_page_clear_region(
-                &g_sprite_atlas_pages[e->page_index],
-                e->alloc_x, e->alloc_y, e->alloc_w, e->alloc_h);
-            atlas_release_rect(e->page_index, e->alloc_x, e->alloc_y, e->alloc_w, e->alloc_h);
-        }
-#endif
+    if (e->sdl_tex && e->page_index >= 0 &&
+        e->page_index < g_sprite_atlas_page_count &&
+        g_sprite_atlas_pages[e->page_index].texture == e->sdl_tex) {
+        stasis_sprite_atlas_release_allocation(
+            e->page_index, e->alloc_x, e->alloc_y, e->alloc_w, e->alloc_h);
     }
+    e->sdl_tex = NULL;
     free(e->path);
     uint32_t next_generation = (e->generation + 1u) & SPRITE_HANDLE_GENERATION_MASK;
     memset(e, 0, sizeof(*e));
@@ -6634,26 +5413,24 @@ STASIS_EXPORT void stasis_gfx_release_sprite(int handle) {
  * a: alpha 0-255
  */
 static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float w, float h,
-                                           int rot_degrees, int a, float src_u0, float src_v0,
-                                           float src_u1, float src_v1, int do_hash) {
+                                           float rot_degrees, uint32_t tint_rgba,
+                                           float src_x, float src_y, float src_w, float src_h,
+                                           float pivot_x, float pivot_y,
+                                           float scale_x, float scale_y, int do_hash) {
     if (do_hash) {
         gfx_debug_hash_i32(handle);
         gfx_debug_hash_f32(x);
         gfx_debug_hash_f32(y);
         gfx_debug_hash_f32(w);
         gfx_debug_hash_f32(h);
-        gfx_debug_hash_i32(rot_degrees);
-        gfx_debug_hash_i32(a);
+        gfx_debug_hash_f32(rot_degrees);
+        gfx_debug_hash_i32((int32_t)tint_rgba);
     }
     SpriteEntry* e = sprite_get(handle);
     if (!e) e = sprite_fallback_get();
     if (!e) return;
 
-    if (w <= 0 || h <= 0) return;
-    if (src_u0 < 0.0f || src_v0 < 0.0f || src_u1 > 1.0f || src_v1 > 1.0f ||
-        src_u0 >= src_u1 || src_v0 >= src_v1) return;
-    if (a < 0) a = 0;
-    if (a > 255) a = 255;
+    if (w <= 0 || h <= 0 || scale_x == 0.0f || scale_y == 0.0f) return;
 
     /* Re-rasterize only when explicitly invalidated (resize/reload).
      *
@@ -6667,94 +5444,49 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
         e->renderer_generation != g_resource_lifecycle.renderer_generation) {
         SDL_Log("Stasis renderer rejected stale sprite: handle=%d path=%s logical=%dx%d raster=%dx%d backend=%s surface_generation=%u resource_surface_generation=%u renderer_generation=%u resource_renderer_generation=%u",
             handle, e->path ? e->path : "<fallback>", e->max_w, e->max_h, e->w, e->h,
-            g_use_sdl_renderer ? "sdl" : "gl",
+            "sdl",
             g_resource_lifecycle.surface_generation, e->surface_generation,
             g_resource_lifecycle.renderer_generation, e->renderer_generation);
         return;
     }
 
-    /* Convert degrees to radians */
-    float rot = (float)rot_degrees * (3.14159265f / 180.0f);
-
-    /* Alpha from 0-255 to 0.0-1.0 */
-    float af = (float)a / 255.0f;
-
-    if (g_use_sdl_renderer) {
-        if (!g_renderer || !e->sdl_tex) return;
-        SDL_FRect dst;
-        dst.w = w;
-        dst.h = h;
-        dst.x = x;
-        dst.y = y;
-        SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
-        SDL_SetTextureColorMod(e->sdl_tex, 255, 255, 255);
-        SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)a);
-        SDL_FRect src = { src_u0 * e->w, src_v0 * e->h,
-            (src_u1 - src_u0) * e->w, (src_v1 - src_v0) * e->h };
-        SDL_RenderTextureRotated(g_renderer, e->sdl_tex, &src, &dst, (double)rot_degrees, &center, SDL_FLIP_NONE);
-        return;
-    }
-
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    GLuint texture = e->gl_texture;
-    if (texture == 0 && e->page_index >= 0 && e->page_index < g_sprite_atlas_page_count) {
-        texture = g_sprite_atlas_pages[e->page_index].texture;
-    }
-    if (texture == 0) return;
-    if (g_sprite_vert_count + 6 > MAX_SPRITE_VERTS) {
-        flush_sprites();
-    }
-    if (g_sprite_vert_count > 0 && g_sprite_batch_texture != texture) {
-        flush_sprites();
-    }
-    g_sprite_batch_page = e->page_index;
-    g_sprite_batch_texture = texture;
-#endif
-
-    float hw = w * 0.5f;
-    float hh = h * 0.5f;
-    float c = cosf(rot);
-    float s = sinf(rot);
-
-    float x0 = -hw, y0 = -hh;
-    float x1 = hw, y1 = hh;
-    float fx = (float)x + hw;
-    float fy = (float)y + hh;
-
-    float p0x = fx + x0 * c - y0 * s;
-    float p0y = fy + x0 * s + y0 * c;
-    float p1x = fx + x1 * c - y0 * s;
-    float p1y = fy + x1 * s + y0 * c;
-    float p2x = fx + x1 * c - y1 * s;
-    float p2y = fy + x1 * s + y1 * c;
-    float p3x = fx + x0 * c - y1 * s;
-    float p3y = fy + x0 * s + y1 * c;
-
-    float u0 = e->u0 + (e->u1 - e->u0) * src_u0;
-    float v0 = e->v0 + (e->v1 - e->v0) * src_v0;
-    float u1 = e->u0 + (e->u1 - e->u0) * src_u1;
-    float v1 = e->v0 + (e->v1 - e->v0) * src_v1;
-
-    SpriteVertex* v = &g_sprite_vertices[g_sprite_vert_count];
-    /* tri 1: 0,1,2 */
-    v[0] = (SpriteVertex){ p0x, p0y, u0, v0, af, af, af, af };
-    v[1] = (SpriteVertex){ p1x, p1y, u1, v0, af, af, af, af };
-    v[2] = (SpriteVertex){ p2x, p2y, u1, v1, af, af, af, af };
-    /* tri 2: 2,3,0 */
-    v[3] = (SpriteVertex){ p2x, p2y, u1, v1, af, af, af, af };
-    v[4] = (SpriteVertex){ p3x, p3y, u0, v1, af, af, af, af };
-    v[5] = (SpriteVertex){ p0x, p0y, u0, v0, af, af, af, af };
-    g_sprite_vert_count += 6;
+    StasisRasterCrop crop;
+    if (!stasis_logical_crop_to_raster(src_x, src_y, src_w, src_h,
+            (float)e->max_w, (float)e->max_h, (float)e->w, (float)e->h, &crop)) return;
+    const Uint8 tint_r = (Uint8)((tint_rgba >> 24) & 0xffu);
+    const Uint8 tint_g = (Uint8)((tint_rgba >> 16) & 0xffu);
+    const Uint8 tint_b = (Uint8)((tint_rgba >> 8) & 0xffu);
+    const Uint8 tint_a = (Uint8)(tint_rgba & 0xffu);
+    if (!g_renderer || !e->sdl_tex) return;
+    SDL_FRect dst;
+    dst.w = fabsf(w * scale_x);
+    dst.h = fabsf(h * scale_y);
+    dst.x = x + pivot_x - fabsf(pivot_x * scale_x);
+    dst.y = y + pivot_y - fabsf(pivot_y * scale_y);
+    SDL_FPoint center = { fabsf(pivot_x * scale_x), fabsf(pivot_y * scale_y) };
+    SDL_SetTextureColorMod(e->sdl_tex, tint_r, tint_g, tint_b);
+    SDL_SetTextureAlphaMod(e->sdl_tex, tint_a);
+    SDL_FRect src = { (float)e->atlas_x + crop.x,
+        (float)e->atlas_y + crop.y, crop.w, crop.h };
+    SDL_FlipMode flip = SDL_FLIP_NONE;
+    if (scale_x < 0.0f) flip = (SDL_FlipMode)(flip | SDL_FLIP_HORIZONTAL);
+    if (scale_y < 0.0f) flip = (SDL_FlipMode)(flip | SDL_FLIP_VERTICAL);
+    SDL_RenderTextureRotated(
+        g_renderer, e->sdl_tex, &src, &dst, (double)rot_degrees, &center, flip);
 }
 
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, float x, float y, float w, float h,
                                           int rot_degrees, int a) {
-    stasis_gfx_draw_sprite_internal(handle, x, y, w, h, rot_degrees, a, 0.0f, 0.0f, 1.0f, 1.0f, 1);
+    if (a < 0) a = 0;
+    if (a > 255) a = 255;
+    stasis_gfx_draw_sprite_internal(handle, x, y, w, h, (float)rot_degrees,
+        0xffffff00u | (uint32_t)a, 0.0f, 0.0f, 0.0f, 0.0f,
+        w * 0.5f, h * 0.5f, 1.0f, 1.0f, 1);
 }
 
 /*
- * Batched sprite submission.
- * Identity/state and logical geometry use separate typed lanes.
+ * Deprecated host compatibility entry point. Guest code uses the canonical
+ * frame writer and never stages/copies these arrays.
  */
 STASIS_EXPORT void stasis_gfx_draw_sprites(const int32_t* cmd_i32, const float* cmd_f32, int sprite_count) {
     if (!cmd_i32 || !cmd_f32 || sprite_count <= 0) return;
@@ -6767,9 +5499,12 @@ STASIS_EXPORT void stasis_gfx_draw_sprites(const int32_t* cmd_i32, const float* 
             cmd_f32[base_f + 1],
             cmd_f32[base_f + 2],
             cmd_f32[base_f + 3],
-            cmd_i32[base_i + 1],
-            cmd_i32[base_i + 2],
-            0.0f, 0.0f, 1.0f, 1.0f,
+            cmd_f32[base_f + 12],
+            (uint32_t)cmd_i32[base_i + 1],
+            cmd_f32[base_f + 4], cmd_f32[base_f + 5],
+            cmd_f32[base_f + 6], cmd_f32[base_f + 7],
+            cmd_f32[base_f + 8], cmd_f32[base_f + 9],
+            cmd_f32[base_f + 10], cmd_f32[base_f + 11],
             g_debug_hash_enabled);
     }
 }
@@ -7301,16 +6036,6 @@ STASIS_EXPORT int stasis_recording_audio_pull_f32_interleaved(
  * Configure fullscreen post-processing parameters.
  * strength: 0-1, phase/time: seconds, speed: oscillation scalar, color: rgb tint (0-1).
  */
-STASIS_EXPORT void stasis_set_postfx(float strength, float phase, float speed, float r, float g, float b) {
-    g_postfx_strength = strength;
-    g_postfx_phase = phase;
-    g_postfx_speed = speed;
-    g_postfx_color[0] = r;
-    g_postfx_color[1] = g;
-    g_postfx_color[2] = b;
-    g_postfx_enabled = true;
-}
-
 /*
  * Check if window should close
  */
@@ -7400,55 +6125,9 @@ STASIS_EXPORT void stasis_shutdown(void) {
     stasis_audio_shutdown_internal();
     gfx_asset_watch_shutdown();
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    if (g_postfx_program) {
-        glDeleteProgram(g_postfx_program);
-        g_postfx_program = 0;
-    }
-    if (g_sprite_program) {
-        glDeleteProgram(g_sprite_program);
-        g_sprite_program = 0;
-    }
-    if (g_sprite_vbo) {
-        glDeleteBuffers(1, &g_sprite_vbo);
-        g_sprite_vbo = 0;
-    }
-    if (g_sprite_vao) {
-        glDeleteVertexArrays(1, &g_sprite_vao);
-        g_sprite_vao = 0;
-    }
-    for (int i = 0; i < g_sprite_atlas_page_count; i++) {
-        if (g_sprite_atlas_pages[i].texture) {
-            glDeleteTextures(1, &g_sprite_atlas_pages[i].texture);
-            g_sprite_atlas_pages[i].texture = 0;
-        }
-        free(g_sprite_atlas_pages[i].free_rects);
-        g_sprite_atlas_pages[i].free_rects = NULL;
-        g_sprite_atlas_pages[i].free_rect_count = 0;
-        g_sprite_atlas_pages[i].free_rect_capacity = 0;
-    }
-    free(g_sprite_atlas_pages);
-    g_sprite_atlas_pages = NULL;
-    g_sprite_atlas_page_count = 0;
-    g_sprite_atlas_page_capacity = 0;
-    g_sprite_atlas_page_w = 0;
-    g_sprite_atlas_page_h = 0;
-    g_sprite_atlas_gl_max_size = 0;
-    g_sprite_batch_page = -1;
-    g_sprite_batch_texture = 0;
-#endif
     for (int i = 0; i < g_sprite_capacity; i++) {
         if (g_sprites[i].used) {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-            if (g_sprites[i].gl_texture) {
-                glDeleteTextures(1, &g_sprites[i].gl_texture);
-                g_sprites[i].gl_texture = 0;
-            }
-#endif
-            if (g_sprites[i].sdl_tex) {
-                SDL_DestroyTexture(g_sprites[i].sdl_tex);
-                g_sprites[i].sdl_tex = NULL;
-            }
+            g_sprites[i].sdl_tex = NULL;
             if (g_sprites[i].path) free(g_sprites[i].path);
             memset(&g_sprites[i], 0, sizeof(g_sprites[i]));
         }
@@ -7461,7 +6140,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
     g_sprite_max_dimension = -1;
     g_sprite_max_pixels = -1;
     g_sprite_max_file_bytes = -1;
-    if (g_sprite_fallback.sdl_tex) SDL_DestroyTexture(g_sprite_fallback.sdl_tex);
+    stasis_sprite_atlas_reset(1);
     memset(&g_sprite_fallback, 0, sizeof(g_sprite_fallback));
     g_sprite_fallback.page_index = -1;
 
@@ -7472,11 +6151,6 @@ STASIS_EXPORT void stasis_shutdown(void) {
     if (g_renderer) {
         SDL_DestroyRenderer(g_renderer);
         g_renderer = NULL;
-    }
-    g_use_sdl_renderer = false;
-    if (g_gl_context) {
-        SDL_GL_DestroyContext(g_gl_context);
-        g_gl_context = NULL;
     }
     if (g_window) {
         SDL_DestroyWindow(g_window);
@@ -7776,7 +6450,7 @@ static int stasis_build_font_atlas(StasisFont* font) {
         atlas_size = next_atlas_size;
     }
 
-    if (g_use_sdl_renderer) {
+    if (true) {
         if (!g_renderer) {
             free(atlas_bitmap);
             return 0;
@@ -7816,19 +6490,6 @@ static int stasis_build_font_atlas(StasisFont* font) {
         if (font->sdl_texture) SDL_DestroyTexture(font->sdl_texture);
         font->sdl_texture = texture;
     } else {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        GLuint texture = 0;
-        glGenTextures(1, &texture);
-        glBindTexture(GL_TEXTURE_2D, texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, atlas_size, atlas_size,
-            0, GL_ALPHA, GL_UNSIGNED_BYTE, atlas_bitmap);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        if (font->atlas_texture) glDeleteTextures(1, &font->atlas_texture);
-        font->atlas_texture = texture;
-#endif
     }
 
     free(atlas_bitmap);
@@ -7871,7 +6532,7 @@ static int stasis_build_text_run_quads(StasisTextRun* run, StasisFont* font) {
 
         stbtt_aligned_quad quad;
         stbtt_GetBakedQuad(font->char_data, font->atlas_size, font->atlas_size,
-            (int)ch - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, g_use_sdl_renderer ? 0 : 1);
+            (int)ch - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 0);
         StasisTextQuad* out = &g_text_run_quads[quad_off + quad_count];
         out->x0 = quad.x0 / pixel_scale;
         out->y0 = quad.y0 / pixel_scale;
@@ -7930,7 +6591,7 @@ static int stasis_restore_renderer_resources(void) {
         return stasis_renderer_lifecycle_can_present(&g_resource_lifecycle);
     }
 
-    int restored = g_use_sdl_renderer ? g_renderer != NULL : g_gl_context != NULL;
+    int restored = g_renderer != NULL;
     for (int i = 0; i < g_sprite_capacity; i++) {
         SpriteEntry* entry = &g_sprites[i];
         if (!entry->used || !entry->path) continue;
@@ -7938,7 +6599,7 @@ static int stasis_restore_renderer_resources(void) {
             stasis_report_runtime_errorf("Renderer restore failed for sprite: %s", entry->path);
             SDL_Log("Stasis renderer restore failed: stage=sprite handle=%d path=%s logical=%dx%d raster=%dx%d backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=texture_rebuild_failed",
                 sprite_handle_for_slot(i), entry->path, entry->max_w, entry->max_h,
-                entry->w, entry->h, g_use_sdl_renderer ? "sdl" : "gl",
+                entry->w, entry->h, "sdl",
                 g_resource_lifecycle.surface_generation,
                 g_resource_lifecycle.renderer_generation,
                 stasis_renderer_reason_name(g_resource_lifecycle.reason));
@@ -7948,7 +6609,7 @@ static int stasis_restore_renderer_resources(void) {
     if (!sprite_fallback_get()) {
         stasis_host_report_runtime_error("Renderer restore failed for fallback texture");
         SDL_Log("Stasis renderer restore failed: stage=fallback handle=0 path=<procedural> logical=2x2 raster=2x2 backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=texture_rebuild_failed",
-            g_use_sdl_renderer ? "sdl" : "gl",
+            "sdl",
             g_resource_lifecycle.surface_generation,
             g_resource_lifecycle.renderer_generation,
             stasis_renderer_reason_name(g_resource_lifecycle.reason));
@@ -7961,7 +6622,7 @@ static int stasis_restore_renderer_resources(void) {
             stasis_host_report_runtime_error("Renderer restore failed for a font atlas");
             SDL_Log("Stasis renderer restore failed: stage=font handle=%d path=<retained-font-bytes> logical=%dx%d raster=%dx%d backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=atlas_rebuild_failed",
                 i + 1, font->font_size, font->font_size, font->raster_size,
-                font->raster_size, g_use_sdl_renderer ? "sdl" : "gl",
+                font->raster_size, "sdl",
                 g_resource_lifecycle.surface_generation,
                 g_resource_lifecycle.renderer_generation,
                 stasis_renderer_reason_name(g_resource_lifecycle.reason));
@@ -7971,7 +6632,7 @@ static int stasis_restore_renderer_resources(void) {
     if (restored && !stasis_rebuild_text_runs()) {
         stasis_host_report_runtime_error("Renderer restore failed for cached text");
         SDL_Log("Stasis renderer restore failed: stage=cached_text handle=0 path=<retained-text-runs> logical=0x0 raster=0x0 backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=quad_rebuild_failed",
-            g_use_sdl_renderer ? "sdl" : "gl",
+            "sdl",
             g_resource_lifecycle.surface_generation,
             g_resource_lifecycle.renderer_generation,
             stasis_renderer_reason_name(g_resource_lifecycle.reason));
@@ -7981,7 +6642,7 @@ static int stasis_restore_renderer_resources(void) {
     stasis_renderer_lifecycle_finish_restore(&g_resource_lifecycle, restored);
     if (restored) {
         SDL_Log("Stasis renderer resources restored: backend=%s surface_generation=%u renderer_generation=%u reason=%s sprites=%d",
-            g_use_sdl_renderer ? "sdl" : "gl",
+            "sdl",
             g_resource_lifecycle.surface_generation,
             g_resource_lifecycle.renderer_generation,
             stasis_renderer_reason_name(g_resource_lifecycle.reason),
@@ -8133,7 +6794,7 @@ static void stasis_draw_text_cached_internal(int run_handle, float x, float y, f
     StasisFont* font = &g_fonts[run->font_handle - 1];
     if (!font->active) return;
 
-    if (g_use_sdl_renderer) {
+    if (true) {
         if (!font->sdl_texture || !g_renderer) return;
 
         SDL_SetTextureBlendMode(font->sdl_texture, SDL_BLENDMODE_BLEND);
@@ -8150,29 +6811,6 @@ static void stasis_draw_text_cached_internal(int run_handle, float x, float y, f
         return;
     }
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
-
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glColor4f(r, g, b, a);
-
-    glBegin(GL_QUADS);
-    for (int i = 0; i < run->quad_count; i++) {
-        StasisTextQuad* q = &g_text_run_quads[run->quad_off + i];
-        glTexCoord2f(q->s0, q->t0); glVertex2f(x + q->x0, y + q->y0);
-        glTexCoord2f(q->s1, q->t0); glVertex2f(x + q->x1, y + q->y0);
-        glTexCoord2f(q->s1, q->t1); glVertex2f(x + q->x1, y + q->y1);
-        glTexCoord2f(q->s0, q->t1); glVertex2f(x + q->x0, y + q->y1);
-    }
-    glEnd();
-
-    glDisable(GL_TEXTURE_2D);
-    glColor4f(1, 1, 1, 1);
-#endif
 }
 
 STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a) {
@@ -8313,7 +6951,7 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
     StasisFont* font = &g_fonts[font_handle - 1];
     if (!font->active || !text) return;
 
-    if (g_use_sdl_renderer) {
+    if (true) {
         if (!font->sdl_texture) return;
 
         SDL_SetTextureBlendMode(font->sdl_texture, SDL_BLENDMODE_BLEND);
@@ -8373,58 +7011,6 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
         return;
     }
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    /* OpenGL path */
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
-
-    /* Set color and modelview for text */
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    glColor4f(r, g, b, a);
-
-    glBegin(GL_QUADS);
-
-    const float pixel_scale = font->pixel_scale;
-    float pos_x = x * pixel_scale;
-    float pos_y = y * pixel_scale + (float)font->ascent * font->scale;
-    const float start_x = pos_x;
-    const float line_height =
-        (float)(font->ascent - font->descent + font->line_gap) * font->scale;
-
-    while (*text) {
-        int c = (unsigned char)*text;
-        if (c == '\r') {
-            text++;
-            continue;
-        }
-        if (c == '\n') {
-            pos_x = start_x;
-            pos_y += line_height;
-            text++;
-            continue;
-        }
-        if (c >= FONT_FIRST_CHAR && c < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
-            stbtt_aligned_quad quad;
-            stbtt_GetBakedQuad(font->char_data, font->atlas_size, font->atlas_size,
-                              c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 1);
-
-            glTexCoord2f(quad.s0, quad.t0); glVertex2f(quad.x0 / pixel_scale, quad.y0 / pixel_scale);
-            glTexCoord2f(quad.s1, quad.t0); glVertex2f(quad.x1 / pixel_scale, quad.y0 / pixel_scale);
-            glTexCoord2f(quad.s1, quad.t1); glVertex2f(quad.x1 / pixel_scale, quad.y1 / pixel_scale);
-            glTexCoord2f(quad.s0, quad.t1); glVertex2f(quad.x0 / pixel_scale, quad.y1 / pixel_scale);
-        }
-        text++;
-    }
-
-    glEnd();
-
-    glDisable(GL_TEXTURE_2D);
-    glColor4f(1, 1, 1, 1);
-#endif
 }
 
 /* Measure text width for layout */
@@ -8446,7 +7032,7 @@ STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
         if (c >= FONT_FIRST_CHAR && c < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
             stbtt_aligned_quad quad;
             stbtt_GetBakedQuad(font->char_data, font->atlas_size, font->atlas_size,
-                              c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, g_use_sdl_renderer ? 0 : 1);
+                              c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 0);
         }
         text++;
     }

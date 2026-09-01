@@ -47,16 +47,19 @@ test `draw uses sprite logical dimensions`(): bool {
     if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 0] != 0 - 7) {
         return false;
     }
-    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 1] != 9) {
+    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 1] != 0 - 66) {
         return false;
     }
-    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 2] != 190) {
+    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 2] != 0) {
         return false;
     }
     if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] != 80.0) {
         return false;
     }
     if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] != 48.0) {
+        return false;
+    }
+    if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 12] != 9.0) {
         return false;
     }
     return true;

@@ -1,8 +1,11 @@
 # GPU instancing for large Stasis scenes
 
-Status: investigation only. This report does not change the current graphics command
-ABI or renderer behavior. It records current paths, a measured Web baseline,
-and a staged design for adjacent-compatible batching.
+Status: historical investigation and before-change evidence. Task #397 later
+replaced the described renderer architecture: native targets use only
+atlas-backed SDL geometry, Web uses only the visible WebGL2 renderer, and
+Android Workshop uses its embedded atlas-backed GLES renderer. Canvas frame
+replay and native GL/GLEW were deleted. The measurements and acceptance budgets
+remain evidence; the fallback rollout recommendations are not current guidance.
 
 ## Executive recommendation
 
@@ -20,7 +23,7 @@ source of truth and no guest-to-GPU pointer ownership is introduced. Add an
 explicit opaque mode only in a later ABI version after it has a separate order
 contract; never infer opacity from alpha alone.
 
-## What exists today
+## Historical implementation at the time of measurement
 
 The current command stream in `src/stdlib/internal/gfx_cmd.stasis` has a 32-i32
 header, separate typed arrays, and an order array at i32 18,464. Lines and
@@ -59,6 +62,11 @@ readability. All reported quantiles use the non-interpolated upper convention
 `Q(q) = x[floor(q * N)]`; they are labeled upper p50/upper p95 and are not
 conventional interpolated median/nearest-rank p95 values. This is a single
 local run, not a cross-machine benchmark or a claim about GPU execution time.
+
+The measurements in this section predate the single-visible-WebGL2 renderer.
+They document the deleted offscreen-WebGL-to-Canvas path and must not be used
+as current backend evidence. Current runs have no Canvas frame composite and
+report visible WebGL2 submissions and atlas transitions directly.
 
 Context: Windows 10 Pro 2009, Intel64 Family 6 Model 170 (22 logical
 processors reported by the environment), Chrome 151.0.7922.174, headless
@@ -293,7 +301,7 @@ reduction against the per-call fallback. Atlas experiments additionally
 record page count, material-key runs, texture allocation/replacement events,
 and peak decoded/atlas memory. Missing metrics are unavailable, never zero.
 
-## Staged rollout and stop conditions
+## Historical staged rollout and stop conditions
 
 1. **Document and instrument.** Keep the current Web rectangle batcher. Add
    per-run keys and metrics in a private experiment, plus deterministic tests

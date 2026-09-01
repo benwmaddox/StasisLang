@@ -133,10 +133,13 @@ source-to-package override table. The runtime uses this metadata to select the
 smallest useful density tier for a declared logical sprite extent; it does not
 package alternate tiers or upscale a PNG master without an inspectable fallback.
 
-Large consecutive rectangle runs use a lazy WebGL2 instanced batcher in the full host, rendered to
-a transparent offscreen canvas and composited once at the run position. Non-rectangle commands
-flush runs to preserve source-over order. Small runs, unavailable WebGL2, and shader/context/resize
-failures use the Canvas 2D fallback; the command ABI is unchanged.
+The visible canvas is WebGL2-only. Sprites, host-private solid texels, lines,
+and prepared text textures use one instanced textured-quad path; logical clips
+map to GL scissors and compatible adjacent sprite/solid commands retain exact
+source-over order in one submission. Canvas2D is used only to rasterize image
+and text resources before atlas upload. Missing assets use a deterministic
+atlas placeholder, oversize resources use the same backend in a dedicated
+domain, and unavailable WebGL2 produces a visible unsupported error.
 
 Release Wasm exports lifecycle/host-access functions and memory, but keeps Stasis globals private.
 Development packages additionally export globals and full reachable function names for diagnostics;

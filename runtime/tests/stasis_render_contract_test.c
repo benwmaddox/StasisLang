@@ -9,6 +9,9 @@ static void build_representative_frame(
     float *f32s,
     uint8_t *u8s
 ) {
+    memset(i32s, 0, STASIS_RENDER_I32_COUNT * sizeof(*i32s));
+    memset(f32s, 0, STASIS_RENDER_F32_COUNT * sizeof(*f32s));
+    memset(u8s, 0, STASIS_RENDER_U8_COUNT * sizeof(*u8s));
     i32s[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
     i32s[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
     i32s[STASIS_RENDER_I_FLAGS] =
@@ -16,6 +19,7 @@ static void build_representative_frame(
     i32s[STASIS_RENDER_I_LINE_COUNT] = 1;
     i32s[STASIS_RENDER_I_RECT_COUNT] = 1;
     i32s[STASIS_RENDER_I_SPRITE_COUNT] = 1;
+    i32s[STASIS_RENDER_I_SPRITE_RUN_COUNT] = 1;
     i32s[STASIS_RENDER_I_TEXT_COUNT] = 2;
     i32s[STASIS_RENDER_I_TEXT_BYTES_USED] = 5;
     i32s[STASIS_RENDER_I_LOGICAL_W] = 640;
@@ -45,12 +49,16 @@ static void build_representative_frame(
         rect,
         sizeof(rect));
 
-    const int32_t sprite_i32[] = {17, 45, 192};
+    const int32_t sprite_i32[] = {17, (int32_t)0xffffffc0u, 0};
     const float sprite_f32[] = {
-        10.25f, 20.5f, 30.75f, 40.125f, 0.25f, 0.5f, 0.75f, 1.0f
+        10.25f, 20.5f, 30.75f, 40.125f,
+        2.0f, 4.0f, 8.0f, 10.0f,
+        15.375f, 20.0625f, 1.0f, 1.0f, 45.0f
     };
     memcpy(i32s + STASIS_RENDER_I_SPRITE_BASE, sprite_i32, sizeof(sprite_i32));
     memcpy(f32s + STASIS_RENDER_F_SPRITE_BASE, sprite_f32, sizeof(sprite_f32));
+    int32_t *run = i32s + STASIS_RENDER_I_SPRITE_RUN_BASE;
+    run[0] = 0; run[1] = 1; run[2] = STASIS_RENDER_SPRITE_CLIP_ORDERED;
 
     int32_t *text = i32s + STASIS_RENDER_I_TEXT_BASE;
     text[0] = 3; text[1] = 0; text[2] = 4;
@@ -105,7 +113,7 @@ int main(void) {
     CHECK(first_trace == stasis_render_trace(second_i32, second_f32, second_u8));
 
     build_representative_frame(second_i32, second_f32, second_u8);
-    for (int legacy_version = 2; legacy_version <= 5; legacy_version++) {
+    for (int legacy_version = 2; legacy_version <= 6; legacy_version++) {
         second_i32[STASIS_RENDER_I_VERSION] = legacy_version;
         CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_VERSION);
         CHECK(stasis_render_trace(second_i32, second_f32, second_u8) == 0);
@@ -165,6 +173,16 @@ int main(void) {
         STASIS_RENDER_ORDER_TEXT * STASIS_RENDER_ORDER_KIND_SCALE + 2;
     CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_ORDER_REFERENCE);
     CHECK(strcmp(stasis_render_validation_stage(STASIS_RENDER_BAD_ORDER_REFERENCE), "order_reference") == 0);
+
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 3] = 1;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_SPRITE_RUN);
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_i32[STASIS_RENDER_I_SPRITE_BASE + 2] = 1;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_SPRITE_INSTANCE);
+    build_representative_frame(second_i32, second_f32, second_u8);
+    second_f32[STASIS_RENDER_F_SPRITE_BASE + 10] = 0.0f;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_SPRITE_INSTANCE);
 
     build_representative_frame(second_i32, second_f32, second_u8);
     second_i32[STASIS_RENDER_I_CLIP_COUNT] = 1;

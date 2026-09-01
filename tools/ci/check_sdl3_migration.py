@@ -54,7 +54,6 @@ PINNED = {
     ),
     "scripts/build_local_editor_release.ps1": (
         "STASIS_GRAPHICS_BUNDLE_SDL=ON",
-        "STASIS_GRAPHICS_SDL_ONLY=ON",
     ),
     "docs/sdl3_migration.md": (
         "There is no SDL2 or `sdl2-compat` fallback.",

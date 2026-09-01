@@ -269,9 +269,11 @@ RENDER_TO_GFX = {
     "STASIS_RENDER_I_DROPPED_ORDER": "GFX_I_DROPPED_ORDER",
     "STASIS_RENDER_I_RECT_COUNT": "GFX_I_RECT_COUNT",
     "STASIS_RENDER_I_CLIP_COUNT": "GFX_I_CLIP_COUNT",
+    "STASIS_RENDER_I_SPRITE_RUN_COUNT": "GFX_I_SPRITE_RUN_COUNT",
     "STASIS_RENDER_I_DROPPED_RECTS": "GFX_I_DROPPED_RECTS",
     "STASIS_RENDER_I_SPRITE_BASE": "GFX_I_SPRITE_BASE",
     "STASIS_RENDER_I_TEXT_BASE": "GFX_I_TEXT_BASE",
+    "STASIS_RENDER_I_SPRITE_RUN_BASE": "GFX_I_SPRITE_RUN_BASE",
     "STASIS_RENDER_I_ORDER_BASE": "GFX_I_ORDER_BASE",
     "STASIS_RENDER_F_LINE_BASE": "GFX_F_LINE_BASE",
     "STASIS_RENDER_F_SPRITE_BASE": "GFX_F_SPRITE_BASE",
@@ -285,6 +287,8 @@ RENDER_TO_GFX = {
     "STASIS_RENDER_MAX_SPRITES": "GFX_MAX_SPRITES",
     "STASIS_RENDER_SPRITE_I32_STRIDE": "GFX_SPRITE_STRIDE_I32",
     "STASIS_RENDER_SPRITE_F32_STRIDE": "GFX_SPRITE_STRIDE_F32",
+    "STASIS_RENDER_MAX_SPRITE_RUNS": "GFX_MAX_SPRITE_RUNS",
+    "STASIS_RENDER_SPRITE_RUN_I32_STRIDE": "GFX_SPRITE_RUN_STRIDE_I32",
     "STASIS_RENDER_MAX_TEXT": "GFX_MAX_TEXT",
     "STASIS_RENDER_TEXT_I32_STRIDE": "GFX_TEXT_STRIDE_I32",
     "STASIS_RENDER_TEXT_F32_STRIDE": "GFX_TEXT_STRIDE_F32",
@@ -310,11 +314,13 @@ RENDER_TO_RUST = {
     "STASIS_RENDER_I_ORDER_COUNT": "STASIS_RENDER_ORDER_COUNT_INDEX",
     "STASIS_RENDER_I_RECT_COUNT": "STASIS_RENDER_RECT_COUNT_INDEX",
     "STASIS_RENDER_I_CLIP_COUNT": "STASIS_RENDER_CLIP_COUNT_INDEX",
+    "STASIS_RENDER_I_SPRITE_RUN_COUNT": "STASIS_RENDER_SPRITE_RUN_COUNT_INDEX",
     "STASIS_RENDER_I_ORDER_BASE": "STASIS_RENDER_ORDER_BASE",
     "STASIS_RENDER_MAX_ORDER": "STASIS_RENDER_MAX_ORDER",
     "STASIS_RENDER_MAX_CLIPS": "STASIS_RENDER_MAX_CLIPS",
     "STASIS_RENDER_CLIP_F32_STRIDE": "STASIS_RENDER_CLIP_STRIDE_F32",
     "STASIS_RENDER_I_SPRITE_BASE": "STASIS_RENDER_SPRITE_BASE",
+    "STASIS_RENDER_I_SPRITE_RUN_BASE": "STASIS_RENDER_SPRITE_RUN_BASE",
     "STASIS_RENDER_MAX_LINES": "STASIS_RENDER_MAX_LINES",
     "STASIS_RENDER_MAX_GEOMETRY": "STASIS_RENDER_MAX_GEOMETRY",
     "STASIS_RENDER_GEOMETRY_F32_STRIDE": "STASIS_RENDER_GEOMETRY_STRIDE_F32",
@@ -323,6 +329,8 @@ RENDER_TO_RUST = {
     "STASIS_RENDER_SPRITE_I32_STRIDE": "STASIS_RENDER_SPRITE_STRIDE_I32",
     "STASIS_RENDER_F_SPRITE_BASE": "STASIS_RENDER_SPRITE_BASE_F32",
     "STASIS_RENDER_SPRITE_F32_STRIDE": "STASIS_RENDER_SPRITE_STRIDE_F32",
+    "STASIS_RENDER_MAX_SPRITE_RUNS": "STASIS_RENDER_MAX_SPRITE_RUNS",
+    "STASIS_RENDER_SPRITE_RUN_I32_STRIDE": "STASIS_RENDER_SPRITE_RUN_STRIDE_I32",
     "STASIS_RENDER_F_CLEAR_BASE": "STASIS_RENDER_F_CLEAR_BASE",
     "STASIS_RENDER_F_LINE_BASE": "STASIS_RENDER_F_LINE_BASE",
     "STASIS_RENDER_F_RECT_REVERSE_BASE": "STASIS_RENDER_RECT_REVERSE_BASE_F32",
@@ -349,8 +357,10 @@ RENDER_TO_WEB = {
     "STASIS_RENDER_I_TEXT_BYTES_USED": "GFX_I_TEXT_BYTES_USED",
     "STASIS_RENDER_I_ORDER_COUNT": "GFX_I_ORDER_COUNT",
     "STASIS_RENDER_I_RECT_COUNT": "GFX_I_RECT_COUNT",
+    "STASIS_RENDER_I_SPRITE_RUN_COUNT": "GFX_I_SPRITE_RUN_COUNT",
     "STASIS_RENDER_I_SPRITE_BASE": "GFX_I_SPRITE_BASE",
     "STASIS_RENDER_I_TEXT_BASE": "GFX_I_TEXT_BASE",
+    "STASIS_RENDER_I_SPRITE_RUN_BASE": "GFX_I_SPRITE_RUN_BASE",
     "STASIS_RENDER_I_ORDER_BASE": "GFX_I_ORDER_BASE",
     "STASIS_RENDER_F_CLEAR_BASE": "GFX_F_CLEAR_BASE",
     "STASIS_RENDER_F_LINE_BASE": "GFX_F_LINE_BASE",
@@ -365,6 +375,8 @@ RENDER_TO_WEB = {
     "STASIS_RENDER_MAX_SPRITES": "GFX_MAX_SPRITES",
     "STASIS_RENDER_SPRITE_I32_STRIDE": "GFX_SPRITE_STRIDE_I32",
     "STASIS_RENDER_SPRITE_F32_STRIDE": "GFX_SPRITE_STRIDE_F32",
+    "STASIS_RENDER_MAX_SPRITE_RUNS": "GFX_MAX_SPRITE_RUNS",
+    "STASIS_RENDER_SPRITE_RUN_I32_STRIDE": "GFX_SPRITE_RUN_STRIDE_I32",
     "STASIS_RENDER_MAX_TEXT": "GFX_MAX_TEXT",
     "STASIS_RENDER_TEXT_I32_STRIDE": "GFX_TEXT_STRIDE_I32",
     "STASIS_RENDER_TEXT_F32_STRIDE": "GFX_TEXT_STRIDE_F32",
@@ -772,14 +784,14 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
 
     checks += 1
     replay_trace_call = re.search(
-        r"native_render_trace\s*\(\s*gfx_cmd_i32\s*,\s*35120\s*,\s*"
-        r"gfx_cmd_f32\s*,\s*126084\s*,\s*gfx_cmd_u8\s*,\s*65536\s*\)",
+        r"native_render_trace\s*\(\s*gfx_cmd_i32\s*,\s*67888\s*,\s*"
+        r"gfx_cmd_f32\s*,\s*146564\s*,\s*gfx_cmd_u8\s*,\s*65536\s*\)",
         sources[JIT_AOT_REPLAY_FIXTURE], re.S,
     )
     if replay_trace_call is None:
         failures.append(Mismatch(
             label(RENDER_HEADER), label(JIT_AOT_REPLAY_FIXTURE),
-            "render_trace.current_capacities", "35120/126084/65536", "missing",
+            "render_trace.current_capacities", "67888/146564/65536", "missing",
         ))
 
     manual_fixture_texts = {
@@ -823,6 +835,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         10: 640, 11: 360, 12: 640, 13: 360, 14: 640, 15: 360,
         16: 0, 17: 0, 18: 640, 19: 360, 20: 1, 21: 1,
         22: 0, 23: 0, 24: 0, 25: 0, 26: 1, 27: 0, 28: 0,
+        29: 0, 30: 0,
     }
     for fixture in HOT_SWAP_FIXTURES:
         fixture_text = manual_fixture_texts[fixture]
@@ -832,7 +845,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             if actual != expected:
                 failures.append(Mismatch(
                     label(RENDER_HEADER), label(fixture),
-                    f"current_v6_header[{index}]", expected, actual,
+                    f"current_v7_header[{index}]", expected, actual,
                 ))
 
     manual_sprite_layouts = {
@@ -842,26 +855,28 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 r"gfx_cmd_i32\s*\[\s*35\s*\]\s*=\s*svg_sprite\s*;",
                 r"gfx_cmd_f32\s*\[\s*80004\s*\]\s*=\s*52\.0\s*;",
             ),
-            r"gfx_cmd_f32\s*\[\s*80012\s*\]\s*=\s*204\.0\s*;",
+            r"gfx_cmd_f32\s*\[\s*80017\s*\]\s*=\s*204\.0\s*;",
             tuple(
                 rf"gfx_cmd_f32\s*\[\s*{index}\s*\]\s*=\s*{value}\s*;"
                 for index, value in (
                     (80008, "0\\.0"), (80009, "0\\.0"),
-                    (80010, "1\\.0"), (80011, "1\\.0"),
-                    (80016, "0\\.0"), (80017, "0\\.0"),
-                    (80018, "1\\.0"), (80019, "1\\.0"),
+                    (80010, "0\\.0"), (80011, "0\\.0"),
+                    (80014, "1\\.0"), (80015, "1\\.0"),
+                    (80021, "0\\.0"), (80022, "0\\.0"),
+                    (80023, "0\\.0"), (80024, "0\\.0"),
+                    (80027, "1\\.0"), (80028, "1\\.0"),
                 )
             ),
         ),
         WORKSHOP_PREVIEW_ADAPTER: (
             (
                 r"let\s+i_base\s*:\s*i32\s*=\s*32\s*\+\s*index\s*\*\s*3\s*;",
-                r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*8\s*;",
+                r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*13\s*;",
             ),
-            r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*8\s*;",
+            r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*13\s*;",
             tuple(
                 rf"gfx_cmd_f32\s*\[\s*f_base\s*\+\s*{offset}\s*\]\s*=\s*{value}\s*;"
-                for offset, value in ((4, "0\\.0"), (5, "0\\.0"), (6, "1\\.0"), (7, "1\\.0"))
+                for offset, value in ((4, "0\\.0"), (5, "0\\.0"), (6, "0\\.0"), (7, "0\\.0"), (10, "1\\.0"), (11, "1\\.0"), (12, "0\\.0"))
             ),
         ),
     }
@@ -870,19 +885,19 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         if not all(re.search(pattern, manual_fixture_texts[fixture]) for pattern in base_patterns):
             failures.append(Mismatch(
                 label(RENDER_HEADER), label(fixture), "sprite_lane_bases",
-                "current v6 i32/f32 sprite bases", "missing",
+                "current v7 i32/f32 sprite bases", "missing",
             ))
         checks += 1
         if re.search(stride_pattern, manual_fixture_texts[fixture]) is None:
             failures.append(Mismatch(
                 label(RENDER_HEADER), label(fixture), "sprite_f32_stride",
-                "current v6 stride 8", "missing",
+                "current v7 stride 13", "missing",
             ))
         checks += 1
         if not all(re.search(pattern, manual_fixture_texts[fixture]) for pattern in uv_patterns):
             failures.append(Mismatch(
-                label(RENDER_HEADER), label(fixture), "sprite_uv_defaults",
-                "explicit 0,0,1,1 UVs for every sprite", "missing",
+                label(RENDER_HEADER), label(fixture), "sprite_source_transform_defaults",
+                "explicit full-source sentinel, unit scale, and zero rotation", "missing",
             ))
 
     parity_manifest_text = sources[RENDER_PARITY_MANIFEST]

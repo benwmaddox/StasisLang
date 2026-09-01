@@ -106,7 +106,6 @@ unsafe fn symbol<T>(library: &Library, name: &str) -> T {
 
 #[test]
 fn desktop_asset_load_stress_loads_bounded_fixture() {
-    std::env::set_var("STASIS_USE_SDL", "1");
     let repository = repository_root();
     let fixture = fixture_root(&repository);
     let manifest = load_project_asset_manifest(&fixture.path, AssetLimits::default())

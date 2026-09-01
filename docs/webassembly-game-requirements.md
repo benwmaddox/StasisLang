@@ -28,7 +28,7 @@ The main blockers are below:
 
 1. The current dev/runtime path is native and Windows-centric.
 2. The current AOT path emits native object files and native executables, not `.wasm`.
-3. The current runtime is `stasis_graphics` built as a native SDL/OpenGL shared library, not a browser host.
+3. The current runtime is `stasis_graphics` built as a native SDL_Renderer shared library, not a browser host.
 4. Asset loading, audio, timing, and file watching assume native process capabilities.
 
 The shortest credible path is not "port the Windows runner to the browser." The right path is:
@@ -65,8 +65,8 @@ The current runtime and execution path are explicitly native:
 
 - `crates/stasis_dynload/src/lib.rs` loads `stasis_graphics.dll` with `LoadLibraryW` and resolves symbols with `GetProcAddress`.
 - many `stasis_dynload` host calls explicitly return "only supported on windows" outside Windows.
-- `runtime/CMakeLists.txt` builds `stasis_graphics` as a native SDL3/OpenGL library.
-- `runtime/README.md` documents a native SDL3/OpenGL runtime.
+- `runtime/CMakeLists.txt` builds `stasis_graphics` as a native SDL3 renderer library.
+- `runtime/README.md` documents a native SDL3 renderer runtime.
 - `apps/stasis/src/lib.rs` implements `play` as a native loop that:
   - loads the graphics runtime
   - JIT-compiles game code
@@ -226,7 +226,7 @@ That is much more compatible with the existing Stasis design than replacing ever
 
 ## 4. Replace the native graphics runtime with a browser host runtime
 
-Today `stasis_graphics` is a native SDL/OpenGL library.
+Today `stasis_graphics` is a native SDL_Renderer library.
 
 For the web, Stasis needs a browser runtime layer that replaces these responsibilities:
 
@@ -587,7 +587,7 @@ These should not block first browser support:
 - native-equivalent hot swap
 - `play` parity in the browser
 - asset file watching in browser
-- exact SDL/OpenGL implementation parity
+- exact native SDL and WebGL2 semantic parity
 - browser-side AOT relinking of native artifacts
 - full offline/PWA story
 - multiplayer/networking

@@ -244,7 +244,6 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
         .current_dir(&tree.0)
         .env("STASIS_RUNTIME_LIBRARY_PATH", &runtime_path)
         .env("STASIS_RUNTIME_DLL_PATH", &runtime_path)
-        .env("STASIS_USE_SDL", "1")
         .env("STASIS_ENABLE_TEST_INPUT", "1")
         .env("STASIS_DESKTOP_FRAME_EVIDENCE", &frames_path)
         .stdout(Stdio::from(log_file.try_clone().expect("clone stdout log")))

@@ -10337,7 +10337,7 @@ public final class MainActivity extends Activity {
         String templateId = activeProject == null ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID
                 : activeProject.templateId;
         String expectedReady = "format=3\ntemplate_id=" + templateId
-                + "\nrenderer=gfx_cmd\nrenderer_schema=6\n";
+                + "\nrenderer=gfx_cmd\nrenderer_schema=7\n";
         if (readyFile.isFile() && expectedReady.equals(readTextFile(readyFile))) return;
         ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
                 ? current : loadBundledAssetSnapshot();

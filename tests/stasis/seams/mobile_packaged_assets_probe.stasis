@@ -13,8 +13,8 @@ function @effects(audio)@extern("stasis_jit_audio_play_effect") audio_play_effec
 
 extern function audio_play(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
 
-global gfx_cmd_i32: i32[35120];
-global gfx_cmd_f32: f32[126084];
+global gfx_cmd_i32: i32[67888];
+global gfx_cmd_f32: f32[146564];
 global gfx_cmd_u8: u8[65536];
 global seam_sprite_handle: i32;
 global seam_font_handle: i32;
@@ -78,47 +78,58 @@ function tick(): i32 {
 
 function render(): i32 {
     gfx_cmd_i32[0] = 1196967473;
-    gfx_cmd_i32[1] = 6;
+    gfx_cmd_i32[1] = 7;
     gfx_cmd_i32[2] = 3;
     gfx_cmd_i32[3] = 0;
     gfx_cmd_i32[4] = 1;
     gfx_cmd_i32[7] = 2;
     gfx_cmd_i32[9] = 7;
     gfx_cmd_i32[22] = 3;
+    gfx_cmd_i32[29] = 1;
     gfx_cmd_f32[0] = 0.04;
     gfx_cmd_f32[1] = 0.07;
     gfx_cmd_f32[2] = 0.12;
     gfx_cmd_f32[3] = 1.0;
 
     gfx_cmd_i32[32] = seam_sprite_handle;
-    gfx_cmd_i32[34] = 255;
+    gfx_cmd_i32[33] = 0 - 1;
+    gfx_cmd_i32[34] = 0;
     gfx_cmd_f32[80004] = 52.0;
     gfx_cmd_f32[80005] = 28.0;
     gfx_cmd_f32[80006] = 64.0;
     gfx_cmd_f32[80007] = 64.0;
     gfx_cmd_f32[80008] = 0.0;
     gfx_cmd_f32[80009] = 0.0;
-    gfx_cmd_f32[80010] = 1.0;
-    gfx_cmd_f32[80011] = 1.0;
+    gfx_cmd_f32[80010] = 0.0;
+    gfx_cmd_f32[80011] = 0.0;
+    gfx_cmd_f32[80012] = 32.0;
+    gfx_cmd_f32[80013] = 32.0;
+    gfx_cmd_f32[80014] = 1.0;
+    gfx_cmd_f32[80015] = 1.0;
+    gfx_cmd_f32[80016] = 0.0;
+
+    gfx_cmd_i32[18464] = 0;
+    gfx_cmd_i32[18465] = 1;
+    gfx_cmd_i32[18466] = 0 - 1;
 
     gfx_cmd_i32[12320] = seam_font_handle;
     gfx_cmd_i32[12321] = 0;
     gfx_cmd_i32[12322] = 6;
-    gfx_cmd_f32[112772] = 30.0;
-    gfx_cmd_f32[112773] = 112.0;
-    gfx_cmd_f32[112774] = 1.0;
-    gfx_cmd_f32[112775] = 0.8;
-    gfx_cmd_f32[112776] = 0.1;
-    gfx_cmd_f32[112777] = 1.0;
+    gfx_cmd_f32[133252] = 30.0;
+    gfx_cmd_f32[133253] = 112.0;
+    gfx_cmd_f32[133254] = 1.0;
+    gfx_cmd_f32[133255] = 0.8;
+    gfx_cmd_f32[133256] = 0.1;
+    gfx_cmd_f32[133257] = 1.0;
 
     gfx_cmd_i32[12323] = seam_font_handle;
     gfx_cmd_i32[12324] = 0 - seam_cached_handle;
-    gfx_cmd_f32[112778] = 175.0;
-    gfx_cmd_f32[112779] = 112.0;
-    gfx_cmd_f32[112780] = 0.1;
-    gfx_cmd_f32[112781] = 0.9;
-    gfx_cmd_f32[112782] = 1.0;
-    gfx_cmd_f32[112783] = 1.0;
+    gfx_cmd_f32[133258] = 175.0;
+    gfx_cmd_f32[133259] = 112.0;
+    gfx_cmd_f32[133260] = 0.1;
+    gfx_cmd_f32[133261] = 0.9;
+    gfx_cmd_f32[133262] = 1.0;
+    gfx_cmd_f32[133263] = 1.0;
 
     gfx_cmd_u8[0] = 66;
     gfx_cmd_u8[1] = 85;
@@ -126,9 +137,9 @@ function render(): i32 {
     gfx_cmd_u8[3] = 68;
     gfx_cmd_u8[4] = 76;
     gfx_cmd_u8[5] = 69;
-    gfx_cmd_i32[18464] = 32768;
-    gfx_cmd_i32[18465] = 49152;
-    gfx_cmd_i32[18466] = 49153;
+    gfx_cmd_i32[51232] = 32768;
+    gfx_cmd_i32[51233] = 49152;
+    gfx_cmd_i32[51234] = 49153;
     return 0;
 }
 

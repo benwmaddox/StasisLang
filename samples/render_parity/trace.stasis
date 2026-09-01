@@ -7,8 +7,8 @@ function @extern("stasis_jit_render_trace") native_render_trace(
     cmd_u8_len: i32
 ): i32;
 
-global cmd_i32: i32[35120];
-global cmd_f32: f32[126084];
+global cmd_i32: i32[67888];
+global cmd_f32: f32[146564];
 global cmd_u8: u8[65536];
 
 function main(): i32 {
@@ -29,10 +29,10 @@ function main(): i32 {
     build_parity_frame(cmd_i32, cmd_f32, cmd_u8, 3, 1, 2, 1, 1);
     append_parity_touch_marker(cmd_i32, cmd_f32, 0, 0, 0);
 
-    let no_touch_order: i32 = native_render_trace(cmd_i32, 35120, cmd_f32, 126084, cmd_u8, 65536);
+    let no_touch_order: i32 = native_render_trace(cmd_i32, 67888, cmd_f32, 146564, cmd_u8, 65536);
     cmd_i32[18464] = 16384;
     cmd_i32[18466] = 32768;
-    let sprite_first_order: i32 = native_render_trace(cmd_i32, 35120, cmd_f32, 126084, cmd_u8, 65536);
+    let sprite_first_order: i32 = native_render_trace(cmd_i32, 67888, cmd_f32, 146564, cmd_u8, 65536);
     if (no_touch_order == sprite_first_order) {
         return 0;
     }

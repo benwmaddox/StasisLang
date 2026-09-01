@@ -474,8 +474,9 @@ Enforce dependency and size budgets for published shells. Android should retain
 its Activity, verified extraction cache, and small adapters. iOS should retain
 its bundle entry and platform permission/network UI. Both should reuse the
 native AOT runtime and should not gain compiler, JIT, watcher, editor, or
-dynamic-loader dependencies. Web should retain browser-native Canvas2D,
-WebAudio, storage, and networking behavior.
+dynamic-loader dependencies. Web should retain its browser-native visible
+WebGL2 renderer plus WebAudio, storage, and networking behavior. Canvas2D is a
+resource-raster preparation dependency only, not a frame renderer.
 
 Share commands, layouts, fixtures, and policies; keep renderers and event loops
 platform-specific.
@@ -491,7 +492,7 @@ addressing the measured complexity:
 - Rewriting the hardcoded parser with a parser generator.
 - Replacing Android Java UI with a cross-platform UI framework as part of this
   maintainability effort.
-- Forcing Java, Canvas2D, and native C renderers or event loops to share an
+- Forcing Java, WebGL2, and native C renderers or event loops to share an
   implementation.
 - Moving compiler-specific packaging into `stasis_runner`.
 - Splitting `stasis_dynload` into multiple crates while also changing its ABI.

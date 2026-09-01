@@ -299,6 +299,17 @@ def validate_markers(markers: list[dict], expectations: dict) -> dict:
     stable = events.get(("stable", stable_frame))
     if stable is None:
         raise SeamError(f"Android shell did not reach stable frame {stable_frame}")
+    if "command_trace" in expectations or expectations.get("require_command_trace") is True:
+        stable_trace = stable.get("command_trace")
+        if (
+            not isinstance(stable_trace, int)
+            or isinstance(stable_trace, bool)
+            or stable_trace <= 0
+        ):
+            raise SeamError(
+                "Android stable-frame marker command_trace must be a positive integer: "
+                f"actual={stable_trace}"
+            )
     expected = {"rejected": 0, "validation": 0}
     for key in ("state_checksum", "command_trace"):
         if key in expectations:
@@ -760,14 +771,51 @@ def validate_touch_markers(markers: list[dict], expectations: dict) -> list[dict
     ):
         raise SeamError(f"Android touch probe ticks are not strictly ordered: {ticks}")
     final = observed[-1]
-    if (
-        "final_command_trace" in touch
-        and final.get("command_trace") != touch["final_command_trace"]
-    ):
-        raise SeamError(
-            "Android touch final command trace mismatch: "
-            f"expected={touch['final_command_trace']} actual={final.get('command_trace')}"
+    require_trace = (
+        "final_command_trace" in touch or touch.get("require_command_trace") is True
+    )
+    if require_trace:
+        final_trace = final.get("command_trace")
+        if (
+            not isinstance(final_trace, int)
+            or isinstance(final_trace, bool)
+            or final_trace <= 0
+        ):
+            raise SeamError(
+                "Android touch final command_trace must be a positive integer: "
+                f"actual={final_trace}"
+            )
+        if (
+            "final_command_trace" in touch
+            and final_trace != touch["final_command_trace"]
+        ):
+            raise SeamError(
+                "Android touch final command trace mismatch: "
+                f"expected={touch['final_command_trace']} actual={final_trace}"
+            )
+        stable = next(
+            (
+                item
+                for item in markers
+                if item.get("event") == "stable"
+                and item.get("frame") == expectations.get("stable_frame")
+            ),
+            None,
         )
+        unchanged = [
+            marker
+            for marker, expected in zip(observed, touch["probes"])
+            if expected.get("state_transitions") == 0
+        ]
+        baseline_traces = [item.get("command_trace") for item in unchanged]
+        if stable is not None:
+            baseline_traces.append(stable.get("command_trace"))
+        if any(final_trace == trace for trace in baseline_traces):
+            raise SeamError(
+                "Android touch final command_trace did not change from the "
+                "stable/outside state: "
+                f"final={final_trace} baseline={baseline_traces}"
+            )
     return observed
 
 

@@ -451,6 +451,36 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 {"stable_frame": 30, "state_checksum": 1210, "command_trace": 77},
             )
 
+    def test_stable_marker_requires_a_positive_command_trace_without_fixed_oracle(self):
+        for trace in (None, 0):
+            stable = {
+                "event": "stable",
+                "frame": 30,
+                "state_checksum": 1210,
+                "accepted": 30,
+                "presented": 30,
+                "rejected": 0,
+                "validation": 0,
+            }
+            if trace is not None:
+                stable["command_trace"] = trace
+            markers = [
+                {"event": "initialized", "frame": 0},
+                {"event": "frame", "frame": 1},
+                stable,
+            ]
+            with self.subTest(trace=trace), self.assertRaisesRegex(
+                seam.SeamError, "positive integer"
+            ):
+                seam.validate_markers(
+                    markers,
+                    {
+                        "stable_frame": 30,
+                        "state_checksum": 1210,
+                        "require_command_trace": True,
+                    },
+                )
+
     def test_it021_validates_packaged_identity_and_offline_audio(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -975,7 +1005,13 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         )
 
     def test_validates_ordered_android_touch_probes(self):
-        markers = []
+        markers = [
+            {
+                "event": "stable",
+                "frame": 30,
+                "command_trace": 71,
+            }
+        ]
         expected_probes = []
         kinds = [1, 2, 3, 4, 5]
         counts = [(1, 0, 0), (1, 0, 1), (2, 0, 1), (2, 1, 1), (2, 1, 2)]
@@ -1000,7 +1036,7 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 "x_n": 0.0 if index < 3 else 0.25 * (index - 2),
                 "y_n": 0.5 if index < 3 else 0.25 * (index - 2),
                 "state_checksum": 3215 if index == 5 else 0,
-                "command_trace": 77,
+                "command_trace": 71 if index < 3 else 70 + index,
             }
             if index == 5:
                 marker.update({"x": 259.183, "y": 518.118, "x_n": 0.72, "y_n": 0.7196})
@@ -1025,9 +1061,10 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         observed = seam.validate_touch_markers(
             markers,
             {
+                "stable_frame": 30,
                 "touch": {
                     "coordinate_tolerance": 16.0,
-                    "final_command_trace": 77,
+                    "require_command_trace": True,
                     "probes": expected_probes,
                 }
             },
@@ -1035,6 +1072,48 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         self.assertEqual(
             [item["probe_sequence"] for item in observed], [1, 2, 3, 4, 5]
         )
+
+        markers[-1]["command_trace"] = 71
+        with self.assertRaisesRegex(seam.SeamError, "stable/outside state"):
+            seam.validate_touch_markers(
+                markers,
+                {
+                    "stable_frame": 30,
+                    "touch": {
+                        "coordinate_tolerance": 16.0,
+                        "require_command_trace": True,
+                        "probes": expected_probes,
+                    },
+                },
+            )
+
+        markers[-1]["command_trace"] = 0
+        with self.assertRaisesRegex(seam.SeamError, "positive integer"):
+            seam.validate_touch_markers(
+                markers,
+                {
+                    "stable_frame": 30,
+                    "touch": {
+                        "coordinate_tolerance": 16.0,
+                        "require_command_trace": True,
+                        "probes": expected_probes,
+                    },
+                },
+            )
+
+        del markers[-1]["command_trace"]
+        with self.assertRaisesRegex(seam.SeamError, "positive integer"):
+            seam.validate_touch_markers(
+                markers,
+                {
+                    "stable_frame": 30,
+                    "touch": {
+                        "coordinate_tolerance": 16.0,
+                        "require_command_trace": True,
+                        "probes": expected_probes,
+                    },
+                },
+            )
 
     def test_rejects_touch_probes_on_the_same_tick(self):
         markers = [

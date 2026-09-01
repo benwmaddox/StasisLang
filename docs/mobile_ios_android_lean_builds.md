@@ -102,18 +102,16 @@ This is much smaller than trying to port the dev runner.
 
 ### 2. One runtime backend on mobile
 
-Use the SDL-only path on both Android and iOS.
+Use the SDL renderer on both Android and iOS.
 
 Reason:
 
-- The repo already has `STASIS_GRAPHICS_SDL_ONLY`.
-- Android already defaults away from the desktop OpenGL 2.1 + GLEW path.
-- Reusing that style on iOS is the smallest path because it avoids carrying a separate mobile renderer implementation.
+- The native runtime has one renderer implementation on every target.
+- Reusing it on iOS avoids carrying a separate mobile renderer implementation.
 
 Inference:
 
-- The right mobile move is not "port desktop OpenGL/GLEW to phones".
-- The right mobile move is "make the SDL-only runtime the mobile runtime".
+- The mobile shells link the same SDL renderer runtime as desktop.
 
 ### 3. No dynamic loading on mobile
 
@@ -208,7 +206,7 @@ Target outcome:
 
 Needed:
 
-- Treat `STASIS_GRAPHICS_SDL_ONLY` as the default mobile runtime path.
+- Link the canonical SDL renderer as the mobile runtime path.
 - Ensure the runtime can be linked into mobile app targets without the desktop runner.
 - Keep input/audio/asset APIs the same at the Stasis level.
 

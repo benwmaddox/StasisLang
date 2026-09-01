@@ -27,6 +27,22 @@ REQUIRED_METRICS = {
     "sprites",
     "text",
     "order",
+    "mixed_runs",
+    "texture_binds",
+    "submitted_quads",
+    "atlas_pages",
+    "atlas_page_creates",
+    "atlas_live_regions",
+    "atlas_upload_bytes",
+}
+ATLAS_METRICS = {
+    "mixed_runs",
+    "texture_binds",
+    "submitted_quads",
+    "atlas_pages",
+    "atlas_page_creates",
+    "atlas_live_regions",
+    "atlas_upload_bytes",
 }
 
 
@@ -60,6 +76,12 @@ def parse_report(log: str) -> dict[str, int]:
         raise ValueError("render performance total percentiles are invalid")
     if report["draw_calls_min"] <= 0 or report["draw_calls_max"] < report["draw_calls_min"]:
         raise ValueError("render performance draw-call bounds are invalid")
+    non_positive_atlas_metrics = sorted(key for key in ATLAS_METRICS if report[key] <= 0)
+    if non_positive_atlas_metrics:
+        raise ValueError(
+            "render performance atlas metrics must be positive: "
+            + ", ".join(non_positive_atlas_metrics)
+        )
     return report
 
 

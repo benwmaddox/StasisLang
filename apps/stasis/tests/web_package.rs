@@ -579,7 +579,6 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "PERF_ROLLING_CAPACITY",
         "performanceWorstTimes",
         "if (hud) {\n      recordPerformanceWorst(",
-        "RECT_BATCH_MIN",
         "getGpuBatcher",
         "drawArraysInstanced",
         "drawSprites",
@@ -588,7 +587,10 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "ATLAS_PAGE_MAX",
         "atlasPages",
         "atlasUploadBytes",
-        "Canvas2D + WebGL2",
+        "performanceBackend = \"WebGL2\"",
+        "const target = canvas;",
+        "target.getContext(\"webgl2\"",
+        "WebGL2 is required by the Stasis Web renderer",
         "\"host_i32\"",
         "\"host_f32\"",
         "audio_push_f32_interleaved",
@@ -599,13 +601,11 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "void enableWebAudio();",
         "function sdlScancode",
         "const spriteStride = GFX_SPRITE_STRIDE_F32;",
-        "const GFX_CMD_VERSION = 6;",
+        "const GFX_CMD_VERSION = 7;",
         "const GFX_ORDER_CLIP_PUSH = 5;",
-        "context.clip();",
-        "while (clipDepth > 0)",
-        "if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1)",
-        "context.drawImage(image, -width / 2, -height / 2, width, height);",
-        "context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight",
+        "batcher.setClip(clip);",
+        "drawPreparedText",
+        "deterministicMissingSprite",
     ] {
         assert!(
             runtime.contains(expected),
@@ -730,14 +730,14 @@ fn network_web_package_embeds_retained_nested_assets_only() {
 }
 
 #[test]
-fn minimal_pong_and_standard_reference_omit_audio_and_input() {
+fn pong_packages_the_single_webgl2_runtime_with_unused_features_stripped() {
     let workspace = repo_root().join("samples/pong_web_minimal");
     let relative_output = PathBuf::from(format!("build/web-package-test-{}", stamp()));
     let output = package(&workspace, &relative_output);
 
     let wasm = fs::read(output.join("game.wasm")).expect("minimal Pong Wasm");
     let runtime = fs::read_to_string(output.join("game.js"))
-        .expect("minimal Pong runtime")
+        .expect("Pong runtime")
         .replace("\r\n", "\n");
     let index = fs::read_to_string(output.join("index.html")).expect("minimal Pong index");
     for reachable in ["main", "tick", "render", "web_draw_rect"] {
@@ -762,8 +762,8 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
         assert!(!runtime.contains(omitted), "JS retained {omitted}");
     }
     assert!(!runtime.contains("AudioContext"));
-    assert!(!runtime.contains("keydown"));
-    assert!(!runtime.contains("pointerdown"));
+    assert!(runtime.contains("keydown"));
+    assert!(runtime.contains("pointerdown"));
     assert!(!index.contains("Enable sound"));
     for expected in [
         "dataset.wasmRenderMs",
@@ -777,19 +777,17 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
         "dataset.presentWaitMs",
         "PERF_ROLLING_CAPACITY",
         "if (hud)",
-        "recordWorst(",
+        "recordPerformanceWorst(",
+        "target.getContext(\"webgl2\"",
+        "const target = canvas;",
     ] {
         assert!(
             runtime.contains(expected),
-            "minimal runtime missing {expected}"
+            "single runtime missing {expected}"
         );
     }
     assert!(!runtime.contains("N/A"));
-    assert!(
-        runtime.len() < 12_000,
-        "minimal runtime was {} bytes",
-        runtime.len()
-    );
+    assert!(!runtime.contains("game_minimal"));
 
     let standard = repo_root().join("samples/pong_web_standard");
     let standard_runtime =
@@ -819,7 +817,7 @@ fn minimal_pong_and_standard_reference_omit_audio_and_input() {
         );
     }
 
-    fs::remove_dir_all(&output).expect("clean minimal Pong package");
+    fs::remove_dir_all(&output).expect("clean Pong package");
 }
 
 #[test]

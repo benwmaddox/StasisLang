@@ -3,6 +3,7 @@ package com.stasislang.workshop;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.opengl.GLES20;
 import android.util.SparseArray;
@@ -27,18 +28,20 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private final SparseArray<TextTexture> textTextures = new SparseArray<>();
     private final SparseArray<FontInfo> fonts = new SparseArray<>();
     private final ArrayList<DynamicTextTexture> dynamicTextTextures = new ArrayList<>();
+    private final ArrayList<AtlasPage> atlasPages = new ArrayList<>();
+    private final ArrayList<AtlasPage> dedicatedAtlasPages = new ArrayList<>();
     private final int[] deletedTexture = new int[1];
     private File manifest;
     private String projectRootPath;
-    private int fallbackTexture;
+    private WorkshopSpriteAtlas atlasLayout;
+    private SpriteTexture placeholderRegion;
+    private int maximumTextureSize;
     private long manifestStamp = Long.MIN_VALUE;
     private long nextManifestCheckNanos;
     private float rasterScale = 1.0f;
     private int densityGeneration = -1;
     private int surfaceGeneration;
     private int rendererGeneration;
-    private int fallbackSurfaceGeneration;
-    private int fallbackRendererGeneration;
     private String lastFailure;
     private String transitionReason = "none";
     private boolean reportRestoreTiming;
@@ -52,6 +55,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private long restoreDeadlineNanos;
     private boolean restoreDeferred;
     private int deferredResources;
+    private long atlasUploadBytes;
+    private int atlasPageCreates;
+    private int atlasLiveRegions;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -175,21 +181,21 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             long decodeStarted = System.nanoTime();
             Bitmap bitmap = decode(resolved, rasterScale);
             if (reportRestoreTiming) spriteDecodeNanos += System.nanoTime() - decodeStarted;
-            int uploaded;
+            SpriteTexture replacement;
             try {
                 long uploadStarted = System.nanoTime();
-                uploaded = upload(bitmap);
+                replacement = uploadSprite(bitmap, hash, manifestStamp,
+                        Math.max(1, resolved.optInt("width")),
+                        Math.max(1, resolved.optInt("height")));
                 if (reportRestoreTiming) spriteUploadNanos += System.nanoTime() - uploadStarted;
             } finally {
                 bitmap.recycle();
             }
             if (reportRestoreTiming) restoredSprites += 1;
-            SpriteTexture replacement = new SpriteTexture(uploaded, hash, manifestStamp,
-                    surfaceGeneration, rendererGeneration);
             textures.put(handle, replacement);
             spriteTexturesByHash.put(hash, replacement);
             releaseSpriteIfUnreferenced(cached);
-            return uploaded;
+            return replacement.texture;
         } catch (Exception error) {
             recordFailure("sprite", handle,
                     resolved == null ? "<unresolved>" : resolved.optString("path", "<unresolved>"),
@@ -201,6 +207,28 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             return fallbackTexture();
         }
+    }
+
+    @Override
+    public int logicalWidthFor(int handle) {
+        SpriteTexture cached = textures.get(handle);
+        return cached == null ? 1 : cached.logicalWidth;
+    }
+
+    @Override
+    public int logicalHeightFor(int handle) {
+        SpriteTexture cached = textures.get(handle);
+        return cached == null ? 1 : cached.logicalHeight;
+    }
+
+    @Override public float atlasU0For(int handle) { return spriteFor(handle).u0; }
+    @Override public float atlasV0For(int handle) { return spriteFor(handle).v0; }
+    @Override public float atlasU1For(int handle) { return spriteFor(handle).u1; }
+    @Override public float atlasV1For(int handle) { return spriteFor(handle).v1; }
+
+    private SpriteTexture spriteFor(int handle) {
+        SpriteTexture sprite = textures.get(handle);
+        return sprite == null ? ensurePlaceholder() : sprite;
     }
 
     @Override
@@ -217,19 +245,35 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
 
     @Override
     public int fallbackTexture() {
-        if (fallbackTexture == 0 || fallbackSurfaceGeneration != surfaceGeneration
-                || fallbackRendererGeneration != rendererGeneration) {
-            try {
-                fallbackTexture = createFallbackTexture();
-            } catch (IOException error) {
-                fallbackTexture = 0;
-                recordFailure("fallback", 0, "<procedural>", 2, 2, error);
-                return 0;
-            }
-            fallbackSurfaceGeneration = surfaceGeneration;
-            fallbackRendererGeneration = rendererGeneration;
+        return ensurePlaceholder().texture;
+    }
+
+    @Override
+    public int solidTextureFor(int preferredTexture) {
+        if (preferredTexture != 0 && pageForTexture(preferredTexture) != null) {
+            return preferredTexture;
         }
-        return fallbackTexture;
+        return ensurePlaceholder().texture;
+    }
+
+    @Override
+    public float solidUFor(int texture) {
+        AtlasPage page = pageForTexture(texture);
+        return page == null ? 0.5f : 1.5f / page.width;
+    }
+
+    @Override
+    public float solidVFor(int texture) {
+        AtlasPage page = pageForTexture(texture);
+        return page == null ? 0.5f : 1.5f / page.height;
+    }
+
+    @Override
+    public String atlasMetrics() {
+        return "atlas_pages=" + (atlasPages.size() + dedicatedAtlasPages.size())
+                + " atlas_page_creates=" + atlasPageCreates
+                + " atlas_live_regions=" + atlasLiveRegions
+                + " atlas_upload_bytes=" + atlasUploadBytes;
     }
 
     @Override
@@ -261,7 +305,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             new Canvas(bitmap).drawText(text, 0.0f, -metrics.ascent, paint);
             int texture;
             try {
-                texture = upload(bitmap);
+                texture = uploadTextTexture(bitmap);
             } finally {
                 bitmap.recycle();
             }
@@ -349,7 +393,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         new Canvas(bitmap).drawText(text, 0.0f, -metrics.ascent, paint);
         int texture;
         try {
-            texture = upload(bitmap);
+            texture = uploadTextTexture(bitmap);
         } catch (IOException error) {
             throw new IllegalStateException(error);
         } finally {
@@ -378,10 +422,17 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
 
     private void clearTextures(boolean deleteGpuHandles) {
         if (deleteGpuHandles) {
-            for (SpriteTexture texture : spriteTexturesByHash.values()) {
-                deleteTexture(texture.texture);
-            }
+            for (AtlasPage page : atlasPages) deleteTexture(page.texture);
+            for (AtlasPage page : dedicatedAtlasPages) deleteTexture(page.texture);
         }
+        atlasPages.clear();
+        dedicatedAtlasPages.clear();
+        atlasLayout = null;
+        placeholderRegion = null;
+        maximumTextureSize = 0;
+        atlasUploadBytes = 0L;
+        atlasPageCreates = 0;
+        atlasLiveRegions = 0;
         textures.clear();
         spriteTexturesByHash.clear();
         for (int index = 0; index < textTextures.size(); index++) {
@@ -393,10 +444,6 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
         dynamicTextTextures.clear();
         fonts.clear();
-        if (fallbackTexture != 0 && deleteGpuHandles) deleteTexture(fallbackTexture);
-        fallbackTexture = 0;
-        fallbackSurfaceGeneration = 0;
-        fallbackRendererGeneration = 0;
     }
 
     private void recordFailure(String stage, int handle, String path,
@@ -420,7 +467,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             if (textures.valueAt(index) == candidate) return;
         }
         if (spriteTexturesByHash.remove(candidate.contentHash, candidate)) {
-            deleteTexture(candidate.texture);
+            // Atlas storage is generation-owned. Regions are intentionally not reclaimed
+            // mid-generation, so replay never observes a partially reused allocation.
         }
     }
 
@@ -476,7 +524,142 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         return bitmap;
     }
 
-    private static int upload(Bitmap bitmap) throws IOException {
+    private SpriteTexture uploadSprite(Bitmap bitmap, String hash, long checkedStamp,
+            int logicalWidth, int logicalHeight) throws IOException {
+        ensureAtlas();
+        WorkshopSpriteAtlas.Region region = atlasLayout.allocate(
+                bitmap.getWidth(), bitmap.getHeight());
+        AtlasPage page;
+        int x;
+        int y;
+        if (region != null) {
+            while (atlasPages.size() <= region.page) atlasPages.add(createAtlasPage(
+                    atlasLayout.pageSize(), atlasLayout.pageSize()));
+            page = atlasPages.get(region.page);
+            x = region.x;
+            y = region.y;
+        } else {
+            int width = bitmap.getWidth() + WorkshopSpriteAtlas.PADDING * 2;
+            int height = bitmap.getHeight() + WorkshopSpriteAtlas.PADDING * 2 + 4;
+            if (width > maximumTextureSize || height > maximumTextureSize) {
+                throw new IOException("sprite dimensions exceed the GLES atlas limit");
+            }
+            page = createAtlasPage(width, height);
+            dedicatedAtlasPages.add(page);
+            x = WorkshopSpriteAtlas.PADDING;
+            y = WorkshopSpriteAtlas.PADDING + 4;
+        }
+        Bitmap padded = extrude(bitmap);
+        try {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, page.texture);
+            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
+            android.opengl.GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0,
+                    x - WorkshopSpriteAtlas.PADDING,
+                    y - WorkshopSpriteAtlas.PADDING, padded);
+            int error = GLES20.glGetError();
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+            if (error != GLES20.GL_NO_ERROR) {
+                throw new IOException("Android atlas upload failed with GL error " + error);
+            }
+            atlasUploadBytes += (long)padded.getWidth() * padded.getHeight() * 4L;
+            atlasLiveRegions += 1;
+        } finally {
+            padded.recycle();
+        }
+        return new SpriteTexture(page.texture, hash, checkedStamp, logicalWidth, logicalHeight,
+                (float)x / page.width, (float)y / page.height,
+                (float)(x + bitmap.getWidth()) / page.width,
+                (float)(y + bitmap.getHeight()) / page.height,
+                surfaceGeneration, rendererGeneration);
+    }
+
+    private void ensureAtlas() throws IOException {
+        if (atlasLayout != null) return;
+        int[] maximum = new int[1];
+        GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maximum, 0);
+        maximumTextureSize = Math.max(WorkshopSpriteAtlas.MIN_PAGE_SIZE, maximum[0]);
+        atlasLayout = new WorkshopSpriteAtlas(maximumTextureSize);
+        atlasPages.add(createAtlasPage(atlasLayout.pageSize(), atlasLayout.pageSize()));
+    }
+
+    private SpriteTexture ensurePlaceholder() {
+        if (placeholderRegion != null) return placeholderRegion;
+        try {
+            ensureAtlas();
+            AtlasPage page = atlasPages.get(0);
+            placeholderRegion = new SpriteTexture(page.texture, "<placeholder>", manifestStamp,
+                    2, 2, 4.0f / page.width, 1.0f / page.height,
+                    6.0f / page.width, 3.0f / page.height,
+                    surfaceGeneration, rendererGeneration);
+        } catch (IOException error) {
+            recordFailure("placeholder", 0, "<atlas>", 2, 2, error);
+            placeholderRegion = new SpriteTexture(0, "<unavailable>", manifestStamp,
+                    1, 1, 0, 0, 1, 1, surfaceGeneration, rendererGeneration);
+        }
+        return placeholderRegion;
+    }
+
+    private AtlasPage createAtlasPage(int width, int height) throws IOException {
+        int[] names = new int[1];
+        GLES20.glGenTextures(1, names, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, names[0]);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, width, height, 0,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+        Bitmap header = Bitmap.createBitmap(8, 4, Bitmap.Config.ARGB_8888);
+        for (int y = 0; y < 3; y += 1) {
+            for (int x = 0; x < 3; x += 1) header.setPixel(x, y, 0xffffffff);
+        }
+        for (int y = 0; y < 4; y += 1) {
+            int sourceY = Math.max(0, Math.min(1, y - 1));
+            for (int x = 3; x < 7; x += 1) {
+                int sourceX = Math.max(0, Math.min(1, x - 4));
+                header.setPixel(x, y, ((sourceX + sourceY) & 1) == 0
+                        ? 0xffff00ff : 0xff232323);
+            }
+        }
+        android.opengl.GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, header);
+        header.recycle();
+        int error = GLES20.glGetError();
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        if (!StasisPreviewRenderer.textureCreationSucceeded(names[0], error)) {
+            if (names[0] != 0) GLES20.glDeleteTextures(1, names, 0);
+            throw new IOException("atlas page creation failed with GL error " + error);
+        }
+        atlasPageCreates += 1;
+        return new AtlasPage(names[0], width, height);
+    }
+
+    private static Bitmap extrude(Bitmap source) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        Bitmap padded = Bitmap.createBitmap(width + 2, height + 2, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(padded);
+        canvas.drawBitmap(source, 1, 1, null);
+        canvas.drawBitmap(source, new Rect(0, 0, width, 1), new Rect(1, 0, width + 1, 1), null);
+        canvas.drawBitmap(source, new Rect(0, height - 1, width, height),
+                new Rect(1, height + 1, width + 1, height + 2), null);
+        canvas.drawBitmap(source, new Rect(0, 0, 1, height), new Rect(0, 1, 1, height + 1), null);
+        canvas.drawBitmap(source, new Rect(width - 1, 0, width, height),
+                new Rect(width + 1, 1, width + 2, height + 1), null);
+        padded.setPixel(0, 0, source.getPixel(0, 0));
+        padded.setPixel(width + 1, 0, source.getPixel(width - 1, 0));
+        padded.setPixel(0, height + 1, source.getPixel(0, height - 1));
+        padded.setPixel(width + 1, height + 1, source.getPixel(width - 1, height - 1));
+        return padded;
+    }
+
+    private AtlasPage pageForTexture(int texture) {
+        for (AtlasPage page : atlasPages) if (page.texture == texture) return page;
+        for (AtlasPage page : dedicatedAtlasPages) if (page.texture == texture) return page;
+        return null;
+    }
+
+    private static int uploadTextTexture(Bitmap bitmap) throws IOException {
         int[] names = new int[1];
         GLES20.glGenTextures(1, names, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, names[0]);
@@ -495,46 +678,44 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         return names[0];
     }
 
-    private static int createFallbackTexture() throws IOException {
-        ByteBuffer pixels = ByteBuffer.allocateDirect(16);
-        pixels.put(new byte[]{
-                (byte)255, 0, (byte)255, (byte)255,
-                35, 35, 35, (byte)255,
-                35, 35, 35, (byte)255,
-                (byte)255, 0, (byte)255, (byte)255});
-        pixels.flip();
-        int[] names = new int[1];
-        GLES20.glGenTextures(1, names, 0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, names[0]);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 2, 2, 0,
-                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
-        int error = GLES20.glGetError();
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        if (!StasisPreviewRenderer.textureCreationSucceeded(names[0], error)) {
-            if (names[0] != 0) GLES20.glDeleteTextures(1, names, 0);
-            throw new IOException("fallback texture upload failed with GL error " + error);
+    private static final class AtlasPage {
+        final int texture;
+        final int width;
+        final int height;
+        AtlasPage(int texture, int width, int height) {
+            this.texture = texture;
+            this.width = width;
+            this.height = height;
         }
-        return names[0];
     }
 
     private static final class SpriteTexture {
         final int texture;
         final String contentHash;
         long checkedManifestStamp;
+        final int logicalWidth;
+        final int logicalHeight;
+        final float u0;
+        final float v0;
+        final float u1;
+        final float v1;
 
         final int surfaceGeneration;
         final int rendererGeneration;
 
         SpriteTexture(int texture, String contentHash, long checkedManifestStamp,
+                int logicalWidth, int logicalHeight,
+                float u0, float v0, float u1, float v1,
                 int surfaceGeneration, int rendererGeneration) {
             this.texture = texture;
             this.contentHash = contentHash;
             this.checkedManifestStamp = checkedManifestStamp;
+            this.logicalWidth = logicalWidth;
+            this.logicalHeight = logicalHeight;
+            this.u0 = u0;
+            this.v0 = v0;
+            this.u1 = u1;
+            this.v1 = v1;
             this.surfaceGeneration = surfaceGeneration;
             this.rendererGeneration = rendererGeneration;
         }

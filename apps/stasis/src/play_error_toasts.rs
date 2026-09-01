@@ -13,7 +13,7 @@ pub const MAX_VISIBLE_TOASTS: usize = 5;
 pub const MAX_MESSAGE_BYTES: usize = 160;
 
 const GFX_CMD_MAGIC: i32 = 0x4758_4631;
-const GFX_CMD_VERSION: i32 = 6;
+const GFX_CMD_VERSION: i32 = 7;
 const GFX_I_VERSION: usize = 1;
 const GFX_I_LINE_COUNT: usize = 3;
 const GFX_I_SPRITE_COUNT: usize = 4;
@@ -22,10 +22,10 @@ const GFX_I_TEXT_BYTES_USED: usize = 9;
 const GFX_I_LOGICAL_W: usize = 10;
 const GFX_I_ORDER_COUNT: usize = 22;
 const GFX_I_RECT_COUNT: usize = 24;
-const GFX_I_ORDER_BASE: usize = 18_464;
+const GFX_I_ORDER_BASE: usize = 51_232;
 const GFX_I_TEXT_BASE: usize = 12_320;
 const GFX_F_RECT_REVERSE_BASE: usize = 79_996;
-const GFX_F_TEXT_BASE: usize = 112_772;
+const GFX_F_TEXT_BASE: usize = 133_252;
 const GFX_MAX_GEOMETRY: usize = 10_000;
 const GFX_MAX_ORDER: usize = 16_656;
 const GFX_MAX_TEXT: usize = 2_048;
@@ -341,7 +341,7 @@ mod tests {
     use super::*;
 
     fn buffers() -> (Vec<i32>, Vec<f32>, Vec<u8>) {
-        let mut i32s = vec![0; 35_120];
+        let mut i32s = vec![0; 67_888];
         i32s[0] = GFX_CMD_MAGIC;
         i32s[1] = GFX_CMD_VERSION;
         i32s[2] = 2;
@@ -349,7 +349,7 @@ mod tests {
         i32s[GFX_I_ORDER_COUNT] = 1;
         i32s[GFX_I_ORDER_BASE] = 16_384 + 0;
         i32s[GFX_I_LOGICAL_W] = 640;
-        (i32s, vec![0.0; 126_084], vec![0; 65_536])
+        (i32s, vec![0.0; 146_564], vec![0; 65_536])
     }
 
     #[test]
