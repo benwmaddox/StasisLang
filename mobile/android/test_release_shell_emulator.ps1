@@ -76,6 +76,11 @@ $seams = @(
         Project = "samples/android_packaged_assets_seam"
         Expectations = "samples/android_asset_rejection_seam/android_seam_expectations.json"
         Output = "android_asset_rejection"
+    },
+    @{
+        TestId = "IT-023"
+        Project = "samples/android_storage_seam"
+        Output = "android_storage_persistence"
     }
 )
 

@@ -451,6 +451,79 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 {"stable_frame": 30, "state_checksum": 1210, "command_trace": 77},
             )
 
+    def test_it023_storage_path_and_marker_validation(self):
+        storage = {
+            "exact_value": 230023,
+            "corrupt_fallback": -2303,
+            "unrelated_scope_fallback": -2311,
+            "unrelated_key_fallback": -2312,
+        }
+        marker = {
+            "storage_phase": 2,
+            "storage_loaded_value": 230023,
+            "storage_unrelated_scope": -2311,
+            "storage_unrelated_key": -2312,
+            "storage_traversal_rejected": 1,
+            "storage_checksum": 2230023,
+        }
+        self.assertEqual(
+            "files/it023_target/durable_value.i32",
+            seam.validate_storage_relative_path("files/it023_target/durable_value.i32"),
+        )
+        self.assertEqual(
+            2, seam.validate_storage_marker(marker, storage, 2)["storage_phase"]
+        )
+        for invalid in (
+            "../escape.i32",
+            "files/../escape.i32",
+            "files/a/b.txt",
+            "/data/local/tmp/x.i32",
+        ):
+            with self.subTest(path=invalid), self.assertRaisesRegex(
+                seam.SeamError, "invalid app-private"
+            ):
+                seam.validate_storage_relative_path(invalid)
+        marker["storage_loaded_value"] = -2303
+        with self.assertRaisesRegex(seam.SeamError, "storage_loaded_value"):
+            seam.validate_storage_marker(marker, storage, 2)
+
+    def test_it023_requires_new_pid_and_exact_corruption_bytes(self):
+        self.assertEqual("202", seam.validate_fresh_process_pid("101", "202"))
+        with self.assertRaisesRegex(seam.SeamError, "fresh process PID"):
+            seam.validate_fresh_process_pid("101", "101")
+        self.assertEqual(
+            "corrupt\n",
+            seam.validate_storage_file_text("corrupt\n", "corrupt\n", "corrupt target"),
+        )
+        with self.assertRaisesRegex(seam.SeamError, "corrupt target storage bytes"):
+            seam.validate_storage_file_text("230023\n", "corrupt\n", "corrupt target")
+        self.assertIsNone(
+            seam.validate_storage_write_result(
+                "files/it023_target/durable_value.i32",
+                0,
+                b"corrupt\n",
+                b"",
+                b"corrupt\n",
+            )
+        )
+        with self.assertRaisesRegex(seam.SeamError, "storage write failed"):
+            seam.validate_storage_write_result(
+                "files/it023_target/durable_value.i32",
+                1,
+                b"",
+                b"permission denied",
+                b"corrupt\n",
+            )
+        self.assertIsNone(
+            seam.require_storage_file_absent(
+                "files/escape.i32", 1, "", "cat: No such file or directory"
+            )
+        )
+        with self.assertRaisesRegex(seam.SeamError, "traversal escaped"):
+            seam.require_storage_file_absent("files/escape.i32", 0, "9\n", "")
+        with self.assertRaisesRegex(seam.SeamError, "escape probe failed"):
+            seam.require_storage_file_absent("files/escape.i32", 1, "", "permission denied")
+
     def test_stable_marker_requires_a_positive_command_trace_without_fixed_oracle(self):
         for trace in (None, 0):
             stable = {

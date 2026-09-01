@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       release_shell_test_id:
-        description: "Optional release-shell seam test ID (for example IT-022)"
+        description: "Optional release-shell seam test ID (for example IT-023)"
         required: false
         default: ""
         type: string
@@ -17,7 +17,7 @@ concurrency:
 jobs:
   release-shell-seams:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "2"
@@ -130,6 +130,14 @@ jobs:
         with:
           name: android-asset-rejection-seam
           path: artifacts/android_asset_rejection/e
+          if-no-files-found: warn
+
+      - name: Upload Android storage-persistence evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-storage-persistence-seam
+          path: artifacts/android_storage_persistence/e
           if-no-files-found: warn
 
   workshop-seams:
