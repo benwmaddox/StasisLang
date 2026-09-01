@@ -6274,10 +6274,9 @@ function render(): void {{ {draws} return; }}
             "stasis_gfx_set_next_sprite_atlas_policy_v3",
             "stasis_asset_request_sprite_with_policy_v3",
             "task->atlas_policy",
-            "stasis_sprite_atlas_realized_group_compatible",
             "stasis_sprite_atlas_page_size_v3",
             "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
-            "if (page->dedicated || page->group_id != group_id) continue;",
+            "if (!page->texture || page->dedicated || page->group_id != group_id) continue;",
             "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
             "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
         ] {
