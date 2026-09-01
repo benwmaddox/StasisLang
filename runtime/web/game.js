@@ -3020,7 +3020,6 @@
     pointer.down = true;
     pointer.wentDown = true;
     canvas.setPointerCapture(event.pointerId);
-    canvas.focus();
     void applyFullscreenGesture();
   });
   canvas.addEventListener("pointerleave", () => { pointer.hover = false; });
