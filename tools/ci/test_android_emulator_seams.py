@@ -221,6 +221,15 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("[int]$PerSeamTimeoutSeconds = 660", self.emulator_script)
         self.assertLess(6 * 660 + 900, 90 * 60)
 
+    def test_release_wrapper_prefers_real_gradle_batch_over_path_shim(self):
+        chocolatey_lookup = self.release_script.index("$env:ChocolateyInstall")
+        batch_lookup = self.release_script.index("-Filter gradle.bat")
+        path_lookup = self.release_script.index("Get-Command gradle.bat")
+        shim_fallback = self.release_script.index("Get-Command gradle -ErrorAction")
+        self.assertLess(chocolatey_lookup, batch_lookup)
+        self.assertLess(batch_lookup, path_lookup)
+        self.assertLess(path_lookup, shim_fallback)
+
     def test_release_wrapper_defaults_to_all_seams_in_stable_order(self):
         self.assertIn('[string]$TestId = ""', self.emulator_script)
         self.assertIn('$selectedSeams = if ($TestId)', self.emulator_script)
