@@ -5872,8 +5872,25 @@ function render(): void {{ {draws} return; }}
             .find("SDL_RestoreWindow(g_window);")
             .expect("an explicit size should restore a maximized or minimized window");
         let resize = resize_source
-            .find("SDL_SetWindowSize(g_window, width, height);")
-            .expect("an explicit size should resize the restored window");
+            .find("stasis_apply_x11_window_scale();")
+            .expect("an explicit size should apply the platform-owned window scale");
+
+        let scaled_resize_start = graphics_source
+            .find("static void stasis_apply_x11_window_scale(void) {")
+            .expect("X11 window scale helper");
+        let scaled_resize_end = graphics_source[scaled_resize_start..]
+            .find("static void stasis_query_available_presentation(")
+            .expect("X11 window scale helper boundary")
+            + scaled_resize_start;
+        let scaled_resize_source = &graphics_source[scaled_resize_start..scaled_resize_end];
+        assert!(
+            scaled_resize_source.contains("SDL_SetWindowSize(")
+                && scaled_resize_source
+                    .contains("stasis_display_scaled_window_extent(g_window_width, scale)")
+                && scaled_resize_source
+                    .contains("stasis_display_scaled_window_extent(g_window_height, scale)"),
+            "platform-owned resize must apply bounded scaled extents to the physical window"
+        );
 
         assert!(
             restore < resize
@@ -6255,8 +6272,8 @@ function render(): void {{ {draws} return; }}
             );
         }
         let scaled_extent = STASIS_GRAPHICS_SOURCE
-            .find("const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);")
-            .expect("scaled sprite extent");
+            .find("const int raster_w = stasis_current_scaled_extent(max_w);")
+            .expect("current-density sprite extent");
         let bounds_check = STASIS_GRAPHICS_SOURCE
             .find("sprite_source_within_limits(path, raster_w, raster_h)")
             .expect("scaled sprite bounds check");
