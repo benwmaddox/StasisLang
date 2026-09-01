@@ -22,9 +22,7 @@ use stasis::{
     run_with_real_backend, write_mobile_aot_bindings_source_with_profile_and_assets,
     PlayProfileConfig, PlayReplayConfig, RunnerConfig, StasisTestRunSession,
 };
-use stasis_assets::{
-    load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
-};
+use stasis_assets::{prepare_asset_bundle, DEFAULT_ASSET_MANIFEST_PATH};
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_compiler::compiler::{source_function_items, source_struct_items};
@@ -2318,6 +2316,7 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stasis_assets::{load_project_asset_manifest, AssetLimits};
     use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
