@@ -6142,10 +6142,10 @@ function render(): void {{ {draws} return; }}
             );
         }
         assert!(
-            runtime_cmake.contains(
-                "Build the canonical SDL_Renderer runtime (disable only for legacy GL conformance)"
-            ) && runtime_cmake.contains("    ON\n)"),
-            "shipping runtime should default to the canonical SDL backend"
+            runtime_cmake.contains("Build pinned SDL3 and SDL3_image into the graphics runtime")
+                && !runtime_cmake.contains("GLEW")
+                && !runtime_cmake.contains("OpenGL"),
+            "native runtime configuration should expose only the canonical SDL backend"
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("stasis_render_validate(cmd_i32, cmd_f32)")

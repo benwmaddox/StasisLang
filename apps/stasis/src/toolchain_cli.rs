@@ -7313,22 +7313,6 @@ mod tests {
     }
 
     #[test]
-    fn lean_web_runtime_defers_window_mailbox_games_to_full_host() {
-        let mut process = WasmProcess::new();
-        process.set_required_emit_roots(&[
-            "main".to_string(),
-            "tick".to_string(),
-            "render".to_string(),
-        ]);
-        process.upsert_file(
-            "window.stasis",
-            "global host_req_seq: i32; global host_req_flags: i32; global host_req_window_w_px: i32; global host_req_window_h_px: i32; function main(): i32 { host_req_flags = 1; host_req_window_w_px = 640; host_req_window_h_px = 360; host_req_seq += 1; return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
-        );
-        process.compile().expect("compile window mailbox game");
-        assert!(lean_web_runtime(&process).is_none());
-    }
-
-    #[test]
     fn sprite_asset_tasks_survive_audio_feature_stripping() {
         let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", false);
         assert!(runtime.contains("const assetTasks = new Map()"));

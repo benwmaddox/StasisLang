@@ -1776,16 +1776,10 @@ static int stasis_audio_ensure_init(void) {
 
 /* Line batching for efficient rendering */
 #define MAX_LINES 10000
-typedef struct {
-    float x, y;
-    float r, g, b, a;
-} LineVertex;
-static LineVertex g_sdl_line_vertices[MAX_LINES * 2];
 static struct {
     float x1, y1, x2, y2;
     float r, g, b, a;
 } g_lines[MAX_LINES];
-static LineVertex g_line_vertices[MAX_LINES * 2];
 static int g_line_count = 0;
 static int g_debug_frame_counter = 0;
 
@@ -2052,42 +2046,6 @@ STASIS_EXPORT void stasis_gfx_notify_file_changed(const char* path) {
 #endif
 }
 
-static char* read_text_file(const char* path) {
-    ensure_asset_base();
-
-    FILE* f = fopen(path, "rb");
-    char resolved[1024];
-
-    if (!f) {
-        if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
-            fprintf(stderr, "read_text_file: failed %s\n", path);
-            return NULL;
-        }
-        f = fopen(resolved, "rb");
-        if (!f) {
-            fprintf(stderr, "read_text_file: failed %s (also %s)\n", path, resolved);
-            return NULL;
-        }
-    }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len <= 0) {
-        fclose(f);
-        return NULL;
-    }
-    char* data = (char*)malloc((size_t)len + 1);
-    if (!data) {
-        fclose(f);
-        return NULL;
-    }
-    size_t read = fread(data, 1, (size_t)len, f);
-    fclose(f);
-    data[read] = 0;
-    return data;
-}
-
-
 static uint64_t get_file_mtime(const char* path) {
     char resolved[1024];
     const char* probe = path;
@@ -2229,161 +2187,6 @@ static int ensure_sprite_table_capacity(int min_capacity) {
     return 1;
 }
 
-
-static void blend_px_premult(unsigned char* dst, int sr, int sg, int sb, int sa) {
-    int inv = 255 - sa;
-    dst[0] = (unsigned char)(sr + (dst[0] * inv) / 255);
-    dst[1] = (unsigned char)(sg + (dst[1] * inv) / 255);
-    dst[2] = (unsigned char)(sb + (dst[2] * inv) / 255);
-    dst[3] = (unsigned char)(sa + (dst[3] * inv) / 255);
-}
-
-static void draw_rect_rgba(unsigned char* buf, int w, int h, int x, int y, int rw, int rh, float r, float g, float b, float a) {
-    if (!buf) return;
-    if (rw <= 0 || rh <= 0) return;
-    int x0 = x;
-    int y0 = y;
-    int x1 = x + rw;
-    int y1 = y + rh;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > w) x1 = w;
-    if (y1 > h) y1 = h;
-
-    int sa = (int)(a * 255.0f + 0.5f);
-    if (sa <= 0) return;
-    if (sa > 255) sa = 255;
-    int sr = (int)(r * (float)sa + 0.5f);
-    int sg = (int)(g * (float)sa + 0.5f);
-    int sb = (int)(b * (float)sa + 0.5f);
-    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
-    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
-    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
-
-    for (int py = y0; py < y1; py++) {
-        unsigned char* row = buf + (py * w * 4);
-        for (int px = x0; px < x1; px++) {
-            blend_px_premult(row + px * 4, sr, sg, sb, sa);
-        }
-    }
-}
-
-static void draw_circle_rgba(unsigned char* buf, int w, int h, float cx, float cy, float radius, float r, float g, float b, float a) {
-    if (!buf) return;
-    if (radius <= 0.0f) return;
-
-    int sa = (int)(a * 255.0f + 0.5f);
-    if (sa <= 0) return;
-    if (sa > 255) sa = 255;
-    int sr = (int)(r * (float)sa + 0.5f);
-    int sg = (int)(g * (float)sa + 0.5f);
-    int sb = (int)(b * (float)sa + 0.5f);
-    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
-    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
-    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
-
-    float rr = radius * radius;
-    int x0 = (int)floorf(cx - radius - 1.0f);
-    int y0 = (int)floorf(cy - radius - 1.0f);
-    int x1 = (int)ceilf(cx + radius + 1.0f);
-    int y1 = (int)ceilf(cy + radius + 1.0f);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > w) x1 = w;
-    if (y1 > h) y1 = h;
-
-    for (int py = y0; py < y1; py++) {
-        unsigned char* row = buf + (py * w * 4);
-        for (int px = x0; px < x1; px++) {
-            float fx = (float)px + 0.5f;
-            float fy = (float)py + 0.5f;
-            float dx = fx - cx;
-            float dy = fy - cy;
-            if (dx * dx + dy * dy <= rr) {
-                blend_px_premult(row + px * 4, sr, sg, sb, sa);
-            }
-        }
-    }
-}
-
-static float dist2_point_segment(float px, float py, float ax, float ay, float bx, float by) {
-    float abx = bx - ax;
-    float aby = by - ay;
-    float apx = px - ax;
-    float apy = py - ay;
-    float ab2 = abx * abx + aby * aby;
-    float t = 0.0f;
-    if (ab2 > 0.0f) {
-        t = (apx * abx + apy * aby) / ab2;
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
-    }
-    float cx = ax + abx * t;
-    float cy = ay + aby * t;
-    float dx = px - cx;
-    float dy = py - cy;
-    return dx * dx + dy * dy;
-}
-
-static void draw_line_rgba(unsigned char* buf, int w, int h, float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a) {
-    if (!buf) return;
-    if (thickness <= 0.0f) return;
-
-    int sa = (int)(a * 255.0f + 0.5f);
-    if (sa <= 0) return;
-    if (sa > 255) sa = 255;
-    int sr = (int)(r * (float)sa + 0.5f);
-    int sg = (int)(g * (float)sa + 0.5f);
-    int sb = (int)(b * (float)sa + 0.5f);
-    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
-    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
-    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
-
-    float rad = thickness * 0.5f;
-    float rr = rad * rad;
-    float minx = fminf(x1, x2) - rad - 1.0f;
-    float miny = fminf(y1, y2) - rad - 1.0f;
-    float maxx = fmaxf(x1, x2) + rad + 1.0f;
-    float maxy = fmaxf(y1, y2) + rad + 1.0f;
-    int ix0 = (int)floorf(minx);
-    int iy0 = (int)floorf(miny);
-    int ix1 = (int)ceilf(maxx);
-    int iy1 = (int)ceilf(maxy);
-    if (ix0 < 0) ix0 = 0;
-    if (iy0 < 0) iy0 = 0;
-    if (ix1 > w) ix1 = w;
-    if (iy1 > h) iy1 = h;
-
-    for (int py = iy0; py < iy1; py++) {
-        unsigned char* row = buf + (py * w * 4);
-        for (int px = ix0; px < ix1; px++) {
-            float fx = (float)px + 0.5f;
-            float fy = (float)py + 0.5f;
-            float d2 = dist2_point_segment(fx, fy, x1, y1, x2, y2);
-            if (d2 <= rr) {
-                blend_px_premult(row + px * 4, sr, sg, sb, sa);
-            }
-        }
-    }
-}
-
-static void downsample_2x(unsigned char* out_buf, int out_w, int out_h, const unsigned char* in_buf, int in_w, int in_h) {
-    for (int y = 0; y < out_h; y++) {
-        for (int x = 0; x < out_w; x++) {
-            int sx = x * 2;
-            int sy = y * 2;
-            const unsigned char* p0 = in_buf + ((sy + 0) * in_w + (sx + 0)) * 4;
-            const unsigned char* p1 = in_buf + ((sy + 0) * in_w + (sx + 1)) * 4;
-            const unsigned char* p2 = in_buf + ((sy + 1) * in_w + (sx + 0)) * 4;
-            const unsigned char* p3 = in_buf + ((sy + 1) * in_w + (sx + 1)) * 4;
-            unsigned char* o = out_buf + (y * out_w + x) * 4;
-            o[0] = (unsigned char)(((int)p0[0] + (int)p1[0] + (int)p2[0] + (int)p3[0]) / 4);
-            o[1] = (unsigned char)(((int)p0[1] + (int)p1[1] + (int)p2[1] + (int)p3[1]) / 4);
-            o[2] = (unsigned char)(((int)p0[2] + (int)p1[2] + (int)p2[2] + (int)p3[2]) / 4);
-            o[3] = (unsigned char)(((int)p0[3] + (int)p1[3] + (int)p2[3] + (int)p3[3]) / 4);
-        }
-    }
-}
 
 static uint32_t fnv1a_32(const unsigned char* data, size_t len) {
     uint32_t h = 2166136261u;

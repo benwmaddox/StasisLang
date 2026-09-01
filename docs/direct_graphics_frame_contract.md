@@ -115,9 +115,12 @@ schedule. A run may contain A-B-A-B logical images when host-private placement
 puts them in one compatible binding domain; logical handle transitions alone do
 not split it. Capable hosts also translate solid rectangles into their private
 ordered quad representation and merge them with adjacent compatible sprites.
-The WebGL2 host reserves a private white texel per atlas binding domain and uses
-the existing 64-byte quad record with per-instance tint; this consumes no guest
-handle and exposes no atlas identity. Canvas, SDL, and unsupported paths replay
-the identical semantic order conventionally. Hosts still split on real clip,
-blend, pass, material/shader, binding-domain, or bounded-capacity differences,
-and never globally sort transparent work.
+Each production host reserves a private white region per atlas binding domain.
+WebGL2 uses its 64-byte private quad record, SDL uses bounded
+`SDL_RenderGeometry` buffers, and Workshop GLES2 uses reusable expanded-quad
+buffers. This consumes no guest handle and exposes no atlas identity. These are
+the only renderers for their targets; missing resources, oversize resources,
+and context restoration remain inside the same backend instead of selecting a
+fallback renderer. Hosts still split on real clip, blend, pass,
+material/shader, binding-domain, or bounded-capacity differences, and never
+globally sort transparent work.

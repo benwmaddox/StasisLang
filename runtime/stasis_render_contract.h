@@ -480,8 +480,6 @@ static inline uint32_t stasis_render_trace(
     const int32_t line_count = stasis_render_clamp_count(
         cmd_i32[STASIS_RENDER_I_LINE_COUNT], STASIS_RENDER_MAX_LINES);
     const int32_t rect_count = stasis_render_rect_count(cmd_i32, line_count);
-    const int32_t sprite_count = stasis_render_clamp_count(
-        cmd_i32[STASIS_RENDER_I_SPRITE_COUNT], STASIS_RENDER_MAX_SPRITES);
     const int32_t sprite_run_count = stasis_render_clamp_count(
         cmd_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT], STASIS_RENDER_MAX_SPRITE_RUNS);
     const int32_t text_count = stasis_render_clamp_count(
