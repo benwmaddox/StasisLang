@@ -229,7 +229,6 @@ jobs:
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
             -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}" `
             -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT" `
-            `
             -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON `
             -DSTASIS_BUILD_RUNNER=ON `
             -DSTASIS_BUILD_SYS=OFF
@@ -245,7 +244,6 @@ jobs:
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-            \
             -DSTASIS_BUILD_RUNNER=ON \
             -DSTASIS_BUILD_SYS=OFF \
             -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}" \

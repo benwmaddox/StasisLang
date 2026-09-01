@@ -79,7 +79,6 @@ jobs:
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-            \
             -DSTASIS_BUILD_RUNNER="${runner_build}" \
             -DSTASIS_BUILD_SYS=OFF \
             -DSTASIS_RELEASE_ID="${STASIS_RELEASE_ID}" \
@@ -102,7 +101,6 @@ jobs:
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON `
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
-            `
             -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON `
             -DSTASIS_BUILD_RUNNER=ON `
             -DSTASIS_BUILD_SYS=OFF `
