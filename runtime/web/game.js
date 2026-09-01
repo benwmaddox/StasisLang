@@ -2488,8 +2488,13 @@
     preparation.fillText(text, 0, font.baseline);
     const resource = {
       ready: true, drawable: surface, width, height, generation: 1,
-      baseline: font.baseline, text, fontHandle, byteLength: width * height * 4
+      baseline: font.baseline, text, fontHandle, byteLength: width * height * 4,
+      transient: false
     };
+    if (resource.byteLength > PREPARED_TEXT_MAX_BYTES) {
+      resource.transient = true;
+      return resource;
+    }
     preparedText.set(key, resource);
     preparedTextBytes += resource.byteLength;
     for (const [candidateKey, candidate] of preparedText) {
@@ -2508,18 +2513,22 @@
     const renderer = getGpuBatcher();
     if (!renderer) return;
     const resource = preparedTextResource(fontHandle, text);
-    const entry = renderer.atlasFor(resource, null);
-    if (!entry) throw new Error("WebGL2 text atlas allocation failed");
-    writeQuad(0, x, y, resource.width, resource.height, {
-      u0: entry.x / entry.page.size, v0: entry.y / entry.page.size,
-      u1: (entry.x + entry.width) / entry.page.size,
-      v1: (entry.y + entry.height) / entry.page.size
-    }, red, green, blue, alpha);
-    renderer.drawSprites(spriteScratch, 1, entry.page);
-    performanceWorkload.instances += 1;
-    performanceWorkload.batches += 1;
-    performanceWorkload.drawCalls += 1;
-    performanceWorkload.uploadedBytes += 16 * Float32Array.BYTES_PER_ELEMENT;
+    try {
+      const entry = renderer.atlasFor(resource, null);
+      if (!entry) throw new Error("WebGL2 text atlas allocation failed");
+      writeQuad(0, x, y, resource.width, resource.height, {
+        u0: entry.x / entry.page.size, v0: entry.y / entry.page.size,
+        u1: (entry.x + entry.width) / entry.page.size,
+        v1: (entry.y + entry.height) / entry.page.size
+      }, red, green, blue, alpha);
+      renderer.drawSprites(spriteScratch, 1, entry.page);
+      performanceWorkload.instances += 1;
+      performanceWorkload.batches += 1;
+      performanceWorkload.drawCalls += 1;
+      performanceWorkload.uploadedBytes += 16 * Float32Array.BYTES_PER_ELEMENT;
+    } finally {
+      if (resource.transient) renderer.releaseResource(resource);
+    }
   };
   function executeCommands() {
     performanceWorkload.commands += commands.length;

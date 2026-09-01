@@ -100,6 +100,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     addEventListener() {}
   };
   let env;
+  let textFixture = null;
   const instance = { exports: {
     memory,
     main: () => {
@@ -113,8 +114,16 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     tick: () => { if (timing) now += 2; },
     render: () => {
       if (timing) now += 3;
-      if (!rects && !sprites && !clips.length) return;
+      if (!rects && !sprites && !clips.length && !textFixture) return;
       i32[0] = MAGIC; i32[1] = 7; i32[2] = 0; i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects; i32[27] = clips.length;
+      if (textFixture) {
+        i32[7] = 1;
+        i32[12320] = textFixture.font;
+        i32[12321] = -textFixture.handle;
+        i32[12322] = 0;
+        f32[133252] = 4; f32[133253] = 8;
+        f32[133254] = 1; f32[133255] = 1; f32[133256] = 1; f32[133257] = 1;
+      }
       const encodedOrder = [];
       const runs = [];
       if (ordered) {
@@ -203,6 +212,10 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       cssExtent[0] = width;
       cssExtent[1] = height;
       contextObject.devicePixelRatio = nextDpr;
+    },
+    setTextFixture(font, text, textId = 1) {
+      contextObject.window.STASIS_GAME.strings[textId] = text;
+      textFixture = { font, handle: env.stasis_jit_gfx_cache_text(font, textId) };
     },
     loseContext: () => { stats.contextLost = true; canvasListeners.get("webglcontextlost")?.({ preventDefault() {} }); },
     restoreContext: () => { stats.contextLost = false; canvasListeners.get("webglcontextrestored")?.({}); }
@@ -1138,6 +1151,21 @@ test("prepared text LRU remains bounded and releases evicted atlas entries", asy
   assert.equal(runtime.body.dataset.preparedTextEntries, "256");
   assert.equal(runtime.body.dataset.atlasLiveEntries, "257");
   assert.equal(runtime.stats.instanced, 260);
+});
+
+test("oversized prepared text is transient and releases its atlas page after drawing", async () => {
+  const runtime = await loadRuntime();
+  const font = runtime.env.load_font(0, 1024);
+  for (let value = 0; value < 3; value += 1) {
+    runtime.setTextFixture(font, `${String(value)}${"x".repeat(256)}`);
+    runtime.frame();
+    assert.equal(runtime.body.dataset.preparedTextEntries, "0");
+    assert.equal(runtime.body.dataset.preparedTextBytes, "0");
+    assert.equal(runtime.body.dataset.atlasLiveEntries, "1"); // loaded sprite fixture only
+    assert.equal(runtime.body.dataset.atlasPages, "1");
+  }
+  assert.equal(runtime.stats.instanced, 3);
+  assert.equal(runtime.stats.deletedTextures, 3);
 });
 
 test("runtime publishes split timing phases and HUD labels", async () => {
