@@ -692,7 +692,11 @@ static void stasis_sync_display_metrics(void) {
                 SDL_LOGICAL_PRESENTATION_LETTERBOX);
         }
     } else if (g_use_sdl_renderer && g_renderer) {
-        if (!SDL_GetCurrentRenderOutputSize(g_renderer, &drawable_w, &drawable_h)) {
+        /* The display contract owns the complete renderer backing here.  The
+         * "current" output is adjusted by SDL logical presentation and can
+         * still describe the previous fitted viewport while a logical canvas
+         * change is being applied. */
+        if (!SDL_GetRenderOutputSize(g_renderer, &drawable_w, &drawable_h)) {
             drawable_w = native_w;
             drawable_h = native_h;
         }

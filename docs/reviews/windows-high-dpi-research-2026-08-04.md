@@ -177,3 +177,33 @@ will improve SVG and text sharpness without changing game layout or input code.
 - Adjustment: Windows display work should verify the executable awareness
   context and captured framebuffer dimensions, not only renderer flags and
   logical metrics.
+
+## 2026-08-31 critical incident: stale fitted output
+
+Released nightly 270 ran on a per-monitor-v2 150% host, yet a
+portrait-to-landscape logical change reported drawable `493 x 986` and loaded
+fonts at scale `1.00` while the captured landscape content was `1920 x 960`.
+The cue was that the reported drawable exactly resembled the previous portrait
+fit instead of any plausible complete renderer backing.
+
+The runtime queried `SDL_GetCurrentRenderOutputSize` before applying the new
+logical presentation. SDL defines that query in terms of current logical
+presentation, so the prior fitted viewport remained observable at the
+transition boundary. `SDL_GetRenderOutputSize` instead reports the renderer's
+complete backing independently of logical presentation. Stasis now uses that
+full-backing query for display metrics and continues to derive its fitted
+content viewport separately.
+
+The tempting alternative was to reorder the current-output query after
+`SDL_SetRenderLogicalPresentation`. That would make this transition less stale
+but would still assign a logical-presentation result to a field whose contract
+is the complete physical target. The ownership correction is the durable fix.
+A counterfactual full-backing receipt equal to the screenshot dimensions would
+have redirected investigation to resource invalidation rather than SDL output
+selection.
+
+Theory gained: renderer backing and fitted logical output can have identical
+dimensions in ordinary windowed cases but remain different kinds of state.
+The released transition exposed that distinction; it predicts a future
+orientation change can alter fitted content and raster scale without changing
+the underlying drawable dimensions.

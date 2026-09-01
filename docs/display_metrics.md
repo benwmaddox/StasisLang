@@ -67,6 +67,15 @@ Callers can therefore rebuild responsive layout or surface state on display
 generation while invalidating density-dependent resources exactly once per
 cache-key change.
 
+For SDL renderer hosts, drawable size comes from `SDL_GetRenderOutputSize` and
+always names the complete physical render target. It is not the current fitted
+logical-presentation output. The latter can retain the previous canvas's
+letterboxed dimensions during a portrait/landscape transition. Stasis first
+samples the full backing, derives the fitted drawable viewport separately, and
+then applies the requested logical presentation. Consequently a logical canvas
+change can alter content scale and density without ever replacing the backing
+receipt with a stale fitted-content size.
+
 ## Web display boundary
 
 The browser host keeps four extents separate: the available safe visible
