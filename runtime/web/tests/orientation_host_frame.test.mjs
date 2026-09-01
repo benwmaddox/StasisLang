@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { fakeWebGL2 } from "./fake_webgl2.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -36,7 +37,7 @@ async function runSequence(first, second, options = {}) {
     style: {},
     parentElement: { style: {} },
     listeners: new Map(),
-    getContext: () => context,
+    getContext: kind => kind === "webgl2" ? fakeWebGL2() : context,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: canvasWidth, height: canvasHeight }),
     addEventListener(type, listener) { this.listeners.set(type, listener); },
     setPointerCapture(pointerId) { capturedPointers.push(pointerId); },

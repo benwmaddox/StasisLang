@@ -19,9 +19,10 @@ Android, and iOS:
 
 Unavailable or unreliable measurements retain an explicit unavailable
 sentinel in the snapshot contract and are omitted from the rendered HUD,
-never substituted with zero. Canvas2D and SDL commonly omit render prep and
-GPU submit; WebGL2 reports rectangle instance, batch, and draw-call counts
-when its instanced path is active. Native sprite counts are sprites, not GPU
+never substituted with zero. SDL commonly omits render prep and GPU submit;
+WebGL2 reports instance, batch, draw-submission, texture-bind, atlas-transition,
+and uploaded-byte counts for its single visible path. Its composite count is
+always zero. Native sprite counts are sprites, not GPU
 instances, unless a backend actually performs instanced drawing.
 
 The budget verdict compares current active frame work with 16.67 ms. The

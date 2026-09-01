@@ -53,8 +53,8 @@ composite. Its 4,096-sprite Canvas sample reported 4,096 draws and 16.5/17.5/28.
 ms browser replay p50/p95/max. Sprite instance/batch/upload metrics on that
 historical Canvas path were unavailable, not zero. The current Web test contract
 now additionally proves same-page cross-handle batching, page-boundary splits,
-64-byte sprite uploads, and whole-run Canvas fallback without partial GPU
-submission.
+64-byte sprite uploads, dedicated same-backend oversize domains, deterministic
+missing-resource atlas regions, and context restoration without another renderer.
 
 Merged Task #335 (`docs/hot_render_metadata.md`, v3) addresses a different stage.
 Compiler snapshots and AOT manifests publish a stable group key, conservative

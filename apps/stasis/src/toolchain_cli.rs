@@ -4145,7 +4145,6 @@ fn package_workspace(
 
 const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
 const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
-const WEB_MINIMAL_RUNTIME_JS: &str = include_str!("../../../runtime/web/game_minimal.js");
 
 struct WebWasmArtifact {
     bytes: Vec<u8>,
@@ -4556,39 +4555,7 @@ fn web_index_html(title: &str, development_build: bool, loading_font: Option<&st
         .replace("__STASIS_LOADING_FONT_FAMILY__", &loading_font_family)
 }
 
-fn lean_web_runtime(process: &WasmProcess) -> Option<String> {
-    if WEB_RUNTIME_BUFFERS
-        .iter()
-        .any(|path| process.memory_layout().contains_key(*path))
-        || WEB_HOST_GLOBALS
-            .iter()
-            .any(|path| process.global_types().contains_key(*path))
-    {
-        return None;
-    }
-    let snippets = BTreeMap::from([
-        ("cos_fast", "    cos_fast: value => Math.cos(value),"),
-        ("print_char", "    print_char: value => console.log(String.fromCodePoint(value)),"),
-        ("print_i32", "    print_i32: value => console.log(value),"),
-        ("print_int", "    print_int: value => console.log(value),"),
-        ("print_string", "    print_string: value => console.log(stringValue(value)),"),
-        ("sin_fast", "    sin_fast: value => Math.sin(value),"),
-        ("web_begin_frame", "    web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },"),
-        ("web_draw_rect", "    web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),"),
-        ("web_draw_text", "    web_draw_text: (x, y, value) => commands.push([2, x, y, value]),"),
-    ]);
-    let imports = process
-        .imported_symbols()
-        .iter()
-        .map(|symbol| snippets.get(symbol.as_str()).copied())
-        .collect::<Option<Vec<_>>>()?;
-    Some(WEB_MINIMAL_RUNTIME_JS.replace("__STASIS_IMPORTS__", &imports.join("\n")))
-}
-
-fn link_web_runtime(process: &WasmProcess, audio_enabled: bool, network_enabled: bool) -> String {
-    if let Some(runtime) = lean_web_runtime(process) {
-        return runtime;
-    }
+fn link_web_runtime(_process: &WasmProcess, audio_enabled: bool, network_enabled: bool) -> String {
     let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled);
     strip_web_runtime_feature(&runtime, "network", network_enabled)
 }

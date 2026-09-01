@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import vm from "node:vm";
+import { fakeWebGL2 } from "./fake_webgl2.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -53,7 +54,7 @@ async function loadRuntime() {
   }
   const canvas = {
     width: 640, height: 360, style: {}, parentElement: { style: {} },
-    getContext: () => ({ fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {},
+    getContext: kind => kind === "webgl2" ? fakeWebGL2() : ({ fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {},
       moveTo() {}, lineTo() {}, stroke() {}, drawImage() {}, translate() {}, rotate() {} }),
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 360 }),
     addEventListener() {}, setPointerCapture() {}, focus() {}, requestFullscreen: async () => {},

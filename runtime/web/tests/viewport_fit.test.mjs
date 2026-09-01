@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { fakeWebGL2 } from "./fake_webgl2.mjs";
 
 const html = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const fitter = html.match(/<script>\s*([\s\S]*?)\s*<\/script>/)?.[1];
@@ -196,7 +197,7 @@ function integratedRuntime({
     style: canvasStyle,
     parentElement: { style: shellStyle },
     listeners: new Map(),
-    getContext: () => ({
+    getContext: kind => kind === "webgl2" ? fakeWebGL2() : ({
       fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
       drawImage() {}, translate() {}, rotate() {}
     }),

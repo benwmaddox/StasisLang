@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { fakeWebGL2 } from "./fake_webgl2.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -19,7 +20,7 @@ async function loadRuntime({ logical = [640, 360], css = logical, dpr = 1, inclu
   const canvas = {
     width: logical[0], height: logical[1], dataset: {}, style: {},
     listeners: new Map(),
-    getContext: () => ({
+    getContext: kind => kind === "webgl2" ? fakeWebGL2() : ({
       setTransform(...value) { transforms.push(value); },
       fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {},
       moveTo() {}, lineTo() {}, stroke() {}, drawImage() {}, translate() {}, rotate() {},
@@ -173,9 +174,10 @@ test("CSS pointer coordinates round trip into logical normalized coordinates", a
   assert.deepEqual(runtime.ticks.at(-1).normalized, [1, 1]);
 });
 
-test("Canvas2D uses one logical-to-backing transform", async () => {
+test("WebGL2 keeps logical coordinates while using the DPR-scaled backing", async () => {
   const runtime = await loadRuntime({ logical: [320, 180], css: [640, 360], dpr: 2 });
-  assert.ok(runtime.transforms.some(value => value[0] === 4 && value[3] === 4));
+  assert.equal(runtime.canvas.width, 1280);
+  assert.equal(runtime.canvas.height, 720);
 });
 
 test("display backing still follows viewport changes when host_f32 is absent", async () => {

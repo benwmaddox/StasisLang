@@ -60,6 +60,11 @@ readability. All reported quantiles use the non-interpolated upper convention
 conventional interpolated median/nearest-rank p95 values. This is a single
 local run, not a cross-machine benchmark or a claim about GPU execution time.
 
+The measurements in this section predate the single-visible-WebGL2 renderer.
+They document the deleted offscreen-WebGL-to-Canvas path and must not be used
+as current backend evidence. Current runs have no Canvas frame composite and
+report visible WebGL2 submissions and atlas transitions directly.
+
 Context: Windows 10 Pro 2009, Intel64 Family 6 Model 170 (22 logical
 processors reported by the environment), Chrome 151.0.7922.174, headless
 Chromium launched with `--no-sandbox` by Playwright, 1280x720 viewport, ANGLE

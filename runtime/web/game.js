@@ -1,7 +1,6 @@
 (() => {
   "use strict";
   const canvas = document.getElementById("stasis-canvas");
-  const context = canvas.getContext("2d", { alpha: false });
   const hud = document.getElementById("stasis-hud");
   const errorBox = document.getElementById("stasis-error");
   const loadingBox = document.getElementById("stasis-loading");
@@ -21,6 +20,7 @@
   const fonts = new Map();
   const fontLoads = new Map();
   const cachedText = new Map();
+  const preparedText = new Map();
   const DISPLAY_MAX_DPR = 4;
   const DISPLAY_MIN_DPR = 0.5;
   const DISPLAY_MAX_BACKING_WIDTH = 8192;
@@ -279,12 +279,14 @@
     commands: 0, lines: 0, rectangles: 0, sprites: 0, text: 0,
     instances: 0, batches: 0, drawCalls: 0, composites: 0,
     renderSubmissions: 0, uploadedBytes: 0,
+    textureBinds: 0, atlasTransitions: 0, pipelineBoundaries: 0,
     atlasPages: -1, atlasLiveEntries: -1, atlasAllocatedBytes: -1,
     atlasUploadCount: -1, atlasUploadBytes: -1
   };
-  let performanceBackend = "Canvas2D";
+  let performanceBackend = "WebGL2";
   let gpuBatcher;
-  const RECT_BATCH_MIN = 64;
+  let webglLifecycleInstalled = false;
+  let loseWebGlRenderer = () => {};
   // Keep the production gfx_cmd decoder values named and mechanically checked
   // against runtime/stasis_render_contract.h by the ABI gate.
   const GFX_CMD_MAGIC = 0x47584631;
@@ -335,37 +337,44 @@
   const GFX_ORDER_RECT = 4;
   const GFX_ORDER_CLIP_PUSH = 5;
   const GFX_ORDER_CLIP_POP = 6;
-  const RECT_CAP = GFX_MAX_GEOMETRY;
-  const rectScratch = new Float32Array(RECT_CAP * 8);
   const SPRITE_CAP = GFX_MAX_SPRITES;
   const spriteScratch = new Float32Array(SPRITE_CAP * 16);
-  let spriteTintCanvas;
-  let spriteTintContext;
   const ATLAS_PAGE_SIZE = 512;
   const ATLAS_PAGE_MAX = 2048;
   const ATLAS_MAX_PAGES = 8;
-  const ATLAS_MAX_BYTES = 64 * 1024 * 1024;
+  // A dedicated 4096² page plus the ordinary shared page must coexist for an
+  // oversize resource without selecting another renderer.
+  const ATLAS_MAX_BYTES = 128 * 1024 * 1024;
   const ATLAS_PADDING = 2;
   const startedAt = performance.now();
 
-  const colorCache = new Map();
-  const color = (r, g, b) => {
-    const red = r & 255;
-    const green = g & 255;
-    const blue = b & 255;
-    const key = (red << 16) | (green << 8) | blue;
-    let value = colorCache.get(key);
-    if (!value) {
-      value = `rgb(${red} ${green} ${blue})`;
-      colorCache.set(key, value);
-    }
-    return value;
+  let preparationCanvas;
+  let preparationContext;
+  let missingSpriteResource;
+  const resourcePreparationContext = () => {
+    preparationCanvas ||= document.createElement?.("canvas");
+    preparationContext ||= preparationCanvas?.getContext?.("2d", { alpha: true });
+    if (!preparationCanvas || !preparationContext) throw new Error("Canvas2D resource preparation unavailable");
+    return { canvas: preparationCanvas, context: preparationContext };
   };
-  const unitColor = (r, g, b) => color(
-    Math.max(0, Math.min(255, Math.round(r * 255))),
-    Math.max(0, Math.min(255, Math.round(g * 255))),
-    Math.max(0, Math.min(255, Math.round(b * 255)))
-  );
+  const deterministicMissingSprite = () => {
+    if (missingSpriteResource) return missingSpriteResource;
+    const surface = document.createElement?.("canvas");
+    const preparation = surface?.getContext?.("2d", { alpha: true });
+    if (!surface || !preparation) throw new Error("Canvas2D placeholder resource preparation unavailable");
+    surface.width = 2;
+    surface.height = 2;
+    preparation.fillStyle = "#ff00ff";
+    preparation.fillRect(0, 0, 2, 2);
+    preparation.fillStyle = "#111111";
+    preparation.fillRect(1, 0, 1, 1);
+    preparation.fillRect(0, 1, 1, 1);
+    missingSpriteResource = {
+      ready: true, drawable: surface, width: 2, height: 2, generation: 1,
+      missing: true
+    };
+    return missingSpriteResource;
+  };
   const stringValue = id => game.strings[String(id)] || "";
   const assetKey = value => {
     if (value === "/assets") return "assets";
@@ -1267,6 +1276,12 @@
     resource.pendingLease = null;
     resource.pendingEntry = null;
     resource.ready = true;
+    const renderer = getGpuBatcher();
+    if (!renderer) throw new Error("WebGL2 renderer unavailable during sprite publication");
+    renderer.atlasFor(resource, spriteVariantFor(resource, false));
+    if (resource.sourceDrawable && resource.sourceDrawableWidth && resource.sourceDrawableHeight) {
+      renderer.atlasFor(resource, spriteVariantFor(resource, true));
+    }
     if (oldCacheEntry) releaseSpriteCacheEntry(oldCacheEntry);
     publishAssetReceipt(resource);
     return { retained };
@@ -1376,14 +1391,15 @@
     }
   };
   onDensityChange = invalidateDensityResources;
-  const setCanvasFont = (font, size = font.renderSize) => {
+  const setPreparationFont = (context, font, size = font.renderSize) => {
     context.font = `${size}px ${font.family}`;
     context.textBaseline = "alphabetic";
     if ("fontKerning" in context) context.fontKerning = "none";
   };
   const measureTextRun = (font, text) => {
+    const { context } = resourcePreparationContext();
     context.save();
-    setCanvasFont(font);
+    setPreparationFont(context, font);
     const metrics = context.measureText(text);
     context.restore();
     const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
@@ -1399,8 +1415,9 @@
     setViewField(run.base, run.index, "height", metrics.height);
   };
   const calibrateFont = font => {
+    const { context } = resourcePreparationContext();
     context.save();
-    setCanvasFont(font, 1000);
+    setPreparationFont(context, font, 1000);
     const metrics = context.measureText("Mg");
     context.restore();
     const ascent = Number.isFinite(metrics.fontBoundingBoxAscent)
@@ -1445,8 +1462,9 @@
   const measureText = (fontHandle, textId) => {
     const font = fonts.get(fontHandle);
     if (!font) return 0;
+    const { context } = resourcePreparationContext();
     context.save();
-    setCanvasFont(font);
+    setPreparationFont(context, font);
     const width = context.measureText(stringValue(textId)).width;
     context.restore();
     return width;
@@ -1948,15 +1966,17 @@
   });
   // @stasis-feature audio end
 
-  // This helper owns all WebGL state for one private, host-created context.
-  // Guest memory is copied into the two reusable staging arrays before upload.
+  // The visible canvas has exactly one renderer. Guest memory is copied into
+  // reusable host staging arrays before upload; Canvas2D is resource prep only.
   function getGpuBatcher() {
     if (gpuBatcher !== undefined) return gpuBatcher;
     try {
-      if (!document.createElement) return (gpuBatcher = null);
-      const target = document.createElement("canvas");
-      const gl = target.getContext("webgl2", { alpha: true, premultipliedAlpha: true });
-      if (!gl) return (gpuBatcher = null);
+      const target = canvas;
+      const gl = target.getContext("webgl2", {
+        alpha: false, premultipliedAlpha: true, antialias: false,
+        preserveDrawingBuffer: false
+      });
+      if (!gl) throw new Error("WebGL2 is required by the Stasis Web renderer");
       const makeProgram = (name, vertexSource, fragmentSource) => {
         const vertex = gl.createShader(gl.VERTEX_SHADER);
         const fragment = gl.createShader(gl.FRAGMENT_SHADER);
@@ -1980,22 +2000,6 @@
         }
         return { program, vertex, fragment };
       };
-      const rectangle = makeProgram("rectangle", `#version 300 es
-        layout(location = 0) in vec2 p;
-        layout(location = 1) in vec4 r;
-        layout(location = 2) in vec4 c;
-        uniform vec2 size;
-        out vec4 color;
-        void main() {
-          vec2 q = r.xy + p * r.zw;
-          gl_Position = vec4(q.x / size.x * 2.0 - 1.0,
-            1.0 - q.y / size.y * 2.0, 0.0, 1.0);
-          color = c;
-        }`, `#version 300 es
-        precision mediump float;
-        in vec4 color;
-        out vec4 outputColor;
-        void main() { outputColor = color; }`);
       const spriteProgram = makeProgram("sprite", `#version 300 es
         layout(location = 0) in vec2 p;
         layout(location = 1) in vec4 rect;
@@ -2021,44 +2025,36 @@
         in vec4 vertexColor;
         out vec4 outputColor;
         void main() { outputColor = texture(sprite, textureUv) * vertexColor; }`);
-      const rectVao = gl.createVertexArray();
       const spriteVao = gl.createVertexArray();
       const unitBuffer = gl.createBuffer();
       const instanceBuffer = gl.createBuffer();
-      if (!rectVao || !spriteVao || !unitBuffer || !instanceBuffer) throw new Error("WebGL buffers failed");
+      if (!spriteVao || !unitBuffer || !instanceBuffer) throw new Error("WebGL buffers failed");
       gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
-      gl.bindVertexArray(rectVao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-      gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, Math.max(rectScratch.byteLength, spriteScratch.byteLength), gl.DYNAMIC_DRAW);
-      for (const [attribute, offset] of [[1, 0], [2, 16]]) {
-        gl.enableVertexAttribArray(attribute);
-        gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 32, offset);
-        gl.vertexAttribDivisor(attribute, 1);
-      }
       gl.bindVertexArray(spriteVao);
       gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, spriteScratch.byteLength, gl.DYNAMIC_DRAW);
       for (const [attribute, offset] of [[1, 0], [2, 16], [3, 32], [4, 48]]) {
         gl.enableVertexAttribArray(attribute);
         gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 64, offset);
         gl.vertexAttribDivisor(attribute, 1);
       }
       gl.bindVertexArray(null);
-      const rectSize = gl.getUniformLocation(rectangle.program, "size");
       const spriteSize = gl.getUniformLocation(spriteProgram.program, "size");
       const spriteSampler = gl.getUniformLocation(spriteProgram.program, "sprite");
       const atlasPages = [];
       const atlasByResource = new WeakMap();
+      const maxTextureSize = Math.max(1, Number(gl.getParameter?.(gl.MAX_TEXTURE_SIZE)) || ATLAS_PAGE_MAX);
       // Upload counters are cumulative for this helper/context lifetime;
       // page and live-entry counts describe the current bounded atlas.
       let atlasUploadCount = 0;
       let atlasUploadBytes = 0;
+      let frameTextureBinds = 0;
+      let frameAtlasTransitions = 0;
+      let lastTexture = null;
       let stagingCanvas;
       let stagingContext;
       let lost = false;
@@ -2074,28 +2070,46 @@
         atlasPages.length = 0;
         gl.deleteBuffer?.(instanceBuffer);
         gl.deleteBuffer?.(unitBuffer);
-        gl.deleteVertexArray?.(rectVao);
         gl.deleteVertexArray?.(spriteVao);
-        gl.deleteProgram?.(rectangle.program);
         gl.deleteProgram?.(spriteProgram.program);
       };
       const fail = () => {
         lost = true;
         dispose();
-        if (gpuBatcher?.target === target) gpuBatcher = undefined;
+        if (gpuBatcher?.target === target) gpuBatcher = null;
       };
-      target.addEventListener?.("webglcontextlost", event => { event.preventDefault?.(); fail(); });
-      target.addEventListener?.("webglcontextrestored", () => {
-        // A draw attempted while the context was lost records a null helper;
-        // restoration must make that helper lazy-recreatable as well.
-        if (gpuBatcher === null || gpuBatcher?.target === target) gpuBatcher = undefined;
-      });
+      loseWebGlRenderer = fail;
+      if (!webglLifecycleInstalled) {
+        webglLifecycleInstalled = true;
+        target.addEventListener?.("webglcontextlost", event => {
+          event.preventDefault?.();
+          loseWebGlRenderer();
+        });
+        target.addEventListener?.("webglcontextrestored", () => {
+          gpuBatcher = undefined;
+          const restored = getGpuBatcher();
+          if (!restored) return;
+          try {
+            for (const resource of sprites.values()) {
+              if (!resource.ready) continue;
+              restored.atlasFor(resource, spriteVariantFor(resource, false));
+              if (resource.sourceDrawable && resource.sourceDrawableWidth && resource.sourceDrawableHeight) {
+                restored.atlasFor(resource, spriteVariantFor(resource, true));
+              }
+            }
+            for (const resource of preparedText.values()) restored.atlasFor(resource, null);
+          } catch (error) {
+            document.body.dataset.gpuError = String(error);
+            gpuBatcher = null;
+          }
+        });
+      }
       const createAtlasPage = size => {
-        if (atlasPages.length >= ATLAS_MAX_PAGES) return null;
+        if (atlasPages.length >= ATLAS_MAX_PAGES) throw new Error("WebGL2 atlas page capacity exhausted");
+        if (size > maxTextureSize) throw new Error("WebGL2 atlas page exceeds MAX_TEXTURE_SIZE");
         const allocatedBytes = atlasPages.reduce((total, page) => total + page.size * page.size * 4, 0);
         if (allocatedBytes + size * size * 4 > ATLAS_MAX_BYTES) {
-          document.body.dataset.atlasFallback = "memory-cap";
-          return null;
+          throw new Error("WebGL2 atlas memory capacity exhausted");
         }
         const texture = gl.createTexture();
         if (!texture) throw new Error("WebGL atlas texture allocation failed");
@@ -2265,12 +2279,12 @@
         if (!resource.ready || !selected.drawable || !selected.width || !selected.height) return null;
         const paddedWidth = selected.width + ATLAS_PADDING * 2;
         const paddedHeight = selected.height + ATLAS_PADDING * 2;
-        if (paddedWidth > ATLAS_PAGE_MAX || paddedHeight > ATLAS_PAGE_MAX) {
-          document.body.dataset.atlasFallback = "dimension";
-          return null;
+        if (paddedWidth > maxTextureSize || paddedHeight > maxTextureSize) {
+          throw new Error("Sprite exceeds WebGL2 MAX_TEXTURE_SIZE");
         }
         let pageSize = ATLAS_PAGE_SIZE;
         while (pageSize < paddedWidth || pageSize < paddedHeight) pageSize *= 2;
+        pageSize = Math.min(pageSize, maxTextureSize);
         let page = null;
         let allocation = null;
         for (const candidate of atlasPages) {
@@ -2318,70 +2332,63 @@
         variants.set(variantKey, entry);
         return entry;
       };
-      const draw = (values, count, stride, texture) => {
+      const draw = (values, count, texture) => {
         const width = display.backingWidth;
         const height = display.backingHeight;
         const logicalWidth = Math.max(1, display.logicalWidth);
         const logicalHeight = Math.max(1, display.logicalHeight);
-        if (target.width !== width || target.height !== height) {
-          target.width = width;
-          target.height = height;
-        }
-        if (!texture) {
-          // Keep this hot path equivalent to the original rectangle helper.
-          gl.viewport(0, 0, width, height);
-          gl.clearColor(0, 0, 0, 0);
-          gl.clear(gl.COLOR_BUFFER_BIT);
-          gl.useProgram(rectangle.program);
-          gl.uniform2f(rectSize, logicalWidth, logicalHeight);
-          gl.bindVertexArray(rectVao);
-          gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-          gl.bufferSubData(gl.ARRAY_BUFFER, 0, values, 0, count * stride);
-          gl.enable(gl.BLEND);
-          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-          gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
-          gl.bindVertexArray(null);
-        } else {
-          failIfBad();
-          gl.viewport(0, 0, width, height);
-          gl.clearColor(0, 0, 0, 0);
-          gl.clear(gl.COLOR_BUFFER_BIT);
-          gl.useProgram(spriteProgram.program);
-          gl.uniform2f(spriteSize, logicalWidth, logicalHeight);
-          gl.uniform1i?.(spriteSampler, 0);
-          gl.bindVertexArray(spriteVao);
-          gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-          gl.bufferSubData(gl.ARRAY_BUFFER, 0, values, 0, count * stride);
-          gl.enable(gl.BLEND);
-          gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-          gl.activeTexture?.(gl.TEXTURE0);
-          gl.bindTexture(gl.TEXTURE_2D, texture);
-          failIfBad();
-          gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
-          gl.bindVertexArray(null);
-          failIfBad();
-        }
-        context.save?.();
-        context.setTransform?.(1, 0, 0, 1, 0, 0);
-        context.globalAlpha = 1;
-        context.globalCompositeOperation = "source-over";
-        context.drawImage(target, 0, 0, width, height);
-        context.restore?.();
-        performanceWorkload.composites += 1;
+        failIfBad();
+        gl.viewport(0, 0, width, height);
+        gl.useProgram(spriteProgram.program);
+        gl.uniform2f(spriteSize, logicalWidth, logicalHeight);
+        gl.uniform1i?.(spriteSampler, 0);
+        gl.bindVertexArray(spriteVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, values, 0, count * 16);
+        gl.enable(gl.BLEND);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        gl.activeTexture?.(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        frameTextureBinds += 1;
+        if (lastTexture !== null && lastTexture !== texture) frameAtlasTransitions += 1;
+        lastTexture = texture;
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+        gl.bindVertexArray(null);
+        failIfBad();
       };
       return (gpuBatcher = {
         target,
-        // Draw calls composite synchronously today. Keep an explicit boundary
-        // so ordered clip changes remain correct if batching becomes queued.
         flush: () => {},
-        drawRect: (values, count) => draw(values, count, 8, null),
+        resetFrameMetrics: () => {
+          frameTextureBinds = 0;
+          frameAtlasTransitions = 0;
+          lastTexture = null;
+        },
+        beginFrame: (red, green, blue, alpha = 1) => {
+          failIfLost();
+          gl.disable(gl.SCISSOR_TEST);
+          gl.viewport(0, 0, display.backingWidth, display.backingHeight);
+          gl.clearColor(red, green, blue, alpha);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        },
+        setClip: clip => {
+          if (!clip) { gl.disable(gl.SCISSOR_TEST); return; }
+          const sx = display.backingWidth / Math.max(1, display.logicalWidth);
+          const sy = display.backingHeight / Math.max(1, display.logicalHeight);
+          const x = Math.max(0, Math.floor(clip.x * sx));
+          const top = Math.max(0, Math.floor(clip.y * sy));
+          const right = Math.min(display.backingWidth, Math.ceil((clip.x + clip.width) * sx));
+          const bottom = Math.min(display.backingHeight, Math.ceil((clip.y + clip.height) * sy));
+          gl.enable(gl.SCISSOR_TEST);
+          gl.scissor(x, display.backingHeight - bottom, Math.max(0, right - x), Math.max(0, bottom - top));
+        },
         atlasFor,
         solidFor: preferredPage => {
           const page = (!preferredPage?.deleted && preferredPage)
             || atlasPages.find(candidate => !candidate.deleted) || createAtlasPage(ATLAS_PAGE_SIZE);
           return page ? { page, uv: page.solidUv } : null;
         },
-        drawSprites: (values, count, page) => draw(values, count, 16, page.texture),
+        drawSprites: (values, count, page) => draw(values, count, page.texture),
         releaseResource: resource => {
           const variants = atlasByResource.get(resource);
           if (!variants) return;
@@ -2398,31 +2405,117 @@
             maximum, ...Array.from(page.entries, entry => entry.generation || 0)
           ), 0),
           uploadCount: atlasUploadCount,
-          uploadBytes: atlasUploadBytes
+          uploadBytes: atlasUploadBytes,
+          frameTextureBinds,
+          frameAtlasTransitions
         })
       });
     } catch (error) {
       document.body.dataset.gpuError = String(error);
+      document.body.dataset.backend = "unsupported";
+      setLoading("This game requires WebGL2.", "failed");
+      if (errorBox) errorBox.textContent = String(error?.message || error);
       return (gpuBatcher = null);
     }
   }
+  const writeQuad = (target, x, y, width, height, atlas, red, green, blue, alpha,
+    radians = 0, pivotX = width * 0.5, pivotY = height * 0.5) => {
+    spriteScratch[target] = x;
+    spriteScratch[target + 1] = y;
+    spriteScratch[target + 2] = width;
+    spriteScratch[target + 3] = height;
+    if (Object.prototype.hasOwnProperty.call(atlas, "uv")) {
+      for (let field = 4; field < 8; field += 1) spriteScratch[target + field] = atlas.uv;
+    } else {
+      spriteScratch[target + 4] = atlas.u0;
+      spriteScratch[target + 5] = atlas.v0;
+      spriteScratch[target + 6] = atlas.u1;
+      spriteScratch[target + 7] = atlas.v1;
+    }
+    spriteScratch[target + 8] = red;
+    spriteScratch[target + 9] = green;
+    spriteScratch[target + 10] = blue;
+    spriteScratch[target + 11] = alpha;
+    spriteScratch[target + 12] = Math.sin(radians);
+    spriteScratch[target + 13] = Math.cos(radians);
+    spriteScratch[target + 14] = pivotX;
+    spriteScratch[target + 15] = pivotY;
+  };
+  const drawImmediateSolid = (x, y, width, height, red, green, blue, alpha = 1,
+    radians = 0, pivotX = width * 0.5, pivotY = height * 0.5) => {
+    const renderer = getGpuBatcher();
+    if (!renderer) return false;
+    const atlas = renderer.solidFor();
+    if (!atlas) throw new Error("WebGL2 solid atlas allocation failed");
+    writeQuad(0, x, y, width, height, atlas, red, green, blue, alpha, radians, pivotX, pivotY);
+    renderer.drawSprites(spriteScratch, 1, atlas.page);
+    performanceWorkload.instances += 1;
+    performanceWorkload.batches += 1;
+    performanceWorkload.drawCalls += 1;
+    performanceWorkload.uploadedBytes += 16 * Float32Array.BYTES_PER_ELEMENT;
+    return true;
+  };
+  const preparedTextResource = (fontHandle, text) => {
+    const font = fonts.get(fontHandle) || {
+      family: "ui-monospace, Consolas, monospace", size: 18, renderSize: 18, baseline: 18,
+      densityGeneration: display.densityGeneration
+    };
+    const key = `${fontHandle}|${font.densityGeneration || 0}|${text}`;
+    const existing = preparedText.get(key);
+    if (existing) return existing;
+    const surface = document.createElement?.("canvas");
+    const preparation = surface?.getContext?.("2d", { alpha: true });
+    if (!surface || !preparation) throw new Error("Canvas2D text resource preparation unavailable");
+    setPreparationFont(preparation, font);
+    const metrics = preparation.measureText(text);
+    const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
+      ? Math.max(0, metrics.actualBoundingBoxDescent) : Math.max(0, font.size - font.baseline);
+    const width = Math.max(1, Math.ceil(metrics.width));
+    const height = Math.max(1, Math.ceil(font.baseline + descent));
+    surface.width = width;
+    surface.height = height;
+    setPreparationFont(preparation, font);
+    preparation.clearRect(0, 0, width, height);
+    preparation.fillStyle = "white";
+    preparation.fillText(text, 0, font.baseline);
+    const resource = {
+      ready: true, drawable: surface, width, height, generation: 1,
+      baseline: font.baseline, text, fontHandle
+    };
+    preparedText.set(key, resource);
+    return resource;
+  };
+  const drawPreparedText = (fontHandle, text, x, y, red, green, blue, alpha) => {
+    if (!text) return;
+    const renderer = getGpuBatcher();
+    if (!renderer) return;
+    const resource = preparedTextResource(fontHandle, text);
+    const entry = renderer.atlasFor(resource, null);
+    if (!entry) throw new Error("WebGL2 text atlas allocation failed");
+    writeQuad(0, x, y, resource.width, resource.height, {
+      u0: entry.x / entry.page.size, v0: entry.y / entry.page.size,
+      u1: (entry.x + entry.width) / entry.page.size,
+      v1: (entry.y + entry.height) / entry.page.size
+    }, red, green, blue, alpha);
+    renderer.drawSprites(spriteScratch, 1, entry.page);
+    performanceWorkload.instances += 1;
+    performanceWorkload.batches += 1;
+    performanceWorkload.drawCalls += 1;
+    performanceWorkload.uploadedBytes += 16 * Float32Array.BYTES_PER_ELEMENT;
+  };
   function executeCommands() {
     performanceWorkload.commands += commands.length;
-    context.setTransform?.(display.scaleX, 0, 0, display.scaleY, 0, 0);
-    context.globalAlpha = 1;
-    context.globalCompositeOperation = "source-over";
     for (const command of commands) {
       if (command[0] === 0) {
-        context.fillStyle = color(command[1], command[2], command[3]);
-        context.fillRect(0, 0, display.logicalWidth, display.logicalHeight);
+        getGpuBatcher()?.beginFrame((command[1] & 255) / 255,
+          (command[2] & 255) / 255, (command[3] & 255) / 255, 1);
       } else if (command[0] === 1) {
-        context.globalAlpha = 1;
-        context.fillStyle = color(command[5], command[6], command[7]);
-        context.fillRect(command[1], command[2], command[3], command[4]);
+        drawImmediateSolid(command[1], command[2], command[3], command[4],
+          (command[5] & 255) / 255, (command[6] & 255) / 255, (command[7] & 255) / 255);
       } else if (command[0] === 2) {
-        context.fillStyle = "#dff6ff";
-        context.font = "18px ui-monospace, Consolas, monospace";
-        context.fillText(`score ${command[3]}`, command[1], command[2]);
+        // Legacy direct text commands are prepared once per distinct value and
+        // submitted through the same texture path as canonical text below.
+        drawPreparedText(0, `score ${command[3]}`, command[1], command[2], 0.875, 0.965, 1, 1);
       }
     }
     executeStasisBuffer();
@@ -2463,97 +2556,60 @@
     }
     const spriteStride = GFX_SPRITE_STRIDE_F32;
     const textBase = GFX_F_TEXT_BASE;
-    const flushGpuBatcher = () => {
-      gpuBatcher?.flush?.();
-    };
+    const batcher = getGpuBatcher();
+    if (!batcher) return;
     const flags = i32[GFX_I_FLAGS];
     if (flags & GFX_FLAG_CLEAR) {
-      context.save();
-      context.globalAlpha = Math.max(0, Math.min(1, f32[GFX_F_CLEAR_BASE + 3]));
-      context.fillStyle = `rgb(${Math.round(f32[GFX_F_CLEAR_BASE] * 255)} ${Math.round(f32[GFX_F_CLEAR_BASE + 1] * 255)} ${Math.round(f32[GFX_F_CLEAR_BASE + 2] * 255)})`;
-      context.fillRect(0, 0, display.logicalWidth, display.logicalHeight);
-      context.restore();
+      batcher.beginFrame(f32[GFX_F_CLEAR_BASE], f32[GFX_F_CLEAR_BASE + 1],
+        f32[GFX_F_CLEAR_BASE + 2], Math.max(0, Math.min(1, f32[GFX_F_CLEAR_BASE + 3])));
     }
     const drawLine = index => {
       performanceWorkload.lines += 1;
-      performanceWorkload.drawCalls += 1;
       const base = GFX_F_LINE_BASE + index * GFX_LINE_STRIDE_F32;
-      context.save();
-      context.globalAlpha = f32[base + 7];
-      context.strokeStyle = `rgb(${Math.round(f32[base + 4] * 255)} ${Math.round(f32[base + 5] * 255)} ${Math.round(f32[base + 6] * 255)})`;
-      context.beginPath();
-      context.moveTo(f32[base], f32[base + 1]);
-      context.lineTo(f32[base + 2], f32[base + 3]);
-      context.stroke();
-      context.restore();
-    };
-    const drawRect = index => {
-      const base = GFX_F_RECT_REVERSE_BASE - index * GFX_GEOMETRY_STRIDE_F32;
-      context.globalAlpha = f32[base + 7];
-      context.fillStyle = unitColor(f32[base + 4], f32[base + 5], f32[base + 6]);
-      context.fillRect(f32[base], f32[base + 1], f32[base + 2], f32[base + 3]);
+      const dx = f32[base + 2] - f32[base];
+      const dy = f32[base + 3] - f32[base + 1];
+      const length = Math.hypot(dx, dy);
+      if (length <= 0) return;
+      drawImmediateSolid(f32[base], f32[base + 1] - 0.5, length, 1,
+        f32[base + 4], f32[base + 5], f32[base + 6], f32[base + 7],
+        Math.atan2(dy, dx), 0, 0.5);
     };
     const drawRectRun = (start, count, ordered) => {
       performanceWorkload.rectangles += count;
-      if (count < RECT_BATCH_MIN) {
-        performanceWorkload.drawCalls += count;
-        for (let offset = 0; offset < count; offset += 1) {
+      const solid = batcher.solidFor();
+      if (!solid) throw new Error("WebGL2 solid atlas allocation failed");
+      for (let first = 0; first < count; first += SPRITE_CAP) {
+        const chunk = Math.min(SPRITE_CAP, count - first);
+        for (let offset = 0; offset < chunk; offset += 1) {
           const index = ordered
-            ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
-            : start + offset;
-          drawRect(index);
+            ? i32[GFX_I_ORDER_BASE + start + first + offset] % GFX_ORDER_KIND_SCALE
+            : start + first + offset;
+          const source = GFX_F_RECT_REVERSE_BASE - index * GFX_GEOMETRY_STRIDE_F32;
+          writeQuad(offset * 16, f32[source], f32[source + 1], f32[source + 2], f32[source + 3],
+            solid, f32[source + 4], f32[source + 5], f32[source + 6], f32[source + 7]);
         }
-        return;
-      }
-      const batcher = getGpuBatcher();
-      if (!batcher) {
-        performanceWorkload.drawCalls += count;
-        for (let offset = 0; offset < count; offset += 1) {
-          const index = ordered
-            ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
-            : start + offset;
-          drawRect(index);
-        }
-        return;
-      }
-      for (let offset = 0; offset < count; offset += 1) {
-        const index = ordered
-          ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
-          : start + offset;
-        const source = GFX_F_RECT_REVERSE_BASE - index * GFX_GEOMETRY_STRIDE_F32;
-        const target = offset * GFX_GEOMETRY_STRIDE_F32;
-        for (let field = 0; field < GFX_GEOMETRY_STRIDE_F32; field += 1) rectScratch[target + field] = f32[source + field];
-      }
-      try {
-        batcher.drawRect(rectScratch, count);
-        performanceWorkload.instances += count;
+        batcher.drawSprites(spriteScratch, chunk, solid.page);
         performanceWorkload.batches += 1;
         performanceWorkload.drawCalls += 1;
-        performanceWorkload.uploadedBytes += count * 8 * Float32Array.BYTES_PER_ELEMENT;
-        performanceBackend = "Canvas2D + WebGL2";
-      } catch (error) {
-        document.body.dataset.gpuError = String(error);
-        gpuBatcher = null;
-        performanceWorkload.drawCalls += count;
-        for (let offset = 0; offset < count; offset += 1) {
-          const index = ordered
-            ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
-            : start + offset;
-          drawRect(index);
-        }
+        performanceWorkload.uploadedBytes += chunk * 16 * Float32Array.BYTES_PER_ELEMENT;
       }
+      performanceWorkload.instances += count;
     };
     const spriteInfo = index => {
       const baseI = GFX_I_SPRITE_BASE + index * GFX_SPRITE_STRIDE_I32;
       const baseF = GFX_F_SPRITE_BASE + index * spriteStride;
-      const resource = sprites.get(i32[baseI]);
-      if (!resource?.ready || !resource.drawable || !resource.width || !resource.height) return null;
+      let resource = sprites.get(i32[baseI]);
+      if (!resource?.ready || !resource.drawable || !resource.width || !resource.height) {
+        resource = deterministicMissingSprite();
+      }
       const x = f32[baseF];
       const y = f32[baseF + 1];
       const width = f32[baseF + 2];
       const height = f32[baseF + 3];
-      const cropRequested = f32[baseF + 6] !== 0 || f32[baseF + 7] !== 0;
-      const variant = spriteVariantFor(resource, cropRequested);
+      const cropRequested = !resource.missing && (f32[baseF + 6] !== 0 || f32[baseF + 7] !== 0);
+      const variant = resource.missing
+        ? { key: "missing", drawable: resource.drawable, width: 2, height: 2 }
+        : spriteVariantFor(resource, cropRequested);
       const logicalWidth = resource.width;
       const logicalHeight = resource.height;
       const logicalX = cropRequested ? f32[baseF + 4] : 0;
@@ -2567,13 +2623,9 @@
       const v0 = logicalY / logicalHeight;
       const u1 = (logicalX + logicalCropWidth) / logicalWidth;
       const v1 = (logicalY + logicalCropHeight) / logicalHeight;
-      const sourceX = u0 * variant.width;
-      const sourceY = v0 * variant.height;
-      const sourceWidth = (u1 - u0) * variant.width;
-      const sourceHeight = (v1 - v0) * variant.height;
       const tint = i32[baseI + 1] >>> 0;
       return { handle: i32[baseI], resource, variant, x, y, width, height,
-        sourceX, sourceY, sourceWidth, sourceHeight, u0, v0, u1, v1,
+        u0, v0, u1, v1,
         pivotX: f32[baseF + 8], pivotY: f32[baseF + 9],
         scaleX: f32[baseF + 10], scaleY: f32[baseF + 11],
         red: ((tint >>> 24) & 255) / 255, green: ((tint >>> 16) & 255) / 255,
@@ -2582,136 +2634,57 @@
     };
     const drawSprite = index => {
       performanceWorkload.sprites += 1;
-      performanceWorkload.drawCalls += 1;
       const info = spriteInfo(index);
       if (!info) return;
-      const { x, y, width, height, sourceX, sourceY, sourceWidth, sourceHeight,
-        pivotX, pivotY, scaleX, scaleY, red, green, blue, alpha, radians, variant } = info;
-      const image = variant.drawable;
-      context.save();
-      context.globalAlpha = alpha;
-      context.translate(x + pivotX, y + pivotY);
-      context.rotate(radians);
-      context.scale(scaleX, scaleY);
-      if (red === 1 && green === 1 && blue === 1) {
-        context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight,
-          -pivotX, -pivotY, width, height);
-      } else {
-        spriteTintCanvas ||= document.createElement?.("canvas");
-        spriteTintContext ||= spriteTintCanvas?.getContext?.("2d");
-        if (!spriteTintCanvas || !spriteTintContext) {
-          context.restore();
-          return;
-        }
-        spriteTintCanvas.width = Math.max(1, Math.ceil(width));
-        spriteTintCanvas.height = Math.max(1, Math.ceil(height));
-        spriteTintContext.clearRect(0, 0, spriteTintCanvas.width, spriteTintCanvas.height);
-        spriteTintContext.globalCompositeOperation = "source-over";
-        spriteTintContext.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight,
-          0, 0, width, height);
-        spriteTintContext.globalCompositeOperation = "multiply";
-        spriteTintContext.fillStyle = `rgb(${Math.round(red * 255)} ${Math.round(green * 255)} ${Math.round(blue * 255)})`;
-        spriteTintContext.fillRect(0, 0, width, height);
-        spriteTintContext.globalCompositeOperation = "destination-in";
-        spriteTintContext.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight,
-          0, 0, width, height);
-        spriteTintContext.globalCompositeOperation = "source-over";
-        context.drawImage(spriteTintCanvas, -pivotX, -pivotY, width, height);
-      }
-      context.restore();
+      const atlas = batcher.atlasFor(info.resource, info.variant);
+      if (!atlas) throw new Error("WebGL2 sprite atlas allocation failed");
+      writeQuad(0,
+        info.x + info.pivotX - info.pivotX * info.scaleX,
+        info.y + info.pivotY - info.pivotY * info.scaleY,
+        info.width * info.scaleX, info.height * info.scaleY, {
+          u0: (atlas.x + info.u0 * atlas.width) / atlas.page.size,
+          v0: (atlas.y + info.v0 * atlas.height) / atlas.page.size,
+          u1: (atlas.x + info.u1 * atlas.width) / atlas.page.size,
+          v1: (atlas.y + info.v1 * atlas.height) / atlas.page.size
+        }, info.red, info.green, info.blue, info.alpha, info.radians,
+        info.pivotX * info.scaleX, info.pivotY * info.scaleY);
+      batcher.drawSprites(spriteScratch, 1, atlas.page);
+      performanceWorkload.instances += 1;
+      performanceWorkload.batches += 1;
+      performanceWorkload.drawCalls += 1;
+      performanceWorkload.uploadedBytes += 16 * Float32Array.BYTES_PER_ELEMENT;
     };
     const drawSpriteRun = (start, count) => {
-      const indexAt = offset => start + offset;
       let offset = 0;
       while (offset < count) {
-        const firstIndex = indexAt(offset);
-        const firstValue = spriteInfo(firstIndex);
-        if (!firstValue) {
-          drawSprite(firstIndex);
-          offset += 1;
-          continue;
-        }
-        let runCount = 1;
-        while (offset + runCount < count) {
-          if (!spriteInfo(indexAt(offset + runCount))) break;
-          runCount += 1;
-        }
-        if (runCount < RECT_BATCH_MIN) {
-          for (let item = 0; item < runCount; item += 1) drawSprite(indexAt(offset + item));
-          offset += runCount;
-          continue;
-        }
-        const batcher = getGpuBatcher();
-        if (!batcher) {
-          for (let item = 0; item < runCount; item += 1) drawSprite(indexAt(offset + item));
-          offset += runCount;
-          continue;
-        }
         let batchCount = 0;
         let page = null;
-        while (batchCount < runCount) {
-          const item = batchCount;
-          const value = spriteInfo(indexAt(offset + item));
-          if (!value) break;
-          let atlas;
-          try {
-            atlas = batcher.atlasFor(value.resource, value.variant);
-          } catch (error) {
-            document.body.dataset.gpuError = String(error);
-            gpuBatcher = null;
-            break;
-          }
+        while (offset + batchCount < count && batchCount < SPRITE_CAP) {
+          const value = spriteInfo(start + offset + batchCount);
+          if (!value) { if (batchCount === 0) offset += 1; break; }
+          const atlas = batcher.atlasFor(value.resource, value.variant);
+          if (!atlas) throw new Error("WebGL2 sprite atlas allocation failed");
           if (!atlas || (page && atlas.page !== page)) break;
           page ||= atlas.page;
-          const target = item * 16;
-          spriteScratch[target] = value.x + value.pivotX - value.pivotX * value.scaleX;
-          spriteScratch[target + 1] = value.y + value.pivotY - value.pivotY * value.scaleY;
-          spriteScratch[target + 2] = value.width * value.scaleX;
-          spriteScratch[target + 3] = value.height * value.scaleY;
-          spriteScratch[target + 4] = (atlas.x + value.u0 * atlas.width) / atlas.page.size;
-          spriteScratch[target + 5] = (atlas.y + value.v0 * atlas.height) / atlas.page.size;
-          spriteScratch[target + 6] = (atlas.x + value.u1 * atlas.width) / atlas.page.size;
-          spriteScratch[target + 7] = (atlas.y + value.v1 * atlas.height) / atlas.page.size;
-          spriteScratch[target + 8] = value.red;
-          spriteScratch[target + 9] = value.green;
-          spriteScratch[target + 10] = value.blue;
-          spriteScratch[target + 11] = value.alpha;
-          spriteScratch[target + 12] = Math.sin(value.radians);
-          spriteScratch[target + 13] = Math.cos(value.radians);
-          spriteScratch[target + 14] = value.pivotX * value.scaleX;
-          spriteScratch[target + 15] = value.pivotY * value.scaleY;
+          writeQuad(batchCount * 16,
+            value.x + value.pivotX - value.pivotX * value.scaleX,
+            value.y + value.pivotY - value.pivotY * value.scaleY,
+            value.width * value.scaleX, value.height * value.scaleY, {
+              u0: (atlas.x + value.u0 * atlas.width) / atlas.page.size,
+              v0: (atlas.y + value.v0 * atlas.height) / atlas.page.size,
+              u1: (atlas.x + value.u1 * atlas.width) / atlas.page.size,
+              v1: (atlas.y + value.v1 * atlas.height) / atlas.page.size
+            }, value.red, value.green, value.blue, value.alpha, value.radians,
+            value.pivotX * value.scaleX, value.pivotY * value.scaleY);
           batchCount += 1;
         }
-        if (gpuBatcher === null) {
-          for (let item = 0; item < runCount; item += 1) drawSprite(indexAt(offset + item));
-          offset += runCount;
-          continue;
-        }
-        if (batchCount === 0) {
-          // An ineligible first resource (oversize or a full bounded atlas)
-          // cannot start a GPU batch. Replay the rest of this adjacent run on
-          // Canvas so a long fallback run is scanned only once.
-          for (let item = 0; item < runCount; item += 1) drawSprite(indexAt(offset + item));
-          offset += runCount;
-          continue;
-        }
-        if (batchCount < RECT_BATCH_MIN) {
-          for (let item = 0; item < batchCount; item += 1) drawSprite(indexAt(offset + item));
-          offset += batchCount;
-          continue;
-        }
-        try {
+        if (batchCount > 0) {
           batcher.drawSprites(spriteScratch, batchCount, page);
           performanceWorkload.instances += batchCount;
           performanceWorkload.batches += 1;
           performanceWorkload.drawCalls += 1;
           performanceWorkload.sprites += batchCount;
           performanceWorkload.uploadedBytes += batchCount * 16 * Float32Array.BYTES_PER_ELEMENT;
-          performanceBackend = "Canvas2D + WebGL2";
-        } catch (error) {
-          document.body.dataset.gpuError = String(error);
-          gpuBatcher = null;
-          for (let item = 0; item < batchCount; item += 1) drawSprite(indexAt(offset + item));
         }
         offset += batchCount;
       }
@@ -2732,8 +2705,6 @@
         }
       }
       if (itemCount < 2) return false;
-      const batcher = getGpuBatcher();
-      if (!batcher) return false;
       let batchCount = 0;
       let batchRects = 0;
       let batchSprites = 0;
@@ -2748,7 +2719,6 @@
         performanceWorkload.batches += 1;
         performanceWorkload.drawCalls += 1;
         performanceWorkload.uploadedBytes += batchCount * 16 * Float32Array.BYTES_PER_ELEMENT;
-        performanceBackend = "Canvas2D + WebGL2";
         batchCount = 0;
         batchRects = 0;
         batchSprites = 0;
@@ -2756,8 +2726,8 @@
         executionDomain = null;
       };
       const emit = (kind, index, domain, preferredPage = null) => {
-        if (executionDomain !== null && executionDomain !== domain) flush();
-        executionDomain = domain;
+        if (kind !== GFX_ORDER_RECT && executionDomain !== null && executionDomain !== domain) flush();
+        if (kind !== GFX_ORDER_RECT) executionDomain = domain;
         let atlas;
         let value;
         if (kind === GFX_ORDER_RECT) {
@@ -2766,19 +2736,12 @@
           value = spriteInfo(index);
           if (!value) {
             flush();
-            drawSprite(index);
             return;
           }
           atlas = batcher.atlasFor(value.resource, value.variant);
         }
         if (!atlas) {
-          flush();
-          if (kind === GFX_ORDER_RECT) {
-            performanceWorkload.rectangles += 1;
-            performanceWorkload.drawCalls += 1;
-            drawRect(index);
-          } else drawSprite(index);
-          return;
+          throw new Error("WebGL2 atlas allocation failed");
         }
         if (page && atlas.page !== page) flush();
         if (batchCount >= SPRITE_CAP) flush();
@@ -2840,7 +2803,7 @@
                 break;
               }
             }
-            emit(kind, index, "-1|0|0|0|0|0", preferredPage);
+            emit(kind, index, executionDomain, preferredPage);
           } else {
             const runBase = GFX_I_SPRITE_RUN_BASE + index * GFX_SPRITE_RUN_STRIDE_I32;
             const first = i32[runBase];
@@ -2853,13 +2816,11 @@
         return true;
       } catch (error) {
         document.body.dataset.gpuError = String(error);
-        gpuBatcher = null;
-        return false;
+        throw error;
       }
     };
     const drawText = index => {
       performanceWorkload.text += 1;
-      performanceWorkload.drawCalls += 1;
       const baseI = GFX_I_TEXT_BASE + index * GFX_TEXT_STRIDE_I32;
       const baseF = textBase + index * GFX_TEXT_STRIDE_F32;
       const offset = i32[baseI + 1];
@@ -2874,12 +2835,8 @@
         const bytes = new Uint8Array(instance.exports.memory.buffer, bytesLayout.offset + offset, i32[baseI + 2]);
         text = new TextDecoder().decode(bytes);
       }
-      context.save();
-      context.globalAlpha = f32[baseF + 5];
-      context.fillStyle = `rgb(${Math.round(f32[baseF + 2] * 255)} ${Math.round(f32[baseF + 3] * 255)} ${Math.round(f32[baseF + 4] * 255)})`;
-      setCanvasFont(font);
-      context.fillText(text, f32[baseF], f32[baseF + 1] + font.baseline);
-      context.restore();
+      drawPreparedText(fontHandle, text, f32[baseF], f32[baseF + 1],
+        f32[baseF + 2], f32[baseF + 3], f32[baseF + 4], f32[baseF + 5]);
     };
     const lineCount = Math.max(0, Math.min(i32[GFX_I_LINE_COUNT], GFX_MAX_LINES));
     const spriteCount = Math.max(0, Math.min(i32[GFX_I_SPRITE_COUNT], GFX_MAX_SPRITES));
@@ -2888,22 +2845,26 @@
     const rectCount = Math.max(0, Math.min(i32[GFX_I_RECT_COUNT], GFX_MAX_GEOMETRY - lineCount));
     const orderCount = Math.max(0, Math.min(i32[GFX_I_ORDER_COUNT], GFX_MAX_ORDER));
     const clipCount = Math.max(0, Math.min(i32[GFX_I_CLIP_COUNT], GFX_MAX_CLIPS));
-    let clipDepth = 0;
+    const clipStack = [];
     const pushClip = index => {
       if (index < 0 || index >= clipCount) return;
-      flushGpuBatcher();
       const base = GFX_F_CLIP_BASE + index * GFX_CLIP_STRIDE_F32;
-      context.save();
-      context.beginPath();
-      context.rect(f32[base], f32[base + 1], f32[base + 2], f32[base + 3]);
-      context.clip();
-      clipDepth += 1;
+      let clip = { x: f32[base], y: f32[base + 1], width: f32[base + 2], height: f32[base + 3] };
+      const parent = clipStack[clipStack.length - 1];
+      if (parent) {
+        const x = Math.max(parent.x, clip.x);
+        const y = Math.max(parent.y, clip.y);
+        const right = Math.min(parent.x + parent.width, clip.x + clip.width);
+        const bottom = Math.min(parent.y + parent.height, clip.y + clip.height);
+        clip = { x, y, width: Math.max(0, right - x), height: Math.max(0, bottom - y) };
+      }
+      clipStack.push(clip);
+      batcher.setClip(clip);
     };
     const popClip = () => {
-      if (clipDepth <= 0) return;
-      flushGpuBatcher();
-      context.restore();
-      clipDepth -= 1;
+      if (clipStack.length === 0) return;
+      clipStack.pop();
+      batcher.setClip(clipStack[clipStack.length - 1] || null);
     };
     performanceWorkload.commands += lineCount + rectCount + spriteCount + textCount;
     if (orderCount > 0) {
@@ -2953,10 +2914,7 @@
       }
       for (let index = 0; index < textCount; index += 1) drawText(index);
     }
-    while (clipDepth > 0) {
-      context.restore();
-      clipDepth -= 1;
-    }
+    batcher.setClip(null);
   }
 
   function sdlScancode(code) {
@@ -3116,6 +3074,12 @@
   }
 
   function frame(timestamp) {
+    if (!getGpuBatcher()) {
+      // Context loss suspends publication. The restore event makes the same
+      // visible WebGL2 renderer recreatable; there is no alternate backend.
+      requestAnimationFrame(frame);
+      return;
+    }
     applyWindowRequest();
     writeHostFrame(timestamp);
     const tickStart = performance.now();
@@ -3135,9 +3099,19 @@
     performanceWorkload.composites = 0;
     performanceWorkload.renderSubmissions = 0;
     performanceWorkload.uploadedBytes = 0;
-    performanceBackend = gpuBatcher ? "Canvas2D + WebGL2" : "Canvas2D";
+    performanceWorkload.textureBinds = 0;
+    performanceWorkload.atlasTransitions = 0;
+    performanceWorkload.pipelineBoundaries = 0;
+    performanceBackend = "WebGL2";
+    gpuBatcher.resetFrameMetrics();
     const replayStart = performance.now();
-    executeCommands();
+    try {
+      executeCommands();
+    } catch (error) {
+      document.body.dataset.gpuError = String(error);
+      requestAnimationFrame(frame);
+      return;
+    }
     const browserReplayMs = performance.now() - replayStart;
     const atlasMetrics = gpuBatcher?.metrics?.();
     performanceWorkload.atlasPages = atlasMetrics?.pages ?? -1;
@@ -3145,6 +3119,8 @@
     performanceWorkload.atlasAllocatedBytes = atlasMetrics?.allocatedBytes ?? -1;
     performanceWorkload.atlasUploadCount = atlasMetrics?.uploadCount ?? -1;
     performanceWorkload.atlasUploadBytes = atlasMetrics?.uploadBytes ?? -1;
+    performanceWorkload.textureBinds = atlasMetrics?.frameTextureBinds ?? 0;
+    performanceWorkload.atlasTransitions = atlasMetrics?.frameAtlasTransitions ?? 0;
     publishDisplayReceipt();
     const renderMs = wasmRenderMs + browserReplayMs;
     const frameWorkMs = tickMs + renderMs;
@@ -3160,11 +3136,10 @@
     const underBudget = frameWorkMs <= 16.67;
     if (hud) {
       const uploadText = performanceWorkload.uploadedBytes > 0 ? ` · uploaded ${performanceWorkload.uploadedBytes} B` : "";
-      const instanceText = performanceBackend.includes("WebGL2")
-        ? ` · instances ${performanceWorkload.instances} · batches ${performanceWorkload.batches}` : "";
+      const instanceText = ` · instances ${performanceWorkload.instances} · batches ${performanceWorkload.batches}`;
       const atlasText = performanceWorkload.atlasPages >= 0
         ? ` · atlas ${performanceWorkload.atlasPages} pages/${performanceWorkload.atlasLiveEntries} live · ${performanceWorkload.atlasAllocatedBytes} B · uploads total ${performanceWorkload.atlasUploadCount}` : "";
-      hud.textContent = `${performanceBackend} · frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)}) · guest render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nhost replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)}) · ${underBudget ? "UNDER 16.67 ms" : "OVER 16.67 ms"}\ncommands ${performanceWorkload.commands} · lines ${performanceWorkload.lines} · rects ${performanceWorkload.rectangles} · sprites ${performanceWorkload.sprites} · text ${performanceWorkload.text}\ndraws ${performanceWorkload.drawCalls} · composites ${performanceWorkload.composites} · submissions ${performanceWorkload.renderSubmissions}${instanceText}${uploadText}${atlasText}`;
+      hud.textContent = `${performanceBackend} · frame ${frames}\ntick ${tickMs.toFixed(3)} ms (worst ${worstTick.toFixed(3)}) · guest render ${wasmRenderMs.toFixed(3)} ms (worst ${worstWasmRender.toFixed(3)})\nhost replay ${browserReplayMs.toFixed(3)} ms (worst ${worstBrowserReplay.toFixed(3)})\nframe work ${frameWorkMs.toFixed(3)} ms (worst ${worstFrameWork.toFixed(3)}) · ${underBudget ? "UNDER 16.67 ms" : "OVER 16.67 ms"}\ncommands ${performanceWorkload.commands} · lines ${performanceWorkload.lines} · rects ${performanceWorkload.rectangles} · sprites ${performanceWorkload.sprites} · text ${performanceWorkload.text}\ndraws ${performanceWorkload.drawCalls} · composites ${performanceWorkload.composites} · submissions ${performanceWorkload.renderSubmissions} · binds ${performanceWorkload.textureBinds} · atlas transitions ${performanceWorkload.atlasTransitions}${instanceText}${uploadText}${atlasText}`;
     }
     document.body.dataset.frames = String(frames);
     document.body.dataset.tickMs = tickMs.toFixed(3);
@@ -3183,12 +3158,15 @@
     document.body.dataset.rectangles = String(performanceWorkload.rectangles);
     document.body.dataset.sprites = String(performanceWorkload.sprites);
     document.body.dataset.text = String(performanceWorkload.text);
-    document.body.dataset.instances = performanceBackend.includes("WebGL2") ? String(performanceWorkload.instances) : "-1";
-    document.body.dataset.batches = performanceBackend.includes("WebGL2") ? String(performanceWorkload.batches) : "-1";
+    document.body.dataset.instances = String(performanceWorkload.instances);
+    document.body.dataset.batches = String(performanceWorkload.batches);
     document.body.dataset.drawCalls = String(performanceWorkload.drawCalls);
     document.body.dataset.composites = String(performanceWorkload.composites);
     document.body.dataset.renderSubmissions = String(performanceWorkload.renderSubmissions);
     document.body.dataset.uploadedBytes = String(performanceWorkload.uploadedBytes);
+    document.body.dataset.textureBinds = String(performanceWorkload.textureBinds);
+    document.body.dataset.atlasTransitions = String(performanceWorkload.atlasTransitions);
+    document.body.dataset.pipelineBoundaries = String(performanceWorkload.pipelineBoundaries);
     document.body.dataset.atlasPages = String(performanceWorkload.atlasPages);
     document.body.dataset.atlasLiveEntries = String(performanceWorkload.atlasLiveEntries);
     document.body.dataset.atlasAllocatedBytes = String(performanceWorkload.atlasAllocatedBytes);
@@ -3269,6 +3247,7 @@
   window.STASIS_RUNTIME_PROMISE = (async () => {
     try {
       setLoading("Preparing…", "loading");
+      if (!getGpuBatcher()) throw new Error("WebGL2 is required by the Stasis Web renderer");
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
       writeHostFrame(performance.now());

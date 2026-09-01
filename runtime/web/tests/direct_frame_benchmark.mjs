@@ -114,7 +114,7 @@ function buildV6Scratch(items) {
   return canonicalI32[0] ^ canonicalF32[3] ^ rectF32[7] ^ order[order.length - 1];
 }
 
-function buildV7DirectAndPlan(items) {
+function buildV7DirectGuestFrame(items) {
   const spriteCount = items.filter((item) => item.kind === "sprite").length;
   const rectCount = items.length - spriteCount;
   const runsCount = spriteRunCount(items);
@@ -128,7 +128,7 @@ function buildV7DirectAndPlan(items) {
   let runIndex = -1;
   let orderIndex = 0;
   let inSpriteRun = false;
-  let plannerHash = 0;
+  let constructionHash = 0;
   for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
     const item = items[itemIndex];
     if (item.kind === "sprite") {
@@ -171,9 +171,9 @@ function buildV7DirectAndPlan(items) {
       rectIndex += 1;
       inSpriteRun = false;
     }
-    plannerHash = (plannerHash * 33 + item.width + item.height) | 0;
+    constructionHash = (constructionHash * 33 + item.width + item.height) | 0;
   }
-  return plannerHash ^ spriteI32[0] ^ spriteF32[12] ^ rectF32[7] ^ runs[1] ^ order[order.length - 1];
+  return constructionHash ^ spriteI32[0] ^ spriteF32[12] ^ rectF32[7] ^ runs[1] ^ order[order.length - 1];
 }
 
 function measure(operation) {
@@ -236,6 +236,7 @@ function v6Plan(items) {
 function v7Plan(items) {
   let draws = 0;
   let activeDomain = null;
+  let activeInstances = 0;
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
     let domain = item.domain;
@@ -246,15 +247,17 @@ function v7Plan(items) {
         domain = nextSprite?.domain ?? 0;
       }
     }
-    if (domain !== activeDomain) {
+    if (domain !== activeDomain || activeInstances === 4096) {
       draws += 1;
       activeDomain = domain;
+      activeInstances = 0;
     }
+    activeInstances += 1;
   }
   return {
     draw_submissions: draws,
-    composites: draws,
-    atlas_page_transitions: Math.max(0, draws - 1),
+    composites: 0,
+    atlas_page_transitions: atlasPageTransitions(items),
     sprite_solid_pipeline_boundaries: 0
   };
 }
@@ -281,38 +284,38 @@ function scenarioEvidence(scenario) {
     },
     measured_cpu: {
       before_v6_guest_construction: measure(() => buildV6Scratch(scenario.items)),
-      after_v7_direct_construction_and_private_plan: measure(() => buildV7DirectAndPlan(scenario.items))
+      after_v7_direct_guest_frame_construction: measure(() => buildV7DirectGuestFrame(scenario.items))
     },
     counters: {
       kind: "deterministic_production-layout_counter_model_not_gpu_timing",
       before_v6: {
         canonical_bytes_written: sprites * 44 + rectangles * 32 + scenario.items.length * 4,
         scratch_to_frame_bytes_copied: sprites * 44,
-        host_private_repack_bytes: sprites * PRIVATE_QUAD_BYTES,
-        host_private_upload_bytes: sprites * PRIVATE_QUAD_BYTES,
+        modeled_host_private_repack_bytes: sprites * PRIVATE_QUAD_BYTES,
+        modeled_host_private_upload_bytes: sprites * PRIVATE_QUAD_BYTES,
         ...beforePlan,
-        solid_texel_upload_bytes_per_generation: 0
+        modeled_solid_texel_bytes_per_context_generation: 0
       },
       after_v7: {
         canonical_bytes_written: sprites * 64 + rectangles * 32 + runs * 32 + (runs + rectangles) * 4,
         scratch_to_frame_bytes_copied: 0,
-        host_private_repack_bytes: scenario.items.length * PRIVATE_QUAD_BYTES,
-        host_private_upload_bytes: scenario.items.length * PRIVATE_QUAD_BYTES,
+        modeled_host_private_repack_bytes: scenario.items.length * PRIVATE_QUAD_BYTES,
+        modeled_host_private_upload_bytes: scenario.items.length * PRIVATE_QUAD_BYTES,
         ...afterPlan,
-        solid_texel_upload_bytes_per_generation: domains * SOLID_TEXEL_BYTES_PER_DOMAIN
+        modeled_solid_texel_bytes_per_context_generation: domains * SOLID_TEXEL_BYTES_PER_DOMAIN
       }
     }
   };
 }
 
 const evidence = {
-  schema: "stasis.direct_frame_benchmark.v2",
+  schema: "stasis.direct_frame_benchmark.v3",
   platform: `node ${process.version} ${process.platform}/${process.arch}`,
   phase_model: {
-    image_and_atlas_preparation: "one-time per load/resource/density/context generation; solid texel overhead is reported separately",
+    image_and_atlas_preparation: "not timed here; production performs it once per load/resource/density/context generation and the modeled solid-texel bytes are labeled separately",
     static_frame_or_list_construction: "not measured: v7 does not expose sealed persistent replay or patchable slots; remaining #399 scope",
     dynamic_frame_construction: "measured every render; harness allocations do not model production's persistent global canonical lanes",
-    host_private_repack_and_upload: "counted every dynamic frame for the WebGL2 64-byte private quad stream"
+    host_private_repack_and_upload: "modeled byte counts only; this harness does not execute production planner, WebGL bufferSubData, driver, or GPU work"
   },
   assumptions: {
     exact_source_order: true,

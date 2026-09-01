@@ -17,17 +17,15 @@ test("web package template exposes an immediate accessible loading status", () =
   assert.match(html, /data-hidden="true"/);
 });
 
-test("web runtimes keep loading visible, hide only when ready, and retain failure", () => {
-  for (const name of ["game.js", "game_minimal.js"]) {
-    const source = read(name);
-    assert.match(source, /const loadingStatus = document\.getElementById\("stasis-loading-status"\)/);
-    assert.match(source, /if \(loadingStatus\) loadingStatus\.textContent = message;/);
-    assert.match(source, /else loadingBox\.textContent = message;/);
-    assert.match(source, /setLoading\("Preparing…", "loading"\)/);
-    assert.match(source, /dataset\.hidden = state === "ready" \? "true" : "false"/);
-    assert.match(source, /dataset\.failed = state === "failed" \? "true" : "false"/);
-    assert.match(source, /setLoading\("", "ready"\)/);
-    assert.match(source, /setLoading\(`Unable to start this game\./);
-    assert.match(source, /, "failed"\)/);
-  }
+test("the sole WebGL2 runtime keeps loading visible, hides only when ready, and retains failure", () => {
+  const source = read("game.js");
+  assert.match(source, /const loadingStatus = document\.getElementById\("stasis-loading-status"\)/);
+  assert.match(source, /if \(loadingStatus\) loadingStatus\.textContent = message;/);
+  assert.match(source, /else loadingBox\.textContent = message;/);
+  assert.match(source, /setLoading\("Preparing…", "loading"\)/);
+  assert.match(source, /dataset\.hidden = state === "ready" \? "true" : "false"/);
+  assert.match(source, /dataset\.failed = state === "failed" \? "true" : "false"/);
+  assert.match(source, /setLoading\("", "ready"\)/);
+  assert.match(source, /setLoading\(`Unable to start this game\./);
+  assert.match(source, /WebGL2 is required by the Stasis Web renderer/);
 });
