@@ -1,6 +1,17 @@
 # Stasis Asset Manifest v2
 
-`assets/manifest.json` is the shared project contract for asset identity, integrity, and optional build-time raster preparation. Desktop, JIT, AOT, Android Workshop, and published runtimes consume this contract rather than inventing platform-specific asset IDs or accepting arbitrary filesystem paths.
+`assets/manifest.json` is the optional authored project contract for asset identity,
+integrity, dynamic asset closure, and build-time raster preparation. Statically
+referenced sprites and fonts do not require a source manifest: Stasis derives their
+canonical paths, formats, dimensions, hashes, deterministic IDs, and stable handles
+from the compiler's reachable asset references and the files themselves. The resolved
+manifest remains in memory until a prepared or published runtime needs a serialized
+package index.
+
+An authored manifest still takes precedence when present. Use one for dynamically
+constructed asset paths, explicit IDs that must remain stable across path renames,
+dependencies, preparation/display policy, or asset metadata that Stasis cannot yet
+infer safely. Audio currently remains in that last category.
 
 Version 1 manifests remain valid and package their files unchanged. Version 2 adds optional display and sprite preparation metadata. Sprite-sheet layout metadata is optional and is also accepted by version 1 manifests for backward-compatible asset description.
 
@@ -178,7 +189,7 @@ and are not subject to this SVG-only line-ending check.
 
 ## Mobile packaging
 
-- The AOT bundle command resolves and verifies the source manifest, then invokes the shared `stasis_assets` preparation path and packages the generated manifest and files under `assets/stasis_game/`.
+- The AOT bundle command resolves and verifies an authored source manifest when one exists. Otherwise it derives the statically reachable sprite/font closure in memory. Both paths invoke the shared `stasis_assets` preparation path and serialize the generated package manifest and files under `assets/stasis_game/`; the inferred path does not create `assets/manifest.json` in the source project.
 - Android and iOS apply the same reachable-source asset closure as desktop release builds; platform packaging does not carry unused manifest entries or alternate prepared sizes.
 - Declared fonts use the same compiler-owned reference set and manifest closure as every other
   asset. Mobile packaging does not scan arbitrary string literals or copy undeclared font files.
