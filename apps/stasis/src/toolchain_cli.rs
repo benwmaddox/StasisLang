@@ -4341,7 +4341,7 @@ fn package_web_workspace(
             .imported_symbols()
             .iter()
             .any(|symbol| symbol.starts_with("stasis_web_network_"));
-        let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled);
+        let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled)?;
         let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
@@ -4556,9 +4556,77 @@ fn web_index_html(title: &str, development_build: bool, loading_font: Option<&st
         .replace("__STASIS_LOADING_FONT_FAMILY__", &loading_font_family)
 }
 
-fn link_web_runtime(_process: &WasmProcess, audio_enabled: bool, network_enabled: bool) -> String {
+fn link_web_runtime(
+    process: &WasmProcess,
+    audio_enabled: bool,
+    network_enabled: bool,
+) -> Result<String, String> {
     let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled);
-    strip_web_runtime_feature(&runtime, "network", network_enabled)
+    let runtime = strip_web_runtime_feature(&runtime, "network", network_enabled);
+    strip_web_runtime_imports(&runtime, process.imported_symbols())
+}
+
+fn strip_web_runtime_imports(
+    source: &str,
+    imported_symbols: &BTreeSet<String>,
+) -> Result<String, String> {
+    const PREFIX: &str = "// @stasis-import ";
+    let mut active: Option<(String, bool)> = None;
+    let mut output = Vec::new();
+
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(marker) = trimmed.strip_prefix(PREFIX) {
+            if let Some(symbol) = marker.strip_suffix(" begin") {
+                if symbol.is_empty() || symbol.split_whitespace().count() != 1 {
+                    return Err(format!(
+                        "invalid Web runtime import marker on line {}: {trimmed}",
+                        index + 1
+                    ));
+                }
+                if let Some((active_symbol, _)) = active.as_ref() {
+                    return Err(format!(
+                        "nested Web runtime import marker for {symbol} inside {active_symbol} on line {}",
+                        index + 1
+                    ));
+                }
+                active = Some((symbol.to_string(), imported_symbols.contains(symbol)));
+                continue;
+            }
+            if let Some(symbol) = marker.strip_suffix(" end") {
+                match active.take() {
+                    Some((active_symbol, _)) if active_symbol == symbol => continue,
+                    Some((active_symbol, _)) => {
+                        return Err(format!(
+                            "mismatched Web runtime import marker for {symbol}; expected {active_symbol} on line {}",
+                            index + 1
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "unmatched Web runtime import end marker for {symbol} on line {}",
+                            index + 1
+                        ));
+                    }
+                }
+            }
+            return Err(format!(
+                "invalid Web runtime import marker on line {}: {trimmed}",
+                index + 1
+            ));
+        }
+
+        if active.as_ref().is_none_or(|(_, retain)| *retain) {
+            output.push(line);
+        }
+    }
+
+    if let Some((symbol, _)) = active {
+        return Err(format!(
+            "unterminated Web runtime import marker for {symbol}"
+        ));
+    }
+    Ok(output.join("\n"))
 }
 
 fn strip_web_runtime_feature(source: &str, feature: &str, enabled: bool) -> String {
@@ -7438,9 +7506,35 @@ mod tests {
         }
         assert!(!memory.contains_key("unrelated"));
 
-        let runtime = link_web_runtime(&process, false, false);
+        let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
         assert!(runtime.contains("const sysMemcpyU8 ="));
         assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+    }
+
+    #[test]
+    fn web_runtime_import_markers_follow_imports_and_reject_malformed_layout() {
+        let source = "before\n// @stasis-import web_input_axis begin\naxis\n// @stasis-import web_input_axis end\nmiddle\n// @stasis-import web_input_fire begin\nfire\n// @stasis-import web_input_fire end\nafter";
+        let imports = BTreeSet::from(["web_input_fire".to_string()]);
+        let stripped = strip_web_runtime_imports(source, &imports).expect("strip imports");
+        assert_eq!(stripped, "before\nmiddle\nfire\nafter");
+
+        let runtime = strip_web_runtime_imports(WEB_RUNTIME_JS, &imports)
+            .expect("strip optional imports from runtime");
+        assert!(runtime.contains("web_input_fire: () =>"));
+        assert!(!runtime.contains("web_input_axis: () =>"));
+        assert!(!runtime.contains("@stasis-import"));
+
+        for malformed in [
+            "// @stasis-import a begin\n// @stasis-import b begin\nvalue",
+            "// @stasis-import a begin\nvalue\n// @stasis-import b end",
+            "// @stasis-import a end",
+            "// @stasis-import a begin\nvalue",
+        ] {
+            assert!(
+                strip_web_runtime_imports(malformed, &BTreeSet::new()).is_err(),
+                "accepted malformed marker layout: {malformed}"
+            );
+        }
     }
 
     #[test]

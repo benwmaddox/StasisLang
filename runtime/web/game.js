@@ -1825,10 +1825,18 @@
     stasis_web_network_resume_seat: () => networkClient.desiredSeat,
     stasis_web_network_last_sequence: () => networkClient.lastSequence,
     // @stasis-feature network end
+    // @stasis-import web_input_axis begin
     web_input_axis: () => (keys.has("ArrowRight") || keys.has("KeyD") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("KeyA") ? 1 : 0),
+    // @stasis-import web_input_axis end
+    // @stasis-import web_input_fire begin
     web_input_fire: () => keys.has("Space") || pointer.down ? 1 : 0,
+    // @stasis-import web_input_fire end
+    // @stasis-import web_pointer_x begin
     web_pointer_x: () => pointer.x | 0,
+    // @stasis-import web_pointer_x end
+    // @stasis-import web_pointer_down begin
     web_pointer_down: () => pointer.down ? 1 : 0,
+    // @stasis-import web_pointer_down end
     web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },
     web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),
     web_draw_text: (x, y, value) => commands.push([2, x, y, value]),
