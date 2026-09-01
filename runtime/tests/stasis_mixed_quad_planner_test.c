@@ -37,5 +37,32 @@ int main(void) {
     CHECK(fabsf(points[1] - 18.0f) < 0.001f);
     CHECK(fabsf(points[4] - 0.0f) < 0.001f);
     CHECK(fabsf(points[5] - 30.0f) < 0.001f);
+
+    StasisRasterCrop crop;
+    CHECK(stasis_logical_crop_to_raster(10, 5, 20, 10, 100, 50, 200, 100, &crop));
+    CHECK(fabsf(crop.x - 20.0f) < 0.001f);
+    CHECK(fabsf(crop.y - 10.0f) < 0.001f);
+    CHECK(fabsf(crop.w - 40.0f) < 0.001f);
+    CHECK(fabsf(crop.h - 20.0f) < 0.001f);
+
+    CHECK(stasis_logical_crop_to_raster(7, 3, 11, 6, 80, 30, 120, 100, &crop));
+    CHECK(fabsf(crop.x - 10.5f) < 0.001f);
+    CHECK(fabsf(crop.y - 10.0f) < 0.001f);
+    CHECK(fabsf(crop.w - 16.5f) < 0.001f);
+    CHECK(fabsf(crop.h - 20.0f) < 0.001f);
+
+    CHECK(stasis_logical_crop_to_raster(0, 0, 0, 0, 80, 30, 120, 100, &crop));
+    CHECK(crop.x == 0.0f && crop.y == 0.0f && crop.w == 120.0f && crop.h == 100.0f);
+    CHECK(stasis_logical_crop_to_raster(70, 24, 10, 6, 80, 30, 120, 100, &crop));
+    CHECK(fabsf(crop.x - 105.0f) < 0.001f);
+    CHECK(fabsf(crop.y - 80.0f) < 0.001f);
+    CHECK(fabsf(crop.w - 15.0f) < 0.001f);
+    CHECK(fabsf(crop.h - 20.0f) < 0.001f);
+
+    CHECK(!stasis_logical_crop_to_raster(1, 0, 0, 0, 80, 30, 120, 100, &crop));
+    CHECK(!stasis_logical_crop_to_raster(0, 0, 10, 0, 80, 30, 120, 100, &crop));
+    CHECK(!stasis_logical_crop_to_raster(71, 24, 10, 6, 80, 30, 120, 100, &crop));
+    CHECK(!stasis_logical_crop_to_raster(NAN, 0, 10, 10, 80, 30, 120, 100, &crop));
+    CHECK(!stasis_logical_crop_to_raster(0, 0, 10, 10, 0, 30, 120, 100, &crop));
     return 0;
 }

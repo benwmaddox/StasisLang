@@ -11,6 +11,54 @@ typedef struct {
     uint32_t domain_transitions;
 } StasisMixedQuadPlan;
 
+typedef struct {
+    float x;
+    float y;
+    float w;
+    float h;
+} StasisRasterCrop;
+
+/* Source crops are expressed in logical image pixels. Convert both endpoints
+ * independently so non-uniform and non-integer raster density is preserved. */
+static inline int stasis_logical_crop_to_raster(
+    float src_x, float src_y, float src_w, float src_h,
+    float logical_w, float logical_h, float raster_w, float raster_h,
+    StasisRasterCrop* out
+) {
+    if (!out || !isfinite(logical_w) || !isfinite(logical_h) ||
+        !isfinite(raster_w) || !isfinite(raster_h) ||
+        logical_w <= 0.0f || logical_h <= 0.0f ||
+        raster_w <= 0.0f || raster_h <= 0.0f) return 0;
+
+    if (src_x == 0.0f && src_y == 0.0f && src_w == 0.0f && src_h == 0.0f) {
+        out->x = 0.0f;
+        out->y = 0.0f;
+        out->w = raster_w;
+        out->h = raster_h;
+        return 1;
+    }
+
+    if (!isfinite(src_x) || !isfinite(src_y) ||
+        !isfinite(src_w) || !isfinite(src_h) ||
+        src_x < 0.0f || src_y < 0.0f || src_w <= 0.0f || src_h <= 0.0f) return 0;
+    const float src_x1 = src_x + src_w;
+    const float src_y1 = src_y + src_h;
+    if (!isfinite(src_x1) || !isfinite(src_y1) ||
+        src_x1 > logical_w || src_y1 > logical_h) return 0;
+
+    const float raster_x0 = src_x * raster_w / logical_w;
+    const float raster_y0 = src_y * raster_h / logical_h;
+    const float raster_x1 = src_x1 * raster_w / logical_w;
+    const float raster_y1 = src_y1 * raster_h / logical_h;
+    if (!isfinite(raster_x0) || !isfinite(raster_y0) ||
+        !isfinite(raster_x1) || !isfinite(raster_y1)) return 0;
+    out->x = raster_x0;
+    out->y = raster_y0;
+    out->w = raster_x1 - raster_x0;
+    out->h = raster_y1 - raster_y0;
+    return out->w > 0.0f && out->h > 0.0f;
+}
+
 /* Domain ids are host-private atlas page indices. Solids are page-neutral:
  * they inherit an active page or look ahead to the next sprite page. */
 static inline StasisMixedQuadPlan stasis_mixed_quad_plan_domains(

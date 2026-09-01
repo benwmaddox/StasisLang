@@ -4363,13 +4363,15 @@ static int stasis_mixed_add_sprite(
         index * STASIS_RENDER_SPRITE_F32_STRIDE;
     const float x = cmd_f32[base_f + 0], y = cmd_f32[base_f + 1];
     const float w = cmd_f32[base_f + 2], h = cmd_f32[base_f + 3];
-    float sx = cmd_f32[base_f + 4], sy = cmd_f32[base_f + 5];
-    float sw = cmd_f32[base_f + 6], sh = cmd_f32[base_f + 7];
+    const float sx = cmd_f32[base_f + 4], sy = cmd_f32[base_f + 5];
+    const float sw = cmd_f32[base_f + 6], sh = cmd_f32[base_f + 7];
     const float px = cmd_f32[base_f + 8], py = cmd_f32[base_f + 9];
     const float scale_x = cmd_f32[base_f + 10], scale_y = cmd_f32[base_f + 11];
-    if (sw == 0.0f && sh == 0.0f) { sx = 0; sy = 0; sw = (float)entry->w; sh = (float)entry->h; }
-    if (w <= 0 || h <= 0 || scale_x == 0 || scale_y == 0 || sx < 0 || sy < 0 ||
-        sw <= 0 || sh <= 0 || sx + sw > entry->w || sy + sh > entry->h) return 0;
+    StasisRasterCrop crop;
+    if (w <= 0 || h <= 0 || scale_x == 0 || scale_y == 0 ||
+        !stasis_logical_crop_to_raster(sx, sy, sw, sh,
+            (float)entry->max_w, (float)entry->max_h,
+            (float)entry->w, (float)entry->h, &crop)) return 0;
     float transformed[8];
     stasis_mixed_quad_transform(x, y, w, h, px, py, scale_x, scale_y,
         cmd_f32[base_f + 12], transformed);
@@ -4384,8 +4386,10 @@ static int stasis_mixed_add_sprite(
         (float)((tint >> 8) & 255u) / 255.0f, (float)(tint & 255u) / 255.0f};
     const StasisSdlAtlasPage* page = &g_sprite_atlas_pages[entry->page_index];
     stasis_mixed_set_quad(quad, points, color,
-        (entry->atlas_x + sx) / page->width, (entry->atlas_y + sy) / page->height,
-        (entry->atlas_x + sx + sw) / page->width, (entry->atlas_y + sy + sh) / page->height);
+        (entry->atlas_x + crop.x) / page->width,
+        (entry->atlas_y + crop.y) / page->height,
+        (entry->atlas_x + crop.x + crop.w) / page->width,
+        (entry->atlas_y + crop.y + crop.h) / page->height);
     return 1;
 }
 
@@ -5197,15 +5201,9 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
         return;
     }
 
-    if (src_w == 0.0f && src_h == 0.0f) {
-        src_x = 0.0f; src_y = 0.0f; src_w = (float)e->w; src_h = (float)e->h;
-    }
-    if (src_x < 0.0f || src_y < 0.0f || src_w <= 0.0f || src_h <= 0.0f ||
-        src_x + src_w > (float)e->w || src_y + src_h > (float)e->h) return;
-    const float src_u0 = src_x / (float)e->w;
-    const float src_v0 = src_y / (float)e->h;
-    const float src_u1 = (src_x + src_w) / (float)e->w;
-    const float src_v1 = (src_y + src_h) / (float)e->h;
+    StasisRasterCrop crop;
+    if (!stasis_logical_crop_to_raster(src_x, src_y, src_w, src_h,
+            (float)e->max_w, (float)e->max_h, (float)e->w, (float)e->h, &crop)) return;
     const Uint8 tint_r = (Uint8)((tint_rgba >> 24) & 0xffu);
     const Uint8 tint_g = (Uint8)((tint_rgba >> 16) & 0xffu);
     const Uint8 tint_b = (Uint8)((tint_rgba >> 8) & 0xffu);
@@ -5219,9 +5217,8 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
     SDL_FPoint center = { fabsf(pivot_x * scale_x), fabsf(pivot_y * scale_y) };
     SDL_SetTextureColorMod(e->sdl_tex, tint_r, tint_g, tint_b);
     SDL_SetTextureAlphaMod(e->sdl_tex, tint_a);
-    SDL_FRect src = { (float)e->atlas_x + src_u0 * e->w,
-        (float)e->atlas_y + src_v0 * e->h,
-        (src_u1 - src_u0) * e->w, (src_v1 - src_v0) * e->h };
+    SDL_FRect src = { (float)e->atlas_x + crop.x,
+        (float)e->atlas_y + crop.y, crop.w, crop.h };
     SDL_FlipMode flip = SDL_FLIP_NONE;
     if (scale_x < 0.0f) flip = (SDL_FlipMode)(flip | SDL_FLIP_HORIZONTAL);
     if (scale_y < 0.0f) flip = (SDL_FlipMode)(flip | SDL_FLIP_VERTICAL);
