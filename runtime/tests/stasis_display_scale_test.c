@@ -103,6 +103,29 @@ static void test_desktop_density_tiers_preserve_logical_geometry(void) {
     CHECK(stasis_display_scaled_extent_for_backing(18, 720, 360, 1921, 986) == 49);
 }
 
+static void test_preparation_scale_is_exact_and_bounded(void) {
+    const StasisDisplayPreparationScale unity =
+        stasis_display_preparation_scale(2000, 1000, 2000, 1000);
+    const StasisDisplayPreparationScale fractional =
+        stasis_display_preparation_scale(2000, 1000, 2001, 1001);
+    CHECK(unity.numerator == 1);
+    CHECK(unity.denominator == 1);
+    CHECK(fractional.numerator == 2001);
+    CHECK(fractional.denominator == 2000);
+    CHECK(stasis_display_preparation_scale_changed(unity, fractional));
+    CHECK(stasis_display_scaled_extent_for_backing(2000, 2000, 1000, 2001, 1001) == 2001);
+
+    const StasisDisplayPreparationScale over_eight =
+        stasis_display_preparation_scale(100, 50, 901, 451);
+    const StasisDisplayPreparationScale farther_over_eight =
+        stasis_display_preparation_scale(100, 50, 1200, 600);
+    CHECK(over_eight.numerator == STASIS_DISPLAY_RASTER_SCALE_MAX);
+    CHECK(over_eight.denominator == 1);
+    CHECK(!stasis_display_preparation_scale_changed(over_eight, farther_over_eight));
+    CHECK(stasis_display_scaled_extent_for_backing(100, 100, 50, 901, 451) == 800);
+    CHECK(stasis_display_scaled_extent_for_backing(9000, 100, 50, 901, 451) == 65536);
+}
+
 static void test_x11_content_scale_selects_window_backing(void) {
     CHECK(stasis_display_scaled_window_extent(720, 1.0f) == 720);
     CHECK(stasis_display_scaled_window_extent(720, 1.25f) == 900);
@@ -226,6 +249,7 @@ int main(void) {
     test_pointer_mapping_round_trips_through_letterbox();
     test_fractional_and_downscale_metrics_are_distinct();
     test_desktop_density_tiers_preserve_logical_geometry();
+    test_preparation_scale_is_exact_and_bounded();
     test_x11_content_scale_selects_window_backing();
     test_full_backing_and_fitted_content_remain_distinct();
     test_orientation_change_keeps_logical_dimensions();

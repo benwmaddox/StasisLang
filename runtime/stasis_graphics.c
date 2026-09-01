@@ -174,6 +174,7 @@ static bool g_recording_config_pending = false;
 static StasisDisplayMetrics g_display_metrics;
 static int g_display_generation = 0;
 static int g_density_generation = 0;
+static StasisDisplayPreparationScale g_density_preparation_scale = {0, 0};
 static int g_available_width = 0;
 static int g_available_height = 0;
 static bool g_window_resized = false;
@@ -763,6 +764,9 @@ static void stasis_sync_display_metrics(void) {
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
         drawable_w, drawable_h, safe_native);
+    const StasisDisplayPreparationScale next_preparation_scale =
+        stasis_display_preparation_scale(
+            next.logical_w, next.logical_h, next.drawable_w, next.drawable_h);
     const int dimensions_changed =
         next.native_w != g_display_metrics.native_w ||
         next.native_h != g_display_metrics.native_h ||
@@ -772,10 +776,12 @@ static void stasis_sync_display_metrics(void) {
         next.logical_h != g_display_metrics.logical_h ||
         available_w != g_available_width ||
         available_h != g_available_height;
-    const int density_changed =
-        g_density_generation == 0 || fabsf(next.raster_scale - g_pixel_scale) > 0.001f;
+    const int density_changed = g_density_generation == 0 ||
+        stasis_display_preparation_scale_changed(
+            g_density_preparation_scale, next_preparation_scale);
     if (density_changed) {
         g_pixel_scale = next.raster_scale;
+        g_density_preparation_scale = next_preparation_scale;
         stasis_mark_density_resources_dirty();
     }
     if (g_display_generation == 0 || dimensions_changed) {
@@ -4280,6 +4286,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_drawable_width = width;
     g_drawable_height = height;
     g_pixel_scale = 1.0f;
+    g_density_preparation_scale.numerator = 0;
+    g_density_preparation_scale.denominator = 0;
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!want_sdl) {

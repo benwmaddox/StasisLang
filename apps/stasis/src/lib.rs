@@ -5778,6 +5778,32 @@ function render(): void {{ {draws} return; }}
             !sync_source.contains("SDL_GetCurrentRenderOutputSize("),
             "logical-presentation-adjusted output can be stale during a canvas transition"
         );
+        let preparation_key = sync_source
+            .find("const StasisDisplayPreparationScale next_preparation_scale =")
+            .expect("exact resource preparation scale key");
+        let density_change = sync_source
+            .find("stasis_display_preparation_scale_changed(")
+            .expect("exact preparation key comparison");
+        let density_dirty = sync_source
+            .find("stasis_mark_density_resources_dirty();")
+            .expect("density resource invalidation");
+        assert!(
+            preparation_key < density_change && density_change < density_dirty,
+            "the exact bounded preparation key must drive density invalidation"
+        );
+        let dirty_start = graphics_source
+            .find("static void stasis_mark_density_resources_dirty(void) {")
+            .expect("density invalidation helper");
+        let dirty_end = graphics_source[dirty_start..]
+            .find("static int stasis_current_scaled_extent(")
+            .expect("density invalidation helper boundary")
+            + dirty_start;
+        let dirty_source = &graphics_source[dirty_start..dirty_end];
+        assert!(
+            dirty_source.contains("g_sprites[i].needs_reraster = 1;")
+                && dirty_source.contains("g_fonts[i].needs_reraster = 1;"),
+            "an exact preparation key change must invalidate existing sprites and fonts"
+        );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains(
                 "Stasis resource preparation: kind=sprite event=%s handle=%d path=%s logical=%dx%d raster=%dx%d source_bytes=%llu density_generation=%d"
