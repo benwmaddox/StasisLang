@@ -198,6 +198,11 @@ initialization to exercise deterministic 1x, fractional, and 2x backing tiers.
 This is an SDL/X11 acceptance control, not a game-owned scale. Wayland remains
 compositor-owned. Both backends feed the same full-backing metrics, fitted
 content, pointer transform, density generation, and bounded preparation path.
+X11 itself uses pixel window coordinates, so Stasis queries SDL's window/display
+content scale and applies it when creating or resizing a windowed presentation.
+`SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED` reapplies that physical extent without
+changing the logical canvas. Maximized/fullscreen backing remains the actual
+bounded screen surface rather than multiplying beyond the display.
 
 On macOS, the release toolchain ships `stasis_runner.app`, and generated
 desktop packages preserve the same app-bundle contract with a game-specific

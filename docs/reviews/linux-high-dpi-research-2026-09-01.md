@@ -17,6 +17,13 @@ exercise the same runtime path used by a configured X11 desktop rather than a
 Stasis-only detector or alternate renderer. Wayland scale remains compositor
 negotiated and is not simulated by the X11 variable.
 
+SDL's X11 model reports this as content scale while keeping window coordinates
+and renderer pixels one-to-one. Stasis therefore multiplies requested windowed
+physical extent by the effective SDL scale, then retains the original logical
+canvas for rendering and input. It reapplies that policy on SDL's display-scale
+event. Maximized and fullscreen windows already own the physical display
+backing and are not multiplied beyond it.
+
 ## Rationale
 
 `SDL_GetRenderOutputSize` names the full renderer backing. The fitted output

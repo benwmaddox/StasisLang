@@ -103,6 +103,15 @@ static void test_desktop_density_tiers_preserve_logical_geometry(void) {
     CHECK(stasis_display_scaled_extent_for_backing(18, 720, 360, 1921, 986) == 49);
 }
 
+static void test_x11_content_scale_selects_window_backing(void) {
+    CHECK(stasis_display_scaled_window_extent(720, 1.0f) == 720);
+    CHECK(stasis_display_scaled_window_extent(720, 1.25f) == 900);
+    CHECK(stasis_display_scaled_window_extent(720, 1.5f) == 1080);
+    CHECK(stasis_display_scaled_window_extent(720, 2.0f) == 1440);
+    CHECK(stasis_display_scaled_window_extent(720, 0.5f) == 720);
+    CHECK(stasis_display_scaled_window_extent(10000, 20.0f) == 65536);
+}
+
 static void test_full_backing_and_fitted_content_remain_distinct(void) {
     StasisDisplayMetrics portrait = metrics_for(
         360, 720, 1920, 960, 1920, 960);
@@ -217,6 +226,7 @@ int main(void) {
     test_pointer_mapping_round_trips_through_letterbox();
     test_fractional_and_downscale_metrics_are_distinct();
     test_desktop_density_tiers_preserve_logical_geometry();
+    test_x11_content_scale_selects_window_backing();
     test_full_backing_and_fitted_content_remain_distinct();
     test_orientation_change_keeps_logical_dimensions();
     test_odd_fractional_viewport_uses_renderer_rounding();

@@ -645,6 +645,34 @@ static SDL_DisplayID stasis_select_presentation_display(
     return window_display != 0 ? window_display : primary_display;
 }
 
+static float stasis_x11_window_scale(void) {
+#if defined(__linux__) && !defined(__ANDROID__)
+    const char* driver = SDL_GetCurrentVideoDriver();
+    if (!driver || strcmp(driver, "x11") != 0) return 1.0f;
+    float scale = g_window
+        ? SDL_GetWindowDisplayScale(g_window)
+        : SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
+    if (!isfinite(scale) || scale < 1.0f) return 1.0f;
+    return scale > 8.0f ? 8.0f : scale;
+#else
+    return 1.0f;
+#endif
+}
+
+static void stasis_apply_x11_window_scale(void) {
+    if (!g_window || g_recording_presentation) return;
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) {
+        return;
+    }
+    const float scale = stasis_x11_window_scale();
+    SDL_SetWindowSize(
+        g_window,
+        stasis_display_scaled_window_extent(g_window_width, scale),
+        stasis_display_scaled_window_extent(g_window_height, scale));
+    SDL_SyncWindow(g_window);
+}
+
 static void stasis_query_available_presentation(
     int fallback_w, int fallback_h, int* width, int* height) {
     int available_w = 0;
@@ -1085,6 +1113,15 @@ static void stasis_pump_events(void) {
                         reset_sprite_program();
                     }
 #endif
+                g_input_frame.viewport_w_px = g_window_width;
+                g_input_frame.viewport_h_px = g_window_height;
+                stasis_update_safe_viewport();
+                break;
+            case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+#if defined(__linux__) && !defined(__ANDROID__)
+                stasis_apply_x11_window_scale();
+#endif
+                stasis_sync_display_metrics();
                 g_input_frame.viewport_w_px = g_window_width;
                 g_input_frame.viewport_h_px = g_window_height;
                 stasis_update_safe_viewport();
@@ -4276,6 +4313,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
     window_flags |= SDL_WINDOW_FULLSCREEN;
 #else
+    if (!g_recording_presentation) {
+        const float display_scale = stasis_x11_window_scale();
+        native_request_width = stasis_display_scaled_window_extent(width, display_scale);
+        native_request_height = stasis_display_scaled_window_extent(height, display_scale);
+    }
     /* Let the desktop window manager fill its usable work area without
        covering taskbars, docks, or panels. */
     if (!g_recording_presentation) {
@@ -4393,10 +4435,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
      */
     SDL_PumpEvents();
     stasis_present_gpu_loading();
-    SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.2f",
+    SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.3f display_scale=%.3f display_generation=%d density_generation=%d",
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
-        g_drawable_width, g_drawable_height, g_pixel_scale);
+        g_drawable_width, g_drawable_height, g_pixel_scale,
+        stasis_x11_window_scale(), g_display_generation, g_density_generation);
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     g_should_quit = false;
     g_line_count = 0;
@@ -4590,13 +4633,17 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         SDL_RestoreWindow(g_window);
         SDL_SyncWindow(g_window);
     }
-    SDL_SetWindowSize(g_window, width, height);
-    SDL_SyncWindow(g_window);
+    stasis_apply_x11_window_scale();
 #endif
     stasis_sync_display_metrics();
 
 #if !defined(__ANDROID__) && !defined(__IPHONEOS__)
-    SDL_Log("Stasis window presentation: mode=windowed");
+    SDL_Log(
+        "Stasis window presentation: mode=windowed logical=%dx%d native=%dx%d drawable=%dx%d display_scale=%.3f display_generation=%d density_generation=%d",
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        g_drawable_width, g_drawable_height,
+        stasis_x11_window_scale(), g_display_generation, g_density_generation);
 #endif
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -4662,14 +4709,15 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
             g_window, &border_top, &border_left, &border_bottom, &border_right);
         if (display != 0 && SDL_GetDisplayUsableBounds(display, &usable)) {
             SDL_Log(
-                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d display_generation=%d density_generation=%d",
+                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d display_scale=%.3f display_generation=%d density_generation=%d",
                 maximized ? "maximized" : "windowed",
                 g_window_width, g_window_height,
                 native_w, native_h,
                 g_drawable_width, g_drawable_height,
                 native_w + border_left + border_right,
                 native_h + border_top + border_bottom,
-                usable.w, usable.h, g_display_generation, g_density_generation);
+                usable.w, usable.h, stasis_x11_window_scale(),
+                g_display_generation, g_density_generation);
         }
     }
     return result ? 1 : 0;

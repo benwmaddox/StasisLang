@@ -199,6 +199,14 @@ static int stasis_display_scaled_extent_for_backing(
     return scaled > 65536 ? 65536 : (int)scaled;
 }
 
+static int stasis_display_scaled_window_extent(int logical_extent, float display_scale) {
+    if (logical_extent <= 0) return 0;
+    if (!isfinite(display_scale) || display_scale < 1.0f) display_scale = 1.0f;
+    if (display_scale > 8.0f) display_scale = 8.0f;
+    const double scaled = ceil((double)logical_extent * (double)display_scale);
+    return scaled > 65536.0 ? 65536 : (int)scaled;
+}
+
 #define STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT 512
 #define STASIS_DISPLAY_FONT_ATLAS_MAX_EXTENT 4096
 

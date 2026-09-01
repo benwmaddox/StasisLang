@@ -5809,8 +5809,17 @@ function render(): void {{ {draws} return; }}
         );
         assert!(
             STASIS_GRAPHICS_SOURCE
-                .contains("usable=%dx%d display_generation=%d density_generation=%d"),
+                .contains("display_scale=%.3f display_generation=%d density_generation=%d"),
             "desktop presentation receipts must join display and density generations"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowDisplayScale(g_window)")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_GetDisplayContentScale(")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED")
+                && STASIS_GRAPHICS_SOURCE.contains("stasis_apply_x11_window_scale();")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("stasis_display_scaled_window_extent(width, display_scale)"),
+            "X11 content scale must size the physical window on the shared desktop path"
         );
         assert!(
             STASIS_RUNTIME_CMAKE
