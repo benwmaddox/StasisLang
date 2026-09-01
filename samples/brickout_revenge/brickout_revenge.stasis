@@ -34,6 +34,7 @@ struct GfxState {
     // Packed line stream: [x1,y1,x2,y2,r,g,b,a] * 512
     lines_f32: f32[4096];
     line_count: i32;
+    sprites: SpriteRunWriter;
 }
 
 struct GameState {
@@ -154,10 +155,56 @@ function tick(): i32 {
     let ball_y: f32;
     ball_x.from_i32((w / 2) - 16);
     ball_y.from_i32((h / 2) - 16);
-    let sprites: SpriteRunWriter = gfx_reserve_sprite_run(2, 0 - 1, 0, 0, 0, 0, 0);
-    sprites.write(state.sprites.paddle.handle, 0 - 1, 0, paddle_x, paddle_y, 128.0, 24.0, 0.0, 0.0, 0.0, 0.0, 64.0, 12.0, 1.0, 1.0, 0.0);
-    sprites.write(state.sprites.ball.handle, 0 - 1, 0, ball_x, ball_y, 32.0, 32.0, 0.0, 0.0, 0.0, 0.0, 16.0, 16.0, 1.0, 1.0, 0.0);
-    sprites.finalize(2);
+    if (state.gfx.sprites.reserve(2, 0 - 1, 0, 0, 0, 0, 0)) {
+        let written: i32 = 0;
+        if (
+            state.gfx.sprites.write(
+                state.sprites.paddle.handle,
+                0 - 1,
+                0,
+                paddle_x,
+                paddle_y,
+                128.0,
+                24.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                64.0,
+                12.0,
+                1.0,
+                1.0,
+                0.0
+            )
+        ) {
+            written = written + 1;
+        }
+        if (
+            state.gfx.sprites.write(
+                state.sprites.ball.handle,
+                0 - 1,
+                0,
+                ball_x,
+                ball_y,
+                32.0,
+                32.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                16.0,
+                16.0,
+                1.0,
+                1.0,
+                0.0
+            )
+        ) {
+            written = written + 1;
+        }
+        if (written != 2 || !state.gfx.sprites.finalize(written)) {
+            state.gfx.sprites.cancel();
+        }
+    }
     draw_lines(state.gfx.lines_f32, state.gfx.line_count);
     draw_frame();
 
