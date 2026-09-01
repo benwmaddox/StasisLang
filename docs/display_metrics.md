@@ -120,6 +120,14 @@ Font and cached-text entries use logical font size plus the same raster scale.
 Raster dimensions use checked, bounded `ceil(logical_extent * raster_scale)`;
 the logical draw size remains unchanged.
 
+Desktop resource extent calculation uses the exact integer logical/full-backing
+ratio rather than applying `ceil` to a rounded floating-point scale. For
+example, an 18-pixel font at a `1920 / 720` backing ratio prepares exactly 48
+pixels, not 49 due to binary float drift. With `STASIS_GFX_LOG_SPRITES=1`, each
+successful initial or replacement preparation emits a current-resource receipt
+containing its handle, source bytes, logical and raster extents, and density
+generation; font receipts also include the live atlas extent.
+
 Desktop and packaged mobile builds perform this policy in
 `runtime/stasis_graphics.c`. Workshop and generated release apps receive
 the same logical/native/drawable metadata in reserved current gfx_cmd header slots,
@@ -176,6 +184,11 @@ initialization. A requested `800 x 600` logical window on a 150% display is
 therefore an `800 x 600` SDL window with a `1200 x 900` drawable. Windows does
 not bitmap-stretch a lower-resolution frame, and the resulting `1.5` raster
 scale rebuilds SVG and font resources at the drawable density.
+
+Regular SDL framebuffer captures remain fitted-content captures. Their extent
+is derived from the full backing and logical canvas, while framebuffer memory
+and density preparation continue to use the complete backing. Recording targets
+retain their explicitly requested physical extent.
 
 On macOS, the release toolchain ships `stasis_runner.app`, and generated
 desktop packages preserve the same app-bundle contract with a game-specific

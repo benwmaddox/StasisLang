@@ -633,6 +633,13 @@ static void stasis_mark_density_resources_dirty(void) {
     }
 }
 
+static int stasis_current_scaled_extent(int logical_extent) {
+    return stasis_display_scaled_extent_for_backing(
+        logical_extent,
+        g_window_width, g_window_height,
+        g_drawable_width, g_drawable_height);
+}
+
 static SDL_DisplayID stasis_select_presentation_display(
     SDL_DisplayID window_display, SDL_DisplayID primary_display) {
     return window_display != 0 ? window_display : primary_display;
@@ -3517,9 +3524,9 @@ static int stasis_asset_task_request(
     task->atlas_policy = kind == STASIS_ASSET_KIND_SPRITE
         ? atlas_policy : stasis_sprite_atlas_policy_v3_standalone();
     task->raster_w = kind == STASIS_ASSET_KIND_SPRITE
-        ? stasis_display_scaled_extent(max_w, g_pixel_scale) : 0;
+        ? stasis_current_scaled_extent(max_w) : 0;
     task->raster_h = kind == STASIS_ASSET_KIND_SPRITE
-        ? stasis_display_scaled_extent(max_h, g_pixel_scale) : 0;
+        ? stasis_current_scaled_extent(max_h) : 0;
     memcpy(task->path, resolved, strlen(resolved) + 1);
     int id = task->id;
     SDL_UnlockMutex(g_asset_task_mutex);
@@ -3563,8 +3570,17 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
         out_path = resolved;
     }
 
-    const int w = g_recording_presentation ? g_recording_width : g_drawable_width;
-    const int h = g_recording_presentation ? g_recording_height : g_drawable_height;
+    int w = g_recording_presentation ? g_recording_width : g_drawable_width;
+    int h = g_recording_presentation ? g_recording_height : g_drawable_height;
+    if (g_use_sdl_renderer && g_renderer && !g_recording_presentation) {
+        /* A regular screenshot captures the fitted logical content returned by
+         * SDL readback, not the complete renderer backing used by density and
+         * framebuffer accounting. Derive that extent from the full backing;
+         * SDL_GetCurrentRenderOutputSize can itself report stale presentation
+         * state during the same logical-canvas transition. */
+        w = stasis_current_scaled_extent(g_window_width);
+        h = stasis_current_scaled_extent(g_window_height);
+    }
     const size_t bytes = (size_t)w * (size_t)h * 4u;
 
     uint8_t* pixels = (uint8_t*)malloc(bytes);
@@ -4646,14 +4662,14 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
             g_window, &border_top, &border_left, &border_bottom, &border_right);
         if (display != 0 && SDL_GetDisplayUsableBounds(display, &usable)) {
             SDL_Log(
-                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d",
+                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d density_generation=%d",
                 maximized ? "maximized" : "windowed",
                 g_window_width, g_window_height,
                 native_w, native_h,
                 g_drawable_width, g_drawable_height,
                 native_w + border_left + border_right,
                 native_h + border_top + border_bottom,
-                usable.w, usable.h);
+                usable.w, usable.h, g_density_generation);
         }
     }
     return result ? 1 : 0;
@@ -5709,6 +5725,55 @@ static int gfx_should_log_sprite_loads(void) {
     return cached;
 }
 
+static uint64_t stasis_resource_source_bytes(const char* path) {
+    if (!path || !*path) return 0;
+    FILE* file = fopen(path, "rb");
+    if (!file) return 0;
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return 0;
+    }
+    const long size = ftell(file);
+    fclose(file);
+    return size > 0 ? (uint64_t)size : 0;
+}
+
+static void stasis_log_sprite_preparation(
+    const SpriteEntry* entry, const char* path, int replaces_existing
+) {
+    if (!gfx_should_log_sprite_loads() || !entry) return;
+    int handle = 0;
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        if (&g_sprites[i] == entry) {
+            handle = sprite_handle_for_slot(i);
+            break;
+        }
+    }
+    SDL_Log(
+        "Stasis resource preparation: kind=sprite event=%s handle=%d path=%s logical=%dx%d raster=%dx%d source_bytes=%llu density_generation=%d",
+        replaces_existing ? "replace" : "initial", handle,
+        path ? path : "<unknown>", entry->max_w, entry->max_h,
+        entry->w, entry->h,
+        (unsigned long long)stasis_resource_source_bytes(path), g_density_generation);
+}
+
+static void stasis_log_font_preparation(const StasisFont* font, int replaces_existing) {
+    if (!gfx_should_log_sprite_loads() || !font) return;
+    int handle = 0;
+    for (int i = 0; i < MAX_FONTS; i++) {
+        if (&g_fonts[i] == font) {
+            handle = i + 1;
+            break;
+        }
+    }
+    SDL_Log(
+        "Stasis resource preparation: kind=font event=%s handle=%d path=%s logical_size=%d raster_size=%d atlas=%dx%d source_bytes=%llu density_generation=%d",
+        replaces_existing ? "replace" : "initial", handle,
+        font->source_path[0] ? font->source_path : "<unknown>",
+        font->font_size, font->raster_size, font->atlas_size, font->atlas_size,
+        (unsigned long long)font->source_size, g_density_generation);
+}
+
 static void sprite_set_gl_region(SpriteEntry* e, int page_index, int sprite_x, int sprite_y,
                                  int alloc_x, int alloc_y, int alloc_w, int alloc_h,
                                  int sprite_w, int sprite_h) {
@@ -5789,6 +5854,7 @@ static int sprite_publish_pixels_into_entry(
     int w,
     int h
 ) {
+    const int replaces_existing = e->w > 0 && e->h > 0;
     if (g_use_sdl_renderer) {
         if (!g_renderer) {
             free(pixels);
@@ -5844,6 +5910,7 @@ static int sprite_publish_pixels_into_entry(
         e->surface_generation = g_resource_lifecycle.surface_generation;
         e->renderer_generation = g_resource_lifecycle.renderer_generation;
         if (previous) SDL_DestroyTexture(previous);
+        stasis_log_sprite_preparation(e, path, replaces_existing);
         return 1;
     }
 
@@ -5866,6 +5933,7 @@ static int sprite_publish_pixels_into_entry(
         e->needs_reraster = 0;
         e->surface_generation = g_resource_lifecycle.surface_generation;
         e->renderer_generation = g_resource_lifecycle.renderer_generation;
+        stasis_log_sprite_preparation(e, path, replaces_existing);
         return 1;
     }
 
@@ -5897,6 +5965,7 @@ static int sprite_publish_pixels_into_entry(
             e->needs_reraster = 0;
             e->surface_generation = g_resource_lifecycle.surface_generation;
             e->renderer_generation = g_resource_lifecycle.renderer_generation;
+            stasis_log_sprite_preparation(e, path, replaces_existing);
             return 1;
         }
     }
@@ -5920,6 +5989,7 @@ static int sprite_publish_pixels_into_entry(
         e->needs_reraster = 0;
         e->surface_generation = g_resource_lifecycle.surface_generation;
         e->renderer_generation = g_resource_lifecycle.renderer_generation;
+        stasis_log_sprite_preparation(e, path, replaces_existing);
         return 1;
     }
 
@@ -5942,6 +6012,7 @@ static int sprite_publish_pixels_into_entry(
     e->needs_reraster = 0;
     e->surface_generation = g_resource_lifecycle.surface_generation;
     e->renderer_generation = g_resource_lifecycle.renderer_generation;
+    stasis_log_sprite_preparation(e, path, replaces_existing);
     return 1;
 #else
     free(pixels);
@@ -5950,8 +6021,8 @@ static int sprite_publish_pixels_into_entry(
 }
 
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h) {
-    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
-    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
+    const int raster_w = stasis_current_scaled_extent(max_w);
+    const int raster_h = stasis_current_scaled_extent(max_h);
     if (!sprite_source_within_limits(path, raster_w, raster_h)) {
         return 0;
     }
@@ -6070,8 +6141,8 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
         SDL_Log("gfx_load_sprite: could not resolve %s", path);
         return 0;
     }
-    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
-    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
+    const int raster_w = stasis_current_scaled_extent(max_w);
+    const int raster_h = stasis_current_scaled_extent(max_h);
 
     /* Reuse the device-local raster/GPU texture for the same source and
      * logical target size. Drawable-density changes mark the entry dirty and
@@ -6315,8 +6386,8 @@ STASIS_EXPORT int stasis_asset_task_poll(int task_id) {
         return state;
     }
     if (task->kind == STASIS_ASSET_KIND_SPRITE) {
-        int current_raster_w = stasis_display_scaled_extent(task->max_w, g_pixel_scale);
-        int current_raster_h = stasis_display_scaled_extent(task->max_h, g_pixel_scale);
+        int current_raster_w = stasis_current_scaled_extent(task->max_w);
+        int current_raster_h = stasis_current_scaled_extent(task->max_h);
         if (task->raster_w != current_raster_w || task->raster_h != current_raster_h) {
             free(task->pixels);
             task->pixels = NULL;
@@ -7596,8 +7667,10 @@ static int stasis_font_atlas_pixels(int atlas_size, size_t* pixels_out) {
 static int stasis_build_font_atlas(StasisFont* font) {
     if (!font || !font->ttf_buffer || font->font_size <= 0) return 0;
 
+    const int replaces_existing = font->raster_size > 0 && font->atlas_size > 0;
+
     const float pixel_scale = g_pixel_scale < 1.0f ? 1.0f : g_pixel_scale;
-    const int raster_size = stasis_display_scaled_extent(font->font_size, pixel_scale);
+    const int raster_size = stasis_current_scaled_extent(font->font_size);
     int atlas_size = stasis_display_font_atlas_extent(pixel_scale);
     size_t atlas_pixels = 0;
     unsigned char* atlas_bitmap = NULL;
@@ -7685,6 +7758,7 @@ static int stasis_build_font_atlas(StasisFont* font) {
     font->needs_reraster = 0;
     font->surface_generation = g_resource_lifecycle.surface_generation;
     font->renderer_generation = g_resource_lifecycle.renderer_generation;
+    stasis_log_font_preparation(font, replaces_existing);
     return 1;
 }
 
