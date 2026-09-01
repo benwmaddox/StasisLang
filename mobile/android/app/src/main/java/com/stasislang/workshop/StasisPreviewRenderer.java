@@ -551,7 +551,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (restoring) {
                 while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
             }
-            boolean hasFrame = shouldPresent(frameI32);
+            boolean hasFrame = shouldPresent(frameI32, frameF32);
             if (hasFrame) prepareFrameResources();
             String resourceFailure = textures.consumeFailure();
             int glError = restoring ? GLES20.glGetError() : GLES20.GL_NO_ERROR;
@@ -1142,8 +1142,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     }
                     texture = wanted;
                     filter = wantedFilter;
-                    appendSprite(I_SPRITE_BASE + sprite * SPRITE_I32_STRIDE);
-                    quads += 1;
+                    if (appendSprite(I_SPRITE_BASE + sprite * SPRITE_I32_STRIDE)) {
+                        quads += 1;
+                    }
                 }
             }
             position += 1;
@@ -1234,26 +1235,28 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int index = first;
         int end = first + count;
         while (index < end) {
-            int base = I_SPRITE_BASE + index * SPRITE_I32_STRIDE;
             int texture = frameSpriteTextures[index];
             int filter = frameSpriteFilters[index];
             spriteVertices.clear();
-            appendSprite(base);
-            int chunk = 1;
-            while (index + chunk < end && chunk < SPRITE_CHUNK_SIZE) {
-                if (frameSpriteTextures[index + chunk] != texture
-                        || frameSpriteFilters[index + chunk] != filter) break;
-                int next = I_SPRITE_BASE + (index + chunk) * SPRITE_I32_STRIDE;
-                appendSprite(next);
-                chunk += 1;
+            int consumed = 0;
+            int quads = 0;
+            while (index + consumed < end && consumed < SPRITE_CHUNK_SIZE) {
+                if (frameSpriteTextures[index + consumed] != texture
+                        || frameSpriteFilters[index + consumed] != filter) break;
+                int next = I_SPRITE_BASE + (index + consumed) * SPRITE_I32_STRIDE;
+                if (appendSprite(next)) quads += 1;
+                consumed += 1;
             }
-            spriteVertices.flip();
-            drawPreparedTextureBatch(chunk * VERTICES_PER_QUAD, texture);
-            index += chunk;
+            if (quads > 0) {
+                spriteVertices.flip();
+                drawPreparedTextureBatch(quads * VERTICES_PER_QUAD, texture);
+                frameSubmittedQuads += quads;
+            }
+            index += consumed;
         }
     }
 
-    private void appendSprite(int base) {
+    boolean appendSprite(int base) {
         int index = (base - I_SPRITE_BASE) / SPRITE_I32_STRIDE;
         int values = F_SPRITE_BASE + index * SPRITE_F32_STRIDE;
         float x = frameF32.get(values);
@@ -1285,6 +1288,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         float sourceWidth = frameF32.get(values + 6);
         float sourceHeight = frameF32.get(values + 7);
         if (sourceWidth == 0 && sourceHeight == 0) {
+            sourceX = 0;
+            sourceY = 0;
             sourceWidth = logicalWidth;
             sourceHeight = logicalHeight;
         }
@@ -1293,7 +1298,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         float sourceU1 = (sourceX + sourceWidth) / logicalWidth;
         float sourceV1 = (sourceY + sourceHeight) / logicalHeight;
         if (sourceU0 < 0 || sourceV0 < 0 || sourceU1 > 1 || sourceV1 > 1
-                || sourceU0 >= sourceU1 || sourceV0 >= sourceV1) return;
+                || sourceU0 >= sourceU1 || sourceV0 >= sourceV1) return false;
         float atlasU0 = frameSpriteU0[index];
         float atlasV0 = frameSpriteV0[index];
         float u0 = WorkshopSpriteAtlas.atlasCoordinate(
@@ -1310,6 +1315,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, u1, v0, red, green, blue, alpha);
         putTextureVertex(spriteVertices, right, bottom, centerX, centerY, cosine, sine, u1, v1, red, green, blue, alpha);
         putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, u0, v1, red, green, blue, alpha);
+        return true;
     }
 
     private void drawText(int first, int count) {
@@ -1438,32 +1444,58 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return entry < 0 ? -1 : entry % ORDER_KIND_SCALE;
     }
 
-    static boolean isValidFrame(IntBuffer values) {
-        if (values == null || values.capacity() < FRAME_I32_CAPACITY
+    static boolean isValidFrame(IntBuffer values, FloatBuffer floats) {
+        if (values == null || floats == null
+                || values.capacity() < FRAME_I32_CAPACITY
+                || floats.capacity() < FRAME_F32_CAPACITY
                 || values.get(I_MAGIC) != RENDER_MAGIC
                 || values.get(I_VERSION) != RENDER_VERSION) return false;
         int spriteCount = values.get(I_SPRITE_COUNT);
         int runCount = values.get(I_SPRITE_RUN_COUNT);
+        int clipCount = values.get(I_CLIP_COUNT);
         if (spriteCount < 0 || spriteCount > MAX_SPRITES
-                || runCount < 0 || runCount > MAX_SPRITE_RUNS) return false;
+                || runCount < 0 || runCount > MAX_SPRITE_RUNS
+                || clipCount < 0 || clipCount > MAX_CLIPS) return false;
         for (int run = 0; run < runCount; run += 1) {
             int base = I_SPRITE_RUN_BASE + run * SPRITE_RUN_I32_STRIDE;
             int first = values.get(base);
             int count = values.get(base + 1);
-            if (first < 0 || count <= 0 || first + count > spriteCount
-                    || values.get(base + 2) < -1 || values.get(base + 3) != 0
+            int clip = values.get(base + 2);
+            if (first < 0 || count <= 0 || first > spriteCount
+                    || count > spriteCount - first
+                    || (clip != -1 && (clip < 0 || clip >= clipCount))
+                    || values.get(base + 3) != 0
                     || values.get(base + 4) != 0 || values.get(base + 5) != 0
                     || values.get(base + 6) != 0 || values.get(base + 7) != 0) return false;
         }
         for (int sprite = 0; sprite < spriteCount; sprite += 1) {
-            int base = I_SPRITE_BASE + sprite * SPRITE_I32_STRIDE;
-            if (values.get(base) == 0 || values.get(base + 2) != 0) return false;
+            int baseI32 = I_SPRITE_BASE + sprite * SPRITE_I32_STRIDE;
+            int baseF32 = F_SPRITE_BASE + sprite * SPRITE_F32_STRIDE;
+            if (values.get(baseI32) == 0 || values.get(baseI32 + 2) != 0
+                    || !isValidSpriteGeometry(floats, baseF32)) return false;
         }
         return true;
     }
 
-    static boolean shouldPresent(IntBuffer values) {
-        return isValidFrame(values) && (values.get(I_FLAGS) & FLAG_PRESENT) != 0;
+    static boolean isValidSpriteGeometry(FloatBuffer values, int base) {
+        if (values == null || base < 0 || base > values.capacity() - SPRITE_F32_STRIDE) {
+            return false;
+        }
+        for (int field = 0; field < SPRITE_F32_STRIDE; field += 1) {
+            if (!Float.isFinite(values.get(base + field))) return false;
+        }
+        float sourceWidth = values.get(base + 6);
+        float sourceHeight = values.get(base + 7);
+        return values.get(base + 2) > 0.0f && values.get(base + 3) > 0.0f
+                && values.get(base + 4) >= 0.0f && values.get(base + 5) >= 0.0f
+                && sourceWidth >= 0.0f && sourceHeight >= 0.0f
+                && ((sourceWidth == 0.0f && sourceHeight == 0.0f)
+                        || (sourceWidth > 0.0f && sourceHeight > 0.0f))
+                && values.get(base + 10) != 0.0f && values.get(base + 11) != 0.0f;
+    }
+
+    static boolean shouldPresent(IntBuffer values, FloatBuffer floats) {
+        return isValidFrame(values, floats) && (values.get(I_FLAGS) & FLAG_PRESENT) != 0;
     }
 
     static boolean isValidTextSpan(int offset, int length, int bytesUsed) {
