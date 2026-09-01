@@ -77,6 +77,15 @@ static int wait_for_task(int task) {
     return 0;
 }
 
+static int atlas_allocations_overlap(const int* left, const int* right) {
+    const int left_x = left[13];
+    const int left_y = left[14];
+    const int right_x = right[13];
+    const int right_y = right[14];
+    return left_x < right_x + right[15] && right_x < left_x + left[15] &&
+           left_y < right_y + right[16] && right_y < left_y + left[16];
+}
+
 int main(void) {
 #if defined(_WIN32)
     _putenv_s("STASIS_ENABLE_TEST_INPUT", "1");
@@ -208,6 +217,50 @@ int main(void) {
     CHECK(stasis_test_get_sprite_state(second_reuse, atlas_state, 18) == 1);
     CHECK(atlas_state[12] == reused_page);
     CHECK(atlas_state[13] == reused_x && atlas_state[14] == reused_y);
+
+    /* A shelf wrap persists its y coordinate for every following allocation. */
+    const uint64_t wrap_group = UINT64_C(0x0ddc0ffeebadf00d);
+    int wrap_first_state[18] = {0};
+    int wrap_second_state[18] = {0};
+    int wrap_third_state[18] = {0};
+    /* Complete group evidence includes one unloaded 1x63 member. */
+    stasis_gfx_set_next_sprite_atlas_policy_v3(1, wrap_group, 4, 2471, 40, 63);
+    int wrap_first = stasis_gfx_load_sprite(STASIS_TEST_SPRITE_PATH, 40, 40);
+    stasis_gfx_set_next_sprite_atlas_policy_v3(1, wrap_group, 4, 2471, 40, 63);
+    int wrap_second = stasis_gfx_load_sprite(STASIS_TEST_SPRITE_PATH, 22, 22);
+    stasis_gfx_set_next_sprite_atlas_policy_v3(1, wrap_group, 4, 2471, 40, 63);
+    int wrap_third = stasis_gfx_load_sprite(STASIS_TEST_SPRITE_PATH, 18, 18);
+    CHECK(wrap_first > 0 && wrap_second > 0 && wrap_third > 0);
+    CHECK(wrap_first != wrap_second && wrap_first != wrap_third &&
+          wrap_second != wrap_third);
+    CHECK(stasis_test_get_sprite_state(wrap_first, wrap_first_state, 18) == 1);
+    CHECK(stasis_test_get_sprite_state(wrap_second, wrap_second_state, 18) == 1);
+    CHECK(stasis_test_get_sprite_state(wrap_third, wrap_third_state, 18) == 1);
+    CHECK(wrap_first_state[4] == 1 && wrap_second_state[4] == 1 &&
+          wrap_third_state[4] == 1);
+    CHECK((uint32_t)wrap_first_state[5] == (uint32_t)wrap_group &&
+          (uint32_t)wrap_first_state[6] == (uint32_t)(wrap_group >> 32));
+    CHECK(wrap_first_state[12] == wrap_second_state[12] &&
+          wrap_second_state[12] == wrap_third_state[12]);
+
+    /* The policy produces a 64x128 page; coordinates include the padded allocation. */
+    CHECK(wrap_first_state[13] == 1 && wrap_first_state[14] == 6);
+    CHECK(wrap_second_state[13] == 1 && wrap_second_state[14] == 48);
+    CHECK(wrap_third_state[13] == 25 && wrap_third_state[14] == 48);
+    CHECK(wrap_second_state[14] == wrap_third_state[14]);
+    CHECK(!atlas_allocations_overlap(wrap_first_state, wrap_second_state));
+    CHECK(!atlas_allocations_overlap(wrap_first_state, wrap_third_state));
+    CHECK(!atlas_allocations_overlap(wrap_second_state, wrap_third_state));
+    for (int i = 0; i < 3; i++) {
+        const int* state = i == 0 ? wrap_first_state :
+            (i == 1 ? wrap_second_state : wrap_third_state);
+        CHECK(state[13] >= 1 && state[14] >= 6);
+        CHECK(state[13] + state[15] <= 64);
+        CHECK(state[14] + state[16] <= 128);
+    }
+    stasis_gfx_release_sprite(wrap_third);
+    stasis_gfx_release_sprite(wrap_second);
+    stasis_gfx_release_sprite(wrap_first);
 
     /* An explicit sprite-run clip intersects the ordered parent and is restored. */
     int32_t* frame_i32 = (int32_t*)calloc(STASIS_RENDER_I32_COUNT, sizeof(int32_t));
