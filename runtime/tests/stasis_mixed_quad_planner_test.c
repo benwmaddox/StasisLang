@@ -53,6 +53,8 @@ int main(void) {
 
     CHECK(stasis_logical_crop_to_raster(0, 0, 0, 0, 80, 30, 120, 100, &crop));
     CHECK(crop.x == 0.0f && crop.y == 0.0f && crop.w == 120.0f && crop.h == 100.0f);
+    CHECK(stasis_logical_crop_to_raster(13, 17, 0, 0, 80, 30, 120, 100, &crop));
+    CHECK(crop.x == 0.0f && crop.y == 0.0f && crop.w == 120.0f && crop.h == 100.0f);
     CHECK(stasis_logical_crop_to_raster(70, 24, 10, 6, 80, 30, 120, 100, &crop));
     CHECK(fabsf(crop.x - 105.0f) < 0.001f);
     CHECK(fabsf(crop.y - 80.0f) < 0.001f);

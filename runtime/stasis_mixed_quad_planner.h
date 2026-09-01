@@ -30,7 +30,7 @@ static inline int stasis_logical_crop_to_raster(
         logical_w <= 0.0f || logical_h <= 0.0f ||
         raster_w <= 0.0f || raster_h <= 0.0f) return 0;
 
-    if (src_x == 0.0f && src_y == 0.0f && src_w == 0.0f && src_h == 0.0f) {
+    if (src_w == 0.0f && src_h == 0.0f) {
         out->x = 0.0f;
         out->y = 0.0f;
         out->w = raster_w;
