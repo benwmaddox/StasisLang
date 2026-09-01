@@ -189,10 +189,11 @@ therefore an `800 x 600` SDL window with a `1200 x 900` drawable. Windows does
 not bitmap-stretch a lower-resolution frame, and the resulting `1.5` raster
 scale rebuilds SVG and font resources at the drawable density.
 
-Regular SDL framebuffer captures remain fitted-content captures. Their extent
-is derived from the full backing and logical canvas, while framebuffer memory
-and density preparation continue to use the complete backing. Recording targets
-retain their explicitly requested physical extent.
+Regular SDL framebuffer captures use the actual fitted-content readback surface
+returned by SDL. That surface can be smaller than the complete drawable backing;
+framebuffer accounting and density preparation continue to use the complete
+backing. Recording targets retain their explicitly requested physical extent and
+reject a readback with different dimensions.
 
 On Linux, X11 tests may set `SDL_VIDEO_X11_SCALING_FACTOR` before SDL video
 initialization to exercise deterministic 1x, fractional, and 2x backing tiers.

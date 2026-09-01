@@ -16,7 +16,9 @@ optionally set the 1-based `STASIS_SCREENSHOT_FRAME` and
 `STASIS_EXIT_AFTER_SCREENSHOT=1`. Scheduled capture occurs after queued drawing
 and post-effects and before the frame is presented. A `.png` suffix selects PNG;
 other suffixes use BMP. PNG bytes are deterministic for identical framebuffer
-pixels, though pixels can vary across backends, drivers, and platforms.
+pixels, though pixels can vary across backends, drivers, and platforms. Ordinary
+captures use the actual fitted readback surface dimensions returned by SDL;
+fixed recording targets continue to require their configured physical extent.
 
 ## High-density displays
 
@@ -32,7 +34,8 @@ replaces their device raster while preserving the game-facing sprite handle.
 TrueType atlases use the same scale, but text measurement and glyph placement
 remain in logical pixels. A drawable-density change invalidates the affected
 sprite and font caches so they are rebuilt before their next draw. Framebuffer
-captures use the drawable resolution.
+captures use the actual SDL readback resolution, which can be a fitted subset of
+the complete drawable backing.
 
 SVG parsing and CPU rasterization use the vendored ThorVG 1.2.0 CPU/SVG build
 pinned in `third_party/thorvg/STASIS_PROVENANCE.md`. The bridge initializes four

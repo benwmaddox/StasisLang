@@ -900,16 +900,9 @@ def validate_orientation_markers(
                 f"Android orientation stage {stage['name']} surface mismatch: "
                 f"{surface_width}x{surface_height}"
             )
-        native_scale = min(
-            surface_width / logical_width, surface_height / logical_height
-        )
-        expected_drawable = (
-            int(logical_width * native_scale),
-            int(logical_height * native_scale),
-        )
         expected_sizes = {
             "native": (surface_width, surface_height),
-            "drawable": expected_drawable,
+            "drawable": (surface_width, surface_height),
         }
         for prefix, (expected_width, expected_height) in expected_sizes.items():
             actual_width = marker.get(f"{prefix}_w", 0)
@@ -924,9 +917,16 @@ def validate_orientation_markers(
                     f"actual={actual_width}x{actual_height} "
                     f"tolerance={surface_tolerance}"
                 )
+        fitted_scale = min(
+            surface_width / logical_width, surface_height / logical_height
+        )
+        fitted_extent = (
+            max(1, int(logical_width * fitted_scale + 0.5)),
+            max(1, int(logical_height * fitted_scale + 0.5)),
+        )
         expected_scale = min(
-            expected_drawable[0] / logical_width,
-            expected_drawable[1] / logical_height,
+            fitted_extent[0] / logical_width,
+            fitted_extent[1] / logical_height,
         )
         if abs(marker.get("content_scale", 0.0) - expected_scale) > 0.02:
             raise SeamError(
@@ -970,7 +970,9 @@ def validate_orientation_markers(
             raise SeamError(
                 f"Android orientation probe {sequence} has an empty command trace"
             )
-        observed.append(marker)
+        observed_marker = dict(marker)
+        observed_marker["fitted_content_extent"] = list(fitted_extent)
+        observed.append(observed_marker)
     ticks = [item.get("probe_tick") for item in observed]
     display_generations = [item.get("display_generation") for item in observed]
     density_generations = [item.get("density_generation") for item in observed]

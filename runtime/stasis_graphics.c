@@ -2647,79 +2647,69 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
         out_path = resolved;
     }
 
-    int w = g_recording_presentation ? g_recording_width : g_drawable_width;
-    int h = g_recording_presentation ? g_recording_height : g_drawable_height;
-    if (g_renderer && !g_recording_presentation) {
-        /* A regular screenshot captures the fitted logical content returned by
-         * SDL readback, not the complete renderer backing used by density and
-         * framebuffer accounting. Derive that extent from the full backing;
-         * SDL_GetCurrentRenderOutputSize can itself report stale presentation
-         * state during the same logical-canvas transition. */
-        w = stasis_current_scaled_extent(g_window_width);
-        h = stasis_current_scaled_extent(g_window_height);
-    }
-    const size_t bytes = (size_t)w * (size_t)h * 4u;
-
-    uint8_t* pixels = (uint8_t*)malloc(bytes);
-    if (!pixels) return 0;
-
     int ok = 0;
+    if (!g_renderer) return 0;
 
-    if (true) {
-        if (g_renderer) {
-            if (render_queued_lines) {
-                /* Direct API calls may happen before end_frame(), so flush pending lines once. */
-                SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-                SDL_Color color;
-                for (int i = 0; i < g_line_count; i++) {
-                    color.r = (Uint8)(g_lines[i].r * 255.0f);
-                    color.g = (Uint8)(g_lines[i].g * 255.0f);
-                    color.b = (Uint8)(g_lines[i].b * 255.0f);
-                    color.a = (Uint8)(g_lines[i].a * 255.0f);
-                    SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-                    SDL_RenderLine(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
-                }
-                g_line_count = 0;
-            }
-
-            /* Read the fixed physical recording target, not the logical viewport. */
-            if (g_recording_presentation) {
-                SDL_SetRenderLogicalPresentation(
-                    g_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
-            }
-            /* SDL3 returns an owned surface for renderer readback. */
-            SDL_Surface* readback = SDL_RenderReadPixels(g_renderer, NULL);
-            SDL_Surface* bgra = readback
-                ? SDL_ConvertSurface(readback, SDL_PIXELFORMAT_BGRA32)
-                : NULL;
-            if (bgra && bgra->w == w && bgra->h == h) {
-                for (int row = 0; row < h; row++) {
-                    SDL_memcpy(
-                        pixels + (size_t)row * (size_t)w * 4u,
-                        (const uint8_t*)bgra->pixels + (size_t)row * (size_t)bgra->pitch,
-                        (size_t)w * 4u);
-                }
-                ok = png ? stasis_image_writer_write_png_bgra32(out_path, w, h, pixels, 0)
-                         : stasis_image_writer_write_bmp_bgra32(out_path, w, h, pixels, 0);
-            } else {
-                SDL_Log("recording readback dimensions mismatch: got=%dx%d expected=%dx%d",
-                    bgra ? bgra->w : 0, bgra ? bgra->h : 0, w, h);
-            }
-            SDL_DestroySurface(bgra);
-            SDL_DestroySurface(readback);
-            if (g_recording_presentation) {
-                SDL_SetRenderLogicalPresentation(
-                    g_renderer, g_window_width, g_window_height,
-                    SDL_LOGICAL_PRESENTATION_LETTERBOX);
-            }
+    if (render_queued_lines) {
+        /* Direct API calls may happen before end_frame(), so flush pending lines once. */
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_Color color;
+        for (int i = 0; i < g_line_count; i++) {
+            color.r = (Uint8)(g_lines[i].r * 255.0f);
+            color.g = (Uint8)(g_lines[i].g * 255.0f);
+            color.b = (Uint8)(g_lines[i].b * 255.0f);
+            color.a = (Uint8)(g_lines[i].a * 255.0f);
+            SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
+            SDL_RenderLine(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
-        free(pixels);
-        return ok;
+        g_line_count = 0;
     }
 
+    /* Read the fixed physical recording target, not the logical viewport. */
+    if (g_recording_presentation) {
+        SDL_SetRenderLogicalPresentation(
+            g_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    }
 
-    free(pixels);
-    return 0;
+    /* SDL3 returns an owned surface for renderer readback. Ordinary captures
+     * use this actual surface extent because it is the authoritative result of
+     * the platform's fitted logical-presentation readback. */
+    SDL_Surface* readback = SDL_RenderReadPixels(g_renderer, NULL);
+    SDL_Surface* bgra = readback
+        ? SDL_ConvertSurface(readback, SDL_PIXELFORMAT_BGRA32)
+        : NULL;
+    int w = bgra ? bgra->w : 0;
+    int h = bgra ? bgra->h : 0;
+
+    if (g_recording_presentation &&
+        (w != g_recording_width || h != g_recording_height)) {
+        SDL_Log("recording readback dimensions mismatch: got=%dx%d expected=%dx%d",
+            w, h, g_recording_width, g_recording_height);
+    } else if (bgra && w > 0 && h > 0 &&
+               (size_t)w <= SIZE_MAX / 4u / (size_t)h) {
+        const size_t bytes = (size_t)w * (size_t)h * 4u;
+        uint8_t* pixels = (uint8_t*)malloc(bytes);
+        if (pixels) {
+            for (int row = 0; row < h; row++) {
+                SDL_memcpy(
+                    pixels + (size_t)row * (size_t)w * 4u,
+                    (const uint8_t*)bgra->pixels + (size_t)row * (size_t)bgra->pitch,
+                    (size_t)w * 4u);
+            }
+            ok = png ? stasis_image_writer_write_png_bgra32(out_path, w, h, pixels, 0)
+                     : stasis_image_writer_write_bmp_bgra32(out_path, w, h, pixels, 0);
+            free(pixels);
+        }
+    }
+
+    SDL_DestroySurface(bgra);
+    SDL_DestroySurface(readback);
+    if (g_recording_presentation) {
+        SDL_SetRenderLogicalPresentation(
+            g_renderer, g_window_width, g_window_height,
+            SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    }
+    return ok;
 }
 
 STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
