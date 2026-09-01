@@ -71,6 +71,57 @@ static void test_fractional_and_downscale_metrics_are_distinct(void) {
     CHECK(stasis_display_scaled_extent(96, downscale.raster_scale) == 96);
 }
 
+static void test_windows_density_tiers_preserve_logical_geometry(void) {
+    const int scales[] = {100, 125, 150, 200};
+    const int drawable_widths[] = {800, 1000, 1200, 1600};
+    const int drawable_heights[] = {600, 750, 900, 1200};
+    for (int index = 0; index < 4; index++) {
+        StasisDisplayMetrics metrics = metrics_for(
+            800, 600, 800, 600,
+            drawable_widths[index], drawable_heights[index]);
+        const float expected_scale = (float)scales[index] / 100.0f;
+        CHECK(metrics.logical_w == 800);
+        CHECK(metrics.logical_h == 600);
+        CHECK(close_enough(metrics.content_scale, expected_scale));
+        CHECK(close_enough(metrics.raster_scale, expected_scale));
+        CHECK(stasis_display_scaled_extent(33, metrics.raster_scale) ==
+            (int)ceilf(33.0f * expected_scale));
+
+        float native_x = 0.0f;
+        float native_y = 0.0f;
+        float logical_x = 0.0f;
+        float logical_y = 0.0f;
+        stasis_display_logical_to_native_xy(
+            &metrics, 613.25f, 411.75f, &native_x, &native_y);
+        stasis_display_native_to_logical_xy(
+            &metrics, native_x, native_y, &logical_x, &logical_y);
+        CHECK(close_enough(logical_x, 613.25f));
+        CHECK(close_enough(logical_y, 411.75f));
+    }
+}
+
+static void test_full_backing_and_fitted_content_remain_distinct(void) {
+    StasisDisplayMetrics portrait = metrics_for(
+        360, 720, 1920, 960, 1920, 960);
+    CHECK(portrait.drawable_w == 1920);
+    CHECK(portrait.drawable_h == 960);
+    CHECK(close_enough(portrait.drawable_viewport.x, 720.0f));
+    CHECK(close_enough(portrait.drawable_viewport.y, 0.0f));
+    CHECK(close_enough(portrait.drawable_viewport.w, 480.0f));
+    CHECK(close_enough(portrait.drawable_viewport.h, 960.0f));
+    CHECK(close_enough(portrait.raster_scale, 4.0f / 3.0f));
+
+    StasisDisplayMetrics landscape = metrics_for(
+        720, 360, 1920, 960, 1920, 960);
+    CHECK(landscape.drawable_w == 1920);
+    CHECK(landscape.drawable_h == 960);
+    CHECK(close_enough(landscape.drawable_viewport.x, 0.0f));
+    CHECK(close_enough(landscape.drawable_viewport.y, 0.0f));
+    CHECK(close_enough(landscape.drawable_viewport.w, 1920.0f));
+    CHECK(close_enough(landscape.drawable_viewport.h, 960.0f));
+    CHECK(close_enough(landscape.raster_scale, 8.0f / 3.0f));
+}
+
 static void test_orientation_change_keeps_logical_dimensions(void) {
     StasisDisplayMetrics portrait = metrics_for(360, 720, 1080, 2400, 1080, 2400);
     StasisDisplayMetrics landscape = metrics_for(360, 720, 2400, 1080, 2400, 1080);
@@ -162,6 +213,8 @@ int main(void) {
     test_phone_scale_preserves_logical_canvas();
     test_pointer_mapping_round_trips_through_letterbox();
     test_fractional_and_downscale_metrics_are_distinct();
+    test_windows_density_tiers_preserve_logical_geometry();
+    test_full_backing_and_fitted_content_remain_distinct();
     test_orientation_change_keeps_logical_dimensions();
     test_odd_fractional_viewport_uses_renderer_rounding();
     test_safe_native_area_maps_to_logical_viewport();

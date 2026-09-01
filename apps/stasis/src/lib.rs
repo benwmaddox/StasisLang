@@ -5761,6 +5761,23 @@ function render(): void {{ {draws} return; }}
             !STASIS_GRAPHICS_SOURCE.contains("stasis_renderer_lifecycle_surface_changed("),
             "SDL3 window metric events must not invalidate renderer-owned textures"
         );
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let sync_start = graphics_source
+            .find("static void stasis_sync_display_metrics(void) {")
+            .expect("display metric synchronization helper");
+        let sync_end = graphics_source[sync_start..]
+            .find("static void stasis_window_to_logical(")
+            .expect("display metric synchronization boundary")
+            + sync_start;
+        let sync_source = &graphics_source[sync_start..sync_end];
+        assert!(
+            sync_source.contains("SDL_GetRenderOutputSize(g_renderer, &drawable_w, &drawable_h)"),
+            "SDL renderer metrics must sample the complete physical backing"
+        );
+        assert!(
+            !sync_source.contains("SDL_GetCurrentRenderOutputSize("),
+            "logical-presentation-adjusted output can be stale during a canvas transition"
+        );
         assert!(
             STASIS_RUNTIME_CMAKE
                 .contains("target_sources(stasis_runner PRIVATE stasis_runner.manifest)"),
