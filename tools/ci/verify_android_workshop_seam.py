@@ -25,6 +25,7 @@ ABI_CASE_MARKER = re.compile(r"Stasis Workshop IT-026 case: (\{[^\r\n]+\})")
 TOUCH_MARKER = re.compile(r"Stasis Workshop IT-027: (\{[^\r\n]+\})")
 TOUCH_CASE_MARKER = re.compile(r"Stasis Workshop IT-027 case: (\{[^\r\n]+\})")
 TOUCH_PRESENT = re.compile(r"Stasis Workshop IT-027 GLES: (\{[^\r\n]+\})")
+ACCEPTANCE_MARKER_ORDER_COUNT = 8
 HOT_EDIT_MARKER = re.compile(r"Stasis Workshop IT-028: (\{[^\r\n]+\})")
 HOT_EDIT_CASE_MARKER = re.compile(r"Stasis Workshop IT-028 case: (\{[^\r\n]+\})")
 HOT_EDIT_PRESENT = re.compile(r"Stasis Workshop IT-028 GLES: (\{[^\r\n]+\})")
@@ -228,7 +229,8 @@ def verify_it028(log: str, after_position: int) -> dict:
                 or present.get("event") != "present" \
                 or present.get("frame_token") != expected_token \
                 or present.get("trace") != expected_trace \
-                or present.get("rect_count") != 2 or present.get("order_count") != 11:
+                or present.get("rect_count") != 2 \
+                or present.get("order_count") != ACCEPTANCE_MARKER_ORDER_COUNT:
             raise SeamError("IT-028 GLES marker did not match its exact token/trace")
         presented_marker = present.get("marker")
         if not isinstance(presented_marker, dict) or presented_marker.get("active") is not True:
@@ -679,7 +681,7 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
                 or present.get("frame_token") != expected_token \
                 or present.get("trace") != cases[index]["render"]["trace"] \
                 or present.get("rect_count") != 2 \
-                or present.get("order_count") != 11:
+                or present.get("order_count") != ACCEPTANCE_MARKER_ORDER_COUNT:
             raise SeamError("IT-027 GLES marker did not match its ordered case token")
         presented_marker = present.get("marker")
         if not isinstance(presented_marker, dict) or presented_marker.get("active") is not True:
