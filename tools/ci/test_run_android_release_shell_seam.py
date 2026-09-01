@@ -32,6 +32,24 @@ def write_rgb_png(
 
 
 class AndroidReleaseShellSeamTests(unittest.TestCase):
+    def test_optional_adb_command_timeout_returns_for_marker_polling(self):
+        timeout = seam.subprocess.TimeoutExpired(
+            ["adb", "shell", "am", "start"], 10
+        )
+        with mock.patch.object(seam.subprocess, "run", side_effect=timeout):
+            self.assertEqual(
+                "",
+                seam._run(
+                    Path("adb"),
+                    "device",
+                    "shell",
+                    "am",
+                    "start",
+                    required=False,
+                    timeout=10,
+                ),
+            )
+
     def test_install_policy_keeps_default_uninstall_and_allows_only_stateful_recovery(self):
         self.assertEqual(
             {
@@ -523,6 +541,108 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             seam.require_storage_file_absent("files/escape.i32", 0, "9\n", "")
         with self.assertRaisesRegex(seam.SeamError, "escape probe failed"):
             seam.require_storage_file_absent("files/escape.i32", 1, "", "permission denied")
+
+    def test_it023_corruption_uses_one_bounded_remote_run_as_command(self):
+        completed = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        with mock.patch.object(
+            seam.subprocess, "run", return_value=completed
+        ) as run:
+            seam.corrupt_storage_file(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "files/it023_target/durable_value.i32",
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(["adb", "-s", "device", "shell"], command[:4])
+        self.assertIn("run-as com.example.seam sh -c", command[4])
+        self.assertIn(
+            "> files/it023_target/durable_value.i32", command[4]
+        )
+        self.assertEqual(10, run.call_args.kwargs["timeout"])
+
+    def test_it023_relaunch_restores_foreground_before_polling_markers(self):
+        calls = []
+        logs = iter(
+            [
+                "",
+                (
+                    'I/Stasis: Stasis seam: {"schema":"stasis.seam_test.v1",'
+                    '"test_id":"IT-023","event":"stable"}'
+                ),
+            ]
+        )
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments[:3] == ("shell", "pidof", "com.example.seam"):
+                return "222"
+            if arguments[:2] == ("logcat", "-d"):
+                return next(logs)
+            return ""
+
+        with (
+            mock.patch.object(seam, "_run", side_effect=fake_run),
+            mock.patch.object(
+                seam, "ensure_test_activity_foreground", return_value=True
+            ) as foreground,
+            mock.patch.object(seam.time, "sleep") as sleep,
+        ):
+            pid, marker, _log = seam.wait_for_storage_launch(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+                "IT-023",
+                {},
+                "111",
+                seam.time.monotonic() + 10,
+            )
+
+        self.assertEqual("222", pid)
+        self.assertEqual("stable", marker["event"])
+        foreground.assert_called_once_with(
+            Path("adb"),
+            "device",
+            "com.example.seam",
+            "com.example.seam/.MainActivity",
+            wait_for_launch=False,
+            intent_arguments=("--es", "stasis.seam_test_id", "IT-023"),
+        )
+        self.assertEqual([mock.call(0.25), mock.call(0.25)], sleep.call_args_list)
+
+    def test_it023_relaunch_accepts_initialized_guest_storage_marker(self):
+        initialized = (
+            'I/Stasis: Stasis seam: {"schema":"stasis.seam_test.v1",'
+            '"test_id":"IT-023","event":"initialized"}'
+        )
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            if arguments[:3] == ("shell", "pidof", "com.example.seam"):
+                return "222"
+            if arguments[:2] == ("logcat", "-d"):
+                return initialized
+            return ""
+
+        with (
+            mock.patch.object(seam, "_run", side_effect=fake_run),
+            mock.patch.object(seam, "ensure_test_activity_foreground") as foreground,
+        ):
+            pid, marker, _log = seam.wait_for_storage_launch(
+                Path("adb"),
+                "device",
+                "com.example.seam",
+                "com.example.seam/.MainActivity",
+                "IT-023",
+                {},
+                "111",
+                seam.time.monotonic() + 10,
+            )
+
+        self.assertEqual("222", pid)
+        self.assertEqual("initialized", marker["event"])
+        foreground.assert_not_called()
 
     def test_stable_marker_requires_a_positive_command_trace_without_fixed_oracle(self):
         for trace in (None, 0):
