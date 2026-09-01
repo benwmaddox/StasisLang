@@ -2,6 +2,7 @@
 #define STASIS_DISPLAY_SCALE_H
 
 #include <math.h>
+#include <stdint.h>
 
 typedef struct {
     float x;
@@ -173,6 +174,29 @@ static int stasis_display_scaled_extent(int logical_extent, float pixel_scale) {
     double scaled = ceil((double)logical_extent * (double)pixel_scale);
     if (scaled > 65536.0) return 65536;
     return (int)scaled;
+}
+
+static int stasis_display_scaled_extent_for_backing(
+    int logical_extent,
+    int logical_w,
+    int logical_h,
+    int drawable_w,
+    int drawable_h
+) {
+    if (logical_extent <= 0) return 0;
+    if (logical_w <= 0 || logical_h <= 0 || drawable_w <= 0 || drawable_h <= 0) {
+        return logical_extent > 65536 ? 65536 : logical_extent;
+    }
+    int64_t numerator = drawable_w;
+    int64_t denominator = logical_w;
+    if ((int64_t)drawable_h * logical_w < (int64_t)drawable_w * logical_h) {
+        numerator = drawable_h;
+        denominator = logical_h;
+    }
+    if (numerator < denominator) numerator = denominator;
+    const int64_t scaled = ((int64_t)logical_extent * numerator + denominator - 1) /
+        denominator;
+    return scaled > 65536 ? 65536 : (int)scaled;
 }
 
 #define STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT 512

@@ -5779,6 +5779,35 @@ function render(): void {{ {draws} return; }}
             "logical-presentation-adjusted output can be stale during a canvas transition"
         );
         assert!(
+            STASIS_GRAPHICS_SOURCE.contains(
+                "Stasis resource preparation: kind=sprite event=%s handle=%d path=%s logical=%dx%d raster=%dx%d source_bytes=%llu density_generation=%d"
+            ) && STASIS_GRAPHICS_SOURCE.contains(
+                "Stasis resource preparation: kind=font event=%s handle=%d path=%s logical_size=%d raster_size=%d atlas=%dx%d source_bytes=%llu density_generation=%d"
+            ),
+            "opt-in receipts must expose current sprite and font preparations at one density generation"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("if (!gfx_should_log_sprite_loads() || !entry) return;")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("if (!gfx_should_log_sprite_loads() || !font) return;"),
+            "resource preparation receipts must remain behind STASIS_GFX_LOG_SPRITES"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("stasis_log_sprite_preparation(e, path, replaces_existing);")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("stasis_log_font_preparation(font, replaces_existing);"),
+            "successful replacements must publish current preparation receipts"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)")
+                && STASIS_GRAPHICS_SOURCE.contains(
+                    "A regular screenshot captures the fitted logical content returned by"
+                ),
+            "resource preparation and capture extents must derive from the full backing without float-tier drift"
+        );
+        assert!(
             STASIS_RUNTIME_CMAKE
                 .contains("target_sources(stasis_runner PRIVATE stasis_runner.manifest)"),
             "the DPI-aware manifest must be embedded in the Windows host executable"

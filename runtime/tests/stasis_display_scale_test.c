@@ -98,6 +98,9 @@ static void test_windows_density_tiers_preserve_logical_geometry(void) {
         CHECK(close_enough(logical_x, 613.25f));
         CHECK(close_enough(logical_y, 411.75f));
     }
+    CHECK(stasis_display_scaled_extent_for_backing(18, 720, 360, 1920, 986) == 48);
+    CHECK(stasis_display_scaled_extent_for_backing(13, 720, 360, 1920, 986) == 35);
+    CHECK(stasis_display_scaled_extent_for_backing(18, 720, 360, 1921, 986) == 49);
 }
 
 static void test_full_backing_and_fitted_content_remain_distinct(void) {
