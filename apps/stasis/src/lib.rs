@@ -6086,6 +6086,11 @@ function render(): void {{ {draws} return; }}
             "graphical mobile packages must use the single SDL preference host"
         );
         assert!(
+            STASIS_GRAPHICS_SOURCE.contains("#if defined(__ANDROID__)\n    written = snprintf(path, capacity, \"%s%s\", root, scope);")
+                && STASIS_GRAPHICS_SOURCE.contains("\"%s%s/%s.%s\", root, scope, key, extension"),
+            "Android storage must add the validated scope below the app-private SDL preference root"
+        );
+        assert!(
             !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_dynload")
                 && !STASIS_MOBILE_RUNTIME_SOURCE.contains("on_code_swap")
                 && !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_runner"),

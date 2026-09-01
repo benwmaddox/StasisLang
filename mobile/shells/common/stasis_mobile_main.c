@@ -173,7 +173,10 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         "\"audio_queued_before\":%d,\"audio_queued_after\":%d,"
         "\"audio_frames_mixed\":%d,\"audio_nonzero_after_prefix\":%d,"
         "\"audio_voice_state\":%d,\"audio_sample_checksum\":%u,"
-        "\"audio_replay_checksum\":%u,\"audio_replay_matches\":%d}",
+        "\"audio_replay_checksum\":%u,\"audio_replay_matches\":%d,"
+        "\"storage_phase\":%d,\"storage_loaded_value\":%d,"
+        "\"storage_unrelated_scope\":%d,\"storage_unrelated_key\":%d,"
+        "\"storage_traversal_rejected\":%d,\"storage_checksum\":%d}",
         test_id,
         event,
         frame,
@@ -240,7 +243,13 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         seam_audio_voice_state,
         seam_audio_sample_checksum,
         seam_audio_replay_checksum,
-        seam_audio_replay_matches
+        seam_audio_replay_matches,
+        seam_i32("seam_storage_phase"),
+        seam_i32("seam_storage_loaded_value"),
+        seam_i32("seam_storage_unrelated_scope"),
+        seam_i32("seam_storage_unrelated_key"),
+        seam_i32("seam_storage_traversal_rejected"),
+        seam_i32("seam_storage_checksum")
     );
 }
 #endif

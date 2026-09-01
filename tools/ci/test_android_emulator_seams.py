@@ -182,13 +182,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
                     "android-orientation-metrics-seam",
                     "android-packaged-assets-seam",
                     "android-asset-rejection-seam",
+                    "android-storage-persistence-seam",
                 )
             ),
             sorted(release_artifacts),
         )
         self.assertEqual(["android-workshop-it025-seam"], workshop_artifacts)
-        self.assertEqual(7, self.workflow.count("          name: android-"))
-        self.assertEqual(7, self.workflow.count("        if: always()"))
+        self.assertEqual(8, self.workflow.count("          name: android-"))
+        self.assertEqual(8, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
@@ -212,19 +213,20 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "samples/android_aot_seam",
             "samples/android_touch_seam",
             "samples/android_orientation_seam",
+            "samples/android_storage_seam",
         ):
             self.assertEqual(1, self.emulator_script.count(project))
         self.assertEqual(2, self.emulator_script.count("samples/android_packaged_assets_seam"))
         self.assertIn("samples/android_asset_rejection_seam/android_seam_expectations.json", self.emulator_script)
         self.assertIn("[int]$PerSeamTimeoutSeconds = 660", self.emulator_script)
-        self.assertLess(5 * 660, 75 * 60)
+        self.assertLess(6 * 660 + 900, 90 * 60)
 
     def test_release_wrapper_defaults_to_all_seams_in_stable_order(self):
         self.assertIn('[string]$TestId = ""', self.emulator_script)
         self.assertIn('$selectedSeams = if ($TestId)', self.emulator_script)
         ordered_ids = [
             self.emulator_script.index(f'TestId = "{test_id}"')
-            for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021", "IT-022")
+            for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021", "IT-022", "IT-023")
         ]
         self.assertEqual(sorted(ordered_ids), ordered_ids)
         self.assertIn('} else {\n    $seams\n}', self.emulator_script)
@@ -251,6 +253,21 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
         self.assertIn('Where-Object { $_.TestId -eq $TestId }', self.emulator_script)
         self.assertIn('TestId = "IT-021"', self.emulator_script)
+        self.assertIn('TestId = "IT-023"', self.emulator_script)
+
+    def test_it023_storage_scope_and_lifecycle_contract(self):
+        source = read("runtime/stasis_graphics.c")
+        sample = read("samples/android_storage_seam/main.stasis")
+        expectations = json.loads(
+            read("samples/android_storage_seam/android_seam_expectations.json")
+        )
+        self.assertIn("#if defined(__ANDROID__)", source)
+        self.assertIn('"%s%s/%s.%s"', source)
+        self.assertIn('storage_save_i32("it023_target", "durable_value", 230023)', sample)
+        self.assertIn('storage_save_i32("..", "escape", 9)', sample)
+        self.assertEqual("IT-023", expectations["test_id"])
+        self.assertEqual(230023, expectations["storage"]["exact_value"])
+        self.assertIn("android-storage-persistence-seam", self.workflow)
 
     def test_release_wrapper_rejects_unknown_test_ids_before_execution(self):
         self.assertIn('$TestId -notin $validTestIds', self.emulator_script)

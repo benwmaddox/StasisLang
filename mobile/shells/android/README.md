@@ -56,7 +56,7 @@ The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for
 initialization, the first frame, stable frame 30, and fixture-owned probe
 sequence changes; ordinary app launches do not compile or enable the marker
-hooks. CI runs IT-017 through IT-022 on a hosted API 35 x86_64 emulator. The same driver can be
+hooks. CI runs IT-017 through IT-023 on a hosted API 35 x86_64 emulator. The same driver can be
 run against an ARM64 device with the default target, or an x86_64 emulator with
 `-Target android-x86_64`:
 
@@ -102,3 +102,10 @@ requires exactly one ready emulator, rejects physical-device serials, verifies
 `x86_64`, and runs IT-017, IT-018, and IT-019 sequentially. The GitHub
 workflow owns AVD startup and shutdown. Physical-device runs remain useful
 supplemental release evidence but do not gate CI readiness.
+
+## Android storage persistence seam
+
+`IT-023` packages `samples/android_storage_seam` and verifies the AOT storage
+stdlib across three fresh Android processes. The lane checks the exact scoped
+file through `run-as`, corrupts only that file, requires the guest fallback on
+the next launch, and proves unrelated scope/key and traversal paths are absent.

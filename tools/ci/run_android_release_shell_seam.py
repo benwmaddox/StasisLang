@@ -333,6 +333,227 @@ def validate_markers(markers: list[dict], expectations: dict) -> dict:
     return stable
 
 
+def validate_storage_relative_path(relative_path: str) -> str:
+    """Accept only fixed app-private storage paths used by IT-023."""
+    if not isinstance(relative_path, str) or re.fullmatch(
+        r"files/[A-Za-z0-9_-]{1,63}/[A-Za-z0-9_-]{1,63}\.i32", relative_path
+    ) is None:
+        raise SeamError(f"IT-023 invalid app-private storage path: {relative_path!r}")
+    return relative_path
+
+
+def probe_storage_file(
+    adb: Path, serial: str | None, package_id: str, relative_path: str
+) -> str | None:
+    relative_path = validate_storage_relative_path(relative_path)
+    result = _run_result(
+        adb, serial, "shell", "run-as", package_id, "cat", relative_path
+    )
+    if result.returncode == 0:
+        return result.stdout
+    diagnostic = (result.stdout + result.stderr).lower()
+    if "no such file" in diagnostic or "not found" in diagnostic:
+        return None
+    raise SeamError(
+        f"IT-023 storage probe failed for {relative_path}: "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def corrupt_storage_file(
+    adb: Path, serial: str | None, package_id: str, relative_path: str
+) -> None:
+    relative_path = validate_storage_relative_path(relative_path)
+    command = [str(adb)]
+    if serial:
+        command.extend(("-s", serial))
+    command.extend(("exec-out", "run-as", package_id, "tee", relative_path))
+    expected = b"corrupt\n"
+    result = subprocess.run(
+        command, input=expected, capture_output=True, text=False, check=False
+    )
+    validate_storage_write_result(
+        relative_path, result.returncode, result.stdout, result.stderr, expected
+    )
+
+
+def validate_storage_write_result(
+    relative_path: str,
+    returncode: int,
+    stdout: bytes,
+    stderr: bytes,
+    expected: bytes,
+) -> None:
+    if returncode != 0 or stdout != expected or stderr:
+        raise SeamError(
+            f"IT-023 storage write failed for {relative_path}: exit={returncode} "
+            f"stdout={stdout!r} stderr={stderr!r}"
+        )
+
+
+def validate_storage_marker(marker: dict, storage: dict, phase: int) -> dict:
+    expected_value = storage["exact_value"] if phase < 3 else storage["corrupt_fallback"]
+    expected = {
+        "storage_phase": phase,
+        "storage_loaded_value": expected_value,
+        "storage_unrelated_scope": storage["unrelated_scope_fallback"],
+        "storage_unrelated_key": storage["unrelated_key_fallback"],
+        "storage_traversal_rejected": 1,
+        "storage_checksum": phase * 1000000 + expected_value,
+    }
+    mismatches = {
+        key: {"expected": value, "actual": marker.get(key)}
+        for key, value in expected.items()
+        if marker.get(key) != value
+    }
+    if mismatches:
+        raise SeamError(f"IT-023 storage marker mismatch: {mismatches}")
+    return {key: marker[key] for key in expected}
+
+
+def validate_fresh_process_pid(previous_pid: str, current_pid: str) -> str:
+    if not current_pid or current_pid == previous_pid:
+        raise SeamError(
+            f"IT-023 fresh process PID expected after {previous_pid!r}, got {current_pid!r}"
+        )
+    return current_pid
+
+
+def validate_storage_file_text(actual: str | None, expected: str, stage: str) -> str:
+    if actual != expected:
+        raise SeamError(
+            f"IT-023 {stage} storage bytes expected {expected!r}, got {actual!r}"
+        )
+    return actual
+
+
+def require_storage_file_absent(
+    relative_path: str, returncode: int, stdout: str, stderr: str
+) -> None:
+    if returncode == 0:
+        raise SeamError(f"IT-023 traversal escaped app storage: {relative_path}")
+    diagnostic = (stdout + stderr).lower()
+    if "no such file" not in diagnostic and "not found" not in diagnostic:
+        raise SeamError(
+            f"IT-023 escape probe failed for {relative_path}: "
+            f"stdout={stdout!r} stderr={stderr!r}"
+        )
+
+
+def wait_for_storage_launch(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    component: str,
+    test_id: str,
+    expectations: dict,
+    previous_pid: str,
+    deadline: float,
+) -> tuple[str, dict, str]:
+    _run(adb, serial, "shell", "am", "force-stop", package_id)
+    _run(adb, serial, "logcat", "-c")
+    _run(
+        adb, serial, "shell", "am", "start", "-W", "-n", component,
+        "--es", "stasis.seam_test_id", test_id,
+    )
+    log = ""
+    while time.monotonic() < deadline:
+        log = _run(
+            adb, serial, "logcat", "-d", "-v", "brief", "Stasis:I", "*:S"
+        )
+        markers = parse_markers(log, test_id)
+        if any(item.get("event") == "stable" for item in markers):
+            marker = validate_markers(markers, expectations)
+            pid = _run(
+                adb, serial, "shell", "pidof", package_id, required=False
+            ).strip()
+            return validate_fresh_process_pid(previous_pid, pid), marker, log
+        time.sleep(0.25)
+    raise SeamError("IT-023 relaunched process did not reach its stable marker")
+
+
+def run_it023_storage_lifecycle(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    component: str,
+    test_id: str,
+    expectations: dict,
+    first_pid: str,
+    initial_marker: dict,
+    deadline: float,
+) -> dict:
+    storage = expectations["storage"]
+    target_path = validate_storage_relative_path(storage["target_path"])
+    control_path = validate_storage_relative_path(storage["control_path"])
+    absent_paths = [
+        validate_storage_relative_path(storage["unrelated_scope_path"]),
+        validate_storage_relative_path(storage["unrelated_key_path"]),
+    ]
+    validate_storage_marker(initial_marker, storage, 1)
+    exact_text = f"{storage['exact_value']}\n"
+    validate_storage_file_text(
+        probe_storage_file(adb, serial, package_id, target_path),
+        exact_text,
+        "initial target",
+    )
+    validate_storage_file_text(
+        probe_storage_file(adb, serial, package_id, control_path),
+        "1\n",
+        "initial control",
+    )
+    if any(
+        probe_storage_file(adb, serial, package_id, path) is not None
+        for path in absent_paths
+    ):
+        raise SeamError("IT-023 unrelated scope or key unexpectedly created storage")
+    second_pid, second_marker, second_log = wait_for_storage_launch(
+        adb, serial, package_id, component, test_id, expectations, first_pid,
+        min(deadline, time.monotonic() + 20),
+    )
+    validate_storage_marker(second_marker, storage, 2)
+    validate_storage_file_text(
+        probe_storage_file(adb, serial, package_id, target_path),
+        exact_text,
+        "persisted target",
+    )
+    corrupt_storage_file(adb, serial, package_id, target_path)
+    validate_storage_file_text(
+        probe_storage_file(adb, serial, package_id, target_path),
+        "corrupt\n",
+        "corrupt target",
+    )
+    third_pid, third_marker, third_log = wait_for_storage_launch(
+        adb, serial, package_id, component, test_id, expectations, second_pid,
+        min(deadline, time.monotonic() + 20),
+    )
+    validate_storage_marker(third_marker, storage, 3)
+    for path in absent_paths:
+        if probe_storage_file(adb, serial, package_id, path) is not None:
+            raise SeamError(f"IT-023 unrelated storage path exists: {path}")
+    for escape_path in storage["escape_paths"]:
+        if not isinstance(escape_path, str) or not re.fullmatch(
+            r"(?:files/)?[A-Za-z0-9_-]{1,63}\.i32", escape_path
+        ):
+            raise SeamError(f"IT-023 invalid escape probe path: {escape_path!r}")
+        result = _run_result(
+            adb, serial, "shell", "run-as", package_id, "cat", escape_path
+        )
+        require_storage_file_absent(
+            escape_path, result.returncode, result.stdout, result.stderr
+        )
+    return {
+        "process_epochs": [first_pid, second_pid, third_pid],
+        "markers": [initial_marker, second_marker, third_marker],
+        "target_path": target_path,
+        "target_value": storage["exact_value"],
+        "corrupt_fallback": storage["corrupt_fallback"],
+        "scope_and_key_isolated": True,
+        "traversal_escape_absent": True,
+        "logs": [second_log, third_log],
+    }
+
+
 def validate_asset_rejection_markers(
     markers: list[dict], log: str, expectations: dict
 ) -> dict:
@@ -1759,6 +1980,16 @@ def main() -> int:
         ).strip()
         if not first_pid:
             raise SeamError("generated Android shell exited before capture")
+        if test_id == "IT-023":
+            storage_evidence = run_it023_storage_lifecycle(
+                args.adb, args.serial, package_id, component, test_id,
+                expectations, first_pid, stable, deadline,
+            )
+            storage_logs = storage_evidence.pop("logs")
+            log = "\n".join([log, *storage_logs])
+            stable = storage_evidence["markers"][-1]
+            first_pid = storage_evidence["process_epochs"][-1]
+            evidence["storage_lifecycle"] = storage_evidence
         lifecycle_evidence = []
         lifecycle_markers = {"initial": stable}
         lifecycle = expectations.get("lifecycle")
