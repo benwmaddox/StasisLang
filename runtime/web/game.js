@@ -21,6 +21,9 @@
   const fontLoads = new Map();
   const cachedText = new Map();
   const preparedText = new Map();
+  const PREPARED_TEXT_MAX_ENTRIES = 256;
+  const PREPARED_TEXT_MAX_BYTES = 8 * 1024 * 1024;
+  let preparedTextBytes = 0;
   const DISPLAY_MAX_DPR = 4;
   const DISPLAY_MIN_DPR = 0.5;
   const DISPLAY_MAX_BACKING_WIDTH = 8192;
@@ -2462,7 +2465,12 @@
     };
     const key = `${fontHandle}|${font.densityGeneration || 0}|${text}`;
     const existing = preparedText.get(key);
-    if (existing) return existing;
+    if (existing) {
+      // Map iteration order is the LRU order used by the bounded cache.
+      preparedText.delete(key);
+      preparedText.set(key, existing);
+      return existing;
+    }
     const surface = document.createElement?.("canvas");
     const preparation = surface?.getContext?.("2d", { alpha: true });
     if (!surface || !preparation) throw new Error("Canvas2D text resource preparation unavailable");
@@ -2480,9 +2488,19 @@
     preparation.fillText(text, 0, font.baseline);
     const resource = {
       ready: true, drawable: surface, width, height, generation: 1,
-      baseline: font.baseline, text, fontHandle
+      baseline: font.baseline, text, fontHandle, byteLength: width * height * 4
     };
     preparedText.set(key, resource);
+    preparedTextBytes += resource.byteLength;
+    for (const [candidateKey, candidate] of preparedText) {
+      if (preparedText.size <= PREPARED_TEXT_MAX_ENTRIES
+          && preparedTextBytes <= PREPARED_TEXT_MAX_BYTES) break;
+      // The new resource is prepared and drawn by the caller immediately.
+      if (candidate === resource) continue;
+      preparedText.delete(candidateKey);
+      preparedTextBytes = Math.max(0, preparedTextBytes - candidate.byteLength);
+      gpuBatcher?.releaseResource(candidate);
+    }
     return resource;
   };
   const drawPreparedText = (fontHandle, text, x, y, red, green, blue, alpha) => {
@@ -3172,6 +3190,8 @@
     document.body.dataset.atlasAllocatedBytes = String(performanceWorkload.atlasAllocatedBytes);
     document.body.dataset.atlasUploadCount = String(performanceWorkload.atlasUploadCount);
     document.body.dataset.atlasUploadBytes = String(performanceWorkload.atlasUploadBytes);
+    document.body.dataset.preparedTextEntries = String(preparedText.size);
+    document.body.dataset.preparedTextBytes = String(preparedTextBytes);
     document.body.dataset.worstTickMs = worstTick.toFixed(3);
     document.body.dataset.worstRenderMs = worstRender.toFixed(3);
     document.body.dataset.worstWasmRenderMs = worstWasmRender.toFixed(3);

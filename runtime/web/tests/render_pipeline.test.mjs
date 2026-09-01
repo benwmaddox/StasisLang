@@ -65,7 +65,9 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
   const rasterStats = { draws: 0, images: [], clears: [] };
   const rasterContext = {
     imageSmoothingEnabled: true, imageSmoothingQuality: "high",
-    clearRect(...args) { rasterStats.clears.push(args); }, drawImage(...args) { rasterStats.draws += 1; rasterStats.images.push(args); }, save() {}, restore() {}
+    clearRect(...args) { rasterStats.clears.push(args); }, drawImage(...args) { rasterStats.draws += 1; rasterStats.images.push(args); },
+    measureText(text) { return { width: String(text).length * 8, actualBoundingBoxDescent: 4 }; },
+    fillText() {}, save() {}, restore() {}
   };
   const gl = fakeGl(stats, true, throwing, textureThrow);
   const canvasListeners = new Map();
@@ -1104,6 +1106,38 @@ test("texture failure and context loss never select another renderer", async () 
   recovered.restoreContext();
   recovered.frame();
   assert.equal(recovered.stats.instanced, 2);
+});
+
+test("prepared text LRU remains bounded and releases evicted atlas entries", async () => {
+  const runtime = await loadRuntime();
+  const drawScore = value => {
+    runtime.env.web_begin_frame(0, 0, 0);
+    runtime.env.web_draw_text(4, 8, value);
+    runtime.frame();
+  };
+
+  for (let value = 0; value < 256; value += 1) drawScore(value);
+  assert.equal(runtime.body.dataset.preparedTextEntries, "256");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "257"); // plus the loaded sprite fixture
+
+  // Refresh score 0 so inserting one more value evicts score 1 instead.
+  drawScore(0);
+  const uploadsBeforeEviction = Number(runtime.body.dataset.atlasUploadCount);
+  drawScore(256);
+  assert.equal(runtime.body.dataset.preparedTextEntries, "256");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "257");
+  assert.ok(Number(runtime.body.dataset.atlasPages) <= 3);
+  assert.ok(Number(runtime.body.dataset.preparedTextBytes) <= 8 * 1024 * 1024);
+
+  drawScore(0);
+  assert.equal(Number(runtime.body.dataset.atlasUploadCount), uploadsBeforeEviction + 1,
+    "the recently used entry should remain atlas-resident");
+  drawScore(1);
+  assert.equal(Number(runtime.body.dataset.atlasUploadCount), uploadsBeforeEviction + 2,
+    "the evicted entry should require one new atlas upload");
+  assert.equal(runtime.body.dataset.preparedTextEntries, "256");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "257");
+  assert.equal(runtime.stats.instanced, 260);
 });
 
 test("runtime publishes split timing phases and HUD labels", async () => {
