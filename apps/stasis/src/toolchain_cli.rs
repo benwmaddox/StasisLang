@@ -1,4 +1,10 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use flate2::{Compression, GzBuilder};
+use oxc_allocator::Allocator;
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
+use oxc_minifier::{CompressOptions, Minifier, MinifierOptions};
+use oxc_parser::Parser as JavaScriptParser;
+use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -4252,12 +4258,12 @@ fn package_web_workspace(
             staging_root.display()
         ));
     }
-    let provenance = resolve_package_provenance(development_build)?;
+    let mut provenance = resolve_package_provenance(development_build)?;
     let development_build = provenance["development_build"].as_bool() == Some(true);
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
 
-    let assembled = (|| -> Result<(bool, usize, usize), String> {
+    let assembled = (|| -> Result<(bool, usize, usize, Value), String> {
         let web_entry = workspace
             .manifest
             .web
@@ -4318,10 +4324,16 @@ fn package_web_workspace(
             .and_then(|web| web.loading_font.as_deref())
             .map(normalize_web_loading_font_path)
             .transpose()?;
+        let audit_asset_metadata = staged_web_asset_metadata(&staging_root)?;
+        let runtime_asset_metadata = if development_build {
+            audit_asset_metadata.clone()
+        } else {
+            release_web_asset_metadata(&audit_asset_metadata)
+        };
         let mut runtime_config = web_runtime_config(workspace, &process, development_build);
-        runtime_config["asset_metadata"] = staged_web_asset_metadata(&staging_root)?;
+        runtime_config["asset_metadata"] = runtime_asset_metadata.clone();
         let asset_identity_path = staging_root.join(ASSET_PACKAGE_IDENTITY_PATH);
-        if asset_identity_path.is_file() {
+        if development_build && asset_identity_path.is_file() {
             runtime_config["asset_package"] =
                 serde_json::from_slice(&fs::read(&asset_identity_path).map_err(|error| {
                     format!(
@@ -4342,7 +4354,26 @@ fn package_web_workspace(
             .iter()
             .any(|symbol| symbol.starts_with("stasis_web_network_"));
         let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled)?;
-        let runtime_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
+        let linked_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
+        let runtime_bundle = if development_build {
+            linked_bundle.clone()
+        } else {
+            format!(
+                "window.STASIS_GAME = {runtime_json};\n{}",
+                minify_web_runtime(&linked_runtime)?
+            )
+        };
+        let size_metrics = web_package_size_metrics(
+            &linked_bundle,
+            &runtime_bundle,
+            &audit_asset_metadata,
+            &runtime_asset_metadata,
+            !development_build,
+        )?;
+        provenance["web_package"] = json!({
+            "asset_metadata_audit": audit_asset_metadata,
+            "size_metrics": size_metrics.clone(),
+        });
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
@@ -4419,9 +4450,14 @@ fn package_web_workspace(
         }
 
         write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
-        Ok((wasm.optimized, wasm.input_bytes, wasm.bytes.len()))
+        Ok((
+            wasm.optimized,
+            wasm.input_bytes,
+            wasm.bytes.len(),
+            size_metrics,
+        ))
     })();
-    let (wasm_optimized, wasm_input_bytes, wasm_output_bytes) = match assembled {
+    let (wasm_optimized, wasm_input_bytes, wasm_output_bytes, web_size_metrics) = match assembled {
         Ok(package) => package,
         Err(error) => {
             let _ = fs::remove_dir_all(&staging_root);
@@ -4449,6 +4485,7 @@ fn package_web_workspace(
             "wasm_optimized": wasm_optimized,
             "wasm_input_bytes": wasm_input_bytes,
             "wasm_output_bytes": wasm_output_bytes,
+            "web_size_metrics": web_size_metrics,
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
             "web_entry": workspace
@@ -4917,6 +4954,110 @@ fn staged_web_asset_metadata(destination_root: &Path) -> Result<Value, String> {
         metadata.insert(path.to_string(), Value::Object(item));
     }
     Ok(Value::Object(metadata))
+}
+
+const WEB_RELEASE_ASSET_METADATA_FIELDS: [&str; 5] = [
+    "encoding",
+    "prepared_width",
+    "prepared_height",
+    "logical_width",
+    "logical_height",
+];
+
+fn release_web_asset_metadata(audit: &Value) -> Value {
+    let metadata = audit
+        .as_object()
+        .into_iter()
+        .flat_map(|metadata| metadata.iter())
+        .map(|(path, item)| {
+            let projected = item
+                .as_object()
+                .into_iter()
+                .flat_map(|item| item.iter())
+                .filter(|(field, _)| WEB_RELEASE_ASSET_METADATA_FIELDS.contains(&field.as_str()))
+                .map(|(field, value)| (field.clone(), value.clone()))
+                .collect();
+            (path.clone(), Value::Object(projected))
+        })
+        .collect();
+    Value::Object(metadata)
+}
+
+fn minify_web_runtime(source: &str) -> Result<String, String> {
+    let allocator = Allocator::default();
+    let parsed = JavaScriptParser::new(&allocator, source, SourceType::cjs()).parse();
+    if !parsed.errors.is_empty() {
+        return Err(format!(
+            "failed to parse linked Web runtime for minification: {}",
+            parsed
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let mut program = parsed.program;
+    let minified = Minifier::new(MinifierOptions {
+        compress: Some(CompressOptions::smallest()),
+        mangle: None,
+        ..MinifierOptions::default()
+    })
+    .minify(&allocator, &mut program);
+    Ok(Codegen::new()
+        .with_options(CodegenOptions {
+            minify: true,
+            comments: CommentOptions::disabled(),
+            ..CodegenOptions::default()
+        })
+        .with_scoping(minified.scoping)
+        .build(&program)
+        .code)
+}
+
+fn deterministic_gzip_size(bytes: &[u8]) -> Result<usize, String> {
+    let mut encoder = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::best());
+    encoder
+        .write_all(bytes)
+        .map_err(|error| format!("failed to measure Web package gzip size: {error}"))?;
+    encoder
+        .finish()
+        .map(|gzip| gzip.len())
+        .map_err(|error| format!("failed to finish Web package gzip measurement: {error}"))
+}
+
+fn byte_size_metrics(bytes: &[u8]) -> Result<Value, String> {
+    Ok(json!({
+        "raw_bytes": bytes.len(),
+        "gzip_bytes": deterministic_gzip_size(bytes)?,
+    }))
+}
+
+fn web_package_size_metrics(
+    javascript_before: &str,
+    javascript_after: &str,
+    metadata_before: &Value,
+    metadata_after: &Value,
+    javascript_minified: bool,
+) -> Result<Value, String> {
+    let metadata_before = serde_json::to_vec(metadata_before)
+        .map_err(|error| format!("failed to encode Web asset audit metadata: {error}"))?;
+    let metadata_after = serde_json::to_vec(metadata_after)
+        .map_err(|error| format!("failed to encode Web runtime asset metadata: {error}"))?;
+    Ok(json!({
+        "definition": "raw is the exact UTF-8 byte length; gzip is RFC 1952 at level 9 with mtime 0",
+        "javascript_minified": javascript_minified,
+        "javascript": {
+            "before": byte_size_metrics(javascript_before.as_bytes())?,
+            "after": byte_size_metrics(javascript_after.as_bytes())?,
+        },
+        "asset_metadata": {
+            "before": byte_size_metrics(&metadata_before)?,
+            "after": byte_size_metrics(&metadata_after)?,
+        },
+    }))
 }
 
 fn network_guest_asset_mime(format: &AssetFormat) -> &'static str {
