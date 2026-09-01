@@ -128,11 +128,24 @@ static void test_preparation_scale_is_exact_and_bounded(void) {
 
 static void test_x11_content_scale_selects_window_backing(void) {
     CHECK(stasis_display_scaled_window_extent(720, 1.0f) == 720);
+    CHECK(stasis_display_scaled_window_extent(360, 1.0f) == 360);
     CHECK(stasis_display_scaled_window_extent(720, 1.25f) == 900);
+    CHECK(stasis_display_scaled_window_extent(360, 1.25f) == 450);
     CHECK(stasis_display_scaled_window_extent(720, 1.5f) == 1080);
+    CHECK(stasis_display_scaled_window_extent(360, 1.5f) == 540);
     CHECK(stasis_display_scaled_window_extent(720, 2.0f) == 1440);
+    CHECK(stasis_display_scaled_window_extent(360, 2.0f) == 720);
     CHECK(stasis_display_scaled_window_extent(720, 0.5f) == 720);
     CHECK(stasis_display_scaled_window_extent(10000, 20.0f) == 65536);
+}
+
+static void test_explicit_window_extent_survives_stale_maximized_state(void) {
+    CHECK(stasis_display_should_apply_windowed_extent(1, 0, 1, 0));
+    CHECK(stasis_display_should_apply_windowed_extent(1, 0, 0, 1));
+    CHECK(!stasis_display_should_apply_windowed_extent(1, 1, 0, 0));
+    CHECK(!stasis_display_should_apply_windowed_extent(0, 0, 1, 0));
+    CHECK(!stasis_display_should_apply_windowed_extent(0, 0, 0, 1));
+    CHECK(stasis_display_should_apply_windowed_extent(0, 0, 0, 0));
 }
 
 static void test_full_backing_and_fitted_content_remain_distinct(void) {
@@ -251,6 +264,7 @@ int main(void) {
     test_desktop_density_tiers_preserve_logical_geometry();
     test_preparation_scale_is_exact_and_bounded();
     test_x11_content_scale_selects_window_backing();
+    test_explicit_window_extent_survives_stale_maximized_state();
     test_full_backing_and_fitted_content_remain_distinct();
     test_orientation_change_keeps_logical_dimensions();
     test_odd_fractional_viewport_uses_renderer_rounding();

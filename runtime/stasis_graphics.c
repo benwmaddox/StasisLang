@@ -660,10 +660,14 @@ static float stasis_x11_window_scale(void) {
 #endif
 }
 
-static void stasis_apply_x11_window_scale(void) {
+static void stasis_apply_x11_window_scale(int explicit_window_request) {
     if (!g_window || g_recording_presentation) return;
     const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
-    if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) {
+    if (!stasis_display_should_apply_windowed_extent(
+            explicit_window_request,
+            (flags & SDL_WINDOW_FULLSCREEN) != 0,
+            (flags & SDL_WINDOW_MAXIMIZED) != 0,
+            (flags & SDL_WINDOW_MINIMIZED) != 0)) {
         return;
     }
     const float scale = stasis_x11_window_scale();
@@ -1125,7 +1129,7 @@ static void stasis_pump_events(void) {
                 break;
             case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
 #if defined(__linux__) && !defined(__ANDROID__)
-                stasis_apply_x11_window_scale();
+                stasis_apply_x11_window_scale(0);
 #endif
                 stasis_sync_display_metrics();
                 g_input_frame.viewport_w_px = g_window_width;
@@ -4641,7 +4645,9 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         SDL_RestoreWindow(g_window);
         SDL_SyncWindow(g_window);
     }
-    stasis_apply_x11_window_scale();
+    /* X11 window-manager state can remain maximized briefly after restore.
+       The explicit request still owns the retained windowed backing extent. */
+    stasis_apply_x11_window_scale(1);
 #endif
     stasis_sync_display_metrics();
 

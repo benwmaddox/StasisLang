@@ -5842,7 +5842,7 @@ function render(): void {{ {draws} return; }}
             STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowDisplayScale(g_window)")
                 && STASIS_GRAPHICS_SOURCE.contains("SDL_GetDisplayContentScale(")
                 && STASIS_GRAPHICS_SOURCE.contains("SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED")
-                && STASIS_GRAPHICS_SOURCE.contains("stasis_apply_x11_window_scale();")
+                && STASIS_GRAPHICS_SOURCE.contains("stasis_apply_x11_window_scale(0);")
                 && STASIS_GRAPHICS_SOURCE
                     .contains("stasis_display_scaled_window_extent(width, display_scale)"),
             "X11 content scale must size the physical window on the shared desktop path"
@@ -5898,11 +5898,11 @@ function render(): void {{ {draws} return; }}
             .find("SDL_RestoreWindow(g_window);")
             .expect("an explicit size should restore a maximized or minimized window");
         let resize = resize_source
-            .find("stasis_apply_x11_window_scale();")
+            .find("stasis_apply_x11_window_scale(1);")
             .expect("an explicit size should apply the platform-owned window scale");
 
         let scaled_resize_start = graphics_source
-            .find("static void stasis_apply_x11_window_scale(void) {")
+            .find("static void stasis_apply_x11_window_scale(int explicit_window_request) {")
             .expect("X11 window scale helper");
         let scaled_resize_end = graphics_source[scaled_resize_start..]
             .find("static void stasis_query_available_presentation(")
@@ -5911,11 +5911,20 @@ function render(): void {{ {draws} return; }}
         let scaled_resize_source = &graphics_source[scaled_resize_start..scaled_resize_end];
         assert!(
             scaled_resize_source.contains("SDL_SetWindowSize(")
+                && scaled_resize_source.contains("stasis_display_should_apply_windowed_extent(")
                 && scaled_resize_source
                     .contains("stasis_display_scaled_window_extent(g_window_width, scale)")
                 && scaled_resize_source
                     .contains("stasis_display_scaled_window_extent(g_window_height, scale)"),
             "platform-owned resize must apply bounded scaled extents to the physical window"
+        );
+
+        assert!(
+            resize_source.contains("stasis_apply_x11_window_scale(1);")
+                && STASIS_GRAPHICS_SOURCE.contains(
+                    "stasis_apply_x11_window_scale(0);"
+                ),
+            "explicit window requests must override stale restored flags without letting display-scale events resize a maximized surface"
         );
 
         assert!(

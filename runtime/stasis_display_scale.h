@@ -253,6 +253,17 @@ static int stasis_display_scaled_window_extent(int logical_extent, float display
     return scaled > 65536.0 ? 65536 : (int)scaled;
 }
 
+static int stasis_display_should_apply_windowed_extent(
+    int explicit_window_request,
+    int fullscreen,
+    int maximized,
+    int minimized
+) {
+    if (fullscreen) return 0;
+    if (explicit_window_request) return 1;
+    return !maximized && !minimized;
+}
+
 #define STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT 512
 #define STASIS_DISPLAY_FONT_ATLAS_MAX_EXTENT 4096
 
