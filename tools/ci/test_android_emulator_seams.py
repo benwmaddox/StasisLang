@@ -156,11 +156,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         release_script = "pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1"
         workshop_script = (
             "pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 "
-            "-Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90"
+            "-Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90 "
+            "-MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94"
         )
         self.assertEqual(1, release_body.count(release_script))
         self.assertNotIn("test_render_emulator.ps1", release_body)
         self.assertEqual(1, workshop_body.count(workshop_script))
+        self.assertEqual(1, self.workflow.count("-MaxRenderP50Millis 1.05"))
+        self.assertEqual(1, self.workflow.count("-MaxRenderP95Millis 8.94"))
         self.assertNotIn("test_release_shell_emulator.ps1", workshop_body)
         release_artifacts = re.findall(r"(?m)^\s+name: (android-[^\s]+)$", release_body)
         workshop_artifacts = re.findall(r"(?m)^\s+name: (android-[^\s]+)$", workshop_body)
