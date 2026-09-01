@@ -6288,15 +6288,18 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
-    fn sprite_runtime_uses_grouped_and_dedicated_atlas_pages() {
+    fn sprite_runtime_uses_grouped_cold_and_dedicated_atlas_pages() {
         for required in [
             "stasis_gfx_set_next_sprite_atlas_policy_v3",
             "stasis_asset_request_sprite_with_policy_v3",
             "task->atlas_policy",
             "stasis_sprite_atlas_page_size_v3",
+            "#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512",
             "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
             "if (!page->texture || page->dedicated || page->group_id != group_id) continue;",
             "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
+            "if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))",
+            "if (!stasis_sprite_atlas_is_cold_page(page)) continue;",
             "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
         ] {
             assert!(
@@ -6304,6 +6307,27 @@ function render(): void {{ {draws} return; }}
                 "runtime hot-render policy should contain {required}"
             );
         }
+        let allocation_start = STASIS_GRAPHICS_SOURCE
+            .find("static int stasis_sprite_atlas_allocate(")
+            .expect("sprite atlas allocation helper");
+        let allocation_end = STASIS_GRAPHICS_SOURCE[allocation_start..]
+            .find("static int stasis_sprite_atlas_upload(")
+            .expect("sprite atlas allocation helper boundary")
+            + allocation_start;
+        let allocation_source = &STASIS_GRAPHICS_SOURCE[allocation_start..allocation_end];
+        let eligible_branch = allocation_source
+            .find("if (eligible &&")
+            .expect("compiler-eligible group allocation");
+        let cold_branch = allocation_source
+            .find("if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))")
+            .expect("standalone cold-page allocation");
+        let dedicated_branch = allocation_source
+            .find("stasis_sprite_atlas_create_page(width, height, group_id, 1)")
+            .expect("oversized standalone allocation");
+        assert!(
+            eligible_branch < cold_branch && cold_branch < dedicated_branch,
+            "eligible groups must keep v3 sizing, fitting standalone sprites must use cold pages, and oversized standalone sprites must remain dedicated"
+        );
         let publish_start = STASIS_GRAPHICS_SOURCE
             .find("static int sprite_publish_pixels_into_entry(")
             .expect("sprite publication helper");
@@ -6312,6 +6336,10 @@ function render(): void {{ {draws} return; }}
             .expect("sprite publication helper boundary")
             + publish_start;
         let publish_source = &STASIS_GRAPHICS_SOURCE[publish_start..publish_end];
+        assert!(
+            publish_source.contains("stasis_sprite_atlas_is_cold_page("),
+            "standalone reloads must retain compatible shared cold or dedicated allocations"
+        );
         let failure = publish_source
             .find("if (page_index < 0 ||")
             .expect("atlas allocation/upload failure branch");

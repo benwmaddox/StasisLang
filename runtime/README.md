@@ -109,9 +109,12 @@ shipping build. See `docs/sdl3_migration.md` for the compatibility boundary.
 
 Sprites are placed in renderer-private, bounded SDL texture pages using the
 compiler-provided logical grouping policy. Pages reserve padded opaque-white
-and missing-image regions; oversized or standalone images receive a dedicated
-SDL texture domain with the same reserved regions. Padding is edge-extruded at
-load, density-change, or renderer-generation rebuild time.
+and missing-image regions. Ordinary sprites that fit share bounded `512 x 512`
+group-0 cold pages, matching the Web atlas's initial page extent; this keeps
+direct and pre-policy loads bounded without mixing them into compiler-eligible
+groups. Larger standalone images receive a dedicated SDL texture domain with
+the same reserved regions. Padding is edge-extruded at load, density-change, or
+renderer-generation rebuild time.
 
 The v7 order stream remains declarative. Adjacent sprite runs and solid
 rectangles are lowered in exact painter order to fixed reusable

@@ -365,6 +365,7 @@ static int g_sprite_max_file_bytes = -1;
 static SpriteEntry g_sprite_fallback;
 
 #define STASIS_SDL_ATLAS_PAGE_SIZE 2048
+#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512
 #define STASIS_SDL_ATLAS_MAX_PAGES 256
 #define STASIS_SDL_ATLAS_PADDING 1
 #define STASIS_SDL_ATLAS_WHITE_SIZE 2
@@ -4722,6 +4723,22 @@ static int stasis_sprite_atlas_reserve_on_page(
     return 1;
 }
 
+static int stasis_sprite_atlas_is_cold_page(const StasisSdlAtlasPage* page) {
+    return page && page->texture && !page->dedicated && page->group_id == 0 &&
+           page->width == STASIS_SDL_ATLAS_COLD_PAGE_SIZE &&
+           page->height == STASIS_SDL_ATLAS_COLD_PAGE_SIZE;
+}
+
+static int stasis_sprite_atlas_fits_cold_page(int w, int h) {
+    /* Shared cold pages retain the reserved white/placeholder header at y=1.
+     * Account for that header, the initial cursor inset, and edge padding. */
+    return w > 0 && h > 0 &&
+           w <= STASIS_SDL_ATLAS_COLD_PAGE_SIZE -
+                    (STASIS_SDL_ATLAS_PADDING * 2 + 1) &&
+           h <= STASIS_SDL_ATLAS_COLD_PAGE_SIZE -
+                    (STASIS_SDL_ATLAS_PADDING * 2 + 6);
+}
+
 static int stasis_sprite_atlas_allocate(
     const StasisSpriteAtlasPolicyV3* policy, int logical_w, int logical_h,
     int w, int h, int* out_x, int* out_y
@@ -4746,6 +4763,21 @@ static int stasis_sprite_atlas_allocate(
         if (page_h < h + 8) page_h = stasis_sprite_atlas_next_extent(
             h + 8, STASIS_SDL_ATLAS_PAGE_SIZE);
         const int page_index = stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0);
+        if (page_index < 0) return -1;
+        return stasis_sprite_atlas_reserve_on_page(
+            &g_sprite_atlas_pages[page_index], w, h, out_x, out_y) ? page_index : -1;
+    }
+    if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h)) {
+        for (int i = 0; i < g_sprite_atlas_page_count; i++) {
+            StasisSdlAtlasPage* page = &g_sprite_atlas_pages[i];
+            if (!stasis_sprite_atlas_is_cold_page(page)) continue;
+            if (stasis_sprite_atlas_reserve_on_page(page, w, h, out_x, out_y)) return i;
+        }
+        const int page_index = stasis_sprite_atlas_create_page(
+            STASIS_SDL_ATLAS_COLD_PAGE_SIZE,
+            STASIS_SDL_ATLAS_COLD_PAGE_SIZE,
+            0,
+            0);
         if (page_index < 0) return -1;
         return stasis_sprite_atlas_reserve_on_page(
             &g_sprite_atlas_pages[page_index], w, h, out_x, out_y) ? page_index : -1;
@@ -4836,7 +4868,9 @@ static int sprite_publish_pixels_into_entry(
             e->sdl_tex == g_sprite_atlas_pages[page_index].texture &&
             ((e->atlas_policy.eligible && !g_sprite_atlas_pages[page_index].dedicated &&
               g_sprite_atlas_pages[page_index].group_id == e->atlas_policy.group_id) ||
-             (!e->atlas_policy.eligible && g_sprite_atlas_pages[page_index].dedicated));
+             (!e->atlas_policy.eligible &&
+              (g_sprite_atlas_pages[page_index].dedicated ||
+               stasis_sprite_atlas_is_cold_page(&g_sprite_atlas_pages[page_index]))));
         int allocated_new = 0;
         if (!page_compatible || e->alloc_w < w + 2 || e->alloc_h < h + 2) {
             page_index = stasis_sprite_atlas_allocate(
