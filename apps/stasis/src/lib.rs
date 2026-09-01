@@ -5744,8 +5744,10 @@ function render(): void {{ {draws} return; }}
     fn desktop_runtime_uses_physical_drawable_pixels_at_monitor_density() {
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("SDL_WINDOW_HIGH_PIXEL_DENSITY")
-                && STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowSizeInPixels("),
-            "SDL3 runtime should request high-density windows and read physical pixels"
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("SDL_GetRenderOutputSize(g_renderer, &drawable_w, &drawable_h)")
+                && !STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowSizeInPixels("),
+            "SDL3 runtime should request high-density windows and sample the renderer output"
         );
         assert!(
             !STASIS_GRAPHICS_SOURCE.contains("stasis_renderer_lifecycle_surface_changed("),
@@ -6054,8 +6056,8 @@ function render(): void {{ {draws} return; }}
             );
         }
         assert!(
-            STASIS_RUNTIME_CMAKE.contains("configure_stasis_target(stasis_mobile_runtime ON TRUE)"),
-            "mobile target should be static, SDL-only, and exclude the SDL desktop main shim"
+            STASIS_RUNTIME_CMAKE.contains("configure_stasis_target(stasis_mobile_runtime ON)"),
+            "mobile target should be static and exclude the SDL desktop main shim"
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("stasis_storage_load_i32")
@@ -6240,55 +6242,77 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
-    fn sprite_runtime_clears_reused_atlas_padding_before_mipmap_regeneration() {
-        assert!(
-            STASIS_GRAPHICS_SOURCE.contains(
-                "unsigned char* clear_pixels = (unsigned char*)calloc(pixel_count, 4);"
-            ),
-            "runtime sprite upload should zero the reused atlas allocation before writing sprite pixels"
-        );
-        assert!(
-            STASIS_GRAPHICS_SOURCE.contains(
-                "atlas_page_clear_region(page, alloc_x, alloc_y, alloc_w, alloc_h);"
-            ) && STASIS_GRAPHICS_SOURCE.contains(
-                "atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels)"
-            ),
-            "runtime sprite upload should clear padded texels before updating the sprite interior and regenerating mipmaps"
-        );
+    fn sprite_runtime_uploads_edge_extruded_atlas_padding() {
+        let upload_start = STASIS_GRAPHICS_SOURCE
+            .find("static int stasis_sprite_atlas_upload(")
+            .expect("sprite atlas upload helper");
+        let upload_end = STASIS_GRAPHICS_SOURCE[upload_start..]
+            .find("static int sprite_publish_pixels_into_entry(")
+            .expect("sprite atlas upload helper boundary")
+            + upload_start;
+        let upload_source = &STASIS_GRAPHICS_SOURCE[upload_start..upload_end];
+        for required in [
+            "const int padded_w = w + 2;",
+            "const int padded_h = h + 2;",
+            "int sy = py - 1;",
+            "int sx = px - 1;",
+            "SDL_Rect rect = {x - 1, y - 1, padded_w, padded_h};",
+            "g_sprite_atlas_pages[page_index].texture, &rect, padded, padded_w * 4",
+        ] {
+            assert!(
+                upload_source.contains(required),
+                "atlas upload should edge-extrude through the padded upload rectangle: {required}"
+            );
+        }
+        assert!(!upload_source.contains("clear"));
+        assert!(!upload_source.contains("mipmap"));
     }
 
     #[test]
-    fn sprite_runtime_uses_hot_render_policy_with_standalone_fallback() {
+    fn sprite_runtime_uses_grouped_and_dedicated_atlas_pages() {
         for required in [
             "stasis_gfx_set_next_sprite_atlas_policy_v3",
             "stasis_asset_request_sprite_with_policy_v3",
             "task->atlas_policy",
-            "if (!e->atlas_policy.eligible)",
-            "sprite_upload_standalone(e, pixels, w, h)",
-            "g_sprite_batch_texture != texture",
             "stasis_sprite_atlas_realized_group_compatible",
             "stasis_sprite_atlas_page_size_v3",
+            "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
+            "if (page->dedicated || page->group_id != group_id) continue;",
+            "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
+            "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
         ] {
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
                 "runtime hot-render policy should contain {required}"
             );
         }
-        let atlas_failure = STASIS_GRAPHICS_SOURCE
-            .find("if (!atlas_alloc(")
-            .expect("atlas allocation failure branch");
+        let publish_start = STASIS_GRAPHICS_SOURCE
+            .find("static int sprite_publish_pixels_into_entry(")
+            .expect("sprite publication helper");
+        let publish_end = STASIS_GRAPHICS_SOURCE[publish_start..]
+            .find("static int sprite_build_into_entry_sized(")
+            .expect("sprite publication helper boundary")
+            + publish_start;
+        let publish_source = &STASIS_GRAPHICS_SOURCE[publish_start..publish_end];
+        let failure = publish_source
+            .find("if (page_index < 0 ||")
+            .expect("atlas allocation/upload failure branch");
+        let failure_return = publish_source[failure..]
+            .find("return 0;")
+            .expect("atlas failure return")
+            + failure;
+        let publication = publish_source
+            .find("e->page_index = page_index;")
+            .expect("atlas page publication");
         assert!(
-            STASIS_GRAPHICS_SOURCE[atlas_failure..]
-                .contains("sprite_upload_standalone(e, pixels, w, h)"),
-            "atlas overflow must fall back to a standalone texture"
+            failure < failure_return && failure_return < publication,
+            "atlas allocation or upload failure must return without publishing a different page"
         );
-        let upload_failure = STASIS_GRAPHICS_SOURCE
-            .find("if (!atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels))")
-            .expect("atlas upload failure branch");
         assert!(
-            STASIS_GRAPHICS_SOURCE[upload_failure..]
-                .contains("sprite_upload_standalone(e, pixels, w, h)"),
-            "atlas upload failure must fall back to a standalone texture"
+            !publish_source.contains("sprite_upload_standalone")
+                && !publish_source.contains("SDL_CreateRenderer")
+                && !publish_source.contains("SDL_SetRenderTarget"),
+            "atlas failure must not switch resources or renderers"
         );
     }
 
@@ -6337,13 +6361,38 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn sprite_reload_preserves_previous_gpu_resource_until_replacement_succeeds() {
+        let publish_start = STASIS_GRAPHICS_SOURCE
+            .find("static int sprite_publish_pixels_into_entry(")
+            .expect("sprite publication helper");
+        let publish_end = STASIS_GRAPHICS_SOURCE[publish_start..]
+            .find("static int sprite_build_into_entry_sized(")
+            .expect("sprite publication helper boundary")
+            + publish_start;
+        let publish_source = &STASIS_GRAPHICS_SOURCE[publish_start..publish_end];
+        let allocation = publish_source
+            .find("page_index = stasis_sprite_atlas_allocate(")
+            .expect("atlas allocation");
+        let upload = publish_source
+            .find("!stasis_sprite_atlas_upload(page_index, atlas_x, atlas_y, pixels, w, h)")
+            .expect("atlas upload");
+        let failure_return = publish_source[upload..]
+            .find("return 0;")
+            .expect("failed upload return")
+            + upload;
+        let page_publication = publish_source
+            .find("e->page_index = page_index;")
+            .expect("atlas page publication");
+        let texture_publication = publish_source
+            .find("e->sdl_tex = page->texture;")
+            .expect("atlas texture publication");
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("SDL_Texture* previous = e->sdl_tex;")
-                && STASIS_GRAPHICS_SOURCE.contains("if (previous) SDL_DestroyTexture(previous);")
-                && STASIS_GRAPHICS_SOURCE.contains("const int can_reuse_existing = 0;")
-                && STASIS_GRAPHICS_SOURCE.contains("sprite_gpu_upload_failed"),
-            "sprite reload should publish a completed replacement before releasing the previous resource"
+            allocation < upload
+                && upload < failure_return
+                && failure_return < page_publication
+                && page_publication < texture_publication,
+            "sprite reload must allocate and upload successfully before publishing entry fields and the page texture"
         );
+        assert!(!publish_source[..failure_return].contains("e->sdl_tex ="));
     }
 
     #[test]
@@ -6364,19 +6413,33 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
-    fn invalid_sprite_draws_use_a_procedural_fallback_resource() {
+    fn invalid_sprite_draws_use_the_atlas_page_placeholder() {
         for required in [
             "static SpriteEntry g_sprite_fallback",
-            "static const unsigned char pixels[16]",
             "if (!e) e = sprite_fallback_get()",
-            "SDL_CreateTexture(",
-            "sprite_upload_standalone(&next, pixels, 2, 2)",
+            "next.atlas_x = page->placeholder_x;",
+            "next.atlas_y = page->placeholder_y;",
+            "next.u0 = (float)page->placeholder_x / (float)page->width;",
+            "next.v0 = (float)page->placeholder_y / (float)page->height;",
+            "next.u1 = (float)(page->placeholder_x + 2) / (float)page->width;",
+            "next.v1 = (float)(page->placeholder_y + 2) / (float)page->height;",
+            "next.sdl_tex = page->texture;",
         ] {
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
-                "fallback sprite path should contain {required}"
+                "fallback sprite should use the atlas page placeholder: {required}"
             );
         }
+        let fallback_start = STASIS_GRAPHICS_SOURCE
+            .find("static SpriteEntry* sprite_fallback_get(void) {")
+            .expect("fallback sprite helper");
+        let fallback_end = STASIS_GRAPHICS_SOURCE[fallback_start..]
+            .find("STASIS_EXPORT void stasis_gfx_release_sprite")
+            .expect("fallback sprite helper boundary")
+            + fallback_start;
+        let fallback_source = &STASIS_GRAPHICS_SOURCE[fallback_start..fallback_end];
+        assert!(!fallback_source.contains("SDL_CreateTexture("));
+        assert!(!fallback_source.contains("sprite_upload_standalone"));
     }
 
     fn decode_zero_terminated_utf8(bytes: &[u8]) -> String {
