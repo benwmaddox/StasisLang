@@ -18,7 +18,7 @@ import org.json.JSONObject;
 final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final String LOG_TAG = "StasisRenderer";
     static final int RENDER_MAGIC = 0x47584631;
-    static final int RENDER_VERSION = 6;
+    static final int RENDER_VERSION = 7;
     static final int FLAG_CLEAR = 1;
     static final int FLAG_PRESENT = 2;
 
@@ -51,6 +51,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int I_FRAME_TOKEN = 26;
     static final int I_CLIP_COUNT = 27;
     static final int I_DROPPED_CLIPS = 28;
+    static final int I_SPRITE_RUN_COUNT = 29;
+    static final int I_DROPPED_SPRITE_RUNS = 30;
     static final int I_SPRITE_BASE = 32;
     static final int F_CLEAR_BASE = 0;
     static final int F_LINE_BASE = 4;
@@ -60,7 +62,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int LINE_F32_STRIDE = GEOMETRY_F32_STRIDE;
     static final int MAX_SPRITES = 4_096;
     static final int SPRITE_I32_STRIDE = 3;
-    static final int SPRITE_F32_STRIDE = 8;
+    static final int SPRITE_F32_STRIDE = 13;
+    static final int MAX_SPRITE_RUNS = 4_096;
+    static final int SPRITE_RUN_I32_STRIDE = 8;
     static final int MAX_TEXT = 2_048;
     static final int TEXT_I32_STRIDE = 3;
     static final int TEXT_F32_STRIDE = 6;
@@ -78,7 +82,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int F_SPRITE_BASE = F_LINE_BASE + MAX_LINES * LINE_F32_STRIDE;
     static final int F_RECT_REVERSE_BASE = F_SPRITE_BASE - GEOMETRY_F32_STRIDE;
     static final int F_TEXT_BASE = F_SPRITE_BASE + MAX_SPRITES * SPRITE_F32_STRIDE;
-    static final int I_ORDER_BASE = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
+    static final int I_SPRITE_RUN_BASE = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
+    static final int I_ORDER_BASE = I_SPRITE_RUN_BASE + MAX_SPRITE_RUNS * SPRITE_RUN_I32_STRIDE;
     static final int FRAME_I32_CAPACITY = I_ORDER_BASE + MAX_ORDER;
     static final int F_CLIP_BASE = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
     static final int CLIP_STRIDE_F32 = 4;
@@ -87,7 +92,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     // The production host header intentionally stops at density generation;
     // the frame token is read through frameToken() so this ABI stays 22 ints.
     private static final int HOST_HEADER_I32S = I_DENSITY_GENERATION + 1;
-    private static final int CAPTURE_HEADER_I32S = I_CLIP_COUNT + 2;
+    private static final int CAPTURE_HEADER_I32S = I_SPRITE_RUN_COUNT + 2;
     private static final int LINE_CHUNK_SIZE = 256;
     private static final int SPRITE_CHUNK_SIZE = 128;
     private static final int VERTICES_PER_QUAD = 6;
@@ -146,6 +151,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             return GLES20.GL_LINEAR;
         }
 
+        default int logicalWidthFor(int handle) { return 1; }
+
+        default int logicalHeightFor(int handle) { return 1; }
+
         // Packed as texture:u32, width:u16, height:u16. Zero means unavailable.
         default long textTextureFor(int font, ByteBuffer utf8, int offset, int length) {
             return 0L;
@@ -170,6 +179,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         final float[] rectangles;
         final int[] sprites;
         final float[] spriteValues;
+        final int[] spriteRuns;
         final int[] textMetadata;
         final float[] textValues;
         final byte[] textBytes;
@@ -177,7 +187,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         final float[] clips;
 
         LogicalFrameSnapshot(int[] header, float[] lines, float[] rectangles,
-                int[] sprites, float[] spriteValues,
+                int[] sprites, float[] spriteValues, int[] spriteRuns,
                 int[] textMetadata, float[] textValues, byte[] textBytes, int[] order,
                 float[] clips) {
             this.header = header;
@@ -185,6 +195,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             this.rectangles = rectangles;
             this.sprites = sprites;
             this.spriteValues = spriteValues;
+            this.spriteRuns = spriteRuns;
             this.textMetadata = textMetadata;
             this.textValues = textValues;
             this.textBytes = textBytes;
@@ -308,6 +319,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             SPRITE_CHUNK_SIZE * VERTICES_PER_QUAD * TEXTURE_VERTEX_FLOATS * 4).asFloatBuffer();
     private final int[] frameSpriteTextures = new int[MAX_SPRITES];
     private final int[] frameSpriteFilters = new int[MAX_SPRITES];
+    private final int[] frameSpriteWidths = new int[MAX_SPRITES];
+    private final int[] frameSpriteHeights = new int[MAX_SPRITES];
     private final long[] frameTextTextures = new long[MAX_TEXT];
     private int colorProgram;
     private int colorPosition;
@@ -437,7 +450,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (pendingCapture != null) {
             pendingCapture.onCaptured(null, "a newer preview capture replaced this request",
                     new LogicalFrameSnapshot(new int[0], new float[0], new float[0],
-                            new int[0], new float[0], new int[0], new float[0],
+                            new int[0], new float[0], new int[0], new int[0], new float[0],
                             new byte[0], new int[0], new float[0]));
         }
         pendingCapture = callback;
@@ -799,12 +812,16 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int lineCount = clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES);
         int rectCount = clampedRectCount(lineCount, frameI32.get(I_RECT_COUNT));
         int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
+        int spriteRunCount = clampCount(frameI32.get(I_SPRITE_RUN_COUNT), MAX_SPRITE_RUNS);
         int textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
         int orderCount = clampCount(frameI32.get(I_ORDER_COUNT), MAX_ORDER);
         if (orderCount == 0) {
             drawLines(0, lineCount);
             drawRects(0, rectCount);
-            drawSprites(0, spriteCount);
+            for (int run = 0; run < spriteRunCount; run += 1) {
+                int runBase = I_SPRITE_RUN_BASE + run * SPRITE_RUN_I32_STRIDE;
+                drawSprites(frameI32.get(runBase), frameI32.get(runBase + 1));
+            }
             drawText(0, textCount);
             finishPipeline();
             resetClipState();
@@ -829,9 +846,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             }
             int limit = kind == ORDER_LINE ? lineCount
                     : kind == ORDER_RECT ? rectCount
-                    : kind == ORDER_SPRITE ? spriteCount
+                    : kind == ORDER_SPRITE ? spriteRunCount
                     : kind == ORDER_TEXT ? textCount : 0;
             if (entry < 0 || index >= limit) {
+                position += 1;
+                continue;
+            }
+            if (kind == ORDER_SPRITE) {
+                int runBase = I_SPRITE_RUN_BASE + index * SPRITE_RUN_I32_STRIDE;
+                drawSprites(frameI32.get(runBase), frameI32.get(runBase + 1));
                 position += 1;
                 continue;
             }
@@ -843,7 +866,6 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             }
             if (kind == ORDER_LINE) drawLines(index, run);
             else if (kind == ORDER_RECT) drawRects(index, run);
-            else if (kind == ORDER_SPRITE) drawSprites(index, run);
             else drawText(index, run);
             position += run;
         }
@@ -855,11 +877,20 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         updateDisplayMetrics();
         textures.onFrameStart();
         resolveFrameResources(textures, frameI32, frameU8Bytes,
-                frameSpriteTextures, frameSpriteFilters, frameTextTextures);
+                frameSpriteTextures, frameSpriteFilters, frameSpriteWidths,
+                frameSpriteHeights, frameTextTextures);
     }
 
     static void resolveFrameResources(TextureProvider textures, IntBuffer frameI32,
             ByteBuffer frameU8Bytes, int[] spriteTextures, int[] spriteFilters,
+            long[] textTextures) {
+        resolveFrameResources(textures, frameI32, frameU8Bytes, spriteTextures, spriteFilters,
+                new int[MAX_SPRITES], new int[MAX_SPRITES], textTextures);
+    }
+
+    static void resolveFrameResources(TextureProvider textures, IntBuffer frameI32,
+            ByteBuffer frameU8Bytes, int[] spriteTextures, int[] spriteFilters,
+            int[] spriteWidths, int[] spriteHeights,
             long[] textTextures) {
         int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
         for (int index = 0; index < spriteCount; index += 1) {
@@ -868,6 +899,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             int texture = textures.textureFor(handle);
             spriteTextures[index] = texture == 0 ? textures.fallbackTexture() : texture;
             spriteFilters[index] = textures.filterFor(handle);
+            spriteWidths[index] = Math.max(1, textures.logicalWidthFor(handle));
+            spriteHeights[index] = Math.max(1, textures.logicalHeightFor(handle));
         }
         int textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
         int bytesUsed = clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY);
@@ -1105,27 +1138,49 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private void appendSprite(int base) {
         int index = (base - I_SPRITE_BASE) / SPRITE_I32_STRIDE;
         int values = F_SPRITE_BASE + index * SPRITE_F32_STRIDE;
-        float left = frameF32.get(values);
-        float top = frameF32.get(values + 1);
-        float right = left + frameF32.get(values + 2);
-        float bottom = top + frameF32.get(values + 3);
-        float centerX = (left + right) * 0.5f;
-        float centerY = (top + bottom) * 0.5f;
-        double radians = Math.toRadians(frameI32.get(base + 1) % 360);
+        float x = frameF32.get(values);
+        float y = frameF32.get(values + 1);
+        float width = frameF32.get(values + 2);
+        float height = frameF32.get(values + 3);
+        float pivotX = frameF32.get(values + 8);
+        float pivotY = frameF32.get(values + 9);
+        float scaleX = frameF32.get(values + 10);
+        float scaleY = frameF32.get(values + 11);
+        float centerX = x + pivotX;
+        float centerY = y + pivotY;
+        float left = centerX - pivotX * scaleX;
+        float top = centerY - pivotY * scaleY;
+        float right = centerX + (width - pivotX) * scaleX;
+        float bottom = centerY + (height - pivotY) * scaleY;
+        double radians = Math.toRadians(frameF32.get(values + 12));
         float cosine = (float)Math.cos(radians);
         float sine = (float)Math.sin(radians);
-        float alpha = clampUnit(frameI32.get(base + 2) / 255.0f);
-        float u0 = frameF32.get(values + 4);
-        float v0 = frameF32.get(values + 5);
-        float u1 = frameF32.get(values + 6);
-        float v1 = frameF32.get(values + 7);
+        int tint = frameI32.get(base + 1);
+        float red = ((tint >>> 24) & 255) / 255.0f;
+        float green = ((tint >>> 16) & 255) / 255.0f;
+        float blue = ((tint >>> 8) & 255) / 255.0f;
+        float alpha = (tint & 255) / 255.0f;
+        float logicalWidth = frameSpriteWidths[index];
+        float logicalHeight = frameSpriteHeights[index];
+        float sourceX = frameF32.get(values + 4);
+        float sourceY = frameF32.get(values + 5);
+        float sourceWidth = frameF32.get(values + 6);
+        float sourceHeight = frameF32.get(values + 7);
+        if (sourceWidth == 0 && sourceHeight == 0) {
+            sourceWidth = logicalWidth;
+            sourceHeight = logicalHeight;
+        }
+        float u0 = sourceX / logicalWidth;
+        float v0 = sourceY / logicalHeight;
+        float u1 = (sourceX + sourceWidth) / logicalWidth;
+        float v1 = (sourceY + sourceHeight) / logicalHeight;
         if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return;
-        putTextureVertex(spriteVertices, left, top, centerX, centerY, cosine, sine, u0, v0, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, u1, v0, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, u0, v1, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, u1, v0, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, right, bottom, centerX, centerY, cosine, sine, u1, v1, 1, 1, 1, alpha);
-        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, u0, v1, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, left, top, centerX, centerY, cosine, sine, u0, v0, red, green, blue, alpha);
+        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, u1, v0, red, green, blue, alpha);
+        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, u0, v1, red, green, blue, alpha);
+        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, u1, v0, red, green, blue, alpha);
+        putTextureVertex(spriteVertices, right, bottom, centerX, centerY, cosine, sine, u1, v1, red, green, blue, alpha);
+        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, u0, v1, red, green, blue, alpha);
     }
 
     private void drawText(int first, int count) {
@@ -1247,9 +1302,27 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     static boolean isValidFrame(IntBuffer values) {
-        return values != null && values.capacity() >= FRAME_I32_CAPACITY
-                && values.get(I_MAGIC) == RENDER_MAGIC
-                && values.get(I_VERSION) == RENDER_VERSION;
+        if (values == null || values.capacity() < FRAME_I32_CAPACITY
+                || values.get(I_MAGIC) != RENDER_MAGIC
+                || values.get(I_VERSION) != RENDER_VERSION) return false;
+        int spriteCount = values.get(I_SPRITE_COUNT);
+        int runCount = values.get(I_SPRITE_RUN_COUNT);
+        if (spriteCount < 0 || spriteCount > MAX_SPRITES
+                || runCount < 0 || runCount > MAX_SPRITE_RUNS) return false;
+        for (int run = 0; run < runCount; run += 1) {
+            int base = I_SPRITE_RUN_BASE + run * SPRITE_RUN_I32_STRIDE;
+            int first = values.get(base);
+            int count = values.get(base + 1);
+            if (first < 0 || count <= 0 || first + count > spriteCount
+                    || values.get(base + 2) < -1 || values.get(base + 3) != 0
+                    || values.get(base + 4) != 0 || values.get(base + 5) != 0
+                    || values.get(base + 6) != 0 || values.get(base + 7) != 0) return false;
+        }
+        for (int sprite = 0; sprite < spriteCount; sprite += 1) {
+            int base = I_SPRITE_BASE + sprite * SPRITE_I32_STRIDE;
+            if (values.get(base) == 0 || values.get(base + 2) != 0) return false;
+        }
+        return true;
     }
 
     static boolean shouldPresent(IntBuffer values) {
@@ -1313,6 +1386,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int lineCount = clampCount(header[I_LINE_COUNT], MAX_LINES);
         int rectCount = clampedRectCount(lineCount, header[I_RECT_COUNT]);
         int spriteCount = clampCount(header[I_SPRITE_COUNT], MAX_SPRITES);
+        int spriteRunCount = clampCount(header[I_SPRITE_RUN_COUNT], MAX_SPRITE_RUNS);
         int textCount = clampCount(header[I_TEXT_COUNT], MAX_TEXT);
         int textByteCount = clampCount(header[I_TEXT_BYTES_USED], TEXT_U8_CAPACITY);
         float[] lines = new float[activeLineF32Count(lineCount)];
@@ -1334,6 +1408,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         float[] spriteValues = new float[activeSpriteF32Count(spriteCount)];
         for (int index = 0; index < spriteValues.length; index += 1) {
             spriteValues[index] = frameF32.get(F_SPRITE_BASE + index);
+        }
+        int[] spriteRuns = new int[spriteRunCount * SPRITE_RUN_I32_STRIDE];
+        for (int index = 0; index < spriteRuns.length; index += 1) {
+            spriteRuns[index] = frameI32.get(I_SPRITE_RUN_BASE + index);
         }
         int[] textMetadata = new int[activeTextI32Count(textCount)];
         for (int index = 0; index < textMetadata.length; index += 1) {
@@ -1358,7 +1436,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             clips[index] = frameF32.get(F_CLIP_BASE + index);
         }
         return new LogicalFrameSnapshot(
-                header, lines, rectangles, sprites, spriteValues,
+                header, lines, rectangles, sprites, spriteValues, spriteRuns,
                 textMetadata, textValues, textBytes, order, clips);
     }
 

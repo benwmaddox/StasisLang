@@ -48,15 +48,10 @@ test `invalid animation fails safely`(): bool {
     ) == 2147483640 && !animation_finished(2147483647, 2147483647, 0, 2147483647);
 }
 
-test `sprite commands default to full UV and allow a bounded frame patch`(): bool {
+test `sprite commands publish one full-source semantic run`(): bool {
     gfx_cmd_begin();
     gfx_cmd_sprite(3, 2.0, 4.0, 8.0, 6.0, 0, 255);
-    if (gfx_cmd_sprite_count() != 1 || gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] != 1.0) {
-        return false;
-    }
-    gfx_cmd_set_last_sprite_uv(0.5, 0.0, 1.0, 0.5);
-    gfx_cmd_set_last_sprite_uv(-0.5, 0.0, 1.0, 0.5);
-    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 1.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 0.5;
+    return gfx_cmd_sprite_count() == 1 && gfx_cmd_sprite_run_count() == 1 && gfx_cmd_order_count() == 1 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 10] == 1.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 11] == 1.0;
 }
 
 test `sprite sheet draw frame selects a row major cell`(): bool {
@@ -70,7 +65,7 @@ test `sprite sheet draw frame selects a row major cell`(): bool {
     if (gfx_cmd_sprite_count() != 1) {
         return false;
     }
-    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] == 12.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] == 10.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 1.0;
+    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] == 12.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] == 10.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 10.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 12.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 10.0;
 }
 
 test `sprite sheet scaled frame preserves custom geometry and nonfull UV`(): bool {
@@ -84,7 +79,7 @@ test `sprite sheet scaled frame preserves custom geometry and nonfull UV`(): boo
     if (gfx_cmd_sprite_count() != 1) {
         return false;
     }
-    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 0] == 7.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 1] == 11.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] == 37.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] == 29.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.5 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 1.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 1.0;
+    return gfx_cmd_f32[GFX_F_SPRITE_BASE + 0] == 7.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 1] == 11.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] == 37.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] == 29.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 12.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 10.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 12.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 10.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 12] == 90.0;
 }
 
 test `sprite sheet scaled frame rejects invalid geometry and frames`(): bool {

@@ -185,6 +185,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             if (reportRestoreTiming) restoredSprites += 1;
             SpriteTexture replacement = new SpriteTexture(uploaded, hash, manifestStamp,
+                    Math.max(1, resolved.optInt("width")), Math.max(1, resolved.optInt("height")),
                     surfaceGeneration, rendererGeneration);
             textures.put(handle, replacement);
             spriteTexturesByHash.put(hash, replacement);
@@ -201,6 +202,18 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             return fallbackTexture();
         }
+    }
+
+    @Override
+    public int logicalWidthFor(int handle) {
+        SpriteTexture cached = textures.get(handle);
+        return cached == null ? 1 : cached.logicalWidth;
+    }
+
+    @Override
+    public int logicalHeightFor(int handle) {
+        SpriteTexture cached = textures.get(handle);
+        return cached == null ? 1 : cached.logicalHeight;
     }
 
     @Override
@@ -526,15 +539,20 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         final int texture;
         final String contentHash;
         long checkedManifestStamp;
+        final int logicalWidth;
+        final int logicalHeight;
 
         final int surfaceGeneration;
         final int rendererGeneration;
 
         SpriteTexture(int texture, String contentHash, long checkedManifestStamp,
+                int logicalWidth, int logicalHeight,
                 int surfaceGeneration, int rendererGeneration) {
             this.texture = texture;
             this.contentHash = contentHash;
             this.checkedManifestStamp = checkedManifestStamp;
+            this.logicalWidth = logicalWidth;
+            this.logicalHeight = logicalHeight;
             this.surfaceGeneration = surfaceGeneration;
             this.rendererGeneration = rendererGeneration;
         }

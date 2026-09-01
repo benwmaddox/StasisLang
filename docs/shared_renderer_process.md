@@ -2,7 +2,7 @@
 
 Stasis shipping packages use one renderer process on desktop, Android, and iOS:
 
-1. JIT or AOT game code writes the stable `gfx_cmd` family buffers (current schema v6).
+1. JIT or AOT game code writes the stable `gfx_cmd` family buffers (current schema v7).
 2. `stasis_gfx_submit_u8` validates and interprets that versioned buffer.
 3. `stasis_graphics.c` owns frame order, resources, blending, filtering,
    clipping state, fallback sprites, and renderer shutdown.
@@ -17,7 +17,7 @@ magic or versions are rejected without drawing.
 
 ## Command contract
 
-Schema v6 keeps clear and present as frame boundaries and records each line,
+Schema v7 keeps clear and present as frame boundaries and records each line,
 filled rectangle, sprite, direct-text, or cached-text submission in one bounded cross-category
 order stream. It also records bounded logical top-origin clip descriptors and
 ordered clip-push/clip-pop entries in that same stream. Payloads remain in typed category arrays;
@@ -27,25 +27,26 @@ boundary. Counts are clamped to the contract capacities;
 invalid text ranges contribute metadata but never read outside the byte buffer.
 JIT and AOT traces must match exactly for the representative conformance frame.
 
-Current-schema frames with an empty order stream use the deterministic
-line -> filled rectangle -> sprite -> text fallback. This supports games that prebuild
-persistent category buffers with `gfx_cmd_set_*_at` and count setters. New calls
-to `gfx_cmd_line`, `gfx_cmd_rect`, `gfx_cmd_sprite`, `gfx_cmd_text`, their cached/bulk variants,
-append order entries automatically; games do not need a separate layer API.
-Invalid or out-of-range order references are skipped deterministically.
+Current-schema frames use one declarative order stream. Sprite entries reference
+bounded semantic run headers; each run owns a contiguous span of canonical
+instances. Calls to `gfx_cmd_line`, `gfx_cmd_rect`, `gfx_cmd_sprite`, and
+`gfx_cmd_text` append order entries automatically, while the direct sprite-run
+writer publishes one entry at finalization. Games do not need a layer API or
+batching-driven reordering. Hosts reject invalid or out-of-range references
+transactionally.
 
 Coordinates are logical top-left pixels. Clip rectangles use the same logical
 top-origin coordinates; native GL/GLES converts them to drawable bottom-origin
 scissors while Canvas and SDL apply the equivalent top-origin clip. Colors and alpha are straight alpha;
 SDL uses source-alpha over destination. Sprite alpha is clamped to `0..255`,
 linear filtering is used for normal sprite textures, rotation is clockwise
-around the destination center, and an invalid sprite handle resolves to the
+around the explicit pivot (center by default), and an invalid sprite handle resolves to the
 procedural magenta checker. Text and SVG rasterization,
 cache keys, and resource replacement live in `stasis_graphics.c`, so platform
 shells cannot redefine them.
 
 Logical, native, drawable, safe-viewport, input-transform, and resource-density
-semantics are defined in `display_metrics.md`. Reserved gfx_cmd v6 header slots
+semantics are defined in `display_metrics.md`. Reserved gfx_cmd v7 header slots
 carry host display metadata to embedded previews but do not participate in the
 backend-independent command trace.
 

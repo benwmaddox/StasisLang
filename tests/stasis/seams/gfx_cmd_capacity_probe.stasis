@@ -68,7 +68,7 @@ function fill_clips(): void {
 }
 
 function trace_commands(): i32 {
-    return native_render_trace(gfx_cmd_i32, 35120, gfx_cmd_f32, 126084, gfx_cmd_u8, 65536);
+    return native_render_trace(gfx_cmd_i32, 67888, gfx_cmd_f32, 146564, gfx_cmd_u8, 65536);
 }
 
 function trace_geometry_capacity(): i32 {

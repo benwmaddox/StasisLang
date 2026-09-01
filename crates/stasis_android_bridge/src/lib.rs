@@ -6720,8 +6720,8 @@ function on_code_swap(): void {}\n",
         let root = temp_project("it031_render_schema");
         fs::write(
             root.join("src/main.stasis"),
-            "global gfx_cmd_i32: i32[35120];\n\
-global gfx_cmd_f32: f32[126084];\n\
+            "global gfx_cmd_i32: i32[67888];\n\
+global gfx_cmd_f32: f32[146564];\n\
 global gfx_cmd_u8: u8[65536];\n\
 function main(): void {}\n\
 function tick(): i32 { return 0; }\n\
@@ -6786,20 +6786,21 @@ function on_code_swap(): void {}\n",
 global host_f32: f32[64];
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
-global gfx_cmd_i32: i32[35120];
-global gfx_cmd_f32: f32[126084];
+global gfx_cmd_i32: i32[67888];
+global gfx_cmd_f32: f32[146564];
 global gfx_cmd_u8: u8[65536];
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
 function render(): void {
   gfx_cmd_i32[0] = 1196967473;
-  gfx_cmd_i32[1] = 6;
+  gfx_cmd_i32[1] = 7;
   gfx_cmd_i32[2] = 3;
   gfx_cmd_i32[3] = 1;
   gfx_cmd_i32[4] = 1;
   gfx_cmd_i32[7] = 1;
   gfx_cmd_i32[9] = 2;
   gfx_cmd_i32[22] = 3;
+  gfx_cmd_i32[29] = 1;
   gfx_cmd_f32[0] = 0.1;
   gfx_cmd_f32[4] = host_f32[0];
   gfx_cmd_f32[5] = host_f32[1];
@@ -6807,23 +6808,31 @@ function render(): void {
   gfx_cmd_f32[7] = 40.0;
   gfx_cmd_f32[8] = 1.0;
   gfx_cmd_i32[32] = 77;
-  gfx_cmd_i32[33] = 11;
-  gfx_cmd_i32[34] = 255;
+  gfx_cmd_i32[33] = -1;
+  gfx_cmd_i32[34] = 0;
   gfx_cmd_i32[12320] = 5;
   gfx_cmd_i32[12321] = 0;
   gfx_cmd_i32[12322] = 1;
-  gfx_cmd_i32[18464] = 32768;
-  gfx_cmd_i32[18465] = 16384;
-  gfx_cmd_i32[18466] = 49152;
+  gfx_cmd_i32[18464] = 0;
+  gfx_cmd_i32[18465] = 1;
+  gfx_cmd_i32[18466] = -1;
+  gfx_cmd_i32[51232] = 32768;
+  gfx_cmd_i32[51233] = 16384;
+  gfx_cmd_i32[51234] = 49152;
   gfx_cmd_f32[80004] = 10.25;
   gfx_cmd_f32[80005] = 20.5;
   gfx_cmd_f32[80006] = 30.75;
   gfx_cmd_f32[80007] = 40.125;
   gfx_cmd_f32[80008] = 0.0;
   gfx_cmd_f32[80009] = 0.0;
-  gfx_cmd_f32[80010] = 1.0;
-  gfx_cmd_f32[80011] = 1.0;
-  gfx_cmd_f32[112772] = 12.0;
+  gfx_cmd_f32[80010] = 0.0;
+  gfx_cmd_f32[80011] = 0.0;
+  gfx_cmd_f32[80012] = 15.375;
+  gfx_cmd_f32[80013] = 20.0625;
+  gfx_cmd_f32[80014] = 1.0;
+  gfx_cmd_f32[80015] = 1.0;
+  gfx_cmd_f32[80016] = 0.0;
+  gfx_cmd_f32[133252] = 12.0;
   gfx_cmd_u8[0] = 65;
   gfx_cmd_u8[1] = 0;
 }
@@ -6852,20 +6861,22 @@ function render(): void {
         );
         assert_eq!(status, 0);
         // Current source frames copy into the canonical destination layout.
-        assert_eq!(&frame_i32[..5], &[1196967473, 6, 3, 1, 1]);
+        assert_eq!(&frame_i32[..5], &[1196967473, 7, 3, 1, 1]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
         assert_eq!(&frame_i32[20..22], &[1, 1]);
         assert_eq!(frame_i32[22], 3);
         assert_eq!(frame_i32[32], 77);
-        assert_eq!(frame_i32[33], 11);
+        assert_eq!(frame_i32[33], -1);
         assert_eq!(&frame_i32[12320..12323], &[5, 0, 1]);
-        assert_eq!(&frame_i32[18464..18467], &[32768, 16384, 49152]);
+        assert_eq!(&frame_i32[18464..18467], &[0, 1, -1]);
+        assert_eq!(&frame_i32[51232..51235], &[32768, 16384, 49152]);
         assert_eq!(frame_f32[4], 180.0);
         assert_eq!(frame_f32[5], 360.0);
         assert_eq!(&frame_f32[80004..80008], &[10.25, 20.5, 30.75, 40.125]);
-        assert_eq!(&frame_f32[80008..80012], &[0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(frame_f32[112772], 12.0);
+        assert_eq!(&frame_f32[80008..80012], &[0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(&frame_f32[80014..80017], &[1.0, 1.0, 0.0]);
+        assert_eq!(frame_f32[133252], 12.0);
         assert_eq!(&frame_u8[..2], &[65, 0]);
         fs::remove_dir_all(&root).ok();
     }
@@ -6880,8 +6891,8 @@ function render(): void {
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 global host_i32: i32[768];
 global host_f32: f32[64];
-global gfx_cmd_i32: i32[35120];
-global gfx_cmd_f32: f32[126084];
+global gfx_cmd_i32: i32[67888];
+global gfx_cmd_f32: f32[146564];
 global gfx_cmd_u8: u8[65536];
 function main(): void {}
 function tick(): void {}
@@ -6947,8 +6958,8 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
-global gfx_cmd_i32: i32[35120];\n\
-global gfx_cmd_f32: f32[126084];\n\
+global gfx_cmd_i32: i32[67888];\n\
+global gfx_cmd_f32: f32[146564];\n\
 global gfx_cmd_u8: u8[65536];\n\
 function main(): void {}\n\
 function tick(): void { gfx_load_sprite(\"assets/tick_missing.svg\", 32, 32); }\n\
@@ -7014,8 +7025,8 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
-global gfx_cmd_i32: i32[35120];\n\
-global gfx_cmd_f32: f32[126084];\n\
+global gfx_cmd_i32: i32[67888];\n\
+global gfx_cmd_f32: f32[146564];\n\
 global gfx_cmd_u8: u8[65536];\n\
 global GameState { tick_count: i32; }\n\
 function main(): void { GameState.tick_count = 7; }\n\

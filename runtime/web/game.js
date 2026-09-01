@@ -288,7 +288,7 @@
   // Keep the production gfx_cmd decoder values named and mechanically checked
   // against runtime/stasis_render_contract.h by the ABI gate.
   const GFX_CMD_MAGIC = 0x47584631;
-  const GFX_CMD_VERSION = 6;
+  const GFX_CMD_VERSION = 7;
   const GFX_FLAG_CLEAR = 1;
   const GFX_FLAG_PRESENT = 2;
   const GFX_I_MAGIC = 0;
@@ -301,22 +301,26 @@
   const GFX_I_ORDER_COUNT = 22;
   const GFX_I_RECT_COUNT = 24;
   const GFX_I_CLIP_COUNT = 27;
+  const GFX_I_SPRITE_RUN_COUNT = 29;
   const GFX_I_SPRITE_BASE = 32;
   const GFX_I_TEXT_BASE = 12320;
-  const GFX_I_ORDER_BASE = 18464;
+  const GFX_I_SPRITE_RUN_BASE = 18464;
+  const GFX_I_ORDER_BASE = 51232;
   const GFX_F_CLEAR_BASE = 0;
   const GFX_F_LINE_BASE = 4;
   const GFX_F_SPRITE_BASE = 80004;
   const GFX_F_RECT_REVERSE_BASE = 79996;
-  const GFX_F_TEXT_BASE = 112772;
-  const GFX_F_CLIP_BASE = 125060;
+  const GFX_F_TEXT_BASE = 133252;
+  const GFX_F_CLIP_BASE = 145540;
   const GFX_MAX_GEOMETRY = 10000;
   const GFX_GEOMETRY_STRIDE_F32 = 8;
   const GFX_MAX_LINES = GFX_MAX_GEOMETRY;
   const GFX_LINE_STRIDE_F32 = GFX_GEOMETRY_STRIDE_F32;
   const GFX_MAX_SPRITES = 4096;
   const GFX_SPRITE_STRIDE_I32 = 3;
-  const GFX_SPRITE_STRIDE_F32 = 8;
+  const GFX_SPRITE_STRIDE_F32 = 13;
+  const GFX_MAX_SPRITE_RUNS = 4096;
+  const GFX_SPRITE_RUN_STRIDE_I32 = 8;
   const GFX_MAX_TEXT = 2048;
   const GFX_TEXT_STRIDE_I32 = 3;
   const GFX_TEXT_STRIDE_F32 = 6;
@@ -335,6 +339,8 @@
   const rectScratch = new Float32Array(RECT_CAP * 8);
   const SPRITE_CAP = GFX_MAX_SPRITES;
   const spriteScratch = new Float32Array(SPRITE_CAP * 16);
+  let spriteTintCanvas;
+  let spriteTintContext;
   const ATLAS_PAGE_SIZE = 512;
   const ATLAS_PAGE_MAX = 2048;
   const ATLAS_MAX_PAGES = 8;
@@ -2000,10 +2006,10 @@
         out vec2 textureUv;
         out vec4 vertexColor;
         void main() {
-          vec2 centered = (p - vec2(0.5)) * rect.zw;
-          vec2 rotated = vec2(centered.x * rotation.y - centered.y * rotation.x,
-            centered.x * rotation.x + centered.y * rotation.y);
-          vec2 q = rect.xy + rect.zw * 0.5 + rotated;
+          vec2 local = p * rect.zw - rotation.zw;
+          vec2 rotated = vec2(local.x * rotation.y - local.y * rotation.x,
+            local.x * rotation.x + local.y * rotation.y);
+          vec2 q = rect.xy + rotation.zw + rotated;
           gl_Position = vec4(q.x / size.x * 2.0 - 1.0,
             1.0 - q.y / size.y * 2.0, 0.0, 1.0);
           textureUv = mix(uv.xy, uv.zw, p);
@@ -2100,11 +2106,19 @@
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0,
           gl.RGBA, gl.UNSIGNED_BYTE, null);
+        const solidPixels = new Uint8Array([
+          255, 255, 255, 255, 255, 255, 255, 255,
+          255, 255, 255, 255, 255, 255, 255, 255
+        ]);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 2, 2, gl.RGBA, gl.UNSIGNED_BYTE, solidPixels);
         failIfBad();
         const page = {
-          texture, size, cursorX: 0, cursorY: 0, rowHeight: 0,
+          texture, size, cursorX: 2, cursorY: 0, rowHeight: 2,
+          solidUv: 0.5 / size,
           entries: new Set(), freeRects: []
         };
+        atlasUploadCount += 1;
+        atlasUploadBytes += solidPixels.byteLength;
         atlasPages.push(page);
         return page;
       };
@@ -2362,6 +2376,11 @@
         flush: () => {},
         drawRect: (values, count) => draw(values, count, 8, null),
         atlasFor,
+        solidFor: preferredPage => {
+          const page = (!preferredPage?.deleted && preferredPage)
+            || atlasPages.find(candidate => !candidate.deleted) || createAtlasPage(ATLAS_PAGE_SIZE);
+          return page ? { page, uv: page.solidUv } : null;
+        },
         drawSprites: (values, count, page) => draw(values, count, 16, page.texture),
         releaseResource: resource => {
           const variants = atlasByResource.get(resource);
@@ -2418,6 +2437,30 @@
     if (i32[GFX_I_MAGIC] !== GFX_CMD_MAGIC) return;
     const version = i32[GFX_I_VERSION];
     if (version !== GFX_CMD_VERSION) return;
+    const publishedSprites = i32[GFX_I_SPRITE_COUNT];
+    const publishedRuns = i32[GFX_I_SPRITE_RUN_COUNT];
+    if (publishedSprites < 0 || publishedSprites > GFX_MAX_SPRITES
+        || publishedRuns < 0 || publishedRuns > GFX_MAX_SPRITE_RUNS) return;
+    for (let run = 0; run < publishedRuns; run += 1) {
+      const base = GFX_I_SPRITE_RUN_BASE + run * GFX_SPRITE_RUN_STRIDE_I32;
+      const first = i32[base];
+      const count = i32[base + 1];
+      if (first < 0 || count <= 0 || first + count > publishedSprites
+          || i32[base + 2] < -1 || i32[base + 3] !== 0 || i32[base + 4] !== 0
+          || i32[base + 5] !== 0 || i32[base + 6] !== 0 || i32[base + 7] !== 0) return;
+    }
+    for (let sprite = 0; sprite < publishedSprites; sprite += 1) {
+      const baseI = GFX_I_SPRITE_BASE + sprite * GFX_SPRITE_STRIDE_I32;
+      const baseF = GFX_F_SPRITE_BASE + sprite * GFX_SPRITE_STRIDE_F32;
+      if (i32[baseI] === 0 || i32[baseI + 2] !== 0) return;
+      for (let field = 0; field < GFX_SPRITE_STRIDE_F32; field += 1) {
+        if (!Number.isFinite(f32[baseF + field])) return;
+      }
+      if (f32[baseF + 2] <= 0 || f32[baseF + 3] <= 0 || f32[baseF + 4] < 0
+          || f32[baseF + 5] < 0 || f32[baseF + 6] < 0 || f32[baseF + 7] < 0
+          || ((f32[baseF + 6] === 0) !== (f32[baseF + 7] === 0))
+          || f32[baseF + 10] === 0 || f32[baseF + 11] === 0) return;
+    }
     const spriteStride = GFX_SPRITE_STRIDE_F32;
     const textBase = GFX_F_TEXT_BASE;
     const flushGpuBatcher = () => {
@@ -2509,42 +2552,76 @@
       const y = f32[baseF + 1];
       const width = f32[baseF + 2];
       const height = f32[baseF + 3];
-      const u0 = f32[baseF + 4];
-      const v0 = f32[baseF + 5];
-      const u1 = f32[baseF + 6];
-      const v1 = f32[baseF + 7];
-      if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return null;
-      const variant = spriteVariantFor(resource, u0 !== 0 || v0 !== 0 || u1 !== 1 || v1 !== 1);
-      return { handle: i32[baseI], resource, variant, x, y, width, height, u0, v0, u1, v1,
-        alpha: Math.max(0, Math.min(1, i32[baseI + 2] / 255)),
-        radians: i32[baseI + 1] * Math.PI / 180 };
+      const cropRequested = f32[baseF + 6] !== 0 || f32[baseF + 7] !== 0;
+      const variant = spriteVariantFor(resource, cropRequested);
+      const logicalWidth = resource.width;
+      const logicalHeight = resource.height;
+      const logicalX = cropRequested ? f32[baseF + 4] : 0;
+      const logicalY = cropRequested ? f32[baseF + 5] : 0;
+      const logicalCropWidth = cropRequested ? f32[baseF + 6] : logicalWidth;
+      const logicalCropHeight = cropRequested ? f32[baseF + 7] : logicalHeight;
+      if (logicalX < 0 || logicalY < 0 || logicalCropWidth <= 0 || logicalCropHeight <= 0
+          || logicalX + logicalCropWidth > logicalWidth
+          || logicalY + logicalCropHeight > logicalHeight) return null;
+      const u0 = logicalX / logicalWidth;
+      const v0 = logicalY / logicalHeight;
+      const u1 = (logicalX + logicalCropWidth) / logicalWidth;
+      const v1 = (logicalY + logicalCropHeight) / logicalHeight;
+      const sourceX = u0 * variant.width;
+      const sourceY = v0 * variant.height;
+      const sourceWidth = (u1 - u0) * variant.width;
+      const sourceHeight = (v1 - v0) * variant.height;
+      const tint = i32[baseI + 1] >>> 0;
+      return { handle: i32[baseI], resource, variant, x, y, width, height,
+        sourceX, sourceY, sourceWidth, sourceHeight, u0, v0, u1, v1,
+        pivotX: f32[baseF + 8], pivotY: f32[baseF + 9],
+        scaleX: f32[baseF + 10], scaleY: f32[baseF + 11],
+        red: ((tint >>> 24) & 255) / 255, green: ((tint >>> 16) & 255) / 255,
+        blue: ((tint >>> 8) & 255) / 255, alpha: (tint & 255) / 255,
+        radians: f32[baseF + 12] * Math.PI / 180 };
     };
     const drawSprite = index => {
       performanceWorkload.sprites += 1;
       performanceWorkload.drawCalls += 1;
       const info = spriteInfo(index);
       if (!info) return;
-      const { x, y, width, height, u0, v0, u1, v1, alpha, radians, variant } = info;
+      const { x, y, width, height, sourceX, sourceY, sourceWidth, sourceHeight,
+        pivotX, pivotY, scaleX, scaleY, red, green, blue, alpha, radians, variant } = info;
       const image = variant.drawable;
-      const sourceX = u0 * variant.width;
-      const sourceY = v0 * variant.height;
-      const sourceWidth = (u1 - u0) * variant.width;
-      const sourceHeight = (v1 - v0) * variant.height;
       context.save();
       context.globalAlpha = alpha;
-      context.translate(x + width / 2, y + height / 2);
+      context.translate(x + pivotX, y + pivotY);
       context.rotate(radians);
-      if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1) {
-        context.drawImage(image, -width / 2, -height / 2, width, height);
+      context.scale(scaleX, scaleY);
+      if (red === 1 && green === 1 && blue === 1) {
+        context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight,
+          -pivotX, -pivotY, width, height);
       } else {
-        context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, -width / 2, -height / 2, width, height);
+        spriteTintCanvas ||= document.createElement?.("canvas");
+        spriteTintContext ||= spriteTintCanvas?.getContext?.("2d");
+        if (!spriteTintCanvas || !spriteTintContext) {
+          context.restore();
+          return;
+        }
+        spriteTintCanvas.width = Math.max(1, Math.ceil(width));
+        spriteTintCanvas.height = Math.max(1, Math.ceil(height));
+        spriteTintContext.clearRect(0, 0, spriteTintCanvas.width, spriteTintCanvas.height);
+        spriteTintContext.globalCompositeOperation = "source-over";
+        spriteTintContext.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight,
+          0, 0, width, height);
+        spriteTintContext.globalCompositeOperation = "multiply";
+        spriteTintContext.fillStyle = `rgb(${Math.round(red * 255)} ${Math.round(green * 255)} ${Math.round(blue * 255)})`;
+        spriteTintContext.fillRect(0, 0, width, height);
+        spriteTintContext.globalCompositeOperation = "destination-in";
+        spriteTintContext.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight,
+          0, 0, width, height);
+        spriteTintContext.globalCompositeOperation = "source-over";
+        context.drawImage(spriteTintCanvas, -pivotX, -pivotY, width, height);
       }
       context.restore();
     };
-    const drawSpriteRun = (start, count, ordered) => {
-      const indexAt = offset => ordered
-        ? i32[GFX_I_ORDER_BASE + start + offset] % GFX_ORDER_KIND_SCALE
-        : start + offset;
+    const drawSpriteRun = (start, count) => {
+      const indexAt = offset => start + offset;
       let offset = 0;
       while (offset < count) {
         const firstIndex = indexAt(offset);
@@ -2556,9 +2633,7 @@
         }
         let runCount = 1;
         while (offset + runCount < count) {
-          const next = i32[GFX_I_ORDER_BASE + start + offset + runCount];
-          if (ordered && Math.floor(next / GFX_ORDER_KIND_SCALE) !== GFX_ORDER_SPRITE) break;
-          if (!ordered && !spriteInfo(indexAt(offset + runCount))) break;
+          if (!spriteInfo(indexAt(offset + runCount))) break;
           runCount += 1;
         }
         if (runCount < RECT_BATCH_MIN) {
@@ -2589,22 +2664,22 @@
           if (!atlas || (page && atlas.page !== page)) break;
           page ||= atlas.page;
           const target = item * 16;
-          spriteScratch[target] = value.x;
-          spriteScratch[target + 1] = value.y;
-          spriteScratch[target + 2] = value.width;
-          spriteScratch[target + 3] = value.height;
+          spriteScratch[target] = value.x + value.pivotX - value.pivotX * value.scaleX;
+          spriteScratch[target + 1] = value.y + value.pivotY - value.pivotY * value.scaleY;
+          spriteScratch[target + 2] = value.width * value.scaleX;
+          spriteScratch[target + 3] = value.height * value.scaleY;
           spriteScratch[target + 4] = (atlas.x + value.u0 * atlas.width) / atlas.page.size;
           spriteScratch[target + 5] = (atlas.y + value.v0 * atlas.height) / atlas.page.size;
           spriteScratch[target + 6] = (atlas.x + value.u1 * atlas.width) / atlas.page.size;
           spriteScratch[target + 7] = (atlas.y + value.v1 * atlas.height) / atlas.page.size;
-          spriteScratch[target + 8] = 1;
-          spriteScratch[target + 9] = 1;
-          spriteScratch[target + 10] = 1;
+          spriteScratch[target + 8] = value.red;
+          spriteScratch[target + 9] = value.green;
+          spriteScratch[target + 10] = value.blue;
           spriteScratch[target + 11] = value.alpha;
           spriteScratch[target + 12] = Math.sin(value.radians);
           spriteScratch[target + 13] = Math.cos(value.radians);
-          spriteScratch[target + 14] = 0;
-          spriteScratch[target + 15] = 0;
+          spriteScratch[target + 14] = value.pivotX * value.scaleX;
+          spriteScratch[target + 15] = value.pivotY * value.scaleY;
           batchCount += 1;
         }
         if (gpuBatcher === null) {
@@ -2641,6 +2716,147 @@
         offset += batchCount;
       }
     };
+    // Decode adjacent semantic rectangles and sprite runs into one private
+    // ordered 64-byte quad stream. Rectangles sample a host-owned white atlas
+    // texel; no synthetic handle or physical page enters guest-visible data.
+    const drawMixedOrderRun = (firstOrder, orderLength) => {
+      let itemCount = 0;
+      for (let offset = 0; offset < orderLength; offset += 1) {
+        const entry = i32[GFX_I_ORDER_BASE + firstOrder + offset];
+        const kind = Math.floor(entry / GFX_ORDER_KIND_SCALE);
+        const index = entry % GFX_ORDER_KIND_SCALE;
+        if (kind === GFX_ORDER_RECT) itemCount += 1;
+        else {
+          const runBase = GFX_I_SPRITE_RUN_BASE + index * GFX_SPRITE_RUN_STRIDE_I32;
+          itemCount += i32[runBase + 1];
+        }
+      }
+      if (itemCount < 2) return false;
+      const batcher = getGpuBatcher();
+      if (!batcher) return false;
+      let batchCount = 0;
+      let batchRects = 0;
+      let batchSprites = 0;
+      let page = null;
+      let executionDomain = null;
+      const flush = () => {
+        if (batchCount === 0) return;
+        batcher.drawSprites(spriteScratch, batchCount, page);
+        performanceWorkload.instances += batchCount;
+        performanceWorkload.rectangles += batchRects;
+        performanceWorkload.sprites += batchSprites;
+        performanceWorkload.batches += 1;
+        performanceWorkload.drawCalls += 1;
+        performanceWorkload.uploadedBytes += batchCount * 16 * Float32Array.BYTES_PER_ELEMENT;
+        performanceBackend = "Canvas2D + WebGL2";
+        batchCount = 0;
+        batchRects = 0;
+        batchSprites = 0;
+        page = null;
+        executionDomain = null;
+      };
+      const emit = (kind, index, domain, preferredPage = null) => {
+        if (executionDomain !== null && executionDomain !== domain) flush();
+        executionDomain = domain;
+        let atlas;
+        let value;
+        if (kind === GFX_ORDER_RECT) {
+          atlas = batcher.solidFor(page || preferredPage);
+        } else {
+          value = spriteInfo(index);
+          if (!value) {
+            flush();
+            drawSprite(index);
+            return;
+          }
+          atlas = batcher.atlasFor(value.resource, value.variant);
+        }
+        if (!atlas) {
+          flush();
+          if (kind === GFX_ORDER_RECT) {
+            performanceWorkload.rectangles += 1;
+            performanceWorkload.drawCalls += 1;
+            drawRect(index);
+          } else drawSprite(index);
+          return;
+        }
+        if (page && atlas.page !== page) flush();
+        if (batchCount >= SPRITE_CAP) flush();
+        executionDomain = domain;
+        page = atlas.page;
+        const target = batchCount * 16;
+        if (kind === GFX_ORDER_RECT) {
+          const source = GFX_F_RECT_REVERSE_BASE - index * GFX_GEOMETRY_STRIDE_F32;
+          spriteScratch[target] = f32[source];
+          spriteScratch[target + 1] = f32[source + 1];
+          spriteScratch[target + 2] = f32[source + 2];
+          spriteScratch[target + 3] = f32[source + 3];
+          for (let uv = 4; uv < 8; uv += 1) spriteScratch[target + uv] = atlas.uv;
+          spriteScratch[target + 8] = f32[source + 4];
+          spriteScratch[target + 9] = f32[source + 5];
+          spriteScratch[target + 10] = f32[source + 6];
+          spriteScratch[target + 11] = f32[source + 7];
+          spriteScratch[target + 12] = 0;
+          spriteScratch[target + 13] = 1;
+          spriteScratch[target + 14] = f32[source + 2] * 0.5;
+          spriteScratch[target + 15] = f32[source + 3] * 0.5;
+          batchRects += 1;
+        } else {
+          spriteScratch[target] = value.x + value.pivotX - value.pivotX * value.scaleX;
+          spriteScratch[target + 1] = value.y + value.pivotY - value.pivotY * value.scaleY;
+          spriteScratch[target + 2] = value.width * value.scaleX;
+          spriteScratch[target + 3] = value.height * value.scaleY;
+          spriteScratch[target + 4] = (atlas.x + value.u0 * atlas.width) / atlas.page.size;
+          spriteScratch[target + 5] = (atlas.y + value.v0 * atlas.height) / atlas.page.size;
+          spriteScratch[target + 6] = (atlas.x + value.u1 * atlas.width) / atlas.page.size;
+          spriteScratch[target + 7] = (atlas.y + value.v1 * atlas.height) / atlas.page.size;
+          spriteScratch[target + 8] = value.red;
+          spriteScratch[target + 9] = value.green;
+          spriteScratch[target + 10] = value.blue;
+          spriteScratch[target + 11] = value.alpha;
+          spriteScratch[target + 12] = Math.sin(value.radians);
+          spriteScratch[target + 13] = Math.cos(value.radians);
+          spriteScratch[target + 14] = value.pivotX * value.scaleX;
+          spriteScratch[target + 15] = value.pivotY * value.scaleY;
+          batchSprites += 1;
+        }
+        batchCount += 1;
+      };
+      try {
+        for (let offset = 0; offset < orderLength; offset += 1) {
+          const entry = i32[GFX_I_ORDER_BASE + firstOrder + offset];
+          const kind = Math.floor(entry / GFX_ORDER_KIND_SCALE);
+          const index = entry % GFX_ORDER_KIND_SCALE;
+          if (kind === GFX_ORDER_RECT) {
+            let preferredPage = null;
+            if (!page) {
+              for (let lookahead = offset + 1; lookahead < orderLength; lookahead += 1) {
+                const future = i32[GFX_I_ORDER_BASE + firstOrder + lookahead];
+                if (Math.floor(future / GFX_ORDER_KIND_SCALE) !== GFX_ORDER_SPRITE) continue;
+                const futureRun = GFX_I_SPRITE_RUN_BASE
+                  + (future % GFX_ORDER_KIND_SCALE) * GFX_SPRITE_RUN_STRIDE_I32;
+                const futureValue = spriteInfo(i32[futureRun]);
+                if (futureValue) preferredPage = batcher.atlasFor(futureValue.resource, futureValue.variant)?.page;
+                break;
+              }
+            }
+            emit(kind, index, "-1|0|0|0|0|0", preferredPage);
+          } else {
+            const runBase = GFX_I_SPRITE_RUN_BASE + index * GFX_SPRITE_RUN_STRIDE_I32;
+            const first = i32[runBase];
+            const count = i32[runBase + 1];
+            const domain = `${i32[runBase + 2]}|${i32[runBase + 3]}|${i32[runBase + 4]}|${i32[runBase + 5]}|${i32[runBase + 6]}|${i32[runBase + 7]}`;
+            for (let item = 0; item < count; item += 1) emit(kind, first + item, domain);
+          }
+        }
+        flush();
+        return true;
+      } catch (error) {
+        document.body.dataset.gpuError = String(error);
+        gpuBatcher = null;
+        return false;
+      }
+    };
     const drawText = index => {
       performanceWorkload.text += 1;
       performanceWorkload.drawCalls += 1;
@@ -2667,6 +2883,7 @@
     };
     const lineCount = Math.max(0, Math.min(i32[GFX_I_LINE_COUNT], GFX_MAX_LINES));
     const spriteCount = Math.max(0, Math.min(i32[GFX_I_SPRITE_COUNT], GFX_MAX_SPRITES));
+    const spriteRunCount = Math.max(0, Math.min(i32[GFX_I_SPRITE_RUN_COUNT], GFX_MAX_SPRITE_RUNS));
     const textCount = Math.max(0, Math.min(i32[GFX_I_TEXT_COUNT], GFX_MAX_TEXT));
     const rectCount = Math.max(0, Math.min(i32[GFX_I_RECT_COUNT], GFX_MAX_GEOMETRY - lineCount));
     const orderCount = Math.max(0, Math.min(i32[GFX_I_ORDER_COUNT], GFX_MAX_ORDER));
@@ -2694,23 +2911,25 @@
         const encoded = i32[GFX_I_ORDER_BASE + order];
         const kind = Math.floor(encoded / GFX_ORDER_KIND_SCALE);
         const index = encoded % GFX_ORDER_KIND_SCALE;
+        if (kind === GFX_ORDER_RECT || kind === GFX_ORDER_SPRITE) {
+          let mixedLength = 1;
+          while (order + mixedLength < orderCount) {
+            const next = i32[GFX_I_ORDER_BASE + order + mixedLength];
+            const nextKind = Math.floor(next / GFX_ORDER_KIND_SCALE);
+            if (nextKind !== GFX_ORDER_RECT && nextKind !== GFX_ORDER_SPRITE) break;
+            mixedLength += 1;
+          }
+          if (drawMixedOrderRun(order, mixedLength)) {
+            order += mixedLength - 1;
+            continue;
+          }
+        }
         if (kind === GFX_ORDER_CLIP_PUSH) pushClip(index);
         else if (kind === GFX_ORDER_CLIP_POP && index === 0) popClip();
         else if (kind === GFX_ORDER_LINE && index < lineCount) drawLine(index);
-        else if (kind === GFX_ORDER_SPRITE && index < spriteCount) {
-          let runCount = 1;
-          while (order + runCount < orderCount) {
-            const next = i32[GFX_I_ORDER_BASE + order + runCount];
-            if (Math.floor(next / GFX_ORDER_KIND_SCALE) !== GFX_ORDER_SPRITE
-                || next % GFX_ORDER_KIND_SCALE >= spriteCount) break;
-            runCount += 1;
-          }
-          if (runCount < RECT_BATCH_MIN) {
-            for (let item = 0; item < runCount; item += 1) {
-              drawSprite(i32[GFX_I_ORDER_BASE + order + item] % GFX_ORDER_KIND_SCALE);
-            }
-          } else drawSpriteRun(order, runCount, true);
-          order += runCount - 1;
+        else if (kind === GFX_ORDER_SPRITE && index < spriteRunCount) {
+          const runBase = GFX_I_SPRITE_RUN_BASE + index * GFX_SPRITE_RUN_STRIDE_I32;
+          drawSpriteRun(i32[runBase], i32[runBase + 1]);
         }
         else if (kind === GFX_ORDER_TEXT && index < textCount) drawText(index);
         else if (kind === GFX_ORDER_RECT && index < rectCount) {
@@ -2728,7 +2947,10 @@
     } else {
       for (let index = 0; index < lineCount; index += 1) drawLine(index);
       drawRectRun(0, rectCount, false);
-      drawSpriteRun(0, spriteCount, false);
+      for (let run = 0; run < spriteRunCount; run += 1) {
+        const runBase = GFX_I_SPRITE_RUN_BASE + run * GFX_SPRITE_RUN_STRIDE_I32;
+        drawSpriteRun(i32[runBase], i32[runBase + 1]);
+      }
       for (let index = 0; index < textCount; index += 1) drawText(index);
     }
     while (clipDepth > 0) {

@@ -3694,11 +3694,11 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     }
 }
 
-pub const STASIS_RENDER_I32_COUNT: usize = 35_120;
-pub const STASIS_RENDER_F32_COUNT: usize = 126_084;
+pub const STASIS_RENDER_I32_COUNT: usize = 67_888;
+pub const STASIS_RENDER_F32_COUNT: usize = 146_564;
 pub const STASIS_RENDER_U8_COUNT: usize = 65_536;
 pub const STASIS_RENDER_MAGIC: i32 = 0x4758_4631;
-pub const STASIS_RENDER_VERSION: i32 = 6;
+pub const STASIS_RENDER_VERSION: i32 = 7;
 const STASIS_RENDER_HEADER_I32_COUNT: usize = 10;
 const STASIS_RENDER_ORDER_COUNT_INDEX: usize = 22;
 const STASIS_RENDER_ORDER_HEADER_END: usize = 24;
@@ -3706,9 +3706,10 @@ const STASIS_RENDER_RECT_COUNT_INDEX: usize = 24;
 const STASIS_RENDER_RECT_HEADER_END: usize = 26;
 const STASIS_RENDER_CLIP_COUNT_INDEX: usize = 27;
 const STASIS_RENDER_CLIP_HEADER_END: usize = 29;
+const STASIS_RENDER_SPRITE_RUN_HEADER_END: usize = 31;
 const STASIS_RENDER_F_CLEAR_BASE: usize = 0;
 const STASIS_RENDER_F_LINE_BASE: usize = 4;
-pub const STASIS_RENDER_ORDER_BASE: usize = 18_464;
+pub const STASIS_RENDER_ORDER_BASE: usize = 51_232;
 const STASIS_RENDER_MAX_CLIPS: usize = 256;
 const STASIS_RENDER_MAX_ORDER: usize = 16_656;
 const STASIS_RENDER_SPRITE_BASE: usize = 32;
@@ -3718,15 +3719,19 @@ const STASIS_RENDER_GEOMETRY_STRIDE_F32: usize = 8;
 const STASIS_RENDER_LINE_STRIDE: usize = 8;
 pub const STASIS_RENDER_MAX_SPRITES: usize = 4_096;
 const STASIS_RENDER_SPRITE_STRIDE_I32: usize = 3;
+const STASIS_RENDER_SPRITE_RUN_COUNT_INDEX: usize = 29;
+const STASIS_RENDER_SPRITE_RUN_BASE: usize = 18_464;
+const STASIS_RENDER_MAX_SPRITE_RUNS: usize = 4_096;
+const STASIS_RENDER_SPRITE_RUN_STRIDE_I32: usize = 8;
 const STASIS_RENDER_SPRITE_BASE_F32: usize = 80_004;
 pub const STASIS_RENDER_RECT_REVERSE_BASE_F32: usize = 79_996;
-const STASIS_RENDER_SPRITE_STRIDE_F32: usize = 8;
+const STASIS_RENDER_SPRITE_STRIDE_F32: usize = 13;
 pub const STASIS_RENDER_TEXT_BASE_I32: usize = 12_320;
-const STASIS_RENDER_TEXT_BASE_F32: usize = 112_772;
+const STASIS_RENDER_TEXT_BASE_F32: usize = 133_252;
 const STASIS_RENDER_MAX_TEXT: usize = 2_048;
 const STASIS_RENDER_TEXT_STRIDE_I32: usize = 3;
 const STASIS_RENDER_TEXT_STRIDE_F32: usize = 6;
-const STASIS_RENDER_CLIP_BASE_F32: usize = 125_060;
+const STASIS_RENDER_CLIP_BASE_F32: usize = 145_540;
 const STASIS_RENDER_CLIP_STRIDE_F32: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3734,6 +3739,7 @@ pub struct RenderActiveCounts {
     pub lines: usize,
     pub rects: usize,
     pub sprites: usize,
+    pub sprite_runs: usize,
     pub text: usize,
     pub text_bytes: usize,
     pub order: usize,
@@ -3803,6 +3809,8 @@ pub fn copy_jit_render_active(
         rects: source_i32[STASIS_RENDER_RECT_COUNT_INDEX]
             .clamp(0, (STASIS_RENDER_MAX_GEOMETRY - lines) as i32) as usize,
         sprites: source_i32[4].clamp(0, STASIS_RENDER_MAX_SPRITES as i32) as usize,
+        sprite_runs: source_i32[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX]
+            .clamp(0, STASIS_RENDER_MAX_SPRITE_RUNS as i32) as usize,
         text: source_i32[7].clamp(0, STASIS_RENDER_MAX_TEXT as i32) as usize,
         text_bytes: source_i32[9].clamp(0, STASIS_RENDER_U8_COUNT as i32) as usize,
         order: source_i32[STASIS_RENDER_ORDER_COUNT_INDEX].clamp(0, STASIS_RENDER_MAX_ORDER as i32)
@@ -3824,12 +3832,21 @@ pub fn copy_jit_render_active(
         &source_i32[STASIS_RENDER_CLIP_COUNT_INDEX..STASIS_RENDER_CLIP_HEADER_END],
     );
     out_i32[STASIS_RENDER_CLIP_COUNT_INDEX] = counts.clips as i32;
+    out_i32[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX..STASIS_RENDER_SPRITE_RUN_HEADER_END]
+        .copy_from_slice(
+            &source_i32[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX..STASIS_RENDER_SPRITE_RUN_HEADER_END],
+        );
+    out_i32[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX] = counts.sprite_runs as i32;
     let sprite_end = STASIS_RENDER_SPRITE_BASE + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_I32;
     out_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]
         .copy_from_slice(&source_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]);
     let text_i32_end = STASIS_RENDER_TEXT_BASE_I32 + counts.text * STASIS_RENDER_TEXT_STRIDE_I32;
     out_i32[STASIS_RENDER_TEXT_BASE_I32..text_i32_end]
         .copy_from_slice(&source_i32[STASIS_RENDER_TEXT_BASE_I32..text_i32_end]);
+    let sprite_run_end =
+        STASIS_RENDER_SPRITE_RUN_BASE + counts.sprite_runs * STASIS_RENDER_SPRITE_RUN_STRIDE_I32;
+    out_i32[STASIS_RENDER_SPRITE_RUN_BASE..sprite_run_end]
+        .copy_from_slice(&source_i32[STASIS_RENDER_SPRITE_RUN_BASE..sprite_run_end]);
     let order_end = STASIS_RENDER_ORDER_BASE + counts.order;
     out_i32[STASIS_RENDER_ORDER_BASE..order_end]
         .copy_from_slice(&source_i32[STASIS_RENDER_ORDER_BASE..order_end]);
@@ -7830,9 +7847,15 @@ mod tests {
         i32s[3] = 1;
         i32s[4] = 1;
         i32s[STASIS_RENDER_SPRITE_BASE] = 17;
+        i32s[STASIS_RENDER_SPRITE_BASE + 1] = -1;
         f32s[4..12].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 0.5, 0.6, 0.7, 0.8]);
-        f32s[STASIS_RENDER_SPRITE_BASE_F32..STASIS_RENDER_SPRITE_BASE_F32 + 4]
-            .copy_from_slice(&[10.0, 20.0, 30.0, 40.0]);
+        f32s[STASIS_RENDER_SPRITE_BASE_F32..STASIS_RENDER_SPRITE_BASE_F32 + 13].copy_from_slice(&[
+            10.0, 20.0, 30.0, 40.0, 0.0, 0.0, 0.0, 0.0, 15.0, 20.0, 1.0, 1.0, 0.0,
+        ]);
+        i32s[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX] = 1;
+        i32s[STASIS_RENDER_SPRITE_RUN_BASE] = 0;
+        i32s[STASIS_RENDER_SPRITE_RUN_BASE + 1] = 1;
+        i32s[STASIS_RENDER_SPRITE_RUN_BASE + 2] = -1;
         i32s[STASIS_RENDER_ORDER_COUNT_INDEX] = 2;
         i32s[STASIS_RENDER_ORDER_BASE] = 2 * 16_384;
         i32s[STASIS_RENDER_ORDER_BASE + 1] = 16_384;

@@ -4,7 +4,7 @@ Official Stasis archives contain `stasis_release_provenance.json`. The schema-v1
 manifest identifies the release tag and source commit, records the clean build
 state, hashes the exact compiler executable, every packaged renderer/mobile
 runtime source, and every mobile shell/template file, identifies the stable
-`gfx_cmd` command-buffer family with current schema v6 and enabled
+`gfx_cmd` command-buffer family with current schema v7 and enabled
 backends/features, and records the full Cargo package/version/source
 set, `Cargo.lock` SHA-256, Rust compiler version, and resolved SDL versions when
 SDL is linked into the release.

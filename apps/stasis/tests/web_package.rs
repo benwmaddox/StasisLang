@@ -599,7 +599,7 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "void enableWebAudio();",
         "function sdlScancode",
         "const spriteStride = GFX_SPRITE_STRIDE_F32;",
-        "const GFX_CMD_VERSION = 6;",
+        "const GFX_CMD_VERSION = 7;",
         "const GFX_ORDER_CLIP_PUSH = 5;",
         "context.clip();",
         "while (clipDepth > 0)",

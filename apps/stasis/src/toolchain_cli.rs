@@ -58,7 +58,7 @@ const MANIFEST_VERSION: u32 = 1;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
-const GFX_CMD_VERSION: i64 = 6;
+const GFX_CMD_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",

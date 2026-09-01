@@ -5,6 +5,12 @@ import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 const MAGIC = 1196967473;
+const I32_COUNT = 67888;
+const F32_COUNT = 146564;
+const F32_OFFSET = 300000;
+const ORDER_BASE = 51232;
+const RUN_BASE = 18464;
+const CLIP_BASE = 145540;
 
 function fakeGl(stats, available = true, throwing = false, textureThrow = false) {
   if (!available) return null;
@@ -40,10 +46,10 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
   return gl;
 }
 
-async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null } = {}) {
+async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
-  const i32 = new Int32Array(memory.buffer, 0, 35120);
-  const f32 = new Float32Array(memory.buffer, 100000, 126084);
+  const i32 = new Int32Array(memory.buffer, 0, I32_COUNT);
+  const f32 = new Float32Array(memory.buffer, F32_OFFSET, F32_COUNT);
   const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], deletedTextures: 0 };
   let now = 0;
   const context2d = {
@@ -54,7 +60,7 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
     save() {}, restore() { stats.restores += 1; }, beginPath() {}, moveTo() {}, lineTo() {},
     rect(x, y, width, height) { stats.clipRects.push([x, y, width, height]); },
     clip() { stats.clipCalls += 1; },
-    stroke() { stats.events.push("stroke"); }, translate() {}, rotate() {}
+    stroke() { stats.events.push("stroke"); }, translate() {}, rotate() {}, scale() {}
   };
   const rasterStats = { draws: 0, images: [], clears: [] };
   const rasterContext = {
@@ -105,11 +111,39 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
     render: () => {
       if (timing) now += 3;
       if (!rects && !sprites && !clips.length) return;
-      i32[0] = MAGIC; i32[1] = 6; i32[2] = 0; i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects; i32[27] = clips.length;
+      i32[0] = MAGIC; i32[1] = 7; i32[2] = 0; i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects; i32[27] = clips.length;
+      const encodedOrder = [];
+      const runs = [];
       if (ordered) {
-        i32[3] = 1; i32[22] = ordered.length;
-        ordered.forEach((encoded, index) => { i32[18464 + index] = encoded; });
+        i32[3] = 1;
+        for (let position = 0; position < ordered.length;) {
+          const encoded = ordered[position];
+          const kind = Math.floor(encoded / 16384);
+          if (kind !== 2) {
+            encodedOrder.push(encoded);
+            position += 1;
+            continue;
+          }
+          const first = encoded % 16384;
+          let count = 1;
+          while (position + count < ordered.length
+              && ordered[position + count] === 2 * 16384 + first + count) count += 1;
+          const run = runs.length;
+          runs.push([first, count]);
+          encodedOrder.push(2 * 16384 + run);
+          position += count;
+        }
+        i32[22] = encodedOrder.length;
+        encodedOrder.forEach((encoded, index) => { i32[ORDER_BASE + index] = encoded; });
+      } else if (sprites > 0) {
+        runs.push([0, sprites]);
       }
+      i32[29] = runs.length;
+      runs.forEach(([first, count], index) => {
+        const base = RUN_BASE + index * 8;
+        i32[base] = first; i32[base + 1] = count; i32[base + 2] = -1;
+        for (let field = 0; field < 5; field += 1) i32[base + 3 + field] = runMetadata[field];
+      });
       for (let index = 0; index < rects; index += 1) {
         const base = 79996 - index * 8;
         f32[base] = index; f32[base + 1] = 1; f32[base + 2] = 2; f32[base + 3] = 2;
@@ -117,16 +151,22 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
       }
       for (let index = 0; index < sprites; index += 1) {
         const baseI = 32 + index * 3;
-        const baseF = 80004 + index * 8;
+        const baseF = 80004 + index * 13;
         i32[baseI] = spriteHandles[index] || 1;
-        i32[baseI + 1] = index * 10;
-        i32[baseI + 2] = 180;
+        i32[baseI + 1] = 0xffffffb4;
+        i32[baseI + 2] = instanceFlags;
         f32[baseF] = index + 0.5; f32[baseF + 1] = 2; f32[baseF + 2] = 8; f32[baseF + 3] = 10;
-        f32[baseF + 4] = spriteUv[0]; f32[baseF + 5] = spriteUv[1];
-        f32[baseF + 6] = spriteUv[2]; f32[baseF + 7] = spriteUv[3];
+        const dimensions = spriteSizes?.[(spriteHandles[index] || 1) - 1] || spriteSize || imageExtent;
+        const partial = spriteUv[0] !== 0 || spriteUv[1] !== 0 || spriteUv[2] !== 1 || spriteUv[3] !== 1;
+        f32[baseF + 4] = partial ? spriteUv[0] * dimensions[0] : 0;
+        f32[baseF + 5] = partial ? spriteUv[1] * dimensions[1] : 0;
+        f32[baseF + 6] = partial ? (spriteUv[2] - spriteUv[0]) * dimensions[0] : 0;
+        f32[baseF + 7] = partial ? (spriteUv[3] - spriteUv[1]) * dimensions[1] : 0;
+        f32[baseF + 8] = spritePivot[0]; f32[baseF + 9] = spritePivot[1];
+        f32[baseF + 10] = spriteScale[0]; f32[baseF + 11] = spriteScale[1]; f32[baseF + 12] = index * 10;
       }
       clips.forEach((clip, index) => {
-        const base = 125060 + index * 4;
+        const base = CLIP_BASE + index * 4;
         f32[base] = clip[0]; f32[base + 1] = clip[1];
         f32[base + 2] = clip[2]; f32[base + 3] = clip[3];
       });
@@ -148,7 +188,7 @@ async function loadRuntime({ rects = 0, ordered = null, clips = [], sprites = 0,
       return createImageBitmap(source, options, stats.bitmapCalls.length);
     };
   }
-  contextObject.window = { STASIS_GAME: { memory: { gfx_cmd_i32: { offset: 0, length: 35120 }, gfx_cmd_f32: { offset: 100000, length: 126084 }, host_i32: { offset: 230000, length: 768 }, host_f32: { offset: 233072, length: 64 } }, strings: {}, assets, asset_metadata: assetMetadata }, screen: contextObject.screen };
+  contextObject.window = { STASIS_GAME: { memory: { gfx_cmd_i32: { offset: 0, length: I32_COUNT }, gfx_cmd_f32: { offset: F32_OFFSET, length: F32_COUNT }, host_i32: { offset: 900000, length: 768 }, host_f32: { offset: 903072, length: 64 } }, strings: {}, assets, asset_metadata: assetMetadata }, screen: contextObject.screen };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
@@ -224,7 +264,7 @@ test("large same-handle sprite run uploads the private 64-byte records", async (
     0.5, 2, 8, 10
   ]);
   assert.deepEqual(runtime.stats.uploads[0].slice(8, 16), [
-    1, 1, 1, new Float32Array([180 / 255])[0], 0, 1, 0, 0
+    1, 1, 1, new Float32Array([180 / 255])[0], 0, 1, 4, 5
   ]);
   const atlasUv = runtime.stats.uploads[0].slice(4, 8);
   assert.ok(atlasUv[0] > 0 && atlasUv[1] > 0 && atlasUv[2] < 1 && atlasUv[3] < 1);
@@ -421,7 +461,7 @@ test("optimized sprite preparation preserves aspect ratio in a centered tier sur
   assert.equal(runtime.stats.imageArgs[0][0], runtime.offscreen);
   assert.equal(runtime.offscreen.width, 16);
   assert.equal(runtime.offscreen.height, 16);
-  assert.deepEqual(runtime.stats.imageArgs[0].slice(1), [-4, -5, 8, 10]);
+  assert.deepEqual(runtime.stats.imageArgs[0].slice(-4), [-4, -5, 8, 10]);
   assert.equal(bitmaps[0].closed, false);
   assert.equal(runtime.body.dataset.assetPreparedWidth, "16");
   assert.equal(runtime.body.dataset.assetPreparedHeight, "16");
@@ -480,7 +520,7 @@ test("optimized contained sprite sheets use unpadded source dimensions in the We
   runtime.frame();
 
   const uv = runtime.stats.uploads[0].slice(4, 8);
-  assert.deepEqual(uv.map(value => Math.round(value * 512)), [2, 2, 10, 6]);
+  assert.deepEqual(uv.map(value => Math.round(value * 512)), [4, 2, 12, 6]);
   assert.equal(runtime.body.dataset.atlasPages, "1");
   assert.equal(runtime.body.dataset.atlasLiveEntries, "1");
   assert.equal(bitmap.closeCount, 0);
@@ -790,7 +830,7 @@ test("underprovisioned sprite sheets use raw source regions in the WebGL atlas",
   });
   runtime.frame();
   const uv = runtime.stats.uploads[0].slice(4, 8);
-  assert.deepEqual(uv.map(value => Math.round(value * 512)), [2, 2, 3, 3]);
+  assert.deepEqual(uv.map(value => Math.round(value * 512)), [4, 2, 5, 3]);
   assert.equal(runtime.body.dataset.atlasPages, "1");
   assert.equal(runtime.body.dataset.atlasLiveEntries, "1");
   assert.equal(runtime.body.dataset.assetPreparedWidth, "96");
@@ -949,7 +989,7 @@ test("releasing the latest Image fallback clears its retained resource receipt",
   assert.equal(runtime.body.dataset.assetSource, "released.png");
 });
 
-test("sprite handle changes and interleaved primitives split in source order", async () => {
+test("same-domain sprites and an interleaved solid rectangle share one ordered quad batch", async () => {
   const first = Array.from({ length: 64 }, (_, index) => 2 * 16384 + index);
   const second = Array.from({ length: 64 }, (_, index) => 2 * 16384 + 64 + index);
   const runtime = await loadRuntime({
@@ -957,9 +997,45 @@ test("sprite handle changes and interleaved primitives split in source order", a
     ordered: [...first, 4 * 16384, ...second]
   });
   runtime.frame();
-  assert.equal(runtime.stats.instanced, 2);
-  assert.deepEqual(runtime.stats.instances, [64, 64]);
-  assert.deepEqual(runtime.stats.events, ["image", "fill", "image"]);
+  assert.equal(runtime.stats.instanced, 1);
+  assert.deepEqual(runtime.stats.instances, [129]);
+  assert.deepEqual(runtime.stats.events, ["image"]);
+});
+
+test("a leading solid rectangle adopts the next sprite binding domain", async () => {
+  const sprites = Array.from({ length: 64 }, (_, index) => 2 * 16384 + index);
+  const runtime = await loadRuntime({
+    rects: 1, sprites: 64, spriteHandles: Array(64).fill(1),
+    ordered: [4 * 16384, ...sprites]
+  });
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 1);
+  assert.deepEqual(runtime.stats.instances, [65]);
+});
+
+test("reserved run metadata and instance flags reject before replay", async () => {
+  for (const configuration of [
+    { runMetadata: [1, 0, 0, 0, 0] },
+    { runMetadata: [0, 1, 0, 0, 0] },
+    { runMetadata: [0, 0, 0, 1, 0] },
+    { instanceFlags: 1 }
+  ]) {
+    const runtime = await loadRuntime({ sprites: 2, spriteHandles: [1, 1], ...configuration });
+    runtime.frame();
+    assert.equal(runtime.stats.instanced, 0);
+    assert.equal(runtime.stats.images, 0);
+    assert.equal(runtime.stats.fills, 0);
+  }
+});
+
+test("non-center negative scale preserves semantic pivot in private records", async () => {
+  const runtime = await loadRuntime({
+    sprites: 64, spriteHandles: Array(64).fill(1), spritePivot: [2, 7], spriteScale: [-2, 0.5]
+  });
+  runtime.frame();
+  const record = runtime.stats.uploads[0].slice(0, 16);
+  assert.deepEqual(record.slice(0, 4), [6.5, 5.5, -16, 5]);
+  assert.deepEqual(record.slice(14, 16), [-4, 3.5]);
 });
 
 test("different handles sharing one atlas page batch together", async () => {

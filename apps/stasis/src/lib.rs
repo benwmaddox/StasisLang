@@ -6130,15 +6130,15 @@ function render(): void {{ {draws} return; }}
         let runtime_cmake = STASIS_RUNTIME_CMAKE.replace("\r\n", "\n");
         for required in [
             "STASIS_RENDER_MAGIC 0x47584631",
-            "STASIS_RENDER_VERSION 6",
-            "STASIS_RENDER_TRACE_VERSION 6",
+            "STASIS_RENDER_VERSION 7",
+            "STASIS_RENDER_TRACE_VERSION 7",
             "STASIS_RENDER_I_ORDER_BASE",
             "STASIS_RENDER_I_RECT_COUNT",
             "STASIS_RENDER_MAX_ORDER",
             "STASIS_RENDER_ORDER_RECT",
             "STASIS_RENDER_ORDER_CLIP_PUSH",
             "STASIS_RENDER_ORDER_CLIP_POP",
-            "STASIS_RENDER_SPRITE_F32_STRIDE 8",
+            "STASIS_RENDER_SPRITE_F32_STRIDE 13",
             "STASIS_RENDER_I32_COUNT",
             "STASIS_RENDER_F32_COUNT",
             "stasis_render_validate",

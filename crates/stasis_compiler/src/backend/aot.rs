@@ -1771,8 +1771,8 @@ mod tests {
     }
 
     fn run_gfx_capacity_jit(gfx_source: &str) -> GfxCapacityResult {
-        const I32_COUNT: usize = 35_120;
-        const F32_COUNT: usize = 126_084;
+        const I32_COUNT: usize = 67_888;
+        const F32_COUNT: usize = 146_564;
         const U8_COUNT: usize = 65_536;
         let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut jit = JitProcess::new();
@@ -1860,6 +1860,8 @@ mod tests {
             ("dropped_rects", 25, 1),
             ("clip_count", 27, 256),
             ("dropped_clips", 28, 1),
+            ("sprite_run_count", 29, 4_096),
+            ("dropped_sprite_runs", 30, 1),
         ];
         for (field, index, expected) in checks {
             let actual = result.i32s[index];
@@ -1875,8 +1877,8 @@ mod tests {
         {
             return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=geometry_arena_boundary expected=adjacent actual=overlap".to_string());
         }
-        if result.i32s[35_119] != 98_304
-            || result.f32s[126_083].to_bits() != 4.0f32.to_bits()
+        if result.i32s[67_887] != 98_304
+            || result.f32s[146_563].to_bits() != 4.0f32.to_bits()
             || result.u8s[65_535] != 0
         {
             return Err("gfx capacity mismatch: producer=gfx_cmd.stasis consumer=native_render_trace field=terminal_entries expected=written actual=missing".to_string());
@@ -2462,8 +2464,8 @@ mod tests {
                 )],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[
-                    ("cmd_i32", 35_120),
-                    ("cmd_f32", 126_084),
+                    ("cmd_i32", 67_888),
+                    ("cmd_f32", 146_564),
                     ("cmd_u8", 65_536),
                 ],
                 expected_clif_markers: &[("main", &["call"])],
