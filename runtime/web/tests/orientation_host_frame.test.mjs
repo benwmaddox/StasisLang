@@ -24,6 +24,8 @@ async function runSequence(first, second, options = {}) {
   } : {};
   let canvasWidth = first[0];
   let canvasHeight = first[1];
+  const capturedPointers = [];
+  let focusCalls = 0;
   const context = {
     fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
     drawImage() {}, translate() {}, rotate() {}
@@ -37,8 +39,8 @@ async function runSequence(first, second, options = {}) {
     getContext: () => context,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: canvasWidth, height: canvasHeight }),
     addEventListener(type, listener) { this.listeners.set(type, listener); },
-    setPointerCapture() {},
-    focus() {},
+    setPointerCapture(pointerId) { capturedPointers.push(pointerId); },
+    focus() { focusCalls += 1; },
     requestFullscreen: async () => {},
   };
   const body = { dataset: {} };
@@ -112,6 +114,8 @@ async function runSequence(first, second, options = {}) {
   if (options.desktopOnly) return ticks;
   const dispatch = (type, event = {}) => canvas.listeners.get(type)?.(event);
   dispatch("pointerdown", { pointerId: 7, clientX: first[0] - 1, clientY: first[1] - 1 });
+  assert.deepEqual(capturedPointers, [7], "pointerdown retains pointer capture");
+  assert.equal(focusCalls, 0, "pointerdown does not force canvas focus");
   frame();
   const down = ticks.at(-1);
   assert.equal(down.pointerCount, 1);

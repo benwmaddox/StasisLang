@@ -8,6 +8,13 @@ const fitter = html.match(/<script>\s*([\s\S]*?)\s*<\/script>/)?.[1];
 assert.ok(fitter, "index.html has an inline viewport fitter");
 const runtime = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
+test("shared web shell keeps the canvas keyboard reachable", () => {
+  const canvasTag = html.match(/<canvas\b[^>]*>/gi)
+    ?.find(tag => /\bid=["']stasis-canvas["']/i.test(tag));
+  assert.ok(canvasTag, "index.html has the game canvas");
+  assert.match(canvasTag, /\btabindex=["']0["']/i);
+});
+
 function runFitter({ layoutWidth = 393, layoutHeight = 844, visualWidth = 393, visualHeight = 650, backingWidth = 640, backingHeight = 360, safe = {}, visual = true } = {}) {
   const windowListeners = new Map();
   const visualListeners = new Map();
