@@ -5819,11 +5819,29 @@ function render(): void {{ {draws} return; }}
             "successful replacements must publish current preparation receipts"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)")
-                && STASIS_GRAPHICS_SOURCE.contains(
-                    "A regular screenshot captures the fitted logical content returned by"
-                ),
-            "resource preparation and capture extents must derive from the full backing without float-tier drift"
+            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)"),
+            "resource preparation must derive from the full-backing density scale"
+        );
+        let capture_start = graphics_source
+            .find("static int stasis_gfx_dump_image(")
+            .expect("framebuffer capture helper");
+        let capture_end = graphics_source[capture_start..]
+            .find("STASIS_EXPORT int stasis_gfx_dump_bmp(")
+            .expect("framebuffer capture helper boundary")
+            + capture_start;
+        let capture_source = &graphics_source[capture_start..capture_end];
+        assert!(
+            capture_source.contains("SDL_RenderReadPixels(g_renderer, NULL)")
+                && capture_source.contains("SDL_ConvertSurface(readback, SDL_PIXELFORMAT_BGRA32)")
+                && capture_source.contains("int w = bgra ? bgra->w : 0;")
+                && capture_source.contains("int h = bgra ? bgra->h : 0;"),
+            "ordinary capture dimensions must come from the converted SDL readback surface"
+        );
+        assert!(
+            capture_source.contains("w != g_recording_width || h != g_recording_height")
+                && capture_source
+                    .contains("recording readback dimensions mismatch: got=%dx%d expected=%dx%d"),
+            "fixed recording targets must reject readbacks outside their configured extent"
         );
         assert!(
             STASIS_GRAPHICS_SOURCE
