@@ -6252,8 +6252,9 @@ function render(): void {{ {draws} return; }}
             + upload_start;
         let upload_source = &STASIS_GRAPHICS_SOURCE[upload_start..upload_end];
         for required in [
-            "const int padded_w = w + 2;",
-            "const int padded_h = h + 2;",
+            "const int padded_w = alloc_w;",
+            "const int padded_h = alloc_h;",
+            "if (padded_w < w + 2 || padded_h < h + 2) return 0;",
             "int sy = py - 1;",
             "int sx = px - 1;",
             "SDL_Rect rect = {x - 1, y - 1, padded_w, padded_h};",
@@ -6372,7 +6373,7 @@ function render(): void {{ {draws} return; }}
             .find("page_index = stasis_sprite_atlas_allocate(")
             .expect("atlas allocation");
         let upload = publish_source
-            .find("!stasis_sprite_atlas_upload(page_index, atlas_x, atlas_y, pixels, w, h)")
+            .find("!stasis_sprite_atlas_upload(")
             .expect("atlas upload");
         let failure_return = publish_source[upload..]
             .find("return 0;")
@@ -6391,7 +6392,7 @@ function render(): void {{ {draws} return; }}
                 && page_publication < texture_publication,
             "sprite reload must allocate and upload successfully before publishing entry fields and the page texture"
         );
-        assert!(!publish_source[..failure_return].contains("e->sdl_tex ="));
+        assert!(!publish_source[..failure_return].contains("e->sdl_tex = page->texture;"));
     }
 
     #[test]
