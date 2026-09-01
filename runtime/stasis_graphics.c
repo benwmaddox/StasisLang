@@ -5617,7 +5617,16 @@ static int stasis_storage_path(
     }
     root = SDL_GetPrefPath("StasisLang", scope);
     if (!root) return 0;
+#if defined(__ANDROID__)
+    written = snprintf(path, capacity, "%s%s", root, scope);
+    if (written < 0 || (size_t)written >= capacity || !SDL_CreateDirectory(path)) {
+        SDL_free(root);
+        return 0;
+    }
+    written = snprintf(path, capacity, "%s%s/%s.%s", root, scope, key, extension);
+#else
     written = snprintf(path, capacity, "%s%s.%s", root, key, extension);
+#endif
     if (written < 0 || (size_t)written >= capacity) {
         SDL_free(root);
         return 0;

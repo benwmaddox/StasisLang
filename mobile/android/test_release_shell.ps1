@@ -69,14 +69,15 @@ function Assert-In-Time([string]$Step) {
 }
 
 function Resolve-Gradle {
-    $command = Get-Command gradle -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
     if ($env:ChocolateyInstall) {
         $installed = Get-ChildItem (Join-Path $env:ChocolateyInstall "lib\gradle\tools") `
             -Recurse -Filter gradle.bat -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending | Select-Object -First 1
         if ($installed) { return $installed.FullName }
     }
+    $command = Get-Command gradle.bat -ErrorAction SilentlyContinue
+    if (-not $command) { $command = Get-Command gradle -ErrorAction SilentlyContinue }
+    if ($command) { return $command.Source }
     throw "Gradle was not found; install Gradle 8.9 or newer"
 }
 
