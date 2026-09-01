@@ -7,7 +7,9 @@ use stasis_dynload::{
     register_global_u8_array, Library, StasisGraphicsApi, STASIS_RENDER_F32_COUNT,
     STASIS_RENDER_I32_COUNT, STASIS_RENDER_U8_COUNT,
 };
+use std::ffi::CString;
 use std::fs;
+use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 
 const FIXTURE: &str =
@@ -109,6 +111,9 @@ struct NativeSurfaceHarness {
     select_display: SelectDisplay,
     push_input: extern "system" fn(i32, i32, f32, f32) -> i32,
     get_lifecycle: extern "system" fn(*mut i32, i32) -> i32,
+    load_sprite: extern "system" fn(*const c_char, i32, i32) -> i32,
+    release_sprite: extern "system" fn(i32),
+    get_sprite_state: extern "system" fn(i32, *mut i32, i32) -> i32,
 }
 
 impl NativeSurfaceHarness {
@@ -142,12 +147,36 @@ impl NativeSurfaceHarness {
                     .expect("resolve renderer lifecycle snapshot"),
             )
         };
+        let load_sprite = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_gfx_load_sprite")
+                    .expect("resolve sprite load seam"),
+            )
+        };
+        let release_sprite = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_gfx_release_sprite")
+                    .expect("resolve sprite release seam"),
+            )
+        };
+        let get_sprite_state = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_test_get_sprite_state")
+                    .expect("resolve gated sprite-state seam"),
+            )
+        };
         Self {
             _library: library,
             push_display,
             select_display,
             push_input,
             get_lifecycle,
+            load_sprite,
+            release_sprite,
+            get_sprite_state,
         }
     }
 
@@ -193,6 +222,43 @@ impl NativeSurfaceHarness {
         let mut values = [0; 6];
         assert_eq!((self.get_lifecycle)(values.as_mut_ptr(), 6), 1);
         values
+    }
+
+    fn load_sprite(&self, path: &Path, logical: [i32; 2]) -> i32 {
+        let path = CString::new(path.to_string_lossy().as_bytes()).expect("sprite path CString");
+        let handle = (self.load_sprite)(path.as_ptr(), logical[0], logical[1]);
+        assert_ne!(handle, 0, "native sprite load failed");
+        handle
+    }
+
+    fn sprite_state(&self, handle: i32) -> [i32; 12] {
+        let mut values = [0; 12];
+        assert_eq!((self.get_sprite_state)(handle, values.as_mut_ptr(), 12), 1);
+        values
+    }
+
+    fn release_sprite(&self, handle: i32) {
+        (self.release_sprite)(handle);
+    }
+}
+
+fn density_sample(
+    drawable: [i32; 2],
+    display_generation: i32,
+    density_generation: i32,
+) -> DisplaySample {
+    let scale = (drawable[0] as f32 / 400.0).min(drawable[1] as f32 / 300.0);
+    DisplaySample {
+        logical: [400, 300],
+        native: [400, 300],
+        drawable,
+        safe_native: [0, 0, 400, 300],
+        safe_logical: [0.0, 0.0, 400.0, 300.0],
+        safe_rounded: [0, 0, 400, 300],
+        content_scale: scale,
+        raster_scale: scale.max(1.0),
+        display_generation,
+        density_generation,
     }
 }
 
@@ -756,6 +822,110 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
         }
     }
 
+    let sprite_path = repository_root().join("samples/windows_launch_smoke/assets/smoke.png");
+    let one_x = density_sample([400, 300], 8, 4);
+    native.display(DISPLAY_CHANGED, one_x);
+    native.pointer(POINTER_DOWN, 300.0, 225.0);
+    run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        one_x,
+        false,
+        true,
+    );
+    assert_close(scalar_f32("metric_pointer_x"), 300.0, "1x pointer x");
+    assert_close(scalar_f32("metric_pointer_y"), 225.0, "1x pointer y");
+    let sprite = native.load_sprite(&sprite_path, [20, 12]);
+    assert_eq!(
+        &native.sprite_state(sprite)[0..12],
+        &[1, 1, 0, 1, 0, 0, 0, 20, 12, 0, 20, 12]
+    );
+
+    native.display(DISPLAY_CHANGED, one_x);
+    run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        one_x,
+        false,
+        false,
+    );
+    assert_eq!(host_i32[30], 8, "duplicate 1x display generation");
+    assert_eq!(host_i32[31], 4, "duplicate 1x density generation");
+
+    let density_tiers = [
+        (density_sample([500, 375], 9, 5), [25, 15]),
+        (density_sample([600, 450], 10, 6), [30, 18]),
+        (density_sample([800, 600], 11, 7), [40, 24]),
+    ];
+    for (index, (sample, expected_raster)) in density_tiers.iter().enumerate() {
+        native.display(DISPLAY_CHANGED, *sample);
+        native.pointer(POINTER_MOVE, 300.0, 225.0);
+        run_frame(
+            &gfx,
+            &mut jit,
+            &mut host_i32,
+            &mut host_f32,
+            &mut gfx_i32,
+            &gfx_f32,
+            &gfx_u8,
+            *sample,
+            false,
+            true,
+        );
+        assert_close(scalar_f32("metric_pointer_x"), 300.0, "tier pointer x");
+        assert_close(scalar_f32("metric_pointer_y"), 225.0, "tier pointer y");
+        assert_eq!(native.load_sprite(&sprite_path, [20, 12]), sprite);
+        let state = native.sprite_state(sprite);
+        assert_eq!(state[1], index as i32 + 2, "tier sprite ref count");
+        assert_eq!(
+            state[3], 1,
+            "tier transition must replace one active sprite"
+        );
+        assert_eq!(&state[7..9], expected_raster, "tier current raster");
+        assert_eq!(state[9], 0, "tier current raster must be clean");
+    }
+
+    let downscaled = density_sample([500, 375], 12, 8);
+    native.display(DISPLAY_CHANGED, downscaled);
+    run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        downscaled,
+        false,
+        true,
+    );
+    assert_eq!(native.load_sprite(&sprite_path, [20, 12]), sprite);
+    let downscaled_state = native.sprite_state(sprite);
+    assert_eq!(downscaled_state[1], 5);
+    assert_eq!(downscaled_state[3], 1);
+    assert_eq!(&downscaled_state[7..9], &[25, 15]);
+    assert_eq!(downscaled_state[9], 0);
+    let two_x_bytes = 40 * 24 * 4;
+    let current_bytes = downscaled_state[7] * downscaled_state[8] * 4;
+    assert_eq!(current_bytes, 25 * 15 * 4);
+    assert!(
+        current_bytes < two_x_bytes,
+        "downscale must release the larger preparation"
+    );
+    for _ in 0..5 {
+        native.release_sprite(sprite);
+    }
+
     let evidence = json!({
         "schema": "stasis.seam_test.v1",
         "test_id": "IT-007",
@@ -773,7 +943,7 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
             {"stage": "restored_portrait", "logical": RESTORED_PORTRAIT.logical, "native": RESTORED_PORTRAIT.native, "drawable": RESTORED_PORTRAIT.drawable, "display_generation": 6, "density_generation": 4, "pointer_went_up": 0, "release_actions": 2, "trace": restored_portrait_trace},
             {"stage": "quiet", "logical": RESTORED_PORTRAIT.logical, "native": RESTORED_PORTRAIT.native, "drawable": RESTORED_PORTRAIT.drawable, "display_generation": 6, "density_generation": 4, "pointer_went_up": 0, "release_actions": 2, "trace": quiet_trace}
         ],
-        "oracle": {"renderer_lifecycle": initial_lifecycle, "restoration_generation_advances": 1, "pointer_round_trip_tolerance": 0.002, "orientation_release_actions": 2}
+        "oracle": {"renderer_lifecycle": initial_lifecycle, "restoration_generation_advances": 1, "pointer_round_trip_tolerance": 0.002, "orientation_release_actions": 2, "density_tiers": [1.0, 1.25, 1.5, 2.0, 1.25], "density_generations": [4, 5, 6, 7, 8], "current_sprite_raster": [25, 15], "current_sprite_rgba_bytes": current_bytes, "replaced_two_x_rgba_bytes": two_x_bytes}
     });
     let evidence_path = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)

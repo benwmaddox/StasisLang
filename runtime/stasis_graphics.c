@@ -5657,6 +5657,13 @@ STASIS_EXPORT int stasis_test_get_sprite_state(int32_t handle, int32_t* out_i32,
         out_i32[5] = (int32_t)(uint32_t)group_id;
         out_i32[6] = (int32_t)(uint32_t)(group_id >> 32);
     }
+    if (capacity >= 12) {
+        out_i32[7] = entry != NULL ? entry->w : 0;
+        out_i32[8] = entry != NULL ? entry->h : 0;
+        out_i32[9] = entry != NULL ? entry->needs_reraster : 0;
+        out_i32[10] = entry != NULL ? entry->max_w : 0;
+        out_i32[11] = entry != NULL ? entry->max_h : 0;
+    }
     return 1;
 }
 
