@@ -167,6 +167,7 @@ static int g_drawable_width = 800;
 static int g_drawable_height = 600;
 static float g_pixel_scale = 1.0f;
 static bool g_recording_presentation = false;
+static bool g_x11_scale_controlled_window = false;
 static int g_recording_width = 0;
 static int g_recording_height = 0;
 static uint32_t g_recording_fps = 0;
@@ -174,6 +175,7 @@ static bool g_recording_config_pending = false;
 static StasisDisplayMetrics g_display_metrics;
 static int g_display_generation = 0;
 static int g_density_generation = 0;
+static StasisDisplayPreparationScale g_density_preparation_scale = {0, 0};
 static int g_available_width = 0;
 static int g_available_height = 0;
 static bool g_window_resized = false;
@@ -633,9 +635,59 @@ static void stasis_mark_density_resources_dirty(void) {
     }
 }
 
+static int stasis_current_scaled_extent(int logical_extent) {
+    return stasis_display_scaled_extent_for_backing(
+        logical_extent,
+        g_window_width, g_window_height,
+        g_drawable_width, g_drawable_height);
+}
+
 static SDL_DisplayID stasis_select_presentation_display(
     SDL_DisplayID window_display, SDL_DisplayID primary_display) {
     return window_display != 0 ? window_display : primary_display;
+}
+
+static float stasis_x11_window_scale(void) {
+#if defined(__linux__) && !defined(__ANDROID__)
+    const char* driver = SDL_GetCurrentVideoDriver();
+    if (!driver || strcmp(driver, "x11") != 0) return 1.0f;
+    float scale = g_window
+        ? SDL_GetWindowDisplayScale(g_window)
+        : SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
+    if (!isfinite(scale) || scale < 1.0f) return 1.0f;
+    return scale > 8.0f ? 8.0f : scale;
+#else
+    return 1.0f;
+#endif
+}
+
+static bool stasis_x11_scale_controlled_launch(void) {
+#if defined(__linux__) && !defined(__ANDROID__)
+    const char* driver = SDL_GetCurrentVideoDriver();
+    return driver && strcmp(driver, "x11") == 0 &&
+        stasis_display_scale_control_is_valid(
+            SDL_getenv("SDL_VIDEO_X11_SCALING_FACTOR"));
+#else
+    return false;
+#endif
+}
+
+static void stasis_apply_x11_window_scale(int explicit_window_request) {
+    if (!g_window || g_recording_presentation) return;
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    if (!stasis_display_should_apply_windowed_extent(
+            explicit_window_request,
+            (flags & SDL_WINDOW_FULLSCREEN) != 0,
+            (flags & SDL_WINDOW_MAXIMIZED) != 0,
+            (flags & SDL_WINDOW_MINIMIZED) != 0)) {
+        return;
+    }
+    const float scale = stasis_x11_window_scale();
+    SDL_SetWindowSize(
+        g_window,
+        stasis_display_scaled_window_extent(g_window_width, scale),
+        stasis_display_scaled_window_extent(g_window_height, scale));
+    SDL_SyncWindow(g_window);
 }
 
 static void stasis_query_available_presentation(
@@ -692,7 +744,11 @@ static void stasis_sync_display_metrics(void) {
                 SDL_LOGICAL_PRESENTATION_LETTERBOX);
         }
     } else if (g_use_sdl_renderer && g_renderer) {
-        if (!SDL_GetCurrentRenderOutputSize(g_renderer, &drawable_w, &drawable_h)) {
+        /* The display contract owns the complete renderer backing here.  The
+         * "current" output is adjusted by SDL logical presentation and can
+         * still describe the previous fitted viewport while a logical canvas
+         * change is being applied. */
+        if (!SDL_GetRenderOutputSize(g_renderer, &drawable_w, &drawable_h)) {
             drawable_w = native_w;
             drawable_h = native_h;
         }
@@ -724,6 +780,9 @@ static void stasis_sync_display_metrics(void) {
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
         drawable_w, drawable_h, safe_native);
+    const StasisDisplayPreparationScale next_preparation_scale =
+        stasis_display_preparation_scale(
+            next.logical_w, next.logical_h, next.drawable_w, next.drawable_h);
     const int dimensions_changed =
         next.native_w != g_display_metrics.native_w ||
         next.native_h != g_display_metrics.native_h ||
@@ -733,10 +792,12 @@ static void stasis_sync_display_metrics(void) {
         next.logical_h != g_display_metrics.logical_h ||
         available_w != g_available_width ||
         available_h != g_available_height;
-    const int density_changed =
-        g_density_generation == 0 || fabsf(next.raster_scale - g_pixel_scale) > 0.001f;
+    const int density_changed = g_density_generation == 0 ||
+        stasis_display_preparation_scale_changed(
+            g_density_preparation_scale, next_preparation_scale);
     if (density_changed) {
         g_pixel_scale = next.raster_scale;
+        g_density_preparation_scale = next_preparation_scale;
         stasis_mark_density_resources_dirty();
     }
     if (g_display_generation == 0 || dimensions_changed) {
@@ -1074,6 +1135,15 @@ static void stasis_pump_events(void) {
                         reset_sprite_program();
                     }
 #endif
+                g_input_frame.viewport_w_px = g_window_width;
+                g_input_frame.viewport_h_px = g_window_height;
+                stasis_update_safe_viewport();
+                break;
+            case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+#if defined(__linux__) && !defined(__ANDROID__)
+                stasis_apply_x11_window_scale(0);
+#endif
+                stasis_sync_display_metrics();
                 g_input_frame.viewport_w_px = g_window_width;
                 g_input_frame.viewport_h_px = g_window_height;
                 stasis_update_safe_viewport();
@@ -3513,9 +3583,9 @@ static int stasis_asset_task_request(
     task->atlas_policy = kind == STASIS_ASSET_KIND_SPRITE
         ? atlas_policy : stasis_sprite_atlas_policy_v3_standalone();
     task->raster_w = kind == STASIS_ASSET_KIND_SPRITE
-        ? stasis_display_scaled_extent(max_w, g_pixel_scale) : 0;
+        ? stasis_current_scaled_extent(max_w) : 0;
     task->raster_h = kind == STASIS_ASSET_KIND_SPRITE
-        ? stasis_display_scaled_extent(max_h, g_pixel_scale) : 0;
+        ? stasis_current_scaled_extent(max_h) : 0;
     memcpy(task->path, resolved, strlen(resolved) + 1);
     int id = task->id;
     SDL_UnlockMutex(g_asset_task_mutex);
@@ -3559,8 +3629,17 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
         out_path = resolved;
     }
 
-    const int w = g_recording_presentation ? g_recording_width : g_drawable_width;
-    const int h = g_recording_presentation ? g_recording_height : g_drawable_height;
+    int w = g_recording_presentation ? g_recording_width : g_drawable_width;
+    int h = g_recording_presentation ? g_recording_height : g_drawable_height;
+    if (g_use_sdl_renderer && g_renderer && !g_recording_presentation) {
+        /* A regular screenshot captures the fitted logical content returned by
+         * SDL readback, not the complete renderer backing used by density and
+         * framebuffer accounting. Derive that extent from the full backing;
+         * SDL_GetCurrentRenderOutputSize can itself report stale presentation
+         * state during the same logical-canvas transition. */
+        w = stasis_current_scaled_extent(g_window_width);
+        h = stasis_current_scaled_extent(g_window_height);
+    }
     const size_t bytes = (size_t)w * (size_t)h * 4u;
 
     uint8_t* pixels = (uint8_t*)malloc(bytes);
@@ -4138,6 +4217,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 0;
     }
+    g_x11_scale_controlled_window = stasis_x11_scale_controlled_launch();
 
     /* Optional screenshot automation via environment variables. */
     g_screenshot_taken = false;
@@ -4223,6 +4303,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_drawable_width = width;
     g_drawable_height = height;
     g_pixel_scale = 1.0f;
+    g_density_preparation_scale.numerator = 0;
+    g_density_preparation_scale.denominator = 0;
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!want_sdl) {
@@ -4256,9 +4338,14 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
     window_flags |= SDL_WINDOW_FULLSCREEN;
 #else
+    if (!g_recording_presentation) {
+        const float display_scale = stasis_x11_window_scale();
+        native_request_width = stasis_display_scaled_window_extent(width, display_scale);
+        native_request_height = stasis_display_scaled_window_extent(height, display_scale);
+    }
     /* Let the desktop window manager fill its usable work area without
        covering taskbars, docks, or panels. */
-    if (!g_recording_presentation) {
+    if (!g_recording_presentation && !g_x11_scale_controlled_window) {
         window_flags |= SDL_WINDOW_MAXIMIZED;
     }
 #endif
@@ -4373,10 +4460,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
      */
     SDL_PumpEvents();
     stasis_present_gpu_loading();
-    SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.2f",
+    SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.3f display_scale=%.3f display_generation=%d density_generation=%d",
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
-        g_drawable_width, g_drawable_height, g_pixel_scale);
+        g_drawable_width, g_drawable_height, g_pixel_scale,
+        stasis_x11_window_scale(), g_display_generation, g_density_generation);
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     g_should_quit = false;
     g_line_count = 0;
@@ -4570,13 +4658,19 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         SDL_RestoreWindow(g_window);
         SDL_SyncWindow(g_window);
     }
-    SDL_SetWindowSize(g_window, width, height);
-    SDL_SyncWindow(g_window);
+    /* X11 window-manager state can remain maximized briefly after restore.
+       The explicit request still owns the retained windowed backing extent. */
+    stasis_apply_x11_window_scale(1);
 #endif
     stasis_sync_display_metrics();
 
 #if !defined(__ANDROID__) && !defined(__IPHONEOS__)
-    SDL_Log("Stasis window presentation: mode=windowed");
+    SDL_Log(
+        "Stasis window presentation: mode=windowed logical=%dx%d native=%dx%d drawable=%dx%d display_scale=%.3f display_generation=%d density_generation=%d",
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        g_drawable_width, g_drawable_height,
+        stasis_x11_window_scale(), g_display_generation, g_density_generation);
 #endif
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -4613,12 +4707,18 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
     stasis_sync_display_metrics();
     return 1;
 #else
+    if (g_x11_scale_controlled_window) {
+        maximized = 0;
+    }
     bool result = SDL_SetWindowFullscreen(g_window, false);
     if (result) {
         result = maximized ? SDL_MaximizeWindow(g_window) : SDL_RestoreWindow(g_window);
     }
     if (result) {
         SDL_SyncWindow(g_window);
+        if (g_x11_scale_controlled_window) {
+            stasis_apply_x11_window_scale(1);
+        }
         stasis_sync_display_metrics();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -4642,14 +4742,15 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
             g_window, &border_top, &border_left, &border_bottom, &border_right);
         if (display != 0 && SDL_GetDisplayUsableBounds(display, &usable)) {
             SDL_Log(
-                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d",
+                "Stasis window presentation: mode=%s logical=%dx%d native=%dx%d drawable=%dx%d bounds=%dx%d usable=%dx%d display_scale=%.3f display_generation=%d density_generation=%d",
                 maximized ? "maximized" : "windowed",
                 g_window_width, g_window_height,
                 native_w, native_h,
                 g_drawable_width, g_drawable_height,
                 native_w + border_left + border_right,
                 native_h + border_top + border_bottom,
-                usable.w, usable.h);
+                usable.w, usable.h, stasis_x11_window_scale(),
+                g_display_generation, g_density_generation);
         }
     }
     return result ? 1 : 0;
@@ -5653,6 +5754,13 @@ STASIS_EXPORT int stasis_test_get_sprite_state(int32_t handle, int32_t* out_i32,
         out_i32[5] = (int32_t)(uint32_t)group_id;
         out_i32[6] = (int32_t)(uint32_t)(group_id >> 32);
     }
+    if (capacity >= 12) {
+        out_i32[7] = entry != NULL ? entry->w : 0;
+        out_i32[8] = entry != NULL ? entry->h : 0;
+        out_i32[9] = entry != NULL ? entry->needs_reraster : 0;
+        out_i32[10] = entry != NULL ? entry->max_w : 0;
+        out_i32[11] = entry != NULL ? entry->max_h : 0;
+    }
     return 1;
 }
 
@@ -5696,6 +5804,55 @@ static int gfx_should_log_sprite_loads(void) {
     const char* env = getenv("STASIS_GFX_LOG_SPRITES");
     cached = (env && env[0] == '1') ? 1 : 0;
     return cached;
+}
+
+static uint64_t stasis_resource_source_bytes(const char* path) {
+    if (!path || !*path) return 0;
+    FILE* file = fopen(path, "rb");
+    if (!file) return 0;
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return 0;
+    }
+    const long size = ftell(file);
+    fclose(file);
+    return size > 0 ? (uint64_t)size : 0;
+}
+
+static void stasis_log_sprite_preparation(
+    const SpriteEntry* entry, const char* path, int replaces_existing
+) {
+    if (!gfx_should_log_sprite_loads() || !entry) return;
+    int handle = 0;
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        if (&g_sprites[i] == entry) {
+            handle = sprite_handle_for_slot(i);
+            break;
+        }
+    }
+    SDL_Log(
+        "Stasis resource preparation: kind=sprite event=%s handle=%d path=%s logical=%dx%d raster=%dx%d source_bytes=%llu density_generation=%d",
+        replaces_existing ? "replace" : "initial", handle,
+        path ? path : "<unknown>", entry->max_w, entry->max_h,
+        entry->w, entry->h,
+        (unsigned long long)stasis_resource_source_bytes(path), g_density_generation);
+}
+
+static void stasis_log_font_preparation(const StasisFont* font, int replaces_existing) {
+    if (!gfx_should_log_sprite_loads() || !font) return;
+    int handle = 0;
+    for (int i = 0; i < MAX_FONTS; i++) {
+        if (&g_fonts[i] == font) {
+            handle = i + 1;
+            break;
+        }
+    }
+    SDL_Log(
+        "Stasis resource preparation: kind=font event=%s handle=%d path=%s logical_size=%d raster_size=%d atlas=%dx%d source_bytes=%llu density_generation=%d",
+        replaces_existing ? "replace" : "initial", handle,
+        font->source_path[0] ? font->source_path : "<unknown>",
+        font->font_size, font->raster_size, font->atlas_size, font->atlas_size,
+        (unsigned long long)font->source_size, g_density_generation);
 }
 
 static void sprite_set_gl_region(SpriteEntry* e, int page_index, int sprite_x, int sprite_y,
@@ -5778,6 +5935,7 @@ static int sprite_publish_pixels_into_entry(
     int w,
     int h
 ) {
+    const int replaces_existing = e->w > 0 && e->h > 0;
     if (g_use_sdl_renderer) {
         if (!g_renderer) {
             free(pixels);
@@ -5833,6 +5991,7 @@ static int sprite_publish_pixels_into_entry(
         e->surface_generation = g_resource_lifecycle.surface_generation;
         e->renderer_generation = g_resource_lifecycle.renderer_generation;
         if (previous) SDL_DestroyTexture(previous);
+        stasis_log_sprite_preparation(e, path, replaces_existing);
         return 1;
     }
 
@@ -5855,6 +6014,7 @@ static int sprite_publish_pixels_into_entry(
         e->needs_reraster = 0;
         e->surface_generation = g_resource_lifecycle.surface_generation;
         e->renderer_generation = g_resource_lifecycle.renderer_generation;
+        stasis_log_sprite_preparation(e, path, replaces_existing);
         return 1;
     }
 
@@ -5886,6 +6046,7 @@ static int sprite_publish_pixels_into_entry(
             e->needs_reraster = 0;
             e->surface_generation = g_resource_lifecycle.surface_generation;
             e->renderer_generation = g_resource_lifecycle.renderer_generation;
+            stasis_log_sprite_preparation(e, path, replaces_existing);
             return 1;
         }
     }
@@ -5909,6 +6070,7 @@ static int sprite_publish_pixels_into_entry(
         e->needs_reraster = 0;
         e->surface_generation = g_resource_lifecycle.surface_generation;
         e->renderer_generation = g_resource_lifecycle.renderer_generation;
+        stasis_log_sprite_preparation(e, path, replaces_existing);
         return 1;
     }
 
@@ -5931,6 +6093,7 @@ static int sprite_publish_pixels_into_entry(
     e->needs_reraster = 0;
     e->surface_generation = g_resource_lifecycle.surface_generation;
     e->renderer_generation = g_resource_lifecycle.renderer_generation;
+    stasis_log_sprite_preparation(e, path, replaces_existing);
     return 1;
 #else
     free(pixels);
@@ -5939,8 +6102,8 @@ static int sprite_publish_pixels_into_entry(
 }
 
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h) {
-    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
-    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
+    const int raster_w = stasis_current_scaled_extent(max_w);
+    const int raster_h = stasis_current_scaled_extent(max_h);
     if (!sprite_source_within_limits(path, raster_w, raster_h)) {
         return 0;
     }
@@ -6059,8 +6222,8 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
         SDL_Log("gfx_load_sprite: could not resolve %s", path);
         return 0;
     }
-    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
-    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
+    const int raster_w = stasis_current_scaled_extent(max_w);
+    const int raster_h = stasis_current_scaled_extent(max_h);
 
     /* Reuse the device-local raster/GPU texture for the same source and
      * logical target size. Drawable-density changes mark the entry dirty and
@@ -6304,8 +6467,8 @@ STASIS_EXPORT int stasis_asset_task_poll(int task_id) {
         return state;
     }
     if (task->kind == STASIS_ASSET_KIND_SPRITE) {
-        int current_raster_w = stasis_display_scaled_extent(task->max_w, g_pixel_scale);
-        int current_raster_h = stasis_display_scaled_extent(task->max_h, g_pixel_scale);
+        int current_raster_w = stasis_current_scaled_extent(task->max_w);
+        int current_raster_h = stasis_current_scaled_extent(task->max_h);
         if (task->raster_w != current_raster_w || task->raster_h != current_raster_h) {
             free(task->pixels);
             task->pixels = NULL;
@@ -7324,6 +7487,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
     memset(&g_test_display_override, 0, sizeof(g_test_display_override));
     g_available_width = 0;
     g_available_height = 0;
+    g_x11_scale_controlled_window = false;
     g_window_minimized = false;
     g_render_accepted_frames = 0;
     g_render_rejected_frames = 0;
@@ -7585,8 +7749,10 @@ static int stasis_font_atlas_pixels(int atlas_size, size_t* pixels_out) {
 static int stasis_build_font_atlas(StasisFont* font) {
     if (!font || !font->ttf_buffer || font->font_size <= 0) return 0;
 
+    const int replaces_existing = font->raster_size > 0 && font->atlas_size > 0;
+
     const float pixel_scale = g_pixel_scale < 1.0f ? 1.0f : g_pixel_scale;
-    const int raster_size = stasis_display_scaled_extent(font->font_size, pixel_scale);
+    const int raster_size = stasis_current_scaled_extent(font->font_size);
     int atlas_size = stasis_display_font_atlas_extent(pixel_scale);
     size_t atlas_pixels = 0;
     unsigned char* atlas_bitmap = NULL;
@@ -7674,6 +7840,7 @@ static int stasis_build_font_atlas(StasisFont* font) {
     font->needs_reraster = 0;
     font->surface_generation = g_resource_lifecycle.surface_generation;
     font->renderer_generation = g_resource_lifecycle.renderer_generation;
+    stasis_log_font_preparation(font, replaces_existing);
     return 1;
 }
 

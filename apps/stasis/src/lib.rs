@@ -5751,7 +5751,7 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
-    fn windows_runtime_uses_physical_drawable_pixels_at_monitor_density() {
+    fn desktop_runtime_uses_physical_drawable_pixels_at_monitor_density() {
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("SDL_WINDOW_HIGH_PIXEL_DENSITY")
                 && STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowSizeInPixels("),
@@ -5760,6 +5760,92 @@ function render(): void {{ {draws} return; }}
         assert!(
             !STASIS_GRAPHICS_SOURCE.contains("stasis_renderer_lifecycle_surface_changed("),
             "SDL3 window metric events must not invalidate renderer-owned textures"
+        );
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let sync_start = graphics_source
+            .find("static void stasis_sync_display_metrics(void) {")
+            .expect("display metric synchronization helper");
+        let sync_end = graphics_source[sync_start..]
+            .find("static void stasis_window_to_logical(")
+            .expect("display metric synchronization boundary")
+            + sync_start;
+        let sync_source = &graphics_source[sync_start..sync_end];
+        assert!(
+            sync_source.contains("SDL_GetRenderOutputSize(g_renderer, &drawable_w, &drawable_h)"),
+            "SDL renderer metrics must sample the complete physical backing"
+        );
+        assert!(
+            !sync_source.contains("SDL_GetCurrentRenderOutputSize("),
+            "logical-presentation-adjusted output can be stale during a canvas transition"
+        );
+        let preparation_key = sync_source
+            .find("const StasisDisplayPreparationScale next_preparation_scale =")
+            .expect("exact resource preparation scale key");
+        let density_change = sync_source
+            .find("stasis_display_preparation_scale_changed(")
+            .expect("exact preparation key comparison");
+        let density_dirty = sync_source
+            .find("stasis_mark_density_resources_dirty();")
+            .expect("density resource invalidation");
+        assert!(
+            preparation_key < density_change && density_change < density_dirty,
+            "the exact bounded preparation key must drive density invalidation"
+        );
+        let dirty_start = graphics_source
+            .find("static void stasis_mark_density_resources_dirty(void) {")
+            .expect("density invalidation helper");
+        let dirty_end = graphics_source[dirty_start..]
+            .find("static int stasis_current_scaled_extent(")
+            .expect("density invalidation helper boundary")
+            + dirty_start;
+        let dirty_source = &graphics_source[dirty_start..dirty_end];
+        assert!(
+            dirty_source.contains("g_sprites[i].needs_reraster = 1;")
+                && dirty_source.contains("g_fonts[i].needs_reraster = 1;"),
+            "an exact preparation key change must invalidate existing sprites and fonts"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains(
+                "Stasis resource preparation: kind=sprite event=%s handle=%d path=%s logical=%dx%d raster=%dx%d source_bytes=%llu density_generation=%d"
+            ) && STASIS_GRAPHICS_SOURCE.contains(
+                "Stasis resource preparation: kind=font event=%s handle=%d path=%s logical_size=%d raster_size=%d atlas=%dx%d source_bytes=%llu density_generation=%d"
+            ),
+            "opt-in receipts must expose current sprite and font preparations at one density generation"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("if (!gfx_should_log_sprite_loads() || !entry) return;")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("if (!gfx_should_log_sprite_loads() || !font) return;"),
+            "resource preparation receipts must remain behind STASIS_GFX_LOG_SPRITES"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("stasis_log_sprite_preparation(e, path, replaces_existing);")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("stasis_log_font_preparation(font, replaces_existing);"),
+            "successful replacements must publish current preparation receipts"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)")
+                && STASIS_GRAPHICS_SOURCE.contains(
+                    "A regular screenshot captures the fitted logical content returned by"
+                ),
+            "resource preparation and capture extents must derive from the full backing without float-tier drift"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("display_scale=%.3f display_generation=%d density_generation=%d"),
+            "desktop presentation receipts must join display and density generations"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowDisplayScale(g_window)")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_GetDisplayContentScale(")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED")
+                && STASIS_GRAPHICS_SOURCE.contains("stasis_apply_x11_window_scale(0);")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("stasis_display_scaled_window_extent(width, display_scale)"),
+            "X11 content scale must size the physical window on the shared desktop path"
         );
         assert!(
             STASIS_RUNTIME_CMAKE
@@ -5786,6 +5872,9 @@ function render(): void {{ {draws} return; }}
         let desktop_maximized = graphics_source
             .find("window_flags |= SDL_WINDOW_MAXIMIZED;")
             .expect("desktop window creation should request a maximized window");
+        let scale_control_guard = graphics_source[..desktop_maximized]
+            .rfind("if (!g_recording_presentation && !g_x11_scale_controlled_window) {")
+            .expect("desktop maximization should exclude explicit X11 scale control");
         let platform_guard_end = graphics_source[desktop_maximized..]
             .find("#endif")
             .expect("desktop window policy should remain platform guarded")
@@ -5795,6 +5884,27 @@ function render(): void {{ {draws} return; }}
             mobile_fullscreen < desktop_maximized && desktop_maximized < platform_guard_end,
             "desktop maximization must be the non-mobile branch of window creation"
         );
+        assert!(
+            mobile_fullscreen < scale_control_guard && scale_control_guard < desktop_maximized,
+            "ordinary desktop launch should maximize unless explicit X11 scale control owns a windowed backing"
+        );
+    }
+
+    #[test]
+    fn explicit_x11_scale_control_owns_a_windowed_launch() {
+        for required in [
+            "SDL_VIDEO_X11_SCALING_FACTOR",
+            "stasis_display_scale_control_is_valid(",
+            "g_x11_scale_controlled_window = stasis_x11_scale_controlled_launch();",
+            "if (!g_recording_presentation && !g_x11_scale_controlled_window)",
+            "if (g_x11_scale_controlled_window) {\n        maximized = 0;",
+            "stasis_apply_x11_window_scale(1);",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "scale-controlled X11 launch should contain {required}"
+            );
+        }
     }
 
     #[test]
@@ -5812,8 +5922,34 @@ function render(): void {{ {draws} return; }}
             .find("SDL_RestoreWindow(g_window);")
             .expect("an explicit size should restore a maximized or minimized window");
         let resize = resize_source
-            .find("SDL_SetWindowSize(g_window, width, height);")
-            .expect("an explicit size should resize the restored window");
+            .find("stasis_apply_x11_window_scale(1);")
+            .expect("an explicit size should apply the platform-owned window scale");
+
+        let scaled_resize_start = graphics_source
+            .find("static void stasis_apply_x11_window_scale(int explicit_window_request) {")
+            .expect("X11 window scale helper");
+        let scaled_resize_end = graphics_source[scaled_resize_start..]
+            .find("static void stasis_query_available_presentation(")
+            .expect("X11 window scale helper boundary")
+            + scaled_resize_start;
+        let scaled_resize_source = &graphics_source[scaled_resize_start..scaled_resize_end];
+        assert!(
+            scaled_resize_source.contains("SDL_SetWindowSize(")
+                && scaled_resize_source.contains("stasis_display_should_apply_windowed_extent(")
+                && scaled_resize_source
+                    .contains("stasis_display_scaled_window_extent(g_window_width, scale)")
+                && scaled_resize_source
+                    .contains("stasis_display_scaled_window_extent(g_window_height, scale)"),
+            "platform-owned resize must apply bounded scaled extents to the physical window"
+        );
+
+        assert!(
+            resize_source.contains("stasis_apply_x11_window_scale(1);")
+                && STASIS_GRAPHICS_SOURCE.contains(
+                    "stasis_apply_x11_window_scale(0);"
+                ),
+            "explicit window requests must override stale restored flags without letting display-scale events resize a maximized surface"
+        );
 
         assert!(
             restore < resize
@@ -6195,8 +6331,8 @@ function render(): void {{ {draws} return; }}
             );
         }
         let scaled_extent = STASIS_GRAPHICS_SOURCE
-            .find("const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);")
-            .expect("scaled sprite extent");
+            .find("const int raster_w = stasis_current_scaled_extent(max_w);")
+            .expect("current-density sprite extent");
         let bounds_check = STASIS_GRAPHICS_SOURCE
             .find("sprite_source_within_limits(path, raster_w, raster_h)")
             .expect("scaled sprite bounds check");

@@ -67,6 +67,15 @@ Callers can therefore rebuild responsive layout or surface state on display
 generation while invalidating density-dependent resources exactly once per
 cache-key change.
 
+For SDL renderer hosts, drawable size comes from `SDL_GetRenderOutputSize` and
+always names the complete physical render target. It is not the current fitted
+logical-presentation output. The latter can retain the previous canvas's
+letterboxed dimensions during a portrait/landscape transition. Stasis first
+samples the full backing, derives the fitted drawable viewport separately, and
+then applies the requested logical presentation. Consequently a logical canvas
+change can alter content scale and density without ever replacing the backing
+receipt with a stale fitted-content size.
+
 ## Web display boundary
 
 The browser host keeps four extents separate: the available safe visible
@@ -110,6 +119,17 @@ current raster scale, and the fixed raster options used by the shared runtime.
 Font and cached-text entries use logical font size plus the same raster scale.
 Raster dimensions use checked, bounded `ceil(logical_extent * raster_scale)`;
 the logical draw size remains unchanged.
+
+Desktop resource extent calculation uses the exact integer logical/full-backing
+ratio rather than applying `ceil` to a rounded floating-point scale. For
+example, an 18-pixel font at a `1920 / 720` backing ratio prepares exactly 48
+pixels, not 49 due to binary float drift. With `STASIS_GFX_LOG_SPRITES=1`, each
+successful initial or replacement preparation emits a current-resource receipt
+containing its handle, source bytes, logical and raster extents, and density
+generation; font receipts also include the live atlas extent.
+Window presentation receipts name both the display generation and density
+generation so acceptance evidence can reject resource receipts from an older
+backing.
 
 Desktop and packaged mobile builds perform this policy in
 `runtime/stasis_graphics.c`. Workshop and generated release apps receive
@@ -167,6 +187,30 @@ initialization. A requested `800 x 600` logical window on a 150% display is
 therefore an `800 x 600` SDL window with a `1200 x 900` drawable. Windows does
 not bitmap-stretch a lower-resolution frame, and the resulting `1.5` raster
 scale rebuilds SVG and font resources at the drawable density.
+
+Regular SDL framebuffer captures remain fitted-content captures. Their extent
+is derived from the full backing and logical canvas, while framebuffer memory
+and density preparation continue to use the complete backing. Recording targets
+retain their explicitly requested physical extent.
+
+On Linux, X11 tests may set `SDL_VIDEO_X11_SCALING_FACTOR` before SDL video
+initialization to exercise deterministic 1x, fractional, and 2x backing tiers.
+This is an SDL/X11 acceptance control, not a game-owned scale. Wayland remains
+compositor-owned. Both backends feed the same full-backing metrics, fitted
+content, pointer transform, density generation, and bounded preparation path.
+When that X11 control is explicitly present and valid, Stasis launches in a
+scale-controlled window instead of requesting the window-manager work area;
+maximize requests retain the latest logical canvas but keep that deterministic
+scaled backing. Without the control, desktop launch and maximize behavior are
+unchanged.
+X11 itself uses pixel window coordinates, so Stasis queries SDL's window/display
+content scale and applies it when creating or resizing a windowed presentation.
+`SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED` reapplies that physical extent without
+changing the logical canvas. Maximized/fullscreen backing remains the actual
+bounded screen surface rather than multiplying beyond the display.
+An explicit window-size request remains authoritative while the X11 window
+manager completes an asynchronous restore: Stasis applies the requested scaled
+backing even if SDL briefly continues to report the prior maximized state.
 
 On macOS, the release toolchain ships `stasis_runner.app`, and generated
 desktop packages preserve the same app-bundle contract with a game-specific

@@ -2,6 +2,8 @@
 #define STASIS_DISPLAY_SCALE_H
 
 #include <math.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 typedef struct {
     float x;
@@ -23,6 +25,13 @@ typedef struct {
     float content_scale;
     float raster_scale;
 } StasisDisplayMetrics;
+
+typedef struct {
+    int64_t numerator;
+    int64_t denominator;
+} StasisDisplayPreparationScale;
+
+#define STASIS_DISPLAY_RASTER_SCALE_MAX 8
 
 static float stasis_display_clampf(float value, float minimum, float maximum) {
     if (value < minimum) return minimum;
@@ -86,7 +95,8 @@ static StasisDisplayMetrics stasis_display_metrics(
         metrics.drawable_viewport.h / (float)metrics.logical_h;
     metrics.content_scale = drawable_scale_x < drawable_scale_y
         ? drawable_scale_x : drawable_scale_y;
-    metrics.raster_scale = stasis_display_clampf(metrics.content_scale, 1.0f, 8.0f);
+    metrics.raster_scale = stasis_display_clampf(
+        metrics.content_scale, 1.0f, (float)STASIS_DISPLAY_RASTER_SCALE_MAX);
 
     if (safe_native_viewport.w <= 0.0f || safe_native_viewport.h <= 0.0f) {
         safe_native_viewport.x = 0.0f;
@@ -173,6 +183,93 @@ static int stasis_display_scaled_extent(int logical_extent, float pixel_scale) {
     double scaled = ceil((double)logical_extent * (double)pixel_scale);
     if (scaled > 65536.0) return 65536;
     return (int)scaled;
+}
+
+static int64_t stasis_display_gcd_i64(int64_t left, int64_t right) {
+    while (right != 0) {
+        const int64_t remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    return left;
+}
+
+static StasisDisplayPreparationScale stasis_display_preparation_scale(
+    int logical_w,
+    int logical_h,
+    int drawable_w,
+    int drawable_h
+) {
+    StasisDisplayPreparationScale scale = {1, 1};
+    if (logical_w <= 0 || logical_h <= 0 || drawable_w <= 0 || drawable_h <= 0) {
+        return scale;
+    }
+    scale.numerator = drawable_w;
+    scale.denominator = logical_w;
+    if ((int64_t)drawable_h * logical_w < (int64_t)drawable_w * logical_h) {
+        scale.numerator = drawable_h;
+        scale.denominator = logical_h;
+    }
+    if (scale.numerator < scale.denominator) scale.numerator = scale.denominator;
+    const int64_t maximum_numerator =
+        scale.denominator * STASIS_DISPLAY_RASTER_SCALE_MAX;
+    if (scale.numerator > maximum_numerator) scale.numerator = maximum_numerator;
+    const int64_t divisor = stasis_display_gcd_i64(scale.numerator, scale.denominator);
+    scale.numerator /= divisor;
+    scale.denominator /= divisor;
+    return scale;
+}
+
+static int stasis_display_preparation_scale_changed(
+    StasisDisplayPreparationScale previous,
+    StasisDisplayPreparationScale next
+) {
+    return previous.numerator != next.numerator || previous.denominator != next.denominator;
+}
+
+static int stasis_display_scaled_extent_for_backing(
+    int logical_extent,
+    int logical_w,
+    int logical_h,
+    int drawable_w,
+    int drawable_h
+) {
+    if (logical_extent <= 0) return 0;
+    if (logical_extent >= 65536) return 65536;
+    const StasisDisplayPreparationScale scale = stasis_display_preparation_scale(
+        logical_w, logical_h, drawable_w, drawable_h);
+    const int64_t scaled =
+        ((int64_t)logical_extent * scale.numerator + scale.denominator - 1) /
+        scale.denominator;
+    return scaled > 65536 ? 65536 : (int)scaled;
+}
+
+static int stasis_display_scaled_window_extent(int logical_extent, float display_scale) {
+    if (logical_extent <= 0) return 0;
+    if (!isfinite(display_scale) || display_scale < 1.0f) display_scale = 1.0f;
+    if (display_scale > (float)STASIS_DISPLAY_RASTER_SCALE_MAX) {
+        display_scale = (float)STASIS_DISPLAY_RASTER_SCALE_MAX;
+    }
+    const double scaled = ceil((double)logical_extent * (double)display_scale);
+    return scaled > 65536.0 ? 65536 : (int)scaled;
+}
+
+static int stasis_display_scale_control_is_valid(const char* value) {
+    if (!value || !*value) return 0;
+    char* end = NULL;
+    const double parsed = strtod(value, &end);
+    return end != value && *end == 0 && isfinite(parsed) && parsed > 0.0;
+}
+
+static int stasis_display_should_apply_windowed_extent(
+    int explicit_window_request,
+    int fullscreen,
+    int maximized,
+    int minimized
+) {
+    if (fullscreen) return 0;
+    if (explicit_window_request) return 1;
+    return !maximized && !minimized;
 }
 
 #define STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT 512
