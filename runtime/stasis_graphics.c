@@ -4716,6 +4716,7 @@ static int stasis_sprite_atlas_reserve_on_page(
     }
     if (y + alloc_h > page->height) return 0;
     page->cursor_x = x + alloc_w;
+    page->cursor_y = y;
     if (alloc_h > page->row_h) page->row_h = alloc_h;
     page->live_allocations++;
     *out_x = x + STASIS_SDL_ATLAS_PADDING;
