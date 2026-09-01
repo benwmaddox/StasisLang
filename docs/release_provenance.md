@@ -19,7 +19,7 @@ Every generated desktop, Android, and iOS package contains
 `app/` payload beside the runtime. Mobile packages also place the manifest in the game
 asset root and compile a small generated header into the lifecycle adapter. At
 startup, the adapter logs the build label, release tag, source commit, and
-`gfx_cmd` renderer family with schema 6. Package validation accepts only the
+`gfx_cmd` renderer family with schema 7. Package validation accepts only the
 current command-buffer schema; generated artifacts must be rebuilt with the matching toolchain.
 The desktop graphics runtime logs the bounded
 sidecar manifest from the resolved runtime payload directory during initialization.

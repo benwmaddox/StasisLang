@@ -156,6 +156,7 @@ function render(): i32 {
 
 function append_it028_marker(cmd_i32: i32[], cmd_f32: f32[], revision: i32): void {
     let marker_f: i32 = PARITY_GFX_F_RECT_REVERSE_BASE - 8;
+    let order_index: i32 = cmd_i32[22];
     let revision_f: f32;
     revision_f.from_i32(revision);
     cmd_i32[24] = 2;
@@ -167,8 +168,8 @@ function append_it028_marker(cmd_i32: i32[], cmd_f32: f32[], revision: i32): voi
     cmd_f32[marker_f + 5] = 0.9;
     cmd_f32[marker_f + 6] = 0.95;
     cmd_f32[marker_f + 7] = 1.0;
-    cmd_i32[22] = 11;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 10] = PARITY_GFX_ORDER_SCALE * 4 + 1;
+    cmd_i32[PARITY_GFX_I_ORDER_BASE + order_index] = PARITY_GFX_ORDER_SCALE * 4 + 1;
+    cmd_i32[22] = order_index + 1;
 }
 
 function on_code_swap(): void {

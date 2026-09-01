@@ -15,6 +15,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = ROOT / "samples" / "render_parity" / "capture_manifest.json"
+ATLAS_SPRITE_HANDLES = (
+    "canvas_sprite",
+    "canvas_sprite",
+    "opaque_sprite",
+    "translucent_sprite",
+    "opaque_sprite",
+)
 ALLOWED_STAGES = {
     "initial_launch",
     "second_frame",
@@ -23,14 +30,14 @@ ALLOWED_STAGES = {
 }
 INITIAL_STAGE_FRAMES = {"initial_launch": 1, "second_frame": 2}
 RUNTIME_TRACE_PATTERN = re.compile(
-    r"Stasis render contract v6 trace=(\d+)\s+flags=3\s+lines=2\s+rects=1\s+sprites=5\s+text=2"
+    r"Stasis render contract v7 trace=(\d+)\s+flags=3\s+lines=2\s+rects=1\s+sprites=5\s+text=2"
 )
 
 
 def _runtime_command_trace(log: str, stage: str) -> int:
     trace_match = RUNTIME_TRACE_PATTERN.search(log)
     if trace_match is None:
-        raise ValueError(f"runtime evidence for {stage} lacks current v6 command counts")
+        raise ValueError(f"runtime evidence for {stage} lacks current v7 command counts")
     trace = int(trace_match.group(1))
     if trace == 0:
         raise ValueError(f"runtime evidence for {stage} has a zero command trace")
@@ -143,6 +150,13 @@ def read_capture(path: Path) -> tuple[int, int, bytes]:
     raise ValueError("capture must use .bmp or .png")
 
 
+def _atlas_sprite_handles(frame_source: str) -> tuple[str, ...]:
+    return tuple(re.findall(
+        r"parity_add_sprite\(cmd_i32,\s*([A-Za-z_][A-Za-z0-9_]*)\s*,",
+        frame_source,
+    ))
+
+
 def validate_fixture(manifest_path: Path) -> dict:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != 1:
@@ -165,8 +179,12 @@ def validate_fixture(manifest_path: Path) -> dict:
         expected = int(manifest["required_commands"][command])
         if actual != expected:
             raise ValueError(f"fixture has {actual} {command} commands; expected {expected}")
-    if "parity_add_sprite(cmd_i32, 0," not in frame_source:
-        raise ValueError("fixture does not exercise the procedural fallback sprite")
+    atlas_handles = _atlas_sprite_handles(frame_source)
+    if atlas_handles != ATLAS_SPRITE_HANDLES:
+        raise ValueError(
+            "fixture sprite instances must use the canonical five resolved "
+            "atlas-backed resources"
+        )
     if "platform" in frame_source.lower():
         raise ValueError("render parity fixture must not branch on platform")
     if 'import "frame.stasis";' not in source or "build_parity_frame(" not in source:
@@ -371,6 +389,17 @@ def _verify_capture_rgba(
             if coverage < float(region["min_coverage"]):
                 raise ValueError(
                     f"region {region['name']} green-sprite coverage {coverage:.3f}; expected "
+                    f"at least {region['min_coverage']:.3f}"
+                )
+        elif region.get("predicate") == "atlas_canvas":
+            matching = sum(
+                pixel[1] >= 40 and pixel[2] >= 55
+                for pixel in pixels
+            )
+            coverage = matching / len(pixels)
+            if coverage < float(region["min_coverage"]):
+                raise ValueError(
+                    f"region {region['name']} atlas-canvas coverage {coverage:.3f}; expected "
                     f"at least {region['min_coverage']:.3f}"
                 )
         elif region.get("predicate") == "crossing_lines":

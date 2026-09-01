@@ -2,8 +2,11 @@
 
 `samples/render_parity` is the framework-owned current gfx_cmd conformance scene. It
 does not depend on a game. One frame contains a clear, two overlapping lines,
-one translucent filled rectangle, the procedural fallback sprite, opaque and translucent SVGs, a full-canvas SVG,
-a rotated/scaled sprite, direct UTF-8 text, cached text, and present.
+one translucent filled rectangle, five resolved atlas-backed sprite instances
+(a full-canvas SVG, the same SVG repeated smaller, opaque and translucent SVGs,
+and a rotated/scaled opaque SVG), direct UTF-8 text, cached text, and present.
+Missing resources use the renderer's same-path placeholder region, but are tested
+separately instead of being part of this normal resource fixture.
 
 The checked-in test font is intentionally synthetic. Regenerate it with
 `python tools/ci/generate_render_parity_font.py`; it contains only deterministic
@@ -65,7 +68,7 @@ font asset, drawable size, and dependency versions are fixed. The checked-in
 `windows_sdl_d3d11` profile records the exact proof capture from that fixed
 configuration. The checked-in `portable` profile instead uses named pixel
 regions with documented tolerances.
-This prevents driver rounding from hiding a missing SVG, fallback sprite, or
+This prevents driver rounding from hiding a missing SVG, the atlas-backed canvas sprite, or
 text layer while still producing a specific stage/region failure.
 
 For Android, package the same project and use the existing device lifecycle
