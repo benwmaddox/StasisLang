@@ -24,6 +24,7 @@ pub use live_workspace::LiveRunConfig;
 pub use mobile_aot_bindings::{
     audit_mobile_aot_bindings, escape_mobile_c_string_literal, mobile_aot_function_for,
     write_mobile_aot_bindings_source, write_mobile_aot_bindings_source_with_profile,
+    write_mobile_aot_bindings_source_with_profile_and_assets,
 };
 pub use record_replay::{simulation_state_hash, PlayReplayConfig};
 pub use stasis_test_runner::{

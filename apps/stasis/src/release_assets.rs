@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use stasis_assets::ResolvedAssetManifest;
+use stasis_assets::{
+    load_project_asset_manifest, resolve_project_asset_paths, AssetLimits, ResolvedAssetManifest,
+    DEFAULT_ASSET_MANIFEST_PATH,
+};
 use stasis_compiler::backend::assets::{
     validate_asset_references, AssetDiagnostic, AssetValidationResult,
 };
@@ -58,6 +61,26 @@ pub(crate) fn retain_snapshot_assets(
 ) -> Result<ResolvedAssetManifest, String> {
     let validation = validate_snapshot_assets(project_dir, snapshot, Some(resolved))?;
     Ok(resolved.retain_paths(&validation.resolved_paths))
+}
+
+pub(crate) fn resolve_snapshot_assets(
+    project_dir: &Path,
+    snapshot: &ProgramSnapshot,
+) -> Result<ResolvedAssetManifest, String> {
+    let source_manifest = project_dir.join(DEFAULT_ASSET_MANIFEST_PATH);
+    if source_manifest.exists() {
+        let resolved = load_project_asset_manifest(project_dir, AssetLimits::default())
+            .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
+        return retain_snapshot_assets(project_dir, snapshot, &resolved);
+    }
+
+    let validation = validate_snapshot_assets(project_dir, snapshot, None)?;
+    resolve_project_asset_paths(
+        project_dir,
+        &validation.resolved_paths,
+        AssetLimits::default(),
+    )
+    .map_err(|error| format!("failed to infer mobile AOT assets: {error}"))
 }
 
 pub(crate) fn format_asset_diagnostics(diagnostics: &[AssetDiagnostic]) -> String {
