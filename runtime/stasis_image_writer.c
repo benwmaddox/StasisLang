@@ -63,7 +63,7 @@ static int write_bmp_bgra32(
 
     const uint32_t row_bytes = (uint32_t)w * 4u;
     if (is_bottom_up) {
-        /* Write rows bottom-up (OpenGL glReadPixels origin). */
+        /* Write rows bottom-up when the capture source uses a lower-left origin. */
         for (int y = 0; y < h; y++) {
             const uint8_t* row = bgra + (size_t)y * (size_t)row_bytes;
             if (fwrite(row, 1, row_bytes, f) != row_bytes) {

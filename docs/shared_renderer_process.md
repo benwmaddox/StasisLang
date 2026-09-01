@@ -58,9 +58,9 @@ typed command submission cannot overflow it before its payload category.
 
 ## Platform boundary
 
-Shipping CMake builds set `STASIS_GRAPHICS_SDL_ONLY=ON`. Android and iOS shells
+Shipping CMake builds one native renderer: SDL_Renderer. Android and iOS shells
 add only lifecycle, asset-root, input/surface, and package glue. Windows CI
-builds this same SDL-only target and runs the portable trace contract test.
+builds this same target and runs the portable trace contract test.
 
 The Android Workshop menus remain native Android UI. Its embedded game canvas
 cannot use SDL's single Android window without handing the editor activity and
@@ -80,9 +80,8 @@ through their normal resource providers before accepting the next valid frame.
 Shipping artifacts use `stasis package-mobile` and the SDL runtime.
 The preview adapter is therefore an embedded-editor boundary, not a competing
 shipping renderer. It performs no per-command JNI calls and adds no additional
-full-frame copy. The old desktop GL adapter is available only when CMake is
-explicitly configured with `STASIS_GRAPHICS_SDL_ONLY=OFF`; it is not packaged or
-exercised as the canonical process.
+full-frame copy. There is no alternate native renderer or runtime renderer
+selector.
 
 ## Frame pacing
 

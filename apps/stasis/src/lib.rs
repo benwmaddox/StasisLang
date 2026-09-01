@@ -250,7 +250,6 @@ impl PlayCaptureEnvironment {
             "STASIS_RECORDING_FPS",
             "STASIS_RECORDING_PRESENTATION",
             "STASIS_WINDOW_HIDDEN",
-            "STASIS_USE_SDL",
             "STASIS_GFX_VSYNC",
             "SDL_VIDEODRIVER",
             "SDL_RENDER_DRIVER",
@@ -264,7 +263,6 @@ impl PlayCaptureEnvironment {
         std::env::set_var("STASIS_RECORDING_FPS", config.fps.to_string());
         std::env::set_var("STASIS_RECORDING_PRESENTATION", "1");
         std::env::set_var("STASIS_WINDOW_HIDDEN", "1");
-        std::env::set_var("STASIS_USE_SDL", "1");
         std::env::set_var("STASIS_GFX_VSYNC", "0");
         std::env::set_var("SDL_VIDEODRIVER", "dummy");
         std::env::set_var("SDL_RENDER_DRIVER", "software");
@@ -5676,13 +5674,11 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
-    fn graphics_runtime_presents_asset_free_loading_on_sdl_and_opengl() {
+    fn graphics_runtime_presents_asset_free_loading_on_sdl() {
         let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
         for required in [
             "static void stasis_present_gpu_loading(void)",
             "SDL_RenderPresent(g_renderer);",
-            "SDL_GL_SwapWindow(g_window);",
-            "g_use_sdl_renderer ? \"sdl\" : \"gl\"",
         ] {
             assert!(
                 graphics_source.contains(required),
@@ -5698,7 +5694,7 @@ function render(): void {{ {draws} return; }}
         );
         assert!(
             graphics_source.contains("SDL_PumpEvents();\n    stasis_present_gpu_loading();"),
-            "every desktop backend must pump initial window messages before presenting loading"
+            "the native renderer must pump initial window messages before presenting loading"
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("stasis_graphics_runtime_abi_version(void)"),
@@ -5731,23 +5727,17 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
-    fn opengl_frame_start_clears_the_entire_drawable_before_viewport_content() {
+    fn sdl_frame_start_clears_the_logical_canvas() {
         let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
         let clear_start = graphics_source
-            .find("static void stasis_gl_clear_drawable(void) {")
-            .expect("OpenGL frame-start clear helper");
+            .find("STASIS_EXPORT void stasis_clear(")
+            .expect("SDL frame-start clear helper");
         let clear_body = graphics_source[clear_start..]
             .split_once("\n}\n")
             .map(|(body, _)| body)
-            .expect("complete OpenGL frame-start clear helper");
-        assert!(clear_body.contains("glDisable(GL_SCISSOR_TEST)"));
-        assert!(clear_body.contains("glClearColor(0.0f, 0.0f, 0.0f, 1.0f)"));
-        assert!(clear_body.contains("glClear(GL_COLOR_BUFFER_BIT)"));
-        assert!(
-            !clear_body.contains("glScissor"),
-            "frame-start clear must not depend on stale letterbox geometry"
-        );
-        assert!(graphics_source.contains("stasis_gl_clear_drawable();"));
+            .expect("complete SDL frame-start clear helper");
+        assert!(clear_body.contains("SDL_RenderClear(g_renderer)"));
+        assert!(clear_body.contains("SDL_RenderFillRect(g_renderer, &logical_canvas)"));
     }
 
     #[test]

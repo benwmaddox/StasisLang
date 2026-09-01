@@ -148,7 +148,7 @@ remains available only with `--development-build` for emulator workflows.
 
 Rules:
 
-- `STASIS_GRAPHICS_SDL_ONLY` is the mobile runtime direction.
+- The canonical SDL renderer is the mobile runtime direction.
 - Android and iOS shells should share the same C runtime ABI wherever platform
   SDK differences do not force a thin adapter.
 - The runtime drives the app lifecycle and calls `main` once, then `tick` and

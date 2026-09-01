@@ -2,7 +2,7 @@
 
 Android and iOS release apps link the same `stasis_mobile_runtime` static C
 library. The target compiles the existing Stasis graphics, input, audio, and
-asset host APIs with `STASIS_GRAPHICS_SDL_ONLY`; it never links the desktop SDL
+asset host APIs with the canonical SDL renderer; it never links the desktop SDL
 entry shim, DLL runner, dynamic loader, JIT, watcher, or hot-swap code.
 
 ## Shell integration

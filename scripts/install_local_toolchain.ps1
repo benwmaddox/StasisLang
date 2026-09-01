@@ -32,6 +32,7 @@ $runtimeSourceFiles = @(
   "stasis_audio_assets.c",
   "stasis_audio_assets.h",
   "stasis_graphics.c",
+  "stasis_mixed_quad_planner.h",
   "stasis_sprite_atlas_policy.h",
   "stasis_image_writer.c",
   "stasis_image_writer.h",
@@ -325,7 +326,7 @@ try {
       "-DCMAKE_TOOLCHAIN_FILE=$(Join-Path $vcpkgRoot 'scripts/buildsystems/vcpkg.cmake')",
       "-DVCPKG_TARGET_TRIPLET=x64-windows-static", "-DSTASIS_GRAPHICS_BUILD_SHARED=ON",
       "-DSTASIS_GRAPHICS_BUILD_STATIC=OFF", "-DSTASIS_GRAPHICS_BUNDLE_SDL=ON",
-      "-DSTASIS_GRAPHICS_SDL_ONLY=ON", "-DSTASIS_BUILD_RUNNER=ON", "-DSTASIS_BUILD_SYS=OFF",
+      "-DSTASIS_BUILD_RUNNER=ON", "-DSTASIS_BUILD_SYS=OFF",
       "-DSTASIS_RELEASE_ID=$ReleaseId", "-DSTASIS_BUILD_FINGERPRINT=$fingerprint"
     ) | Out-Null
     Invoke-Bounded -FilePath "cmake" -Arguments @("--build", $runtimeBuild, "--config", "Release", "--target", "stasis_graphics", "stasis_runner") | Out-Null

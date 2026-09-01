@@ -75,6 +75,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",
+    "stasis_mixed_quad_planner.h",
     "stasis_sprite_atlas_policy.h",
     "stasis_image_writer.c",
     "stasis_image_writer.h",
@@ -5952,7 +5953,7 @@ fn write_ios_object_config(
     fs::write(
         output,
         format!(
-            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited) STASIS_GRAPHICS_SDL_ONLY=1{network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
+            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited){network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
             network_flags = network_flags,
             network_headers = network_headers,
             network_library = network_library,
@@ -8995,7 +8996,6 @@ mod tests {
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
         assert!(!project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
-        assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
         assert!(ios.join("runtime/stasis_asset_path.h").is_file());
         assert!(ios.join("runtime/stasis_render_contract.h").is_file());

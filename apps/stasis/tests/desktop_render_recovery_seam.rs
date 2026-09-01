@@ -103,7 +103,6 @@ fn malformed_frames_are_rejected_without_poisoning_the_next_valid_frame() {
         std::env::var_os("STASIS_RUNTIME_DLL_PATH")
             .expect("STASIS_RUNTIME_DLL_PATH must name the CI-built SDL runtime"),
     );
-    std::env::set_var("STASIS_USE_SDL", "1");
     std::env::set_var("STASIS_ENABLE_TEST_INPUT", "1");
     let gfx = StasisGraphicsApi::load(&runtime_path).expect("load graphics runtime");
     assert!(gfx

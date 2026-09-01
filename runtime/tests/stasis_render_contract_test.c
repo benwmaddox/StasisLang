@@ -9,6 +9,9 @@ static void build_representative_frame(
     float *f32s,
     uint8_t *u8s
 ) {
+    memset(i32s, 0, STASIS_RENDER_I32_COUNT * sizeof(*i32s));
+    memset(f32s, 0, STASIS_RENDER_F32_COUNT * sizeof(*f32s));
+    memset(u8s, 0, STASIS_RENDER_U8_COUNT * sizeof(*u8s));
     i32s[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
     i32s[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
     i32s[STASIS_RENDER_I_FLAGS] =

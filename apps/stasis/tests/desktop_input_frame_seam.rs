@@ -154,7 +154,6 @@ fn desktop_sdl_input_changes_jit_state_and_submitted_frame_on_the_intended_tick(
             .expect("STASIS_RUNTIME_DLL_PATH must name the CI-built SDL runtime"),
     );
     std::env::set_var("STASIS_ENABLE_TEST_INPUT", "1");
-    std::env::set_var("STASIS_USE_SDL", "1");
 
     let gfx = StasisGraphicsApi::load(&runtime_path).expect("load graphics runtime");
     assert!(gfx

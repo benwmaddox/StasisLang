@@ -43,11 +43,12 @@ set(STASIS_MONOLITH_OUTPUT_DIR "" CACHE PATH "Production executable output direc
 set(STASIS_MONOLITH_OUTPUT_NAME "stasis_game" CACHE STRING "Production executable file name")
 option(
     STASIS_BUILD_MOBILE_RUNTIME
-    "Build the shared SDL-only mobile runtime core"
+    "Build the shared SDL renderer mobile runtime core"
     ${STASIS_MOBILE_PLATFORM}
 )
 option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" OFF)
 option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke tests" OFF)
+option(STASIS_GRAPHICS_BUILD_TESTS "Build native renderer contract tests" OFF)
 
 if(STASIS_BUILD_MONOLITH)
     set(STASIS_GRAPHICS_BUNDLE_SDL ON CACHE BOOL "" FORCE)
@@ -72,13 +73,6 @@ if(STASIS_SVG_BUILD_TESTS)
         COMMAND stasis_svg_smoke "${CMAKE_CURRENT_LIST_DIR}/tests/fixtures/viewport-clip.svg"
     )
 endif()
-
-# Android and other restricted platforms do not support the OpenGL 2.1 + GLEW path.
-option(
-    STASIS_GRAPHICS_SDL_ONLY
-    "Build the canonical SDL_Renderer runtime (disable only for legacy GL conformance)"
-    ON
-)
 
 # Find graphics deps only when building graphics targets.
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_MOBILE_RUNTIME)
@@ -154,15 +148,15 @@ if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_
         find_package(SDL3_image CONFIG REQUIRED)
     endif()
 
-    if((STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC) AND
-       NOT STASIS_GRAPHICS_SDL_ONLY)
-        # Find OpenGL and GLEW (desktop backend)
-        find_package(OpenGL REQUIRED)
-        find_package(GLEW REQUIRED)
-    endif()
 endif()
 
-function(configure_stasis_target target is_static sdl_only)
+if(STASIS_GRAPHICS_BUILD_TESTS)
+    enable_testing()
+    add_executable(stasis_mixed_quad_planner_test tests/stasis_mixed_quad_planner_test.c)
+    add_test(NAME stasis_mixed_quad_planner_test COMMAND stasis_mixed_quad_planner_test)
+endif()
+
+function(configure_stasis_target target is_static)
     target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_svg.cpp)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     target_compile_definitions(${target} PRIVATE STASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}")
@@ -171,15 +165,6 @@ function(configure_stasis_target target is_static sdl_only)
         $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>
         $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image>,SDL3_image::SDL3_image,SDL3_image::SDL3_image-static>
     )
-
-    if(NOT sdl_only)
-        target_link_libraries(${target} PRIVATE
-            OpenGL::GL
-            GLEW::GLEW
-        )
-    else()
-        target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_SDL_ONLY)
-    endif()
 
     if(NOT WIN32)
         target_link_libraries(${target} PRIVATE m)
@@ -195,17 +180,13 @@ function(configure_stasis_target target is_static sdl_only)
     endif()
 
     if(${is_static})
-        if(NOT sdl_only)
-            target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_STATIC GLEW_STATIC)
-        else()
-            target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_STATIC)
-        endif()
+        target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_STATIC)
     endif()
 endfunction()
 
 if(STASIS_GRAPHICS_BUILD_SHARED)
     add_library(stasis_graphics SHARED)
-    configure_stasis_target(stasis_graphics OFF ${STASIS_GRAPHICS_SDL_ONLY})
+    configure_stasis_target(stasis_graphics OFF)
 
     # On Windows, use .def file for explicit exports
     if(WIN32)
@@ -225,7 +206,7 @@ endif()
 
 if(STASIS_GRAPHICS_BUILD_STATIC)
     add_library(stasis_graphics_static STATIC)
-    configure_stasis_target(stasis_graphics_static ON ${STASIS_GRAPHICS_SDL_ONLY})
+    configure_stasis_target(stasis_graphics_static ON)
     set_target_properties(stasis_graphics_static PROPERTIES
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Release"
         ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"
@@ -242,7 +223,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
     )
-    configure_stasis_target(stasis_mobile_runtime ON TRUE)
+    configure_stasis_target(stasis_mobile_runtime ON)
     set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD 11)
     set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD_REQUIRED ON)
     if(MSVC)
