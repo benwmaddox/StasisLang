@@ -423,6 +423,322 @@ pub fn load_project_asset_manifest(
     })
 }
 
+/// Resolves a compiler-discovered, static asset closure without requiring an
+/// authored `assets/manifest.json` in the project.
+///
+/// `paths` must use canonical project-relative `assets/...` spelling. The
+/// resulting manifest remains in memory; [`prepare_asset_bundle`] serializes a
+/// compatible manifest only into the requested bundle destination.
+pub fn resolve_project_asset_paths(
+    project_root: impl AsRef<Path>,
+    paths: &BTreeSet<String>,
+    limits: AssetLimits,
+) -> Result<ResolvedAssetManifest, AssetManifestError> {
+    let root = project_root.as_ref().canonicalize().map_err(|error| {
+        manifest_error(
+            "asset_root_unavailable",
+            None,
+            Some(project_root.as_ref()),
+            error.to_string(),
+        )
+    })?;
+    if paths.len() > limits.max_assets {
+        return Err(manifest_error(
+            "asset_manifest_too_many_entries",
+            None,
+            Some(Path::new(DEFAULT_ASSET_MANIFEST_PATH)),
+            format!(
+                "{} discovered assets exceeds limit {}",
+                paths.len(),
+                limits.max_assets
+            ),
+        ));
+    }
+    let asset_root = if paths.is_empty() {
+        root.join("assets")
+    } else {
+        let asset_root = root.join("assets").canonicalize().map_err(|error| {
+            manifest_error(
+                "asset_root_unavailable",
+                None,
+                Some(Path::new("assets")),
+                error.to_string(),
+            )
+        })?;
+        if !asset_root.starts_with(&root) || !asset_root.is_dir() {
+            return Err(manifest_error(
+                "asset_root_unavailable",
+                None,
+                Some(Path::new("assets")),
+                "assets must resolve to a directory inside the project root",
+            ));
+        }
+        asset_root
+    };
+
+    let mut assets = Vec::with_capacity(paths.len());
+    let mut ids = BTreeSet::new();
+    let mut handles = BTreeMap::new();
+    for path in paths {
+        let relative = validate_relative_asset_path(path).map_err(|detail| {
+            manifest_error("asset_path_invalid", None, Some(Path::new(path)), detail)
+        })?;
+        validate_exact_path_case(&root, &relative).map_err(|detail| {
+            manifest_error(
+                "asset_path_case_mismatch",
+                None,
+                Some(Path::new(path)),
+                detail,
+            )
+        })?;
+        let absolute_path = root.join(&relative).canonicalize().map_err(|error| {
+            manifest_error(
+                "asset_file_missing",
+                None,
+                Some(Path::new(path)),
+                error.to_string(),
+            )
+        })?;
+        if !absolute_path.starts_with(&asset_root) || !absolute_path.is_file() {
+            return Err(manifest_error(
+                "asset_path_outside_assets",
+                None,
+                Some(Path::new(path)),
+                "asset must resolve to a file inside the project assets directory",
+            ));
+        }
+        let require_svg_lf = Path::new(path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+        let (content_sha256, byte_length) =
+            sha256_file(&absolute_path, limits.max_asset_bytes, require_svg_lf).map_err(
+                |(code, detail)| manifest_error(code, None, Some(Path::new(path)), detail),
+            )?;
+        let format = infer_asset_format(path, &absolute_path)?;
+        let kind = asset_kind_name(&format);
+        let id = format!(
+            "generated-{kind}-{}",
+            sha256_bytes(format!("{kind}:{path}").as_bytes())
+        );
+        let entry = AssetEntry {
+            id,
+            path: path.clone(),
+            content_sha256,
+            prepared_from_sha256: None,
+            format,
+            prepare: None,
+            dependencies: Vec::new(),
+        };
+        validate_entry(&entry)?;
+        if !ids.insert(entry.id.clone()) {
+            return Err(entry_error(
+                "asset_id_duplicate",
+                &entry,
+                "generated asset IDs must be unique",
+            ));
+        }
+        let handle = stable_asset_handle(&entry);
+        if let Some(other_id) = handles.insert(handle, entry.id.clone()) {
+            return Err(entry_error(
+                "asset_handle_collision",
+                &entry,
+                format!("stable handle collides with asset {other_id}"),
+            ));
+        }
+        assets.push(ResolvedAsset {
+            handle,
+            entry,
+            absolute_path,
+            byte_length,
+        });
+    }
+    assets.sort_by(|left, right| left.entry.id.cmp(&right.entry.id));
+    Ok(ResolvedAssetManifest {
+        manifest_path: root.join(DEFAULT_ASSET_MANIFEST_PATH),
+        dynamic_assets: BTreeSet::new(),
+        assets,
+    })
+}
+
+fn asset_kind_name(format: &AssetFormat) -> &'static str {
+    match format {
+        AssetFormat::Sprite { .. } => "sprite",
+        AssetFormat::Audio { .. } => "audio",
+        AssetFormat::Font { .. } => "font",
+    }
+}
+
+fn infer_asset_format(path: &str, absolute_path: &Path) -> Result<AssetFormat, AssetManifestError> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            manifest_error(
+                "asset_format_inference_unsupported",
+                None,
+                Some(Path::new(path)),
+                "static asset path must have a supported extension",
+            )
+        })?;
+    match extension.as_str() {
+        "ttf" | "otf" => Ok(AssetFormat::Font {
+            encoding: if extension == "ttf" {
+                FontEncoding::Ttf
+            } else {
+                FontEncoding::Otf
+            },
+        }),
+        "png" | "jpg" | "jpeg" | "webp" => {
+            let reader = image::ImageReader::open(absolute_path)
+                .map_err(|error| inference_error(path, error))?
+                .with_guessed_format()
+                .map_err(|error| inference_error(path, error))?;
+            let expected_image_format = match extension.as_str() {
+                "png" => image::ImageFormat::Png,
+                "jpg" | "jpeg" => image::ImageFormat::Jpeg,
+                "webp" => image::ImageFormat::WebP,
+                _ => unreachable!("matched image extension"),
+            };
+            if reader.format() != Some(expected_image_format) {
+                return Err(inference_error(
+                    path,
+                    format!(
+                        "file bytes do not match the declared .{extension} image extension"
+                    ),
+                ));
+            }
+            let (width, height) = reader
+                .into_dimensions()
+                .map_err(|error| inference_error(path, error))?;
+            let encoding = match extension.as_str() {
+                "png" => SpriteEncoding::Png,
+                "jpg" | "jpeg" => SpriteEncoding::Jpeg,
+                "webp" => SpriteEncoding::Webp,
+                _ => unreachable!("matched image extension"),
+            };
+            Ok(AssetFormat::Sprite {
+                encoding,
+                width,
+                height,
+                layout: None,
+            })
+        }
+        "svg" => {
+            let bytes = fs::read(absolute_path).map_err(|error| inference_error(path, error))?;
+            let (width, height) = infer_svg_dimensions(path, &bytes)?;
+            Ok(AssetFormat::Sprite {
+                encoding: SpriteEncoding::Svg,
+                width,
+                height,
+                layout: None,
+            })
+        }
+        "wav" | "ogg" | "mp3" | "m4a" => Err(manifest_error(
+            "asset_audio_metadata_requires_manifest",
+            None,
+            Some(Path::new(path)),
+            "audio sample rate, channels, and duration cannot yet be inferred safely; declare this asset in assets/manifest.json",
+        )),
+        _ => Err(manifest_error(
+            "asset_format_inference_unsupported",
+            None,
+            Some(Path::new(path)),
+            format!("cannot infer asset metadata from .{extension}"),
+        )),
+    }
+}
+
+fn inference_error(path: &str, error: impl fmt::Display) -> AssetManifestError {
+    manifest_error(
+        "asset_metadata_inference_failed",
+        None,
+        Some(Path::new(path)),
+        error.to_string(),
+    )
+}
+
+fn infer_svg_dimensions(path: &str, bytes: &[u8]) -> Result<(u32, u32), AssetManifestError> {
+    let source = std::str::from_utf8(bytes).map_err(|error| inference_error(path, error))?;
+    let start = source.find("<svg").ok_or_else(|| {
+        inference_error(path, "SVG source does not contain an <svg> root element")
+    })?;
+    let end = source[start..]
+        .find('>')
+        .map(|offset| start + offset)
+        .ok_or_else(|| inference_error(path, "SVG root element is not terminated"))?;
+    let root = &source[start..=end];
+    let width = svg_dimension_attribute(root, "width");
+    let height = svg_dimension_attribute(root, "height");
+    let dimensions = match (width, height) {
+        (Some(width), Some(height)) => Some((width, height)),
+        (None, None) => svg_attribute(root, "viewBox").and_then(|view_box| {
+            let values = view_box
+                .split(|character: char| character.is_ascii_whitespace() || character == ',')
+                .filter(|value| !value.is_empty())
+                .map(str::parse::<f64>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            (values.len() == 4).then_some(()).and_then(|()| {
+                exact_positive_dimension(values[2]).zip(exact_positive_dimension(values[3]))
+            })
+        }),
+        _ => None,
+    };
+    dimensions.ok_or_else(|| {
+        inference_error(
+            path,
+            "SVG requires positive integer width/height in pixels or a four-number viewBox; otherwise declare dimensions in assets/manifest.json",
+        )
+    })
+}
+
+fn svg_dimension_attribute(root: &str, name: &str) -> Option<u32> {
+    let raw = svg_attribute(root, name)?;
+    let number = raw.strip_suffix("px").unwrap_or(raw).parse::<f64>().ok()?;
+    exact_positive_dimension(number)
+}
+
+fn exact_positive_dimension(value: f64) -> Option<u32> {
+    (value.is_finite() && value.fract() == 0.0 && (1.0..=16_384.0).contains(&value))
+        .then_some(value as u32)
+}
+
+fn svg_attribute<'a>(root: &'a str, name: &str) -> Option<&'a str> {
+    let bytes = root.as_bytes();
+    let name_bytes = name.as_bytes();
+    let mut offset = 0;
+    while offset + name_bytes.len() <= bytes.len() {
+        let found = root[offset..].find(name)? + offset;
+        let before_ok =
+            found == 0 || bytes[found - 1].is_ascii_whitespace() || bytes[found - 1] == b'<';
+        let after = found + name_bytes.len();
+        let mut equals = after;
+        while bytes.get(equals).is_some_and(u8::is_ascii_whitespace) {
+            equals += 1;
+        }
+        if before_ok && bytes.get(equals) == Some(&b'=') {
+            let mut quote_offset = equals + 1;
+            while bytes.get(quote_offset).is_some_and(u8::is_ascii_whitespace) {
+                quote_offset += 1;
+            }
+            let quote = *bytes.get(quote_offset)?;
+            if quote != b'\'' && quote != b'"' {
+                return None;
+            }
+            let value_start = quote_offset + 1;
+            let value_end = bytes[value_start..]
+                .iter()
+                .position(|byte| *byte == quote)?
+                + value_start;
+            return root.get(value_start..value_end);
+        }
+        offset = after;
+    }
+    None
+}
+
 fn validate_exact_path_case(root: &Path, relative: &Path) -> Result<(), String> {
     let mut current = root.to_path_buf();
     for component in relative.components() {
@@ -563,10 +879,24 @@ pub fn prepare_asset_bundle(
     destination_root: impl AsRef<Path>,
     cache_root: impl AsRef<Path>,
 ) -> Result<PreparedAssetSummary, String> {
-    let manifest_bytes = fs::read(&resolved.manifest_path)
-        .map_err(|error| format!("failed to read source asset manifest: {error}"))?;
-    let mut manifest: AssetManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|error| format!("failed to decode source asset manifest: {error}"))?;
+    let mut manifest = if resolved.manifest_path.is_file() {
+        let manifest_bytes = fs::read(&resolved.manifest_path)
+            .map_err(|error| format!("failed to read source asset manifest: {error}"))?;
+        serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| format!("failed to decode source asset manifest: {error}"))?
+    } else {
+        AssetManifest {
+            schema: ASSET_MANIFEST_SCHEMA.to_string(),
+            version: ASSET_MANIFEST_VERSION,
+            display: None,
+            dynamic_assets: resolved.dynamic_assets.iter().cloned().collect(),
+            assets: resolved
+                .assets
+                .iter()
+                .map(|asset| asset.entry.clone())
+                .collect(),
+        }
+    };
     let destination_root = destination_root.as_ref();
     let cache_root = cache_root.as_ref();
     fs::create_dir_all(destination_root.join("assets"))
@@ -1380,6 +1710,73 @@ mod tests {
         assert_eq!(
             fs::read(root.join("output/assets/fonts/ui.ttf")).unwrap(),
             bytes
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn resolves_and_packages_static_svg_without_source_manifest() {
+        let root = project("generated_svg");
+        let bytes = br#"<svg xmlns="http://www.w3.org/2000/svg" width="37" height="19"><path d="M0 0"/></svg>"#;
+        let path = "assets/images/hero.svg";
+        fs::write(root.join(path), bytes).unwrap();
+
+        let resolved = resolve_project_asset_paths(
+            &root,
+            &BTreeSet::from([path.to_string()]),
+            AssetLimits::default(),
+        )
+        .unwrap();
+        assert!(!root.join(DEFAULT_ASSET_MANIFEST_PATH).exists());
+        assert_eq!(resolved.assets.len(), 1);
+        assert_eq!(resolved.assets[0].entry.content_sha256, sha256_bytes(bytes));
+        assert_eq!(
+            resolved.assets[0].entry.format,
+            AssetFormat::Sprite {
+                encoding: SpriteEncoding::Svg,
+                width: 37,
+                height: 19,
+                layout: None,
+            }
+        );
+
+        let output = root.join("output");
+        prepare_asset_bundle(&resolved, &output, root.join("cache")).unwrap();
+        assert!(!root.join(DEFAULT_ASSET_MANIFEST_PATH).exists());
+        assert_eq!(fs::read(output.join(path)).unwrap(), bytes);
+        let generated: AssetManifest =
+            serde_json::from_slice(&fs::read(output.join(DEFAULT_ASSET_MANIFEST_PATH)).unwrap())
+                .unwrap();
+        assert_eq!(generated.assets, vec![resolved.assets[0].entry.clone()]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn generated_static_png_uses_decoded_intrinsic_dimensions() {
+        let root = project("generated_png");
+        let path = "assets/images/hero.png";
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            23,
+            11,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .save_with_format(root.join(path), image::ImageFormat::Png)
+        .unwrap();
+
+        let resolved = resolve_project_asset_paths(
+            &root,
+            &BTreeSet::from([path.to_string()]),
+            AssetLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.assets[0].entry.format,
+            AssetFormat::Sprite {
+                encoding: SpriteEncoding::Png,
+                width: 23,
+                height: 11,
+                layout: None,
+            }
         );
         fs::remove_dir_all(root).ok();
     }

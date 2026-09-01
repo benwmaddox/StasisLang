@@ -1,5 +1,5 @@
 use crate::build_aot_direct_storage_source;
-use stasis_assets::{load_project_asset_manifest, AssetFormat, AssetLimits};
+use stasis_assets::{load_project_asset_manifest, AssetFormat, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::state_layout::StateLayout;
 use std::fs;
 use std::path::Path;
@@ -25,6 +25,28 @@ pub fn write_mobile_aot_bindings_source_with_profile(
     manifest: &serde_json::Value,
     state_layout: &StateLayout,
     project_dir: &Path,
+    output_path: &Path,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
+) -> Result<(), String> {
+    let assets = load_project_asset_manifest(project_dir, AssetLimits::default())
+        .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
+    write_mobile_aot_bindings_source_with_profile_and_assets(
+        manifest,
+        state_layout,
+        &assets,
+        output_path,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
+    )
+}
+
+pub fn write_mobile_aot_bindings_source_with_profile_and_assets(
+    manifest: &serde_json::Value,
+    state_layout: &StateLayout,
+    assets: &ResolvedAssetManifest,
     output_path: &Path,
     profile_functions: &[String],
     profile_warmup_frames: u32,
@@ -87,8 +109,6 @@ pub fn write_mobile_aot_bindings_source_with_profile(
             escape_mobile_c_string_literal(value)
         ));
     }
-    let assets = load_project_asset_manifest(project_dir, AssetLimits::default())
-        .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
     out.push_str("\ntypedef struct { const char *path; int32_t handle; } StasisPublishedSprite;\n");
     out.push_str("static const StasisPublishedSprite stasis_published_sprites[] = {\n");
     for asset in assets

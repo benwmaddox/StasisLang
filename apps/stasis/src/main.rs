@@ -19,8 +19,8 @@ use stasis::{
     mobile_aot_function_for, run_jit_tests_in_directory_with_session,
     run_play_in_process_with_input_script_window_title_and_profile,
     run_play_in_process_with_replay, run_self_host_aot_cli_with_options, run_with_default_backend,
-    run_with_real_backend, write_mobile_aot_bindings_source_with_profile, PlayProfileConfig,
-    PlayReplayConfig, RunnerConfig, StasisTestRunSession,
+    run_with_real_backend, write_mobile_aot_bindings_source_with_profile_and_assets,
+    PlayProfileConfig, PlayReplayConfig, RunnerConfig, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
@@ -1899,12 +1899,10 @@ fn write_mobile_aot_engine_bundle(
     process
         .compile()
         .map_err(|error| format!("failed to compile mobile AOT bundle: {error:?}"))?;
-    let resolved = load_project_asset_manifest(project_dir, AssetLimits::default())
-        .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
     let snapshot = process
         .program_snapshot()
         .ok_or_else(|| "mobile AOT compile produced no ProgramSnapshot".to_string())?;
-    let resolved = release_assets::retain_snapshot_assets(project_dir, snapshot, &resolved)?;
+    let resolved = release_assets::resolve_snapshot_assets(project_dir, snapshot)?;
     let bundle = process.write_engine_bundle(&mobile_engine_entrypoints(), output_dir)?;
     let manifest = fs::read_to_string(&bundle.manifest_path).map_err(|error| {
         format!(
@@ -1917,10 +1915,10 @@ fn write_mobile_aot_engine_bundle(
     let symbols_header = output_dir.join("published_aot_symbols.h");
     write_mobile_aot_symbols_header(&manifest_json, &symbols_header)?;
     let bindings_source = output_dir.join("published_aot_bindings.c");
-    write_mobile_aot_bindings_source_with_profile(
+    write_mobile_aot_bindings_source_with_profile_and_assets(
         &manifest_json,
         &process.state_layout(),
-        project_dir,
+        &resolved,
         &bindings_source,
         profile_functions,
         profile_warmup_frames,
@@ -3380,6 +3378,74 @@ function main(): void { hero.load_sprite_from("../assets/svg/used.svg", 32, 32);
             assert_eq!(packaged["assets"].as_array().expect("assets").len(), 1);
             assert_eq!(packaged["assets"][0]["id"], "used");
         }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mobile_aot_packages_inferred_static_svg_without_source_manifest() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_mobile_inferred_{stamp}"));
+        let project_dir = root.join("project");
+        let src_dir = project_dir.join("src");
+        let svg_dir = project_dir.join("assets/svg");
+        let output_dir = root.join("out");
+        std::fs::create_dir_all(&src_dir).expect("mkdir src");
+        std::fs::create_dir_all(&svg_dir).expect("mkdir svg");
+        let used_svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="37" height="19"><path d="M0 0"/></svg>"#;
+        let unused_svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="5" height="7"/>"#;
+        std::fs::write(svg_dir.join("used.svg"), used_svg).expect("write used svg");
+        std::fs::write(svg_dir.join("unused.svg"), unused_svg).expect("write unused svg");
+        std::fs::write(
+            src_dir.join("main.stasis"),
+            r#"struct Sprite { handle: i32; width: i32; height: i32; }
+global hero: Sprite;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function main(): i32 { if (hero.load_sprite_from("../assets/svg/used.svg", 37, 19)) { return hero.handle; } return 0; }
+function tick(): i32 { return 0; }
+function render(): i32 { return 0; }
+"#,
+        )
+        .expect("write source");
+
+        let summary = write_mobile_aot_engine_bundle(
+            MobileAotTarget::IosArm64,
+            &project_dir,
+            Some(Path::new("src/main.stasis")),
+            &output_dir,
+            &[],
+            0,
+            0,
+        )
+        .expect("package inferred mobile assets");
+
+        assert!(!project_dir.join("assets/manifest.json").exists());
+        let game_root = summary.asset_dir.join("stasis_game");
+        assert!(game_root.join("assets/svg/used.svg").is_file());
+        assert!(!game_root.join("assets/svg/unused.svg").exists());
+        let packaged: stasis_assets::AssetManifest = serde_json::from_slice(
+            &std::fs::read(game_root.join("assets/manifest.json"))
+                .expect("read generated manifest"),
+        )
+        .expect("parse generated manifest");
+        assert_eq!(packaged.assets.len(), 1);
+        let entry = &packaged.assets[0];
+        assert_eq!(entry.path, "assets/svg/used.svg");
+        assert_eq!(entry.content_sha256, stasis_assets::sha256_bytes(used_svg));
+        assert_eq!(
+            entry.format,
+            stasis_assets::AssetFormat::Sprite {
+                encoding: stasis_assets::SpriteEncoding::Svg,
+                width: 37,
+                height: 19,
+                layout: None,
+            }
+        );
+        let expected_handle = stasis_assets::stable_asset_handle(entry).as_i32();
+        let bindings = std::fs::read_to_string(&summary.bindings_source).expect("read bindings");
+        assert!(bindings.contains(&format!("{{\"assets/svg/used.svg\", {expected_handle}}}")));
         std::fs::remove_dir_all(&root).ok();
     }
 
