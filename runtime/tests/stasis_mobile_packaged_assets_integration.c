@@ -76,6 +76,7 @@ static uint32_t it015_expected_frame_trace(
     expected_i32[STASIS_RENDER_I_FLAGS] =
         STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT;
     expected_i32[STASIS_RENDER_I_SPRITE_COUNT] = 1;
+    expected_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT] = 1;
     expected_i32[STASIS_RENDER_I_TEXT_COUNT] = 2;
     expected_i32[STASIS_RENDER_I_TEXT_BYTES_USED] = 7;
     expected_i32[STASIS_RENDER_I_ORDER_COUNT] = 3;
@@ -87,16 +88,26 @@ static uint32_t it015_expected_frame_trace(
 
     const int32_t sprite_i32_base = STASIS_RENDER_I_SPRITE_BASE;
     const int32_t sprite_f32_base = STASIS_RENDER_F_SPRITE_BASE;
+    const int32_t sprite_run_i32_base = STASIS_RENDER_I_SPRITE_RUN_BASE;
     expected_i32[sprite_i32_base + 0] = sprite_handle;
-    expected_i32[sprite_i32_base + 2] = 255;
+    expected_i32[sprite_i32_base + 1] = -1;
+    expected_i32[sprite_i32_base + 2] = 0;
+    expected_i32[sprite_run_i32_base + 0] = 0;
+    expected_i32[sprite_run_i32_base + 1] = 1;
+    expected_i32[sprite_run_i32_base + 2] = STASIS_RENDER_SPRITE_CLIP_ORDERED;
     expected_f32[sprite_f32_base + 0] = 52.0f;
     expected_f32[sprite_f32_base + 1] = 28.0f;
     expected_f32[sprite_f32_base + 2] = 64.0f;
     expected_f32[sprite_f32_base + 3] = 64.0f;
     expected_f32[sprite_f32_base + 4] = 0.0f;
     expected_f32[sprite_f32_base + 5] = 0.0f;
-    expected_f32[sprite_f32_base + 6] = 1.0f;
-    expected_f32[sprite_f32_base + 7] = 1.0f;
+    expected_f32[sprite_f32_base + 6] = 0.0f;
+    expected_f32[sprite_f32_base + 7] = 0.0f;
+    expected_f32[sprite_f32_base + 8] = 32.0f;
+    expected_f32[sprite_f32_base + 9] = 32.0f;
+    expected_f32[sprite_f32_base + 10] = 1.0f;
+    expected_f32[sprite_f32_base + 11] = 1.0f;
+    expected_f32[sprite_f32_base + 12] = 0.0f;
 
     const int32_t direct_text_i32_base = STASIS_RENDER_I_TEXT_BASE;
     const int32_t cached_text_i32_base =

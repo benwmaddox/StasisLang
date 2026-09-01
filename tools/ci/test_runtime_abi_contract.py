@@ -365,6 +365,18 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 "CHECK(actual_trace != expected_trace);",
                 "it015.semantic_oracle.comparison",
             ),
+            (
+                contract.MOBILE_PACKAGED_ASSETS_NATIVE,
+                "expected_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT] = 1;",
+                "expected_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT] = 0;",
+                "it015.semantic_oracle.sprite_run.count",
+            ),
+            (
+                contract.MOBILE_PACKAGED_ASSETS_NATIVE,
+                "expected_i32[sprite_run_i32_base + 2] = STASIS_RENDER_SPRITE_CLIP_ORDERED;",
+                "expected_i32[sprite_run_i32_base + 2] = 0;",
+                "it015.semantic_oracle.sprite_run.clip",
+            ),
         )
         for path, old, new, field in mutations:
             with self.subTest(path=path, field=field):
