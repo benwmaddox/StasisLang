@@ -155,6 +155,20 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
         default int logicalHeightFor(int handle) { return 1; }
 
+        default float atlasU0For(int handle) { return 0.0f; }
+        default float atlasV0For(int handle) { return 0.0f; }
+        default float atlasU1For(int handle) { return 1.0f; }
+        default float atlasV1For(int handle) { return 1.0f; }
+
+        /** White texel on the requested sprite page, or the default atlas page. */
+        default int solidTextureFor(int preferredTexture) {
+            return preferredTexture != 0 ? preferredTexture : fallbackTexture();
+        }
+        default float solidUFor(int texture) { return 0.5f; }
+        default float solidVFor(int texture) { return 0.5f; }
+
+        default String atlasMetrics() { return "atlas_metrics=unavailable"; }
+
         // Packed as texture:u32, width:u16, height:u16. Zero means unavailable.
         default long textTextureFor(int font, ByteBuffer utf8, int offset, int length) {
             return 0L;
@@ -321,6 +335,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private final int[] frameSpriteFilters = new int[MAX_SPRITES];
     private final int[] frameSpriteWidths = new int[MAX_SPRITES];
     private final int[] frameSpriteHeights = new int[MAX_SPRITES];
+    private final float[] frameSpriteU0 = new float[MAX_SPRITES];
+    private final float[] frameSpriteV0 = new float[MAX_SPRITES];
+    private final float[] frameSpriteU1 = new float[MAX_SPRITES];
+    private final float[] frameSpriteV1 = new float[MAX_SPRITES];
     private final long[] frameTextTextures = new long[MAX_TEXT];
     private int colorProgram;
     private int colorPosition;
@@ -349,6 +367,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int acceptanceTrace = -1;
     private int acceptanceTraceToken = -1;
     private int frameDrawCalls;
+    private int frameTextureBinds;
+    private int frameMixedRuns;
+    private int frameSubmittedQuads;
     private int activePipeline;
     private final float[] clipStack = new float[MAX_CLIPS * 4];
     private int clipDepth;
@@ -575,6 +596,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                         ? 0L : System.nanoTime() - resourceStarted;
                 long drawStarted = performanceSamples == null ? 0L : System.nanoTime();
                 frameDrawCalls = 0;
+                frameTextureBinds = 0;
+                frameMixedRuns = 0;
+                frameSubmittedQuads = 0;
                 drawFrame();
                 drawNanos = performanceSamples == null
                         ? 0L : System.nanoTime() - drawStarted;
@@ -641,7 +665,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (performanceSamples != null && presented) {
             String report = performanceSamples.add(totalNanos, resourceNanos, drawNanos,
                     drawCalls, lineCount, rectCount, spriteCount, textCount, orderCount);
-            if (report != null) Log.i(LOG_TAG, report);
+            if (report != null) {
+                Log.i(LOG_TAG, report + " mixed_runs=" + frameMixedRuns
+                        + " texture_binds=" + frameTextureBinds
+                        + " submitted_quads=" + frameSubmittedQuads + " "
+                        + textures.atlasMetrics());
+            }
         }
         timing.onRendered(totalNanos);
     }
@@ -844,17 +873,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 position += 1;
                 continue;
             }
+            if (kind == ORDER_SPRITE || kind == ORDER_RECT) {
+                position = drawMixedOrder(position, orderCount, rectCount, spriteRunCount);
+                continue;
+            }
             int limit = kind == ORDER_LINE ? lineCount
                     : kind == ORDER_RECT ? rectCount
                     : kind == ORDER_SPRITE ? spriteRunCount
                     : kind == ORDER_TEXT ? textCount : 0;
             if (entry < 0 || index >= limit) {
-                position += 1;
-                continue;
-            }
-            if (kind == ORDER_SPRITE) {
-                int runBase = I_SPRITE_RUN_BASE + index * SPRITE_RUN_I32_STRIDE;
-                drawSprites(frameI32.get(runBase), frameI32.get(runBase + 1));
                 position += 1;
                 continue;
             }
@@ -878,19 +905,23 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         textures.onFrameStart();
         resolveFrameResources(textures, frameI32, frameU8Bytes,
                 frameSpriteTextures, frameSpriteFilters, frameSpriteWidths,
-                frameSpriteHeights, frameTextTextures);
+                frameSpriteHeights, frameSpriteU0, frameSpriteV0,
+                frameSpriteU1, frameSpriteV1, frameTextTextures);
     }
 
     static void resolveFrameResources(TextureProvider textures, IntBuffer frameI32,
             ByteBuffer frameU8Bytes, int[] spriteTextures, int[] spriteFilters,
             long[] textTextures) {
         resolveFrameResources(textures, frameI32, frameU8Bytes, spriteTextures, spriteFilters,
-                new int[MAX_SPRITES], new int[MAX_SPRITES], textTextures);
+                new int[MAX_SPRITES], new int[MAX_SPRITES], new float[MAX_SPRITES],
+                new float[MAX_SPRITES], new float[MAX_SPRITES], new float[MAX_SPRITES],
+                textTextures);
     }
 
     static void resolveFrameResources(TextureProvider textures, IntBuffer frameI32,
             ByteBuffer frameU8Bytes, int[] spriteTextures, int[] spriteFilters,
             int[] spriteWidths, int[] spriteHeights,
+            float[] spriteU0, float[] spriteV0, float[] spriteU1, float[] spriteV1,
             long[] textTextures) {
         int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
         for (int index = 0; index < spriteCount; index += 1) {
@@ -901,6 +932,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             spriteFilters[index] = textures.filterFor(handle);
             spriteWidths[index] = Math.max(1, textures.logicalWidthFor(handle));
             spriteHeights[index] = Math.max(1, textures.logicalHeightFor(handle));
+            spriteU0[index] = textures.atlasU0For(handle);
+            spriteV0[index] = textures.atlasV0For(handle);
+            spriteU1[index] = textures.atlasU1For(handle);
+            spriteV1[index] = textures.atlasV1For(handle);
         }
         int textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
         int bytesUsed = clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY);
@@ -1048,23 +1083,106 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private void drawRects(int first, int count) {
         int end = first + count;
         while (first < end) {
-            int chunk = Math.min(LINE_CHUNK_SIZE / 3, end - first);
-            lineVertices.clear();
+            int chunk = Math.min(SPRITE_CHUNK_SIZE, end - first);
+            int texture = textures.solidTextureFor(0);
+            spriteVertices.clear();
             for (int index = 0; index < chunk; index += 1) {
-                int base = F_RECT_REVERSE_BASE
-                        - (first + index) * GEOMETRY_F32_STRIDE;
-                float left = frameF32.get(base);
-                float top = frameF32.get(base + 1);
-                appendColorQuad(lineVertices, left, top,
-                        left + frameF32.get(base + 2), top + frameF32.get(base + 3),
-                        frameF32.get(base + 4), frameF32.get(base + 5),
-                        frameF32.get(base + 6), frameF32.get(base + 7));
+                appendSolid(first + index, texture);
             }
-            lineVertices.flip();
-            drawColorBatch(lineVertices,
-                    chunk * VERTICES_PER_QUAD, GLES20.GL_TRIANGLES);
+            spriteVertices.flip();
+            drawPreparedTextureBatch(chunk * VERTICES_PER_QUAD, texture);
+            frameSubmittedQuads += chunk;
             first += chunk;
         }
+    }
+
+    private int drawMixedOrder(int position, int orderCount, int rectCount, int spriteRunCount) {
+        spriteVertices.clear();
+        int texture = 0;
+        int filter = GLES20.GL_LINEAR;
+        int quads = 0;
+        int start = position;
+        while (position < orderCount) {
+            int entry = frameI32.get(I_ORDER_BASE + position);
+            int kind = orderKind(entry);
+            int index = orderIndex(entry);
+            if (kind != ORDER_RECT && kind != ORDER_SPRITE) break;
+            if (kind == ORDER_RECT) {
+                if (index >= 0 && index < rectCount) {
+                    int wanted = WorkshopSpriteAtlas.chooseSolidTexture(texture,
+                            nextSpriteTexture(position + 1,
+                            orderCount, spriteRunCount));
+                    wanted = textures.solidTextureFor(wanted);
+                    if (quads > 0 && wanted != texture) {
+                        spriteVertices.flip();
+                        drawPreparedTextureBatch(quads * VERTICES_PER_QUAD, texture);
+                        frameSubmittedQuads += quads;
+                        spriteVertices.clear();
+                        quads = 0;
+                    }
+                    texture = wanted;
+                    appendSolid(index, texture);
+                    quads += 1;
+                }
+            } else if (index >= 0 && index < spriteRunCount) {
+                int runBase = I_SPRITE_RUN_BASE + index * SPRITE_RUN_I32_STRIDE;
+                int first = clampCount(frameI32.get(runBase), MAX_SPRITES);
+                int count = clampCount(frameI32.get(runBase + 1), MAX_SPRITES - first);
+                for (int item = 0; item < count; item += 1) {
+                    int sprite = first + item;
+                    int wanted = frameSpriteTextures[sprite];
+                    int wantedFilter = frameSpriteFilters[sprite];
+                    if (quads > 0 && (wanted != texture || wantedFilter != filter
+                            || quads == SPRITE_CHUNK_SIZE)) {
+                        spriteVertices.flip();
+                        drawPreparedTextureBatch(quads * VERTICES_PER_QUAD, texture);
+                        frameSubmittedQuads += quads;
+                        spriteVertices.clear();
+                        quads = 0;
+                    }
+                    texture = wanted;
+                    filter = wantedFilter;
+                    appendSprite(I_SPRITE_BASE + sprite * SPRITE_I32_STRIDE);
+                    quads += 1;
+                }
+            }
+            position += 1;
+        }
+        if (quads > 0) {
+            spriteVertices.flip();
+            drawPreparedTextureBatch(quads * VERTICES_PER_QUAD, texture);
+            frameSubmittedQuads += quads;
+        }
+        if (position > start) frameMixedRuns += 1;
+        return position;
+    }
+
+    private int nextSpriteTexture(int position, int orderCount, int spriteRunCount) {
+        int end = Math.min(orderCount, position + 32);
+        while (position < end) {
+            int entry = frameI32.get(I_ORDER_BASE + position++);
+            int kind = orderKind(entry);
+            if (kind != ORDER_RECT && kind != ORDER_SPRITE) break;
+            int run = orderIndex(entry);
+            if (kind == ORDER_SPRITE && run >= 0 && run < spriteRunCount) {
+                int runBase = I_SPRITE_RUN_BASE + run * SPRITE_RUN_I32_STRIDE;
+                int first = frameI32.get(runBase);
+                if (first >= 0 && first < MAX_SPRITES) return frameSpriteTextures[first];
+            }
+        }
+        return 0;
+    }
+
+    private void appendSolid(int index, int texture) {
+        int base = F_RECT_REVERSE_BASE - index * GEOMETRY_F32_STRIDE;
+        float left = frameF32.get(base);
+        float top = frameF32.get(base + 1);
+        float u = textures.solidUFor(texture);
+        float v = textures.solidVFor(texture);
+        appendAxisAlignedQuad(spriteVertices, left, top,
+                left + frameF32.get(base + 2), top + frameF32.get(base + 3),
+                u, v, u, v, frameF32.get(base + 4), frameF32.get(base + 5),
+                frameF32.get(base + 6), frameF32.get(base + 7));
     }
 
     static int horizontalRunLength(FloatBuffer values, int first, int count) {
@@ -1170,11 +1288,22 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             sourceWidth = logicalWidth;
             sourceHeight = logicalHeight;
         }
-        float u0 = sourceX / logicalWidth;
-        float v0 = sourceY / logicalHeight;
-        float u1 = (sourceX + sourceWidth) / logicalWidth;
-        float v1 = (sourceY + sourceHeight) / logicalHeight;
-        if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 >= u1 || v0 >= v1) return;
+        float sourceU0 = sourceX / logicalWidth;
+        float sourceV0 = sourceY / logicalHeight;
+        float sourceU1 = (sourceX + sourceWidth) / logicalWidth;
+        float sourceV1 = (sourceY + sourceHeight) / logicalHeight;
+        if (sourceU0 < 0 || sourceV0 < 0 || sourceU1 > 1 || sourceV1 > 1
+                || sourceU0 >= sourceU1 || sourceV0 >= sourceV1) return;
+        float atlasU0 = frameSpriteU0[index];
+        float atlasV0 = frameSpriteV0[index];
+        float u0 = WorkshopSpriteAtlas.atlasCoordinate(
+                atlasU0, frameSpriteU1[index], sourceX, logicalWidth);
+        float v0 = WorkshopSpriteAtlas.atlasCoordinate(
+                atlasV0, frameSpriteV1[index], sourceY, logicalHeight);
+        float u1 = WorkshopSpriteAtlas.atlasCoordinate(
+                atlasU0, frameSpriteU1[index], sourceX + sourceWidth, logicalWidth);
+        float v1 = WorkshopSpriteAtlas.atlasCoordinate(
+                atlasV0, frameSpriteV1[index], sourceY + sourceHeight, logicalHeight);
         putTextureVertex(spriteVertices, left, top, centerX, centerY, cosine, sine, u0, v0, red, green, blue, alpha);
         putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, u1, v0, red, green, blue, alpha);
         putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, u0, v1, red, green, blue, alpha);
@@ -1206,12 +1335,19 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     private static void appendAxisAlignedQuad(FloatBuffer output, float left, float top,
             float right, float bottom, float red, float green, float blue, float alpha) {
-        putTextureVertex(output, left, top, left, top, 1, 0, 0, 0, red, green, blue, alpha);
-        putTextureVertex(output, right, top, left, top, 1, 0, 1, 0, red, green, blue, alpha);
-        putTextureVertex(output, left, bottom, left, top, 1, 0, 0, 1, red, green, blue, alpha);
-        putTextureVertex(output, right, top, left, top, 1, 0, 1, 0, red, green, blue, alpha);
-        putTextureVertex(output, right, bottom, left, top, 1, 0, 1, 1, red, green, blue, alpha);
-        putTextureVertex(output, left, bottom, left, top, 1, 0, 0, 1, red, green, blue, alpha);
+        appendAxisAlignedQuad(output, left, top, right, bottom, 0, 0,
+                1, 1, red, green, blue, alpha);
+    }
+
+    private static void appendAxisAlignedQuad(FloatBuffer output, float left, float top,
+            float right, float bottom, float u0, float v0, float u1, float v1,
+            float red, float green, float blue, float alpha) {
+        putTextureVertex(output, left, top, left, top, 1, 0, u0, v0, red, green, blue, alpha);
+        putTextureVertex(output, right, top, left, top, 1, 0, u1, v0, red, green, blue, alpha);
+        putTextureVertex(output, left, bottom, left, top, 1, 0, u0, v1, red, green, blue, alpha);
+        putTextureVertex(output, right, top, left, top, 1, 0, u1, v0, red, green, blue, alpha);
+        putTextureVertex(output, right, bottom, left, top, 1, 0, u1, v1, red, green, blue, alpha);
+        putTextureVertex(output, left, bottom, left, top, 1, 0, u0, v1, red, green, blue, alpha);
     }
 
     private static void putTextureVertex(FloatBuffer output, float x, float y,
@@ -1272,6 +1408,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private void drawPreparedTextureBatch(int vertexCount, int texture) {
         beginTextureBatches(spriteVertices);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
+        frameTextureBinds += 1;
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
         frameDrawCalls += 1;
     }
