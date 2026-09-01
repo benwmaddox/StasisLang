@@ -415,7 +415,13 @@ function Assert-RenderedVariant(
     if ($RequireJit -and -not ($log -match 'CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=[1-9][0-9]*')) {
         throw "$Name did not log a successful non-empty Workshop JIT compile; see $logFile"
     }
-    $observedAvd = (Invoke-Adb @("emu", "avd", "name") | Select-Object -First 1).Trim()
+    $observedAvdLine = Invoke-Adb @("emu", "avd", "name") | Select-Object -First 1
+    $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
+    if (-not $observedAvd) {
+        $observedAvdLine = Invoke-Adb @("shell", "getprop", "ro.boot.qemu.avd_name") |
+            Select-Object -First 1
+        $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
+    }
     $observedSdk = (Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") | Select-Object -First 1).Trim()
     if ($observedAvd -ne $AvdName -or $observedSdk -ne "35") {
         throw "$Name benchmark identity mismatch: requested=$AvdName/API35 observed=$observedAvd/API$observedSdk"
