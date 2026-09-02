@@ -346,14 +346,14 @@ final class WorkshopDiagnosticSeamAcceptance {
             throw new IOException("refusing to overwrite IT-031 render-schema helper: "
                     + RENDER_SCHEMA_HELPER_PATH);
         }
-        boolean written = false;
         try (FileOutputStream output = new FileOutputStream(helper, false)) {
             output.write(RENDER_SCHEMA_HELPER_SOURCE.getBytes(StandardCharsets.UTF_8));
-            written = true;
-        } finally {
-            if (!written && helper.exists() && !helper.delete()) {
-                Log.e(LOG_TAG, "could not remove incomplete IT-031 render-schema helper");
+        } catch (IOException | RuntimeException error) {
+            if (helper.exists() && !helper.delete()) {
+                error.addSuppressed(new IOException(
+                        "could not remove incomplete IT-031 render-schema helper"));
             }
+            throw error;
         }
     }
 
