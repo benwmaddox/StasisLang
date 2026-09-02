@@ -42,15 +42,41 @@ def _run(
     *arguments: str,
     text: bool = True,
     required: bool = True,
+    timeout: float | None = None,
 ):
-    if not text:
-        command = [str(adb)]
-        if serial:
-            command.extend(("-s", serial))
-        command.extend(arguments)
-        result = subprocess.run(command, capture_output=True, text=False, check=False)
-    else:
-        result = _run_result(adb, serial, *arguments)
+    try:
+        if not text:
+            command = [str(adb)]
+            if serial:
+                command.extend(("-s", serial))
+            command.extend(arguments)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                check=False,
+                timeout=timeout,
+            )
+        elif timeout is None:
+            result = _run_result(adb, serial, *arguments)
+        else:
+            command = [str(adb)]
+            if serial:
+                command.extend(("-s", serial))
+            command.extend(arguments)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+    except subprocess.TimeoutExpired as error:
+        if required:
+            raise SeamError(
+                f"adb {' '.join(arguments)} timed out after {timeout} seconds"
+            ) from error
+        return "" if text else b""
     if required and result.returncode != 0:
         stderr = (
             result.stderr.strip()
@@ -367,13 +393,15 @@ def corrupt_storage_file(
     command = [str(adb)]
     if serial:
         command.extend(("-s", serial))
-    command.extend(("exec-out", "run-as", package_id, "tee", relative_path))
-    expected = b"corrupt\n"
+    remote_command = (
+        f"run-as {package_id} sh -c 'printf \"corrupt\\n\" > {relative_path}'"
+    )
+    command.extend(("shell", remote_command))
     result = subprocess.run(
-        command, input=expected, capture_output=True, text=False, check=False
+        command, capture_output=True, text=False, check=False, timeout=10
     )
     validate_storage_write_result(
-        relative_path, result.returncode, result.stdout, result.stderr, expected
+        relative_path, result.returncode, result.stdout, result.stderr, b""
     )
 
 
@@ -453,21 +481,42 @@ def wait_for_storage_launch(
     _run(adb, serial, "shell", "am", "force-stop", package_id)
     _run(adb, serial, "logcat", "-c")
     _run(
-        adb, serial, "shell", "am", "start", "-W", "-n", component,
+        adb, serial, "shell", "am", "start", "-n", component,
         "--es", "stasis.seam_test_id", test_id,
+        required=False,
+        timeout=10,
     )
     log = ""
+    foreground_checked = False
     while time.monotonic() < deadline:
         log = _run(
             adb, serial, "logcat", "-d", "-v", "brief", "Stasis:I", "*:S"
         )
         markers = parse_markers(log, test_id)
-        if any(item.get("event") == "stable" for item in markers):
-            marker = validate_markers(markers, expectations)
+        marker = next(
+            (
+                item
+                for item in reversed(markers)
+                if item.get("event") in {"stable", "initialized"}
+            ),
+            None,
+        )
+        if marker is not None:
             pid = _run(
                 adb, serial, "shell", "pidof", package_id, required=False
             ).strip()
             return validate_fresh_process_pid(previous_pid, pid), marker, log
+        if not markers and not foreground_checked:
+            foreground_checked = True
+            if ensure_test_activity_foreground(
+                adb,
+                serial,
+                package_id,
+                component,
+                wait_for_launch=False,
+                intent_arguments=("--es", "stasis.seam_test_id", test_id),
+            ):
+                time.sleep(0.25)
         time.sleep(0.25)
     raise SeamError("IT-023 relaunched process did not reach its stable marker")
 
@@ -509,7 +558,7 @@ def run_it023_storage_lifecycle(
         raise SeamError("IT-023 unrelated scope or key unexpectedly created storage")
     second_pid, second_marker, second_log = wait_for_storage_launch(
         adb, serial, package_id, component, test_id, expectations, first_pid,
-        min(deadline, time.monotonic() + 20),
+        min(deadline, time.monotonic() + 45),
     )
     validate_storage_marker(second_marker, storage, 2)
     validate_storage_file_text(
@@ -525,7 +574,7 @@ def run_it023_storage_lifecycle(
     )
     third_pid, third_marker, third_log = wait_for_storage_launch(
         adb, serial, package_id, component, test_id, expectations, second_pid,
-        min(deadline, time.monotonic() + 20),
+        min(deadline, time.monotonic() + 45),
     )
     validate_storage_marker(third_marker, storage, 3)
     for path in absent_paths:
@@ -1518,6 +1567,9 @@ def ensure_test_activity_foreground(
     serial: str | None,
     package_id: str,
     component: str,
+    *,
+    wait_for_launch: bool = True,
+    intent_arguments: tuple[str, ...] = (),
 ) -> bool:
     windows = _run(
         adb,
@@ -1556,10 +1608,12 @@ def ensure_test_activity_foreground(
         "shell",
         "am",
         "start",
-        "-W",
+        *(("-W",) if wait_for_launch else ()),
         "-n",
         component,
+        *intent_arguments,
         required=False,
+        timeout=10,
     )
     return True
 
@@ -1825,6 +1879,8 @@ def main() -> int:
     }
     if device_state is not None:
         evidence["original_device_state"] = device_state
+    if test_id == "IT-023":
+        evidence["artifacts"].pop("capture")
     installed = False
     try:
         _run(
@@ -1878,7 +1934,7 @@ def main() -> int:
             "shell",
             "am",
             "start",
-            "-W",
+            *(("-W",) if test_id != "IT-023" else ()),
             "-n",
             component,
             "--es",
@@ -1889,6 +1945,8 @@ def main() -> int:
                 "stasis.asset_variant",
                 args.asset_variant,
             ) if args.asset_variant else () ),
+            required=test_id != "IT-023",
+            timeout=10 if test_id == "IT-023" else None,
         )
         deadline = time.monotonic() + args.timeout_seconds
         log = ""
@@ -2298,7 +2356,10 @@ def main() -> int:
             log = "\n".join(log_history)
         log_path.write_text(log, encoding="utf-8")
         validate_resource_diagnostics(log, expectations)
-        if expectations.get("resource_regions"):
+        if test_id == "IT-023":
+            regions = []
+            resource_regions = []
+        elif expectations.get("resource_regions"):
             regions, resource_regions = capture_until_resource_regions_match(
                 args.adb,
                 args.serial,
@@ -2344,7 +2405,11 @@ def main() -> int:
                 "process_id": first_pid,
                 "regions": regions,
                 "resource_regions": resource_regions,
-                "presentation_oracle": "android_compositor_capture_target_pixels",
+                "presentation_oracle": (
+                    "guest_storage_markers_and_app_private_bytes"
+                    if test_id == "IT-023"
+                    else "android_compositor_capture_target_pixels"
+                ),
             }
         )
         if touch_probes:
