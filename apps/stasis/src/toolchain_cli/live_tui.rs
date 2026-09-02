@@ -4814,7 +4814,7 @@ mod tests {
         let catalog = load_stdlib_module_index(stdlib_root.as_ref()).expect("stdlib module index");
 
         assert_eq!(catalog["available"], true);
-        assert_eq!(catalog["total"], 20);
+        assert_eq!(catalog["total"], 21);
         let rendered = serde_json::to_string(&catalog).expect("catalog JSON");
         assert!(rendered.contains("\"module\":\"graphics\""));
         assert!(rendered.contains("\"module\":\"module_17\""));

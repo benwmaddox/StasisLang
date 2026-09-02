@@ -4591,7 +4591,7 @@ mod tests {
 
         assert!(profile
             .instruction
-            .contains("first JSONL record is the immutable request header"));
+            .contains("Later JSONL records are completed; do not repeat them"));
         assert!(profile
             .instruction
             .contains("host-mediated virtual tools described by tool_specs"));
