@@ -3,7 +3,14 @@ import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
 global png_sprite: Sprite;
 global svg_sprite: Sprite;
 global smoke_label: TextRun;
+global smoke_writer: SpriteRunWriter;
 global ticks: i32;
+
+function smoke_write_sprite(sprite: Sprite, x: f32, y: f32): bool {
+    let width: f32 = i32_to_f32(sprite.width);
+    let height: f32 = i32_to_f32(sprite.height);
+    return smoke_writer.write(sprite.handle, -1, 0, x, y, width, height, 0.0, 0.0, 0.0, 0.0, width * 0.5, height * 0.5, 1.0, 1.0, 0.0);
+}
 
 function main(): i32 {
     if (!init_window(320, 180, "Stasis Windows launch smoke")) {
@@ -38,8 +45,20 @@ function render(): i32 {
     } else {
         clear(0.04, 0.07, 0.12, 1.0);
     }
-    png_sprite.draw(52.0, 34.0, 255, 0);
-    svg_sprite.draw(204.0, 34.0, 255, 0);
+    if (smoke_writer.reserve(2, -1, 0, 0, 0, 0, 0)) {
+        let written: i32 = 0;
+        if (smoke_write_sprite(png_sprite, 52.0, 34.0)) {
+            written += 1;
+        }
+        if (smoke_write_sprite(svg_sprite, 204.0, 34.0)) {
+            written += 1;
+        }
+        if (written == 2) {
+            smoke_writer.finalize(2);
+        } else {
+            smoke_writer.cancel();
+        }
+    }
     smoke_label.draw(55.0, 126.0, 0.95, 0.82, 0.25, 1.0);
     end_frame();
     return 0;

@@ -123,15 +123,36 @@ fn public_sprite_run_writer_matches_jit_and_linked_aot() {
         "public writer JIT result"
     );
 
-    assert_eq!(i32s[4], 2, "published sprite count");
-    assert_eq!(i32s[22], 2, "sprite run and line order count");
-    assert_eq!(i32s[29], 1, "published sprite run count");
+    assert_eq!(i32s[4], 4, "published sprite count");
+    assert_eq!(i32s[7], 2, "published text count");
+    assert_eq!(i32s[22], 6, "public drawable order count");
+    assert_eq!(i32s[29], 3, "published sprite run count");
     assert_eq!(
-        &i32s[32..38],
-        &[101, -1_430_532_899, 0, 202, 287_454_020, 0]
+        &i32s[32..44],
+        &[
+            101,
+            -1_430_532_899,
+            0,
+            202,
+            287_454_020,
+            0,
+            303,
+            -66,
+            0,
+            404,
+            -239,
+            0,
+        ]
     );
-    assert_eq!(&i32s[18_464..18_472], &[0, 2, -1, 0, 0, 0, 0, 0]);
-    assert_eq!(&i32s[51_232..51_234], &[32_768, 16_384]);
+    assert_eq!(
+        &i32s[18_464..18_488],
+        &[0, 2, -1, 0, 0, 0, 0, 0, 2, 1, -1, 0, 0, 0, 0, 0, 3, 1, -1, 0, 0, 0, 0, 0,]
+    );
+    assert_eq!(
+        &i32s[51_232..51_238],
+        &[32_768, 16_384, 32_769, 32_770, 49_152, 49_153]
+    );
+    assert_eq!(&i32s[12_320..12_326], &[7, 0, 5, 5, -6, 0]);
     for (offset, expected) in [
         10.0, 20.0, 30.0, 40.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.5, 2.5, 15.0, 50.0, 60.0, 70.0,
         80.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, -1.0, 0.5, -30.0,
@@ -155,6 +176,28 @@ fn public_sprite_run_writer_matches_jit_and_linked_aot() {
             "line descriptor after sprite run",
         );
     }
+    for (offset, expected) in [
+        2.0, 3.0, 80.0, 48.0, 0.0, 0.0, 0.0, 0.0, 40.0, 24.0, 1.0, 1.0, 9.0, 12.0, 13.0, 14.0,
+        15.0, 0.0, 0.0, 0.0, 0.0, 7.0, 7.5, 1.0, 1.0, 16.0,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_f32(
+            f32s[80_030 + offset],
+            expected,
+            "public immediate sprite descriptor",
+        );
+    }
+    for (offset, expected) in [
+        20.0, 21.0, 0.9, 0.8, 0.7, 0.6, 30.0, 31.0, 0.5, 0.4, 0.3, 0.2,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_f32(f32s[133_252 + offset], expected, "public text descriptor");
+    }
+    assert_eq!(&u8s[..6], &[b'p', b'r', b'o', b'b', b'e', 0]);
 
     let mut aot = AotProcess::new();
     aot.set_project_root(root.to_string_lossy())

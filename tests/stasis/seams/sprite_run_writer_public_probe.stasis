@@ -3,6 +3,8 @@ import "../../../src/stdlib/graphics.stasis";
 global probe_writer: SpriteRunWriter;
 global blocker_writer: SpriteRunWriter;
 global line_batch: LineBatch;
+global drawable_sprite: Sprite;
+global drawable_text: TextRun;
 
 function line_batch_public_probe(): i32 {
     begin_frame();
@@ -111,6 +113,35 @@ function sprite_run_writer_public_probe(): i32 {
         return 15;
     }
     draw_line(100.0, 101.0, 102.0, 103.0, 0.1, 0.2, 0.3, 0.4);
+    drawable_sprite.handle = 303;
+    drawable_sprite.width = 80;
+    drawable_sprite.height = 48;
+    drawable_sprite.draw(2.0, 3.0, 190, 9);
+    draw_sprite(404, 12.0, 13.0, 14.0, 15.0, 16, 17);
+    draw_text(7, "probe", 20.0, 21.0, 0.9, 0.8, 0.7, 0.6);
+    drawable_text.font = 5;
+    drawable_text.handle = 6;
+    drawable_text.draw(30.0, 31.0, 0.5, 0.4, 0.3, 0.2);
     end_frame();
+    if (gfx_cmd_sprite_count() != 4 || gfx_cmd_sprite_run_count() != 3 || gfx_cmd_text_count() != 2 || gfx_cmd_order_count() != 6) {
+        return 27;
+    }
+    if (
+        gfx_cmd_i32[GFX_I_SPRITE_BASE + 6] != 303
+        || gfx_cmd_i32[GFX_I_SPRITE_BASE + 7] != -66
+        || gfx_cmd_i32[GFX_I_SPRITE_BASE + 9] != 404
+        || gfx_cmd_i32[GFX_I_SPRITE_BASE + 10] != -239
+    ) {
+        return 28;
+    }
+    if (
+        gfx_cmd_i32[GFX_I_TEXT_BASE] != 7
+        || gfx_cmd_i32[GFX_I_TEXT_BASE + 1] != 0
+        || gfx_cmd_i32[GFX_I_TEXT_BASE + 2] != 5
+        || gfx_cmd_i32[GFX_I_TEXT_BASE + 3] != 5
+        || gfx_cmd_i32[GFX_I_TEXT_BASE + 4] != -6
+    ) {
+        return 29;
+    }
     return 0;
 }

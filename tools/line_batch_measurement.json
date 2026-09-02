@@ -1,24 +1,36 @@
 {
-  "schema": 1,
-  "measurement_kind": "deterministic operation and command descriptors (not wall-clock timing)",
+  "schema": 2,
+  "measurement_kind": "source-derived deterministic static operation counts (not wall-clock timing)",
+  "baseline_commit": "eb4393e5353fa8e70424dae2b783bd155777493a",
+  "line_lanes": [
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "r",
+    "g",
+    "b",
+    "a"
+  ],
   "batch_capacity": 512,
   "old_packed_api": {
     "public_signature": "draw_lines(f32[], count)",
-    "construction_scalar_writes_per_line": 8,
-    "count_storage_coupled": false,
+    "packed_input_f32_per_line": 8,
     "submission_bulk_copies_per_batch": 1,
-    "canonical_line_calls_per_line": 0,
-    "order_entries_per_line": 1,
-    "submission_descriptor": "one memcpy plus one order entry per accepted line"
+    "descriptor_f32_per_line": 8,
+    "order_append_call_sites_in_submission_loop": 1,
+    "canonical_line_calls_per_line": 0
   },
   "line_batch_api": {
-    "public_signature": "LineBatch.append(Line); LineBatch.draw()",
-    "construction_scalar_writes_per_line": 8,
-    "count_storage_coupled": true,
+    "public_signatures": "LineBatch.append(Line); LineBatch.append_line(...); LineBatch.draw()",
+    "append_typed_line_field_reads_per_line": 8,
+    "append_typed_line_lane_stores_per_line": 8,
+    "append_line_scalar_lane_stores_per_line": 8,
+    "draw_lane_loads_per_line": 8,
     "submission_bulk_copies_per_batch": 0,
     "canonical_line_calls_per_line": 1,
-    "order_entries_per_line": 1,
-    "submission_descriptor": "one canonical gfx_cmd_line call and order entry per accepted line"
+    "canonical_descriptor_f32_stores_per_line": 8,
+    "canonical_order_appends_per_line": 1
   },
   "wire_contract": {
     "version": 7,

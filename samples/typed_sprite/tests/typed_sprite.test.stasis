@@ -41,7 +41,7 @@ test `draw uses sprite logical dimensions`(): bool {
     begin_frame();
     tested_sprite.draw(2.0, 3.0, 190, 9);
     end_frame();
-    return true;
+    return tested_sprite.handle == 0 - 7 && tested_sprite.width == 80 && tested_sprite.height == 48;
 }
 
 test `draw ignores invalid sprite metadata`(): bool {
@@ -54,7 +54,7 @@ test `draw ignores invalid sprite metadata`(): bool {
     tested_sprite.width = 0;
     tested_sprite.draw(0.0, 0.0, 255, 0);
     end_frame();
-    return true;
+    return tested_sprite.handle == 7 && tested_sprite.width == 0 && tested_sprite.height == 48;
 }
 
 test `cached text draw uses its font and run handles`(): bool {
@@ -65,7 +65,7 @@ test `cached text draw uses its font and run handles`(): bool {
     begin_frame();
     tested_text.draw(5.0, 6.0, 1.0, 0.8, 0.6, 0.4);
     end_frame();
-    return true;
+    return tested_text.font == 4 && tested_text.handle == 12 && tested_text.width == 72.5 && tested_text.height == 18.0;
 }
 
 test `invalid cached text replacement preserves receiver atomically`(): bool {

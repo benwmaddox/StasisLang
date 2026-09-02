@@ -56,6 +56,9 @@ WINDOWS_LAUNCH_FIXTURE = Path("samples/windows_launch_smoke/main.stasis")
 WORKSHOP_PREVIEW_ADAPTER = Path(
     "mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis"
 )
+EXPLORATION_HOST = Path(
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_runtime.stasis"
+)
 HOT_SWAP_V1_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_v1.stasis")
 HOT_SWAP_V2_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_v2.stasis")
 HOT_SWAP_REJECT_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_reject.stasis")
@@ -77,7 +80,7 @@ RENDER_DOWNSTREAM = (
     PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
-    WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
+    WORKSHOP_PREVIEW_ADAPTER, EXPLORATION_HOST, *HOT_SWAP_FIXTURES,
 )
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
@@ -90,7 +93,7 @@ REQUIRED = (
     MOBILE_PACKAGED_ASSETS_NATIVE, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
-    WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
+    WORKSHOP_PREVIEW_ADAPTER, EXPLORATION_HOST, *HOT_SWAP_FIXTURES,
     RENDER_PARITY_MANIFEST, COMPILER_AOT,
 )
 IGNORED_SOURCE_DIRS = {
@@ -853,8 +856,17 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
 
     public_render_fixtures = {
         VSCODE_RENDER_FIXTURE: ("begin_frame();", "draw_line("),
-        WINDOWS_LAUNCH_FIXTURE: ("begin_frame();", "png_sprite.draw(", "smoke_label.draw("),
-        WORKSHOP_PREVIEW_ADAPTER: ("begin_frame();", "draw_sprite("),
+        WINDOWS_LAUNCH_FIXTURE: (
+            "begin_frame();",
+            "smoke_writer.reserve(2,",
+            "smoke_writer.finalize(2);",
+            "smoke_label.draw(",
+        ),
+        WORKSHOP_PREVIEW_ADAPTER: (
+            "begin_frame();",
+            "PongHost.writer.reserve(4,",
+            "PongHost.writer.finalize(4);",
+        ),
     }
     for fixture, required_calls in public_render_fixtures.items():
         text = sources[fixture]
@@ -870,6 +882,66 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 label(RENDER_HEADER), label(fixture), "public_graphics_boundary",
                 "no command-storage identifiers", "internal identifier present",
             ))
+
+    grouped_sprite_fixtures = {
+        WINDOWS_LAUNCH_FIXTURE: (
+            "smoke_writer.reserve(2,",
+            "smoke_writer.finalize(2);",
+            ("smoke_write_sprite(png_sprite", "smoke_write_sprite(svg_sprite", "smoke_label.draw("),
+        ),
+        WORKSHOP_PREVIEW_ADAPTER: (
+            "PongHost.writer.reserve(4,",
+            "PongHost.writer.finalize(4);",
+            (
+                "Render.command1_x",
+                "Render.command2_x",
+                "Render.command4_x",
+                "Render.command3_x",
+            ),
+        ),
+    }
+    for fixture, (reserve, finalize, ordered_markers) in grouped_sprite_fixtures.items():
+        text = sources[fixture]
+        checks += 1
+        if text.count(reserve) != 1 or text.count(finalize) != 1:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture), "public_sprite_run_count",
+                "one caller-owned grouped run", "missing or duplicated reserve/finalize",
+            ))
+        checks += 1
+        positions = [text.find(marker) for marker in ordered_markers]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture), "public_sprite_run_order",
+                "legacy sprite painter order", "missing or reordered calls",
+            ))
+
+    exploration_host = sources[EXPLORATION_HOST]
+    checks += 1
+    if not all(marker in exploration_host for marker in (
+        "if (input_pointer_count() > 0)",
+        "input_pointer_x_logical(0)",
+        "input_pointer_y_logical(0)",
+        "if (input_pointer_is_down(0))",
+    )):
+        failures.append(Mismatch(
+            label(HOST_FRAME), label(EXPLORATION_HOST), "pointer_presence_and_down_state",
+            "coordinates for present pointer; active only while down", "public input path missing",
+        ))
+    checks += 1
+    pointer_block = re.search(
+        r"if\s*\(input_pointer_count\(\)\s*>\s*0\)\s*\{(?P<body>.*?)\n\s*\}",
+        exploration_host,
+        re.DOTALL,
+    )
+    if pointer_block is None or re.search(
+        r"Input\.touch_active\s*=\s*1\s*;",
+        pointer_block.group("body").split("if (input_pointer_is_down(0))", 1)[0],
+    ):
+        failures.append(Mismatch(
+            label(HOST_FRAME), label(EXPLORATION_HOST), "pointer_active_semantics",
+            "touch_active assignment guarded by input_pointer_is_down", "presence implies active",
+        ))
 
     parity_manifest_text = sources[RENDER_PARITY_MANIFEST]
     checks += 1

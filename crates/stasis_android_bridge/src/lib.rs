@@ -4129,8 +4129,6 @@ struct State {
     initial_handle: i32;
     initial_width: i32;
     initial_height: i32;
-    draw_count: i32;
-    draw_asset: i32;
     phase: i32;
 }
 
@@ -4148,8 +4146,6 @@ function main(): void {
 function tick(): void {
     begin_frame();
     state.sprite.draw(4.0, 5.0, 200, 7);
-    state.draw_count = 1;
-    state.draw_asset = state.sprite.handle;
     end_frame();
     if (state.phase == 0) {
         state.sprite.release();
@@ -4165,24 +4161,6 @@ function tick(): void {
         let _first =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
                 .expect("run typed sprite release tick");
-        assert_eq!(
-            get_android_workshop_i32_global(
-                &root,
-                Path::new("src/main.stasis"),
-                "state.draw_count"
-            )
-            .expect("read draw count"),
-            1
-        );
-        assert_eq!(
-            get_android_workshop_i32_global(
-                &root,
-                Path::new("src/main.stasis"),
-                "state.draw_asset"
-            )
-            .expect("read draw asset"),
-            handle
-        );
         assert_eq!(
             get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "state.loaded")
                 .expect("read loaded flag"),
@@ -4273,8 +4251,6 @@ struct State {
     reload_handle: i32;
     reload_width: i32;
     reload_height: i32;
-    draw_count: i32;
-    draw_asset: i32;
     phase: i32;
 }
 
@@ -4298,8 +4274,6 @@ function tick(): void {
             state.reload_height = state.sprite.height;
         }
         state.sprite.draw(6.0, 7.0, 255, 0);
-        state.draw_count = 1;
-        state.draw_asset = state.sprite.handle;
         state.phase = 1;
     } else {
         state.sprite.release();
@@ -4313,24 +4287,6 @@ function tick(): void {
         let _reacquired =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
                 .expect("run same-tick release and reacquire");
-        assert_eq!(
-            get_android_workshop_i32_global(
-                &root,
-                Path::new("src/main.stasis"),
-                "state.draw_count"
-            )
-            .expect("read draw count"),
-            1
-        );
-        assert_eq!(
-            get_android_workshop_i32_global(
-                &root,
-                Path::new("src/main.stasis"),
-                "state.draw_asset"
-            )
-            .expect("read draw asset"),
-            handle
-        );
         assert_eq!(
             get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "state.loaded")
                 .expect("read loaded flag"),

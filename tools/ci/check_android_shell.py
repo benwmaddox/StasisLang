@@ -1645,8 +1645,14 @@ def main() -> int:
     assert '"orientation": "sensorLandscape"' in pong_project
     preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
     assert 'import "/vendor/stasis/src/stdlib/graphics.stasis";' in preview_adapter
-    assert "begin_frame();" in preview_adapter and "draw_sprite(" in preview_adapter
+    assert "begin_frame();" in preview_adapter
+    assert "PongHost.writer.reserve(4," in preview_adapter
+    assert "PongHost.writer.finalize(4);" in preview_adapter
     assert "gfx_cmd_i32" not in preview_adapter
+    exploration_host = read("mobile/android/app/src/main/assets/exploration_sample/src/host_runtime.stasis")
+    assert "if (input_pointer_count() > 0)" in exploration_host
+    assert "if (input_pointer_is_down(0))" in exploration_host
+    assert "Input.touch_active = 1;" in exploration_host
     assert '"encoding": "svg"' in pong_manifest
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")

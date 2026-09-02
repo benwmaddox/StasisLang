@@ -182,8 +182,7 @@ fn validate_graphics_internal_source_policy(
     imports: &[ModuleImport],
 ) -> Result<(), SourceDiagnostic> {
     let normalized = path.replace('\\', "/");
-    let is_graphics_implementation = normalized.ends_with("stdlib/graphics.stasis")
-        || normalized.ends_with("stdlib/internal/gfx_cmd.stasis");
+    let is_graphics_implementation = is_recognized_graphics_implementation_path(&normalized);
     let is_explicit_seam =
         normalized.starts_with("tests/stasis/") || normalized.contains("/tests/stasis/");
     if is_graphics_implementation || is_explicit_seam {
@@ -231,6 +230,28 @@ fn validate_graphics_internal_source_policy(
         }
     }
     Ok(())
+}
+
+fn is_recognized_graphics_implementation_path(path: &str) -> bool {
+    let path = path.trim_start_matches("./");
+    let is_graphics_file = |root: &str| {
+        path == format!("{root}/graphics.stasis")
+            || path == format!("{root}/internal/gfx_cmd.stasis")
+    };
+
+    if is_graphics_file("src/stdlib") || is_graphics_file(".stasis_cache/toolchain/src/stdlib") {
+        return true;
+    }
+
+    ["vendor/stasis/stdlib", "vendor/stasis/src/stdlib"]
+        .iter()
+        .any(|root| {
+            is_graphics_file(root)
+                || path
+                    .strip_suffix("/graphics.stasis")
+                    .or_else(|| path.strip_suffix("/internal/gfx_cmd.stasis"))
+                    .is_some_and(|prefix| prefix == *root || prefix.ends_with(&format!("/{root}")))
+        })
 }
 
 pub fn load_project_module_graph(
@@ -910,18 +931,43 @@ mod tests {
         assert!(transitive_error
             .message
             .contains("graphics internal identifier"));
+
+        for spoof_path in [
+            "src/my/stdlib/graphics.stasis",
+            "src/my/stdlib/internal/gfx_cmd.stasis",
+        ] {
+            let error = graph(
+                &[spoof_path],
+                &[(spoof_path, "global gfx_cmd_i32: i32[4];")],
+            )
+            .expect_err("a stdlib suffix alone must not grant graphics implementation access");
+            assert!(error.message.contains("graphics internal identifier"));
+        }
     }
 
     #[test]
     fn graphics_internal_policy_allows_implementation_and_explicit_seams() {
-        graph(
-            &["vendor/stasis/stdlib/graphics.stasis"],
-            &[(
-                "vendor/stasis/stdlib/graphics.stasis",
-                "function draw_line(): i32 { return gfx_cmd_line_count(); }",
-            )],
-        )
-        .expect("graphics implementation owns the private vocabulary");
+        for implementation_path in [
+            "src/stdlib/graphics.stasis",
+            "src/stdlib/internal/gfx_cmd.stasis",
+            ".stasis_cache/toolchain/src/stdlib/graphics.stasis",
+            ".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis",
+            "vendor/stasis/stdlib/graphics.stasis",
+            "vendor/stasis/stdlib/internal/gfx_cmd.stasis",
+            "vendor/stasis/src/stdlib/graphics.stasis",
+            "vendor/stasis/src/stdlib/internal/gfx_cmd.stasis",
+            "samples/example/vendor/stasis/stdlib/graphics.stasis",
+            "samples/example/vendor/stasis/stdlib/internal/gfx_cmd.stasis",
+        ] {
+            graph(
+                &[implementation_path],
+                &[(
+                    implementation_path,
+                    "function private_probe(): i32 { return gfx_cmd_line_count(); }",
+                )],
+            )
+            .expect("recognized graphics module identity owns the private vocabulary");
+        }
         graph(
             &["tests/stasis/seams/gfx_probe.stasis"],
             &[(

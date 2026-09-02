@@ -106,7 +106,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 contract.VSCODE_RENDER_FIXTURE, "draw_line(", "legacy_line(", "public_graphics_path",
             ),
             (
-                contract.WINDOWS_LAUNCH_FIXTURE, "png_sprite.draw(", "legacy_sprite(", "public_graphics_path",
+                contract.WINDOWS_LAUNCH_FIXTURE, "smoke_writer.reserve(2,", "legacy_sprite(", "public_graphics_path",
             ),
             (
                 contract.WORKSHOP_PREVIEW_ADAPTER, "begin_frame();", "legacy_begin();", "public_graphics_path",
@@ -118,6 +118,25 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 failure = next(failure for failure in failures if failure.field == field)
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
+
+    def test_grouped_sprite_runs_and_exploration_pointer_semantics_are_guarded(self):
+        failures, _ = self.run_with(
+            contract.WINDOWS_LAUNCH_FIXTURE,
+            "smoke_writer.finalize(2);",
+            "smoke_writer.finalize(1);",
+        )
+        self.assertTrue(any(failure.field == "public_sprite_run_count" for failure in failures))
+
+        failures, _ = self.run_with(
+            contract.EXPLORATION_HOST,
+            "if (input_pointer_is_down(0)) {",
+            "Input.touch_active = 1;\n        if (input_pointer_is_down(0)) {",
+        )
+        failure = next(
+            failure for failure in failures if failure.field == "pointer_active_semantics"
+        )
+        self.assertEqual("src/stdlib/internal/host_frame.stasis", failure.producer)
+        self.assertEqual(contract.EXPLORATION_HOST.as_posix(), failure.consumer)
 
     def test_hot_swap_fixtures_require_complete_current_v7_header(self):
         mutations = (
