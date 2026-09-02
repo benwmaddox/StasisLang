@@ -1068,7 +1068,7 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
-const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 4;
+const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 3;
 
 fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
     let address = lib
@@ -1685,7 +1685,7 @@ struct StasisGraphicsAssetsApi {
     stasis_load_font: usize,
     stasis_measure_text: usize,
     stasis_gfx_cache_text: usize,
-    stasis_gfx_replace_text: usize,
+    stasis_gfx_replace_text: Option<usize>,
     stasis_gfx_measure_text_cached: usize,
     stasis_gfx_measure_text_cached_height: usize,
     stasis_clipboard_load_ascii: Option<usize>,
@@ -1767,7 +1767,9 @@ impl StasisGraphicsAssetsApi {
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
-            stasis_gfx_replace_text: lib.symbol_address("stasis_gfx_replace_text")?,
+            // Replaceable runs are additive to graphics ABI 3. Older runtimes remain usable for
+            // immutable TextRuns and report replacement as unsupported.
+            stasis_gfx_replace_text: lib.symbol_address("stasis_gfx_replace_text").ok(),
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
             stasis_gfx_measure_text_cached_height: lib
                 .symbol_address("stasis_gfx_measure_text_cached_height")?,
@@ -5699,12 +5701,15 @@ fn replace_cached_text(run_handle: i32, font: i32, text_id: i32) -> i32 {
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
+    let Some(address) = api.stasis_gfx_replace_text else {
+        return 0;
+    };
     #[cfg(windows)]
     let callback: extern "system" fn(i32, i32, *const c_char) -> i32 =
-        unsafe { std::mem::transmute(api.stasis_gfx_replace_text) };
+        unsafe { std::mem::transmute(address) };
     #[cfg(not(windows))]
     let callback: extern "C" fn(i32, i32, *const c_char) -> i32 =
-        unsafe { std::mem::transmute(api.stasis_gfx_replace_text) };
+        unsafe { std::mem::transmute(address) };
     callback(run_handle, font, text.as_ptr())
 }
 
