@@ -35,7 +35,17 @@ jobs:
         run: ./tools/restore-stasis-release.ps1 -ReleaseId '${{ steps.stasis.outputs.release_id }}' -AssetName stasis-nightly-linux-x64.tar.gz
 
       - name: Verify checked-in vendor snapshot
-        run: stasis vendor status --workspace .
+        shell: pwsh
+        run: |
+          $statusJson = @(& stasis --json vendor status --workspace .)
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the checked-in Stasis vendor snapshot.' }
+          try {
+            $status = ($statusJson -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop
+          } catch {
+            throw 'Stasis vendor status returned invalid JSON.'
+          }
+          if ($status.ok -ne $true) { throw 'Stasis vendor status did not report success.' }
+          if ($status.result.current -ne $true) { throw 'Checked-in Stasis vendor snapshot is not current.' }
 
       - name: Check
         run: stasis check

@@ -14,7 +14,8 @@ if (-not $Repository) { throw 'The official Stasis release repository is require
 $project = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
 $destinationPath = if ([IO.Path]::IsPathRooted($Destination)) { [IO.Path]::GetFullPath($Destination) } else { [IO.Path]::GetFullPath((Join-Path $project $Destination)) }
 $prefix = $project + [IO.Path]::DirectorySeparatorChar
-if (-not $destinationPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+$pathComparison = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+if (-not $destinationPath.StartsWith($prefix, $pathComparison)) {
     throw "Toolchain destination must be contained under project root '$project'."
 }
 if (Get-Item -LiteralPath $destinationPath -Force -ErrorAction SilentlyContinue) { throw "Refusing to overwrite existing toolchain destination '$destinationPath'." }

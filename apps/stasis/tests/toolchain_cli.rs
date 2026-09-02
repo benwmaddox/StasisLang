@@ -830,6 +830,14 @@ fn new_always_generates_github_actions() {
     ] {
         assert!(project.join(path).is_file(), "missing generated {path}");
     }
+    let pr = fs::read_to_string(project.join(".github/workflows/stasis-pr.yml"))
+        .expect("read generated PR workflow");
+    assert!(pr.contains("stasis --json vendor status --workspace ."));
+    assert!(pr.contains("$status.result.current -ne $true"));
+    let restore = fs::read_to_string(project.join("tools/restore-stasis-release.ps1"))
+        .expect("read generated restore helper");
+    assert!(restore.contains("StartsWith($prefix, $pathComparison)"));
+    assert!(!restore.contains("StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)"));
     let manifest: Value =
         serde_json::from_slice(&fs::read(project.join("stasis.json")).expect("read manifest"))
             .expect("parse manifest");

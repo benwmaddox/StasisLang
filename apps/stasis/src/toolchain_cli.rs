@@ -9707,7 +9707,15 @@ mod tests {
         assert!(!pr.contains("pinnedReleaseId"));
         assert!(pr.contains("Using newest complete published Stasis nightly"));
         assert!(pr.contains("GITHUB_STEP_SUMMARY"));
-        assert!(pr.contains("stasis vendor status --workspace ."));
+        for expected in [
+            "stasis --json vendor status --workspace .",
+            "$LASTEXITCODE -ne 0",
+            "ConvertFrom-Json -ErrorAction Stop",
+            "$status.ok -ne $true",
+            "$status.result.current -ne $true",
+        ] {
+            assert!(pr.contains(expected), "PR workflow missing {expected}");
+        }
         assert!(pr.contains("cancel-in-progress: true"));
         assert!(pr.contains("run: stasis check"));
         for forbidden in [
@@ -9814,6 +9822,47 @@ mod tests {
         assert!(wrapper_gate < exact_executable_gate);
         assert!(exact_executable_gate < strip_wrapper);
         assert!(!restore.contains("Get-ChildItem -LiteralPath $staging -Recurse -Directory"));
+    }
+
+    #[test]
+    fn github_actions_pr_rejects_vendor_drift_from_json_before_checking() {
+        let pr = include_str!("../templates/github-actions/stasis-pr.yml");
+        let status_command = pr
+            .find("stasis --json vendor status --workspace .")
+            .expect("JSON vendor status command");
+        let command_gate = pr
+            .find("if ($LASTEXITCODE -ne 0)")
+            .expect("vendor status command gate");
+        let json_gate = pr
+            .find("if ($status.ok -ne $true)")
+            .expect("vendor status JSON success gate");
+        let current_gate = pr
+            .find("if ($status.result.current -ne $true)")
+            .expect("vendor current gate");
+        let check = pr.find("run: stasis check").expect("Stasis check step");
+        assert!(status_command < command_gate);
+        assert!(command_gate < json_gate);
+        assert!(json_gate < current_gate);
+        assert!(current_gate < check);
+        assert!(!pr.contains("run: stasis vendor status --workspace ."));
+    }
+
+    #[test]
+    fn github_actions_restore_uses_platform_path_comparison() {
+        let restore = include_str!("../templates/github-actions/restore-stasis-release.ps1");
+        for expected in [
+            "[Runtime.InteropServices.RuntimeInformation]::IsOSPlatform",
+            "[Runtime.InteropServices.OSPlatform]::Windows",
+            "[StringComparison]::OrdinalIgnoreCase",
+            "else { [StringComparison]::Ordinal }",
+            "StartsWith($prefix, $pathComparison)",
+        ] {
+            assert!(
+                restore.contains(expected),
+                "restore helper path comparison contract missing {expected}"
+            );
+        }
+        assert!(!restore.contains("StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)"));
     }
 
     #[test]
