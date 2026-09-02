@@ -367,7 +367,7 @@ fn build_struct_scalars(
         let Some(field_types) = analysis.named_struct_field_types.get(type_id) else {
             continue;
         };
-        let fields = field_types
+        let scalar_fields = field_types
             .iter()
             .filter_map(|(suffix, field_type)| {
                 memory
@@ -377,16 +377,14 @@ fn build_struct_scalars(
                     .map(|binding| (suffix.clone(), binding))
             })
             .collect::<BTreeMap<_, _>>();
-        if !fields.is_empty() {
-            out.insert(
-                path.clone(),
-                StructScalarBinding {
-                    base: hash_global_path(path),
-                    type_id: *type_id,
-                    fields,
-                },
-            );
-        }
+        out.insert(
+            path.clone(),
+            StructScalarBinding {
+                base: hash_global_path(path),
+                type_id: *type_id,
+                fields: scalar_fields,
+            },
+        );
     }
     out
 }
@@ -4171,9 +4169,10 @@ function render(): i32 { return 0; }
         process.upsert_file(
             "receiver_arrays.stasis",
             r#"
+const CAP: i32 = 4;
+
 struct Batch {
-    values: f32[4];
-    count: i32;
+    values: f32[CAP];
 }
 
 global first: Batch;
@@ -4182,7 +4181,6 @@ global second: Batch;
 function write(self: Batch, index: i32, value: f32): void {
     self.values[index] = value;
     self.values[index] += 0.5;
-    self.count += 1;
 }
 
 function read(self: Batch, index: i32): f32 {
@@ -4195,7 +4193,7 @@ function main(): i32 {
     return f32_to_i32(first.read(1) + second.read(2));
 }
 
-function tick(): i32 { return first.count + second.count; }
+function tick(): i32 { return 0; }
 function render(): i32 { return 0; }
 "#,
         );

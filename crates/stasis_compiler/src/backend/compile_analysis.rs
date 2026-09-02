@@ -273,7 +273,8 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
     let constant_values = collect_top_level_constant_values(files, type_table)?;
     let global_path_types = collect_global_path_types(files, type_table, &constant_values)?;
     let collection_infos = collect_foreach_collection_infos(files, type_table, &constant_values)?;
-    let named_struct_field_types = collect_named_struct_field_types(files, type_table)?;
+    let named_struct_field_types =
+        collect_named_struct_field_types(files, type_table, &constant_values)?;
     Ok(CompileAnalysisCache {
         files_fingerprint,
         call_signatures,
@@ -916,6 +917,7 @@ pub(crate) fn collect_foreach_collection_infos(
 pub(crate) fn collect_named_struct_field_types(
     files: &[SourceFile],
     type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
 ) -> Result<NamedStructFieldTypeMap, String> {
     let mut struct_fields_by_name: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
     for file in files {
@@ -948,6 +950,7 @@ pub(crate) fn collect_named_struct_field_types(
             struct_name,
             &struct_fields_by_name,
             type_table,
+            constant_values,
             &mut field_types,
             &mut Vec::new(),
         )?;
@@ -1075,6 +1078,7 @@ pub(crate) fn build_collection_info_for_element_type(
         element_type_name,
         struct_fields_by_name,
         type_table,
+        constant_values,
         &mut field_types,
         visiting_structs,
     )?;
@@ -1160,6 +1164,7 @@ pub(crate) fn collect_struct_primitive_leaf_fields(
     struct_name: &str,
     struct_fields_by_name: &BTreeMap<String, Vec<ParsedField>>,
     type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
     out: &mut BTreeMap<String, TypeId>,
     visiting_structs: &mut Vec<String>,
 ) -> Result<(), String> {
@@ -1189,10 +1194,22 @@ pub(crate) fn collect_struct_primitive_leaf_fields(
         }
         if let Some((element_type_name, extent_text)) = parse_array_type_parts(&field.type_name) {
             if !extent_text.is_empty() {
-                if extent_text.bytes().all(|byte| byte.is_ascii_digit()) {
-                    let type_id = type_table.resolve_or_intern(field.type_name.trim())?;
-                    out.insert(field_path, type_id);
+                let extent =
+                    resolve_fixed_array_extent(extent_text, constant_values).ok_or_else(|| {
+                        format!(
+                            "struct field '{}.{}' has unsupported array extent '{}'",
+                            struct_name, field.name, extent_text
+                        )
+                    })?;
+                if extent < 0 {
+                    return Err(format!(
+                        "struct field '{}.{}' has negative array extent {}",
+                        struct_name, field.name, extent
+                    ));
                 }
+                let canonical_type = format!("{}[{extent}]", element_type_name.trim());
+                let type_id = type_table.resolve_or_intern(&canonical_type)?;
+                out.insert(field_path, type_id);
                 continue;
             }
             if resolve_primitive_scalar_type_id(element_type_name, type_table).is_some() {
@@ -1206,6 +1223,7 @@ pub(crate) fn collect_struct_primitive_leaf_fields(
                 field.type_name.trim(),
                 struct_fields_by_name,
                 type_table,
+                constant_values,
                 out,
                 visiting_structs,
             )?;
