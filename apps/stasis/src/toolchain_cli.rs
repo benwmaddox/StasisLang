@@ -7449,9 +7449,13 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let release_memory = release["memory"].as_object().expect("release memory");
         assert!(release_memory
-            .keys()
-            .all(|path| retained_view_paths.contains(path.as_str())
-                || WEB_RUNTIME_BUFFERS.contains(&path.as_str())));
+            .iter()
+            .all(|(path, layout)| retained_view_paths.contains(path.as_str())
+                || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
+                || (process
+                    .imported_symbols()
+                    .contains("stasis_jit_text_run_replace_from")
+                    && layout["byte_backed"].as_bool() == Some(true))));
         let release_globals = release["globals"].as_object().expect("release globals");
         assert!(release_globals.keys().all(|path| {
             WEB_HOST_GLOBALS.contains(&path.as_str()) || retained_view_paths.contains(path.as_str())
