@@ -1366,22 +1366,15 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
         return 0;
     };
     let Ok(text) = std::str::from_utf8(text) else {
-        set_embedded_resource_error(catalog, "dynamic text is not valid UTF-8".to_string());
         return 0;
     };
     if text.is_empty() {
-        set_embedded_resource_error(catalog, "dynamic text must not be empty".to_string());
         return 0;
     }
     if text.len() > MAX_EMBEDDED_DYNAMIC_TEXT_BYTES {
-        set_embedded_resource_error(
-            catalog,
-            "dynamic text exceeds per-run byte capacity".to_string(),
-        );
         return 0;
     }
     let Some(font_entry) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
-        set_embedded_resource_error(catalog, format!("font handle {font} was not loaded"));
         return 0;
     };
     let existing = catalog
@@ -1390,7 +1383,6 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
         .position(|run| run.handle == handle);
     let replace_index = existing.filter(|&index| catalog.text_runs[index].replaceable);
     if replace_index.is_none() && catalog.text_runs.len() >= MAX_EMBEDDED_TEXT_RUNS {
-        set_embedded_resource_error(catalog, "cached text registry is full".to_string());
         return 0;
     }
     let prior_len = replace_index.map_or(0, |index| catalog.text_runs[index].text.len());
@@ -1400,7 +1392,6 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
         .map(|run| run.text.len())
         .sum::<usize>();
     if retained - prior_len + text.len() > MAX_EMBEDDED_TEXT_BYTES {
-        set_embedded_resource_error(catalog, "cached text byte capacity is full".to_string());
         return 0;
     }
     let measured_width = text.len() as f32 * font_entry.size as f32 * 0.6;
@@ -7272,11 +7263,60 @@ function on_code_swap(): void {}\n";
         assert_eq!(before.font, 2);
         assert_eq!(before.measured_height, 30.0);
         assert_eq!(embedded_replace_text(dynamic, 1, &[0xff]), 0);
+        take_embedded_resource_error().expect("invalid UTF-8 replacement is nonfatal");
+        assert_eq!(embedded_replace_text(dynamic, 1, b""), 0);
+        take_embedded_resource_error().expect("empty replacement is nonfatal");
         assert_eq!(embedded_replace_text(dynamic, 99, b"invalid font"), 0);
+        take_embedded_resource_error().expect("invalid replacement font is nonfatal");
         assert_eq!(
             embedded_replace_text(dynamic, 1, &vec![b'x'; MAX_EMBEDDED_DYNAMIC_TEXT_BYTES + 1]),
             0
         );
+        take_embedded_resource_error().expect("oversized replacement is nonfatal");
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            let catalog = slot.as_mut().unwrap();
+            while catalog.text_runs.len() < MAX_EMBEDDED_TEXT_RUNS {
+                let next_handle = catalog.text_runs.len() as i32 + 1;
+                catalog.text_runs.push(EmbeddedTextRun {
+                    handle: next_handle,
+                    font: 1,
+                    text: String::new(),
+                    measured_width: 0.0,
+                    measured_height: 18.0,
+                    replaceable: false,
+                });
+            }
+        }
+        assert_eq!(embedded_replace_text(fixed, 1, b"new dynamic"), 0);
+        take_embedded_resource_error().expect("replacement registry exhaustion is nonfatal");
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            slot.as_mut().unwrap().text_runs.truncate(2);
+        }
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            let catalog = slot.as_mut().unwrap();
+            let retained = catalog
+                .text_runs
+                .iter()
+                .map(|run| run.text.len())
+                .sum::<usize>();
+            catalog.text_runs.push(EmbeddedTextRun {
+                handle: 3,
+                font: 1,
+                text: "x".repeat(MAX_EMBEDDED_TEXT_BYTES - retained),
+                measured_width: 0.0,
+                measured_height: 18.0,
+                replaceable: false,
+            });
+        }
+        assert_eq!(embedded_replace_text(dynamic, 1, b"Punktzahl 88"), 0);
+        take_embedded_resource_error().expect("replacement byte exhaustion is nonfatal");
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            slot.as_mut().unwrap().text_runs.truncate(2);
+        }
         let after = {
             let slot = embedded_resource_catalog().lock().unwrap();
             slot.as_ref()

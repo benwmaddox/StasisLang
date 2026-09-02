@@ -896,20 +896,22 @@
     return Number.isInteger(length) && length >= 0 && length <= memory.length ? length : null;
   };
   const runtimeTextValue = reference => {
+    const memory = resolveU8Memory(reference);
+    if (memory) {
+      const length = runtimeCollectionLength(memory);
+      if (length === null) return null;
+      const bytes = Array.from({ length }, (_, index) => readU8(memory, index));
+      try {
+        return { text: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)), bytes: bytes.length };
+      } catch {
+        return null;
+      }
+    }
     if (Object.prototype.hasOwnProperty.call(game.strings || {}, String(reference))) {
       const text = String(game.strings[String(reference)]);
       return { text, bytes: new TextEncoder().encode(text).length };
     }
-    const memory = resolveU8Memory(reference);
-    if (!memory) return null;
-    const length = runtimeCollectionLength(memory);
-    if (length === null) return null;
-    const bytes = Array.from({ length }, (_, index) => readU8(memory, index));
-    try {
-      return { text: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)), bytes: bytes.length };
-    } catch {
-      return null;
-    }
+    return null;
   };
   const getViewField = (base, index, field) => {
     const path = game.views?.[String(base)]?.[field];
@@ -1492,6 +1494,8 @@
     if (!font?.ready) return;
     const entry = cachedText.get(run.handle);
     if (!entry || entry.generation !== run.generation) return;
+    if (getViewField(run.base, run.index, "font") !== run.font
+      || getViewField(run.base, run.index, "handle") !== run.handle) return;
     const metrics = measureTextRun(font, run.text);
     entry.width = metrics.width;
     entry.height = metrics.height;
