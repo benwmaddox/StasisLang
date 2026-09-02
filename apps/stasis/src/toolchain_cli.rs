@@ -1248,7 +1248,9 @@ fn execute(
         verify_installed_toolchain_identity()?;
     }
     match command {
-        ToolchainCommand::New { name, dir } => create_new_project(dir.unwrap_or_else(|| PathBuf::from(&name)), name),
+        ToolchainCommand::New { name, dir } => {
+            create_new_project(dir.unwrap_or_else(|| PathBuf::from(&name)), name)
+        }
         ToolchainCommand::Init { dir, name } => {
             let root = absolute_path(&dir)?;
             let inferred = root
@@ -1523,17 +1525,22 @@ fn command_requires_runtime(command: &ToolchainCommand) -> bool {
 }
 
 fn create_new_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
-    create_project_with_options(path, name, true)
+    create_project_with_options(path, name, true, true)
+}
+
+fn create_internal_git_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
+    create_project_with_options(path, name, true, false)
 }
 
 fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
-    create_project_with_options(path, name, false)
+    create_project_with_options(path, name, false, false)
 }
 
 fn create_project_with_options(
     path: PathBuf,
     name: String,
     initialize_git: bool,
+    github_actions: bool,
 ) -> Result<CommandResult, String> {
     validate_project_name(&name)?;
     if initialize_git {
@@ -1559,45 +1566,44 @@ fn create_project_with_options(
         reserved_paths.push(root.join(".gitignore"));
         reserved_paths.push(root.join(".githooks/pre-commit"));
     }
+    if github_actions {
+        reserved_paths.extend([
+            root.join(".github/workflows/stasis-pr.yml"),
+            root.join(".github/workflows/stasis-weekly.yml"),
+            root.join("tools/restore-stasis-release.ps1"),
+            root.join("tools/resolve-stasis-nightly.ps1"),
+        ]);
+        for directory in [
+            root.join(".github"),
+            root.join(".github/workflows"),
+            root.join("tools"),
+        ] {
+            validate_safe_project_directory(
+                &directory,
+                "refusing to generate GitHub Actions through",
+            )?;
+        }
+    }
     let vscode_directory = root.join(".vscode");
-    if vscode_directory.exists() {
-        let metadata = fs::symlink_metadata(&vscode_directory).map_err(|error| {
-            format!("failed to inspect {}: {error}", vscode_directory.display())
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!(
-                "refusing to write editor settings through {}",
-                vscode_directory.display()
-            ));
-        }
-    }
+    validate_safe_project_directory(
+        &vscode_directory,
+        "refusing to write editor settings through",
+    )?;
     let vendor_directory = root.join("vendor");
-    if vendor_directory.exists() {
-        let metadata = fs::symlink_metadata(&vendor_directory).map_err(|error| {
-            format!("failed to inspect {}: {error}", vendor_directory.display())
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!(
-                "refusing to write vendored packages through {}",
-                vendor_directory.display()
-            ));
-        }
-    }
+    validate_safe_project_directory(
+        &vendor_directory,
+        "refusing to write vendored packages through",
+    )?;
     let assets_directory = root.join("assets");
-    if assets_directory.exists() {
-        let metadata = fs::symlink_metadata(&assets_directory).map_err(|error| {
-            format!("failed to inspect {}: {error}", assets_directory.display())
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!(
-                "refusing to write asset manifest through {}",
-                assets_directory.display()
-            ));
-        }
-    }
+    validate_safe_project_directory(
+        &assets_directory,
+        "refusing to write asset manifest through",
+    )?;
     for reserved in &reserved_paths {
-        if reserved.exists() {
-            return Err(format!("refusing to overwrite {}", reserved.display()));
+        match fs::symlink_metadata(reserved) {
+            Ok(_) => return Err(format!("refusing to overwrite {}", reserved.display())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to inspect {}: {error}", reserved.display())),
         }
     }
     fs::create_dir_all(root.join("src"))
@@ -1620,6 +1626,28 @@ fn create_project_with_options(
     if initialize_git {
         write_new_file(&root.join(".gitattributes"), PROJECT_GIT_ATTRIBUTES)?;
         write_new_file(&root.join(".gitignore"), PROJECT_GIT_IGNORE)?;
+    }
+    if github_actions {
+        fs::create_dir_all(root.join(".github/workflows"))
+            .map_err(|error| format!("failed to create GitHub workflows directory: {error}"))?;
+        fs::create_dir_all(root.join("tools"))
+            .map_err(|error| format!("failed to create tools directory: {error}"))?;
+        write_new_file(
+            &root.join(".github/workflows/stasis-pr.yml"),
+            include_str!("../templates/github-actions/stasis-pr.yml"),
+        )?;
+        write_new_file(
+            &root.join(".github/workflows/stasis-weekly.yml"),
+            include_str!("../templates/github-actions/stasis-weekly.yml"),
+        )?;
+        write_new_file(
+            &root.join("tools/restore-stasis-release.ps1"),
+            include_str!("../templates/github-actions/restore-stasis-release.ps1"),
+        )?;
+        write_new_file(
+            &root.join("tools/resolve-stasis-nightly.ps1"),
+            include_str!("../templates/github-actions/resolve-stasis-nightly.ps1"),
+        )?;
     }
     write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
     write_new_file(&root.join("assets/manifest.json"), DEFAULT_ASSET_MANIFEST)?;
@@ -1649,8 +1677,29 @@ fn create_project_with_options(
             "root": display_path(&root),
             "manifest": MANIFEST_NAME,
             "format_hook": initialize_git,
+            "github_actions": github_actions,
         }),
     ))
+}
+
+fn validate_safe_project_directory(path: &Path, refusal: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            #[cfg(windows)]
+            let reparse_point = {
+                use std::os::windows::fs::MetadataExt;
+                metadata.file_attributes() & 0x400 != 0
+            };
+            #[cfg(not(windows))]
+            let reparse_point = false;
+            if metadata.file_type().is_symlink() || reparse_point || !metadata.is_dir() {
+                return Err(format!("{refusal} {}", path.display()));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to inspect {}: {error}", path.display())),
+    }
 }
 
 fn require_git() -> Result<(), String> {
@@ -9639,6 +9688,154 @@ mod tests {
             "user source\n"
         );
         remove_temp(&root);
+    }
+
+    #[test]
+    fn github_actions_templates_are_offline_and_match_the_ci_contract() {
+        let root = temp_dir("github_actions_templates");
+        let result = create_project_with_options(root.clone(), "demo".to_string(), false, true)
+            .expect("generate GitHub Actions scaffold");
+        assert_eq!(result.data["github_actions"], true);
+
+        let pr = fs::read_to_string(root.join(".github/workflows/stasis-pr.yml"))
+            .expect("read PR workflow");
+        assert!(pr.contains("pull_request:"));
+        assert!(!pr.contains("paths:"));
+        assert_eq!(pr.matches("./tools/resolve-stasis-nightly.ps1").count(), 1);
+        assert!(!pr.contains("stasis.json"));
+        assert!(!pr.contains("vendor.stasis.release_id"));
+        assert!(!pr.contains("pinnedReleaseId"));
+        assert!(pr.contains("Using newest complete published Stasis nightly"));
+        assert!(pr.contains("GITHUB_STEP_SUMMARY"));
+        assert!(pr.contains("stasis vendor status --workspace ."));
+        assert!(pr.contains("cancel-in-progress: true"));
+        assert!(pr.contains("run: stasis check"));
+        for forbidden in [
+            "stasis fmt",
+            "stasis test",
+            "stasis build",
+            "stasis package",
+        ] {
+            assert!(!pr.contains(forbidden), "PR workflow contains {forbidden}");
+        }
+
+        let weekly = fs::read_to_string(root.join(".github/workflows/stasis-weekly.yml"))
+            .expect("read weekly workflow");
+        for expected in [
+            "cron: \"0 9 * * 5\"",
+            "workflow_dispatch:",
+            "ubuntu-latest",
+            "windows-latest",
+            "macos-15",
+            "stasis vendor update",
+            "stasis fmt --check",
+            "run: stasis check",
+            "run: stasis test",
+            "stasis package --target desktop",
+            "actions/upload-artifact@v4",
+        ] {
+            assert!(
+                weekly.contains(expected),
+                "weekly workflow missing {expected}"
+            );
+        }
+        for forbidden in [
+            "release create",
+            "package-mobile",
+            "--target web",
+            "signing",
+        ] {
+            assert!(
+                !weekly.contains(forbidden),
+                "weekly workflow contains {forbidden}"
+            );
+        }
+
+        let restore = fs::read_to_string(root.join("tools/restore-stasis-release.ps1"))
+            .expect("read restore helper");
+        for expected in [
+            "GetRelativePath",
+            "ReparsePoint",
+            "sha256:",
+            "Get-FileHash",
+            ".stasis-restore-",
+            "exactly one Stasis executable",
+            "$LASTEXITCODE -ne 0",
+            "finally",
+            "editor-info",
+        ] {
+            assert!(
+                restore.contains(expected),
+                "restore helper missing {expected}"
+            );
+        }
+        let resolver = fs::read_to_string(root.join("tools/resolve-stasis-nightly.ps1"))
+            .expect("read resolver helper");
+        assert!(restore.contains("'benwmaddox/StasisLang'"));
+        assert!(resolver.contains("'benwmaddox/StasisLang'"));
+        assert!(resolver.contains("-notmatch '^nightly-[0-9]{8}-[0-9]+$'"));
+        assert!(resolver.contains("$release.draft"));
+        assert!(resolver.contains("$matches.Count -ne 1"));
+        assert!(resolver.contains("$LASTEXITCODE -ne 0"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn github_actions_preflights_conflicts_without_partial_writes() {
+        let root = temp_dir("github_actions_conflict");
+        fs::create_dir_all(root.join(".github/workflows")).expect("create workflow directory");
+        fs::write(
+            root.join(".github/workflows/stasis-weekly.yml"),
+            "user workflow\n",
+        )
+        .expect("write workflow conflict");
+        let error = create_new_project(root.clone(), "demo".to_string())
+            .expect_err("reject workflow conflict");
+        assert!(error.contains("stasis-weekly.yml"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".github/workflows/stasis-weekly.yml"))
+                .expect("read preserved workflow"),
+            "user workflow\n"
+        );
+        remove_temp(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_actions_rejects_broken_directory_symlinks_without_partial_writes() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("github_actions_broken_symlink");
+        fs::create_dir_all(&root).expect("create root");
+        symlink(root.join("missing"), root.join(".github")).expect("create broken symlink");
+        let error = create_new_project(root.clone(), "demo".to_string())
+            .expect_err("reject broken symlink");
+        assert!(error.contains("refusing to generate GitHub Actions"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        remove_temp(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn github_actions_rejects_directory_reparse_points_without_partial_writes() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = temp_dir("github_actions_reparse");
+        let outside = temp_dir("github_actions_reparse_outside");
+        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        if symlink_dir(&outside, root.join(".github")).is_err() {
+            remove_temp(&root);
+            remove_temp(&outside);
+            return;
+        }
+        let error =
+            create_new_project(root.clone(), "demo".to_string()).expect_err("reject reparse point");
+        assert!(error.contains("refusing to generate GitHub Actions"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        remove_temp(&root);
+        remove_temp(&outside);
     }
 
     #[test]

@@ -129,9 +129,33 @@ staged Stasis changes. A retry then commits the canonical source. Git must be av
 cloning a generated repository, reactivate the checked-in hook with
 `git config --local core.hooksPath .githooks`.
 
+### Generated GitHub Actions
+
+`stasis new NAME` adds `.github/workflows/stasis-pr.yml`,
+`.github/workflows/stasis-weekly.yml`, and two PowerShell restore/resolution helpers under `tools/`.
+`stasis init` does not add them. Conflicting or linked workflow/tool directories fail preflight
+without a partial scaffold.
+
+The PR workflow runs for every pull request without path filters. It resolves the newest complete
+published nightly at CI runtime and reports the selected release in the step summary. The job
+verifies GitHub's published SHA-256 asset digest and installed toolchain identity,
+checks `vendor/stasis`, and runs `stasis check`. The scheduled Friday and manually dispatched weekly
+workflow selects the newest non-draft nightly containing Linux x64, Windows x64, and macOS arm64
+assets. Its three-host matrix runs vendor update, format check, check, test, and desktop package, then
+uploads short-lived per-platform artifacts. It never creates a tag or release, publishes or signs a
+package, or builds Android, iOS, or web targets.
+
+`stasis.json` continues to record the release identity and hash of the checked-in `vendor/stasis`
+snapshot. That identity does not pin either generated CI workflow's toolchain.
+
+All templates are embedded in `stasis`, so project creation itself remains offline. Only the
+generated Actions jobs access the public `benwmaddox/StasisLang` GitHub releases to resolve and
+restore release assets.
+
 ## Commands and outputs
 
-- `new` / `init`: create the manifest and built-in starter template without network access.
+- `new` / `init`: create the manifest and built-in starter template without network access. `new`
+  also generates GitHub Actions; `init` leaves existing repository automation unchanged.
 - `fmt [--check] [PATH ...]` / `format [--check] [PATH ...]`: apply the canonical Stasis source layout described below.
   `format` is an alias for `fmt`; both emit `fmt` as the canonical JSON command name. The operation
   is idempotent and never follows symlinks. With explicit file or directory paths, formatting works

@@ -1,0 +1,41 @@
+name: Stasis PR
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stasis-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Stasis release
+        id: stasis
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseId = ./tools/resolve-stasis-nightly.ps1
+          $message = "Using newest complete published Stasis nightly: $releaseId"
+          Write-Host $message
+          if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "### Stasis toolchain`n$message" }
+          "release_id=$releaseId" >> $env:GITHUB_OUTPUT
+
+      - name: Restore verified Stasis toolchain
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tools/restore-stasis-release.ps1 -ReleaseId '${{ steps.stasis.outputs.release_id }}' -AssetName stasis-nightly-linux-x64.tar.gz
+
+      - name: Verify checked-in vendor snapshot
+        run: stasis vendor status --workspace .
+
+      - name: Check
+        run: stasis check

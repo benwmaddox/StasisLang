@@ -533,6 +533,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let created_json = json_stdout(&created);
     assert_eq!(created_json["ok"], true);
     assert_eq!(created_json["command"], "new");
+    assert_eq!(created_json["result"]["github_actions"], true);
     let manifest: Value = serde_json::from_slice(
         &fs::read(project.join("stasis.json")).expect("read generated manifest"),
     )
@@ -810,6 +811,41 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     );
 
     fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn new_always_generates_github_actions() {
+    let parent = temp_dir("github_actions_development");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+
+    let output = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(json_stdout(&output)["result"]["github_actions"], true);
+    for path in [
+        ".github/workflows/stasis-pr.yml",
+        ".github/workflows/stasis-weekly.yml",
+        "tools/restore-stasis-release.ps1",
+        "tools/resolve-stasis-nightly.ps1",
+    ] {
+        assert!(project.join(path).is_file(), "missing generated {path}");
+    }
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(project.join("stasis.json")).expect("read manifest"))
+            .expect("parse manifest");
+    assert_eq!(
+        manifest["vendor"]["stasis"]["release_id"],
+        option_env!("STASIS_RELEASE_ID").unwrap_or("development")
+    );
+
+    let initialized = parent.join("initialized");
+    fs::create_dir_all(&initialized).expect("create init directory");
+    let init = stasis(&["--json", "init", "--name", "initialized"], &initialized);
+    assert_eq!(init.status.code(), Some(0));
+    assert_eq!(json_stdout(&init)["result"]["github_actions"], false);
+    assert!(!initialized.join(".github").exists());
+    assert!(!initialized.join("tools").exists());
+    fs::remove_dir_all(parent).ok();
 }
 
 #[test]

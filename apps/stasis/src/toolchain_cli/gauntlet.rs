@@ -1,5 +1,5 @@
 use super::{
-    absolute_path, create_new_project, load_workspace, load_workspace_with_vendor_gate,
+    absolute_path, create_internal_git_project, load_workspace, load_workspace_with_vendor_gate,
     CommandResult, VendorGate, Workspace,
 };
 use clap::Subcommand;
@@ -595,7 +595,7 @@ fn create_and_start(options: NewOptions) -> Result<CommandResult, String> {
         return Err("Gauntlet goal must not be empty".to_string());
     }
     let root = absolute_path(&options.dir)?;
-    create_new_project(root.clone(), options.name)?;
+    create_internal_git_project(root.clone(), options.name)?;
     write_graphical_seed(&root)?;
     fs::write(root.join(GAUNTLET_GOAL_NAME), normalized_text_file(&goal))
         .map_err(|error| format!("failed writing Gauntlet goal: {error}"))?;
@@ -983,7 +983,8 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ));
-        create_new_project(root.clone(), "vendor_sync".to_string()).expect("create project");
+        create_internal_git_project(root.clone(), "vendor_sync".to_string())
+            .expect("create project");
         let git = |args: &[&str]| {
             let output = Command::new("git")
                 .args(args)
@@ -1181,7 +1182,7 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(root.clone());
-        create_new_project(root.clone(), "gauntlet_seed_test".to_string())
+        create_internal_git_project(root.clone(), "gauntlet_seed_test".to_string())
             .expect("create seed project");
         write_graphical_seed(&root).expect("write graphical seed");
         assert_eq!(
