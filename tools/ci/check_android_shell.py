@@ -1485,11 +1485,14 @@ def main() -> int:
     assert "Stasis Workshop IT-025" in native
     render_main = read("samples/render_parity/main.stasis")
     render_frame = read("samples/render_parity/frame.stasis")
+    canonical_graphics_import = 'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";'
+    assert render_main.startswith(canonical_graphics_import)
+    assert render_frame.startswith(canonical_graphics_import)
     assert "seam_touch_checksum" in render_main
-    assert "host_f32[4] * 1000.0" in render_main
+    assert "input_pointer_x_n(0) * 1000.0" in render_main
     assert "append_parity_touch_marker" in render_frame
     assert "marker_active" in render_frame
-    assert "PARITY_GFX_F_RECT_REVERSE_BASE - 8" in render_frame
+    assert "fill_rect(i32_to_f32(marker_x_i32) - 8.0" in render_frame
     acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java")
     assert "Stasis Workshop IT-026" in acceptance
     assert "all_invalid_unchanged" in acceptance
@@ -1652,7 +1655,15 @@ def main() -> int:
     assert '"label": "Stasis Pong"' in pong_project
     assert '"orientation": "sensorLandscape"' in pong_project
     preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
-    assert "function on_code_swap(): void { pong_game_on_code_swap(); pong_host_render(); }" in preview_adapter
+    assert 'import "/vendor/stasis/src/stdlib/graphics.stasis";' in preview_adapter
+    assert "begin_frame();" in preview_adapter
+    assert "PongHost.writer.reserve(4," in preview_adapter
+    assert "PongHost.writer.finalize(4);" in preview_adapter
+    assert "gfx_cmd_i32" not in preview_adapter
+    exploration_host = read("mobile/android/app/src/main/assets/exploration_sample/src/host_runtime.stasis")
+    assert "if (input_pointer_count() > 0)" in exploration_host
+    assert "if (input_pointer_is_down(0))" in exploration_host
+    assert "Input.touch_active = 1;" in exploration_host
     assert '"encoding": "svg"' in pong_manifest
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")

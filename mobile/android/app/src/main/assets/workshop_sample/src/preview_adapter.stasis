@@ -1,77 +1,96 @@
-@link("stasis_graphics");
+import "/vendor/stasis/src/stdlib/graphics.stasis";
 
 global host_i32: i32[768];
 global host_f32: f32[64];
-global gfx_cmd_i32: i32[67888];
-global gfx_cmd_f32: f32[146564];
-global gfx_cmd_u8: u8[65536];
-
-struct Sprite {
-    handle: i32;
-    width: i32;
-    height: i32;
-}
 
 global PongHost {
     ball_sprite: Sprite;
     paddle_sprite: Sprite;
     center_sprite: Sprite;
+    writer: SpriteRunWriter;
 }
 
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
-
-function pong_host_sprite(index: i32, handle: i32, x: i32, y: i32, w: i32, h: i32): void {
-    let i_base: i32 = 32 + index * 3;
-    let f_base: i32 = 80004 + index * 13;
-    gfx_cmd_i32[i_base] = handle;
-    gfx_cmd_i32[i_base + 1] = 0 - 1;
-    gfx_cmd_i32[i_base + 2] = 0;
-    gfx_cmd_f32[f_base].from_i32(x);
-    gfx_cmd_f32[f_base + 1].from_i32(y);
-    gfx_cmd_f32[f_base + 2].from_i32(w);
-    gfx_cmd_f32[f_base + 3].from_i32(h);
-    gfx_cmd_f32[f_base + 4] = 0.0;
-    gfx_cmd_f32[f_base + 5] = 0.0;
-    gfx_cmd_f32[f_base + 6] = 0.0;
-    gfx_cmd_f32[f_base + 7] = 0.0;
-    gfx_cmd_f32[f_base + 8].from_i32(w);
-    gfx_cmd_f32[f_base + 8] = gfx_cmd_f32[f_base + 8] * 0.5;
-    gfx_cmd_f32[f_base + 9].from_i32(h);
-    gfx_cmd_f32[f_base + 9] = gfx_cmd_f32[f_base + 9] * 0.5;
-    gfx_cmd_f32[f_base + 10] = 1.0;
-    gfx_cmd_f32[f_base + 11] = 1.0;
-    gfx_cmd_f32[f_base + 12] = 0.0;
+function pong_host_write_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rotation: i32): bool {
+    let width: f32 = i32_to_f32(w);
+    let height: f32 = i32_to_f32(h);
+    return PongHost.writer.write(
+        handle,
+        -1,
+        0,
+        i32_to_f32(x),
+        i32_to_f32(y),
+        width,
+        height,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        width * 0.5,
+        height * 0.5,
+        1.0,
+        1.0,
+        i32_to_f32(rotation)
+    );
 }
 
 function pong_host_render(): void {
-    gfx_cmd_i32[0] = 1196967473;
-    gfx_cmd_i32[1] = 7;
-    gfx_cmd_i32[2] = 1;
-    gfx_cmd_i32[3] = 0;
-    gfx_cmd_i32[4] = 0;
-    gfx_cmd_i32[7] = 0;
-    gfx_cmd_i32[9] = 0;
-    gfx_cmd_f32[0] = 0.0588;
-    gfx_cmd_f32[1] = 0.0667;
-    gfx_cmd_f32[2] = 0.1098;
-    gfx_cmd_f32[3] = 1.0;
-    pong_host_sprite(0, PongHost.paddle_sprite.handle, Render.command1_x, Render.command1_y, Render.command1_w, Render.command1_h);
-    pong_host_sprite(1, PongHost.paddle_sprite.handle, Render.command2_x, Render.command2_y, Render.command2_w, Render.command2_h);
-    pong_host_sprite(2, PongHost.center_sprite.handle, Render.command4_x, Render.command4_y, Render.command4_w, Render.command4_h);
-    pong_host_sprite(3, PongHost.ball_sprite.handle, Render.command3_x, Render.command3_y, Render.command3_w, Render.command3_h);
-    let ball_f_base: i32 = 80004 + 3 * 13;
-    gfx_cmd_f32[ball_f_base + 12].from_i32((GameState.tick_count * 3) % 360);
-    gfx_cmd_i32[4] = 4;
-    gfx_cmd_i32[22] = 1;
-    gfx_cmd_i32[29] = 1;
-    gfx_cmd_i32[18464] = 0;
-    gfx_cmd_i32[18465] = 4;
-    gfx_cmd_i32[18466] = 0 - 1;
-    gfx_cmd_i32[18467] = 0;
-    gfx_cmd_i32[18468] = 0;
-    gfx_cmd_i32[18469] = 0;
-    gfx_cmd_i32[18470] = 0;
-    gfx_cmd_i32[18471] = 0;
-    gfx_cmd_i32[51232] = 32768;
-    gfx_cmd_i32[2] = 3;
+    begin_frame();
+    clear(0.0588, 0.0667, 0.1098, 1.0);
+    if (PongHost.writer.reserve(4, -1, 0, 0, 0, 0, 0)) {
+        let written: i32 = 0;
+        if (
+            pong_host_write_sprite(
+                PongHost.paddle_sprite.handle,
+                Render.command1_x,
+                Render.command1_y,
+                Render.command1_w,
+                Render.command1_h,
+                0
+            )
+        ) {
+            written += 1;
+        }
+        if (
+            pong_host_write_sprite(
+                PongHost.paddle_sprite.handle,
+                Render.command2_x,
+                Render.command2_y,
+                Render.command2_w,
+                Render.command2_h,
+                0
+            )
+        ) {
+            written += 1;
+        }
+        if (
+            pong_host_write_sprite(
+                PongHost.center_sprite.handle,
+                Render.command4_x,
+                Render.command4_y,
+                Render.command4_w,
+                Render.command4_h,
+                0
+            )
+        ) {
+            written += 1;
+        }
+        if (
+            pong_host_write_sprite(
+                PongHost.ball_sprite.handle,
+                Render.command3_x,
+                Render.command3_y,
+                Render.command3_w,
+                Render.command3_h,
+                (GameState.tick_count * 3) % 360
+            )
+        ) {
+            written += 1;
+        }
+        if (written == 4) {
+            PongHost.writer.finalize(4);
+        } else {
+            PongHost.writer.cancel();
+        }
+    }
+    end_frame();
 }

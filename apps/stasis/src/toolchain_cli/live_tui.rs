@@ -19,8 +19,8 @@ use stasis_compiler::frontend::parser::{
     completion_expected_type, parse_top_level_extern_functions,
 };
 use stasis_compiler::frontend::workshop::{
-    workshop_source_hash, workshop_symbols, WorkshopSourceFile, WorkshopSourceItem,
-    WorkshopSourceItemKind, WorkshopSymbolKind,
+    workshop_declaration_exposure, workshop_source_hash, workshop_symbols, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolKind,
 };
 use stasis_runner::live::{
     CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEdit, LiveEditOperation,
@@ -643,6 +643,9 @@ fn read_stdlib_api_items(
     };
     let mut items = Vec::new();
     for symbol in workshop_symbols(&[file])? {
+        if !symbol.exposure.is_public() {
+            continue;
+        }
         if !matches!(
             symbol.kind,
             WorkshopSymbolKind::Function
@@ -657,6 +660,17 @@ fn read_stdlib_api_items(
         }));
     }
     for external in extern_functions {
+        if !workshop_declaration_exposure(
+            &relative,
+            external
+                .annotations
+                .iter()
+                .map(|annotation| annotation.name.as_str()),
+        )
+        .is_public()
+        {
+            continue;
+        }
         let params = external
             .params
             .iter()
@@ -4768,6 +4782,8 @@ mod tests {
                 "global private_counter: i32;\n",
                 "extern function load_font(path: string, size: i32): i32;\n",
                 "function @extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\n",
+                "function @internal @extern(\"stasis_jit_sprite_load_raw\") load_sprite_raw(path: string): i32;\n",
+                "function @internal raw_draw(): void { return; }\n",
                 "function draw_line(x: f32, y: f32): void { return; }\n",
             ),
         )
@@ -4799,6 +4815,13 @@ mod tests {
         assert!(!rendered.contains("load_font(path: string, size: i32): i32"));
         assert!(!rendered.contains("private_counter"));
         assert!(!rendered.contains("host_private"));
+        assert!(!rendered.contains("load_sprite_raw"));
+        assert!(!rendered.contains("raw_draw"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stdlib_module_index_excludes_non_public_api_and_signatures() {
         let context = ai_initial_context(json!([]));
         assert_eq!(context.as_object().unwrap().len(), 3);
         assert_eq!(context["language"], "Stasis");
@@ -4813,6 +4836,42 @@ mod tests {
         assert!(context.get("project_hints").is_none());
         assert!(context.get("project_index").is_none());
         assert!(context.get("initial_symbols").is_none());
+    }
+
+    #[test]
+    fn stdlib_catalog_does_not_truncate_public_modules_at_sixteen() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_stdlib_catalog_many_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let stdlib = root.join("vendor/stasis/stdlib");
+        fs::create_dir_all(&stdlib).expect("stdlib dir");
+        for index in 0..18 {
+            fs::write(
+                stdlib.join(format!("module_{index:02}.stasis")),
+                format!("function public_{index:02}(): i32 {{ return {index}; }}\n"),
+            )
+            .expect("stdlib module");
+        }
+        fs::write(
+            stdlib.join("stdlib.stasis"),
+            "function root_api(): i32 { return 0; }\n",
+        )
+        .expect("stdlib umbrella");
+
+        let stdlib_root = resolve_stdlib_api_root(&root)
+            .expect("stdlib root")
+            .expect("available stdlib");
+        let catalog = load_stdlib_module_index(Some(&stdlib_root)).expect("stdlib catalog");
+        assert_eq!(catalog["modules"].as_array().expect("modules").len(), 19);
+        assert!(catalog["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|module| module["module"] == "module_17"));
         fs::remove_dir_all(root).ok();
     }
 

@@ -1,5 +1,5 @@
 import "../../src/stdlib/stdlib.stasis";
-import "../../src/stdlib/frame_timer.stasis";
+import "frame_timer.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
 import "../../src/stdlib/graphics.stasis";
 import "../../src/stdlib/audio.stasis";
@@ -1832,7 +1832,7 @@ function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, 
     screen_y_i.from_f32(screen_y);
     let top_left_x: i32 = screen_x_i -(screen_w / 2);
     let top_left_y: i32 = screen_y_i -(screen_h / 2);
-    gfx_cmd_sprite(handle, i32_to_f32(top_left_x), i32_to_f32(top_left_y), i32_to_f32(screen_w), i32_to_f32(screen_h), rot_deg, alpha);
+    draw_sprite(handle, i32_to_f32(top_left_x), i32_to_f32(top_left_y), i32_to_f32(screen_w), i32_to_f32(screen_h), rot_deg, alpha);
 }
 
 function draw_bricks(): void {
@@ -2523,13 +2523,13 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
                 }
 
                 if (i == 0) {
-                    gfx_cmd_text(state.ui_font, "10s/1p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
+                    draw_text(state.ui_font, "10s/1p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
                 }
                 if (i == 1) {
-                    gfx_cmd_text(state.ui_font, "20s/2p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
+                    draw_text(state.ui_font, "20s/2p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
                 }
                 if (i == 2) {
-                    gfx_cmd_text(state.ui_font, "15s/2p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
+                    draw_text(state.ui_font, "15s/2p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
                 }
 
                 let icon_handle: i32 = state.sprites.brick_basic_base.handle;
@@ -2556,7 +2556,7 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
                         icon_w_i.from_f32(icon_size);
                         let icon_h_i: i32;
                         icon_h_i.from_f32(icon_size);
-                        gfx_cmd_sprite(
+                        draw_sprite(
                             icon_handle,
                             i32_to_f32(icon_x_i),
                             i32_to_f32(icon_y_i),
@@ -2628,9 +2628,9 @@ function draw_ui_panels(): void {
     draw_filled_rect(ui_x, handle_y, ui_w, handle_h, 0.05, 0.07, 0.11, 0.92);
     draw_rect(ui_x, handle_y, ui_w, handle_h, 0.2, 0.6, 0.9, 0.9);
     if (state.shop_open == 0) {
-        gfx_cmd_text(state.ui_font, "SHOP", ui_x + 10.0, handle_y + 5.0, 0.9, 0.9, 0.95, 0.9);
+        draw_text(state.ui_font, "SHOP", ui_x + 10.0, handle_y + 5.0, 0.9, 0.9, 0.95, 0.9);
     } else {
-        gfx_cmd_text(state.ui_font, "CLOSE", ui_x + 10.0, handle_y + 5.0, 0.9, 0.9, 0.95, 0.9);
+        draw_text(state.ui_font, "CLOSE", ui_x + 10.0, handle_y + 5.0, 0.9, 0.9, 0.95, 0.9);
     }
 
     if (state.shop_anim < 0.02) {
@@ -2674,7 +2674,7 @@ function draw_ui(): void {
         state.economy.power_used,
         state.economy.power_cap
     );
-    gfx_cmd_text(state.ui_font, state.ui_hud_line, play_to_screen_x(20.0), play_to_screen_y(34.0), 0.95, 0.95, 0.95, 0.95);
+    draw_text(state.ui_font, state.ui_hud_line, play_to_screen_x(20.0), play_to_screen_y(34.0), 0.95, 0.95, 0.95, 0.95);
 
     // Score in top-left
     draw_number(state.score, play_to_screen_x(20.0), play_to_screen_y(10.0), 8.0 * s);
@@ -2693,12 +2693,12 @@ function draw_ui(): void {
         let bh: f32 = play_to_screen_len(btn_h);
         draw_filled_rect(bx, by, bw, bh, 0.08, 0.12, 0.18, 0.95);
         draw_rect(bx, by, bw, bh, 0.25, 0.75, 0.95, 0.95);
-        gfx_cmd_text(state.ui_font, "START", bx + 22.0 * s, by + 6.0 * s, 0.95, 0.95, 0.95, 0.95);
+        draw_text(state.ui_font, "START", bx + 22.0 * s, by + 6.0 * s, 0.95, 0.95, 0.95, 0.95);
 
         if (count_active_bricks() < 1) {
-            gfx_cmd_text(state.ui_font, "Place a tower first", play_to_screen_x(20.0), play_to_screen_y(70.0), 0.95, 0.6, 0.3, 0.95);
+            draw_text(state.ui_font, "Place a tower first", play_to_screen_x(20.0), play_to_screen_y(70.0), 0.95, 0.6, 0.3, 0.95);
         } else {
-            gfx_cmd_text(state.ui_font, "Setup: place towers", play_to_screen_x(20.0), play_to_screen_y(70.0), 0.8, 0.9, 1.0, 0.9);
+            draw_text(state.ui_font, "Setup: place towers", play_to_screen_x(20.0), play_to_screen_y(70.0), 0.8, 0.9, 1.0, 0.9);
         }
     }
 
@@ -2716,10 +2716,10 @@ function draw_ui(): void {
     draw_number(active_bricks_count, play_to_screen_x(sw - 80.0), play_to_screen_y(GAME_H - 30.0), 4.0 * s);
 
     if (state.phase == Phase.Lose) {
-        gfx_cmd_text(state.ui_font, "LOSE", play_to_screen_x(sw * 0.5 - 22.0), play_to_screen_y(sh * 0.5 - 10.0), 1.0, 0.3, 0.3, 1.0);
+        draw_text(state.ui_font, "LOSE", play_to_screen_x(sw * 0.5 - 22.0), play_to_screen_y(sh * 0.5 - 10.0), 1.0, 0.3, 0.3, 1.0);
     }
     if (state.phase == Phase.Win) {
-        gfx_cmd_text(state.ui_font, "WIN", play_to_screen_x(sw * 0.5 - 18.0), play_to_screen_y(sh * 0.5 - 10.0), 0.3, 1.0, 0.3, 1.0);
+        draw_text(state.ui_font, "WIN", play_to_screen_x(sw * 0.5 - 18.0), play_to_screen_y(sh * 0.5 - 10.0), 0.3, 1.0, 0.3, 1.0);
     }
 
     draw_ui_panels();
@@ -3330,8 +3330,8 @@ function draw_main_menu(): void {
     let s: f32 = state.layout.play_scale;
     let title_x: f32 = play_to_screen_x(28.0);
     let title_y: f32 = play_to_screen_y(90.0);
-    gfx_cmd_text(state.ui_font, "Brickout Revenge v1", title_x, title_y, 0.95, 0.95, 0.95, 1.0);
-    gfx_cmd_text(state.ui_font, "Tap a level to start", title_x, title_y + 24.0 * s, 0.75, 0.85, 0.95, 0.9);
+    draw_text(state.ui_font, "Brickout Revenge v1", title_x, title_y, 0.95, 0.95, 0.95, 1.0);
+    draw_text(state.ui_font, "Tap a level to start", title_x, title_y + 24.0 * s, 0.75, 0.85, 0.95, 0.9);
 
     let base_x: f32 = 36.0;
     let base_y: f32 = 220.0;
@@ -3359,13 +3359,13 @@ function draw_main_menu(): void {
         draw_number(i + 1, sx + 10.0, sy + 12.0 * s, 6.0 * s);
 
         if (i == 0) {
-            gfx_cmd_text(state.ui_font, brickout_level_name_0, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95);
+            draw_text(state.ui_font, brickout_level_name_0, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95);
         }
         if (i == 1) {
-            gfx_cmd_text(state.ui_font, brickout_level_name_1, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95);
+            draw_text(state.ui_font, brickout_level_name_1, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95);
         }
         if (i == 2) {
-            gfx_cmd_text(state.ui_font, brickout_level_name_2, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95);
+            draw_text(state.ui_font, brickout_level_name_2, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95);
         }
     }
 }

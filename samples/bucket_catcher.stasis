@@ -305,7 +305,7 @@ function draw_ui(): void {
     ascii_push_i32(state.ui_ascii, state.misses);
     utf8_from_ascii(state.ui_text, state.ui_ascii, 64);
 
-    gfx_cmd_text(state.ui_font, state.ui_text, 12.0, 10.0, state.config.ui_red, state.config.ui_green, state.config.ui_blue, 1.0);
+    draw_text(state.ui_font, state.ui_text, 12.0, 10.0, state.config.ui_red, state.config.ui_green, state.config.ui_blue, 1.0);
 }
 
 function is_ready_to_run(): bool {

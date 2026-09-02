@@ -3,5 +3,6 @@
   "name": "render_parity",
   "entry": "main.stasis",
   "tests": "tests",
-  "output": "build"
+  "output": "build",
+  "stdlib": "toolchain"
 }

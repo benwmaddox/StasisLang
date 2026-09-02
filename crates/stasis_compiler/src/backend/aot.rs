@@ -1684,15 +1684,19 @@ mod tests {
 
     #[cfg(windows)]
     fn sign_test_artifact(path: &Path, page_hashes: bool) {
+        try_sign_test_artifact(path, page_hashes).unwrap_or_else(|message| panic!("{message}"));
+    }
+
+    #[cfg(windows)]
+    fn try_sign_test_artifact(path: &Path, page_hashes: bool) -> Result<(), String> {
         let Some(sign_tool) =
             std::env::var_os("STASIS_AOT_SIGN_TOOL").filter(|tool| !tool.is_empty())
         else {
-            assert_ne!(
-                std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").as_deref(),
-                Some(std::ffi::OsStr::new("1")),
-                "signed execution is required but STASIS_AOT_SIGN_TOOL is not set"
-            );
-            return;
+            return if signed_execution_required() {
+                Err("signed execution is required but STASIS_AOT_SIGN_TOOL is not set".to_string())
+            } else {
+                Ok(())
+            };
         };
         let mut command = Command::new(&sign_tool);
         command.arg(path);
@@ -1701,20 +1705,28 @@ mod tests {
         } else {
             command.env_remove("STASIS_SIGN_PAGE_HASHES");
         }
-        let status = command.status().unwrap_or_else(|error| {
-            panic!(
+        let status = command.status().map_err(|error| {
+            format!(
                 "failed to launch signer {:?} for {}: {error}",
                 sign_tool,
                 path.display()
             )
-        });
-        assert!(
-            status.success(),
-            "signer {:?} failed for {} with status {:?}",
-            sign_tool,
-            path.display(),
-            status.code()
-        );
+        })?;
+        if !status.success() {
+            return Err(format!(
+                "signer {:?} failed for {} with status {:?}",
+                sign_tool,
+                path.display(),
+                status.code()
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn signed_execution_required() -> bool {
+        std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
     }
 
     #[cfg(windows)]
@@ -1740,6 +1752,40 @@ mod tests {
                 })
             }
             Err(error) => panic!("failed to run {}: {error}", path.display()),
+        }
+    }
+
+    #[cfg(windows)]
+    struct TempFixtureCleanup(PathBuf);
+
+    #[cfg(windows)]
+    impl Drop for TempFixtureCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
+    fn optional_signer_is_usable(source: &Path) -> bool {
+        if std::env::var_os("STASIS_AOT_SIGN_TOOL").is_none() {
+            return true;
+        }
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_sign_probe_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create signer probe directory");
+        let _cleanup = TempFixtureCleanup(temp_root.clone());
+        let probe = temp_root.join("sign_probe.dll");
+        fs::copy(source, &probe).expect("copy signer probe artifact");
+        match try_sign_test_artifact(&probe, false) {
+            Ok(()) => true,
+            Err(message) if signed_execution_required() => panic!("{message}"),
+            Err(message) => {
+                eprintln!("skipping optional signed AOT execution: {message}");
+                false
+            }
         }
     }
 
@@ -2120,10 +2166,8 @@ mod tests {
         expected_clif_markers: &'static [(&'static str, &'static [&'static str])],
     }
 
-    const RENDER_TRACE_FIXTURE: &str = concat!(
-        include_str!("../../../../samples/render_parity/frame.stasis"),
-        include_str!("../../../../samples/render_parity/trace.stasis")
-    );
+    const RENDER_TRACE_FIXTURE: &str =
+        include_str!("../../../../samples/render_parity/trace.stasis");
 
     #[cfg(windows)]
     fn ensure_test_dynload_artifacts(deps_dir: &Path) -> (PathBuf, PathBuf) {
@@ -2437,6 +2481,7 @@ mod tests {
             .as_nanos();
         let temp_root = std::env::temp_dir().join(format!("stasis_aot_fixture_{label}_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
+        let _cleanup = TempFixtureCleanup(temp_root.clone());
         let exe_path = temp_root.join(format!("{function_name}_{label}.exe"));
         let mut effective_config = link_config.clone();
         let deps_dir = std::env::current_exe()
@@ -2459,7 +2504,6 @@ mod tests {
                 eprintln!(
                     "skipping AOT parity fixture '{label}': runtime symbols not available at link time"
                 );
-                let _ = fs::remove_dir_all(&temp_root);
                 return None;
             }
         }
@@ -2467,7 +2511,6 @@ mod tests {
 
         let status = run_signed_test_executable(&exe_path, environment);
         let code = status.code().expect("expected process exit code");
-        let _ = fs::remove_dir_all(&temp_root);
         Some(code)
     }
 
@@ -3880,6 +3923,46 @@ function on_code_swap(): void { return; }
         assert!(report.emit.emitted_functions >= 2);
     }
 
+    #[test]
+    fn aot_process_compiles_compound_assignment_to_receiver_array_fields() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "receiver_array_compound.stasis",
+            crate::backend::jit::RECEIVER_ARRAY_COMPOUND_TEST_SOURCE,
+        );
+        let report = process
+            .compile()
+            .expect("AOT compile receiver array compound assignment");
+        assert!(report.emit.emitted_functions >= 2);
+        assert!(process
+            .artifacts()
+            .iter()
+            .all(|artifact| artifact.object_bytes_len > 0));
+        #[cfg(windows)]
+        {
+            let deps_dir = std::env::current_exe()
+                .expect("current test executable")
+                .parent()
+                .expect("Cargo deps directory")
+                .to_path_buf();
+            let (_, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
+            if !optional_signer_is_usable(&runtime_dll) {
+                return;
+            }
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let result = run_linked_i32_noarg_fixture(
+                &process,
+                "main",
+                "receiver_array_compound",
+                &link_config,
+            )
+            .expect("receiver-array AOT fixture must link and execute");
+            assert_eq!(result, 29);
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn aot_process_links_and_executes_nested_struct_receiver_call() {
@@ -3910,8 +3993,8 @@ function on_code_swap(): void { return; }
             include_str!("../../../../src/stdlib/ui_axis_layout.stasis"),
         );
         process.upsert_file(
-            "src/stdlib/ui_layout_audit.stasis",
-            include_str!("../../../../src/stdlib/ui_layout_audit.stasis"),
+            "src/stdlib/testing/ui_layout_audit.stasis",
+            include_str!("../../../../src/stdlib/testing/ui_layout_audit.stasis"),
         );
         process.upsert_file(
             "samples/immediate_axis_layout/placement.stasis",

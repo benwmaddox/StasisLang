@@ -572,7 +572,34 @@ contracts. Ordinary internal functions may be added, removed, renamed, or change
 a live edit because the compiler rebuilds every reachable caller in the same candidate generation.
 The host must not retain any compiled entry address after the execution window that resolved it.
 
-### 7.7 Opt-in effect contracts
+### 7.7 Internal discovery exposure
+
+`@internal` marks a function or extern declaration as implementation-only for user-facing
+discovery:
+
+```stasis
+function @internal decode_host_frame(): void { return; }
+extern function @internal sys_memmove_u8(
+    dst: u8[],
+    dst_index: i32,
+    src: u8[],
+    src_index: i32,
+    count: i32
+): void;
+```
+
+Internal declarations compile, link, and resolve like any other declaration. Public wrappers may
+call them, and exact definition, hover, and reference navigation remains available from an existing
+call site. Completion, auto-import, workspace-symbol lists, palettes, generated public API catalogs,
+and default AI symbol enumeration omit them outside their defining file. Files below stdlib
+`internal/` and `testing/` directories receive the same discovery exposure by default.
+
+This annotation controls discovery only. It is not source access control, an ABI rule, or a
+confidentiality boundary; a caller that knows the declaration may still resolve it. Internal source
+may also be present in a vendored project. A future module-access feature would be a separate
+language contract.
+
+### 7.8 Opt-in effect contracts
 
 `@effects(...)` is an optional compile-time assertion on a function boundary. It follows the
 existing function-attribute grammar:

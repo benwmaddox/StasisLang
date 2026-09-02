@@ -2295,4 +2295,24 @@ function tick(): i32 {
         let parsed = parse_top_level_test_declarations(source).expect("parse");
         assert_eq!(parsed.len(), 0);
     }
+
+    #[test]
+    fn parses_internal_annotations_on_functions_and_externs() {
+        let source = concat!(
+            "function @internal helper(): i32 { return 1; }\n",
+            "function @internal @extern(\"host_raw\") host_raw(): i32;\n",
+            "extern function @internal legacy_host_raw(): i32;\n",
+        );
+        let functions = parse_top_level_functions(source).expect("functions");
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].annotations[0].name, "internal");
+        let externs = parse_top_level_extern_functions(source).expect("externs");
+        assert_eq!(externs.len(), 2);
+        assert!(externs.iter().all(|external| external
+            .annotations
+            .iter()
+            .any(|annotation| annotation.name == "internal")));
+        assert_eq!(externs[0].symbol_name, "host_raw");
+        assert_eq!(externs[1].symbol_name, "legacy_host_raw");
+    }
 }

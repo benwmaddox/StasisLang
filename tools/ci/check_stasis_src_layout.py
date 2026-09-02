@@ -75,8 +75,17 @@ def main() -> int:
         for name in missing_internal:
             print(f"- src/stdlib/internal/{name}", file=sys.stderr)
         return 2
-    if not (testing_dir / "input_testkit.stasis").is_file():
-        print("error: missing src/stdlib/testing/input_testkit.stasis", file=sys.stderr)
+    required_testing = {
+        "input_testkit.stasis",
+        "ui_layout_audit.stasis",
+    }
+    missing_testing = sorted(
+        name for name in required_testing if not (testing_dir / name).is_file()
+    )
+    if missing_testing:
+        print("error: missing canonical stdlib testing modules:", file=sys.stderr)
+        for name in missing_testing:
+            print(f"- src/stdlib/testing/{name}", file=sys.stderr)
         return 2
 
     obsolete_paths = [stdlib_dir / "gfx_cmd.stasis"]
@@ -142,7 +151,16 @@ def main() -> int:
                     )
 
             imports_testing = "/testing/" in norm or norm.startswith("testing/")
-            if imports_testing and not rel_path.name.endswith(".test.stasis"):
+            diagnostic_sample = rel_path.as_posix() in {
+                "samples/immediate_axis_layout/audit.stasis",
+                "samples/immediate_axis_layout/verify.stasis",
+                "samples/immediate_axis_layout/verify_jit.stasis",
+            }
+            if (
+                imports_testing
+                and not rel_path.name.endswith(".test.stasis")
+                and not diagnostic_sample
+            ):
                 errors.append(
                     f'{rel_path.as_posix()}:{line_no}: test-only import "{import_path}" '
                     "is limited to .test.stasis files"

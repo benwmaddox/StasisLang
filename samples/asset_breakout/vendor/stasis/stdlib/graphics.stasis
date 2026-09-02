@@ -59,6 +59,95 @@ struct SpriteSheet {
     cell_height: i32;
 }
 
+// Public bounded bulk-line storage. Count and storage travel together, so a
+// caller cannot submit a count that describes memory it does not own.
+struct Line {
+    x1: f32;
+    y1: f32;
+    x2: f32;
+    y2: f32;
+    r: f32;
+    g: f32;
+    b: f32;
+    a: f32;
+}
+
+struct LineBatch {
+    x1: f32[512];
+    y1: f32[512];
+    x2: f32[512];
+    y2: f32[512];
+    r: f32[512];
+    g: f32[512];
+    b: f32[512];
+    a: f32[512];
+    count: i32;
+}
+
+function reset_lines(self: LineBatch): void {
+    self.count = 0;
+}
+
+function append(self: LineBatch, line: Line): bool {
+    if (self.count < 0) {
+        self.count = 0;
+    }
+    if (self.count >= 512) {
+        return false;
+    }
+    self.x1[self.count] = line.x1;
+    self.y1[self.count] = line.y1;
+    self.x2[self.count] = line.x2;
+    self.y2[self.count] = line.y2;
+    self.r[self.count] = line.r;
+    self.g[self.count] = line.g;
+    self.b[self.count] = line.b;
+    self.a[self.count] = line.a;
+    self.count = self.count + 1;
+    return true;
+}
+
+function append_line(self: LineBatch, x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): bool {
+    if (self.count < 0) {
+        self.count = 0;
+    }
+    if (self.count >= 512) {
+        return false;
+    }
+    self.x1[self.count] = x1;
+    self.y1[self.count] = y1;
+    self.x2[self.count] = x2;
+    self.y2[self.count] = y2;
+    self.r[self.count] = r;
+    self.g[self.count] = g;
+    self.b[self.count] = b;
+    self.a[self.count] = a;
+    self.count = self.count + 1;
+    return true;
+}
+
+function draw(self: LineBatch): void {
+    let bounded_count: i32 = self.count;
+    if (bounded_count < 0) {
+        bounded_count = 0;
+    }
+    if (bounded_count > 512) {
+        bounded_count = 512;
+    }
+    for (let i: i32 = 0; i < bounded_count; i += 1) {
+        gfx_cmd_line(
+            self.x1[i],
+            self.y1[i],
+            self.x2[i],
+            self.y2[i],
+            self.r[i],
+            self.g[i],
+            self.b[i],
+            self.a[i]
+        );
+    }
+}
+
 // Caller-owned storage for one direct canonical sprite run. The writer must be
 // global-backed and its storage may persist. Its token is frame-local and must
 // not cross begin_frame/code-swap; reserve and finalize/cancel in one frame.
@@ -133,7 +222,7 @@ function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from
     width: i32,
     height: i32
 ): bool;
-function @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
+function @internal @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
     self: SpriteSheet,
     path: string,
     width: i32,
@@ -354,6 +443,14 @@ function draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a
     gfx_cmd_line(x1, y1, x2, y2, r, g, b, a);
 }
 
+function draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rotation: i32, alpha: i32): void {
+    gfx_cmd_sprite(handle, x, y, w, h, rotation, alpha);
+}
+
+function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_text(font, text, x, y, r, g, b, a);
+}
+
 function fill_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
     gfx_cmd_rect(x, y, w, h, r, g, b, a);
 }
@@ -366,18 +463,6 @@ function gfx_push_clip(x: f32, y: f32, w: f32, h: f32): void {
 
 function gfx_pop_clip(): void {
     gfx_cmd_clip_pop();
-}
-
-function gfx_clip_push(x: f32, y: f32, w: f32, h: f32): void {
-    gfx_push_clip(x, y, w, h);
-}
-
-function gfx_clip_pop(): void {
-    gfx_pop_clip();
-}
-
-function draw_lines(lines: f32[], count: i32): void {
-    gfx_cmd_lines_from(lines, count);
 }
 
 function gfx_window_resized(): bool {

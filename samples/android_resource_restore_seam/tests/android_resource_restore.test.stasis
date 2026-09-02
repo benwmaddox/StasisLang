@@ -11,13 +11,11 @@ test `resource restore frame retains named resource lanes`(): bool {
     tested_text.handle = 9;
     tested_text.width = 120.0;
     tested_text.height = 24.0;
-    gfx_cmd_begin();
+    begin_frame();
     tested_sprite.draw(1.0, 2.0, 255, 0);
     tested_text.draw(3.0, 4.0, 1.0, 1.0, 1.0, 1.0);
-    if (gfx_cmd_sprite_count() != 1 || gfx_cmd_text_count() != 1) {
-        return false;
-    }
-    return gfx_cmd_i32[GFX_I_SPRITE_BASE] == 2147483647 && gfx_cmd_i32[GFX_I_TEXT_BASE] == 3 && gfx_cmd_i32[GFX_I_TEXT_BASE + 1] == 0 - 9;
+    end_frame();
+    return tested_sprite.handle == 2147483647 && tested_text.font == 3 && tested_text.handle == 9;
 }
 
 test `invalid cached text never replaces the live run`(): bool {

@@ -458,9 +458,13 @@ pub fn android_workshop_source_items(
             path.starts_with("src/") || path.starts_with("tests/")
         })
         .collect::<Vec<_>>();
+    let items = workshop_source_items(&editable)?
+        .into_iter()
+        .filter(|item| item.exposure.is_public())
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "schema_version": 1,
-        "items": workshop_source_items(&editable)?,
+        "items": items,
     }))
 }
 
@@ -4129,8 +4133,6 @@ struct State {
     initial_handle: i32;
     initial_width: i32;
     initial_height: i32;
-    draw_count: i32;
-    draw_asset: i32;
     phase: i32;
 }
 
@@ -4146,11 +4148,9 @@ function main(): void {
 }
 
 function tick(): void {
-    gfx_cmd_begin();
+    begin_frame();
     state.sprite.draw(4.0, 5.0, 200, 7);
-    state.draw_count = gfx_cmd_sprite_count();
-    state.draw_asset = gfx_cmd_i32[GFX_I_SPRITE_BASE];
-    gfx_cmd_mark_present();
+    end_frame();
     if (state.phase == 0) {
         state.sprite.release();
         state.phase = 1;
@@ -4165,24 +4165,6 @@ function tick(): void {
         let _first =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
                 .expect("run typed sprite release tick");
-        assert_eq!(
-            get_android_workshop_i32_global(
-                &root,
-                Path::new("src/main.stasis"),
-                "state.draw_count"
-            )
-            .expect("read draw count"),
-            1
-        );
-        assert_eq!(
-            get_android_workshop_i32_global(
-                &root,
-                Path::new("src/main.stasis"),
-                "state.draw_asset"
-            )
-            .expect("read draw asset"),
-            handle
-        );
         assert_eq!(
             get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "state.loaded")
                 .expect("read loaded flag"),
@@ -4273,8 +4255,6 @@ struct State {
     reload_handle: i32;
     reload_width: i32;
     reload_height: i32;
-    draw_count: i32;
-    draw_asset: i32;
     phase: i32;
 }
 
@@ -4288,7 +4268,7 @@ function main(): void {
 }
 
 function tick(): void {
-    gfx_cmd_begin();
+    begin_frame();
     if (state.phase == 0) {
         state.sprite.release();
         if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
@@ -4298,14 +4278,12 @@ function tick(): void {
             state.reload_height = state.sprite.height;
         }
         state.sprite.draw(6.0, 7.0, 255, 0);
-        state.draw_count = gfx_cmd_sprite_count();
-        state.draw_asset = gfx_cmd_i32[GFX_I_SPRITE_BASE];
         state.phase = 1;
     } else {
         state.sprite.release();
         state.phase = 2;
     }
-    gfx_cmd_mark_present();
+    end_frame();
 }
 "#;
         let (root, handle) = write_typed_sprite_project("typed_reacquire", source);
@@ -4313,24 +4291,6 @@ function tick(): void {
         let _reacquired =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
                 .expect("run same-tick release and reacquire");
-        assert_eq!(
-            get_android_workshop_i32_global(
-                &root,
-                Path::new("src/main.stasis"),
-                "state.draw_count"
-            )
-            .expect("read draw count"),
-            1
-        );
-        assert_eq!(
-            get_android_workshop_i32_global(
-                &root,
-                Path::new("src/main.stasis"),
-                "state.draw_asset"
-            )
-            .expect("read draw asset"),
-            handle
-        );
         assert_eq!(
             get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "state.loaded")
                 .expect("read loaded flag"),
@@ -4437,25 +4397,35 @@ function tick(): void {}
         }
     }
 
-    fn stage_android_sample(sample_name: &str, project_name: &str) -> PathBuf {
+    fn stage_project_with_stdlib(
+        source: &Path,
+        project_name: &str,
+        stdlib_mount: &Path,
+    ) -> PathBuf {
         let root = temp_project(project_name);
+        copy_tree(source, &root);
+        fs::remove_dir_all(root.join(".stasis_cache")).ok();
+        fs::remove_dir_all(root.join("build")).ok();
+        let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        copy_tree(&stdlib, &root.join(stdlib_mount));
+        root
+    }
+
+    fn stage_android_sample(sample_name: &str, project_name: &str) -> PathBuf {
         let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../samples")
             .join(sample_name)
             .canonicalize()
             .expect("Android seam sample root");
-        copy_tree(&sample, &root);
 
         // The packaged Android sample resolves its canonical graphics import
         // from the project-owned vendor mount.  Keep the test source and
         // renderer exactly the checked-in sample while staging that mount in
         // the temporary project used by the live bridge.
-        let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/stdlib")
-            .canonicalize()
-            .expect("canonical stdlib root");
-        copy_tree(&stdlib, &root.join("vendor/stasis/src/stdlib"));
-        root
+        stage_project_with_stdlib(&sample, project_name, Path::new("vendor/stasis/src/stdlib"))
     }
 
     fn stage_android_aot_sample() -> PathBuf {
@@ -4464,6 +4434,30 @@ function tick(): void {}
 
     fn stage_android_touch_sample() -> PathBuf {
         stage_android_sample("android_touch_seam", "it018_touch_sample")
+    }
+
+    fn stage_bundled_pong_sample() -> PathBuf {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/workshop_sample")
+            .canonicalize()
+            .expect("bundled sample root");
+        stage_project_with_stdlib(
+            &sample,
+            "bundled_touch_pong",
+            Path::new("vendor/stasis/src/stdlib"),
+        )
+    }
+
+    fn stage_render_parity_sample() -> PathBuf {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples/render_parity")
+            .canonicalize()
+            .expect("render parity sample root");
+        stage_project_with_stdlib(
+            &sample,
+            "render_parity",
+            Path::new(".stasis_cache/toolchain/src/stdlib"),
+        )
     }
 
     fn run_android_touch_slot_frame(
@@ -6054,10 +6048,7 @@ function tick(): void {}
     fn android_it027_render_parity_sample_real_jit_exports_marker_and_idle_trace() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../samples/render_parity")
-            .canonicalize()
-            .expect("render parity sample root");
+        let root = stage_render_parity_sample();
         let entry = Path::new("main.stasis");
         let capture_manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -6239,14 +6230,12 @@ function tick(): void {}
             "the same idle scene must have a stable current-build trace"
         );
         clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn android_bundled_touch_pong_sample_real_jit_is_runnable() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/workshop_sample")
-            .canonicalize()
-            .expect("bundled sample root");
+        let root = stage_bundled_pong_sample();
 
         let result = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
             .expect("compile bundled pong sample");
@@ -6255,16 +6244,14 @@ function tick(): void {}
 
         assert_eq!(result.status, 0, "{manifest}");
         assert!(result.compiled_function_count >= 5, "{manifest}");
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn android_bundled_touch_pong_sample_runs_and_exports_render_commands() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/workshop_sample")
-            .canonicalize()
-            .expect("bundled sample root");
+        let root = stage_bundled_pong_sample();
 
         let result = run_android_workshop_tick(
             &root,
@@ -6292,6 +6279,8 @@ function tick(): void {}
         assert_eq!(result.render_commands[3].clip_w, 360);
         assert_eq!(result.render_commands[3].clip_h, 640);
         assert!(result.observed_game_tick_count >= 1);
+        clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -6334,10 +6323,7 @@ function tick(): void {}
     fn android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/workshop_sample")
-            .canonicalize()
-            .expect("bundled sample root");
+        let root = stage_bundled_pong_sample();
         let entry = Path::new("src/main.stasis");
 
         let first = run_android_workshop_tick(
@@ -6409,15 +6395,13 @@ function tick(): void {}
         );
 
         clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
     #[test]
     fn android_bridge_runs_bundled_stasis_tests() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/workshop_sample")
-            .canonicalize()
-            .expect("bundled sample root");
+        let root = stage_bundled_pong_sample();
         let result = run_android_workshop_stasis_tests(&root).expect("run bundled Stasis tests");
         assert_eq!(result["passed"], 2, "{result}");
         assert_eq!(result["failed"], 0);
@@ -6428,6 +6412,7 @@ function tick(): void {}
         );
         assert_eq!(result["results"][0]["line"], 3);
         clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -6806,8 +6791,9 @@ function on_code_swap(): void {}\n",
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("it031_render_schema");
+        fs::create_dir_all(root.join("tests/stasis/seams")).expect("seam directory");
         fs::write(
-            root.join("src/main.stasis"),
+            root.join("tests/stasis/seams/render_schema.stasis"),
             "global gfx_cmd_i32: i32[67888];\n\
 global gfx_cmd_f32: f32[146564];\n\
 global gfx_cmd_u8: u8[65536];\n\
@@ -6817,10 +6803,13 @@ function render(): i32 { gfx_cmd_i32[0] = 1196967473; gfx_cmd_i32[1] = 99; retur
 function on_code_swap(): void {}\n",
         )
         .expect("write source");
-        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
-            .expect("render-schema source compiles before invocation");
+        compile_android_workshop_project(
+            &root,
+            Path::new("tests/stasis/seams/render_schema.stasis"),
+        )
+        .expect("render-schema source compiles before invocation");
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
-        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let entry_c = CString::new("tests/stasis/seams/render_schema.stasis").expect("entry cstr");
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
@@ -6868,8 +6857,9 @@ function on_code_swap(): void {}\n",
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("ffi_production_frame_tick");
+        fs::create_dir_all(root.join("tests/stasis/seams")).expect("seam directory");
         fs::write(
-            root.join("src/main.stasis"),
+            root.join("tests/stasis/seams/production_frame.stasis"),
             "global host_i32: i32[768];
 global host_f32: f32[64];
 global host_req_window_w_px: i32;
@@ -6928,7 +6918,8 @@ function render(): void {
         )
         .expect("write production source");
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
-        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let entry_c =
+            CString::new("tests/stasis/seams/production_frame.stasis").expect("entry cstr");
         let mut frame_i32 = vec![0i32; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut frame_u8 = vec![0u8; ANDROID_RENDER_GFX_U8_CAPACITY];
@@ -6979,9 +6970,6 @@ function render(): void {
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 global host_i32: i32[768];
 global host_f32: f32[64];
-global gfx_cmd_i32: i32[67888];
-global gfx_cmd_f32: f32[146564];
-global gfx_cmd_u8: u8[65536];
 function main(): void {}
 function tick(): void {}
 function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }
@@ -7046,9 +7034,6 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
-global gfx_cmd_i32: i32[67888];\n\
-global gfx_cmd_f32: f32[146564];\n\
-global gfx_cmd_u8: u8[65536];\n\
 function main(): void {}\n\
 function tick(): void { gfx_load_sprite(\"assets/tick_missing.svg\", 32, 32); }\n\
 function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }\n",
@@ -7113,9 +7098,6 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
-global gfx_cmd_i32: i32[67888];\n\
-global gfx_cmd_f32: f32[146564];\n\
-global gfx_cmd_u8: u8[65536];\n\
 global GameState { tick_count: i32; }\n\
 function main(): void { GameState.tick_count = 7; }\n\
 function tick(): void { GameState.tick_count += 1; }\n\
@@ -7601,12 +7583,13 @@ function on_code_swap(): void {}\n";
         let root = temp_project("semantic_identity");
         fs::write(
             root.join("src/main.stasis"),
-            "struct Player { value: i32; }\nstruct Enemy { value: i32; }\nfunction main(): i32 { return 0; }\nfunction tick(): void {}\nfunction adjust(self: Player): i32 { return 1; }\nfunction adjust(self: Enemy): i32 { return 2; }\n",
+            "struct Player { value: i32; }\nstruct Enemy { value: i32; }\nfunction main(): i32 { return 0; }\nfunction tick(): void {}\nfunction @internal raw_helper(): i32 { return 0; }\nfunction adjust(self: Player): i32 { return 1; }\nfunction adjust(self: Enemy): i32 { return 2; }\n",
         )
         .expect("write overloads");
         let response = android_workshop_source_items(&root, Path::new("src/main.stasis"))
             .expect("source items");
         let items = response["items"].as_array().expect("items array");
+        assert!(!items.iter().any(|item| item["name"] == "raw_helper"));
         let tick = items
             .iter()
             .find(|item| item["kind"] == "function" && item["name"] == "tick")

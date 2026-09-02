@@ -3,7 +3,7 @@ import "ui_single_pass.stasis";
 import "gallery_state.stasis";
 
 function gallery_label(text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
-    gfx_cmd_text(gallery.font, text, x, y, r, g, b, a);
+    draw_text(gallery.font, text, x, y, r, g, b, a);
 }
 
 function gallery_panel(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32): void {

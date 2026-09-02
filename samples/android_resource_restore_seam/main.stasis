@@ -43,7 +43,7 @@ function render(): i32 {
     fill_rect(432.0, 48.0, 176.0, 264.0, 0.95, 0.78, 0.20, 1.0);
     sprite.draw(64.0, 124.0, 255, 0);
     fallback.draw(264.0, 124.0, 255, 0);
-    gfx_cmd_text(font, "DIRECT AOT", 260.0, 68.0, 1.0, 1.0, 1.0, 1.0);
+    draw_text(font, "DIRECT AOT", 260.0, 68.0, 1.0, 1.0, 1.0, 1.0);
     label.draw(448.0, 156.0, 0.0666667, 0.9058824, 0.8627451, 1.0);
     end_frame();
     return 0;

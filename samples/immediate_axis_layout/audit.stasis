@@ -1,4 +1,4 @@
-import "../../src/stdlib/ui_layout_audit.stasis";
+import "../../src/stdlib/testing/ui_layout_audit.stasis";
 
 function menu_emit_layout_audit(safe_x: f32, safe_y: f32, safe_w: f32, safe_h: f32, title_w: f32, title_h: f32, label_w: f32, label_h: f32): void {
     ui_audit_rect("safe_viewport", "viewport", safe_x, safe_y, safe_w, safe_h);
