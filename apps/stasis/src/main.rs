@@ -2336,6 +2336,51 @@ mod tests {
         std::env::temp_dir().join(format!("stasis_lookup_{name}_{stamp}"))
     }
 
+    struct TemporaryWorkshopProject {
+        root: PathBuf,
+        project: PathBuf,
+    }
+
+    impl Drop for TemporaryWorkshopProject {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    fn copy_test_tree(source: &Path, destination: &Path) {
+        std::fs::create_dir_all(destination).expect("create copied test directory");
+        for entry in std::fs::read_dir(source).expect("read test source directory") {
+            let entry = entry.expect("read test source entry");
+            let file_type = entry.file_type().expect("read test source entry type");
+            let target = destination.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_test_tree(&entry.path(), &target);
+            } else if file_type.is_file() {
+                std::fs::copy(entry.path(), target).expect("copy test source file");
+            }
+        }
+    }
+
+    fn materialize_workshop_project(name: &str) -> (PathBuf, TemporaryWorkshopProject) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root =
+            std::env::temp_dir().join(format!("stasis_{name}_{}_{}", std::process::id(), stamp));
+        let project = root.join("project");
+        copy_test_tree(
+            &repo_root.join("mobile/android/app/src/main/assets/workshop_sample"),
+            &project,
+        );
+        copy_test_tree(
+            &repo_root.join("src/stdlib"),
+            &project.join("vendor/stasis/src/stdlib"),
+        );
+        (repo_root, TemporaryWorkshopProject { root, project })
+    }
+
     fn retained_mobile_assets(
         project_dir: &Path,
         sources: &[(String, String)],
@@ -3061,16 +3106,11 @@ mod tests {
     fn android_aot_bundle_writes_pong_symbols_header() {
         use object::{Object, ObjectSymbol};
 
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let project_dir = repo_root.join("mobile/android/app/src/main/assets/workshop_sample");
-        let output_dir = std::env::temp_dir().join(format!("stasis_android_aot_bundle_{stamp}"));
+        let (repo_root, workshop) = materialize_workshop_project("android_aot_bundle");
+        let output_dir = workshop.root.join("out");
 
         let summary = write_android_aot_engine_bundle(
-            &project_dir,
+            &workshop.project,
             Some(Path::new("src/main.stasis")),
             &output_dir,
         )
@@ -3228,8 +3268,6 @@ mod tests {
             .asset_dir
             .join("stasis_game/assets/ball.svg")
             .is_file());
-
-        std::fs::remove_dir_all(&output_dir).ok();
     }
 
     #[test]
@@ -3571,17 +3609,12 @@ function frame_width(): i32 { return 360; }
 
     #[test]
     fn mobile_aot_bundle_writes_ios_arm64_artifact_manifest() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let project_dir = repo_root.join("mobile/android/app/src/main/assets/workshop_sample");
-        let output_dir = std::env::temp_dir().join(format!("stasis_ios_aot_bundle_{stamp}"));
+        let (_repo_root, workshop) = materialize_workshop_project("ios_aot_bundle");
+        let output_dir = workshop.root.join("out");
 
         let summary = write_mobile_aot_engine_bundle(
             MobileAotTarget::IosArm64,
-            &project_dir,
+            &workshop.project,
             Some(Path::new("src/main.stasis")),
             &output_dir,
             &[],
@@ -3624,8 +3657,6 @@ function frame_width(): i32 { return 360; }
                 .is_some_and(|path| { path.ends_with(".o") && !Path::new(path).is_absolute() })));
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
         assert!(header.contains("#define STASIS_AOT_MAIN stasis_mobile_main_entry"));
-
-        std::fs::remove_dir_all(&output_dir).ok();
     }
     #[test]
     fn parse_aot_cli_contract_args_accepts_required_flags() {
