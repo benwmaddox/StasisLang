@@ -15,6 +15,8 @@ const INVALID: &str =
     include_str!("../../../tests/stasis/seams/desktop_hot_swap_generation_invalid.stasis");
 const REJECT: &str =
     include_str!("../../../tests/stasis/seams/desktop_hot_swap_generation_reject.stasis");
+const PUBLIC_GRAPHICS_IMPORT: &str =
+    "import \"/.stasis_cache/toolchain/src/stdlib/graphics.stasis\";";
 const COMPILE_REJECTED_SWAP_REVISION: u64 = 2;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -42,6 +44,51 @@ fn repository_root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .expect("canonical repository root")
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create fixture destination");
+    for entry in fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("read fixture entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("copy fixture file");
+        }
+    }
+}
+
+fn materialize_toolchain_stdlib(project: &Path) {
+    let destination = project.join(".stasis_cache/toolchain/src/stdlib");
+    copy_tree(&repository_root().join("src/stdlib"), &destination);
+    assert!(
+        destination.join("graphics.stasis").is_file(),
+        "toolchain stdlib staging omitted graphics.stasis"
+    );
+}
+
+fn assert_public_graphics_fixture(name: &str, source: &str) {
+    assert!(
+        source.contains(PUBLIC_GRAPHICS_IMPORT),
+        "{name} must use the rooted public graphics import"
+    );
+    assert!(
+        !source.contains("gfx_cmd_"),
+        "{name} must not name private graphics command storage"
+    );
+}
+
+fn assert_generation_fixtures_use_public_graphics() {
+    for (name, source) in [
+        ("v1", V1),
+        ("v2", V2),
+        ("invalid", INVALID),
+        ("reject", REJECT),
+    ] {
+        assert_public_graphics_fixture(name, source);
+    }
 }
 
 fn evidence_root() -> PathBuf {
@@ -211,6 +258,11 @@ fn aborted_swap_revision_parser_is_strict_and_tolerates_superseded_events() {
 }
 
 #[test]
+fn generation_fixtures_use_only_public_graphics() {
+    assert_generation_fixtures_use_public_graphics();
+}
+
+#[test]
 fn desktop_watch_frames_never_mix_tick_and_render_generations() {
     let runtime_path = PathBuf::from(
         std::env::var_os("STASIS_RUNTIME_DLL_PATH")
@@ -224,6 +276,8 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
         std::env::temp_dir().join(format!("stasis-it-010-{}-{stamp}", std::process::id())),
     );
     fs::create_dir_all(&tree.0).expect("create seam project");
+    materialize_toolchain_stdlib(&tree.0);
+    assert_generation_fixtures_use_public_graphics();
     let source = tree.0.join("main.stasis");
     let frames_path = tree.0.join("frames.jsonl");
     let log_path = tree.0.join("play.log");
