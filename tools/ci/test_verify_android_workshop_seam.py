@@ -215,7 +215,8 @@ def _it030_case(phase, sequence, source_sha, generation, runtime_fingerprint,
                    "column": 1, "name": "IT-030 Workshop JNI rollback",
                    "passed": result_status == "passed", "status": result_status},
         "source_sha256": source_sha,
-        "runtime": {"fingerprint": runtime_fingerprint, "generation": generation},
+        "runtime": {"fingerprint": runtime_fingerprint, "generation": generation,
+                    "activation": "native_frame"},
         "test_file": {"path": "tests/it030_workshop_jni.test.stasis", "exists": True},
     }
 
@@ -232,14 +233,18 @@ _it030_summary = {
     "case_phases": ["pass", "fail", "subsequent_pass"],
     "transport": "rust_owned_json", "accepted_source_sha256": "c" * 64,
     "failing_source_sha256": "d" * 64, "rollback_source_sha256": "c" * 64,
-    "accepted_runtime": {"fingerprint": "accepted-runtime", "generation": 10},
-    "failing_runtime": {"fingerprint": "failing-runtime", "generation": 11},
-    "rollback_runtime": {"fingerprint": "accepted-runtime", "generation": 12},
+    "accepted_runtime": {"fingerprint": "accepted-runtime", "generation": 10,
+                         "activation": "native_frame"},
+    "failing_runtime": {"fingerprint": "failing-runtime", "generation": 11,
+                        "activation": "native_frame"},
+    "rollback_runtime": {"fingerprint": "accepted-runtime", "generation": 12,
+                         "activation": "native_frame"},
     "temporary_test": {"path": "tests/it030_workshop_jni.test.stasis",
                        "created": True, "removed": True},
     "cleanup_receipt": {"status": "Restored", "packaged_source_sha256": "e" * 64,
                         "test_removed": True, "compile": "CompileReady: status=0",
-                        "runtime": {"fingerprint": "packaged-runtime", "generation": 13}},
+                        "runtime": {"fingerprint": "packaged-runtime", "generation": 13,
+                                    "activation": "native_frame"}},
 }
 _it030_lines = "\n".join(
     "Stasis Workshop IT-030 case: " + json.dumps(case, separators=(",", ":"))
@@ -629,6 +634,11 @@ class WorkshopSeamTests(unittest.TestCase):
             verify_log(GOOD.replace('"fingerprint":"accepted-runtime","generation":12',
                                     '"fingerprint":"accepted-runtime","generation":11', 1),
                        MANIFEST)
+
+    def test_rejects_it030_runtime_without_native_activation(self):
+        with self.assertRaisesRegex(SeamError, "runtime identity"):
+            verify_log(GOOD.replace('"activation":"native_frame"',
+                                    '"activation":"compile_only"', 1), MANIFEST)
 
     def test_it030_jni_transport_has_no_fixed_result_buffer(self):
         root = Path(__file__).resolve().parents[2]

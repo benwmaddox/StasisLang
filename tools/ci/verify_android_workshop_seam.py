@@ -576,7 +576,8 @@ def verify_it030(log: str, after_position: int) -> dict:
             raise SeamError("IT-030 source checksum is not exact SHA-256 evidence")
         if not isinstance(runtime, dict) or not runtime.get("fingerprint") \
                 or not isinstance(runtime.get("generation"), int) \
-                or runtime["generation"] <= 0:
+                or runtime["generation"] <= 0 \
+                or runtime.get("activation") != "native_frame":
             raise SeamError("IT-030 runtime identity is incomplete")
     passed_case, failed_case, subsequent = values
     if passed_case["passed"] <= 0 \
@@ -618,6 +619,7 @@ def verify_it030(log: str, after_position: int) -> dict:
             or "status=0" not in cleanup["compile"] \
             or not isinstance(cleanup_runtime, dict) \
             or cleanup_runtime.get("generation", 0) <= subsequent["runtime"]["generation"] \
+            or cleanup_runtime.get("activation") != "native_frame" \
             or cleanup.get("packaged_source_sha256") == passed_case["source_sha256"]:
         raise SeamError("IT-030 cleanup did not restore the packaged project and remove its test")
     return {"summary": summary, "cases": values, "_position": summary_match.start()}

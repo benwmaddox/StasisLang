@@ -69,6 +69,21 @@ public class WorkshopTestRunnerAcceptanceTest {
                         "\"passed\":1", "\"passed\":2")));
     }
 
+    @Test public void runtimeIdentityRequiresCommittedNativeFrameActivation() throws Exception {
+        JSONObject active = new JSONObject().put("source", "live_session")
+                .put("source_fingerprint", "accepted-runtime").put("generation", 7)
+                .put("pending_candidate", false).put("activation", "native_frame");
+        assertEquals("native_frame", WorkshopTestRunnerAcceptance.runtimeIdentity(active)
+                .getString("activation"));
+        JSONObject pending = new JSONObject(active.toString()).put("pending_candidate", true);
+        assertThrows(IllegalStateException.class, () ->
+                WorkshopTestRunnerAcceptance.runtimeIdentity(pending));
+        JSONObject missingActivation = new JSONObject(active.toString());
+        missingActivation.remove("activation");
+        assertThrows(IllegalStateException.class, () ->
+                WorkshopTestRunnerAcceptance.runtimeIdentity(missingActivation));
+    }
+
     @Test public void productionTransactionRestoresSourceAndRemovesTemporaryTest()
             throws Exception {
         File project = temporaryFolder.newFolder("it030-project");

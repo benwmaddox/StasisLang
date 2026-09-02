@@ -38,7 +38,7 @@ final class WorkshopTestRunnerAcceptance {
             WorkshopAiProjectTransaction.Snapshot acceptedSnapshot =
                     activity.acceptanceCaptureProject(projectRoot);
             String acceptedSha = activity.acceptanceProjectFingerprint(acceptedSnapshot);
-            JSONObject acceptedRuntime = activity.acceptanceRuntimeState(projectRoot);
+            JSONObject acceptedRuntime = activity.acceptanceActivateRuntime(projectRoot);
             JSONObject pass = caseRecord("pass", 1,
                     parseRun(activity.acceptanceRunTests(projectRoot)), acceptedSha,
                     acceptedRuntime, true);
@@ -50,7 +50,7 @@ final class WorkshopTestRunnerAcceptance {
             requireCompileReady(failingCompile, "test-failing revision");
             String failingSha = activity.acceptanceProjectFingerprint(
                     activity.acceptanceCaptureProject(projectRoot));
-            JSONObject failingRuntime = activity.acceptanceRuntimeState(projectRoot);
+            JSONObject failingRuntime = activity.acceptanceActivateRuntime(projectRoot);
             JSONObject failure = caseRecord("fail", 2,
                     parseRun(activity.acceptanceRunTests(projectRoot)), failingSha,
                     failingRuntime, true);
@@ -62,7 +62,7 @@ final class WorkshopTestRunnerAcceptance {
             requireCompileReady(rollbackCompile, "accepted rollback");
             String restoredSha = activity.acceptanceProjectFingerprint(
                     activity.acceptanceCaptureProject(projectRoot));
-            JSONObject restoredRuntime = activity.acceptanceRuntimeState(projectRoot);
+            JSONObject restoredRuntime = activity.acceptanceActivateRuntime(projectRoot);
             requireRollback(acceptedSha, restoredSha, acceptedRuntime, failingRuntime,
                     restoredRuntime);
             JSONObject subsequent = caseRecord("subsequent_pass", 3,
@@ -149,7 +149,8 @@ final class WorkshopTestRunnerAcceptance {
         JSONObject value = caseRecord("pass", 1, run,
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 new JSONObject().put("source", "live_session")
-                        .put("source_fingerprint", "runtime-source").put("generation", 1), true);
+                        .put("source_fingerprint", "runtime-source").put("generation", 1)
+                        .put("pending_candidate", false).put("activation", "native_frame"), true);
         requireCase(value, "passed", 0);
         return value.getJSONObject("result");
     }
@@ -206,14 +207,17 @@ final class WorkshopTestRunnerAcceptance {
         }
     }
 
-    private static JSONObject runtimeIdentity(JSONObject runtime) throws Exception {
+    static JSONObject runtimeIdentity(JSONObject runtime) throws Exception {
         String fingerprint = runtime.optString("source_fingerprint", "");
         long generation = runtime.optLong("generation", 0);
         if (!"live_session".equals(runtime.optString("source"))
-                || fingerprint.isEmpty() || generation <= 0) {
+                || fingerprint.isEmpty() || generation <= 0
+                || runtime.optBoolean("pending_candidate", true)
+                || !"native_frame".equals(runtime.optString("activation"))) {
             throw new IllegalStateException("IT-030 runtime identity is incomplete: " + runtime);
         }
-        return new JSONObject().put("fingerprint", fingerprint).put("generation", generation);
+        return new JSONObject().put("fingerprint", fingerprint).put("generation", generation)
+                .put("activation", "native_frame");
     }
 
     private static JSONObject restorePackaged(MainActivity activity, String projectRoot,
@@ -224,7 +228,7 @@ final class WorkshopTestRunnerAcceptance {
                 activity.acceptanceCaptureProject(projectRoot));
         String compile = activity.acceptanceCompile(projectRoot);
         requireCompileReady(compile, "packaged cleanup");
-        JSONObject runtime = activity.acceptanceRuntimeState(projectRoot);
+        JSONObject runtime = activity.acceptanceActivateRuntime(projectRoot);
         boolean removed = !new File(projectRoot, TEST_PATH).exists();
         if (!packagedFingerprint.equals(actual) || !removed) {
             throw new IllegalStateException("IT-030 packaged cleanup was not exact");

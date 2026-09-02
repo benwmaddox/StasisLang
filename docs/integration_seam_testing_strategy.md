@@ -270,9 +270,11 @@ initial pass, publishes value 4 as a second compilable source revision that make
 that same test fail, restores the accepted snapshot through the production
 transaction helper, and proves a subsequent pass. Because reachable tick code reads
 the constant, every source transition publishes a real runtime generation without
-changing an ABI or layout. The C JNI shim converts the complete Rust-owned JSON
-string with `NewStringUTF` and frees it only afterward; no fixed-size transport
-buffer is allowed.
+changing an ABI or layout. After each compile, a native preview frame activates the
+staged candidate before Java captures its generation and fingerprint; evidence is
+rejected if Rust still reports a pending candidate. The C JNI shim converts the
+complete Rust-owned JSON string with `NewStringUTF` and frees it only afterward; no
+fixed-size transport buffer is allowed.
 
 Three ordered `stasis.workshop_test_runner.v1` case records carry bounded counts and
 the IT-030 result's exact file, line, column, name, and status. Each case also records

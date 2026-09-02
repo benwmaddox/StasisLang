@@ -5307,6 +5307,26 @@ public final class MainActivity extends Activity {
         return new JSONObject(nativeInspectRuntimeState(projectRoot));
     }
 
+    JSONObject acceptanceActivateRuntime(String projectRoot) throws Exception {
+        if (gamePreview == null) {
+            throw new IllegalStateException("IT-030 runtime activation requires the preview");
+        }
+        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+                gamePreview.touchY(), gamePreview.touchActive(),
+                Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
+                nativeFrameValues);
+        if (status != 0) {
+            throw new IllegalStateException("IT-030 runtime activation failed: "
+                    + nativeLastFrameError());
+        }
+        JSONObject runtime = acceptanceRuntimeState(projectRoot);
+        if (runtime.optBoolean("pending_candidate", true)) {
+            throw new IllegalStateException("IT-030 runtime activation left a pending candidate");
+        }
+        runtime.put("activation", "native_frame");
+        return runtime;
+    }
+
     String acceptanceRunTests(String projectRoot) {
         return nativeRunTests(projectRoot);
     }
