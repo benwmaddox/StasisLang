@@ -811,7 +811,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";'
     )
     for fixture in HOT_SWAP_FIXTURES:
-        fixture_text = sources[fixture]
+        fixture_text = without_c_comments(sources[fixture])
         checks += 1
         if hot_swap_public_import not in fixture_text or any(
             not re.search(pattern, fixture_text)

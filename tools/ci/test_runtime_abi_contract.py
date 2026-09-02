@@ -150,7 +150,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
             (
                 contract.HOT_SWAP_V1_FIXTURE,
                 'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
-                'import "graphics.stasis";',
+                '// import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
             ),
             (contract.HOT_SWAP_V2_FIXTURE, "begin_frame();", "legacy_begin();"),
             (contract.HOT_SWAP_INVALID_FIXTURE, "end_frame();", "legacy_end();"),
