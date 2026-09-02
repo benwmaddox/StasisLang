@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define STASIS_MOBILE_RUNTIME_ABI_VERSION 1
+#define STASIS_MOBILE_RUNTIME_ABI_VERSION 2
 #define STASIS_MOBILE_FRAME_INTERVAL_NS 16666667ULL
 
 enum StasisMobileRuntimeResult {
@@ -17,6 +17,13 @@ enum StasisMobileRuntimeResult {
     STASIS_MOBILE_RUNTIME_NOT_INITIALIZED = -2,
     STASIS_MOBILE_RUNTIME_ALREADY_INITIALIZED = -3,
     STASIS_MOBILE_RUNTIME_GRAPHICS_UNAVAILABLE = -4
+};
+
+enum StasisMobileRuntimeEntry {
+    STASIS_MOBILE_RUNTIME_ENTRY_NONE = 0,
+    STASIS_MOBILE_RUNTIME_ENTRY_MAIN = 1,
+    STASIS_MOBILE_RUNTIME_ENTRY_TICK = 2,
+    STASIS_MOBILE_RUNTIME_ENTRY_RENDER = 3
 };
 
 typedef void (*StasisMobileBindEntry)(void);
@@ -83,6 +90,8 @@ void stasis_mobile_runtime_set_paused(int32_t paused);
 int32_t stasis_mobile_runtime_is_initialized(void);
 /* Exact non-zero main/tick/render result; read before shutdown resets state. */
 int32_t stasis_mobile_runtime_last_entry_result(void);
+/* Entry associated with last_entry_result; read before shutdown resets state. */
+int32_t stasis_mobile_runtime_last_entry(void);
 
 /* Releases graphics and audio state. Safe to call more than once. */
 void stasis_mobile_runtime_shutdown(void);

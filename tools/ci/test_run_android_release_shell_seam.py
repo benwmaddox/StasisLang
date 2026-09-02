@@ -98,6 +98,78 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         )
         self.assertEqual("stable", seam.terminal_event({"stable_frame": 30}))
 
+    def test_terminal_event_stops_entry_failure_polling(self):
+        self.assertEqual(
+            "entry_failure",
+            seam.terminal_event({"entry_failure": {"entry": "tick", "code": 42}}),
+        )
+
+    def test_it024_validates_exact_entry_code_boundary_and_zero_submission(self):
+        for entry, code, calls in (
+            ("main", 41, (1, 0, 0)),
+            ("tick", 42, (1, 1, 0)),
+            ("render", 43, (1, 1, 1)),
+        ):
+            marker = {
+                "event": "entry_failure",
+                "entry": entry,
+                "code": code,
+                "main_calls": calls[0],
+                "tick_calls": calls[1],
+                "render_calls": calls[2],
+                "accepted": 0,
+                "rejected": 0,
+                "presented": 0,
+                "validation": 0,
+            }
+            diagnostic = f"Stasis {entry} entry failed with code {code}"
+            result = seam.validate_entry_failure_markers(
+                [marker],
+                diagnostic,
+                {
+                    "entry_failure": {
+                        "entry": entry,
+                        "code": code,
+                        "main_calls": calls[0],
+                        "tick_calls": calls[1],
+                        "render_calls": calls[2],
+                    }
+                },
+            )
+            self.assertEqual(diagnostic, result["diagnostic"])
+
+    def test_it024_rejects_submission_duplicate_diagnostic_and_fatal_evidence(self):
+        expected = {
+            "entry_failure": {
+                "entry": "render",
+                "code": 43,
+                "main_calls": 1,
+                "tick_calls": 1,
+                "render_calls": 1,
+            }
+        }
+        marker = {"event": "entry_failure", **expected["entry_failure"],
+                  "accepted": 1, "rejected": 0, "presented": 0, "validation": 0}
+        with self.assertRaisesRegex(seam.SeamError, "nonzero accepted"):
+            seam.validate_entry_failure_markers(
+                [marker], "Stasis render entry failed with code 43", expected
+            )
+        with self.assertRaisesRegex(seam.SeamError, "fatal/crash"):
+            seam.validate_no_android_fatal_evidence("E/AndroidRuntime: FATAL EXCEPTION")
+
+    def test_it024_accessibility_overlay_preserves_exact_diagnostic(self):
+        diagnostic = "Stasis tick entry failed with code 42"
+        xml = (
+            '<?xml version="1.0"?><hierarchy><node '
+            'content-desc="Stasis runtime error&#10;Release runtime error&#10;'
+            + diagnostic
+            + '" bounds="[10,20][300,400]"/></hierarchy>'
+        )
+        self.assertEqual(
+            {"java_error_visible": True, "overlay_bounds": [10, 20, 300, 400]},
+            seam.validate_entry_failure_error_overlay(xml, diagnostic),
+        )
+
     def test_it022_storage_probe_requires_absent_staging_and_root(self):
         self.assertEqual(
             {"staging_absent": True, "root_unpublished": True},

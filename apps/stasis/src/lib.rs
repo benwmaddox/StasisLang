@@ -6050,7 +6050,11 @@ function render(): void {{ {draws} return; }}
             "StasisMobileI32Entry tick_entry",
             "StasisMobileI32Entry render_entry",
             "stasis_mobile_runtime_last_entry_result(void)",
-            "STASIS_MOBILE_RUNTIME_ABI_VERSION 1",
+            "stasis_mobile_runtime_last_entry(void)",
+            "STASIS_MOBILE_RUNTIME_ABI_VERSION 2",
+            "STASIS_MOBILE_RUNTIME_ENTRY_MAIN = 1",
+            "STASIS_MOBILE_RUNTIME_ENTRY_TICK = 2",
+            "STASIS_MOBILE_RUNTIME_ENTRY_RENDER = 3",
         ] {
             assert!(
                 STASIS_MOBILE_RUNTIME_HEADER.contains(required),
@@ -6062,6 +6066,9 @@ function render(): void {{ {draws} return; }}
             "runtime_state.entries.main_entry()",
             "runtime_state.entries.tick_entry()",
             "runtime_state.entries.render_entry()",
+            "runtime_state.last_entry = STASIS_MOBILE_RUNTIME_ENTRY_MAIN",
+            "runtime_state.last_entry = STASIS_MOBILE_RUNTIME_ENTRY_TICK",
+            "runtime_state.last_entry = STASIS_MOBILE_RUNTIME_ENTRY_RENDER",
             "runtime_state.last_entry_result != 0",
             "stasis_should_quit()",
             "stasis_mobile_poll_events()",

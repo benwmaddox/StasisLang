@@ -17,7 +17,7 @@ concurrency:
 jobs:
   release-shell-seams:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 105
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "2"
@@ -138,6 +138,14 @@ jobs:
         with:
           name: android-storage-persistence-seam
           path: artifacts/android_storage_persistence/e
+          if-no-files-found: warn
+
+      - name: Upload Android lifecycle-entry-failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lifecycle-entry-failure-seam
+          path: artifacts/android_entry_failures
           if-no-files-found: warn
 
   workshop-seams:

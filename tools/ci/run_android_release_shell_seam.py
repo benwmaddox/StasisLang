@@ -151,35 +151,30 @@ def _clip_probe_text(value: str, limit: int = 320) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
-def validate_it022_error_overlay(
-    ui_xml: str, diagnostic: str
+def validate_runtime_error_overlay(
+    ui_xml: str, required_text: tuple[str, ...], test_id: str
 ) -> dict[str, bool | list[int]]:
-    """Require the expected IT-022 error content on one XML node."""
+    """Require all expected runtime-error content on one accessibility node."""
     start = ui_xml.find("<?xml")
     if start < 0:
         start = ui_xml.find("<hierarchy")
     end = ui_xml.rfind("</hierarchy>")
     if start < 0 or end < start:
-        raise SeamError("IT-022 UI hierarchy XML is missing or incomplete")
+        raise SeamError(f"{test_id} UI hierarchy XML is missing or incomplete")
     xml = ui_xml[start : end + len("</hierarchy>")]
     try:
         root = ET.fromstring(xml)
     except ET.ParseError as error:
-        raise SeamError(f"IT-022 UI hierarchy XML is malformed: {error}") from error
+        raise SeamError(f"{test_id} UI hierarchy XML is malformed: {error}") from error
     if root.tag != "hierarchy":
-        raise SeamError("IT-022 UI hierarchy XML has no hierarchy root")
+        raise SeamError(f"{test_id} UI hierarchy XML has no hierarchy root")
     overlay_nodes = [
         node
         for node in root.iter("node")
         if node.attrib.get("content-desc", "").startswith("Stasis runtime error")
     ]
     if not overlay_nodes:
-        raise SeamError("IT-022 UI hierarchy has no Stasis runtime error node")
-    required_text = (
-        "Release runtime error",
-        "Asset verification failed",
-        diagnostic,
-    )
+        raise SeamError(f"{test_id} UI hierarchy has no Stasis runtime error node")
     matching_nodes = [
         node
         for node in overlay_nodes
@@ -190,9 +185,8 @@ def validate_it022_error_overlay(
     ]
     if not matching_nodes:
         raise SeamError(
-            "IT-022 error overlay node is missing required text: "
-            + ", ".join(required_text[:2])
-            + " and native diagnostic"
+            f"{test_id} error overlay node is missing required text: "
+            + ", ".join(required_text)
         )
     for node in matching_nodes:
         bounds_text = node.attrib.get("bounds", "")
@@ -205,7 +199,18 @@ def validate_it022_error_overlay(
         if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
             continue
         return {"java_error_visible": True, "overlay_bounds": bounds}
-    raise SeamError("IT-022 error overlay node has malformed bounds")
+    raise SeamError(f"{test_id} error overlay node has malformed bounds")
+
+
+def validate_it022_error_overlay(
+    ui_xml: str, diagnostic: str
+) -> dict[str, bool | list[int]]:
+    """Require the expected IT-022 error content on one XML node."""
+    return validate_runtime_error_overlay(
+        ui_xml,
+        ("Release runtime error", "Asset verification failed", diagnostic),
+        "IT-022",
+    )
 
 
 def validate_it022_overlay_capture(
@@ -242,16 +247,18 @@ def validate_it022_overlay_capture(
     return {"overlay_bounds": bounds, "overlay_red_pixels": red_pixels}
 
 
-def capture_it022_error_overlay(
+def capture_runtime_error_overlay(
     adb: Path,
     serial: str | None,
     diagnostic: str,
     capture: Path,
     ui_hierarchy: Path,
+    validator,
+    test_id: str,
     deadline_seconds: float = 10.0,
     retry_interval_seconds: float = 0.25,
 ) -> dict[str, bool | int | list[int]]:
-    """Poll a direct UI XML dump until the IT-022 rejection overlay is ready."""
+    """Poll a direct UI XML dump until the expected error overlay is ready."""
     deadline = time.monotonic() + deadline_seconds
     attempts = 0
     last_error = ""
@@ -271,7 +278,7 @@ def capture_it022_error_overlay(
         ui_hierarchy.write_text(result.stdout, encoding="utf-8")
         if result.returncode == 0:
             try:
-                evidence = validate_it022_error_overlay(result.stdout, diagnostic)
+                evidence = validator(result.stdout, diagnostic)
                 capture.write_bytes(
                     _run(adb, serial, "exec-out", "screencap", "-p", text=False)
                 )
@@ -293,10 +300,63 @@ def capture_it022_error_overlay(
         time.sleep(min(max(retry_interval_seconds, 0.0), remaining))
     assert last_result is not None
     raise SeamError(
-        f"IT-022 Java error overlay was not visible after {attempts} attempts: "
+        f"{test_id} Java error overlay was not visible after {attempts} attempts: "
         f"{last_error}; final_exit={last_result.returncode} "
         f"final_stdout={_clip_probe_text(last_result.stdout)!r} "
         f"final_stderr={_clip_probe_text(last_result.stderr)!r}"
+    )
+
+
+def capture_it022_error_overlay(
+    adb: Path,
+    serial: str | None,
+    diagnostic: str,
+    capture: Path,
+    ui_hierarchy: Path,
+    deadline_seconds: float = 10.0,
+    retry_interval_seconds: float = 0.25,
+) -> dict[str, bool | int | list[int]]:
+    """Poll a direct UI XML dump until the IT-022 rejection overlay is ready."""
+    return capture_runtime_error_overlay(
+        adb,
+        serial,
+        diagnostic,
+        capture,
+        ui_hierarchy,
+        validate_it022_error_overlay,
+        "IT-022",
+        deadline_seconds,
+        retry_interval_seconds,
+    )
+
+
+def validate_entry_failure_error_overlay(
+    ui_xml: str, diagnostic: str
+) -> dict[str, bool | list[int]]:
+    """Require the exact native entry failure on the Java accessibility node."""
+    return validate_runtime_error_overlay(
+        ui_xml, ("Release runtime error", diagnostic), "IT-024"
+    )
+
+
+def capture_entry_failure_error_overlay(
+    adb: Path,
+    serial: str | None,
+    diagnostic: str,
+    capture: Path,
+    ui_hierarchy: Path,
+    deadline_seconds: float = 10.0,
+) -> dict[str, bool | int | list[int]]:
+    """Poll accessibility until the IT-024 runtime error overlay is visible."""
+    return capture_runtime_error_overlay(
+        adb,
+        serial,
+        diagnostic,
+        capture,
+        ui_hierarchy,
+        validate_entry_failure_error_overlay,
+        "IT-024",
+        deadline_seconds,
     )
 
 
@@ -314,7 +374,11 @@ def parse_markers(log: str, test_id: str) -> list[dict]:
 
 def terminal_event(expectations: dict) -> str:
     """Return the marker that ends polling for this shell lane."""
-    return "asset_rejected" if expectations.get("asset_rejection") is not None else "stable"
+    if expectations.get("asset_rejection") is not None:
+        return "asset_rejected"
+    if expectations.get("entry_failure") is not None:
+        return "entry_failure"
+    return "stable"
 
 
 def validate_markers(markers: list[dict], expectations: dict) -> dict:
@@ -637,6 +701,59 @@ def validate_asset_rejection_markers(
             f"IT-022 detail expected {rejection['detail_contains']} actual {detail}"
         )
     return {"code": code, "path": path, "detail": detail, "diagnostic": diagnostic}
+
+
+def validate_entry_failure_markers(
+    markers: list[dict], log: str, expectations: dict
+) -> dict:
+    """Validate exact IT-024 entry identity, code, call boundary, and no submit."""
+    expected = expectations.get("entry_failure")
+    if not isinstance(expected, dict):
+        raise SeamError("IT-024 expectations are missing entry_failure")
+    failures = [item for item in markers if item.get("event") == "entry_failure"]
+    if len(failures) != 1:
+        raise SeamError(f"IT-024 expected one entry_failure marker, observed {len(failures)}")
+    marker = failures[0]
+    failure_index = markers.index(marker)
+    if failure_index != len(markers) - 1:
+        later = [item.get("event") for item in markers[failure_index + 1 :]]
+        raise SeamError(f"IT-024 emitted lifecycle markers after entry failure: {later}")
+    for key in ("entry", "code", "main_calls", "tick_calls", "render_calls"):
+        if marker.get(key) != expected.get(key):
+            raise SeamError(
+                f"IT-024 {key} expected {expected.get(key)!r} actual {marker.get(key)!r}"
+            )
+    for key in ("accepted", "rejected", "presented", "validation"):
+        if marker.get(key) != 0:
+            raise SeamError(f"IT-024 entry failure reported nonzero {key}: {marker.get(key)!r}")
+    diagnostic = f"Stasis {expected['entry']} entry failed with code {expected['code']}"
+    if log.count(diagnostic) != 1:
+        raise SeamError("IT-024 native log must contain exactly one entry/code diagnostic")
+    return {**expected, "diagnostic": diagnostic}
+
+
+def validate_entry_failure_process_identity(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    expected_pid: str,
+) -> str:
+    """Require the IT-024 error surface to stay in its original process."""
+    actual = _run(
+        adb, serial, "shell", "pidof", package_id, required=False
+    ).strip()
+    if actual != expected_pid:
+        raise SeamError(
+            f"IT-024 process identity changed: expected {expected_pid!r} actual {actual!r}"
+        )
+    return actual
+
+
+def validate_no_android_fatal_evidence(log: str) -> None:
+    """Reject Android runtime/native crash evidence after a graceful entry stop."""
+    fatal = re.search(r"FATAL EXCEPTION|Fatal signal|Abort message|has died", log, re.I)
+    if fatal is not None:
+        raise SeamError(f"IT-024 fatal/crash evidence observed: {fatal.group(0)}")
 
 
 def validate_rejection_storage_state(staging_probe: str, root_probe: str) -> dict[str, bool]:
@@ -2017,6 +2134,72 @@ def main() -> int:
                     **storage,
                     "lifecycle_events": [item["event"] for item in markers],
                     "presentation_oracle": "native_rejection_before_game_runtime",
+                }
+            )
+            return 0
+        entry_failure = expectations.get("entry_failure")
+        if entry_failure is not None:
+            failure = validate_entry_failure_markers(markers, log, expectations)
+            log_path.write_text(log, encoding="utf-8")
+            first_pid = _run(
+                args.adb, args.serial, "shell", "pidof", package_id, required=False
+            ).strip()
+            if not first_pid:
+                raise SeamError("IT-024 failed package process exited unexpectedly")
+            foreground_restored = ensure_test_activity_foreground(
+                args.adb, args.serial, package_id, component
+            )
+            evidence["artifacts"]["ui_hierarchy"] = str(ui_hierarchy_path)
+            overlay = capture_entry_failure_error_overlay(
+                args.adb,
+                args.serial,
+                failure["diagnostic"],
+                capture_path,
+                ui_hierarchy_path,
+            )
+            time.sleep(2.0)
+            second_pid = validate_entry_failure_process_identity(
+                args.adb, args.serial, package_id, first_pid
+            )
+            log = _run(
+                args.adb,
+                args.serial,
+                "logcat",
+                "-d",
+                "-v",
+                "brief",
+                "Stasis:I",
+                "*:S",
+            )
+            markers = parse_markers(log, test_id)
+            failure = validate_entry_failure_markers(markers, log, expectations)
+            log_path.write_text(log, encoding="utf-8")
+            fatal_log = _run(
+                args.adb,
+                args.serial,
+                "logcat",
+                "-d",
+                "-v",
+                "brief",
+                "AndroidRuntime:E",
+                "libc:F",
+                "DEBUG:F",
+                "*:S",
+            )
+            validate_no_android_fatal_evidence(fatal_log)
+            fatal_log_path = args.output / "fatal-logcat.txt"
+            fatal_log_path.write_text(fatal_log, encoding="utf-8")
+            evidence["artifacts"]["fatal_log"] = str(fatal_log_path)
+            evidence.update(
+                {
+                    "status": "passed",
+                    "entry_failure": failure,
+                    "process_ids": [first_pid, second_pid],
+                    "foreground_restored": foreground_restored,
+                    **overlay,
+                    "lifecycle_events": [item["event"] for item in markers],
+                    "presentation_oracle": "entry_failure_before_native_submission",
+                    "fatal_evidence": False,
                 }
             )
             return 0

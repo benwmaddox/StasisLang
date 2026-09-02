@@ -183,13 +183,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
                     "android-packaged-assets-seam",
                     "android-asset-rejection-seam",
                     "android-storage-persistence-seam",
+                    "android-lifecycle-entry-failure-seam",
                 )
             ),
             sorted(release_artifacts),
         )
         self.assertEqual(["android-workshop-it025-seam"], workshop_artifacts)
-        self.assertEqual(8, self.workflow.count("          name: android-"))
-        self.assertEqual(8, self.workflow.count("        if: always()"))
+        self.assertEqual(9, self.workflow.count("          name: android-"))
+        self.assertEqual(9, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
@@ -218,8 +219,13 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.assertEqual(1, self.emulator_script.count(project))
         self.assertEqual(2, self.emulator_script.count("samples/android_packaged_assets_seam"))
         self.assertIn("samples/android_asset_rejection_seam/android_seam_expectations.json", self.emulator_script)
+        for entry in ("main", "tick", "render"):
+            self.assertIn(
+                f"samples/android_lifecycle_failure_seam/{entry}",
+                self.emulator_script,
+            )
         self.assertIn("[int]$PerSeamTimeoutSeconds = 660", self.emulator_script)
-        self.assertLess(6 * 660 + 900, 90 * 60)
+        self.assertLess(6 * 660 + 900 + 3 * 180, 105 * 60)
 
     def test_gradle_resolvers_only_select_native_application_launchers(self):
         for name, script in (
@@ -253,7 +259,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn('$selectedSeams = if ($TestId)', self.emulator_script)
         ordered_ids = [
             self.emulator_script.index(f'TestId = "{test_id}"')
-            for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021", "IT-022", "IT-023")
+            for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021", "IT-022", "IT-023", "IT-024")
         ]
         self.assertEqual(sorted(ordered_ids), ordered_ids)
         self.assertIn('} else {\n    $seams\n}', self.emulator_script)
@@ -281,6 +287,41 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn('Where-Object { $_.TestId -eq $TestId }', self.emulator_script)
         self.assertIn('TestId = "IT-021"', self.emulator_script)
         self.assertIn('TestId = "IT-023"', self.emulator_script)
+        self.assertEqual(3, self.emulator_script.count('TestId = "IT-024"'))
+
+    def test_it024_entry_failure_contract_is_exact_and_grouped(self):
+        expected = {
+            "main": (41, [1, 0, 0]),
+            "tick": (42, [1, 1, 0]),
+            "render": (43, [1, 1, 1]),
+        }
+        for entry, (code, calls) in expected.items():
+            fixture = read(f"samples/android_lifecycle_failure_seam/{entry}/main.stasis")
+            expectations = json.loads(read(
+                f"samples/android_lifecycle_failure_seam/{entry}/android_seam_expectations.json"
+            ))
+            failure = expectations["entry_failure"]
+            self.assertEqual("IT-024", expectations["test_id"])
+            self.assertEqual(entry, failure["entry"])
+            self.assertEqual(code, failure["code"])
+            self.assertEqual(calls, [
+                failure["main_calls"], failure["tick_calls"], failure["render_calls"]
+            ])
+            self.assertIn(f"return {code};", fixture)
+        render = read("samples/android_lifecycle_failure_seam/render/main.stasis")
+        self.assertIn("begin_frame();", render)
+        self.assertIn("end_frame();", render)
+        self.assertIn('Output = "android_entry_failures/', self.emulator_script)
+        self.assertIn("path: artifacts/android_entry_failures", self.workflow)
+        for token in (
+            '\\"event\\":\\"entry_failure\\"',
+            'stasis_mobile_runtime_last_entry()',
+            'stasis_mobile_wait_for_error_surface_quit();',
+        ):
+            self.assertIn(token, self.mobile_main)
+        self.assertIn('if expectations.get("entry_failure") is not None:', self.release_runner)
+        self.assertIn("validate_entry_failure_process_identity", self.release_runner)
+        self.assertIn("validate_no_android_fatal_evidence", self.release_runner)
 
     def test_it023_storage_scope_and_lifecycle_contract(self):
         source = read("runtime/stasis_graphics.c")
@@ -366,7 +407,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("stasis_pregraphics_info_log(", marker)
         self.assertIn('\\\"event\\\":\\\"asset_rejected', marker)
         wait_start = source.index(
-            "static void stasis_mobile_wait_for_asset_rejection_quit"
+            "static void stasis_mobile_wait_for_error_surface_quit"
         )
         wait_end = source.index("#if defined(STASIS_ENABLE_SEAM_TESTS)", wait_start)
         wait_helper = source[wait_start:wait_end]
@@ -380,10 +421,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("SDL_WaitEvent(&event)", wait_helper)
         self.assertIn("SDL_EVENT_QUIT", wait_helper)
         self.assertIn(
-            "stasis_mobile_wait_for_asset_rejection_quit();", rejection_with_return
+            "stasis_mobile_wait_for_error_surface_quit();", rejection_with_return
         )
         self.assertLess(
-            rejection_with_return.index("stasis_mobile_wait_for_asset_rejection_quit();"),
+            rejection_with_return.index("stasis_mobile_wait_for_error_surface_quit();"),
             rejection_with_return.index("return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;"),
         )
         self.assertLess(
