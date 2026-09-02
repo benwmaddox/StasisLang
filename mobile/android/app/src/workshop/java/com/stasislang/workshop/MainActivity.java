@@ -5202,7 +5202,16 @@ public final class MainActivity extends Activity {
             logical[0] = frame;
             captureReady.countDown();
         });
-        if (!captureReady.await(5L, TimeUnit.SECONDS) || captured[0] == null) {
+        long captureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+        while (captureReady.getCount() != 0L && System.nanoTime() < captureDeadline) {
+            gamePreview.requestRender();
+            long remaining = captureDeadline - System.nanoTime();
+            if (remaining > 0L) {
+                captureReady.await(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(100L)),
+                        TimeUnit.NANOSECONDS);
+            }
+        }
+        if (captureReady.getCount() != 0L || captured[0] == null) {
             throw new IllegalStateException("IT-029 capture failed: "
                     + (captureError[0] == null ? "timeout" : captureError[0]));
         }
