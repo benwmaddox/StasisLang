@@ -398,45 +398,44 @@ pub fn run_android_workshop_stasis_tests(
             failed += tests.len();
             let message = format!("{error:?}");
             let diagnostic = jit.last_source_diagnostic();
-            let test = diagnostic.and_then(|diagnostic| {
+            let diagnostic_test = diagnostic.and_then(|diagnostic| {
                 tests
                     .iter()
                     .find(|test| test.generated_function_name == diagnostic.symbol)
             });
-            let offset = test
-                .map(|test| test.declaration_range.start)
-                .unwrap_or_else(|| diagnostic_offset(&source, &message));
-            let (line, column) = source_line_column(&source, offset);
-            results.push(serde_json::json!({
-                "file": relative_path,
-                "line": line,
-                "column": column,
-                "name": test
-                    .map(|test| test.display_name.clone())
-                    .unwrap_or_else(|| diagnostic_symbol(&source, offset, &message)),
-                "passed": false,
-                "status": "compile_failed",
-                "error": message,
-            }));
+            for test in &tests {
+                let offset = if diagnostic_test.is_some() {
+                    test.declaration_range.start
+                } else {
+                    diagnostic_offset(&source, &message)
+                };
+                let (line, column) = source_line_column(&source, offset);
+                results.push(serde_json::json!({
+                    "file": relative_path,
+                    "line": line,
+                    "column": column,
+                    "name": test.display_name,
+                    "passed": false,
+                    "status": "compile_failed",
+                    "error": message,
+                }));
+            }
             continue;
         }
         for test in tests {
-            let line = 1 + source[..test.declaration_range.start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count();
+            let (line, column) = source_line_column(&source, test.declaration_range.start);
             match jit.execute_bool_noarg_by_name(&test.generated_function_name) {
                 Ok(true) => {
                     passed += 1;
-                    results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": true}));
+                    results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": true, "status": "passed"}));
                 }
                 Ok(false) => {
                     failed += 1;
-                    results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": false}));
+                    results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": false, "status": "failed"}));
                 }
                 Err(error) => {
                     failed += 1;
-                    results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": false, "error": error}));
+                    results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": false, "status": "runtime_failed", "error": error}));
                 }
             }
         }
@@ -6446,6 +6445,58 @@ function tick(): void {}
         assert_eq!(result["results"][0]["file"], "tests/failing.test.stasis");
         assert_eq!(result["results"][0]["line"], 3);
         assert_eq!(result["results"][0]["name"], "intentional failure");
+        assert_eq!(result["results"][0]["column"], 1);
+        assert_eq!(result["results"][0]["status"], "failed");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_test_success_reports_status_and_declaration_coordinates() {
+        let root = temp_project("test_success_location");
+        fs::create_dir_all(root.join("tests")).expect("create tests");
+        fs::write(
+            root.join("tests/passing.test.stasis"),
+            "\n  test `located pass`(): bool { return true; }\n",
+        )
+        .expect("write passing test");
+        let result = run_android_workshop_stasis_tests(&root).expect("run Stasis tests");
+        assert_eq!(result["passed"], 1);
+        assert_eq!(result["failed"], 0);
+        assert_eq!(result["results"][0]["file"], "tests/passing.test.stasis");
+        assert_eq!(result["results"][0]["line"], 2);
+        assert_eq!(result["results"][0]["column"], 3);
+        assert_eq!(result["results"][0]["name"], "located pass");
+        assert_eq!(result["results"][0]["status"], "passed");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_test_c_transport_preserves_json_larger_than_legacy_buffer() {
+        let root = temp_project("large_test_transport");
+        fs::create_dir_all(root.join("tests")).expect("create tests");
+        let mut source = String::new();
+        for index in 0..160 {
+            source.push_str(&format!(
+                "test `transport result {index:03} with deterministic padding`(): bool {{ return true; }}\n"
+            ));
+        }
+        fs::write(root.join("tests/large.test.stasis"), source).expect("write tests");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("project root CString");
+        let raw = stasis_android_bridge_run_tests(root_c.as_ptr());
+        assert!(!raw.is_null());
+        let json = unsafe { CStr::from_ptr(raw) }
+            .to_str()
+            .expect("test JSON UTF-8")
+            .to_string();
+        stasis_android_bridge_free_string(raw);
+        assert!(
+            json.len() > 8192,
+            "transport fixture must exceed legacy buffer"
+        );
+        let result: serde_json::Value = serde_json::from_str(&json).expect("complete test JSON");
+        assert_eq!(result["passed"], 160);
+        assert_eq!(result["failed"], 0);
+        assert_eq!(result["results"].as_array().map(Vec::len), Some(160));
         fs::remove_dir_all(root).ok();
     }
 

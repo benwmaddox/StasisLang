@@ -325,6 +325,7 @@ public final class MainActivity extends Activity {
     private boolean workshopTouchAcceptanceRun;
     private boolean workshopHotEditAcceptanceRun;
     private boolean workshopResourceScopeAcceptanceRun;
+    private boolean workshopTestRunnerAcceptanceRun;
     private boolean workshopDiagnosticSeamAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
@@ -1424,6 +1425,26 @@ public final class MainActivity extends Activity {
                 }
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
                         && workshopResourceScopeAcceptanceRun
+                        && !workshopTestRunnerAcceptanceRun) {
+                    String testRunnerResult = WorkshopTestRunnerAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopTestRunnerAcceptanceRun = true;
+                    boolean testRunnerPassed = false;
+                    try {
+                        testRunnerPassed = "passed".equals(
+                                new JSONObject(testRunnerResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!testRunnerPassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-030 Workshop test-runner acceptance failed: "
+                                + testRunnerResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopTestRunnerAcceptanceRun
                         && !workshopDiagnosticSeamAcceptanceRun) {
                     String diagnosticResult = WorkshopDiagnosticSeamAcceptance.run(
                             MainActivity.this, projectRootPath());
@@ -5284,6 +5305,40 @@ public final class MainActivity extends Activity {
 
     JSONObject acceptanceRuntimeState(String projectRoot) throws Exception {
         return new JSONObject(nativeInspectRuntimeState(projectRoot));
+    }
+
+    String acceptanceRunTests(String projectRoot) {
+        return nativeRunTests(projectRoot);
+    }
+
+    WorkshopAiProjectTransaction.Snapshot acceptanceCaptureProject(String projectRoot)
+            throws Exception {
+        return WorkshopAiProjectTransaction.capture(new File(projectRoot));
+    }
+
+    void acceptanceRestoreProject(String projectRoot,
+            WorkshopAiProjectTransaction.Snapshot snapshot) throws Exception {
+        WorkshopAiProjectTransaction.restore(new File(projectRoot), snapshot);
+    }
+
+    String acceptanceProjectFingerprint(WorkshopAiProjectTransaction.Snapshot snapshot)
+            throws Exception {
+        return WorkshopAiProjectTransaction.fingerprint(snapshot);
+    }
+
+    void acceptanceWriteTest(String projectRoot, String relativePath, String source)
+            throws Exception {
+        String normalized = relativePath.replace('\\', '/');
+        if (!normalized.startsWith("tests/") || !normalized.endsWith(".test.stasis")
+                || normalized.contains("..")) {
+            throw new IllegalArgumentException("IT-030 test path is invalid");
+        }
+        File root = new File(projectRoot).getCanonicalFile();
+        File target = new File(root, normalized.replace('/', File.separatorChar)).getCanonicalFile();
+        if (!target.getPath().startsWith(root.getPath() + File.separator)) {
+            throw new IllegalArgumentException("IT-030 test path escaped project");
+        }
+        replaceTextFileAtomically(target, source);
     }
 
     String acceptanceSetRuntimeI32(String projectRoot, String path, int value) {

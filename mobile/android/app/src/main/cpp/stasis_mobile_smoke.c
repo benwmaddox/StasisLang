@@ -595,25 +595,6 @@ static int try_rust_bridge_set_i32_global(const char *project_root, const char *
     return 1;
 }
 
-static int try_rust_bridge_run_tests(const char *project_root, char *message, size_t message_size) {
-    if (!stasis_audio_set_project_root(project_root)) {
-        snprintf(message, message_size, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"invalid audio project root\"}");
-        return 1;
-    }
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->run_tests == NULL || bridge->free_string == NULL) {
-        return 0;
-    }
-    char *bridge_message = bridge->run_tests(project_root);
-    if (bridge_message == NULL) {
-        snprintf(message, message_size, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"Rust Android bridge returned null test result\"}");
-        return 1;
-    }
-    snprintf(message, message_size, "%s", bridge_message);
-    bridge->free_string(bridge_message);
-    return 1;
-}
-
 static int try_rust_bridge_get_i32_global(const char *project_root, const char *path, char *message, size_t message_size) {
     if (!stasis_audio_set_project_root(project_root)) {
         snprintf(message, message_size, "StateError: invalid audio project root");
@@ -714,12 +695,23 @@ Java_com_stasislang_workshop_MainActivity_nativeRunTests(JNIEnv *env, jclass act
     if (root == NULL) {
         return (*env)->NewStringUTF(env, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"unable to read project root\"}");
     }
-    char message[8192];
-    if (try_rust_bridge_run_tests(root, message, sizeof(message)) == 0) {
-        snprintf(message, sizeof(message), "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"Rust Android bridge test runner unavailable\"}");
+    if (!stasis_audio_set_project_root(root)) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"invalid audio project root\"}");
     }
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->run_tests == NULL || bridge->free_string == NULL) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"Rust Android bridge test runner unavailable\"}");
+    }
+    char *message = bridge->run_tests(root);
     (*env)->ReleaseStringUTFChars(env, project_root, root);
-    return (*env)->NewStringUTF(env, message);
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"Rust Android bridge returned null test result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
 }
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activity_class) {
