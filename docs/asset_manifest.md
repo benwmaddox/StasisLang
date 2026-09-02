@@ -26,9 +26,11 @@ the sole asset inventory and retains its v1/v2 compatibility rules.
 
 Prepared bundles compute the identity after rewriting preparation hashes and
 dimensions, so the digest identifies the bytes consumers actually receive.
-Web runtime metadata carries the same identity, and package provenance
-verification rejects a sidecar whose manifest is missing or whose digest no
-longer matches.
+Development Web runtime metadata carries the same identity for inspection.
+Release Web packages keep it out of `game.js`: the external sidecar and the
+complete metadata copied into `stasis_provenance.json` are the audit contract.
+Package provenance verification rejects a sidecar whose manifest is missing or
+whose digest no longer matches.
 
 ## Prepared sprite example
 
