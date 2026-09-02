@@ -333,7 +333,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                     Math.max(1, Math.round(height / rasterScale)),
                     surfaceGeneration, rendererGeneration);
             textTextures.put(runHandle, cached);
-            recordAcceptanceUpload("cached_text", runHandle, sha256(text));
+            if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+                recordAcceptanceUpload("cached_text", runHandle, sha256(text));
+            }
             if (reportRestoreTiming) {
                 textRasterNanos += System.nanoTime() - rasterStarted;
                 restoredTextRuns += 1;
@@ -367,7 +369,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                     fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale,
                     surfaceGeneration, rendererGeneration);
             dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
-            recordAcceptanceUpload("text", font, sha256(bytes));
+            if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+                recordAcceptanceUpload("text", font, sha256(bytes));
+            }
             if (reportRestoreTiming) {
                 textRasterNanos += System.nanoTime() - rasterStarted;
                 restoredTextRuns += 1;

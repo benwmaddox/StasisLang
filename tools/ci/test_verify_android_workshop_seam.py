@@ -1,6 +1,9 @@
+import hashlib
 import json
+import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 try:
@@ -10,6 +13,66 @@ except ImportError:
 
 
 MANIFEST = {"state_checksum": 2500, "render_contract_version": 7}
+
+
+def _png_rgba(width: int, height: int, pixels: bytes) -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+
+    rows = b"".join(
+        b"\x00" + pixels[y * width * 4:(y + 1) * width * 4]
+        for y in range(height)
+    )
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+def _it029_png(project_color: tuple[int, int, int, int],
+               missing_text: str = "") -> bytes:
+    width, height = 100, 160
+    pixels = bytearray(b"\x00\x00\x00\xff" * (width * height))
+
+    def fill(x0: int, y0: int, x1: int, y1: int,
+             color: tuple[int, int, int, int]) -> None:
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                offset = (y * width + x) * 4
+                pixels[offset:offset + 4] = bytes(color)
+
+    fill(10, 40, 90, 120, (15, 49, 81, 255))
+    fill(15, 45, 25, 55, project_color)
+    fill(30, 45, 42, 57, (49, 209, 124, 255))
+    if missing_text != "left":
+        fill(17, 98, 40, 106, (230, 235, 242, 255))
+    if missing_text != "right":
+        fill(53, 98, 79, 106, (242, 204, 38, 255))
+    return _png_rgba(width, height, bytes(pixels))
+
+
+def _verify_files_fixture(root: Path, alpha_png: bytes, beta_png: bytes):
+    alpha_hash = hashlib.sha256(alpha_png).hexdigest()
+    beta_hash = hashlib.sha256(beta_png).hexdigest()
+    log = GOOD.replace("a" * 64, alpha_hash).replace("b" * 64, beta_hash)
+    log_path = root / "log.txt"
+    log_path.write_text(log, encoding="utf-8")
+    manifest = root / "manifest.json"
+    manifest.write_text(json.dumps(MANIFEST), encoding="utf-8")
+    metadata = root / "metadata.json"
+    metadata.write_text('{"git_revision":"abc"}', encoding="utf-8")
+    capture = root / "capture.png"
+    apk = root / "app.apk"
+    capture.write_bytes(b"stable")
+    apk.write_bytes(b"apk")
+    it029 = []
+    for index, data in enumerate((alpha_png, beta_png, beta_png, alpha_png)):
+        path = root / f"it029-{index}.png"
+        path.write_bytes(data)
+        it029.append(path)
+    return log_path, capture, manifest, apk, metadata, it029
+
+
 GOOD = """CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=7 compile_us=12 manifest=x
 Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":7,"state_checksum":2500,"command_trace":919191,"frame_token":1,"fallback":0,"stub":0}
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":1,"frame_token":1}
@@ -205,6 +268,17 @@ for _name, _detail in (("parse", "parse detail"), ("extern_resolution", "extern 
 
 
 class WorkshopSeamTests(unittest.TestCase):
+    def test_non_acceptance_text_uploads_do_not_compute_acceptance_hashes(self):
+        source = (Path(__file__).resolve().parents[2]
+                  / "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java").read_text()
+        for call in (
+            'recordAcceptanceUpload("cached_text", runHandle, sha256(text));',
+            'recordAcceptanceUpload("text", font, sha256(bytes));',
+        ):
+            offset = source.index(call)
+            guard = source.rfind("if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {", 0, offset)
+            self.assertGreater(guard, source.rfind("}", 0, offset))
+
     def test_accepts_ordered_it031_native_ui_diagnostics(self):
         cases = []
         for name, stage, code in [
@@ -462,36 +536,55 @@ class WorkshopSeamTests(unittest.TestCase):
             verify_log(reused, MANIFEST)
 
     def test_verify_files_binds_each_it029_png_to_its_case_hash(self):
-        import hashlib
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            alpha_hash = hashlib.sha256(b"alpha-png").hexdigest()
-            beta_hash = hashlib.sha256(b"beta-png").hexdigest()
-            log = GOOD.replace("a" * 64, alpha_hash).replace("b" * 64, beta_hash)
-            log_path = root / "log.txt"
-            log_path.write_text(log, encoding="utf-8")
-            manifest = root / "manifest.json"
-            manifest.write_text(json.dumps(MANIFEST), encoding="utf-8")
-            metadata = root / "metadata.json"
-            metadata.write_text('{"git_revision":"abc"}', encoding="utf-8")
-            capture = root / "capture.png"
-            apk = root / "app.apk"
-            capture.write_bytes(b"stable")
-            apk.write_bytes(b"apk")
-            it029 = []
-            for index, data in enumerate(
-                    (b"alpha-png", b"beta-png", b"beta-png", b"alpha-png")):
-                path = root / f"it029-{index}.png"
-                path.write_bytes(data)
-                it029.append(path)
+            args = _verify_files_fixture(
+                root, _it029_png((0x12, 0x61, 0xA0, 0xFF)),
+                _it029_png((0xA0, 0x38, 0x12, 0xFF)),
+            )
+            log_path, capture, manifest, apk, metadata, it029 = args
             result = verify_files(log_path, capture, manifest, apk, metadata,
                                   root / "evidence.json", it029)
             self.assertEqual(4, len(result["it029_capture_artifacts"]))
+            self.assertGreater(
+                result["it029_capture_artifacts"][0]["pixel_oracle"]["project_pixels"], 32
+            )
 
             it029[2].write_bytes(b"wrong")
             with self.assertRaisesRegex(SeamError, "capture hash"):
                 verify_files(log_path, capture, manifest, apk, metadata,
                              root / "evidence.json", it029)
+
+    def test_it029_pixel_oracle_rejects_hash_bound_wrong_project_color(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alpha_wrong = _it029_png(
+                (0xA0, 0x38, 0x12, 0xFF), missing_text="left"
+            )
+            beta = _it029_png((0xA0, 0x38, 0x12, 0xFF))
+            args = _verify_files_fixture(root, alpha_wrong, beta)
+            with self.assertRaisesRegex(SeamError, "expected project color"):
+                verify_files(*args[:5], root / "evidence.json", args[5])
+
+    def test_it029_pixel_oracle_rejects_missing_text_band_and_malformed_png(self):
+        for missing_text in ("left", "right"):
+            with self.subTest(missing_text=missing_text), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                alpha = _it029_png((0x12, 0x61, 0xA0, 0xFF))
+                beta = _it029_png(
+                    (0xA0, 0x38, 0x12, 0xFF), missing_text=missing_text
+                )
+                args = _verify_files_fixture(root, alpha, beta)
+                with self.assertRaisesRegex(SeamError, f"{missing_text} text-band"):
+                    verify_files(*args[:5], root / "evidence.json", args[5])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = _verify_files_fixture(
+                root, b"not-a-png", _it029_png((0xA0, 0x38, 0x12, 0xFF))
+            )
+            with self.assertRaisesRegex(SeamError, "not a supported PNG"):
+                verify_files(*args[:5], root / "evidence.json", args[5])
 
     def test_count30_edge_uses_it031_boundary_after_count1_predecessor(self):
         presentations = [

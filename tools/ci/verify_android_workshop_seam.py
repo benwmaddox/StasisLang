@@ -6,13 +6,16 @@ import argparse
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
 
 try:
     from .check_runtime_abi_contract import c_constants
+    from .verify_render_parity import read_capture
 except ImportError:
     from check_runtime_abi_contract import c_constants
+    from verify_render_parity import read_capture
 
 
 COMPILE = re.compile(
@@ -913,8 +916,10 @@ def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
         digest = _sha256(path)
         if digest != case["capture_sha256"]:
             raise SeamError(f"IT-029 capture hash does not match {case['phase']}")
+        pixel_oracle = _verify_it029_capture_pixels(path, case["phase"])
         capture_evidence.append({
             "phase": case["phase"], "path": str(path), "sha256": digest,
+            "pixel_oracle": pixel_oracle,
         })
     evidence = {
         "schema": "stasis.workshop_seam.evidence.v1",
@@ -930,6 +935,91 @@ def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return evidence
+
+
+def _verify_it029_capture_pixels(path: Path, phase: str) -> dict:
+    expected_colors = {
+        "project_a_first": (0x12, 0x61, 0xA0, 0xFF),
+        "project_a_return": (0x12, 0x61, 0xA0, 0xFF),
+        "project_b_before_recreation": (0xA0, 0x38, 0x12, 0xFF),
+        "project_b_after_recreation": (0xA0, 0x38, 0x12, 0xFF),
+    }
+    expected = expected_colors.get(phase)
+    if expected is None:
+        raise SeamError(f"IT-029 capture has unknown phase {phase}")
+    if path.suffix.lower() != ".png":
+        raise SeamError(f"IT-029 capture for {phase} must be a PNG")
+    try:
+        width, height, rgba = read_capture(path)
+    except Exception as error:
+        raise SeamError(f"IT-029 capture for {phase} is not a supported PNG: {error}") from error
+    if width <= 0 or height <= 0 or len(rgba) != width * height * 4:
+        raise SeamError(f"IT-029 capture for {phase} has invalid decoded dimensions")
+
+    non_black = []
+    for offset in range(0, len(rgba), 4):
+        pixel = tuple(rgba[offset:offset + 4])
+        if pixel[3] != 0 and pixel[:3] != (0, 0, 0):
+            index = offset // 4
+            non_black.append((index % width, index // width))
+    if not non_black:
+        raise SeamError(f"IT-029 capture for {phase} has no visible logical viewport")
+    left = min(point[0] for point in non_black)
+    top = min(point[1] for point in non_black)
+    right = max(point[0] for point in non_black) + 1
+    bottom = max(point[1] for point in non_black) + 1
+    viewport_width = right - left
+    viewport_height = bottom - top
+    if viewport_width < 32 or viewport_height < 32:
+        raise SeamError(f"IT-029 capture for {phase} has an implausibly small viewport")
+
+    def pixels_in(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, ...]]:
+        return [
+            tuple(rgba[(y * width + x) * 4:(y * width + x + 1) * 4])
+            for y in range(y0, y1)
+            for x in range(x0, x1)
+        ]
+
+    viewport = pixels_in(left, top, right, bottom)
+    project_pixels = viewport.count(expected)
+    shared_pixels = viewport.count((0x31, 0xD1, 0x7C, 0xFF))
+    viewport_area = viewport_width * viewport_height
+    if project_pixels < max(32, int(viewport_area * 0.005)):
+        raise SeamError(
+            f"IT-029 {phase} capture lacks expected project color "
+            f"#{expected[0]:02x}{expected[1]:02x}{expected[2]:02x}"
+        )
+    if shared_pixels < max(48, int(viewport_area * 0.007)):
+        raise SeamError(f"IT-029 {phase} capture lacks the shared sprite color #31d17c")
+
+    text_measurements = {}
+    for name, x_start, x_end in (
+        ("left", 0.07, 0.43),
+        ("right", 0.50, 0.90),
+    ):
+        roi_left = left + int(viewport_width * x_start)
+        roi_right = left + int(viewport_width * x_end)
+        roi_top = top + int(viewport_height * 0.68)
+        roi_bottom = top + int(viewport_height * 0.88)
+        roi = pixels_in(roi_left, roi_top, roi_right, roi_bottom)
+        background = Counter(roi).most_common(1)[0][0]
+        contrast = sum(
+            1 for pixel in roi
+            if pixel[3] >= 128
+            and sum(abs(pixel[channel] - background[channel]) for channel in range(3)) >= 60
+        )
+        if contrast < max(24, int(len(roi) * 0.03)):
+            raise SeamError(f"IT-029 {phase} capture lacks visible {name} text-band pixels")
+        text_measurements[f"{name}_text_contrast_pixels"] = contrast
+
+    return {
+        "decoded_size": [width, height],
+        "logical_viewport": [left, top, viewport_width, viewport_height],
+        "expected_project_rgba": "#%02x%02x%02xff" % expected[:3],
+        "project_pixels": project_pixels,
+        "shared_sprite_pixels": shared_pixels,
+        **text_measurements,
+    }
 
 
 def main() -> int:
