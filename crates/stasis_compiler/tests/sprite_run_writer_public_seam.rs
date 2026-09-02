@@ -17,6 +17,8 @@ const FIXTURE: &str =
 const GRAPHICS: &str = include_str!("../../../src/stdlib/graphics.stasis");
 const BRICKOUT_PATH: &str = "samples/brickout_revenge/brickout_revenge.stasis";
 const BRICKOUT: &str = include_str!("../../../samples/brickout_revenge/brickout_revenge.stasis");
+const POINTER_PONG_PATH: &str = "samples/pointer_pong/main.stasis";
+const POINTER_PONG: &str = include_str!("../../../samples/pointer_pong/main.stasis");
 const ROOT: &str = "sprite_run_writer_public_probe";
 const GFX_I32_COUNT: usize = 67_888;
 const GFX_F32_COUNT: usize = 146_564;
@@ -208,4 +210,33 @@ fn public_writer_contract_and_brickout_compile() {
     jit.set_required_emit_roots(&["tick".to_string()]);
     jit.upsert_file(BRICKOUT_PATH, BRICKOUT);
     jit.compile().expect("compile migrated Brickout sample");
+}
+
+#[test]
+fn dynamic_text_run_api_and_pointer_pong_compile_for_jit_and_aot() {
+    assert!(GRAPHICS.contains(
+        "function @effects(graphics)@extern(\"stasis_jit_text_run_replace_from\") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool;"
+    ));
+    assert!(POINTER_PONG.contains("left_score_run.replace_text_from"));
+    assert!(!POINTER_PONG.contains("struct ScoreDigits"));
+    assert!(!POINTER_PONG.contains("ascii_push_i32(scratch"));
+    assert!(POINTER_PONG.contains("48 + display / 10"));
+    assert!(POINTER_PONG.contains("48 + display % 10"));
+    let source = POINTER_PONG.replace(
+        "import \".stasis_cache/toolchain/src/stdlib/graphics.stasis\";",
+        "import \"../../src/stdlib/graphics.stasis\";",
+    );
+    let root = repository_root();
+    let required = ["main".to_string(), "tick".to_string(), "render".to_string()];
+    let mut jit = JitProcess::new();
+    jit.set_project_root(root.to_string_lossy()).unwrap();
+    jit.set_required_emit_roots(&required);
+    jit.upsert_file(POINTER_PONG_PATH, &source);
+    jit.compile().expect("compile dynamic Pointer Pong JIT");
+
+    let mut aot = AotProcess::new();
+    aot.set_project_root(root.to_string_lossy()).unwrap();
+    aot.set_required_emit_roots(&required);
+    aot.upsert_file(POINTER_PONG_PATH, &source);
+    aot.compile().expect("compile dynamic Pointer Pong AOT");
 }

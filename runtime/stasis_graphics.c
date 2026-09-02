@@ -118,6 +118,7 @@ STASIS_EXPORT int stasis_set_maximized(int maximized);
 STASIS_EXPORT int stasis_get_time_us(void);
 STASIS_EXPORT int stasis_load_font(const char* path, int font_size);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
+STASIS_EXPORT int stasis_gfx_replace_text(int run_handle, int font_handle, const char* text);
 STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a);
 STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle);
 STASIS_EXPORT float stasis_gfx_measure_text_cached_height(int run_handle);
@@ -6415,26 +6416,67 @@ typedef struct {
     int quad_count;
     float width;
     float height;
+    int replaceable;
+    int dynamic_slot;
 } StasisTextRun;
 
 #define STASIS_MAX_TEXT_RUNS 1024
 #define STASIS_TEXT_RUN_MAX_BYTES 262144
 #define STASIS_TEXT_RUN_MAX_QUADS 65536
 #define STASIS_TEXT_GEOMETRY_BATCH_QUADS 256
+#define STASIS_MAX_DYNAMIC_TEXT_RUNS 16
+#define STASIS_DYNAMIC_TEXT_MAX_BYTES 1024
+#define STASIS_DYNAMIC_TEXT_MAX_QUADS 1024
 
 static StasisTextRun g_text_runs[STASIS_MAX_TEXT_RUNS];
 static unsigned char g_text_run_bytes[STASIS_TEXT_RUN_MAX_BYTES];
 static int g_text_run_bytes_used = 0;
 static StasisTextQuad g_text_run_quads[STASIS_TEXT_RUN_MAX_QUADS];
 static int g_text_run_quads_used = 0;
+static unsigned char g_dynamic_text_bytes[STASIS_MAX_DYNAMIC_TEXT_RUNS][STASIS_DYNAMIC_TEXT_MAX_BYTES];
+static StasisTextQuad g_dynamic_text_quads[STASIS_MAX_DYNAMIC_TEXT_RUNS][STASIS_DYNAMIC_TEXT_MAX_QUADS];
+static int g_dynamic_text_runs_used = 0;
 static SDL_Vertex g_text_geometry_vertices[STASIS_TEXT_GEOMETRY_BATCH_QUADS * 4];
 static int g_text_geometry_indices[STASIS_TEXT_GEOMETRY_BATCH_QUADS * 6];
 static bool g_text_geometry_indices_ready = false;
+
+static int stasis_text_is_valid_utf8(const unsigned char* text, int len) {
+    int i = 0;
+    while (i < len) {
+        uint32_t codepoint;
+        int continuation;
+        const unsigned char lead = text[i++];
+        if (lead < 0x80) continue;
+        if (lead >= 0xc2 && lead <= 0xdf) {
+            codepoint = lead & 0x1f;
+            continuation = 1;
+        } else if (lead >= 0xe0 && lead <= 0xef) {
+            codepoint = lead & 0x0f;
+            continuation = 2;
+        } else if (lead >= 0xf0 && lead <= 0xf4) {
+            codepoint = lead & 0x07;
+            continuation = 3;
+        } else {
+            return 0;
+        }
+        if (i + continuation > len) return 0;
+        for (int j = 0; j < continuation; j++) {
+            const unsigned char byte = text[i++];
+            if ((byte & 0xc0) != 0x80) return 0;
+            codepoint = (codepoint << 6) | (byte & 0x3f);
+        }
+        if ((continuation == 2 && codepoint < 0x800) ||
+            (continuation == 3 && codepoint < 0x10000) ||
+            (codepoint >= 0xd800 && codepoint <= 0xdfff) || codepoint > 0x10ffff) return 0;
+    }
+    return 1;
+}
 
 static void stasis_reset_text_cache(void) {
     memset(g_text_runs, 0, sizeof(g_text_runs));
     g_text_run_bytes_used = 0;
     g_text_run_quads_used = 0;
+    g_dynamic_text_runs_used = 0;
 }
 
 static uint32_t fnv1a_u32(const unsigned char* data, int len) {
@@ -6539,11 +6581,11 @@ static int stasis_build_font_atlas(StasisFont* font) {
     return 1;
 }
 
-static int stasis_build_text_run_quads(StasisTextRun* run, StasisFont* font) {
-    if (!run || !font || run->text_off < 0 || run->text_len <= 0) return 0;
-    if (g_text_run_quads_used + run->text_len > STASIS_TEXT_RUN_MAX_QUADS) return 0;
-
-    const char* text = (const char*)g_text_run_bytes + run->text_off;
+static int stasis_build_text_run_quads_into(
+    StasisTextRun* run, StasisFont* font, const char* text,
+    StasisTextQuad* quads, int quad_capacity
+) {
+    if (!run || !font || !text || run->text_len <= 0 || !quads || quad_capacity <= 0) return 0;
     const float pixel_scale = font->pixel_scale;
     float pos_x = 0.0f;
     float pos_y = (float)font->ascent * font->scale;
@@ -6551,7 +6593,6 @@ static int stasis_build_text_run_quads(StasisTextRun* run, StasisFont* font) {
     float max_y = 0.0f;
     const float line_height =
         (float)(font->ascent - font->descent + font->line_gap) * font->scale;
-    const int quad_off = g_text_run_quads_used;
     int quad_count = 0;
 
     for (int i = 0; i < run->text_len; i++) {
@@ -6563,11 +6604,12 @@ static int stasis_build_text_run_quads(StasisTextRun* run, StasisFont* font) {
             continue;
         }
         if (ch < FONT_FIRST_CHAR || ch >= FONT_FIRST_CHAR + FONT_NUM_CHARS) continue;
+        if (quad_count >= quad_capacity) return 0;
 
         stbtt_aligned_quad quad;
         stbtt_GetBakedQuad(font->char_data, font->atlas_size, font->atlas_size,
             (int)ch - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 0);
-        StasisTextQuad* out = &g_text_run_quads[quad_off + quad_count];
+        StasisTextQuad* out = &quads[quad_count];
         out->x0 = quad.x0 / pixel_scale;
         out->y0 = quad.y0 / pixel_scale;
         out->x1 = quad.x1 / pixel_scale;
@@ -6581,11 +6623,21 @@ static int stasis_build_text_run_quads(StasisTextRun* run, StasisFont* font) {
         quad_count++;
     }
 
-    g_text_run_quads_used += quad_count;
-    run->quad_off = quad_off;
     run->quad_count = quad_count;
     run->width = max_x / pixel_scale;
     run->height = max_y / pixel_scale;
+    return 1;
+}
+
+static int stasis_build_text_run_quads(StasisTextRun* run, StasisFont* font) {
+    if (!run || run->text_off < 0 || run->text_len <= 0) return 0;
+    if (g_text_run_quads_used + run->text_len > STASIS_TEXT_RUN_MAX_QUADS) return 0;
+    const int quad_off = g_text_run_quads_used;
+    if (!stasis_build_text_run_quads_into(
+            run, font, (const char*)g_text_run_bytes + run->text_off,
+            g_text_run_quads + quad_off, STASIS_TEXT_RUN_MAX_QUADS - quad_off)) return 0;
+    g_text_run_quads_used += run->quad_count;
+    run->quad_off = quad_off;
     return 1;
 }
 
@@ -6596,7 +6648,13 @@ static int stasis_rebuild_text_runs(void) {
         if (!run->active) continue;
         if (run->font_handle <= 0 || run->font_handle > MAX_FONTS) return 0;
         StasisFont* font = &g_fonts[run->font_handle - 1];
-        if (!font->active || !stasis_build_text_run_quads(run, font)) return 0;
+        if (!font->active) return 0;
+        if (run->replaceable) {
+            if (run->dynamic_slot < 0 || run->dynamic_slot >= STASIS_MAX_DYNAMIC_TEXT_RUNS) return 0;
+            if (!stasis_build_text_run_quads_into(
+                    run, font, (const char*)g_dynamic_text_bytes[run->dynamic_slot],
+                    g_dynamic_text_quads[run->dynamic_slot], STASIS_DYNAMIC_TEXT_MAX_QUADS)) return 0;
+        } else if (!stasis_build_text_run_quads(run, font)) return 0;
     }
     return 1;
 }
@@ -6692,6 +6750,7 @@ static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, co
             if (free_slot < 0) free_slot = i;
             continue;
         }
+        if (g_text_runs[i].replaceable) continue;
         if (g_text_runs[i].font_handle != font_handle) continue;
         if (g_text_runs[i].hash != hash) continue;
         if (g_text_runs[i].text_len != len) continue;
@@ -6743,8 +6802,9 @@ static void stasis_draw_cached_text_sdl(
             batch_count = STASIS_TEXT_GEOMETRY_BATCH_QUADS;
         }
         for (int i = 0; i < batch_count; i++) {
-            const StasisTextQuad* q =
-                &g_text_run_quads[run->quad_off + batch_start + i];
+            const StasisTextQuad* q = run->replaceable
+                ? &g_dynamic_text_quads[run->dynamic_slot][batch_start + i]
+                : &g_text_run_quads[run->quad_off + batch_start + i];
             const int src_x = (int)(q->s0 * (float)font->atlas_size);
             const int src_y = (int)(q->t0 * (float)font->atlas_size);
             const int src_w = (int)((q->s1 - q->s0) * (float)font->atlas_size);
@@ -6788,6 +6848,7 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     const int len = (int)strlen(text);
     if (len <= 0) return 0;
     if (len > 8192) return 0; /* hard cap per cached run */
+    if (!stasis_text_is_valid_utf8((const unsigned char*)text, len)) return 0;
 
     const uint32_t hash = fnv1a_u32((const unsigned char*)text, len);
     const int slot = stasis_find_or_alloc_text_run_slot(font_handle, hash, text, len);
@@ -6815,6 +6876,51 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
         return 0;
     }
 
+    return slot + 1;
+}
+
+/* Replaceable runs own bounded storage and never enter the immutable dedup cache. */
+STASIS_EXPORT int stasis_gfx_replace_text(int run_handle, int font_handle, const char* text) {
+    if (font_handle <= 0 || font_handle > MAX_FONTS || !text) return 0;
+    if (!stasis_ensure_font_ready(font_handle)) return 0;
+    StasisFont* font = &g_fonts[font_handle - 1];
+    if (!font->active) return 0;
+    const int len = (int)strlen(text);
+    if (len <= 0 || len >= STASIS_DYNAMIC_TEXT_MAX_BYTES) return 0;
+    if (!stasis_text_is_valid_utf8((const unsigned char*)text, len)) return 0;
+
+    int slot = -1;
+    int dynamic_slot = -1;
+    if (run_handle > 0 && run_handle <= STASIS_MAX_TEXT_RUNS &&
+        g_text_runs[run_handle - 1].active && g_text_runs[run_handle - 1].replaceable) {
+        slot = run_handle - 1;
+        dynamic_slot = g_text_runs[slot].dynamic_slot;
+    } else {
+        if (g_dynamic_text_runs_used >= STASIS_MAX_DYNAMIC_TEXT_RUNS) return 0;
+        for (int i = 0; i < STASIS_MAX_TEXT_RUNS; i++) {
+            if (!g_text_runs[i].active) { slot = i; break; }
+        }
+        if (slot < 0) return 0;
+        dynamic_slot = g_dynamic_text_runs_used;
+    }
+
+    StasisTextRun candidate;
+    memset(&candidate, 0, sizeof(candidate));
+    candidate.active = 1;
+    candidate.font_handle = font_handle;
+    candidate.hash = fnv1a_u32((const unsigned char*)text, len);
+    candidate.text_len = len;
+    candidate.replaceable = 1;
+    candidate.dynamic_slot = dynamic_slot;
+    StasisTextQuad candidate_quads[STASIS_DYNAMIC_TEXT_MAX_QUADS];
+    if (!stasis_build_text_run_quads_into(
+            &candidate, font, text, candidate_quads, STASIS_DYNAMIC_TEXT_MAX_QUADS)) return 0;
+
+    memcpy(g_dynamic_text_bytes[dynamic_slot], text, (size_t)len + 1);
+    memcpy(g_dynamic_text_quads[dynamic_slot], candidate_quads,
+        (size_t)candidate.quad_count * sizeof(StasisTextQuad));
+    g_text_runs[slot] = candidate;
+    if (dynamic_slot == g_dynamic_text_runs_used) g_dynamic_text_runs_used++;
     return slot + 1;
 }
 

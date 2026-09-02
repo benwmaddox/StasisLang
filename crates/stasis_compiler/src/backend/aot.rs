@@ -2217,6 +2217,31 @@ mod tests {
                 "stasis.asset_extern.v1\tmeasure_text_cached_height\t303\t{}",
                 12.25_f32.to_bits()
             ),
+            format!(
+                "stasis.asset_extern.v1\treplace_text\t303\t202\t{}\t404",
+                text_hex("A1")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text_cached\t404\t{}",
+                44.5_f32.to_bits()
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text_cached_height\t404\t{}",
+                12.25_f32.to_bits()
+            ),
+            format!(
+                "stasis.asset_extern.v1\treplace_text\t404\t202\t{}\t404",
+                text_hex("B2")
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text_cached\t404\t{}",
+                44.5_f32.to_bits()
+            ),
+            format!(
+                "stasis.asset_extern.v1\tmeasure_text_cached_height\t404\t{}",
+                12.25_f32.to_bits()
+            ),
+            "stasis.asset_extern.v1\treplace_text\t404\t202\tc328\t0".to_string(),
             "stasis.asset_extern.v1\tpoll_reload\t101\t1".to_string(),
             format!(
                 "stasis.asset_extern.v1\tdump_bmp\t{}\t11",
@@ -2285,12 +2310,36 @@ mod tests {
             stasis_dynload::ASSET_EXTERN_SEAM_EVIDENCE_ENV,
             &jit_calls_path,
         );
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut jit = JitProcess::new();
+        jit.set_project_root(project_root.to_string_lossy())
+            .expect("set asset extern JIT project root");
         jit.upsert_file(
             "tests/stasis/seams/asset_extern_abi_probe.stasis",
             ASSET_EXTERN_FIXTURE,
         );
         jit.compile().expect("compile asset extern JIT fixture");
+        let mut gfx_i32 = vec![0; 67_888];
+        let mut gfx_f32 = vec![0.0; 146_564];
+        let mut gfx_u8 = vec![0; 65_536];
+        stasis_dynload::register_global_i32_array(
+            stasis_dynload::global_path_hash("gfx_cmd_i32"),
+            0,
+            gfx_i32.as_mut_ptr(),
+            gfx_i32.len(),
+        );
+        stasis_dynload::register_global_f32_array(
+            stasis_dynload::global_path_hash("gfx_cmd_f32"),
+            0,
+            gfx_f32.as_mut_ptr(),
+            gfx_f32.len(),
+        );
+        stasis_dynload::register_global_u8_array(
+            stasis_dynload::global_path_hash("gfx_cmd_u8"),
+            0,
+            gfx_u8.as_mut_ptr(),
+            gfx_u8.len(),
+        );
         let jit_exit = jit
             .execute_i32_noarg_by_name("main")
             .expect("execute asset extern JIT fixture");
@@ -2301,6 +2350,8 @@ mod tests {
         drop(jit);
 
         let mut aot = AotProcess::new();
+        aot.set_project_root(project_root.to_string_lossy())
+            .expect("set asset extern AOT project root");
         aot.upsert_file(
             "tests/stasis/seams/asset_extern_abi_probe.stasis",
             ASSET_EXTERN_FIXTURE,
@@ -2322,6 +2373,7 @@ mod tests {
             ("measure_text", "stasis_jit_measure_text"),
             ("load_sprite_from", "stasis_jit_sprite_load_from"),
             ("load_text_from", "stasis_jit_text_run_load_from"),
+            ("replace_text_from", "stasis_jit_text_run_replace_from"),
         ] {
             assert_eq!(resolved.get(name).copied(), Some(symbol));
         }
@@ -2356,13 +2408,15 @@ mod tests {
         )
         .expect("write asset extern seam evidence");
 
-        let missing_declaration = ASSET_EXTERN_FIXTURE.replace(
+        const ASSET_EXTERN_DIAGNOSTIC_FIXTURE: &str =
+            "extern function load_font(path: string, size: i32): i32;\nfunction main(): i32 { return load_font(\"font.ttf\", 16); }\n";
+        let missing_declaration = ASSET_EXTERN_DIAGNOSTIC_FIXTURE.replace(
             "extern function load_font(path: string, size: i32): i32;",
             "",
         );
-        assert_ne!(missing_declaration, ASSET_EXTERN_FIXTURE);
+        assert_ne!(missing_declaration, ASSET_EXTERN_DIAGNOSTIC_FIXTURE);
         assert_asset_extern_diagnostic(&missing_declaration, "load_font");
-        let wrong_signature = ASSET_EXTERN_FIXTURE.replace(
+        let wrong_signature = ASSET_EXTERN_DIAGNOSTIC_FIXTURE.replace(
             "extern function load_font(path: string, size: i32): i32;",
             "extern function load_font(path: string, size: f32): i32;",
         );

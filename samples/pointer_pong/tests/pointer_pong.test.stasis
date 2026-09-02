@@ -38,7 +38,23 @@ test `score display wraps after two digits`(): bool {
     if (score_for_display(-1) != 0) {
         return false;
     }
-    if (score_digit(47, 10) != 4 || score_digit(47, 1) != 7) {
+    build_score_text(left_score_ascii, left_score_text, 0);
+    if (length(left_score_ascii) != 2 || left_score_text.byte_length != 2) {
+        return false;
+    }
+    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 48) {
+        return false;
+    }
+    build_score_text(left_score_ascii, left_score_text, 7);
+    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 55) {
+        return false;
+    }
+    build_score_text(left_score_ascii, left_score_text, 47);
+    if (ascii_get(left_score_ascii, 0) != 52 || ascii_get(left_score_ascii, 1) != 55) {
+        return false;
+    }
+    build_score_text(left_score_ascii, left_score_text, 100);
+    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 48) {
         return false;
     }
     return true;
