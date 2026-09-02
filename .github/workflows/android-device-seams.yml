@@ -145,7 +145,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-lifecycle-entry-failure-seam
-          path: artifacts/android_entry_failures
+          path: artifacts/android_entry_failures/*/e
           if-no-files-found: warn
 
   workshop-seams:
