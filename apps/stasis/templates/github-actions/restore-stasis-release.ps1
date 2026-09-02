@@ -65,9 +65,24 @@ try {
     $linked = @(Get-ChildItem -LiteralPath $staging -Recurse -Force | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 })
     if ($linked.Count -ne 0) { throw "Archive '$AssetName' contains links or reparse points." }
     $candidateNames = if ($AssetName.EndsWith('.zip')) { @('stasis.exe', 'bin/stasis.exe') } else { @('stasis', 'bin/stasis') }
-    $candidates = @($candidateNames | ForEach-Object { Join-Path $staging $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     $allExecutables = @(Get-ChildItem -LiteralPath $staging -Recurse -File | Where-Object { $_.Name -in @('stasis', 'stasis.exe') })
-    if ($candidates.Count -ne 1 -or $allExecutables.Count -ne 1) { throw "Archive '$AssetName' must contain exactly one Stasis executable at its root or in bin; found $($allExecutables.Count)." }
+    $candidates = @($candidateNames | ForEach-Object { Join-Path $staging $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    $wrapper = $null
+    if ($candidates.Count -eq 0) {
+        $topLevel = @(Get-ChildItem -LiteralPath $staging -Force)
+        if ($topLevel.Count -eq 1 -and $topLevel[0].PSIsContainer) {
+            $wrapper = $topLevel[0].FullName
+            $candidates = @($candidateNames | ForEach-Object { Join-Path $wrapper $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+        }
+    }
+    if ($candidates.Count -ne 1 -or $allExecutables.Count -ne 1) { throw "Archive '$AssetName' must contain exactly one Stasis executable at its root, in bin, or under one shared wrapper directory; found $($allExecutables.Count)." }
+
+    if ($wrapper) {
+        $candidateRelative = [IO.Path]::GetRelativePath($wrapper, $candidates[0])
+        Get-ChildItem -LiteralPath $wrapper -Force | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination $staging }
+        Remove-Item -LiteralPath $wrapper -Force
+        $candidates = @(Join-Path $staging $candidateRelative)
+    }
 
     $info = & $candidates[0] --json editor-info | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or $info.result.release_id -ne $ReleaseId) { throw "Restored toolchain identity does not match '$ReleaseId'." }

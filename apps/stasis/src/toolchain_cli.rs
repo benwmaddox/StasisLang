@@ -9781,6 +9781,42 @@ mod tests {
     }
 
     #[test]
+    fn github_actions_restore_accepts_only_supported_archive_layouts() {
+        let restore = include_str!("../templates/github-actions/restore-stasis-release.ps1");
+        for expected in [
+            "@('stasis.exe', 'bin/stasis.exe')",
+            "@('stasis', 'bin/stasis')",
+            "$candidates.Count -eq 0",
+            "$topLevel.Count -eq 1 -and $topLevel[0].PSIsContainer",
+            "$candidates.Count -ne 1 -or $allExecutables.Count -ne 1",
+            "[IO.Path]::GetRelativePath($wrapper, $candidates[0])",
+            "Get-ChildItem -LiteralPath $wrapper -Force",
+            "Move-Item -LiteralPath $_.FullName -Destination $staging",
+            "Remove-Item -LiteralPath $wrapper -Force",
+        ] {
+            assert!(
+                restore.contains(expected),
+                "restore helper layout contract missing {expected}"
+            );
+        }
+
+        let root_candidates = restore
+            .find("$candidates = @($candidateNames")
+            .expect("root candidate lookup");
+        let wrapper_gate = restore
+            .find("if ($candidates.Count -eq 0)")
+            .expect("wrapper fallback gate");
+        let exact_executable_gate = restore
+            .find("if ($candidates.Count -ne 1 -or $allExecutables.Count -ne 1)")
+            .expect("exact executable gate");
+        let strip_wrapper = restore.find("if ($wrapper)").expect("wrapper strip gate");
+        assert!(root_candidates < wrapper_gate);
+        assert!(wrapper_gate < exact_executable_gate);
+        assert!(exact_executable_gate < strip_wrapper);
+        assert!(!restore.contains("Get-ChildItem -LiteralPath $staging -Recurse -Directory"));
+    }
+
+    #[test]
     fn github_actions_preflights_conflicts_without_partial_writes() {
         let root = temp_dir("github_actions_conflict");
         fs::create_dir_all(root.join(".github/workflows")).expect("create workflow directory");
