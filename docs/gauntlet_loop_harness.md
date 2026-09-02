@@ -519,16 +519,17 @@ may run concurrently over immutable evidence; production builders remain
 serialized because one live runtime and one transactional project state are
 authoritative.
 
-Every ordinary `stasis ai` agent and Gauntlet builder also receives two completed
-discovery payloads before its first model turn. `initial_symbols` contains compact
-signatures for the entry file and its direct imports. `stdlib_api` contains the
-bounded public API catalog for the project-matched Stasis standard library,
-including canonical import paths and function, struct, and constant signatures.
-The catalog includes top-level public modules such as graphics, audio, collision,
-layout, storage, memory, camera, and realtime controls; it excludes internal host ABI,
-test-only modules, globals, and function bodies. Agents should use this catalog
-directly rather than spending turns rediscovering standard-library implementation
-files.
+Every ordinary `stasis ai` agent and Gauntlet builder receives compact discovery
+context before its first model turn. Its `start` section contains only a bounded set
+of directly usable `list_symbols` and `read_symbol` actions selected lexically
+from the request; they are leads rather than authoritative matches. With no
+useful match it contains the executable default `list_symbols` action. `options`
+exposes executable lazy standard-library discovery and baseline-test actions. Standard
+library choices are fully lazy: builders call `get_stdlib_api` without a module
+to list deterministic public module names, then call it with one choice for
+filtered, paged public signatures and the canonical import path for
+`write_imports`. The host validates module names against the matched stdlib root
+instead of accepting arbitrary paths.
 
 Fresh leads and builders receive a compact chronological projection of the
 latest 48 decision records, capped at 32 KiB. Builders may call

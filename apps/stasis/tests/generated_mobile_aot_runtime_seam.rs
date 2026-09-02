@@ -14,9 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const FIXTURE: &str =
     include_str!("../../../tests/stasis/seams/generated_mobile_aot_probe.stasis.fixture");
-const STDLIB: &str = include_str!("../../../src/stdlib/stdlib.stasis");
-const MEMORY: &str = include_str!("../../../src/stdlib/memory.stasis");
-const GFX_CMD: &str = include_str!("../../../src/stdlib/internal/gfx_cmd.stasis");
 
 struct TestTree(PathBuf);
 
@@ -33,6 +30,29 @@ fn repository_root() -> PathBuf {
         .expect("canonical repository root");
     let display = canonical.to_string_lossy();
     PathBuf::from(display.strip_prefix(r"\\?\").unwrap_or(&display))
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create fixture destination");
+    for entry in fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("read fixture entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("copy fixture file");
+        }
+    }
+}
+
+fn materialize_toolchain_stdlib(project: &Path) {
+    let destination = project.join(".stasis_cache/toolchain/src/stdlib");
+    copy_tree(&repository_root().join("src/stdlib"), &destination);
+    assert!(
+        destination.join("graphics.stasis").is_file(),
+        "toolchain stdlib staging omitted graphics.stasis"
+    );
 }
 
 fn evidence_root() -> PathBuf {
@@ -79,8 +99,7 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     let bundle_dir = tree.0.join("bundle");
     fs::create_dir_all(project.join("src")).expect("create fixture source directory");
     fs::create_dir_all(project.join("assets")).expect("create fixture asset directory");
-    fs::create_dir_all(project.join("vendor/stasis/stdlib/internal"))
-        .expect("create fixture stdlib directory");
+    materialize_toolchain_stdlib(&project);
     fs::write(
         project.join("stasis.json"),
         "{\"manifest_version\":1,\"name\":\"it012\",\"entry\":\"src/main.stasis\",\"tests\":\"tests\",\"output\":\"build\"}\n",
@@ -91,15 +110,6 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         "{\"schema\":\"stasis-assets\",\"version\":1,\"assets\":[]}\n",
     )
     .expect("write empty asset manifest");
-    fs::write(project.join("vendor/stasis/stdlib/stdlib.stasis"), STDLIB)
-        .expect("write fixture stdlib");
-    fs::write(project.join("vendor/stasis/stdlib/memory.stasis"), MEMORY)
-        .expect("write fixture memory stdlib");
-    fs::write(
-        project.join("vendor/stasis/stdlib/internal/gfx_cmd.stasis"),
-        GFX_CMD,
-    )
-    .expect("write fixture graphics command stdlib");
     fs::write(project.join("src/main.stasis"), FIXTURE).expect("write fixture source");
 
     let mut process = AotProcess::new();

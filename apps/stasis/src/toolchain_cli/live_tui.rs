@@ -10,9 +10,9 @@ use crossterm::terminal::{
 };
 use serde_json::Value;
 use stasis_ai::{
-    gauntlet_tool_specs, live_tool_specs, project_ai_tool_specs, run_agent, run_agent_with_profile,
-    AgentEvent, AgentProfile, CodexExecProvider, ToolCall, ToolExecutor, ToolObservation,
-    DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
+    asset_tool_specs, gauntlet_tool_specs, live_tool_specs, project_ai_tool_specs, run_agent,
+    run_agent_with_profile, runtime_tool_specs, AgentEvent, AgentProfile, CodexExecProvider,
+    ToolCall, ToolExecutor, ToolObservation, DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
 };
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::parser::{
@@ -26,7 +26,7 @@ use stasis_runner::live::{
     CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEdit, LiveEditOperation,
     LiveRequest, LiveResponse, LiveSessionClient, LiveSymbolTarget, TerminalBuffer, TerminalInput,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -42,8 +42,14 @@ const TUI_REQUEST_START: u64 = 1u64 << 61;
 const AI_REQUEST_START: u64 = 1u64 << 62;
 const MAX_DECISION_FIELD_CHARS: usize = 2_000;
 const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
+const MAX_STDLIB_API_FILES: usize = 64;
 const MAX_STDLIB_API_FILE_BYTES: u64 = 512 * 1024;
+const MAX_STDLIB_API_PAGE_ITEMS: usize = 64;
+const MAX_PROJECT_INDEX_SYMBOLS: usize = 200;
+const MAX_PROJECT_HINT_SYMBOLS: usize = 12;
+const MAX_PROJECT_HINT_FILES: usize = 8;
 const DEFAULT_IMAGEGEN_WAIT_SECONDS: u64 = 30 * 60;
+const PROJECT_ASSET_INSTRUCTION: &str = " Use asset tools only for authored presentation, data, or audio changes, not ordinary logic. For UI text use an existing project-local font (assets/gauntlet-ui.ttf in new Gauntlet projects); absolute and system font paths are invalid. Preserve or replace a seeded font transactionally. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art, including early versions; reserve primitives for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. Request one isolated foreground subject on a flat removable background, never an atlas. Rendering preserves submission order: submit opaque background sprites before line-rendered gameplay and overlays. Put one contiguous asset-tool group immediately before source writes that load or use it. The combined change is one rollback-safe transaction; never edit the manifest directly. Generated bitmap art must be loaded and visibly drawn for authored-art completion. Delete an obsolete different-path asset before reusing its id; overwrite directly when its stable path is unchanged. One-shot layout changes remain validated previews requiring explicit user approval.";
 
 enum AiUiEvent {
     InitialContext(Value),
@@ -88,13 +94,11 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     prompt: &str,
     canceled: &AtomicBool,
 ) -> Result<(String, PathBuf, PathBuf), String> {
-    let mut profile = AgentProfile::default();
-    profile.instruction.push_str(" New Gauntlet projects include the project-local assets/gauntlet-ui.ttf font. Use that exact project-local path with load_font for readable UI text; absolute and system font paths are invalid and the atomic write gate rejects them. Preserve or replace the seeded font transactionally. You may request host-generated bitmap art with request_imagegen_asset when you judge that it materially improves the assigned work, then import its returned source_path with import_png_asset. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art such as characters, units, buildings, terrain props, and decorative environments, including in early versions. Reserve primitive shapes primarily for basic UI, simple icons, selection/range overlays, and deterministic fallbacks. ImageGen remains optional when the task is purely logic or basic interface geometry. Request one isolated foreground subject per image on a flat removable background; use the 1024x1024 master default and request up to 2048x2048 only when extra detail or crop latitude is needed. The current render contract preserves submission order; submit opaque background sprites before line-rendered gameplay and overlays. Derive the project copy with bounded crop or flat-background removal instead of requesting an atlas. Use delete_asset in the same rollback-safe asset/source batch when a replacement makes an older generated asset at a different path obsolete. If the replacement keeps the same stable path, import it directly without delete_asset; the transaction overwrites the file and manifest entry. You may also create or update JSON/CSV and procedural WAV assets. Put one contiguous asset-tool group immediately before source writes that load or use those assets. The combined asset/source change is one rollback-safe transaction; never edit the asset manifest directly.");
     let outcome = run_scripted_ai_profile(
         client,
         project_root,
         prompt,
-        profile,
+        AgentProfile::default(),
         Vec::new(),
         false,
         true,
@@ -184,8 +188,8 @@ pub(super) fn run_scripted_ai_profile(
     } else {
         LiveAiTools::new(client.clone())
     };
-    let initial_context =
-        load_ai_initial_context(&mut tools, project_root, canceled).map_err(|message| {
+    let initial_context = load_ai_initial_context(&mut tools, project_root, prompt, canceled)
+        .map_err(|message| {
             scripted_ai_failure(message, &trace_path, &usage_path, provider.call_count())
         })?;
     audit
@@ -206,7 +210,7 @@ pub(super) fn run_scripted_ai_profile(
     } else {
         live_tool_specs()
     };
-    if require_imagegen {
+    if require_imagegen && decision_log.is_some() {
         tool_specs
             .retain(|spec| !matches!(spec.tool.as_str(), "write_svg_asset" | "write_png_asset"));
     }
@@ -287,46 +291,226 @@ fn scripted_ai_failure(
     }
 }
 
-fn ai_initial_context(initial_symbols: Value, stdlib_api: Value) -> Value {
+fn ai_initial_context(project_hints: Value) -> Value {
     serde_json::json!({
         "language": "Stasis",
-        "runtime": "live in-process JIT",
-        "commit_boundary": "between deterministic ticks",
-        "write_policy": "all writes in one model batch compile, test, and commit atomically",
-        "initial_symbols": initial_symbols,
-        "initial_symbols_instruction": "This is the completed default list_symbols result. Use it before requesting filtered or paged follow-up discovery.",
-        "stdlib_api": stdlib_api,
-        "stdlib_api_instruction": "This is the completed compact public standard-library catalog. Use these signatures and canonical_import paths directly; do not rediscover stdlib implementation files unless behavior is ambiguous.",
+        "start": project_hints,
+        "options": {
+            "stdlib": {"tool":"get_stdlib_api", "args":{}},
+            "baseline_tests": {"tool":"run_tests", "args":{}}
+        }
     })
 }
 
 fn load_ai_initial_context(
     tools: &mut LiveAiTools,
     project_root: &Path,
+    user_prompt: &str,
     canceled: &AtomicBool,
 ) -> Result<Value, String> {
-    let observations = tools.execute(
-        &[ToolCall {
-            tool: "list_symbols".to_string(),
-            args: serde_json::json!({}),
-        }],
+    let response = tools.request(
+        LiveCommand::Symbols {
+            query: None,
+            kind: None,
+            files: Vec::new(),
+            owner: None,
+            page: 0,
+            limit: MAX_PROJECT_INDEX_SYMBOLS,
+        },
         canceled,
-    );
-    let observation = observations
-        .into_iter()
-        .next()
-        .ok_or_else(|| "initial symbol discovery returned no observation".to_string())?;
-    if let Some(error) = observation.error {
-        return Err(format!("initial symbol discovery failed: {error}"));
+    )?;
+    if !response.ok {
+        return Err(format!(
+            "initial symbol discovery failed: {}",
+            format_live_response(&response)
+        ));
     }
-    let stdlib_api = load_stdlib_api_catalog(project_root)?;
-    Ok(ai_initial_context(
-        observation.result.unwrap_or(Value::Null),
-        stdlib_api,
-    ))
+    let project_hints =
+        build_project_hints(response.data.as_ref().unwrap_or(&Value::Null), user_prompt);
+    let stdlib_root = resolve_stdlib_api_root(project_root)?;
+    tools.stdlib_root = stdlib_root;
+    tools.test_project_root = Some(project_root.to_path_buf());
+    Ok(ai_initial_context(project_hints))
 }
 
-fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
+fn insert_lexical_variants(tokens: &mut BTreeSet<String>, token: String) {
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "and", "for", "in", "it", "make", "of", "on", "please", "the", "to", "with",
+    ];
+    if token.len() < 2 || STOP_WORDS.contains(&token.as_str()) {
+        return;
+    }
+    tokens.insert(token.clone());
+    if let Some(stem) = token.strip_suffix("ies").filter(|stem| stem.len() >= 2) {
+        tokens.insert(format!("{stem}y"));
+    } else if let Some(stem) = token.strip_suffix('s').filter(|stem| stem.len() >= 2) {
+        tokens.insert(stem.to_string());
+    } else if let Some(stem) = token.strip_suffix('y').filter(|stem| stem.len() >= 2) {
+        tokens.insert(format!("{stem}ies"));
+    } else {
+        tokens.insert(format!("{token}s"));
+    }
+}
+
+fn lexical_tokens(text: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() {
+            if character.is_ascii_uppercase()
+                && current
+                    .chars()
+                    .last()
+                    .is_some_and(|previous| previous.is_ascii_lowercase())
+            {
+                insert_lexical_variants(&mut tokens, std::mem::take(&mut current));
+            }
+            current.push(character.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            insert_lexical_variants(&mut tokens, std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        insert_lexical_variants(&mut tokens, current);
+    }
+    tokens
+}
+
+fn lexical_match_count(prompt_tokens: &BTreeSet<String>, candidate: &str) -> usize {
+    lexical_tokens(candidate)
+        .intersection(prompt_tokens)
+        .count()
+}
+
+fn build_project_hints(symbols: &Value, user_prompt: &str) -> Value {
+    let mut files = ["_hint_files", "files"]
+        .into_iter()
+        .filter_map(|key| symbols.get(key).and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+    let imports = symbols
+        .get("imports")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(file, imported)| {
+            let mut imported = imported
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            imported.sort();
+            imported.dedup();
+            (file.clone(), imported)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let items = symbols
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(MAX_PROJECT_INDEX_SYMBOLS)
+        .collect::<Vec<_>>();
+    let prompt_tokens = lexical_tokens(user_prompt);
+    let mut ranked_symbols = items
+        .iter()
+        .filter_map(|item| {
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            let file = item.get("file").and_then(Value::as_str).unwrap_or("");
+            let owner = item.get("owner").and_then(Value::as_str).unwrap_or("");
+            let signature = item.get("signature").and_then(Value::as_str).unwrap_or("");
+            let name_matches = lexical_match_count(&prompt_tokens, name);
+            let score = name_matches * 8
+                + lexical_match_count(&prompt_tokens, owner) * 6
+                + lexical_match_count(&prompt_tokens, file) * 4
+                + lexical_match_count(&prompt_tokens, signature) * 2;
+            (name_matches > 0).then_some((score, item.clone()))
+        })
+        .collect::<Vec<_>>();
+    ranked_symbols.sort_by(|(left_score, left), (right_score, right)| {
+        right_score.cmp(left_score).then_with(|| {
+            let key = |item: &Value| {
+                format!(
+                    "{}\0{}\0{}\0{}\0{}",
+                    item.get("file").and_then(Value::as_str).unwrap_or(""),
+                    item.get("owner").and_then(Value::as_str).unwrap_or(""),
+                    item.get("kind").and_then(Value::as_str).unwrap_or(""),
+                    item.get("name").and_then(Value::as_str).unwrap_or(""),
+                    item.get("signature").and_then(Value::as_str).unwrap_or("")
+                )
+            };
+            key(left).cmp(&key(right))
+        })
+    });
+    let mut topology_files = files
+        .iter()
+        .chain(imports.keys())
+        .chain(imports.values().flatten())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    topology_files.extend(
+        items
+            .iter()
+            .filter_map(|item| item.get("file").and_then(Value::as_str))
+            .map(str::to_string),
+    );
+    let mut candidate_files = topology_files
+        .into_iter()
+        .map(|file| {
+            let discovery_name = file.strip_suffix(".stasis").unwrap_or(&file);
+            (lexical_match_count(&prompt_tokens, discovery_name), file)
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect::<Vec<_>>();
+    candidate_files.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    let candidate_files = candidate_files
+        .into_iter()
+        .take(MAX_PROJECT_HINT_FILES)
+        .map(|(_, file)| file)
+        .collect::<Vec<_>>();
+
+    let mut actions = Vec::new();
+    if !candidate_files.is_empty() {
+        actions.push(serde_json::json!({
+            "tool": "list_symbols",
+            "args": {"files": candidate_files},
+        }));
+    }
+    actions.extend(
+        ranked_symbols
+            .into_iter()
+            .take(MAX_PROJECT_HINT_SYMBOLS)
+            .map(|(_, item)| {
+                let mut args = serde_json::Map::new();
+                for key in ["name", "kind", "file", "owner", "signature"] {
+                    if let Some(value) = item.get(key).and_then(Value::as_str) {
+                        args.insert(key.to_string(), Value::String(value.to_string()));
+                    }
+                }
+                serde_json::json!({"tool": "read_symbol", "args": args})
+            }),
+    );
+    if actions.is_empty() {
+        actions.push(serde_json::json!({"tool": "list_symbols", "args": {}}));
+    }
+    Value::Array(actions)
+}
+
+#[derive(Clone)]
+struct StdlibApiRoot {
+    canonical_project: PathBuf,
+    canonical_root: PathBuf,
+    import_prefix: &'static str,
+}
+
+fn resolve_stdlib_api_root(project_root: &Path) -> Result<Option<StdlibApiRoot>, String> {
     let candidates = [
         (
             project_root.join("vendor/stasis/stdlib"),
@@ -342,11 +526,7 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
         .into_iter()
         .find(|(path, _)| path.join("stdlib.stasis").is_file())
     else {
-        return Ok(serde_json::json!({
-            "available": false,
-            "modules": [],
-            "total": 0,
-        }));
+        return Ok(None);
     };
     let canonical_project = project_root
         .canonicalize()
@@ -358,13 +538,29 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
         return Err("Stasis stdlib catalog resolved outside the project".to_string());
     }
 
-    let mut files = fs::read_dir(&canonical_root)
+    Ok(Some(StdlibApiRoot {
+        canonical_project,
+        canonical_root,
+        import_prefix,
+    }))
+}
+
+fn load_stdlib_module_index(stdlib_root: Option<&StdlibApiRoot>) -> Result<Value, String> {
+    let Some(stdlib_root) = stdlib_root else {
+        return Ok(serde_json::json!({
+            "available": false,
+            "modules": [],
+            "total": 0,
+        }));
+    };
+    let mut files = fs::read_dir(&stdlib_root.canonical_root)
         .map_err(|error| format!("failed reading Stasis stdlib catalog: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed enumerating Stasis stdlib catalog: {error}"))?;
     files.sort_by_key(|entry| entry.file_name());
     let mut modules = Vec::new();
     let mut total = 0_usize;
+    let mut inspected_files = 0_usize;
     for entry in files.into_iter() {
         let file_type = entry
             .file_type()
@@ -372,74 +568,21 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
         if !file_type.is_file() {
             continue;
         }
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("stasis") {
+            continue;
+        }
+        if inspected_files >= MAX_STDLIB_API_FILES {
+            break;
+        }
+        inspected_files = inspected_files.saturating_add(1);
         let metadata = entry
             .metadata()
             .map_err(|error| format!("failed inspecting Stasis stdlib module: {error}"))?;
-        let path = entry.path();
-        if metadata.len() > MAX_STDLIB_API_FILE_BYTES
-            || path.extension().and_then(|value| value.to_str()) != Some("stasis")
-        {
+        if metadata.len() > MAX_STDLIB_API_FILE_BYTES {
             continue;
         }
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed reading Stasis stdlib module: {error}"))?;
-        let relative = path
-            .strip_prefix(&canonical_project)
-            .map_err(|_| "Stasis stdlib module resolved outside the project".to_string())?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let extern_functions = parse_top_level_extern_functions(&source)?;
-        let file = WorkshopSourceFile {
-            path: relative.clone(),
-            source,
-        };
-        let mut items = Vec::new();
-        for symbol in workshop_symbols(&[file])? {
-            if !symbol.exposure.is_public() {
-                continue;
-            }
-            if !matches!(
-                symbol.kind,
-                WorkshopSymbolKind::Function
-                    | WorkshopSymbolKind::Struct
-                    | WorkshopSymbolKind::Constant
-            ) {
-                continue;
-            }
-            items.push(serde_json::json!({
-                "kind": symbol.kind,
-                "signature": symbol.signature,
-            }));
-            total = total.saturating_add(1);
-        }
-        for external in extern_functions {
-            if !workshop_declaration_exposure(
-                &relative,
-                external
-                    .annotations
-                    .iter()
-                    .map(|annotation| annotation.name.as_str()),
-            )
-            .is_public()
-            {
-                continue;
-            }
-            let params = external
-                .params
-                .iter()
-                .map(|param| format!("{}: {}", param.name, param.type_name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            items.push(serde_json::json!({
-                "kind": "function",
-                "signature": format!(
-                    "{}({params}): {}",
-                    external.name, external.return_type_name
-                ),
-                "extern": true,
-            }));
-            total = total.saturating_add(1);
-        }
+        let (relative, items) = read_stdlib_api_items(stdlib_root, &path)?;
         if items.is_empty() {
             continue;
         }
@@ -447,17 +590,116 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
             .file_name()
             .and_then(|value| value.to_str())
             .ok_or_else(|| "Stasis stdlib module name is not UTF-8".to_string())?;
+        let module_name = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "Stasis stdlib module name is not UTF-8".to_string())?;
         modules.push(serde_json::json!({
+            "module": module_name,
             "file": relative,
-            "canonical_import": format!("{import_prefix}/{file_name}"),
-            "items": items,
+            "canonical_import": format!("{}/{file_name}", stdlib_root.import_prefix),
+            "api_item_count": items.len(),
         }));
+        total = total.saturating_add(1);
     }
     Ok(serde_json::json!({
         "available": true,
         "modules": modules,
         "total": total,
     }))
+}
+
+fn read_stdlib_api_items(
+    stdlib_root: &StdlibApiRoot,
+    path: &Path,
+) -> Result<(String, Vec<Value>), String> {
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("failed resolving Stasis stdlib module: {error}"))?;
+    if !canonical_path.starts_with(&stdlib_root.canonical_root)
+        || !canonical_path.starts_with(&stdlib_root.canonical_project)
+    {
+        return Err("Stasis stdlib module resolved outside the project".to_string());
+    }
+    let metadata = canonical_path
+        .metadata()
+        .map_err(|error| format!("failed inspecting Stasis stdlib module: {error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_STDLIB_API_FILE_BYTES {
+        return Err(format!(
+            "Stasis stdlib module must be a file no larger than {MAX_STDLIB_API_FILE_BYTES} bytes"
+        ));
+    }
+    let source = fs::read_to_string(&canonical_path)
+        .map_err(|error| format!("failed reading Stasis stdlib module: {error}"))?;
+    let relative = canonical_path
+        .strip_prefix(&stdlib_root.canonical_project)
+        .map_err(|_| "Stasis stdlib module resolved outside the project".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let extern_functions = parse_top_level_extern_functions(&source)?;
+    let file = WorkshopSourceFile {
+        path: relative.clone(),
+        source,
+    };
+    let mut items = Vec::new();
+    for symbol in workshop_symbols(&[file])? {
+        if !symbol.exposure.is_public() {
+            continue;
+        }
+        if !matches!(
+            symbol.kind,
+            WorkshopSymbolKind::Function
+                | WorkshopSymbolKind::Struct
+                | WorkshopSymbolKind::Constant
+        ) {
+            continue;
+        }
+        items.push(serde_json::json!({
+            "kind": symbol.kind,
+            "signature": symbol.signature,
+        }));
+    }
+    for external in extern_functions {
+        if !workshop_declaration_exposure(
+            &relative,
+            external
+                .annotations
+                .iter()
+                .map(|annotation| annotation.name.as_str()),
+        )
+        .is_public()
+        {
+            continue;
+        }
+        let params = external
+            .params
+            .iter()
+            .map(|param| format!("{}: {}", param.name, param.type_name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        items.push(serde_json::json!({
+            "kind": "function",
+            "signature": format!("{}({params}): {}", external.name, external.return_type_name),
+            "extern": true,
+        }));
+    }
+    items.sort_by(|left, right| {
+        let left_key = (
+            left.get("kind").and_then(Value::as_str).unwrap_or(""),
+            left.get("signature").and_then(Value::as_str).unwrap_or(""),
+            left.get("extern").and_then(Value::as_bool).unwrap_or(false),
+        );
+        let right_key = (
+            right.get("kind").and_then(Value::as_str).unwrap_or(""),
+            right.get("signature").and_then(Value::as_str).unwrap_or(""),
+            right
+                .get("extern")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        );
+        left_key.cmp(&right_key)
+    });
+    Ok((relative, items))
 }
 
 fn audit_agent_event(event: &AgentEvent) -> Value {
@@ -1632,21 +1874,22 @@ impl LiveTui {
             let mut provider = CodexExecProvider::default();
             let mut tools = LiveAiTools::new(client);
             let progress = events_tx.clone();
-            let result = load_ai_initial_context(&mut tools, &project_root, &worker_canceled)
-                .and_then(|initial_context| {
-                    let _ = progress.send(AiUiEvent::InitialContext(initial_context.clone()));
-                    run_agent(
-                        &mut provider,
-                        &mut tools,
-                        &prompt,
-                        initial_context,
-                        live_tool_specs(),
-                        &worker_canceled,
-                        move |event| {
-                            let _ = progress.send(AiUiEvent::Progress(event));
-                        },
-                    )
-                });
+            let result =
+                load_ai_initial_context(&mut tools, &project_root, &prompt, &worker_canceled)
+                    .and_then(|initial_context| {
+                        let _ = progress.send(AiUiEvent::InitialContext(initial_context.clone()));
+                        run_agent(
+                            &mut provider,
+                            &mut tools,
+                            &prompt,
+                            initial_context,
+                            live_tool_specs(),
+                            &worker_canceled,
+                            move |event| {
+                                let _ = progress.send(AiUiEvent::Progress(event));
+                            },
+                        )
+                    });
             let _ = events_tx.send(AiUiEvent::Finished(result));
         });
         self.ai_run = Some(AiRun {
@@ -2326,6 +2569,8 @@ struct LiveAiTools {
     last_write: Option<LiveResponse>,
     reference_search_ready: bool,
     project_root: Option<PathBuf>,
+    test_project_root: Option<PathBuf>,
+    stdlib_root: Option<StdlibApiRoot>,
     asset_transaction: Option<super::gauntlet::assets::AppliedAssetTransaction>,
     auto_apply_layout: bool,
     decision_log: Option<PathBuf>,
@@ -2348,6 +2593,8 @@ impl LiveAiTools {
             last_write: None,
             reference_search_ready: false,
             project_root: None,
+            test_project_root: None,
+            stdlib_root: None,
             asset_transaction: None,
             auto_apply_layout: false,
             decision_log: None,
@@ -2767,6 +3014,50 @@ impl LiveAiTools {
 
     fn execute_read(&mut self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
         let args = call.args.as_object().expect("validated tool args");
+        if call.tool == "run_tests" {
+            let Some(project_root) = self.test_project_root.as_ref() else {
+                return ToolObservation::error(&call.tool, "project test root is unavailable");
+            };
+            return baseline_test_observation(stasis::run_project_tests_bounded(
+                project_root,
+                canceled,
+            ));
+        }
+        if call.tool == "get_capability" {
+            return match string_arg(args, "name").as_deref() {
+                Some("assets") => {
+                    let mut tool_specs = asset_tool_specs();
+                    if self.require_imagegen {
+                        tool_specs.retain(|spec| {
+                            !matches!(spec.tool.as_str(), "write_svg_asset" | "write_png_asset")
+                        });
+                    }
+                    ToolObservation::result(
+                        &call.tool,
+                        serde_json::json!({
+                            "name": "assets",
+                            "instruction": PROJECT_ASSET_INSTRUCTION.trim(),
+                            "tool_specs": tool_specs,
+                        }),
+                    )
+                }
+                Some("runtime") => ToolObservation::result(
+                    &call.tool,
+                    serde_json::json!({
+                        "name": "runtime",
+                        "instruction": "Use runtime observation only when durable tests cannot establish necessary live state.",
+                        "tool_specs": runtime_tool_specs(),
+                    }),
+                ),
+                _ => ToolObservation::error(
+                    &call.tool,
+                    "get_capability name must be assets or runtime",
+                ),
+            };
+        }
+        if call.tool == "get_stdlib_api" {
+            return self.get_stdlib_api(call, args);
+        }
         let command = match call.tool.as_str() {
             "list_symbols" => LiveCommand::Symbols {
                 query: string_arg(args, "query"),
@@ -2786,6 +3077,13 @@ impl LiveAiTools {
                 owner: string_arg(args, "owner"),
                 signature: string_arg(args, "signature"),
             },
+            "read_imports" => LiveCommand::Read {
+                name: "imports".to_string(),
+                kind: Some("imports".to_string()),
+                file: string_arg(args, "file"),
+                owner: None,
+                signature: None,
+            },
             "find_references" => LiveCommand::References {
                 symbol: string_arg(args, "symbol").unwrap_or_default(),
                 limit: usize_arg(args, "limit").unwrap_or(128).min(256),
@@ -2803,11 +3101,115 @@ impl LiveAiTools {
                 if call.tool == "find_references" {
                     self.reference_search_ready = true;
                 }
-                ToolObservation::result(&call.tool, response.data.unwrap_or(Value::Null))
+                ToolObservation::result(
+                    &call.tool,
+                    compact_ai_read_result(call, response.data.unwrap_or(Value::Null)),
+                )
             }
             Ok(response) => ToolObservation::error(&call.tool, format_live_response(&response)),
             Err(error) => ToolObservation::error(&call.tool, error),
         }
+    }
+
+    fn get_stdlib_api(
+        &self,
+        call: &ToolCall,
+        args: &serde_json::Map<String, Value>,
+    ) -> ToolObservation {
+        let Some(stdlib_root) = self.stdlib_root.as_ref() else {
+            return ToolObservation::error(
+                &call.tool,
+                "no project-matched Stasis standard library is available",
+            );
+        };
+        let index = match load_stdlib_module_index(Some(stdlib_root)) {
+            Ok(index) => index,
+            Err(error) => return ToolObservation::error(&call.tool, error),
+        };
+        let Some(module) = string_arg(args, "module") else {
+            let modules = index["modules"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry["module"].as_str())
+                .collect::<Vec<_>>();
+            return ToolObservation::result(&call.tool, serde_json::json!({"modules": modules}));
+        };
+        if !module
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return ToolObservation::error(
+                &call.tool,
+                "get_stdlib_api module must be an indexed module name, not a path",
+            );
+        }
+        let indexed = index["modules"].as_array().and_then(|modules| {
+            modules
+                .iter()
+                .find(|candidate| candidate["module"].as_str() == Some(module.as_str()))
+        });
+        let Some(indexed) = indexed else {
+            return ToolObservation::error(
+                &call.tool,
+                format!("unknown or unavailable indexed stdlib module: {module}"),
+            );
+        };
+        let Some(relative_file) = indexed["file"].as_str() else {
+            return ToolObservation::error(&call.tool, "indexed stdlib module has no file");
+        };
+        let path = stdlib_root.canonical_project.join(relative_file);
+        let (_, mut items) = match read_stdlib_api_items(stdlib_root, &path) {
+            Ok(result) => result,
+            Err(error) => return ToolObservation::error(&call.tool, error),
+        };
+        if let Some(kind) = string_arg(args, "kind") {
+            let kind = kind.to_ascii_lowercase();
+            if !matches!(kind.as_str(), "function" | "struct" | "constant") {
+                return ToolObservation::error(
+                    &call.tool,
+                    "get_stdlib_api kind must be function, struct, or constant",
+                );
+            }
+            items.retain(|item| item["kind"].as_str() == Some(kind.as_str()));
+        }
+        if let Some(query) = string_arg(args, "query") {
+            let query = query.to_ascii_lowercase();
+            items.retain(|item| {
+                item["signature"]
+                    .as_str()
+                    .is_some_and(|signature| signature.to_ascii_lowercase().contains(&query))
+            });
+        }
+        let total = items.len();
+        let page = usize_arg(args, "page").unwrap_or(0);
+        let limit = usize_arg(args, "limit")
+            .unwrap_or(MAX_STDLIB_API_PAGE_ITEMS)
+            .clamp(1, MAX_STDLIB_API_PAGE_ITEMS);
+        let start = page.checked_mul(limit).unwrap_or(usize::MAX).min(total);
+        let items = items
+            .into_iter()
+            .skip(start)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let returned = items.len();
+        let mut result = serde_json::json!({
+            "canonical_import": indexed["canonical_import"],
+            "items": items,
+        });
+        if start.saturating_add(returned) < total {
+            let mut next_args = serde_json::Map::new();
+            next_args.insert("module".into(), serde_json::json!(module));
+            for key in ["query", "kind"] {
+                if let Some(value) = args.get(key) {
+                    next_args.insert(key.into(), value.clone());
+                }
+            }
+            next_args.insert("page".into(), serde_json::json!(page.saturating_add(1)));
+            next_args.insert("limit".into(), serde_json::json!(limit));
+            result["next"] = serde_json::json!({"tool":"get_stdlib_api", "args":next_args});
+        }
+        ToolObservation::result(&call.tool, result)
     }
 
     fn execute_writes(
@@ -2815,15 +3217,32 @@ impl LiveAiTools {
         calls: &[&ToolCall],
         canceled: &AtomicBool,
     ) -> Vec<ToolObservation> {
-        if !self.reference_search_ready {
+        let includes_behavior_write = calls
+            .iter()
+            .any(|call| matches!(call.tool.as_str(), "write_symbol" | "delete_symbol"));
+        if includes_behavior_write && !self.reference_search_ready {
             let error = "run find_references for a behavior-bearing symbol before a live AI write";
             self.note_write_failure(error);
             return failed_write_observations(calls, error.to_string());
         }
-        let edits: Vec<LiveEdit> = calls
+        let edits = calls
             .iter()
-            .map(|call| {
+            .map(|call| -> Result<LiveEdit, String> {
                 let args = call.args.as_object().expect("validated tool args");
+                if call.tool == "write_imports" {
+                    return Ok(LiveEdit {
+                        operation: LiveEditOperation::Update,
+                        target: LiveSymbolTarget {
+                            name: "imports".to_string(),
+                            kind: Some("imports".to_string()),
+                            file: string_arg(args, "file"),
+                            owner: None,
+                            signature: None,
+                        },
+                        source: Some(render_import_statements(args)?),
+                        expected_source_hash: None,
+                    });
+                }
                 let operation = if call.tool == "delete_symbol" {
                     LiveEditOperation::Delete
                 } else if string_arg(args, "operation").as_deref() == Some("add") {
@@ -2831,7 +3250,7 @@ impl LiveAiTools {
                 } else {
                     LiveEditOperation::Update
                 };
-                LiveEdit {
+                Ok(LiveEdit {
                     operation,
                     target: LiveSymbolTarget {
                         name: string_arg(args, "name").unwrap_or_default(),
@@ -2842,9 +3261,13 @@ impl LiveAiTools {
                     },
                     source: string_arg(args, "new_source"),
                     expected_source_hash: string_arg(args, "expected_source_hash"),
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>();
+        let edits = match edits {
+            Ok(edits) => edits,
+            Err(error) => return failed_write_observations(calls, error),
+        };
         if let Some(project_root) = self.project_root.as_ref() {
             if let Err(error) = validate_ai_font_paths(project_root, &edits) {
                 self.note_write_failure(&error);
@@ -2870,6 +3293,7 @@ impl LiveAiTools {
                                     self.imagegen_staged_paths.clear();
                                     let _ = transaction.rollback();
                                 }
+                                let error = self.model_write_failure(error);
                                 return failed_write_observations(calls, error);
                             }
                         }
@@ -2919,7 +3343,7 @@ impl LiveAiTools {
                         &error,
                         "Correct the reported compile or test failure before attempting another atomic write.",
                     );
-                    self.note_write_failure(&error);
+                    let error = self.model_write_failure(error);
                     failed_write_observations(calls, error)
                 }
             }
@@ -2935,10 +3359,29 @@ impl LiveAiTools {
                     &error,
                     "Correct the reported live request failure before attempting another atomic write.",
                 );
-                self.note_write_failure(&error);
+                let error = self.model_write_failure(error);
                 failed_write_observations(calls, error)
             }
         }
+    }
+
+    fn model_write_failure(&mut self, error: String) -> String {
+        if error.contains("global collection path ") && error.contains(" is not a supported scalar")
+        {
+            let message = "no edit was applied: runtime state serialization is unsupported; restart or reinitialize the runtime".to_string();
+            if self.terminal_blocker.is_none() {
+                self.terminal_blocker = Some(message.clone());
+                self.record_durable_failure(
+                    "builder_runtime_restart_required",
+                    "The runtime state could not be serialized for an atomic edit",
+                    &error,
+                    "Restart or reinitialize the runtime before attempting another edit.",
+                );
+            }
+            return message;
+        }
+        self.note_write_failure(&error);
+        error
     }
 
     fn note_write_failure(&mut self, error: &str) {
@@ -3107,6 +3550,106 @@ fn stable_write_failure_key(error: &str) -> String {
     error.chars().take(512).collect()
 }
 
+fn compact_ai_read_result(call: &ToolCall, data: Value) -> Value {
+    match call.tool.as_str() {
+        "list_symbols" => {
+            let mut result = data.as_object().cloned().unwrap_or_default();
+            result.remove("_hint_files");
+            Value::Object(result)
+        }
+        "read_symbol" => {
+            let mut result = serde_json::Map::new();
+            for key in ["file", "kind", "name", "owner", "signature", "source"] {
+                if let Some(value) = data.get(key).filter(|value| !value.is_null()) {
+                    result.insert(key.into(), value.clone());
+                }
+            }
+            if let Some(hash) = data.get("source_hash") {
+                result.insert("expected_source_hash".into(), hash.clone());
+            }
+            Value::Object(result)
+        }
+        "read_imports" => {
+            let mut result = serde_json::Map::new();
+            if let Some(file) = data
+                .get("file")
+                .and_then(Value::as_str)
+                .or_else(|| call.args.get("file").and_then(Value::as_str))
+            {
+                result.insert("file".into(), serde_json::json!(file));
+            }
+            if let Some(source) = data.get("source") {
+                result.insert("source".into(), source.clone());
+            }
+            Value::Object(result)
+        }
+        "find_references" => compact_ai_references(&data),
+        _ => data,
+    }
+}
+
+fn baseline_test_observation(result: Result<(), String>) -> ToolObservation {
+    match result {
+        Ok(()) => ToolObservation::result("run_tests", serde_json::json!({"passed":true})),
+        Err(error) => {
+            let truncated = error.chars().count() > 900;
+            let mut concise = error.chars().take(900).collect::<String>();
+            if truncated {
+                concise.push('…');
+            }
+            ToolObservation::error("run_tests", concise)
+        }
+    }
+}
+
+fn compact_ai_references(data: &Value) -> Value {
+    let symbol = data.get("symbol").cloned().unwrap_or(Value::Null);
+    let mut grouped = BTreeMap::<(String, String, String, String), BTreeSet<String>>::new();
+    for reference in data
+        .get("references")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(file) = reference.get("file").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(kind) = reference.get("containing_kind").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(name) = reference.get("containing_name").and_then(Value::as_str) else {
+            continue;
+        };
+        let signature = reference
+            .get("containing_signature")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(use_kind) = reference.get("kind").and_then(Value::as_str) else {
+            continue;
+        };
+        grouped
+            .entry((file.into(), kind.into(), name.into(), signature.into()))
+            .or_default()
+            .insert(use_kind.into());
+    }
+    let symbols = grouped
+        .into_iter()
+        .map(|((file, kind, name, signature), uses)| {
+            let mut item = serde_json::json!({
+                "file": file,
+                "kind": kind,
+                "name": name,
+                "uses": uses,
+            });
+            if !signature.is_empty() {
+                item["signature"] = serde_json::json!(signature);
+            }
+            item
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({"symbol": symbol, "symbols": symbols})
+}
+
 fn failed_write_observations(calls: &[&ToolCall], error: String) -> Vec<ToolObservation> {
     calls
         .iter()
@@ -3117,7 +3660,7 @@ fn failed_write_observations(calls: &[&ToolCall], error: String) -> Vec<ToolObse
                 if index == 0 {
                     error.clone()
                 } else {
-                    "atomic write batch failed; see the first write observation".to_string()
+                    "batch failed; see first observation".to_string()
                 },
             )
         })
@@ -3139,9 +3682,8 @@ fn applied_write_observation(
         })
     } else {
         serde_json::json!({
-            "status": "compiled_tested_applied",
-            "batch_size": batch_size,
-            "write_receipt": transaction.get("receipt").cloned().unwrap_or(Value::Null),
+            "batch": "applied",
+            "see": 0,
         })
     };
     ToolObservation::result(&call.tool, result)
@@ -3167,7 +3709,11 @@ fn contiguous_write_range(calls: &[ToolCall]) -> Result<Option<std::ops::Range<u
         .iter()
         .enumerate()
         .filter_map(|(index, call)| {
-            matches!(call.tool.as_str(), "write_symbol" | "delete_symbol").then_some(index)
+            matches!(
+                call.tool.as_str(),
+                "write_symbol" | "delete_symbol" | "write_imports"
+            )
+            .then_some(index)
         })
         .collect::<Vec<_>>();
     let Some(first) = write_indexes.first().copied() else {
@@ -3176,7 +3722,7 @@ fn contiguous_write_range(calls: &[ToolCall]) -> Result<Option<std::ops::Range<u
     let last = write_indexes.last().copied().expect("write index");
     if write_indexes.len() != last - first + 1 {
         return Err(
-            "write_symbol and delete_symbol calls must be contiguous so their atomic order is unambiguous"
+            "source and import write calls must be contiguous so their atomic order is unambiguous"
                 .to_string(),
         );
     }
@@ -3450,6 +3996,25 @@ fn string_array_arg(
                 .ok_or_else(|| format!("{name} must contain non-empty strings"))
         })
         .collect()
+}
+
+fn render_import_statements(args: &serde_json::Map<String, Value>) -> Result<String, String> {
+    let mut imports = string_array_arg(args, "imports")?;
+    if imports.iter().any(|path| {
+        path.contains('"')
+            || path.contains('\r')
+            || path.contains('\n')
+            || path.chars().any(char::is_control)
+    }) {
+        return Err("imports must contain valid paths without quotes or control characters".into());
+    }
+    imports.sort();
+    imports.dedup();
+    Ok(imports
+        .into_iter()
+        .map(|path| format!("import \"{path}\";"))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn audit_tool_call(call: &ToolCall) -> Value {
@@ -4061,6 +4626,112 @@ mod tests {
     }
 
     #[test]
+    fn project_asset_guidance_centralizes_the_complete_policy() {
+        for required in [
+            "only for authored presentation, data, or audio changes",
+            "project-local font",
+            "absolute and system font paths are invalid",
+            "Preserve or replace a seeded font transactionally",
+            "Prefer ImageGen",
+            "including early versions",
+            "isolated foreground subject",
+            "never an atlas",
+            "Rendering preserves submission order",
+            "one contiguous asset-tool group",
+            "one rollback-safe transaction",
+            "never edit the manifest directly",
+            "loaded and visibly drawn",
+            "different-path asset",
+            "stable path is unchanged",
+            "validated previews requiring explicit user approval",
+        ] {
+            assert!(
+                PROJECT_ASSET_INSTRUCTION.contains(required),
+                "missing shared project asset policy: {required}"
+            );
+        }
+        let base = AgentProfile::default().instruction;
+        let combined_bytes = base.len() + PROJECT_ASSET_INSTRUCTION.len();
+        eprintln!(
+            "instruction bytes: base={}, project_guidance={}, combined={combined_bytes}",
+            base.len(),
+            PROJECT_ASSET_INSTRUCTION.len()
+        );
+        assert!(PROJECT_ASSET_INSTRUCTION.len() <= 1_200);
+        assert!(combined_bytes <= 3_700);
+    }
+
+    #[test]
+    fn capability_returns_bounded_asset_and_runtime_specs_on_demand() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new_project_assets(
+            client,
+            std::env::temp_dir(),
+            false,
+            None,
+            "project AI".to_string(),
+            false,
+        );
+        let call = ToolCall {
+            tool: "get_capability".to_string(),
+            args: json!({"name":"assets"}),
+        };
+        let result = tools
+            .execute_read(&call, &AtomicBool::new(false))
+            .result
+            .expect("asset capability");
+        assert_eq!(result["instruction"], PROJECT_ASSET_INSTRUCTION.trim());
+        assert_eq!(result["name"], "assets");
+        assert_eq!(result["tool_specs"].as_array().unwrap().len(), 7);
+        assert!(result["tool_specs"][0].get("use").is_some());
+
+        tools.require_imagegen = true;
+        let filtered = tools
+            .execute_read(&call, &AtomicBool::new(false))
+            .result
+            .expect("filtered asset capability");
+        assert!(filtered["tool_specs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|spec| !matches!(
+                spec["tool"].as_str(),
+                Some("write_svg_asset" | "write_png_asset")
+            )));
+
+        tools.require_imagegen = false;
+        let runtime = tools
+            .execute_read(
+                &ToolCall {
+                    tool: "get_capability".to_string(),
+                    args: json!({"name":"runtime"}),
+                },
+                &AtomicBool::new(false),
+            )
+            .result
+            .expect("runtime capability");
+        assert_eq!(runtime["name"], "runtime");
+        assert_eq!(runtime["tool_specs"].as_array().unwrap().len(), 2);
+        assert!(runtime["tool_specs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|spec| spec["tool"] == "run_frame"));
+
+        let unknown = tools.execute_read(
+            &ToolCall {
+                tool: "get_capability".to_string(),
+                args: json!({"name":"network"}),
+            },
+            &AtomicBool::new(false),
+        );
+        assert!(unknown
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("assets or runtime")));
+    }
+
+    #[test]
     fn ai_font_path_rejects_absolute_system_font() {
         let root = font_path_test_root("system_font");
         fs::create_dir_all(root.join("assets")).expect("assets dir");
@@ -4089,7 +4760,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_context_catalogs_public_stdlib_signatures() {
+    fn initial_context_omits_lazy_stdlib_modules_and_signatures() {
         let root = std::env::temp_dir().join(format!(
             "stasis_ai_stdlib_catalog_{}",
             SystemTime::now()
@@ -4131,27 +4802,52 @@ mod tests {
             "function host_private(): i32 { return 0; }\n",
         )
         .expect("internal module");
+        for index in 0..18 {
+            fs::write(
+                stdlib.join(format!("module_{index:02}.stasis")),
+                format!("function module_{index:02}_value(): i32 {{ return {index}; }}\n"),
+            )
+            .expect("additional public stdlib module");
+        }
 
-        let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
+        let stdlib_root = resolve_stdlib_api_root(&root).expect("stdlib root");
+        let catalog = load_stdlib_module_index(stdlib_root.as_ref()).expect("stdlib module index");
 
         assert_eq!(catalog["available"], true);
-        assert_eq!(catalog["total"], 8);
+        assert_eq!(catalog["total"], 20);
         let rendered = serde_json::to_string(&catalog).expect("catalog JSON");
-        assert!(rendered.contains("draw_line(x: f32, y: f32): void"));
-        assert!(rendered.contains("load_font(path: string, size: i32): i32"));
-        assert!(rendered.contains(
-            "load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool"
-        ));
-        assert!(rendered.contains("\"extern\":true"));
+        assert!(rendered.contains("\"module\":\"graphics\""));
+        assert!(rendered.contains("\"module\":\"module_17\""));
+        assert!(rendered.contains("\"api_item_count\":4"));
         assert!(rendered.contains("/vendor/stasis/stdlib/graphics.stasis"));
         assert!(rendered.contains("/vendor/stasis/stdlib/host_frame.stasis"));
         assert!(rendered.contains("HostFrame"));
         assert!(rendered.contains("refresh(self: HostFrame): void"));
+        assert!(!rendered.contains("draw_line(x: f32, y: f32): void"));
+        assert!(!rendered.contains("load_font(path: string, size: i32): i32"));
         assert!(!rendered.contains("private_counter"));
         assert!(!rendered.contains("host_private"));
         assert!(!rendered.contains("load_sprite_raw"));
         assert!(!rendered.contains("raw_draw"));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stdlib_module_index_excludes_non_public_api_and_signatures() {
+        let context = ai_initial_context(json!([]));
+        assert_eq!(context.as_object().unwrap().len(), 3);
+        assert_eq!(context["language"], "Stasis");
+        assert_eq!(context["start"], json!([]));
+        for key in ["stdlib", "baseline_tests"] {
+            let _: ToolCall = serde_json::from_value(context["options"][key].clone())
+                .expect("initial option is an executable ToolCall");
+        }
+        assert!(serde_json::to_vec(&context).unwrap().len() < 1024);
+        assert!(context.get("stdlib_api").is_none());
+        assert!(context.get("stdlib_modules").is_none());
+        assert!(context.get("project_hints").is_none());
+        assert!(context.get("project_index").is_none());
+        assert!(context.get("initial_symbols").is_none());
     }
 
     #[test]
@@ -4178,12 +4874,228 @@ mod tests {
         )
         .expect("stdlib umbrella");
 
-        let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
+        let stdlib_root = resolve_stdlib_api_root(&root)
+            .expect("stdlib root")
+            .expect("available stdlib");
+        let catalog = load_stdlib_module_index(Some(&stdlib_root)).expect("stdlib catalog");
         assert_eq!(catalog["modules"].as_array().expect("modules").len(), 19);
-        assert!(serde_json::to_string(&catalog)
-            .expect("catalog JSON")
-            .contains("public_17"));
+        assert!(catalog["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|module| module["module"] == "module_17"));
         fs::remove_dir_all(root).ok();
+    }
+
+    fn synthetic_project_symbols(total: usize) -> Value {
+        let mut items = (0..40)
+            .map(|index| {
+                json!({
+                    "kind": "function",
+                    "name": format!("audio_method_{index}"),
+                    "file": "src/audio_presentation.stasis",
+                    "owner": "AudioPresentation",
+                    "signature": format!("AudioPresentation.audio_method_{index}(): void"),
+                })
+            })
+            .collect::<Vec<_>>();
+        items.extend([
+            json!({
+                "kind": "function",
+                "name": "update_enemies",
+                "file": "src/enemies.stasis",
+                "signature": "update_enemies(speed: f32): void",
+            }),
+            json!({
+                "kind": "struct",
+                "name": "Enemy",
+                "file": "src/enemies.stasis",
+                "signature": "Enemy",
+            }),
+            json!({
+                "kind": "function",
+                "name": "main",
+                "file": "src/main.stasis",
+                "signature": "main(): i32",
+            }),
+        ]);
+        json!({
+            "schema_version": 1,
+            "files": [
+                "src/main.stasis",
+                "src/enemies.stasis",
+                "src/audio_presentation.stasis"
+            ],
+            "imports": {
+                "src/main.stasis": ["src/audio_presentation.stasis", "src/enemies.stasis"],
+                "src/enemies.stasis": [],
+                "src/audio_presentation.stasis": [],
+            },
+            "page": 0,
+            "limit": 200,
+            "total": total,
+            "items": items,
+        })
+    }
+
+    #[test]
+    fn project_hints_offer_direct_actions_for_prompt_matches() {
+        let symbols = synthetic_project_symbols(243);
+        let hints = build_project_hints(&symbols, "make enemy movement faster");
+        let actions = hints.as_array().expect("hint actions");
+        let list: ToolCall = serde_json::from_value(
+            actions
+                .iter()
+                .find(|action| action["tool"] == "list_symbols")
+                .expect("list action")
+                .clone(),
+        )
+        .expect("valid list_symbols ToolCall");
+        assert_eq!(list.args["files"], json!(["src/enemies.stasis"]));
+        assert!(actions
+            .iter()
+            .any(|action| action["tool"] == "read_symbol"
+                && action["args"]["name"] == "update_enemies"));
+        assert_eq!(
+            hints,
+            build_project_hints(&symbols, "make enemy movement faster")
+        );
+
+        let raw_bytes = serde_json::to_vec(&symbols)
+            .expect("raw symbols JSON")
+            .len();
+        let bytes = serde_json::to_vec(&hints)
+            .expect("project hints JSON")
+            .len();
+        let initial = ai_initial_context(hints.clone());
+        let initial_bytes = serde_json::to_vec(&initial)
+            .expect("initial context JSON")
+            .len();
+        let instruction_bytes = AgentProfile::default().instruction.len();
+        let tool_bytes = serde_json::to_vec(&project_ai_tool_specs())
+            .expect("project tool specs JSON")
+            .len();
+        let combined_bytes = instruction_bytes + tool_bytes + initial_bytes;
+        eprintln!(
+            "synthetic ordinary first request bytes: raw_symbols={raw_bytes}, project_hints={bytes}, initial_context={initial_bytes}, instruction={instruction_bytes}, tools={tool_bytes}, combined={combined_bytes}"
+        );
+        assert!(
+            initial_bytes <= 500,
+            "initial project context grew to {initial_bytes} bytes"
+        );
+        assert!(
+            combined_bytes <= 3_200,
+            "ordinary first request core grew to {combined_bytes} bytes"
+        );
+        assert!(bytes < raw_bytes);
+        assert!(actions.len() <= 1 + MAX_PROJECT_HINT_SYMBOLS);
+    }
+
+    #[test]
+    fn initial_context_uses_internal_default_scope_files_without_exposing_them() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_initial_scope_{}_{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        fs::create_dir_all(root.join("src/game/systems")).expect("fixture directories");
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"game/game.stasis\";\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("entry source");
+        fs::write(
+            root.join("src/game/game.stasis"),
+            "import \"systems/enemies.stasis\";\nimport \"../vendor/unloaded.stasis\";\nfunction game_value(): i32 { return 1; }\n",
+        )
+        .expect("game module source");
+        fs::write(
+            root.join("src/game/systems/enemies.stasis"),
+            "function update_enemy_movement(): void { return; }\n",
+        )
+        .expect("enemy source");
+        let internal = json!({
+            "items": [{
+                "kind":"function",
+                "name":"main",
+                "file":"src/main.stasis",
+                "signature":"main(): i32"
+            }],
+            "_hint_files":[
+                "src/game/game.stasis",
+                "src/game/systems/enemies.stasis",
+                "src/main.stasis"
+            ]
+        });
+        let (client, server) = stasis_runner::live::live_session(1);
+        let response_data = internal.clone();
+        let responder = thread::spawn(move || loop {
+            if let Some(request) = server.drain(1).into_iter().next() {
+                assert!(matches!(request.command, LiveCommand::Symbols { .. }));
+                server
+                    .respond(LiveResponse::success(
+                        request.request_id,
+                        1,
+                        "symbols",
+                        response_data,
+                    ))
+                    .expect("initial symbol response");
+                break;
+            }
+            thread::yield_now();
+        });
+        let mut tools = LiveAiTools::new(client);
+
+        let context = load_ai_initial_context(
+            &mut tools,
+            &root,
+            "Make enemy movement faster",
+            &AtomicBool::new(false),
+        )
+        .expect("initial context");
+        responder.join().expect("initial responder");
+
+        assert_eq!(
+            context,
+            json!({
+                "language":"Stasis",
+                "start":[{
+                    "tool":"list_symbols",
+                    "args":{"files":["src/game/systems/enemies.stasis"]}
+                }],
+                "options":{
+                    "stdlib":{"tool":"get_stdlib_api", "args":{}},
+                    "baseline_tests":{"tool":"run_tests", "args":{}}
+                }
+            })
+        );
+
+        let projected = compact_ai_read_result(
+            &ToolCall {
+                tool: "list_symbols".into(),
+                args: json!({}),
+            },
+            internal,
+        );
+        assert!(projected.get("_hint_files").is_none());
+        assert_eq!(projected.as_object().unwrap().len(), 1);
+        assert!(serde_json::to_vec(&projected).unwrap().len() < 1024);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn project_hints_no_match_offer_executable_default_discovery() {
+        let symbols = synthetic_project_symbols(43);
+        let hints = build_project_hints(
+            &symbols,
+            "localize dialogue captions in this Stasis project",
+        );
+
+        assert_eq!(hints, json!([{"tool":"list_symbols", "args":{}}]));
+        let call: ToolCall =
+            serde_json::from_value(hints[0].clone()).expect("valid default list_symbols ToolCall");
+        assert_eq!(call.tool, "list_symbols");
+        assert_eq!(call.args, json!({}));
     }
 
     #[test]
@@ -4203,12 +5115,194 @@ mod tests {
         )
         .expect("stdlib module");
 
-        let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
+        let stdlib_root = resolve_stdlib_api_root(&root).expect("stdlib root");
+        let catalog = load_stdlib_module_index(stdlib_root.as_ref()).expect("stdlib module index");
 
         assert_eq!(
             catalog["modules"][0]["canonical_import"],
             "/stdlib/stdlib.stasis"
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stdlib_api_is_filtered_paged_and_keeps_extern_signatures() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_stdlib_api_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let stdlib = root.join("vendor/stasis/stdlib");
+        fs::create_dir_all(&stdlib).expect("stdlib dir");
+        fs::write(
+            stdlib.join("stdlib.stasis"),
+            "function print(value: i32): void { return; }\n",
+        )
+        .expect("stdlib umbrella");
+        let mut source = String::from(
+            "struct Sprite { handle: i32; }\nextern function load_font(path: string, size: i32): i32;\n",
+        );
+        for index in 0..300 {
+            source.push_str(&format!(
+                "function draw_{index}(value: i32): void {{ return; }}\n"
+            ));
+        }
+        fs::write(stdlib.join("graphics.stasis"), source).expect("graphics module");
+
+        let stdlib_root = resolve_stdlib_api_root(&root)
+            .expect("stdlib root")
+            .expect("available stdlib");
+        let index = load_stdlib_module_index(Some(&stdlib_root)).expect("module index");
+        assert_eq!(
+            index["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|module| module["module"] == "graphics")
+                .unwrap()["api_item_count"],
+            302
+        );
+        assert_eq!(
+            index,
+            load_stdlib_module_index(Some(&stdlib_root)).expect("repeatable module index")
+        );
+        let (_, eager_items) = read_stdlib_api_items(&stdlib_root, &stdlib.join("graphics.stasis"))
+            .expect("eager API");
+        let eager = json!({
+            "available": true,
+            "modules": [{
+                "file": "vendor/stasis/stdlib/graphics.stasis",
+                "canonical_import": "/vendor/stasis/stdlib/graphics.stasis",
+                "items": eager_items,
+            }],
+            "total": 302,
+        });
+        let index_bytes = serde_json::to_vec(&index).expect("index JSON").len();
+        let eager_bytes = serde_json::to_vec(&eager).expect("eager JSON").len();
+        eprintln!(
+            "synthetic stdlib context bytes: eager={eager_bytes}, module_index={index_bytes}"
+        );
+        assert!(index_bytes < eager_bytes / 4);
+
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.stdlib_root = Some(stdlib_root);
+        let call = |args| ToolCall {
+            tool: "get_stdlib_api".to_string(),
+            args,
+        };
+
+        let discovery = tools.execute_read(&call(json!({})), &AtomicBool::new(false));
+        let discovery = discovery.result.expect("module discovery");
+        assert_eq!(discovery["modules"], json!(["graphics", "stdlib"]));
+
+        let first = tools.execute_read(
+            &call(json!({"module":"graphics", "kind":"function", "page":0})),
+            &AtomicBool::new(false),
+        );
+        let first = first.result.expect("first page");
+        assert_eq!(first["items"].as_array().unwrap().len(), 64);
+        assert_eq!(
+            first["canonical_import"],
+            "/vendor/stasis/stdlib/graphics.stasis"
+        );
+        assert_eq!(
+            first["next"],
+            json!({
+                "tool":"get_stdlib_api",
+                "args":{"module":"graphics", "kind":"function", "page":1, "limit":64}
+            })
+        );
+        assert_eq!(first.as_object().unwrap().len(), 3);
+
+        let second = tools.execute_read(
+            &call(json!({"module":"graphics", "kind":"function", "page":4})),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(
+            second.result.as_ref().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            45
+        );
+        assert!(second.result.as_ref().unwrap().get("next").is_none());
+        assert_eq!(
+            second.result.as_ref().unwrap().as_object().unwrap().len(),
+            2
+        );
+
+        let external = tools.execute_read(
+            &call(json!({"module":"graphics", "query":"load_font"})),
+            &AtomicBool::new(false),
+        );
+        let external = &external.result.as_ref().unwrap()["items"][0];
+        assert_eq!(external["extern"], true);
+        assert_eq!(
+            external["signature"],
+            "load_font(path: string, size: i32): i32"
+        );
+
+        let structs = tools.execute_read(
+            &call(json!({"module":"graphics", "kind":"struct"})),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(
+            structs.result.as_ref().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stdlib_api_rejects_unknown_and_path_module_values() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_stdlib_safety_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let stdlib = root.join("stdlib");
+        fs::create_dir_all(&stdlib).expect("stdlib dir");
+        fs::write(
+            stdlib.join("stdlib.stasis"),
+            "function print(value: i32): void { return; }\n",
+        )
+        .expect("stdlib module");
+        fs::write(root.join("secret.stasis"), "constant secret: i32 = 42;\n")
+            .expect("outside file");
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        let unavailable = tools.execute_read(
+            &ToolCall {
+                tool: "get_stdlib_api".to_string(),
+                args: json!({}),
+            },
+            &AtomicBool::new(false),
+        );
+        assert!(unavailable
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("no project-matched")));
+        tools.stdlib_root = resolve_stdlib_api_root(&root).expect("stdlib root");
+
+        for module in ["missing", "../secret", "C:\\secret"] {
+            let observation = tools.execute_read(
+                &ToolCall {
+                    tool: "get_stdlib_api".to_string(),
+                    args: json!({"module": module}),
+                },
+                &AtomicBool::new(false),
+            );
+            assert!(observation.error.is_some(), "module {module} should fail");
+            assert!(observation.result.is_none());
+        }
         fs::remove_dir_all(root).ok();
     }
 
@@ -4274,6 +5368,247 @@ mod tests {
     }
 
     #[test]
+    fn live_ai_reads_imports_through_the_compiler_owned_group() {
+        let (client, server) = stasis_runner::live::live_session(1);
+        let responder = thread::spawn(move || loop {
+            let requests = server.drain(1);
+            if let Some(request) = requests.into_iter().next() {
+                assert!(matches!(
+                    &request.command,
+                    LiveCommand::Read { name, kind, file, .. }
+                        if name == "imports"
+                            && kind.as_deref() == Some("imports")
+                            && file.as_deref() == Some("src/main.stasis")
+                ));
+                server
+                    .respond(LiveResponse::success(
+                        request.request_id,
+                        1,
+                        "symbol",
+                        json!({"name":"imports", "source":"import \"/stdlib/stdlib.stasis\";"}),
+                    ))
+                    .expect("imports response");
+                break;
+            }
+            thread::yield_now();
+        });
+        let mut tools = LiveAiTools::new(client);
+        let observation = tools.execute_read(
+            &ToolCall {
+                tool: "read_imports".to_string(),
+                args: json!({"file":"src/main.stasis"}),
+            },
+            &AtomicBool::new(false),
+        );
+        responder.join().expect("imports responder");
+        assert_eq!(
+            observation.result.as_ref().unwrap()["source"],
+            "import \"/stdlib/stdlib.stasis\";"
+        );
+        assert_eq!(
+            observation.result.as_ref().unwrap()["file"],
+            "src/main.stasis"
+        );
+        assert_eq!(
+            observation
+                .result
+                .as_ref()
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn baseline_test_observations_are_exact_and_bounded() {
+        let passed = baseline_test_observation(Ok(()));
+        assert_eq!(
+            serde_json::to_value(&passed).unwrap(),
+            json!({"tool":"run_tests", "result":{"passed":true}})
+        );
+        assert_eq!(
+            serde_json::to_value(baseline_test_observation(Err("command_failed".into()))).unwrap(),
+            json!({"tool":"run_tests", "error":"command_failed"})
+        );
+
+        let failed = baseline_test_observation(Err(format!(
+            "staged live tests failed: {}",
+            "noisy output ".repeat(200)
+        )));
+        assert!(failed.result.is_none());
+        assert!(failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.ends_with('…')));
+        assert!(serde_json::to_vec(&failed).unwrap().len() < 1024);
+    }
+
+    #[test]
+    fn ai_symbol_read_keeps_only_editable_identity_source_and_stale_write_hash() {
+        let call = ToolCall {
+            tool: "read_symbol".into(),
+            args: json!({"name":"tick"}),
+        };
+        let result = compact_ai_read_result(
+            &call,
+            json!({
+                "symbol_id":"ignored",
+                "kind":"function",
+                "name":"tick",
+                "file":"src/main.stasis",
+                "signature":"function tick(): i32",
+                "source_spans":[{"start":0,"end":10}],
+                "source":"function tick(): i32 { return 0; }",
+                "source_hash":"abc123"
+            }),
+        );
+
+        assert_eq!(
+            result,
+            json!({
+                "kind":"function",
+                "name":"tick",
+                "file":"src/main.stasis",
+                "signature":"function tick(): i32",
+                "source":"function tick(): i32 { return 0; }",
+                "expected_source_hash":"abc123"
+            })
+        );
+    }
+
+    #[test]
+    fn ai_references_group_duplicate_occurrences_by_containing_symbol() {
+        let references = (0..100)
+            .map(|index| {
+                json!({
+                    "symbol":"score",
+                    "kind": if index % 2 == 0 { "read" } else { "write" },
+                    "file":"src/main.stasis",
+                    "source_span":{"start":index * 10,"end":index * 10 + 5},
+                    "containing_kind":"function",
+                    "containing_name":"tick",
+                    "containing_signature":"function tick(): i32",
+                    "containing_source_hash":"large-repeated-hash"
+                })
+            })
+            .collect::<Vec<_>>();
+        let raw = json!({"symbol":"score", "references": references});
+        let compact = compact_ai_references(&raw);
+
+        assert_eq!(
+            compact,
+            json!({
+                "symbol":"score",
+                "symbols":[{
+                    "file":"src/main.stasis",
+                    "kind":"function",
+                    "name":"tick",
+                    "signature":"function tick(): i32",
+                    "uses":["read", "write"]
+                }]
+            })
+        );
+        let raw_bytes = serde_json::to_vec(&raw).unwrap().len();
+        let compact_bytes = serde_json::to_vec(&compact).unwrap().len();
+        eprintln!("reference response bytes: raw={raw_bytes}, compact={compact_bytes}");
+        assert!(compact_bytes < 1024);
+        assert!(
+            raw_bytes > compact_bytes * 50,
+            "{raw_bytes} vs {compact_bytes}"
+        );
+    }
+
+    #[test]
+    fn import_only_write_is_sorted_atomic_and_does_not_require_references() {
+        let (client, server) = stasis_runner::live::live_session(1);
+        let responder = thread::spawn(move || loop {
+            let requests = server.drain(1);
+            if let Some(request) = requests.into_iter().next() {
+                let LiveCommand::EditBatch {
+                    edits,
+                    preview,
+                    run_tests,
+                } = &request.command
+                else {
+                    panic!("expected edit batch")
+                };
+                assert!(!*preview);
+                assert!(*run_tests);
+                assert_eq!(edits.len(), 1);
+                assert_eq!(edits[0].target.name, "imports");
+                assert_eq!(edits[0].target.kind.as_deref(), Some("imports"));
+                assert_eq!(edits[0].target.file.as_deref(), Some("src/main.stasis"));
+                assert_eq!(
+                    edits[0].source.as_deref(),
+                    Some("import \"/stdlib/audio.stasis\";\nimport \"/stdlib/graphics.stasis\";")
+                );
+                server
+                    .respond(LiveResponse::success(
+                        request.request_id,
+                        1,
+                        "edit_applied",
+                        json!({"tests":"passed", "receipt":"imports.json"}),
+                    ))
+                    .expect("import edit response");
+                break;
+            }
+            thread::yield_now();
+        });
+        let mut tools = LiveAiTools::new(client);
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "write_imports".to_string(),
+                args: json!({
+                    "file":"src/main.stasis",
+                    "imports":[
+                        "/stdlib/graphics.stasis",
+                        "/stdlib/audio.stasis",
+                        "/stdlib/graphics.stasis"
+                    ]
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+        responder.join().expect("import edit responder");
+        assert!(observations[0].error.is_none());
+        tools
+            .validate_completion()
+            .expect("tested import-only batch completes");
+    }
+
+    #[test]
+    fn behavior_write_with_import_still_requires_references() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        let observations = tools.execute(
+            &[
+                ToolCall {
+                    tool: "write_imports".to_string(),
+                    args: json!({"file":"src/main.stasis", "imports":[]}),
+                },
+                ToolCall {
+                    tool: "write_symbol".to_string(),
+                    args: json!({
+                        "file":"src/main.stasis", "name":"tick",
+                        "new_source":"function tick(): void { return; }"
+                    }),
+                },
+            ],
+            &AtomicBool::new(false),
+        );
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("find_references")));
+        assert!(observations[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("batch failed")));
+    }
+
+    #[test]
     fn atomic_write_batch_returns_one_compact_receipt() {
         let calls = [
             ToolCall {
@@ -4311,9 +5646,11 @@ mod tests {
             .get("large_source")
             .is_none());
         assert_eq!(
-            second.result.as_ref().unwrap()["write_receipt"],
-            "build/live-edits/receipt.json"
+            second.result.as_ref().unwrap(),
+            &json!({"batch":"applied", "see":0})
         );
+        assert!(serde_json::to_vec(&first).unwrap().len() < 1024);
+        assert!(serde_json::to_vec(&second).unwrap().len() < 1024);
     }
 
     #[test]
@@ -4403,8 +5740,9 @@ mod tests {
         );
         assert_eq!(
             observations[1].error.as_deref(),
-            Some("atomic write batch failed; see the first write observation")
+            Some("batch failed; see first observation")
         );
+        assert!(serde_json::to_vec(&observations).unwrap().len() < 1024);
     }
 
     #[test]
@@ -4454,6 +5792,24 @@ mod tests {
         assert!(memory.contains("builder_repeated_write_failure"));
         assert!(memory.contains("Escalate with fresh turns"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unsupported_global_collection_state_is_terminal_on_first_failure() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+
+        let message = tools.model_write_failure(
+            "global collection path state.enemies is not a supported scalar".into(),
+        );
+
+        assert_eq!(
+            message,
+            "no edit was applied: runtime state serialization is unsupported; restart or reinitialize the runtime"
+        );
+        assert_eq!(tools.terminal_blocker.as_deref(), Some(message.as_str()));
+        assert_eq!(tools.consecutive_write_failures, 0);
+        assert!(message.len() < 1024);
     }
 
     #[test]
