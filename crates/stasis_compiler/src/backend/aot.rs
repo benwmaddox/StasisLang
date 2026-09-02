@@ -2408,13 +2408,15 @@ mod tests {
         )
         .expect("write asset extern seam evidence");
 
-        let missing_declaration = ASSET_EXTERN_FIXTURE.replace(
+        const ASSET_EXTERN_DIAGNOSTIC_FIXTURE: &str =
+            "extern function load_font(path: string, size: i32): i32;\nfunction main(): i32 { return load_font(\"font.ttf\", 16); }\n";
+        let missing_declaration = ASSET_EXTERN_DIAGNOSTIC_FIXTURE.replace(
             "extern function load_font(path: string, size: i32): i32;",
             "",
         );
-        assert_ne!(missing_declaration, ASSET_EXTERN_FIXTURE);
+        assert_ne!(missing_declaration, ASSET_EXTERN_DIAGNOSTIC_FIXTURE);
         assert_asset_extern_diagnostic(&missing_declaration, "load_font");
-        let wrong_signature = ASSET_EXTERN_FIXTURE.replace(
+        let wrong_signature = ASSET_EXTERN_DIAGNOSTIC_FIXTURE.replace(
             "extern function load_font(path: string, size: i32): i32;",
             "extern function load_font(path: string, size: f32): i32;",
         );
