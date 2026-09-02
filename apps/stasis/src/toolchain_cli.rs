@@ -4742,12 +4742,24 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
         })
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
+    let dynamic_text_paths = if imported_symbols.contains("stasis_jit_text_run_replace_from") {
+        config["memory"]
+            .as_object()
+            .expect("generated memory layouts")
+            .iter()
+            .filter(|(_, layout)| layout["byte_backed"].as_bool() == Some(true))
+            .map(|(path, _)| path.clone())
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
     config["memory"]
         .as_object_mut()
         .expect("generated memory layouts")
         .retain(|path, layout| {
             retained_paths.contains(path.as_str())
                 || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
+                || dynamic_text_paths.contains(path)
                 || (imported_symbols.contains("sys_memcpy_u8")
                     && layout["byte_backed"].as_bool() == Some(true))
                 || (imported_symbols.contains("sys_memcpy_i32")
@@ -4759,7 +4771,11 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
         .as_object_mut()
         .expect("generated globals")
         .retain(|path, _| {
-            retained_paths.contains(path.as_str()) || WEB_HOST_GLOBALS.contains(&path.as_str())
+            retained_paths.contains(path.as_str())
+                || WEB_HOST_GLOBALS.contains(&path.as_str())
+                || path
+                    .strip_suffix(".length")
+                    .is_some_and(|collection| dynamic_text_paths.contains(collection))
         });
 }
 
@@ -7509,6 +7525,30 @@ mod tests {
         let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
         assert!(runtime.contains("const sysMemcpyU8 ="));
         assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+    }
+
+    #[test]
+    fn release_web_runtime_retains_dynamic_text_length_metadata() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        process.upsert_file(
+            "dynamic_text.stasis",
+            "struct TextRun { font: i32; handle: i32; width: f32; height: f32; } global run: TextRun; global text: utf8[8]; function @effects(graphics)@extern(\"stasis_jit_text_run_replace_from\") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool; function main(): i32 { text[0] = 65; text.length = 1; if (run.replace_text_from(1, text)) { return 1; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile Web dynamic text fixture");
+        assert!(process
+            .imported_symbols()
+            .contains("stasis_jit_text_run_replace_from"));
+
+        let release = web_runtime_config(&workspace, &process, false);
+        assert_eq!(release["memory"]["text"]["byte_backed"], json!(true));
+        assert!(release["globals"].get("text.length").is_some());
     }
 
     #[test]

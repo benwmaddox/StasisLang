@@ -26,6 +26,8 @@ another caller's immutable cached text.
   4096 bytes per replaceable run. Replacement recycles the catalog entry and preserves it across a
   compatible catalog refresh.
 - Web supports 4096 total runs, 256 KiB total retained UTF-8, and 4096 bytes per replaceable run.
+  The import reads the generated collection's current `.length` metadata, not its backing capacity
+  or a NUL scan, so shortening a reused buffer cannot retain stale suffix bytes.
   Pending font calibration carries the run generation; stale readiness work cannot overwrite a
   newer replacement's metrics.
 
@@ -40,7 +42,8 @@ retained text and the existing font identity. A full runtime/session reset clear
 callers must initialize or replace their runs again after such a reset.
 
 Pointer Pong demonstrates the intended pattern: two caller-owned UTF-8 buffers and two replaceable
-runs are updated only when a score changes, while `render` emits cached-handle draw commands only.
+runs are updated only when a score changes, preserve the original two-digit `00` through `99`
+display, and let `render` emit cached-handle draw commands only.
 
 ## Characterization
 

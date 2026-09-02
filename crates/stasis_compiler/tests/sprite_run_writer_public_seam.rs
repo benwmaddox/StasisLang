@@ -219,6 +219,9 @@ fn dynamic_text_run_api_and_pointer_pong_compile_for_jit_and_aot() {
     ));
     assert!(POINTER_PONG.contains("left_score_run.replace_text_from"));
     assert!(!POINTER_PONG.contains("struct ScoreDigits"));
+    assert!(!POINTER_PONG.contains("ascii_push_i32(scratch"));
+    assert!(POINTER_PONG.contains("48 + display / 10"));
+    assert!(POINTER_PONG.contains("48 + display % 10"));
     let source = POINTER_PONG.replace(
         "import \".stasis_cache/toolchain/src/stdlib/graphics.stasis\";",
         "import \"../../src/stdlib/graphics.stasis\";",

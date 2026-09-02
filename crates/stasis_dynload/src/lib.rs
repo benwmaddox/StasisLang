@@ -5669,6 +5669,27 @@ fn replace_cached_text(run_handle: i32, font: i32, text_id: i32) -> i32 {
     let Some(text) = jit_text_arg_bytes(text_id) else {
         return 0;
     };
+    if asset_extern_seam_evidence_path().is_some() {
+        let result = if std::str::from_utf8(&text).is_ok() {
+            404
+        } else {
+            0
+        };
+        return if record_asset_extern_seam_call(
+            "replace_text",
+            &[
+                run_handle.to_string(),
+                font.to_string(),
+                asset_extern_seam_text_hex(&text),
+                result.to_string(),
+            ],
+        ) == Some(true)
+        {
+            result
+        } else {
+            0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         return (host.replace_text)(run_handle, font, &text);
     }

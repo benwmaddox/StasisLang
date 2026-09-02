@@ -36,8 +36,10 @@ function score_for_display(score: i32): i32 {
 }
 
 function build_score_text(scratch: ascii[], text: utf8[], score: i32): void {
+    let display: i32 = score_for_display(score);
     ascii_clear(scratch);
-    ascii_push_i32(scratch, score_for_display(score));
+    ascii_push(scratch, to_u8_trunc(48 + display / 10));
+    ascii_push(scratch, to_u8_trunc(48 + display % 10));
     utf8_from_ascii(text, scratch, 4);
 }
 

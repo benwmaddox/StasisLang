@@ -63,6 +63,7 @@ export async function loadRuntime(game, options = {}) {
   const instance = {
     exports: {
       memory,
+      __stasis_global_get_i32: hash => options.globalGetI32?.(hash) ?? 0,
       main: () => { options.main?.(env, memory); return 0; },
       tick: () => 0,
       render: () => 0,

@@ -732,16 +732,16 @@
       .map(layout => [layout.offset | 0, layout])
   );
   const u8MemoryLayouts = new Map(
-    Object.values(game.memory || {})
-      .filter(layout => (layout?.byte_backed === true || layout?.type_id === 5)
+    Object.entries(game.memory || {})
+      .filter(([, layout]) => (layout?.byte_backed === true || layout?.type_id === 5)
         && Number.isSafeInteger(layout.hash))
-      .map(layout => [layout.hash | 0, layout])
+      .map(([path, layout]) => [layout.hash | 0, { ...layout, path }])
   );
   const u8MemoryLayoutsByOffset = new Map(
-    Object.values(game.memory || {})
-      .filter(layout => (layout?.byte_backed === true || layout?.type_id === 5)
+    Object.entries(game.memory || {})
+      .filter(([, layout]) => (layout?.byte_backed === true || layout?.type_id === 5)
         && Number.isSafeInteger(layout.offset))
-      .map(layout => [layout.offset | 0, layout])
+      .map(([path, layout]) => [layout.offset | 0, { ...layout, path }])
   );
   const hasU8MemoryReference = reference => u8MemoryLayouts.has(reference | 0)
     || u8MemoryLayoutsByOffset.has(reference | 0);
@@ -756,7 +756,7 @@
     const end = offset + span;
     if (!Number.isSafeInteger(span) || !Number.isSafeInteger(end)
       || end > memory.buffer.byteLength) return null;
-    return { bytes: new Uint8Array(memory.buffer), offset, stride, length };
+    return { bytes: new Uint8Array(memory.buffer), offset, stride, length, path: layout.path };
   };
   const readU8 = (memory, index) => {
     if (!memory || !Number.isInteger(index) || index < 0 || index >= memory.length) return 0;
@@ -879,6 +879,22 @@
   };
   const canWriteTextRun = (base, index) => ["font", "handle", "width", "height"]
     .every(field => canWriteViewField(base, index, field));
+  const runtimeCollectionLength = memory => {
+    const path = memory?.path;
+    if (!path) return null;
+    const lengthPath = `${path}.length`;
+    const exported = instance?.exports?.[lengthPath];
+    let length;
+    if (exported instanceof WebAssembly.Global) {
+      length = Number(exported.value);
+    } else {
+      const metadata = game.globals?.[lengthPath];
+      const getter = instance?.exports?.__stasis_global_get_i32;
+      if (!metadata || typeof getter !== "function") return null;
+      length = Number(getter(metadata.hash));
+    }
+    return Number.isInteger(length) && length >= 0 && length <= memory.length ? length : null;
+  };
   const runtimeTextValue = reference => {
     if (Object.prototype.hasOwnProperty.call(game.strings || {}, String(reference))) {
       const text = String(game.strings[String(reference)]);
@@ -886,12 +902,9 @@
     }
     const memory = resolveU8Memory(reference);
     if (!memory) return null;
-    const bytes = [];
-    for (let index = 0; index < memory.length; index += 1) {
-      const value = readU8(memory, index);
-      if (value === 0) break;
-      bytes.push(value);
-    }
+    const length = runtimeCollectionLength(memory);
+    if (length === null) return null;
+    const bytes = Array.from({ length }, (_, index) => readU8(memory, index));
     try {
       return { text: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)), bytes: bytes.length };
     } catch {

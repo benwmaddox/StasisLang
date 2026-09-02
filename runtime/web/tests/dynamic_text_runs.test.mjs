@@ -11,13 +11,18 @@ test("web dynamic text replacement reuses a bounded handle and ignores stale fon
       "run.height": { offset: 12, length: 1, stride: 4, type_id: 2 },
       dynamic_text: { hash: 202, offset: 32, length: 32, stride: 1, type_id: 5, byte_backed: true },
     },
+    globals: {
+      "dynamic_text.length": { hash: 203, type_id: 1 },
+    },
     views: {
       "101": { font: "run.font", handle: "run.handle", width: "run.width", height: "run.height" },
     },
     strings: { "1": "assets/font.ttf", "2": "fixed" },
   };
   let stableHandle = 0;
+  let dynamicTextLength = 0;
   const result = await loadRuntime(game, {
+    globalGetI32: hash => hash === 203 ? dynamicTextLength : 0,
     main: (env, memory) => {
       const font = env.load_font(1, 20);
       const fixed = env.stasis_jit_gfx_cache_text(font, 2);
@@ -31,12 +36,18 @@ test("web dynamic text replacement reuses a bounded handle and ignores stale fon
       stableHandle = view.getInt32(4, true);
       assert.notEqual(stableHandle, fixed);
       const dynamicBytes = new Uint8Array(memory.buffer, 32, 32);
-      dynamicBytes.set(new TextEncoder().encode("Punktzahl 7"));
+      const localized = new TextEncoder().encode("Punktzahl 7");
+      dynamicBytes.set(localized);
+      dynamicTextLength = localized.length;
+      assert.equal(env.stasis_jit_text_run_replace_from(101, 0, 1, font, 202), 1);
+      assert.equal(view.getInt32(4, true), stableHandle);
+      dynamicBytes.set(new TextEncoder().encode("OK"));
+      dynamicTextLength = 2;
       assert.equal(env.stasis_jit_text_run_replace_from(101, 0, 1, font, 202), 1);
       assert.equal(view.getInt32(4, true), stableHandle);
       const before = [view.getInt32(0, true), view.getInt32(4, true), view.getFloat32(8, true), view.getFloat32(12, true)];
-      dynamicBytes.fill(0);
       dynamicBytes.set([0xc3, 0x28]);
+      dynamicTextLength = 2;
       assert.equal(env.stasis_jit_text_run_replace_from(101, 0, 1, font, 202), 0);
       assert.deepEqual(
         [view.getInt32(0, true), view.getInt32(4, true), view.getFloat32(8, true), view.getFloat32(12, true)],
@@ -57,6 +68,8 @@ test("web dynamic text replacement reuses a bounded handle and ignores stale fon
   await result.runtimePromise;
   const view = new DataView(memory.buffer);
   assert.equal(view.getInt32(4, true), stableHandle);
-  assert.equal(view.getFloat32(8, true), 91);
+  assert.equal(view.getFloat32(8, true), 14);
   assert.equal(view.getFloat32(12, true), 18);
+  assert.ok(result.measurements.some(({ value }) => value === "OK"));
+  assert.ok(result.measurements.every(({ value }) => value !== "OKnktzahl 7"));
 });
