@@ -2811,13 +2811,11 @@ pub(crate) fn emit_simple_statements(
                                                 collection_path, suffix
                                             ));
                                         }
-                                        if *op != AssignOp::Set
-                                            || !are_assignment_types_compatible(
-                                                element_type,
-                                                rhs.type_id,
-                                                type_table,
-                                            )
-                                        {
+                                        if !are_assignment_types_compatible(
+                                            element_type,
+                                            rhs.type_id,
+                                            type_table,
+                                        ) {
                                             return Err(format!(
                                                 "unsupported indexed receiver assignment for '{}'",
                                                 collection_path
@@ -2846,13 +2844,53 @@ pub(crate) fn emit_simple_statements(
                                             builder,
                                         );
                                         let no_field = builder.ins().iconst(types::I32, 0);
+                                        let lhs = match op {
+                                            AssignOp::Set => None,
+                                            AssignOp::Mod => {
+                                                return Err(format!(
+                                                    "'%=' is unsupported for f32 indexed receiver assignment '{}[...]'",
+                                                    collection_path
+                                                ));
+                                            }
+                                            _ => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f32_array_load,
+                                                    &[
+                                                        collection_hash,
+                                                        no_field,
+                                                        index_binding.value,
+                                                    ],
+                                                );
+                                                Some(builder.inst_results(call)[0])
+                                            }
+                                        };
+                                        let value = match op {
+                                            AssignOp::Set => rhs.value,
+                                            AssignOp::Add => builder.ins().fadd(
+                                                lhs.expect("compound assignment lhs"),
+                                                rhs.value,
+                                            ),
+                                            AssignOp::Sub => builder.ins().fsub(
+                                                lhs.expect("compound assignment lhs"),
+                                                rhs.value,
+                                            ),
+                                            AssignOp::Mul => builder.ins().fmul(
+                                                lhs.expect("compound assignment lhs"),
+                                                rhs.value,
+                                            ),
+                                            AssignOp::Div => builder.ins().fdiv(
+                                                lhs.expect("compound assignment lhs"),
+                                                rhs.value,
+                                            ),
+                                            AssignOp::Mod => unreachable!(),
+                                        };
                                         builder.ins().call(
                                             runtime_call_refs.global_f32_array_store,
                                             &[
                                                 collection_hash,
                                                 no_field,
                                                 index_binding.value,
-                                                rhs.value,
+                                                value,
                                             ],
                                         );
                                         continue;

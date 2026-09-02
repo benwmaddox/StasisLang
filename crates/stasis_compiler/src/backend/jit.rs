@@ -7877,6 +7877,65 @@ function main(): i32 {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_compound_assignment_to_receiver_array_fields() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "receiver_array_compound.stasis",
+            r#"
+const CAP: i32 = 4;
+struct Batch { values: f32[CAP]; }
+global first: Batch;
+global second: Batch;
+
+function update(self: Batch, index: i32, value: f32): void {
+    self.values[index] = value;
+    self.values[index] += 0.5;
+}
+
+function main(): i32 {
+    first.update(1, 2.0);
+    second.update(1, 4.0);
+    return f32_to_i32(first.values[1] * 10.0 + second.values[1]);
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile receiver array compound assignment");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute receiver array compound assignment"),
+            29
+        );
+    }
+
+    #[test]
+    fn jit_process_rejects_mod_assignment_to_f32_receiver_array_fields() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "receiver_array_mod.stasis",
+            r#"
+const CAP: i32 = 4;
+struct Batch { values: f32[CAP]; }
+global batch: Batch;
+function update(self: Batch, index: i32): void { self.values[index] %= 0.5; }
+function main(): i32 { batch.update(0); return 0; }
+"#,
+        );
+        let error = process
+            .compile()
+            .expect_err("reject f32 receiver array remainder assignment");
+        assert!(
+            format!("{error:?}").contains(
+                "'%=' is unsupported for f32 indexed receiver assignment 'self.values[...]'"
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_resolves_same_method_name_by_receiver_type() {
         let mut process = JitProcess::new();
         process.upsert_file(
