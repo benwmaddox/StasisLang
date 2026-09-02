@@ -1,4 +1,4 @@
-import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
 
 const PARITY_WINDOW_W: i32 = 640;
 const PARITY_WINDOW_H: i32 = 360;

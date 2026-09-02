@@ -11,7 +11,7 @@ final class WorkshopTemplateCatalog {
     private static final DirectoryMount VENDORED_STDLIB = new DirectoryMount(
             "stasis_stdlib", "vendor/stasis/src/stdlib");
     private static final DirectoryMount TOOLCHAIN_STDLIB = new DirectoryMount(
-            "stasis_stdlib", "src/.stasis_cache/toolchain/src/stdlib");
+            "stasis_stdlib", ".stasis_cache/toolchain/src/stdlib");
 
     private static final Template PONG = new Template(
             "pong",

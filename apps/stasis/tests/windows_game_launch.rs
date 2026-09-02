@@ -58,6 +58,15 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
+fn materialize_toolchain_stdlib(project: &Path) {
+    let destination = project.join(".stasis_cache/toolchain/src/stdlib");
+    copy_tree(&repository_root().join("src/stdlib"), &destination);
+    assert!(
+        destination.join("graphics.stasis").is_file(),
+        "toolchain stdlib staging omitted graphics.stasis"
+    );
+}
+
 fn finish_child(mut child: Child, description: &str, timeout: Duration) -> CompletedProcess {
     let started = Instant::now();
     let status = loop {
@@ -377,6 +386,7 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
     let parent = &test_tree.0;
     let project = parent.join("windows_launch_smoke");
     copy_tree(&fixture, &project);
+    materialize_toolchain_stdlib(&project);
 
     let nested_launch_dir = project.join("nested/launch");
     fs::create_dir_all(&nested_launch_dir).expect("create nested manifest launch directory");
@@ -532,6 +542,7 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
     let test_tree = TestTree(temp_dir("headless_recording"));
     let project = test_tree.0.join("windows_launch_smoke");
     copy_tree(&fixture, &project);
+    materialize_toolchain_stdlib(&project);
 
     let visible = test_tree.0.join("visible.png");
     let visible_run = launch(
@@ -1109,6 +1120,7 @@ fn recording_imported_network_client_is_offline_repeatable_and_non_mutating() {
     let test_tree = TestTree(temp_dir("network_client_recording"));
     let project = test_tree.0.join("windows_launch_smoke");
     copy_tree(&fixture, &project);
+    materialize_toolchain_stdlib(&project);
 
     let vendor_file = project.join("vendor/stasis/stdlib/network_client.stasis");
     fs::create_dir_all(vendor_file.parent().expect("vendor stdlib parent"))
@@ -1116,13 +1128,21 @@ fn recording_imported_network_client_is_offline_repeatable_and_non_mutating() {
     let network_client = root.join("src/stdlib/network_client.stasis");
     fs::copy(&network_client, &vendor_file).expect("copy network client stdlib");
     let source_file = project.join("main.stasis");
+    let graphics_import = "import \".stasis_cache/toolchain/src/stdlib/graphics.stasis\";";
     let source = fs::read_to_string(&source_file)
         .expect("read network-client recording fixture")
-        .replace("\r\n", "\n")
-        .replace(
-            "@link(\"stasis_graphics\");",
-            "@link(\"stasis_graphics\");\nimport \"/vendor/stasis/stdlib/network_client.stasis\";\nglobal network_probe: u8[4];",
-        )
+        .replace("\r\n", "\n");
+    assert!(
+        source.contains(graphics_import),
+        "network-client fixture is missing the public graphics import anchor"
+    );
+    let source = source.replacen(
+        graphics_import,
+        &format!(
+            "{graphics_import}\nimport \"/vendor/stasis/stdlib/network_client.stasis\";\nglobal network_probe: u8[4];"
+        ),
+        1,
+    )
         + r#"
 
 function before_record(frame: i32): i32 {
@@ -1234,6 +1254,7 @@ fn recording_before_tick_hook_observes_input_and_failure_publishes_nothing() {
     let test_tree = TestTree(temp_dir("before_tick_hook"));
     let project = test_tree.0.join("windows_launch_smoke");
     copy_tree(&fixture, &project);
+    materialize_toolchain_stdlib(&project);
     let source_path = project.join("main.stasis");
     let source = fs::read_to_string(&source_path)
         .expect("read hook fixture")

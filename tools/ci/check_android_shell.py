@@ -1477,6 +1477,9 @@ def main() -> int:
     assert "Stasis Workshop IT-025" in native
     render_main = read("samples/render_parity/main.stasis")
     render_frame = read("samples/render_parity/frame.stasis")
+    canonical_graphics_import = 'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";'
+    assert render_main.startswith(canonical_graphics_import)
+    assert render_frame.startswith(canonical_graphics_import)
     assert "seam_touch_checksum" in render_main
     assert "input_pointer_x_n(0) * 1000.0" in render_main
     assert "append_parity_touch_marker" in render_frame

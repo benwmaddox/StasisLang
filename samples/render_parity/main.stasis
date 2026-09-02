@@ -1,4 +1,4 @@
-import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
 import "frame.stasis";
 
 // IT-025 reads this guest-owned value through the live JIT global bridge.  It

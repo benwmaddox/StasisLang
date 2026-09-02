@@ -39,7 +39,7 @@ public final class WorkshopTemplateCatalogTest {
         WorkshopTemplateCatalog.Template parity = WorkshopTemplateCatalog.require("render-parity");
         assertEquals(1, parity.directoryMounts.length);
         assertEquals("stasis_stdlib", parity.directoryMounts[0].assetDirectory);
-        assertEquals("src/.stasis_cache/toolchain/src/stdlib",
+        assertEquals(".stasis_cache/toolchain/src/stdlib",
                 parity.directoryMounts[0].projectDirectory);
     }
 }
