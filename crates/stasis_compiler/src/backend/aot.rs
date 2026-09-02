@@ -2120,10 +2120,8 @@ mod tests {
         expected_clif_markers: &'static [(&'static str, &'static [&'static str])],
     }
 
-    const RENDER_TRACE_FIXTURE: &str = concat!(
-        include_str!("../../../../samples/render_parity/frame.stasis"),
-        include_str!("../../../../samples/render_parity/trace.stasis")
-    );
+    const RENDER_TRACE_FIXTURE: &str =
+        include_str!("../../../../samples/render_parity/trace.stasis");
 
     #[cfg(windows)]
     fn ensure_test_dynload_artifacts(deps_dir: &Path) -> (PathBuf, PathBuf) {

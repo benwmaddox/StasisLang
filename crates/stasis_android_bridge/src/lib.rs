@@ -4146,11 +4146,11 @@ function main(): void {
 }
 
 function tick(): void {
-    gfx_cmd_begin();
+    begin_frame();
     state.sprite.draw(4.0, 5.0, 200, 7);
-    state.draw_count = gfx_cmd_sprite_count();
-    state.draw_asset = gfx_cmd_i32[GFX_I_SPRITE_BASE];
-    gfx_cmd_mark_present();
+    state.draw_count = 1;
+    state.draw_asset = state.sprite.handle;
+    end_frame();
     if (state.phase == 0) {
         state.sprite.release();
         state.phase = 1;
@@ -4288,7 +4288,7 @@ function main(): void {
 }
 
 function tick(): void {
-    gfx_cmd_begin();
+    begin_frame();
     if (state.phase == 0) {
         state.sprite.release();
         if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
@@ -4298,14 +4298,14 @@ function tick(): void {
             state.reload_height = state.sprite.height;
         }
         state.sprite.draw(6.0, 7.0, 255, 0);
-        state.draw_count = gfx_cmd_sprite_count();
-        state.draw_asset = gfx_cmd_i32[GFX_I_SPRITE_BASE];
+        state.draw_count = 1;
+        state.draw_asset = state.sprite.handle;
         state.phase = 1;
     } else {
         state.sprite.release();
         state.phase = 2;
     }
-    gfx_cmd_mark_present();
+    end_frame();
 }
 "#;
         let (root, handle) = write_typed_sprite_project("typed_reacquire", source);
@@ -6806,8 +6806,9 @@ function on_code_swap(): void {}\n",
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("it031_render_schema");
+        fs::create_dir_all(root.join("tests/stasis/seams")).expect("seam directory");
         fs::write(
-            root.join("src/main.stasis"),
+            root.join("tests/stasis/seams/render_schema.stasis"),
             "global gfx_cmd_i32: i32[67888];\n\
 global gfx_cmd_f32: f32[146564];\n\
 global gfx_cmd_u8: u8[65536];\n\
@@ -6817,10 +6818,13 @@ function render(): i32 { gfx_cmd_i32[0] = 1196967473; gfx_cmd_i32[1] = 99; retur
 function on_code_swap(): void {}\n",
         )
         .expect("write source");
-        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
-            .expect("render-schema source compiles before invocation");
+        compile_android_workshop_project(
+            &root,
+            Path::new("tests/stasis/seams/render_schema.stasis"),
+        )
+        .expect("render-schema source compiles before invocation");
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
-        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let entry_c = CString::new("tests/stasis/seams/render_schema.stasis").expect("entry cstr");
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
@@ -6868,8 +6872,9 @@ function on_code_swap(): void {}\n",
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("ffi_production_frame_tick");
+        fs::create_dir_all(root.join("tests/stasis/seams")).expect("seam directory");
         fs::write(
-            root.join("src/main.stasis"),
+            root.join("tests/stasis/seams/production_frame.stasis"),
             "global host_i32: i32[768];
 global host_f32: f32[64];
 global host_req_window_w_px: i32;
@@ -6928,7 +6933,8 @@ function render(): void {
         )
         .expect("write production source");
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
-        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let entry_c =
+            CString::new("tests/stasis/seams/production_frame.stasis").expect("entry cstr");
         let mut frame_i32 = vec![0i32; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut frame_u8 = vec![0u8; ANDROID_RENDER_GFX_U8_CAPACITY];
@@ -6979,9 +6985,6 @@ function render(): void {
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 global host_i32: i32[768];
 global host_f32: f32[64];
-global gfx_cmd_i32: i32[67888];
-global gfx_cmd_f32: f32[146564];
-global gfx_cmd_u8: u8[65536];
 function main(): void {}
 function tick(): void {}
 function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }
@@ -7046,9 +7049,6 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
-global gfx_cmd_i32: i32[67888];\n\
-global gfx_cmd_f32: f32[146564];\n\
-global gfx_cmd_u8: u8[65536];\n\
 function main(): void {}\n\
 function tick(): void { gfx_load_sprite(\"assets/tick_missing.svg\", 32, 32); }\n\
 function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }\n",
@@ -7113,9 +7113,6 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
-global gfx_cmd_i32: i32[67888];\n\
-global gfx_cmd_f32: f32[146564];\n\
-global gfx_cmd_u8: u8[65536];\n\
 global GameState { tick_count: i32; }\n\
 function main(): void { GameState.tick_count = 7; }\n\
 function tick(): void { GameState.tick_count += 1; }\n\

@@ -1478,10 +1478,10 @@ def main() -> int:
     render_main = read("samples/render_parity/main.stasis")
     render_frame = read("samples/render_parity/frame.stasis")
     assert "seam_touch_checksum" in render_main
-    assert "host_f32[4] * 1000.0" in render_main
+    assert "input_pointer_x_n(0) * 1000.0" in render_main
     assert "append_parity_touch_marker" in render_frame
     assert "marker_active" in render_frame
-    assert "PARITY_GFX_F_RECT_REVERSE_BASE - 8" in render_frame
+    assert "fill_rect(i32_to_f32(marker_x_i32) - 8.0" in render_frame
     acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java")
     assert "Stasis Workshop IT-026" in acceptance
     assert "all_invalid_unchanged" in acceptance
@@ -1644,7 +1644,9 @@ def main() -> int:
     assert '"label": "Stasis Pong"' in pong_project
     assert '"orientation": "sensorLandscape"' in pong_project
     preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
-    assert "function on_code_swap(): void { pong_game_on_code_swap(); pong_host_render(); }" in preview_adapter
+    assert 'import "/vendor/stasis/src/stdlib/graphics.stasis";' in preview_adapter
+    assert "begin_frame();" in preview_adapter and "draw_sprite(" in preview_adapter
+    assert "gfx_cmd_i32" not in preview_adapter
     assert '"encoding": "svg"' in pong_manifest
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")

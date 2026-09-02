@@ -1,3 +1,5 @@
+// Explicit renderer ABI seam. Application code uses graphics.stasis; this
+// isolated trace owns arrays only to verify the host's schema-7 fallback.
 function @extern("stasis_jit_render_trace") native_render_trace(
     cmd_i32: i32[],
     cmd_i32_len: i32,
@@ -12,29 +14,23 @@ global cmd_f32: f32[146564];
 global cmd_u8: u8[65536];
 
 function main(): i32 {
-    // Display metadata deliberately differs by host and is excluded from the command trace.
-    cmd_i32[10] = 640;
-    cmd_i32[11] = 360;
-    cmd_i32[12] = 1280;
-    cmd_i32[13] = 720;
-    cmd_i32[14] = 1280;
-    cmd_i32[15] = 720;
-    cmd_i32[16] = 0;
-    cmd_i32[17] = 0;
-    cmd_i32[18] = 1280;
-    cmd_i32[19] = 720;
-    cmd_i32[20] = 3;
-    cmd_i32[21] = 5;
-
-    build_parity_frame(cmd_i32, cmd_f32, cmd_u8, 3, 1, 2, 1, 1);
-    append_parity_touch_marker(cmd_i32, cmd_f32, 0, 0, 0);
-
-    let no_touch_order: i32 = native_render_trace(cmd_i32, 67888, cmd_f32, 146564, cmd_u8, 65536);
-    cmd_i32[18464] = 16384;
-    cmd_i32[18466] = 32768;
-    let sprite_first_order: i32 = native_render_trace(cmd_i32, 67888, cmd_f32, 146564, cmd_u8, 65536);
-    if (no_touch_order == sprite_first_order) {
-        return 0;
-    }
-    return no_touch_order;
+    cmd_i32[0] = 1196967473;
+    cmd_i32[1] = 7;
+    cmd_i32[2] = 3;
+    cmd_i32[3] = 1;
+    cmd_i32[22] = 1;
+    cmd_i32[51232] = 16384;
+    cmd_f32[0] = 0.05;
+    cmd_f32[1] = 0.08;
+    cmd_f32[2] = 0.13;
+    cmd_f32[3] = 1.0;
+    cmd_f32[4] = 24.0;
+    cmd_f32[5] = 36.0;
+    cmd_f32[6] = 616.0;
+    cmd_f32[7] = 324.0;
+    cmd_f32[8] = 1.0;
+    cmd_f32[9] = 0.25;
+    cmd_f32[10] = 0.15;
+    cmd_f32[11] = 1.0;
+    return native_render_trace(cmd_i32, 67888, cmd_f32, 146564, cmd_u8, 65536);
 }

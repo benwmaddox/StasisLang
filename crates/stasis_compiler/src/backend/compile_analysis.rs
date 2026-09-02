@@ -1189,6 +1189,10 @@ pub(crate) fn collect_struct_primitive_leaf_fields(
         }
         if let Some((element_type_name, extent_text)) = parse_array_type_parts(&field.type_name) {
             if !extent_text.is_empty() {
+                if extent_text.bytes().all(|byte| byte.is_ascii_digit()) {
+                    let type_id = type_table.resolve_or_intern(field.type_name.trim())?;
+                    out.insert(field_path, type_id);
+                }
                 continue;
             }
             if resolve_primitive_scalar_type_id(element_type_name, type_table).is_some() {

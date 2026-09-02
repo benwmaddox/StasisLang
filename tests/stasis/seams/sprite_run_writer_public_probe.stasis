@@ -2,6 +2,50 @@ import "../../../src/stdlib/graphics.stasis";
 
 global probe_writer: SpriteRunWriter;
 global blocker_writer: SpriteRunWriter;
+global line_batch: LineBatch;
+
+function line_batch_public_probe(): i32 {
+    begin_frame();
+    line_batch.reset_lines();
+    for (let i: i32 = 0; i < 512; i += 1) {
+        if (!line_batch.append_line(i32_to_f32(i), 1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.4)) {
+            return 20;
+        }
+    }
+    if (line_batch.append_line(99.0, 1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.4)) {
+        return 21;
+    }
+    line_batch.draw();
+    if (gfx_cmd_line_count() != 512 || gfx_cmd_order_count() != 512) {
+        return 22;
+    }
+    if (gfx_cmd_f32[GFX_F_LINE_BASE] != 0.0 || gfx_cmd_f32[GFX_F_LINE_BASE + 511 * 8] != 511.0) {
+        return 23;
+    }
+    line_batch.count = 513;
+    begin_frame();
+    line_batch.draw();
+    if (gfx_cmd_line_count() != 512 || gfx_cmd_dropped_lines() != 0) {
+        return 24;
+    }
+    begin_frame();
+    for (let i: i32 = 0; i < 9500; i += 1) {
+        fill_rect(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    }
+    line_batch.draw();
+    if (gfx_cmd_rect_count() != 9500 || gfx_cmd_line_count() != 500 || gfx_cmd_dropped_lines() != 12 || gfx_cmd_order_count() != 10000) {
+        return 25;
+    }
+    if (
+        gfx_cmd_i32[GFX_I_ORDER_BASE] != GFX_ORDER_RECT * GFX_ORDER_KIND_SCALE
+        || gfx_cmd_i32[GFX_I_ORDER_BASE + 9499] != GFX_ORDER_RECT * GFX_ORDER_KIND_SCALE + 9499
+        || gfx_cmd_i32[GFX_I_ORDER_BASE + 9500] != GFX_ORDER_LINE * GFX_ORDER_KIND_SCALE
+        || gfx_cmd_i32[GFX_I_ORDER_BASE + 9999] != GFX_ORDER_LINE * GFX_ORDER_KIND_SCALE + 499
+    ) {
+        return 26;
+    }
+    return 0;
+}
 
 function probe_writer_lifecycle(): i32 {
     begin_frame();
@@ -42,6 +86,10 @@ function probe_writer_lifecycle(): i32 {
 }
 
 function sprite_run_writer_public_probe(): i32 {
+    let batch: i32 = line_batch_public_probe();
+    if (batch != 0) {
+        return batch;
+    }
     let lifecycle: i32 = probe_writer_lifecycle();
     if (lifecycle != 0) {
         return lifecycle;

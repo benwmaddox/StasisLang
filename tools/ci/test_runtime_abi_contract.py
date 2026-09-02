@@ -100,45 +100,16 @@ class RuntimeAbiContractTests(unittest.TestCase):
         )
         self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
 
-    def test_vscode_render_fixture_rejects_legacy_version_and_capacity(self):
-        mutations = (
-            ("gfx_cmd_i32[1] = 7;", "gfx_cmd_i32[1] = 6;", "STASIS_RENDER_VERSION"),
-            (
-                "global gfx_cmd_f32: f32[146564];",
-                "global gfx_cmd_f32: f32[125060];",
-                "gfx_cmd_f32.length",
-            ),
-        )
-        for current, stale, field in mutations:
-            with self.subTest(field=field):
-                failures, _ = self.run_with(
-                    contract.VSCODE_RENDER_FIXTURE, current, stale
-                )
-                failure = next(failure for failure in failures if failure.field == field)
-                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
-                self.assertEqual(
-                    "vscode-stasis/test/fixture/src/main.stasis", failure.consumer
-                )
-
-    def test_manual_sprite_fixtures_reject_legacy_version_and_stride(self):
+    def test_public_render_fixtures_require_canonical_calls(self):
         mutations = (
             (
-                contract.WINDOWS_LAUNCH_FIXTURE,
-                "gfx_cmd_f32[80017] = 204.0;",
-                "gfx_cmd_f32[80012] = 204.0;",
-                "sprite_f32_stride",
+                contract.VSCODE_RENDER_FIXTURE, "draw_line(", "legacy_line(", "public_graphics_path",
             ),
             (
-                contract.WORKSHOP_PREVIEW_ADAPTER,
-                "let f_base: i32 = 80004 + index * 13;",
-                "let f_base: i32 = 80004 + index * 8;",
-                "sprite_f32_stride",
+                contract.WINDOWS_LAUNCH_FIXTURE, "png_sprite.draw(", "legacy_sprite(", "public_graphics_path",
             ),
             (
-                contract.WORKSHOP_PREVIEW_ADAPTER,
-                "gfx_cmd_i32[1] = 7;",
-                "gfx_cmd_i32[1] = 6;",
-                "STASIS_RENDER_VERSION",
+                contract.WORKSHOP_PREVIEW_ADAPTER, "begin_frame();", "legacy_begin();", "public_graphics_path",
             ),
         )
         for path, current, stale, field in mutations:

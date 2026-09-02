@@ -4,7 +4,7 @@ import "graphics.stasis";
 // Background uses 9 sprites (3x3 grid). Icons are sprites; text uses the command buffer.
 
 function ui_draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, a: i32): void {
-    gfx_cmd_sprite(handle, x, y, w, h, 0, a);
+    draw_sprite(handle, x, y, w, h, 0, a);
 }
 
 function ui_row_button_width(available_w: f32, count: i32, gap: f32): f32 {
@@ -129,5 +129,5 @@ function ui_draw_button_9slice(
     let text_w: f32 = measure_text(font_handle, label);
     let text_x: f32 = content_x +(content_w - text_w) * 0.5;
     let text_y: f32 = y +(h * 0.55);
-    gfx_cmd_text(font_handle, label, text_x, text_y, text_r, text_g, text_b, text_a);
+    draw_text(font_handle, label, text_x, text_y, text_r, text_g, text_b, text_a);
 }

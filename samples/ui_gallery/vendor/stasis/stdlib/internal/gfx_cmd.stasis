@@ -146,29 +146,6 @@ function @inline gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_DROPPED_SPRITE_RUNS] = 0;
 }
 
-// Begin a new frame without clearing counts/streams (persistent-mode usage).
-//
-// Intended usage:
-// - Prebuild streams once (set counts + write entries).
-// - Each tick call `gfx_cmd_begin_persistent()`, patch only changed entries, and `gfx_cmd_mark_present()`.
-function @inline gfx_cmd_begin_persistent(): void {
-    gfx_sprite_writer_frame_generation = gfx_sprite_writer_frame_generation + 1;
-    if (gfx_sprite_writer_frame_generation <= 0) {
-        gfx_sprite_writer_frame_generation = 1;
-    }
-    gfx_sprite_writer_token = 0;
-    gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;
-    gfx_cmd_i32[GFX_I_VERSION] = GFX_CMD_VERSION;
-    gfx_cmd_i32[GFX_I_FLAGS] = 0;
-    gfx_cmd_i32[GFX_I_DROPPED_LINES] = 0;
-    gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = 0;
-    gfx_cmd_i32[GFX_I_DROPPED_TEXT] = 0;
-    gfx_cmd_i32[GFX_I_DROPPED_ORDER] = 0;
-    gfx_cmd_i32[GFX_I_DROPPED_RECTS] = 0;
-    gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = 0;
-    gfx_cmd_i32[GFX_I_DROPPED_SPRITE_RUNS] = 0;
-}
-
 function @inline gfx_cmd_append_order(kind: i32, index: i32): bool {
     let order_index: i32 = gfx_cmd_i32[GFX_I_ORDER_COUNT];
     if (order_index < 0 || order_index >= GFX_MAX_ORDER) {
@@ -266,7 +243,7 @@ function gfx_cmd_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a:
 
 // Reserve one unpublished semantic sprite run. Returns an opaque frame-local
 // token, or zero when any required capacity is unavailable.
-function gfx_cmd_sprite_run_reserve(max_count: i32, clip: i32, material: i32, blend: i32, filter: i32, pass: i32, flags: i32): i32 {
+function @effects(graphics) gfx_cmd_sprite_run_reserve(max_count: i32, clip: i32, material: i32, blend: i32, filter: i32, pass: i32, flags: i32): i32 {
     let start: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
     let run: i32 = gfx_cmd_i32[GFX_I_SPRITE_RUN_COUNT];
     let order: i32 = gfx_cmd_i32[GFX_I_ORDER_COUNT];
@@ -373,7 +350,7 @@ function gfx_cmd_sprite_run_write(
     return true;
 }
 
-function gfx_cmd_sprite_run_finalize(token: i32, actual_count: i32): bool {
+function @effects(graphics) gfx_cmd_sprite_run_finalize(token: i32, actual_count: i32): bool {
     if (token <= 0 || token != gfx_sprite_writer_token || actual_count < 0 || actual_count > gfx_sprite_writer_written) {
         return false;
     }
@@ -404,7 +381,7 @@ function gfx_cmd_sprite_run_finalize(token: i32, actual_count: i32): bool {
     return true;
 }
 
-function gfx_cmd_sprite_run_cancel(token: i32): bool {
+function @effects(graphics) gfx_cmd_sprite_run_cancel(token: i32): bool {
     if (token <= 0 || token != gfx_sprite_writer_token) {
         return false;
     }
@@ -469,74 +446,6 @@ function gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i3
         alpha = 255;
     }
     gfx_cmd_sprite_semantic(handle, x, y, w, h, 0.0, 0.0, 0.0, 0.0, w * 0.5, h * 0.5, 1.0, 1.0, i32_to_f32(rot_deg), -256 + alpha);
-}
-
-function gfx_cmd_lines_from(lines: f32[], count: i32): void {
-    if (count <= 0) {
-        return;
-    }
-
-    let start: i32 = gfx_cmd_i32[GFX_I_LINE_COUNT];
-    let rect_count: i32 = gfx_cmd_i32[GFX_I_RECT_COUNT];
-    if (start < 0 || rect_count < 0 || rect_count > GFX_MAX_GEOMETRY || start > GFX_MAX_GEOMETRY - rect_count) {
-        gfx_cmd_i32[GFX_I_DROPPED_LINES] = gfx_cmd_i32[GFX_I_DROPPED_LINES] + count;
-        return;
-    }
-    let avail: i32 = GFX_MAX_GEOMETRY - rect_count - start;
-    let n: i32 = count;
-    if (n > avail) {
-        n = avail;
-        gfx_cmd_i32[GFX_I_DROPPED_LINES] = gfx_cmd_i32[GFX_I_DROPPED_LINES] +(count - n);
-    }
-    if (n <= 0) {
-        return;
-    }
-
-    let dst: i32 = GFX_F_LINE_BASE + start * GFX_LINE_STRIDE_F32;
-    let total: i32 = n * GFX_LINE_STRIDE_F32;
-    sys_memcpy_f32(gfx_cmd_f32, dst, lines, 0, total);
-    let order_i: i32 = 0;
-    for (order_i = 0; order_i < n; order_i = order_i + 1) {
-        if (!gfx_cmd_append_order(GFX_ORDER_LINE, start + order_i)) {
-            gfx_cmd_i32[GFX_I_DROPPED_LINES] = gfx_cmd_i32[GFX_I_DROPPED_LINES] +(n - order_i);
-            n = order_i;
-        }
-    }
-    gfx_cmd_i32[GFX_I_LINE_COUNT] = start + n;
-}
-
-function gfx_cmd_set_line_at(index: i32, x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
-    let rect_count: i32 = gfx_cmd_i32[GFX_I_RECT_COUNT];
-    if (index < 0 || rect_count < 0 || rect_count > GFX_MAX_GEOMETRY || index >= GFX_MAX_GEOMETRY - rect_count) {
-        return;
-    }
-
-    let base: i32 = GFX_F_LINE_BASE + index * GFX_LINE_STRIDE_F32;
-    gfx_cmd_f32[base + 0] = x1;
-    gfx_cmd_f32[base + 1] = y1;
-    gfx_cmd_f32[base + 2] = x2;
-    gfx_cmd_f32[base + 3] = y2;
-    gfx_cmd_f32[base + 4] = r;
-    gfx_cmd_f32[base + 5] = g;
-    gfx_cmd_f32[base + 6] = b;
-    gfx_cmd_f32[base + 7] = a;
-}
-
-function gfx_cmd_set_rect_at(index: i32, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
-    let line_count: i32 = gfx_cmd_i32[GFX_I_LINE_COUNT];
-    if (index < 0 || line_count < 0 || line_count > GFX_MAX_GEOMETRY || index >= GFX_MAX_GEOMETRY - line_count) {
-        return;
-    }
-
-    let base: i32 = GFX_F_RECT_REVERSE_BASE - index * GFX_GEOMETRY_STRIDE_F32;
-    gfx_cmd_f32[base + 0] = x;
-    gfx_cmd_f32[base + 1] = y;
-    gfx_cmd_f32[base + 2] = w;
-    gfx_cmd_f32[base + 3] = h;
-    gfx_cmd_f32[base + 4] = r;
-    gfx_cmd_f32[base + 5] = g;
-    gfx_cmd_f32[base + 6] = b;
-    gfx_cmd_f32[base + 7] = a;
 }
 
 function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
@@ -620,60 +529,8 @@ function gfx_cmd_text_cached(font: i32, run_handle: i32, x: f32, y: f32, r: f32,
     gfx_cmd_i32[GFX_I_TEXT_COUNT] = i + 1;
 }
 
-function gfx_cmd_set_line_count(count: i32): void {
-    if (count < 0) {
-        count = 0;
-    }
-    let maximum: i32 = GFX_MAX_GEOMETRY - gfx_cmd_i32[GFX_I_RECT_COUNT];
-    if (maximum < 0) {
-        maximum = 0;
-    }
-    if (count > maximum) {
-        count = maximum;
-    }
-    gfx_cmd_i32[GFX_I_LINE_COUNT] = count;
-}
-
-function gfx_cmd_set_rect_count(count: i32): void {
-    if (count < 0) {
-        count = 0;
-    }
-    let maximum: i32 = GFX_MAX_GEOMETRY - gfx_cmd_i32[GFX_I_LINE_COUNT];
-    if (maximum < 0) {
-        maximum = 0;
-    }
-    if (count > maximum) {
-        count = maximum;
-    }
-    gfx_cmd_i32[GFX_I_RECT_COUNT] = count;
-}
-
-function gfx_cmd_set_text_count(count: i32): void {
-    if (count < 0) {
-        count = 0;
-    }
-    if (count > GFX_MAX_TEXT) {
-        count = GFX_MAX_TEXT;
-    }
-    gfx_cmd_i32[GFX_I_TEXT_COUNT] = count;
-}
-
-function gfx_cmd_set_text_bytes_used(bytes_used: i32): void {
-    if (bytes_used < 0) {
-        bytes_used = 0;
-    }
-    if (bytes_used > GFX_TEXT_MAX_BYTES) {
-        bytes_used = GFX_TEXT_MAX_BYTES;
-    }
-    gfx_cmd_i32[GFX_I_TEXT_BYTES_USED] = bytes_used;
-}
-
 function @inline gfx_cmd_submit(): void {
     gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
-}
-
-function @inline gfx_cmd_submit_no_present(): void {
-    return;
 }
 
 function @inline gfx_cmd_mark_present(): void {
@@ -730,8 +587,4 @@ function @inline gfx_cmd_dropped_text(): i32 {
 
 function @inline gfx_cmd_dropped_order(): i32 {
     return gfx_cmd_i32[GFX_I_DROPPED_ORDER];
-}
-
-function @inline gfx_cmd_text_bytes_used(): i32 {
-    return gfx_cmd_i32[GFX_I_TEXT_BYTES_USED];
 }

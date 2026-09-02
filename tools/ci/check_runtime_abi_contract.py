@@ -804,12 +804,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
 
     manual_fixture_texts = {
         path: without_c_comments(sources[path])
-        for path in (
-            VSCODE_RENDER_FIXTURE,
-            WINDOWS_LAUNCH_FIXTURE,
-            WORKSHOP_PREVIEW_ADAPTER,
-            *HOT_SWAP_FIXTURES,
-        )
+        for path in HOT_SWAP_FIXTURES
     }
     for fixture, fixture_text in manual_fixture_texts.items():
         for lane, render_name in (
@@ -856,56 +851,24 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                     f"current_v7_header[{index}]", expected, actual,
                 ))
 
-    manual_sprite_layouts = {
-        WINDOWS_LAUNCH_FIXTURE: (
-            (
-                r"gfx_cmd_i32\s*\[\s*32\s*\]\s*=\s*png_sprite\s*;",
-                r"gfx_cmd_i32\s*\[\s*35\s*\]\s*=\s*svg_sprite\s*;",
-                r"gfx_cmd_f32\s*\[\s*80004\s*\]\s*=\s*52\.0\s*;",
-            ),
-            r"gfx_cmd_f32\s*\[\s*80017\s*\]\s*=\s*204\.0\s*;",
-            tuple(
-                rf"gfx_cmd_f32\s*\[\s*{index}\s*\]\s*=\s*{value}\s*;"
-                for index, value in (
-                    (80008, "0\\.0"), (80009, "0\\.0"),
-                    (80010, "0\\.0"), (80011, "0\\.0"),
-                    (80014, "1\\.0"), (80015, "1\\.0"),
-                    (80021, "0\\.0"), (80022, "0\\.0"),
-                    (80023, "0\\.0"), (80024, "0\\.0"),
-                    (80027, "1\\.0"), (80028, "1\\.0"),
-                )
-            ),
-        ),
-        WORKSHOP_PREVIEW_ADAPTER: (
-            (
-                r"let\s+i_base\s*:\s*i32\s*=\s*32\s*\+\s*index\s*\*\s*3\s*;",
-                r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*13\s*;",
-            ),
-            r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*13\s*;",
-            tuple(
-                rf"gfx_cmd_f32\s*\[\s*f_base\s*\+\s*{offset}\s*\]\s*=\s*{value}\s*;"
-                for offset, value in ((4, "0\\.0"), (5, "0\\.0"), (6, "0\\.0"), (7, "0\\.0"), (10, "1\\.0"), (11, "1\\.0"), (12, "0\\.0"))
-            ),
-        ),
+    public_render_fixtures = {
+        VSCODE_RENDER_FIXTURE: ("begin_frame();", "draw_line("),
+        WINDOWS_LAUNCH_FIXTURE: ("begin_frame();", "png_sprite.draw(", "smoke_label.draw("),
+        WORKSHOP_PREVIEW_ADAPTER: ("begin_frame();", "draw_sprite("),
     }
-    for fixture, (base_patterns, stride_pattern, uv_patterns) in manual_sprite_layouts.items():
+    for fixture, required_calls in public_render_fixtures.items():
+        text = sources[fixture]
         checks += 1
-        if not all(re.search(pattern, manual_fixture_texts[fixture]) for pattern in base_patterns):
+        if "stdlib/graphics.stasis\";" not in text or any(call not in text for call in required_calls):
             failures.append(Mismatch(
-                label(RENDER_HEADER), label(fixture), "sprite_lane_bases",
-                "current v7 i32/f32 sprite bases", "missing",
+                label(RENDER_HEADER), label(fixture), "public_graphics_path",
+                "graphics import and canonical public calls", "missing",
             ))
         checks += 1
-        if re.search(stride_pattern, manual_fixture_texts[fixture]) is None:
+        if re.search(r"\b(?:gfx_cmd_|gfx_sprite_writer_|GFX_)", text):
             failures.append(Mismatch(
-                label(RENDER_HEADER), label(fixture), "sprite_f32_stride",
-                "current v7 stride 13", "missing",
-            ))
-        checks += 1
-        if not all(re.search(pattern, manual_fixture_texts[fixture]) for pattern in uv_patterns):
-            failures.append(Mismatch(
-                label(RENDER_HEADER), label(fixture), "sprite_source_transform_defaults",
-                "explicit full-source sentinel, unit scale, and zero rotation", "missing",
+                label(RENDER_HEADER), label(fixture), "public_graphics_boundary",
+                "no command-storage identifiers", "internal identifier present",
             ))
 
     parity_manifest_text = sources[RENDER_PARITY_MANIFEST]

@@ -2795,6 +2795,71 @@ pub(crate) fn emit_simple_statements(
                             )?;
                             continue;
                         }
+                        if let Some((base, field)) = collection_path.split_once('.') {
+                            if let Some(local) = values_by_name.get(base).copied() {
+                                if let Some(collection_type) = named_struct_field_types
+                                    .get(&local.type_id)
+                                    .and_then(|fields| fields.get(field))
+                                    .copied()
+                                {
+                                    if let Some(element_type) =
+                                        type_table.indexed_element_type_id(collection_type)
+                                    {
+                                        if !suffix.is_empty() || element_type != TYPE_ID_F32 {
+                                            return Err(format!(
+                                                "unsupported indexed receiver field '{}[...].{}'",
+                                                collection_path, suffix
+                                            ));
+                                        }
+                                        if *op != AssignOp::Set
+                                            || !are_assignment_types_compatible(
+                                                element_type,
+                                                rhs.type_id,
+                                                type_table,
+                                            )
+                                        {
+                                            return Err(format!(
+                                                "unsupported indexed receiver assignment for '{}'",
+                                                collection_path
+                                            ));
+                                        }
+                                        let index_binding = emit_simple_expression(
+                                            builder,
+                                            index,
+                                            Some(TYPE_ID_I32),
+                                            values_by_name,
+                                            runtime_call_refs,
+                                            internal_calls,
+                                            call_signatures,
+                                            type_table,
+                                            global_path_types,
+                                            constant_values,
+                                            collection_infos,
+                                            named_struct_field_types,
+                                            foreach_bindings,
+                                        )?;
+                                        let index_binding =
+                                            normalize_index_binding(index_binding, type_table)?;
+                                        let collection_hash = emit_local_struct_field_path_hash(
+                                            builder.use_var(local.var),
+                                            field,
+                                            builder,
+                                        );
+                                        let no_field = builder.ins().iconst(types::I32, 0);
+                                        builder.ins().call(
+                                            runtime_call_refs.global_f32_array_store,
+                                            &[
+                                                collection_hash,
+                                                no_field,
+                                                index_binding.value,
+                                                rhs.value,
+                                            ],
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         let Some(collection_info) = collection_infos.get(collection_path) else {
                             return Err(format!(
                                 "unknown indexed assignment collection '{}' in current jit path",
@@ -4377,6 +4442,50 @@ pub(crate) fn emit_simple_expression(
                     suffix,
                     index_binding,
                 );
+            }
+            if let Some((base, field)) = collection_path.split_once('.') {
+                if let Some(local) = values_by_name.get(base).copied() {
+                    if let Some(collection_type) = named_struct_field_types
+                        .get(&local.type_id)
+                        .and_then(|fields| fields.get(field))
+                        .copied()
+                    {
+                        if type_table.indexed_element_type_id(collection_type) == Some(TYPE_ID_F32)
+                            && suffix.is_empty()
+                        {
+                            let index_binding = emit_simple_expression(
+                                builder,
+                                index,
+                                Some(TYPE_ID_I32),
+                                values_by_name,
+                                runtime_call_refs,
+                                internal_calls,
+                                call_signatures,
+                                type_table,
+                                global_path_types,
+                                constant_values,
+                                collection_infos,
+                                named_struct_field_types,
+                                foreach_bindings,
+                            )?;
+                            let index_binding = normalize_index_binding(index_binding, type_table)?;
+                            let collection_hash = emit_local_struct_field_path_hash(
+                                builder.use_var(local.var),
+                                field,
+                                builder,
+                            );
+                            let no_field = builder.ins().iconst(types::I32, 0);
+                            let call = builder.ins().call(
+                                runtime_call_refs.global_f32_array_load,
+                                &[collection_hash, no_field, index_binding.value],
+                            );
+                            return Ok(ValueBinding {
+                                value: builder.inst_results(call)[0],
+                                type_id: TYPE_ID_F32,
+                            });
+                        }
+                    }
+                }
             }
             let Some(collection_info) = collection_infos.get(collection_path) else {
                 return Err(format!(

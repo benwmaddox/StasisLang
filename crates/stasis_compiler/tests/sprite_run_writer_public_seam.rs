@@ -203,6 +203,9 @@ fn public_writer_contract_and_brickout_compile() {
     assert!(GRAPHICS.contains("function reserve(self: SpriteRunWriter, max_count: i32"));
     assert!(!BRICKOUT.contains("let sprites: SpriteRunWriter"));
     assert!(BRICKOUT.contains("state.gfx.sprites.reserve("));
+    assert!(GRAPHICS.contains("struct LineBatch"));
+    assert!(!GRAPHICS.contains("function draw_lines("));
+    assert!(BRICKOUT.contains("state.gfx.lines.draw()"));
 
     let mut jit = JitProcess::new();
     jit.set_project_root(repository_root().to_string_lossy())
