@@ -415,6 +415,14 @@ def main() -> int:
     assert "SparseArray<SpriteTexture>" in workshop_textures
     assert "projectChanged(projectRootPath, currentProjectRoot)" in workshop_textures
     assert "clearTextures();" in workshop_textures
+    assert "stasis.workshop_resource_scope.v1" in read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopResourceScopeAcceptance.java"
+    )
+    assert "recreateEglContextForAcceptance" in activity
+    assert "setPreserveEGLContextOnPause(false)" in activity
+    assert "acceptanceStaleGenerationRejects" in workshop_textures
+    assert "duplicate_restore_uploads" in workshop_textures
+    assert "lifecycle_renderer_generation" in activity
     assert "private final int[] deletedTexture = new int[1]" in workshop_textures
     assert "extractIntField" in activity
     assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_HEADER_SIZE]" in activity

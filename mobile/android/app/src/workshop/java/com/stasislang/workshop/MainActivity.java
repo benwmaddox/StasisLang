@@ -91,6 +91,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
@@ -323,6 +324,7 @@ public final class MainActivity extends Activity {
     private boolean jniFrameAbiAcceptanceRun;
     private boolean workshopTouchAcceptanceRun;
     private boolean workshopHotEditAcceptanceRun;
+    private boolean workshopResourceScopeAcceptanceRun;
     private boolean workshopDiagnosticSeamAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
@@ -1402,7 +1404,27 @@ public final class MainActivity extends Activity {
                     }
                 }
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
-                        && workshopHotEditAcceptanceRun && !workshopDiagnosticSeamAcceptanceRun) {
+                        && workshopHotEditAcceptanceRun && !workshopResourceScopeAcceptanceRun) {
+                    String resourceScopeResult = WorkshopResourceScopeAcceptance.run(
+                            MainActivity.this);
+                    workshopResourceScopeAcceptanceRun = true;
+                    boolean resourceScopePassed = false;
+                    try {
+                        resourceScopePassed = "passed".equals(
+                                new JSONObject(resourceScopeResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!resourceScopePassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-029 resource-scope acceptance failed: "
+                                + resourceScopeResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopResourceScopeAcceptanceRun
+                        && !workshopDiagnosticSeamAcceptanceRun) {
                     String diagnosticResult = WorkshopDiagnosticSeamAcceptance.run(
                             MainActivity.this, projectRootPath());
                     workshopDiagnosticSeamAcceptanceRun = true;
@@ -2795,7 +2817,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private boolean activateProject(WorkshopProjectRegistry.ProjectInfo project) {
+    boolean activateProject(WorkshopProjectRegistry.ProjectInfo project) {
         if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project switch blocked while AI, GitHub, or project I/O is active");
@@ -5155,6 +5177,97 @@ public final class MainActivity extends Activity {
                     + JSONObject.quote(error.getMessage() == null ? error.getClass().getSimpleName()
                             : error.getMessage()) + "}";
         }
+    }
+
+    JSONObject runIt029Frame(String projectRoot, String phase, int sequence) throws Exception {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || gamePreview == null) {
+            throw new IllegalStateException("IT-029 preview unavailable");
+        }
+        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+                Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
+                nativeFrameValues);
+        if (status != 0) throw new IllegalStateException(nativeLastFrameError());
+        int token = gamePreview.frameToken();
+        if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+            throw new IllegalStateException("IT-029 GLES token timeout");
+        }
+        final Bitmap[] captured = new Bitmap[1];
+        final String[] captureError = new String[1];
+        final StasisPreviewRenderer.LogicalFrameSnapshot[] logical =
+                new StasisPreviewRenderer.LogicalFrameSnapshot[1];
+        CountDownLatch captureReady = new CountDownLatch(1);
+        gamePreview.captureFrame((bitmap, error, frame) -> {
+            captured[0] = bitmap;
+            captureError[0] = error;
+            logical[0] = frame;
+            captureReady.countDown();
+        });
+        long captureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+        while (captureReady.getCount() != 0L && System.nanoTime() < captureDeadline) {
+            gamePreview.requestRender();
+            long remaining = captureDeadline - System.nanoTime();
+            if (remaining > 0L) {
+                captureReady.await(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(100L)),
+                        TimeUnit.NANOSECONDS);
+            }
+        }
+        if (captureReady.getCount() != 0L || captured[0] == null) {
+            throw new IllegalStateException("IT-029 capture failed: "
+                    + (captureError[0] == null ? "timeout" : captureError[0]));
+        }
+        byte[] png;
+        try {
+            png = encodeBitmapPng(captured[0]);
+        } finally {
+            captured[0].recycle();
+        }
+        File captureDirectory = new File(getExternalFilesDir(null), "it029");
+        if (!captureDirectory.isDirectory() && !captureDirectory.mkdirs()) {
+            throw new IOException("IT-029 capture directory could not be created");
+        }
+        File capture = new File(captureDirectory, phase + ".png");
+        FileOutputStream output = new FileOutputStream(capture);
+        try {
+            output.write(png);
+            output.getFD().sync();
+        } finally {
+            output.close();
+        }
+        StasisPreviewRenderer.LogicalFrameSnapshot frame = logical[0];
+        JSONArray sprites = new JSONArray();
+        for (int index = 0; index + 2 < frame.sprites.length; index += 3) {
+            sprites.put(frame.sprites[index]);
+        }
+        JSONArray fonts = new JSONArray();
+        JSONArray cachedText = new JSONArray();
+        for (int index = 0; index + 2 < frame.textMetadata.length; index += 3) {
+            fonts.put(frame.textMetadata[index]);
+            if (frame.textMetadata[index + 1] < 0) {
+                cachedText.put(0 - frame.textMetadata[index + 1]);
+            }
+        }
+        JSONObject resources = gamePreview.resourceScopeSnapshot();
+        return new JSONObject()
+                .put("schema", "stasis.workshop_resource_scope.v1")
+                .put("test_id", "IT-029").put("event", "case")
+                .put("status", "passed").put("phase", phase).put("sequence", sequence)
+                .put("project_root", new File(projectRoot).getCanonicalPath())
+                .put("frame_token", token).put("gles_presented", true)
+                .put("sprite_handles", sprites).put("font_handles", fonts)
+                .put("cached_text_handles", cachedText)
+                .put("direct_text_sha256", sha256Bytes(frame.textBytes))
+                .put("capture_path", capture.getAbsolutePath())
+                .put("capture_sha256", sha256Bytes(png))
+                .put("resources", resources)
+                .put("java_only", false).put("fallback", 0).put("stub", 0);
+    }
+
+    void resetIt029ResourceMetrics() {
+        if (gamePreview != null) gamePreview.resetResourceScopeMetrics();
+    }
+
+    boolean recreateIt029Surface() {
+        return gamePreview != null && gamePreview.recreateEglContextForAcceptance(5_000L);
     }
 
     String acceptanceReadSource(String projectRoot) throws IOException {
@@ -12047,6 +12160,7 @@ public final class MainActivity extends Activity {
 
         private final MainActivity activity;
         private final StasisPreviewRenderer renderer;
+        private final WorkshopTextureProvider textureProvider;
         private static final long ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS = 100L;
         private int touchX;
         private int touchY;
@@ -12059,8 +12173,8 @@ public final class MainActivity extends Activity {
             this.activity = activity;
             setEGLContextClientVersion(2);
             setPreserveEGLContextOnPause(true);
-            renderer = new StasisPreviewRenderer(
-                    new WorkshopTextureProvider(activity),
+            textureProvider = new WorkshopTextureProvider(activity);
+            renderer = new StasisPreviewRenderer(textureProvider,
                     activity::recordRenderTimeNanos);
             setRenderer(renderer);
             setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
@@ -12104,6 +12218,47 @@ public final class MainActivity extends Activity {
         int rectCount() {
             synchronized (renderer) {
                 return renderer.rectCount();
+            }
+        }
+
+        void resetResourceScopeMetrics() {
+            synchronized (renderer) {
+                textureProvider.resetAcceptanceMetrics();
+            }
+        }
+
+        JSONObject resourceScopeSnapshot() throws Exception {
+            synchronized (renderer) {
+                JSONObject snapshot = textureProvider.acceptanceSnapshot();
+                snapshot.put("lifecycle_surface_generation", renderer.surfaceGeneration());
+                snapshot.put("lifecycle_renderer_generation", renderer.rendererGeneration());
+                snapshot.put("resources_ready", renderer.resourcesReady());
+                return snapshot;
+            }
+        }
+
+        int rendererGeneration() {
+            synchronized (renderer) {
+                return renderer.rendererGeneration();
+            }
+        }
+
+        boolean recreateEglContextForAcceptance(long timeoutMillis) {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return false;
+            int previous = rendererGeneration();
+            setPreserveEGLContextOnPause(false);
+            try {
+                onHostPause();
+                onHostResume();
+                long deadline = SystemClock.uptimeMillis() + timeoutMillis;
+                while (SystemClock.uptimeMillis() < deadline) {
+                    requestRender();
+                    if (rendererGeneration() > previous) return true;
+                    SystemClock.sleep(10L);
+                }
+                return false;
+            } finally {
+                setPreserveEGLContextOnPause(true);
             }
         }
 

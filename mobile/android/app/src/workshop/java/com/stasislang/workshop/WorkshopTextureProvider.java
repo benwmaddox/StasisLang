@@ -15,7 +15,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HashMap;
 
 final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProvider {
@@ -58,6 +60,16 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private long atlasUploadBytes;
     private int atlasPageCreates;
     private int atlasLiveRegions;
+    private final HashSet<String> acceptanceUploads = new HashSet<>();
+    private final HashSet<String> acceptanceIdentities = new HashSet<>();
+    private int acceptanceProjectSwitches;
+    private int acceptanceStaleGenerationRejects;
+    private int acceptanceRestoreUploads;
+    private int acceptanceDuplicateUploads;
+    private int acceptanceMaximumAtlasPages;
+    private int acceptanceMaximumLiveRegions;
+    private int acceptanceMaximumTextTextures;
+    private int acceptanceMaximumFontEntries;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -67,6 +79,12 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     public void onResourceGenerationChanged(int nextSurfaceGeneration,
             int nextRendererGeneration, boolean discardGpuHandles,
             String nextTransitionReason) {
+        if (BuildConfig.STASIS_RENDER_ACCEPTANCE
+                && (surfaceGeneration != nextSurfaceGeneration
+                || rendererGeneration != nextRendererGeneration)) {
+            acceptanceStaleGenerationRejects += liveResourceCount();
+            acceptanceIdentities.clear();
+        }
         clearTextures(!discardGpuHandles);
         surfaceGeneration = nextSurfaceGeneration;
         rendererGeneration = nextRendererGeneration;
@@ -194,6 +212,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             if (reportRestoreTiming) restoredSprites += 1;
             textures.put(handle, replacement);
             spriteTexturesByHash.put(hash, replacement);
+            recordAcceptanceUpload("sprite", handle, hash);
             releaseSpriteIfUnreferenced(cached);
             return replacement.texture;
         } catch (Exception error) {
@@ -314,6 +333,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                     Math.max(1, Math.round(height / rasterScale)),
                     surfaceGeneration, rendererGeneration);
             textTextures.put(runHandle, cached);
+            if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+                recordAcceptanceUpload("cached_text", runHandle, sha256(text));
+            }
             if (reportRestoreTiming) {
                 textRasterNanos += System.nanoTime() - rasterStarted;
                 restoredTextRuns += 1;
@@ -347,6 +369,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                     fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale,
                     surfaceGeneration, rendererGeneration);
             dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
+            if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+                recordAcceptanceUpload("text", font, sha256(bytes));
+            }
             if (reportRestoreTiming) {
                 textRasterNanos += System.nanoTime() - rasterStarted;
                 restoredTextRuns += 1;
@@ -361,6 +386,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private String ensureCurrentProject() {
         String currentProjectRoot = activity.projectRootPath();
         if (projectChanged(projectRootPath, currentProjectRoot)) {
+            if (BuildConfig.STASIS_RENDER_ACCEPTANCE && projectRootPath != null) {
+                acceptanceProjectSwitches += 1;
+                acceptanceIdentities.clear();
+            }
             clearTextures();
             setProjectRoot(currentProjectRoot);
         }
@@ -377,6 +406,12 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         cached = new FontInfo(Typeface.createFromFile(resolved.getString("font_path")),
                 resolved.getInt("font_size"));
         fonts.put(handle, cached);
+        if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+            acceptanceIdentities.add("font:" + handle + ":" + canonicalProjectRoot()
+                    + ":" + resolved.optString("content_sha256", "") + ":"
+                    + resolved.getInt("font_size"));
+            updateAcceptanceMaximums();
+        }
         return cached;
     }
 
@@ -407,6 +442,109 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
 
     static boolean projectChanged(String boundRoot, String currentRoot) {
         return boundRoot == null || !boundRoot.equals(currentRoot);
+    }
+
+    static boolean generationMatches(int entrySurface, int entryRenderer,
+            int surface, int renderer) {
+        return entrySurface == surface && entryRenderer == renderer;
+    }
+
+    static String acceptanceIdentity(String kind, int handle, String projectRoot,
+            String exactIdentity) {
+        return kind + ":" + handle + ":" + projectRoot + ":" + exactIdentity;
+    }
+
+    synchronized void resetAcceptanceMetrics() {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
+        acceptanceUploads.clear();
+        acceptanceIdentities.clear();
+        acceptanceProjectSwitches = 0;
+        acceptanceStaleGenerationRejects = 0;
+        acceptanceRestoreUploads = 0;
+        acceptanceDuplicateUploads = 0;
+        acceptanceMaximumAtlasPages = 0;
+        acceptanceMaximumLiveRegions = 0;
+        acceptanceMaximumTextTextures = 0;
+        acceptanceMaximumFontEntries = 0;
+    }
+
+    synchronized JSONObject acceptanceSnapshot() throws Exception {
+        updateAcceptanceMaximums();
+        org.json.JSONArray handles = new org.json.JSONArray();
+        for (int index = 0; index < textures.size(); index += 1) {
+            handles.put(textures.keyAt(index));
+        }
+        org.json.JSONArray identities = new org.json.JSONArray();
+        ArrayList<String> ordered = new ArrayList<>(acceptanceIdentities);
+        java.util.Collections.sort(ordered);
+        for (String identity : ordered) identities.put(identity);
+        return new JSONObject()
+                .put("project_root", canonicalProjectRoot())
+                .put("surface_generation", surfaceGeneration)
+                .put("renderer_generation", rendererGeneration)
+                .put("sprite_handles", handles)
+                .put("identities", identities)
+                .put("project_switches", acceptanceProjectSwitches)
+                .put("stale_generation_rejections", acceptanceStaleGenerationRejects)
+                .put("restore_uploads", acceptanceRestoreUploads)
+                .put("duplicate_restore_uploads", acceptanceDuplicateUploads)
+                .put("atlas_pages", atlasPages.size() + dedicatedAtlasPages.size())
+                .put("atlas_live_regions", atlasLiveRegions)
+                .put("text_textures", textTextures.size() + dynamicTextTextures.size())
+                .put("font_entries", fonts.size())
+                .put("maximum_atlas_pages", acceptanceMaximumAtlasPages)
+                .put("maximum_live_regions", acceptanceMaximumLiveRegions)
+                .put("maximum_text_textures", acceptanceMaximumTextTextures)
+                .put("maximum_font_entries", acceptanceMaximumFontEntries);
+    }
+
+    private void recordAcceptanceUpload(String kind, int handle, String identity) {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
+        String exact = acceptanceIdentity(kind, handle, canonicalProjectRoot(), identity);
+        acceptanceIdentities.add(exact);
+        String upload = exact + ":" + surfaceGeneration + ":" + rendererGeneration;
+        if (!acceptanceUploads.add(upload)) acceptanceDuplicateUploads += 1;
+        acceptanceRestoreUploads += 1;
+        updateAcceptanceMaximums();
+    }
+
+    private void updateAcceptanceMaximums() {
+        acceptanceMaximumAtlasPages = Math.max(acceptanceMaximumAtlasPages,
+                atlasPages.size() + dedicatedAtlasPages.size());
+        acceptanceMaximumLiveRegions = Math.max(acceptanceMaximumLiveRegions, atlasLiveRegions);
+        acceptanceMaximumTextTextures = Math.max(acceptanceMaximumTextTextures,
+                textTextures.size() + dynamicTextTextures.size());
+        acceptanceMaximumFontEntries = Math.max(acceptanceMaximumFontEntries, fonts.size());
+    }
+
+    private int liveResourceCount() {
+        return textures.size() + textTextures.size() + dynamicTextTextures.size() + fonts.size();
+    }
+
+    private String canonicalProjectRoot() {
+        if (projectRootPath == null) return "";
+        try {
+            return new File(projectRootPath).getCanonicalPath();
+        } catch (IOException ignored) {
+            return new File(projectRootPath).getAbsolutePath();
+        }
+    }
+
+    private static String sha256(String text) {
+        return sha256(text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            StringBuilder output = new StringBuilder();
+            for (byte value : digest.digest(bytes)) {
+                output.append(String.format(java.util.Locale.US, "%02x", value & 0xff));
+            }
+            return output.toString();
+        } catch (Exception impossible) {
+            throw new IllegalStateException(impossible);
+        }
     }
 
     private void setProjectRoot(String root) {
@@ -721,7 +859,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
 
         boolean matches(int surface, int renderer) {
-            return surfaceGeneration == surface && rendererGeneration == renderer;
+            return generationMatches(surfaceGeneration, rendererGeneration, surface, renderer);
         }
     }
 
@@ -742,7 +880,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
 
         boolean matches(int surface, int renderer) {
-            return surfaceGeneration == surface && rendererGeneration == renderer;
+            return generationMatches(surfaceGeneration, rendererGeneration, surface, renderer);
         }
     }
 

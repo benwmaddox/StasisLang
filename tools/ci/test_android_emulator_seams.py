@@ -188,7 +188,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             ),
             sorted(release_artifacts),
         )
-        self.assertEqual(["android-workshop-it025-seam"], workshop_artifacts)
+        self.assertEqual(["android-workshop-it025-it029-seams"], workshop_artifacts)
         self.assertEqual(9, self.workflow.count("          name: android-"))
         self.assertEqual(9, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
@@ -527,6 +527,18 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("--viewport-y-search-radius=0", self.workshop_script)
         self.assertNotIn("--viewport-y-search-radius=1080", self.workshop_script)
         self.assertNotIn("min_coverage", self.workshop_script)
+
+    def test_workshop_collects_and_verifies_it029_identity_captures(self):
+        for phase in (
+            "project_a_first",
+            "project_b_before_recreation",
+            "project_b_after_recreation",
+            "project_a_return",
+        ):
+            self.assertIn(phase, self.workshop_script)
+        self.assertIn('"--it029-capture", $it029Capture', self.workshop_script)
+        self.assertIn("/sdcard/Android/data/$Package/files/it029/$phase.png",
+                      self.workshop_script)
 
     def test_workshop_fatal_scan_delegates_only_valid_it031_case_records(self):
         self.assertIn("ConvertFrom-Json -ErrorAction Stop", self.workshop_script)

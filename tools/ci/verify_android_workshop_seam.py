@@ -6,13 +6,16 @@ import argparse
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
 
 try:
     from .check_runtime_abi_contract import c_constants
+    from .verify_render_parity import read_capture
 except ImportError:
     from check_runtime_abi_contract import c_constants
+    from verify_render_parity import read_capture
 
 
 COMPILE = re.compile(
@@ -29,6 +32,10 @@ ACCEPTANCE_MARKER_ORDER_COUNT = 8
 HOT_EDIT_MARKER = re.compile(r"Stasis Workshop IT-028: (\{[^\r\n]+\})")
 HOT_EDIT_CASE_MARKER = re.compile(r"Stasis Workshop IT-028 case: (\{[^\r\n]+\})")
 HOT_EDIT_PRESENT = re.compile(r"Stasis Workshop IT-028 GLES: (\{[^\r\n]+\})")
+RESOURCE_SCOPE_CASE_MARKER = re.compile(
+    r"Stasis Workshop IT-029 case: (\{[^\r\n]+\})"
+)
+RESOURCE_SCOPE_MARKER = re.compile(r"Stasis Workshop IT-029: (\{[^\r\n]+\})")
 DIAGNOSTIC_CASE_MARKER = re.compile(r"Stasis Workshop IT-031 case: (\{[^\r\n]+\})")
 DIAGNOSTIC_MARKER = re.compile(r"Stasis Workshop IT-031: (\{[^\r\n]+\})")
 COMPILE_ERROR_LINE = re.compile(r"^[^\r\n]*CompileError[^\r\n]*\r?$", re.MULTILINE)
@@ -278,6 +285,138 @@ def verify_it028(log: str, after_position: int) -> dict:
     }
 
 
+def verify_it029(log: str, after_position: int) -> dict:
+    summaries = _json_markers(
+        RESOURCE_SCOPE_MARKER, log, "IT-029 marker", "IT-029"
+    )
+    if len(summaries) != 1:
+        raise SeamError(f"expected exactly one IT-029 summary, found {len(summaries)}")
+    summary_match, summary = summaries[0]
+    cases = _json_markers(
+        RESOURCE_SCOPE_CASE_MARKER, log, "IT-029 case", "IT-029"
+    )
+    if len(cases) != 4:
+        raise SeamError(f"expected exactly 4 IT-029 cases, found {len(cases)}")
+    if summary_match.start() <= after_position or any(
+        match.start() <= after_position or match.start() >= summary_match.start()
+        for match, _ in cases
+    ):
+        raise SeamError("IT-029 cases must follow IT-028 and precede their summary")
+    expected_phases = [
+        "project_a_first",
+        "project_b_before_recreation",
+        "project_b_after_recreation",
+        "project_a_return",
+    ]
+    values = [case for _, case in cases]
+    if [case.get("phase") for case in values] != expected_phases \
+            or [case.get("sequence") for case in values] != [1, 2, 3, 4]:
+        raise SeamError("IT-029 cases are missing or reordered")
+    required_summary = {
+        "schema": "stasis.workshop_resource_scope.v1",
+        "test_id": "IT-029",
+        "event": "resource_scope",
+        "status": "passed",
+        "ordered": True,
+        "same_handles": True,
+        "distinct_projects": True,
+        "distinct_assets": True,
+        "surface_recreated": True,
+        "restore_once": True,
+        "bounded": True,
+    }
+    if any(summary.get(key) != expected for key, expected in required_summary.items()):
+        raise SeamError("IT-029 summary does not report the complete scoped restore proof")
+    cleanup = summary.get("cleanup", {})
+    if cleanup.get("status") != "Restored" \
+            or cleanup.get("frame_status") != "passed" \
+            or not isinstance(cleanup.get("frame_token"), int) \
+            or cleanup["frame_token"] <= 0:
+        raise SeamError("IT-029 cleanup did not restore the packaged project")
+    if "cases" in summary:
+        raise SeamError("IT-029 summary must keep case evidence in bounded log records")
+
+    for case in values:
+        if case.get("schema") != "stasis.workshop_resource_scope.v1" \
+                or case.get("event") != "case" or case.get("status") != "passed" \
+                or case.get("gles_presented") is not True \
+                or case.get("java_only") is not False \
+                or case.get("fallback") != 0 or case.get("stub") != 0:
+            raise SeamError("IT-029 case lacks real JNI/GLES presentation evidence")
+        if not isinstance(case.get("frame_token"), int) or case["frame_token"] <= 0:
+            raise SeamError("IT-029 case lacks a positive frame token")
+        for field in ("sprite_handles", "font_handles", "cached_text_handles"):
+            handles = case.get(field)
+            if not isinstance(handles, list) or not handles \
+                    or any(not isinstance(handle, int) or handle == 0 for handle in handles):
+                raise SeamError(f"IT-029 {field} lacks stable nonzero handles")
+        for field in ("direct_text_sha256", "capture_sha256"):
+            if not re.fullmatch(r"[0-9a-f]{64}", str(case.get(field, ""))):
+                raise SeamError(f"IT-029 {field} is not exact SHA-256 evidence")
+        if not str(case.get("capture_path", "")).endswith(".png"):
+            raise SeamError("IT-029 capture evidence is missing a PNG path")
+        resources = case.get("resources")
+        if not isinstance(resources, dict) \
+                or resources.get("project_root") != case.get("project_root") \
+                or resources.get("resources_ready") is not True:
+            raise SeamError("IT-029 resource snapshot is not bound to its active project")
+        identities = resources.get("identities")
+        required_identity_kinds = ("sprite:", "font:", "cached_text:", "text:")
+        if not isinstance(identities, list) or len(identities) < 4 \
+                or any(case["project_root"] not in identity for identity in identities):
+            raise SeamError("IT-029 exact resource identities lost project scope")
+        if any(not any(identity.startswith(kind) for identity in identities)
+               for kind in required_identity_kinds):
+            raise SeamError("IT-029 sprite/font/text identity evidence is incomplete")
+        bounds = {
+            "maximum_atlas_pages": 2,
+            "maximum_live_regions": 6,
+            "maximum_text_textures": 2,
+            "maximum_font_entries": 1,
+        }
+        if any(not isinstance(resources.get(field), int)
+               or resources[field] < 0 or resources[field] > maximum
+               for field, maximum in bounds.items()):
+            raise SeamError("IT-029 resource counts are unbounded")
+
+    alpha, beta_before, beta_after, alpha_return = values
+    for field in ("sprite_handles", "font_handles", "cached_text_handles"):
+        if any(case[field] != alpha[field] for case in values[1:]):
+            raise SeamError(f"IT-029 colliding {field} changed across projects")
+    if alpha["project_root"] == beta_before["project_root"] \
+            or alpha["project_root"] != alpha_return["project_root"] \
+            or beta_before["project_root"] != beta_after["project_root"]:
+        raise SeamError("IT-029 project roots were reused or restored incorrectly")
+    if alpha["direct_text_sha256"] == beta_before["direct_text_sha256"] \
+            or alpha["capture_sha256"] == beta_before["capture_sha256"]:
+        raise SeamError("IT-029 project A/B asset identity was reused")
+    if beta_before["direct_text_sha256"] != beta_after["direct_text_sha256"] \
+            or beta_before["capture_sha256"] != beta_after["capture_sha256"] \
+            or alpha["direct_text_sha256"] != alpha_return["direct_text_sha256"] \
+            or alpha["capture_sha256"] != alpha_return["capture_sha256"]:
+        raise SeamError("IT-029 recreated or returned project restored the wrong identity")
+    alpha_identities = alpha["resources"]["identities"]
+    beta_identities = beta_before["resources"]["identities"]
+    if alpha_identities == beta_identities \
+            or alpha_identities != alpha_return["resources"]["identities"] \
+            or beta_identities != beta_after["resources"]["identities"]:
+        raise SeamError("IT-029 exact resource identities crossed a project or surface epoch")
+    before_resources = beta_before["resources"]
+    after_resources = beta_after["resources"]
+    if after_resources.get("lifecycle_renderer_generation", 0) \
+            <= before_resources.get("lifecycle_renderer_generation", 0) \
+            or after_resources.get("stale_generation_rejections", 0) \
+            <= before_resources.get("stale_generation_rejections", 0) \
+            or after_resources.get("restore_uploads") != 5 \
+            or after_resources.get("duplicate_restore_uploads") != 0:
+        raise SeamError("IT-029 stale generation was not rejected and restored exactly once")
+    captures = summary.get("captures")
+    if captures != [case["capture_path"] for case in values] \
+            or len(set(captures)) != 4:
+        raise SeamError("IT-029 summary capture artifacts are missing or reused")
+    return {"summary": summary, "cases": values, "_position": summary_match.start()}
+
+
 def verify_it031(log: str, after_position: int) -> dict | None:
     markers = _json_markers(DIAGNOSTIC_MARKER, log, "IT-031 diagnostic marker", "IT-031")
     if not markers:
@@ -286,13 +425,13 @@ def verify_it031(log: str, after_position: int) -> dict | None:
         raise SeamError(f"expected exactly one IT-031 summary, found {len(markers)}")
     marker_match, marker = markers[0]
     if marker_match.start() <= after_position:
-        raise SeamError("IT-031 summary must follow IT-028")
+        raise SeamError("IT-031 summary must follow IT-029")
     case_markers = _json_markers(DIAGNOSTIC_CASE_MARKER, log, "IT-031 case", "IT-031")
     if len(case_markers) != 5:
         raise SeamError(f"expected exactly 5 IT-031 cases, found {len(case_markers)}")
     if any(match.start() <= after_position or match.start() >= marker_match.start()
            for match, _ in case_markers):
-        raise SeamError("IT-031 cases must follow IT-028 and precede its summary")
+        raise SeamError("IT-031 cases must follow IT-029 and precede its summary")
     if (marker.get("schema"), marker.get("test_id"), marker.get("event"),
             marker.get("status"), marker.get("ordered")) != (
                 "stasis.workshop_diagnostic_seam.v1", "IT-031", "diagnostic_seam",
@@ -702,7 +841,8 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
     if [kind for _, kind in interleaved] != ["present", "case"] * 3:
         raise SeamError("IT-027 GLES and case evidence is not strictly interleaved")
     hot_edit = verify_it028(log, touch_summary_match.start())
-    diagnostic_seam = verify_it031(log, hot_edit["_position"])
+    resource_scope = verify_it029(log, hot_edit["_position"])
+    diagnostic_seam = verify_it031(log, resource_scope["_position"])
     if diagnostic_seam is None:
         raise SeamError("missing mandatory IT-031 diagnostic seam evidence")
     diagnostic_boundary = next(DIAGNOSTIC_MARKER.finditer(log)).end()
@@ -750,18 +890,37 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         "it028": hot_edit["summary"],
         "it028_cases": hot_edit["cases"],
         "it028_gles": hot_edit["gles"],
+        "it029": resource_scope["summary"],
+        "it029_cases": resource_scope["cases"],
         "it031": diagnostic_seam,
     }
 
 
 def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
-                 metadata_path: Path, evidence_path: Path) -> dict:
+                 metadata_path: Path, evidence_path: Path,
+                 it029_captures: list[Path] | None = None) -> dict:
     for path in (log_path, capture, manifest_path, apk, metadata_path):
         if not path.is_file():
             raise SeamError(f"required Workshop evidence file is missing: {path}")
     manifest = _read_json(manifest_path)
     metadata = _read_json(metadata_path)
     result = verify_log(log_path.read_text(encoding="utf-8", errors="replace"), manifest)
+    supplied_it029 = it029_captures or []
+    if len(supplied_it029) != 4:
+        raise SeamError("exactly four IT-029 PNG captures are required")
+    expected_cases = result["it029_cases"]
+    capture_evidence = []
+    for path, case in zip(supplied_it029, expected_cases):
+        if not path.is_file():
+            raise SeamError(f"required IT-029 capture is missing: {path}")
+        digest = _sha256(path)
+        if digest != case["capture_sha256"]:
+            raise SeamError(f"IT-029 capture hash does not match {case['phase']}")
+        pixel_oracle = _verify_it029_capture_pixels(path, case["phase"])
+        capture_evidence.append({
+            "phase": case["phase"], "path": str(path), "sha256": digest,
+            "pixel_oracle": pixel_oracle,
+        })
     evidence = {
         "schema": "stasis.workshop_seam.evidence.v1",
         "test_id": "IT-025",
@@ -770,11 +929,97 @@ def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
         "apk_sha256": _sha256(apk),
         "capture_sha256": _sha256(capture),
         "metadata": metadata,
+        "it029_capture_artifacts": capture_evidence,
         **result,
     }
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return evidence
+
+
+def _verify_it029_capture_pixels(path: Path, phase: str) -> dict:
+    expected_colors = {
+        "project_a_first": (0x12, 0x61, 0xA0, 0xFF),
+        "project_a_return": (0x12, 0x61, 0xA0, 0xFF),
+        "project_b_before_recreation": (0xA0, 0x38, 0x12, 0xFF),
+        "project_b_after_recreation": (0xA0, 0x38, 0x12, 0xFF),
+    }
+    expected = expected_colors.get(phase)
+    if expected is None:
+        raise SeamError(f"IT-029 capture has unknown phase {phase}")
+    if path.suffix.lower() != ".png":
+        raise SeamError(f"IT-029 capture for {phase} must be a PNG")
+    try:
+        width, height, rgba = read_capture(path)
+    except Exception as error:
+        raise SeamError(f"IT-029 capture for {phase} is not a supported PNG: {error}") from error
+    if width <= 0 or height <= 0 or len(rgba) != width * height * 4:
+        raise SeamError(f"IT-029 capture for {phase} has invalid decoded dimensions")
+
+    non_black = []
+    for offset in range(0, len(rgba), 4):
+        pixel = tuple(rgba[offset:offset + 4])
+        if pixel[3] != 0 and pixel[:3] != (0, 0, 0):
+            index = offset // 4
+            non_black.append((index % width, index // width))
+    if not non_black:
+        raise SeamError(f"IT-029 capture for {phase} has no visible logical viewport")
+    left = min(point[0] for point in non_black)
+    top = min(point[1] for point in non_black)
+    right = max(point[0] for point in non_black) + 1
+    bottom = max(point[1] for point in non_black) + 1
+    viewport_width = right - left
+    viewport_height = bottom - top
+    if viewport_width < 32 or viewport_height < 32:
+        raise SeamError(f"IT-029 capture for {phase} has an implausibly small viewport")
+
+    def pixels_in(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, ...]]:
+        return [
+            tuple(rgba[(y * width + x) * 4:(y * width + x + 1) * 4])
+            for y in range(y0, y1)
+            for x in range(x0, x1)
+        ]
+
+    viewport = pixels_in(left, top, right, bottom)
+    project_pixels = viewport.count(expected)
+    shared_pixels = viewport.count((0x31, 0xD1, 0x7C, 0xFF))
+    viewport_area = viewport_width * viewport_height
+    if project_pixels < max(32, int(viewport_area * 0.005)):
+        raise SeamError(
+            f"IT-029 {phase} capture lacks expected project color "
+            f"#{expected[0]:02x}{expected[1]:02x}{expected[2]:02x}"
+        )
+    if shared_pixels < max(48, int(viewport_area * 0.007)):
+        raise SeamError(f"IT-029 {phase} capture lacks the shared sprite color #31d17c")
+
+    text_measurements = {}
+    for name, x_start, x_end in (
+        ("left", 0.07, 0.43),
+        ("right", 0.50, 0.90),
+    ):
+        roi_left = left + int(viewport_width * x_start)
+        roi_right = left + int(viewport_width * x_end)
+        roi_top = top + int(viewport_height * 0.68)
+        roi_bottom = top + int(viewport_height * 0.88)
+        roi = pixels_in(roi_left, roi_top, roi_right, roi_bottom)
+        background = Counter(roi).most_common(1)[0][0]
+        contrast = sum(
+            1 for pixel in roi
+            if pixel[3] >= 128
+            and sum(abs(pixel[channel] - background[channel]) for channel in range(3)) >= 60
+        )
+        if contrast < max(24, int(len(roi) * 0.03)):
+            raise SeamError(f"IT-029 {phase} capture lacks visible {name} text-band pixels")
+        text_measurements[f"{name}_text_contrast_pixels"] = contrast
+
+    return {
+        "decoded_size": [width, height],
+        "logical_viewport": [left, top, viewport_width, viewport_height],
+        "expected_project_rgba": "#%02x%02x%02xff" % expected[:3],
+        "project_pixels": project_pixels,
+        "shared_sprite_pixels": shared_pixels,
+        **text_measurements,
+    }
 
 
 def main() -> int:
@@ -785,9 +1030,11 @@ def main() -> int:
     parser.add_argument("--apk", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--it029-capture", type=Path, action="append", default=[])
     args = parser.parse_args()
     try:
-        evidence = verify_files(args.log, args.capture, args.manifest, args.apk, args.metadata, args.evidence)
+        evidence = verify_files(args.log, args.capture, args.manifest, args.apk,
+                                args.metadata, args.evidence, args.it029_capture)
     except (OSError, json.JSONDecodeError, SeamError) as error:
         parser.error(str(error))
     print(json.dumps({"status": evidence["status"], "evidence": str(args.evidence)}))

@@ -380,6 +380,22 @@ function Assert-RenderedVariant(
         $log | Set-Content -LiteralPath $logFile -Encoding UTF8
         & $adb -s $serial shell am force-stop $Package 2>$null | Out-Null
     }
+    $it029CaptureNames = @(
+        "project_a_first",
+        "project_b_before_recreation",
+        "project_b_after_recreation",
+        "project_a_return"
+    )
+    $it029Captures = @()
+    foreach ($phase in $it029CaptureNames) {
+        $localCapture = Join-Path $artifactRoot "workshop-it029-$phase.png"
+        $remoteCapture = "/sdcard/Android/data/$Package/files/it029/$phase.png"
+        Invoke-Adb @("pull", $remoteCapture, $localCapture) | Out-Null
+        if (-not (Test-Path $localCapture)) {
+            throw "$Name IT-029 capture was not collected: $phase"
+        }
+        $it029Captures += $localCapture
+    }
     $fatalPatterns = @(
         "native preview frame failed",
         "Render resource error",
@@ -469,9 +485,16 @@ function Assert-RenderedVariant(
     if (-not $renderPassed) {
         throw "$Name render acceptance timed out: $lastFailure; see $artifactRoot"
     }
-    & python (Join-Path $toolsCiRoot "verify_android_workshop_seam.py") `
-        --log $logFile --capture $capture --manifest $renderParityManifest `
-        --apk $Apk --metadata $metadataPath --evidence (Join-Path $artifactRoot "$Name-workshop-seam.json")
+    $workshopVerifyArguments = @(
+        (Join-Path $toolsCiRoot "verify_android_workshop_seam.py"),
+        "--log", $logFile, "--capture", $capture, "--manifest", $renderParityManifest,
+        "--apk", $Apk, "--metadata", $metadataPath,
+        "--evidence", (Join-Path $artifactRoot "$Name-workshop-seam.json")
+    )
+    foreach ($it029Capture in $it029Captures) {
+        $workshopVerifyArguments += @("--it029-capture", $it029Capture)
+    }
+    & python @workshopVerifyArguments
     if ($LASTEXITCODE -ne 0) { throw "$Name IT-025 Workshop seam verification failed; see $logFile" }
     Write-Output "$Name render acceptance passed: $capture"
 }
