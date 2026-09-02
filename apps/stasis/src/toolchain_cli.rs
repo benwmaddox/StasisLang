@@ -8070,12 +8070,23 @@ mod tests {
     fn every_live_ai_tool_has_a_human_command_surface() {
         let mappings = BTreeMap::from([
             ("list_symbols", "stasis symbol list / :symbols"),
+            (
+                "get_stdlib_api",
+                "stasis symbol list --file / :symbols --file",
+            ),
             ("find_references", "stasis symbol references / :references"),
             ("read_symbol", "stasis symbol read / :read"),
+            ("read_imports", "stasis symbol read imports / :read imports"),
             ("write_symbol", "stasis symbol update / :update"),
+            (
+                "write_imports",
+                "stasis symbol update imports / :update imports",
+            ),
             ("delete_symbol", "stasis symbol delete / :delete"),
+            ("get_capability", "stasis ai / :inspect / controlled assets"),
             ("inspect_runtime_state", ":inspect"),
             ("run_frame", ":step / stasis validate --frames"),
+            ("run_tests", "stasis test"),
         ]);
 
         for tool in live_tool_specs() {
