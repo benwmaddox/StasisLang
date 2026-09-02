@@ -3952,14 +3952,13 @@ function on_code_swap(): void { return; }
             let Some(link_config) = resolve_link_config_for_smoke() else {
                 return;
             };
-            let Some(result) = run_linked_i32_noarg_fixture(
+            let result = run_linked_i32_noarg_fixture(
                 &process,
                 "main",
                 "receiver_array_compound",
                 &link_config,
-            ) else {
-                return;
-            };
+            )
+            .expect("receiver-array AOT fixture must link and execute");
             assert_eq!(result, 29);
         }
     }
