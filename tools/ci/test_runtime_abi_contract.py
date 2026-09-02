@@ -111,6 +111,18 @@ class RuntimeAbiContractTests(unittest.TestCase):
             (
                 contract.WORKSHOP_PREVIEW_ADAPTER, "begin_frame();", "legacy_begin();", "public_graphics_path",
             ),
+            (
+                contract.GENERATED_MOBILE_AOT_FIXTURE,
+                'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
+                'import "graphics.stasis";',
+                "public_graphics_path",
+            ),
+            (
+                contract.GENERATED_MOBILE_AOT_FIXTURE,
+                "draw_text(",
+                "// draw_text(",
+                "public_graphics_path",
+            ),
         )
         for path, current, stale, field in mutations:
             with self.subTest(path=path, field=field):
@@ -118,6 +130,19 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 failure = next(failure for failure in failures if failure.field == field)
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
+
+    def test_it012_public_fixture_rejects_private_graphics_storage(self):
+        failures, _ = self.run_with(
+            contract.GENERATED_MOBILE_AOT_FIXTURE,
+            "global score: i32;",
+            "global gfx_cmd_i32: i32[67888];\nglobal score: i32;",
+        )
+        failure = next(
+            failure for failure in failures
+            if failure.field == "public_graphics_boundary"
+        )
+        self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+        self.assertEqual(contract.GENERATED_MOBILE_AOT_FIXTURE.as_posix(), failure.consumer)
 
     def test_grouped_sprite_runs_and_exploration_pointer_semantics_are_guarded(self):
         failures, _ = self.run_with(
@@ -328,8 +353,9 @@ class RuntimeAbiContractTests(unittest.TestCase):
             ),
             (
                 contract.GENERATED_MOBILE_AOT_RUST,
-                'const GFX_CMD: &str = include_str!("../../../src/stdlib/internal/gfx_cmd.stasis");',
-                'const GFX_CMD: &str = include_str!("../../../src/stdlib/internal/gfx_cmd.stasis");\nconst EXPECTED_TRACE: u32 = 2_880_741_754;',
+                "use std::time::{SystemTime, UNIX_EPOCH};",
+                "use std::time::{SystemTime, UNIX_EPOCH};\n"
+                "const EXPECTED_TRACE: u32 = 2_880_741_754;",
             ),
         )
         for path, old, new in mutations:
