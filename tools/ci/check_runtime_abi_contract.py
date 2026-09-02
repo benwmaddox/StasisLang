@@ -62,9 +62,11 @@ EXPLORATION_HOST = Path(
 HOT_SWAP_V1_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_v1.stasis")
 HOT_SWAP_V2_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_v2.stasis")
 HOT_SWAP_REJECT_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_reject.stasis")
+HOT_SWAP_INVALID_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_invalid.stasis")
 HOT_SWAP_FIXTURES = (
     HOT_SWAP_V1_FIXTURE,
     HOT_SWAP_V2_FIXTURE,
+    HOT_SWAP_INVALID_FIXTURE,
     HOT_SWAP_REJECT_FIXTURE,
 )
 RENDER_PARITY_MANIFEST = Path("samples/render_parity/capture_manifest.json")
@@ -805,54 +807,32 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             "render_trace.current_capacities", "67888/146564/65536", "missing",
         ))
 
-    manual_fixture_texts = {
-        path: without_c_comments(sources[path])
-        for path in HOT_SWAP_FIXTURES
-    }
-    for fixture, fixture_text in manual_fixture_texts.items():
-        for lane, render_name in (
-            ("gfx_cmd_i32", "STASIS_RENDER_I32_COUNT"),
-            ("gfx_cmd_f32", "STASIS_RENDER_F32_COUNT"),
-            ("gfx_cmd_u8", "STASIS_RENDER_U8_COUNT"),
-        ):
-            actual = literal_array(fixture_text, lane)
-            expected = render[render_name]
-            checks += 1
-            if not array_matches(actual, expected, lane):
-                failures.append(Mismatch(
-                    label(RENDER_HEADER), label(fixture),
-                    f"{lane}.length", expected, actual,
-                ))
-        for field, index, render_name in (
-            ("STASIS_RENDER_MAGIC", 0, "STASIS_RENDER_MAGIC"),
-            ("STASIS_RENDER_VERSION", 1, "STASIS_RENDER_VERSION"),
-        ):
-            actual = literal_index_write(fixture_text, "gfx_cmd_i32", index)
-            expected = render[render_name]
-            checks += 1
-            if actual != expected:
-                failures.append(Mismatch(
-                    label(RENDER_HEADER), label(fixture),
-                    field, expected, actual,
-                ))
-
-    hot_swap_header = {
-        2: 3, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0,
-        10: 640, 11: 360, 12: 640, 13: 360, 14: 640, 15: 360,
-        16: 0, 17: 0, 18: 640, 19: 360, 20: 1, 21: 1,
-        22: 0, 23: 0, 24: 0, 25: 0, 26: 1, 27: 0, 28: 0,
-        29: 0, 30: 0,
-    }
+    hot_swap_public_import = (
+        'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";'
+    )
     for fixture in HOT_SWAP_FIXTURES:
-        fixture_text = manual_fixture_texts[fixture]
-        for index, expected in hot_swap_header.items():
-            actual = literal_index_write(fixture_text, "gfx_cmd_i32", index)
-            checks += 1
-            if actual != expected:
-                failures.append(Mismatch(
-                    label(RENDER_HEADER), label(fixture),
-                    f"current_v7_header[{index}]", expected, actual,
-                ))
+        fixture_text = sources[fixture]
+        checks += 1
+        if hot_swap_public_import not in fixture_text or any(
+            not re.search(pattern, fixture_text)
+            for pattern in (
+                r"\bbegin_frame\(\)\s*;",
+                r"\bclear\(",
+                r"\bend_frame\(\)\s*;",
+            )
+        ):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture),
+                "hot_swap.public_graphics_path",
+                "rooted graphics import and begin/clear/end calls", "missing",
+            ))
+        checks += 1
+        if re.search(r"\b(?:gfx_cmd_|gfx_sprite_writer_|GFX_)", fixture_text):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture),
+                "hot_swap.private_storage",
+                "no private graphics identifiers", "internal identifier present",
+            ))
 
     public_render_fixtures = {
         VSCODE_RENDER_FIXTURE: ("begin_frame();", "draw_line("),
