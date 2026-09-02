@@ -55,6 +55,29 @@ pub use crate::backend::state_layout::{
 const MAX_STATE_QUERY_SCAN: usize = 4096;
 const MAX_STATE_QUERY_MATCHES: usize = 64;
 
+#[cfg(test)]
+pub(crate) const RECEIVER_ARRAY_COMPOUND_TEST_SOURCE: &str = r#"
+const CAP: i32 = 4;
+struct Batch { values: f32[CAP]; }
+global first: Batch;
+global second: Batch;
+
+function update(self: Batch, index: i32, value: f32): void {
+    self.values[index] = value;
+    self.values[index] += 0.5;
+}
+
+function read(self: Batch, index: i32): f32 {
+    return self.values[index];
+}
+
+function main(): i32 {
+    first.update(1, 2.0);
+    second.update(1, 4.0);
+    return f32_to_i32(first.read(1) * 10.0 + second.read(1));
+}
+"#;
+
 fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -7881,23 +7904,7 @@ function main(): i32 {
         let mut process = JitProcess::new();
         process.upsert_file(
             "receiver_array_compound.stasis",
-            r#"
-const CAP: i32 = 4;
-struct Batch { values: f32[CAP]; }
-global first: Batch;
-global second: Batch;
-
-function update(self: Batch, index: i32, value: f32): void {
-    self.values[index] = value;
-    self.values[index] += 0.5;
-}
-
-function main(): i32 {
-    first.update(1, 2.0);
-    second.update(1, 4.0);
-    return f32_to_i32(first.values[1] * 10.0 + second.values[1]);
-}
-"#,
+            RECEIVER_ARRAY_COMPOUND_TEST_SOURCE,
         );
         process
             .compile()
@@ -7907,6 +7914,22 @@ function main(): i32 {
                 .execute_i32_noarg_by_name("main")
                 .expect("execute receiver array compound assignment"),
             29
+        );
+        let update_clif = process
+            .clif_for_function_name("update")
+            .expect("receiver array update CLIF");
+        assert_eq!(
+            update_clif.matches("trapz").count(),
+            2,
+            "each unproven receiver array index must retain a bounds trap:\n{update_clif}"
+        );
+        let read_clif = process
+            .clif_for_function_name("read")
+            .expect("receiver array read CLIF");
+        assert_eq!(
+            read_clif.matches("trapz").count(),
+            1,
+            "unproven receiver array reads must retain a bounds trap:\n{read_clif}"
         );
     }
 

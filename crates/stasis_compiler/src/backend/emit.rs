@@ -2838,6 +2838,13 @@ pub(crate) fn emit_simple_statements(
                                         )?;
                                         let index_binding =
                                             normalize_index_binding(index_binding, type_table)?;
+                                        emit_fixed_collection_bounds_trap(
+                                            builder,
+                                            index_binding.value,
+                                            collection_type,
+                                            collection_path,
+                                            type_table,
+                                        )?;
                                         let collection_hash = emit_local_struct_field_path_hash(
                                             builder.use_var(local.var),
                                             field,
@@ -4507,6 +4514,13 @@ pub(crate) fn emit_simple_expression(
                                 foreach_bindings,
                             )?;
                             let index_binding = normalize_index_binding(index_binding, type_table)?;
+                            emit_fixed_collection_bounds_trap(
+                                builder,
+                                index_binding.value,
+                                collection_type,
+                                collection_path,
+                                type_table,
+                            )?;
                             let collection_hash = emit_local_struct_field_path_hash(
                                 builder.use_var(local.var),
                                 field,
@@ -6502,6 +6516,26 @@ fn emit_array_bounds_trap(builder: &mut FunctionBuilder<'_>, index: Value, len: 
     let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
     let valid = builder.ins().band(non_negative, below_len);
     builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
+}
+
+fn emit_fixed_collection_bounds_trap(
+    builder: &mut FunctionBuilder<'_>,
+    index: Value,
+    collection_type: TypeId,
+    collection_path: &str,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let collection_len = type_table
+        .fixed_collection_len(collection_type)
+        .ok_or_else(|| {
+            format!(
+                "indexed receiver field '{}' has no fixed capacity",
+                collection_path
+            )
+        })?;
+    let collection_len = builder.ins().iconst(types::I32, collection_len as i64);
+    emit_array_bounds_trap(builder, index, collection_len);
+    Ok(())
 }
 
 fn static_index_bounds_proven(

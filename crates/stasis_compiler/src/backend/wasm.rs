@@ -1363,12 +1363,13 @@ fn encode_function(
         }
     }
     let scratch_index = physical_cursor;
-    let scratch_i32 = scratch_index + 1;
-    let scratch_i32_b = scratch_index + 2;
-    let scratch_i32_c = scratch_index + 3;
-    let scratch_f32 = scratch_index + 4;
-    let scratch_f64 = scratch_index + 5;
-    local_types.extend([I32, I32, I32, I32, F32, F64]);
+    let scratch_address = scratch_index + 1;
+    let scratch_i32 = scratch_index + 2;
+    let scratch_i32_b = scratch_index + 3;
+    let scratch_i32_c = scratch_index + 4;
+    let scratch_f32 = scratch_index + 5;
+    let scratch_f64 = scratch_index + 6;
+    local_types.extend([I32, I32, I32, I32, I32, F32, F64]);
     let mut body = Vec::new();
     encode_local_declarations(&local_types, &mut body);
     let context = EncodeContext {
@@ -1387,6 +1388,7 @@ fn encode_function(
         internal_overloads,
         signatures,
         scratch_index,
+        scratch_address,
         return_type: function.return_type,
         scratch_i32,
         scratch_i32_b,
@@ -1514,6 +1516,7 @@ struct EncodeContext<'a> {
     internal_overloads: &'a BTreeMap<String, Vec<u32>>,
     signatures: &'a [Signature],
     scratch_index: u32,
+    scratch_address: u32,
     return_type: TypeId,
     scratch_i32: u32,
     scratch_i32_b: u32,
@@ -1634,6 +1637,13 @@ fn encode_statements(
                         }
                     }
                 }
+                if *op != AssignOp::Set
+                    && encode_receiver_array_compound_assignment(
+                        target, *op, expression, context, out,
+                    )?
+                {
+                    continue;
+                }
                 let target_type = target_type(target, context)?;
                 if *op == AssignOp::Set && is_struct_view_type(target_type, context.named_structs) {
                     let AssignTarget::Local(name) = target else {
@@ -1753,6 +1763,46 @@ fn encode_statements(
         }
     }
     Ok(())
+}
+
+fn encode_receiver_array_compound_assignment(
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<bool, String> {
+    let AssignTarget::IndexedPath {
+        collection_path,
+        index,
+        suffix,
+    } = target
+    else {
+        return Ok(false);
+    };
+    let Some(binding) = receiver_array_binding(context, collection_path, suffix)? else {
+        return Ok(false);
+    };
+
+    encode_receiver_array_address(&binding, index, context, out)?;
+    out.push(0x21);
+    uleb(context.scratch_address, out);
+    out.push(0x20);
+    uleb(context.scratch_address, out);
+    encode_memory_load(binding.element_type, out)?;
+    let value_type = encode_expr_as(expression, Some(binding.element_type), context, out)?;
+    require_same_type(binding.element_type, value_type, "assignment")?;
+    out.push(arithmetic_opcode(op, binding.element_type)?);
+
+    let value_local = scratch_local(context, binding.element_type)?;
+    out.push(0x21);
+    uleb(value_local, out);
+    out.push(0x20);
+    uleb(context.scratch_address, out);
+    out.push(0x20);
+    uleb(value_local, out);
+    encode_memory_store(binding.element_type, out)?;
+    Ok(true)
 }
 
 fn encode_conversion(from: TypeId, to: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
@@ -3906,6 +3956,9 @@ fn collect_string_literals(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn read_test_uleb(bytes: &[u8], cursor: &mut usize) -> u32 {
         let mut value = 0;
@@ -4206,6 +4259,69 @@ function render(): i32 { return 0; }
             process.memory_layout()["first.values"].offset,
             process.memory_layout()["second.values"].offset
         );
+    }
+
+    #[test]
+    fn evaluates_receiver_array_compound_index_once() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "receiver_array_index.stasis",
+            r#"
+const CAP: i32 = 4;
+struct Batch { values: f32[CAP]; }
+global batch: Batch;
+global calls: i32;
+
+function next_index(): i32 {
+    calls += 1;
+    return 1;
+}
+
+function update(self: Batch): void {
+    self.values[next_index()] += self.values[0];
+}
+
+function main(): i32 {
+    batch.values[0] = 0.5;
+    batch.values[1] = 2.0;
+    batch.update();
+    return calls * 10 + f32_to_i32(batch.values[1] * 2.0);
+}
+
+function tick(): i32 { return 0; }
+function render(): i32 { return 0; }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile single-evaluation receiver compound assignment");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_receiver_compound_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write receiver compound wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for receiver compound wasm");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "15");
     }
 
     #[test]
