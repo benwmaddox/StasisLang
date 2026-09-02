@@ -222,7 +222,7 @@ function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from
     width: i32,
     height: i32
 ): bool;
-function @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
+function @internal @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
     self: SpriteSheet,
     path: string,
     width: i32,

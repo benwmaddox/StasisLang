@@ -1492,7 +1492,8 @@ impl LiveWorkspace {
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         let matches = |item: &WorkshopSourceItem| {
-            item.kind != WorkshopSourceItemKind::Imports
+            item.exposure.is_public()
+                && item.kind != WorkshopSourceItemKind::Imports
                 && !(item.kind == WorkshopSourceItemKind::Globals && item.source.trim().is_empty())
                 && (query.is_empty()
                     || item.name.to_ascii_lowercase().contains(&query)
@@ -1966,7 +1967,7 @@ impl LiveWorkspace {
         items.extend(
             self.completion_items
                 .iter()
-                .filter(|item| !is_static_type_field(item))
+                .filter(|item| item.exposure.is_public() && !is_static_type_field(item))
                 .map(live_completion_item),
         );
         items.extend(

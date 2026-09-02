@@ -85,16 +85,16 @@ function successful(self: LoadingProgress): bool {
     return self.complete() && self.failed_count == 0;
 }
 
-function @effects(graphics)@extern("stasis_jit_asset_request_sprite") asset_request_sprite(path: string, width: i32, height: i32): i32;
-function @effects(audio)@extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
-function @effects(platform)@extern("stasis_jit_asset_task_poll") asset_task_state(request: i32): AssetState;
-function @effects(platform)@extern("stasis_jit_asset_task_take_handle") asset_task_take_handle(request: i32): i32;
-function @effects(platform)@extern("stasis_jit_asset_task_cancel") asset_task_cancel(request: i32): void;
-function @effects(graphics)@extern("stasis_jit_gfx_release_sprite") gfx_release_sprite(handle: i32): void;
+function @internal @effects(graphics)@extern("stasis_jit_asset_request_sprite") asset_request_sprite(path: string, width: i32, height: i32): i32;
+function @internal @effects(audio)@extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
+function @internal @effects(platform)@extern("stasis_jit_asset_task_poll") asset_task_state(request: i32): AssetState;
+function @internal @effects(platform)@extern("stasis_jit_asset_task_take_handle") asset_task_take_handle(request: i32): i32;
+function @internal @effects(platform)@extern("stasis_jit_asset_task_cancel") asset_task_cancel(request: i32): void;
+function @internal @effects(graphics)@extern("stasis_jit_gfx_release_sprite") gfx_release_sprite(handle: i32): void;
 
-extern function @effects(audio) audio_release(asset_handle: i32): void;
+extern function @internal @effects(audio) audio_release(asset_handle: i32): void;
 
-function reset_image(self: ImageAsset): void {
+function @internal reset_image(self: ImageAsset): void {
     if (self.request > 0) {
         asset_task_cancel(self.request);
     }
@@ -115,7 +115,7 @@ struct Sprite {
     height: i32;
 }
 
-function reset_audio(self: AudioAsset): void {
+function @internal reset_audio(self: AudioAsset): void {
     if (self.request > 0) {
         asset_task_cancel(self.request);
     }

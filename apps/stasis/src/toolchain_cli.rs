@@ -132,15 +132,6 @@ const KNOWLEDGE_FILES: &[&str] = &[
 ];
 const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
-import "/vendor/stasis/stdlib/audio.stasis";
-import "/vendor/stasis/stdlib/collision.stasis";
-import "/vendor/stasis/stdlib/frame_timer.stasis";
-import "/vendor/stasis/stdlib/hud_table.stasis";
-import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
-import "/vendor/stasis/stdlib/storage.stasis";
-import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
-import "/vendor/stasis/stdlib/ui_layout_audit.stasis";
-import "/vendor/stasis/stdlib/ui_button_9slice.stasis";
 import "/vendor/stasis/stdlib/ui_single_pass.stasis";
 
 struct GameState {
@@ -6324,7 +6315,8 @@ fn symbol_workspace(
                 })
                 .collect::<Result<BTreeMap<_, _>, String>>()?;
             items.retain(|item| {
-                item.kind != WorkshopSourceItemKind::Imports
+                item.exposure.is_public()
+                    && item.kind != WorkshopSourceItemKind::Imports
                     && !(item.kind == WorkshopSourceItemKind::Globals
                         && item.source.trim().is_empty())
                     && query.as_deref().is_none_or(|query| {
@@ -8368,25 +8360,13 @@ mod tests {
         let root = temp_dir("smoke");
         create_project(root.clone(), "smoke".to_string()).expect("create project");
         let source = fs::read_to_string(root.join("src/main.stasis")).expect("read main source");
-        for module in [
-            "stdlib",
-            "graphics",
-            "audio",
-            "collision",
-            "frame_timer",
-            "hud_table",
-            "sdl_scancodes",
-            "storage",
-            "ui_axis_layout",
-            "ui_layout_audit",
-            "ui_button_9slice",
-            "ui_single_pass",
-        ] {
+        for module in ["stdlib", "graphics", "ui_single_pass"] {
             assert!(
                 source.contains(&format!("/vendor/stasis/stdlib/{module}.stasis")),
                 "missing default {module} import"
             );
         }
+        assert_eq!(source.matches("import \"").count(), 3);
         let workspace = load_workspace(Some(&root)).expect("load workspace");
         check_workspace(&workspace).expect("check project");
         test_workspace(&workspace, None).expect("test project");

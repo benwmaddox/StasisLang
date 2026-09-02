@@ -2,14 +2,14 @@
 // web adapter; semantic game frames contain no credential material.
 const NETWORK_CLIENT_MAX_MESSAGE_BYTES: i32 = 65536;
 
-function @extern("stasis_web_network_supported") network_client_supported_raw(): i32;
-function @extern("stasis_web_network_connect") network_client_connect_raw(): i32;
-function @extern("stasis_web_network_status") network_client_status_raw(): i32;
-function @extern("stasis_web_network_poll") network_client_poll_raw(out: u8[], capacity: i32): i32;
-function @extern("stasis_web_network_send") network_client_send_raw(payload: u8[], length: i32): i32;
-function @extern("stasis_web_network_resume_seat") network_client_resume_seat_raw(): i32;
-function @extern("stasis_web_network_last_sequence") network_client_last_sequence_raw(): i32;
-function @extern("stasis_web_network_checkpoint") network_client_checkpoint_raw(seat: i32, last_sequence: i32): i32;
+function @internal @extern("stasis_web_network_supported") network_client_supported_raw(): i32;
+function @internal @extern("stasis_web_network_connect") network_client_connect_raw(): i32;
+function @internal @extern("stasis_web_network_status") network_client_status_raw(): i32;
+function @internal @extern("stasis_web_network_poll") network_client_poll_raw(out: u8[], capacity: i32): i32;
+function @internal @extern("stasis_web_network_send") network_client_send_raw(payload: u8[], length: i32): i32;
+function @internal @extern("stasis_web_network_resume_seat") network_client_resume_seat_raw(): i32;
+function @internal @extern("stasis_web_network_last_sequence") network_client_last_sequence_raw(): i32;
+function @internal @extern("stasis_web_network_checkpoint") network_client_checkpoint_raw(seat: i32, last_sequence: i32): i32;
 
 function network_client_supported(): i32 {
     return network_client_supported_raw();

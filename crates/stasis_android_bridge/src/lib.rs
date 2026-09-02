@@ -458,9 +458,13 @@ pub fn android_workshop_source_items(
             path.starts_with("src/") || path.starts_with("tests/")
         })
         .collect::<Vec<_>>();
+    let items = workshop_source_items(&editable)?
+        .into_iter()
+        .filter(|item| item.exposure.is_public())
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "schema_version": 1,
-        "items": workshop_source_items(&editable)?,
+        "items": items,
     }))
 }
 
@@ -7579,12 +7583,13 @@ function on_code_swap(): void {}\n";
         let root = temp_project("semantic_identity");
         fs::write(
             root.join("src/main.stasis"),
-            "struct Player { value: i32; }\nstruct Enemy { value: i32; }\nfunction main(): i32 { return 0; }\nfunction tick(): void {}\nfunction adjust(self: Player): i32 { return 1; }\nfunction adjust(self: Enemy): i32 { return 2; }\n",
+            "struct Player { value: i32; }\nstruct Enemy { value: i32; }\nfunction main(): i32 { return 0; }\nfunction tick(): void {}\nfunction @internal raw_helper(): i32 { return 0; }\nfunction adjust(self: Player): i32 { return 1; }\nfunction adjust(self: Enemy): i32 { return 2; }\n",
         )
         .expect("write overloads");
         let response = android_workshop_source_items(&root, Path::new("src/main.stasis"))
             .expect("source items");
         let items = response["items"].as_array().expect("items array");
+        assert!(!items.iter().any(|item| item["name"] == "raw_helper"));
         let tick = items
             .iter()
             .find(|item| item["kind"] == "function" && item["name"] == "tick")
