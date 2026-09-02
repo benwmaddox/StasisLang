@@ -183,8 +183,7 @@ fn validate_graphics_internal_source_policy(
 ) -> Result<(), SourceDiagnostic> {
     let normalized = path.replace('\\', "/");
     let is_graphics_implementation = is_recognized_graphics_implementation_path(&normalized);
-    let is_explicit_seam =
-        normalized.starts_with("tests/stasis/") || normalized.contains("/tests/stasis/");
+    let is_explicit_seam = normalized.starts_with("tests/stasis/");
     if is_graphics_implementation || is_explicit_seam {
         return Ok(());
     }
@@ -935,6 +934,7 @@ mod tests {
         for spoof_path in [
             "src/my/stdlib/graphics.stasis",
             "src/my/stdlib/internal/gfx_cmd.stasis",
+            "src/tests/stasis/main.stasis",
         ] {
             let error = graph(
                 &[spoof_path],
