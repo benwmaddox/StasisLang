@@ -14,6 +14,7 @@ struct MenuState {
 }
 
 global state: MenuState;
+global immediate_layout_host_frame: HostFrame;
 
 function main(): i32 {
     init_window(360, 720, "Immediate Axis Layout");
@@ -33,23 +34,24 @@ function main(): i32 {
 
 function update_menu_layout(): void {
     menu_layout(
-        gfx_safe_viewport_x(),
-        gfx_safe_viewport_y(),
-        gfx_safe_viewport_width(),
-        gfx_safe_viewport_height(),
+        immediate_layout_host_frame.display.safe_x,
+        immediate_layout_host_frame.display.safe_y,
+        immediate_layout_host_frame.display.safe_width,
+        immediate_layout_host_frame.display.safe_height,
         state.title_width,
         state.play_width
     );
 }
 
 function tick(): i32 {
+    immediate_layout_host_frame.refresh();
     update_menu_layout();
     if (!state.audit_emitted) {
         menu_emit_layout_audit(
-            gfx_safe_viewport_x(),
-            gfx_safe_viewport_y(),
-            gfx_safe_viewport_width(),
-            gfx_safe_viewport_height(),
+            immediate_layout_host_frame.display.safe_x,
+            immediate_layout_host_frame.display.safe_y,
+            immediate_layout_host_frame.display.safe_width,
+            immediate_layout_host_frame.display.safe_height,
             state.title.width,
             state.title.height,
             state.play.width,
@@ -58,11 +60,11 @@ function tick(): i32 {
         state.audit_emitted = true;
     }
     state.play_clicked = false;
-    let pointer_count: i32 = input_pointer_count();
+    let pointer_count: i32 = immediate_layout_host_frame.pointer_count;
     let i: i32 = 0;
     for (i = 0; i < pointer_count; i = i + 1) {
-        if (input_pointer_went_up(i)) {
-            if (menu_button_contains(input_pointer_x_logical(i), input_pointer_y_logical(i))) {
+        if (immediate_layout_host_frame.pointers[i].went_up) {
+            if (menu_button_contains(immediate_layout_host_frame.pointers[i].x_logical, immediate_layout_host_frame.pointers[i].y_logical)) {
                 state.play_clicked = true;
             }
         }
@@ -71,6 +73,7 @@ function tick(): i32 {
 }
 
 function render(): i32 {
+    immediate_layout_host_frame.refresh();
     begin_frame();
     clear(0.04, 0.06, 0.10, 1.0);
     update_menu_layout();

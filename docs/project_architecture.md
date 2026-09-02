@@ -9,7 +9,7 @@ host input -> game intent -> tick systems -> game state -> render commands
 
 The important boundaries are straightforward:
 
-- Read host input once per tick and translate it into game actions.
+- Refresh one caller-owned `HostFrame` once per tick, then translate its input into game actions.
 - During play, change gameplay state only from tick logic.
 - Run gameplay systems in a visible, deliberate order.
 - Make `render()` draw the state that already exists.
@@ -33,7 +33,8 @@ Keep `tick()` short enough to read as the game's update schedule:
 
 ```stasis
 function tick(): i32 {
-    if (should_quit()) { return 1; }
+    host_frame.refresh();
+    if (host_frame.quit_requested) { return 1; }
 
     bind_input();
     handle_screen_actions();
@@ -131,6 +132,7 @@ struct AppState {
 }
 
 global game: AppState;
+global host_frame: HostFrame;
 ```
 
 The groups answer practical questions:
@@ -175,12 +177,12 @@ function push_intent(kind: IntentKind, actor_index: i32,
 function bind_input(): void {
     clear_input();
 
-    if (input_pointer_count() > 0 && input_pointer_went_up(0)) {
+    if (host_frame.pointer_count > 0 && host_frame.pointers[0].went_up) {
         push_intent(
             IntentKind.Move,
             game.ui.selected_actor,
-            f32_to_i32(input_pointer_x_logical(0)),
-            f32_to_i32(input_pointer_y_logical(0))
+            f32_to_i32(host_frame.pointers[0].x_logical),
+            f32_to_i32(host_frame.pointers[0].y_logical)
         );
     }
 }

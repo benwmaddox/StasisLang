@@ -1282,7 +1282,7 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height);
  * Notes:
  * - The guest owns the host_window_request globals (src/runtime/host_window_request.stasis). We track the last applied
  *   request seq in this library, initialized by stasis_host_bulk_init().
- * - HostFrame layout is defined in src/stdlib/internal/host_frame.stasis and is written by stasis_host_get_frame().
+ * - HostFrame layout is defined in src/stdlib/internal/host_frame_raw.stasis and is written by stasis_host_get_frame().
  * - Rendering is driven by gfx_cmd buffers (src/stdlib/internal/gfx_cmd.stasis) and submitted by stasis_gfx_submit_u8().
  */
 static int g_host_req_inited = 0;
@@ -1499,7 +1499,7 @@ STASIS_EXPORT int stasis_host_bulk_step(
 /*
  * Host snapshot: fill caller-provided buffers with a deterministic view of host state.
  *
- * Layout is defined in src/stdlib/internal/host_frame.stasis. This is intentionally a simple
+ * Layout is defined in src/stdlib/internal/host_frame_raw.stasis. This is intentionally a simple
  * "copy out" ABI for native now, and a good fit for WASM later (one import to get a snapshot).
  */
 STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {

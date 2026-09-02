@@ -17,10 +17,10 @@ class StasisSourceDiscoveryTests(unittest.TestCase):
             application.parent.mkdir(parents=True)
             vendored.parent.mkdir(parents=True)
             application.write_text(
-                'import "internal/host_frame.stasis";\n', encoding="utf-8"
+                'import "internal/host_frame_raw.stasis";\n', encoding="utf-8"
             )
             vendored.write_text(
-                'import "internal/host_frame.stasis";\n', encoding="utf-8"
+                'import "internal/host_frame_raw.stasis";\n', encoding="utf-8"
             )
 
             discovered = discover_stasis_files([root])

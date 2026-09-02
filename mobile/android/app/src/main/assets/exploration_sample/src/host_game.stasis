@@ -86,6 +86,7 @@ function exploration_host_start(): void {
 }
 
 function exploration_host_tick(): void {
+    exploration_host_frame.refresh();
     exploration_host_sync_input();
     exploration_tick_schedule();
     exploration_host_draw();

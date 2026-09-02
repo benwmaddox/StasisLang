@@ -41,6 +41,7 @@ struct ParityState {
 // Command buffers and host_req_* are fixed host ABI globals. Application-owned
 // resources stay under the single root state.
 global state: ParityState;
+global render_parity_host_frame: HostFrame;
 
 function main(): i32 {
     seam_state_checksum = 2500;
@@ -70,18 +71,19 @@ function main(): i32 {
 }
 
 function tick(): i32 {
+    render_parity_host_frame.refresh();
     let touch_x: i32;
     let touch_y: i32;
     let touch_dx: i32;
     let touch_dy: i32;
     let touch_x_norm: i32;
     let touch_y_norm: i32;
-    touch_x.from_f32(input_pointer_x_logical(0));
-    touch_y.from_f32(input_pointer_y_logical(0));
-    touch_dx.from_f32(input_pointer_dx_logical(0));
-    touch_dy.from_f32(input_pointer_dy_logical(0));
-    touch_x_norm.from_f32(input_pointer_x_n(0) * 1000.0);
-    touch_y_norm.from_f32(input_pointer_y_n(0) * 1000.0);
+    touch_x.from_f32(render_parity_host_frame.pointers[0].x_logical);
+    touch_y.from_f32(render_parity_host_frame.pointers[0].y_logical);
+    touch_dx.from_f32(render_parity_host_frame.pointers[0].dx_logical);
+    touch_dy.from_f32(render_parity_host_frame.pointers[0].dy_logical);
+    touch_x_norm.from_f32(render_parity_host_frame.pointers[0].x_normalized * 1000.0);
+    touch_y_norm.from_f32(render_parity_host_frame.pointers[0].y_normalized * 1000.0);
     seam_touch_x = touch_x;
     seam_touch_y = touch_y;
     seam_touch_dx = touch_dx;
@@ -91,14 +93,14 @@ function tick(): i32 {
     seam_touch_active = 0;
     seam_touch_down_edge = 0;
     seam_touch_up_edge = 0;
-    if (input_pointer_count() > 0) {
-        if (input_pointer_is_down(0)) {
+    if (render_parity_host_frame.pointer_count > 0) {
+        if (render_parity_host_frame.pointers[0].is_down) {
             seam_touch_active = 1;
         }
-        if (input_pointer_went_down(0)) {
+        if (render_parity_host_frame.pointers[0].went_down) {
             seam_touch_down_edge = 1;
         }
-        if (input_pointer_went_up(0)) {
+        if (render_parity_host_frame.pointers[0].went_up) {
             seam_touch_up_edge = 1;
         }
     }

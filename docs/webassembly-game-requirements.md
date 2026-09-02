@@ -45,7 +45,7 @@ The shortest credible path is not "port the Windows runner to the browser." The 
 These parts are already aligned with a browser-hosted model:
 
 - `README.md` describes the intended game loop as `main()`, then `tick()`, then `render()`.
-- `src/stdlib/internal/host_frame.stasis` defines a host-owned frame snapshot for time, window size, pointers, keyboard state, and quit state.
+- `src/stdlib/internal/host_frame_raw.stasis` defines a host-owned frame snapshot for time, window size, pointers, keyboard state, and quit state.
 - `src/stdlib/internal/host_window_request.stasis` defines guest-to-host window requests as globals.
 - `src/stdlib/internal/gfx_cmd.stasis` defines the single fixed graphics command buffer ABI.
 - `src/stdlib/graphics.stasis` uses host snapshots for reads and command buffers for render output.
@@ -321,7 +321,8 @@ Current code already trends in the right direction because game code uses host-p
 
 For web support:
 
-- the browser host should populate `host_time_ms`, `host_time_us`, and tick index
+- the browser host should populate the frame snapshot lanes surfaced as
+  `HostFrame.time_ms`, `HostFrame.time_us`, and `HostFrame.tick_index`
 - use `performance.now()` or equivalent
 - do not rely on blocking sleep semantics for gameplay
 

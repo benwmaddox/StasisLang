@@ -4731,7 +4731,7 @@ function player_overlaps_enemy(player: Player, enemy: Enemy): bool { return true
                 .to_string(),
             },
             WorkshopSourceFile {
-                path: "src/stdlib/internal/host_frame.stasis".to_string(),
+                path: "src/stdlib/internal/host_frame_raw.stasis".to_string(),
                 source: "function host_frame_raw(): i32 { return 0; }\n".to_string(),
             },
         ];

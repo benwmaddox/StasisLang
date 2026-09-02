@@ -179,56 +179,24 @@ Sprite handles, rotation policy, and alpha remain unchanged. The graphics comman
 
 Rounding and rasterization then occur in one platform rendering layer. Stasis layout and widget code do not choose an integer rounding policy independently.
 
-### 5.9 Pre-1.0 API replacement policy
+### 5.9 Pre-1.0 HostFrame replacement policy
 
-This is an intentional breaking cleanup. The implementation must remove, not deprecate, compatibility APIs whose names obscure coordinate semantics.
+This is an intentional breaking cleanup. The scalar display and input query
+functions are removed rather than deprecated. `graphics.stasis` transitively
+provides the public `HostFrame` type, callers own one global snapshot, and
+`refresh(self: HostFrame): void` updates it once per tick or frame.
 
-Remove:
+Layout reads `host_frame.display.logical_width`, `logical_height`, `safe_x`,
+`safe_y`, `safe_width`, and `safe_height`. Physical metadata is available as
+the `native_*_px` and `drawable_*_px` fields. Pointer records expose logical
+deltas and positions plus normalized positions without per-field host calls.
 
-```stasis
-gfx_window_width()
-gfx_window_height()
-
-input_viewport_x_px()
-input_viewport_y_px()
-input_viewport_w_px()
-input_viewport_h_px()
-
-input_pointer_x_px(index)
-input_pointer_y_px(index)
-input_pointer_dx_px(index)
-input_pointer_dy_px(index)
-```
-
-The `gfx_window_*` functions are compatibility aliases for logical canvas size. The `input_viewport_*` family is an older ambiguous surface and is not needed by the new layout contract. Pointer values are logical coordinates, so names ending in `_px` incorrectly suggest native or drawable pixels.
-
-Use the canonical replacements:
-
-```stasis
-gfx_logical_width(): f32
-gfx_logical_height(): f32
-
-gfx_safe_viewport_x(): f32
-gfx_safe_viewport_y(): f32
-gfx_safe_viewport_width(): f32
-gfx_safe_viewport_height(): f32
-
-input_pointer_x_logical(index): f32
-input_pointer_y_logical(index): f32
-input_pointer_dx_logical(index): f32
-input_pointer_dy_logical(index): f32
-```
-
-Normalized pointer accessors may retain their explicit `_n` names. Native and drawable queries use names ending in `_px` and return integer physical pixel counts:
-
-```stasis
-gfx_native_width_px(): i32
-gfx_native_height_px(): i32
-gfx_drawable_width_px(): i32
-gfx_drawable_height_px(): i32
-```
-
-The HostFrame version must be bumped. Compatibility fields such as `HOST_I_WINDOW_*` and `HOST_I_VIEWPORT_*` must be removed from the active contract rather than populated indefinitely as aliases. All hosts, fixtures, generated bindings, and consumers migrate atomically. Removed source APIs fail with normal deterministic unknown-function diagnostics; no compatibility implementation remains.
+This public-surface cleanup does not change the raw HostFrame wire layout, so
+its version remains 4. Compatibility fields such as `HOST_I_WINDOW_*` and
+`HOST_I_VIEWPORT_*` were already removed from that active contract rather than
+being populated indefinitely as aliases. Removed source APIs fail with normal
+deterministic unknown-function diagnostics; no compatibility implementation
+remains.
 
 ## 6. Required API
 
@@ -295,6 +263,7 @@ global menu_title_width: f32;
 global play_label_run: i32;
 global play_label_width: f32;
 global button_sprite: i32;
+global host_frame: HostFrame;
 
 function menu_load_ui(): void {
     ui_font = load_font("assets/ui.ttf", 28);
@@ -314,9 +283,9 @@ The title is centered within the safe viewport and placed 24 units below its top
 
 ```stasis
 function menu_draw_title(): void {
-    let safe_x: f32 = gfx_safe_viewport_x();
-    let safe_y: f32 = gfx_safe_viewport_y();
-    let safe_w: f32 = gfx_safe_viewport_width();
+    let safe_x: f32 = host_frame.display.safe_x;
+    let safe_y: f32 = host_frame.display.safe_y;
+    let safe_w: f32 = host_frame.display.safe_width;
 
     let title_w: f32 = menu_title_width;
     let title_h: f32 = 32.0;
@@ -358,10 +327,10 @@ This creates scalar button bounds 20 units from the safe viewport's left edge an
 
 ```stasis
 function menu_draw_play_button(): void {
-    let safe_x: f32 = gfx_safe_viewport_x();
-    let safe_y: f32 = gfx_safe_viewport_y();
-    let safe_w: f32 = gfx_safe_viewport_width();
-    let safe_h: f32 = gfx_safe_viewport_height();
+    let safe_x: f32 = host_frame.display.safe_x;
+    let safe_y: f32 = host_frame.display.safe_y;
+    let safe_w: f32 = host_frame.display.safe_width;
+    let safe_h: f32 = host_frame.display.safe_height;
 
     let button_w: f32 = 180.0;
     let button_h: f32 = 56.0;
@@ -495,10 +464,10 @@ let hit_y: f32 = button_y - hit_pad;
 let hit_w: f32 = button_w + hit_pad * 2.0;
 let hit_h: f32 = button_h + hit_pad * 2.0;
 
-if (input_pointer_count() > 0 && input_pointer_went_up(0)) {
+if (host_frame.pointer_count > 0 && host_frame.pointers[0].went_up) {
     let clicked: bool = ui_point_in_box(
-        input_pointer_x_logical(0),
-        input_pointer_y_logical(0),
+        host_frame.pointers[0].x_logical,
+        host_frame.pointers[0].y_logical,
         hit_x,
         hit_y,
         hit_w,
@@ -596,28 +565,19 @@ V1 exposes enough scalar information for the caller to detect fit. It does not w
 Adaptive menus and HUDs can read safe viewport scalars directly:
 
 ```stasis
-let safe_x: f32 = gfx_safe_viewport_x();
-let safe_y: f32 = gfx_safe_viewport_y();
-let safe_w: f32 = gfx_safe_viewport_width();
-let safe_h: f32 = gfx_safe_viewport_height();
+host_frame.refresh();
+let safe_x: f32 = host_frame.display.safe_x;
+let safe_y: f32 = host_frame.display.safe_y;
+let safe_w: f32 = host_frame.display.safe_width;
+let safe_h: f32 = host_frame.display.safe_height;
 ```
 
-These public layout-facing functions return `f32`. HostFrame v4 stores logical, safe viewport, and available presentation geometry directly in its `f32` lane; physical native and drawable pixel counts remain `i32` metadata. No `f32[4]` wrapper is required.
-
-Logical presentation dimensions use one canonical public API:
-
-```stasis
-function gfx_logical_width(): f32;
-function gfx_logical_height(): f32;
-function gfx_safe_viewport_x(): f32;
-function gfx_safe_viewport_y(): f32;
-function gfx_safe_viewport_width(): f32;
-function gfx_safe_viewport_height(): f32;
-```
-
-Window creation and resize requests may continue accepting integer logical dimensions because they establish a discrete requested canvas configuration. Native and drawable pixel counts use the explicit `_px` integer APIs defined in section 5.9. They are not used directly as layout coordinates.
-
-There is no new `input_viewport_*` layout API. Safe-area layout uses `gfx_safe_viewport_*`, full-canvas layout uses `gfx_logical_*`, and hit testing uses the logical pointer accessors. Each name identifies its coordinate space.
+The logical, safe viewport, and available presentation fields are `f32`.
+Physical native and drawable pixel counts remain `i32` metadata. Window
+creation and resize requests may continue accepting integer logical dimensions
+because they establish a discrete requested canvas configuration. Hit testing
+reads `x_logical` and `y_logical` from a present pointer in the same refreshed
+snapshot.
 
 ### 9.2 Fixed-design canvas
 
@@ -713,9 +673,9 @@ At least one test or sample must:
 
 Tests must verify that:
 
-- logical canvas and safe viewport accessors return `f32`
+- logical canvas and safe viewport snapshot fields are `f32`
 - removed compatibility display and input APIs are absent from the stdlib surface
-- canonical logical pointer accessors return `f32` in the same coordinate space as logical and safe layout bounds
+- logical pointer snapshot fields are `f32` in the same coordinate space as logical and safe layout bounds
 - pointer, text, line, single-pass layout, placement, and sprite geometry share the `f32` presentation path
 - sprite command encoding and host decoding agree on the new geometry representation
 - fractional sprite positions and sizes survive command submission until renderer rasterization
@@ -735,11 +695,11 @@ All test commands remain bounded to 900 seconds, with lingering processes checke
 
 ### Float presentation boundary
 
-- expose logical canvas and safe viewport geometry as `f32` to Stasis layout callers
-- replace `_px` pointer compatibility names with explicit logical-coordinate accessors
-- remove `gfx_window_*`, `input_viewport_*`, and superseded HostFrame alias fields
-- rename native and drawable queries with explicit `_px` suffixes
-- bump HostFrame and command-buffer versions and migrate every host and fixture atomically
+- expose logical canvas and safe viewport geometry as `f32` HostFrame fields
+- replace pointer compatibility queries with explicit logical-coordinate fields
+- remove superseded scalar queries and HostFrame alias fields
+- expose native and drawable metadata as explicit `_px` fields
+- preserve the HostFrame v4 wire layout while migrating callers to the typed snapshot atomically
 - migrate sprite x/y/width/height parameters and command storage to `f32`
 - update existing sprite callers and parity fixtures
 - verify fractional geometry through a real renderer path
@@ -777,14 +737,14 @@ V1 is complete when:
 10. One real menu title, button, and centered button label demonstrate the API.
 11. Drawing and hit testing reuse the same scalar button bounds.
 12. Tests execute the representative path through Cranelift and verify results.
-13. Canonical logical and safe viewport accessors return `f32` without caller-side conversion.
+13. Canonical logical and safe viewport HostFrame fields are `f32` without caller-side conversion.
 14. Sprite x/y/width/height remain `f32` through Stasis command submission.
 15. The graphics command-buffer version and all host decoders agree on the migrated sprite representation.
 16. Raw physical pixel counts, handles, counts, and indices remain `i32` where integer semantics are intrinsic.
-17. `gfx_window_*`, `input_viewport_*`, and logical pointer APIs ending in `_px` are removed rather than deprecated.
-18. Canonical logical pointer accessors share the coordinate space used by `gfx_logical_*` and `gfx_safe_viewport_*`.
-19. Native and drawable integer queries use explicit `_px` names.
-20. The bumped HostFrame contract contains no active compatibility aliases for removed window or viewport fields.
+17. Superseded scalar display and pointer queries are removed rather than deprecated.
+18. Canonical logical pointer fields share the coordinate space used by the logical and safe display fields.
+19. Native and drawable integer HostFrame fields use explicit `_px` names.
+20. The HostFrame v4 contract contains no active compatibility aliases for removed window or viewport fields.
 
 ## 15. Deferred Extensions
 

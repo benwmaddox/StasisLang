@@ -32,37 +32,52 @@ use the same aspect-fit values, including letterbox offsets.
 
 ## HostFrame API
 
-HostFrame version 4 keeps the canonical physical fields in `host_i32` and the
-logical/presentation fields in `host_f32`:
+`graphics.stasis` transitively imports the public `HostFrame` snapshot. A game
+owns one global instance and refreshes it once at the start of each tick (or
+frame for a frame-driven host):
 
-| Indices | Meaning |
+```stasis
+global host_frame: HostFrame;
+
+function tick(): i32 {
+    host_frame.refresh();
+    if (host_frame.quit_requested) { return 1; }
+    return 0;
+}
+```
+
+`refresh(self: HostFrame): void` is the sole operation on the snapshot. Reads
+then use the public fields directly. Frame metadata includes `time_ms`,
+`time_us`, `tick_index`, `version`, `flags`, and `tick_hz`; lifecycle state
+includes `window_focused`, `window_minimized`, and `quit_requested`. Input is
+available through `pointer_count`, `dropped_pointer_count`, the bounded
+`pointers[8]` records, and `keys[512]`.
+
+Display state is grouped under `host_frame.display`:
+
+| Fields | Meaning |
 | --- | --- |
-| `22, 23` | native width, height |
-| `24, 25` | drawable width, height |
-| `30` | display generation |
-| `31` | density generation |
+| `screen_width_px`, `screen_height_px` | platform screen extent |
+| `native_width_px`, `native_height_px` | native window or surface extent |
+| `drawable_width_px`, `drawable_height_px` | render-target pixel extent |
+| `logical_width`, `logical_height` | stable game coordinate extent |
+| `safe_x`, `safe_y`, `safe_width`, `safe_height` | safe logical viewport |
+| `available_width`, `available_height` | available presentation extent |
+| `content_scale`, `raster_scale` | presentation and resource density scales |
+| `resized`, `generation`, `density_generation` | change notifications |
 
-| f32 indices | Meaning |
-| --- | --- |
-| `48, 49` | content scale, raster scale |
-| `50, 51` | logical width, height |
-| `52..55` | safe logical x, y, width, height |
-| `56, 57` | available presentation width, height |
-
-The Stasis stdlib exposes these through `gfx_logical_*`, `gfx_native_*`,
-`gfx_drawable_*`, `gfx_safe_viewport_*`, `gfx_available_width`,
-`gfx_available_height`, `gfx_content_scale`, `gfx_raster_scale`, and the two
-generation accessors. Available presentation values are scalar platform units:
+Available presentation values are scalar platform units:
 CSS pixels after safe-area accounting on Web, desktop usable-area units on
 the native window's current display (with the primary display only as a
 fallback), and platform surface units on Android. They are populated
-before guest `main()` and every `tick()`. Native hosts can call
+into the private raw frame before guest `main()` and every `tick()`; the public
+snapshot reflects them after `refresh()`. Native hosts can call
 `stasis_get_display_metrics` for the pre-existing display geometry.
 
-The display generation advances once when any logical, native, drawable, or
+`host_frame.display.generation` advances once when any logical, native, drawable, or
 available-presentation extent changes. This includes safe visible viewport
 changes on Web even when the fitted CSS canvas remains pinned at the same size.
-The density generation advances only when the effective raster scale changes.
+`host_frame.display.density_generation` advances only when the effective raster scale changes.
 Callers can therefore rebuild responsive layout or surface state on display
 generation while invalidating density-dependent resources exactly once per
 cache-key change.

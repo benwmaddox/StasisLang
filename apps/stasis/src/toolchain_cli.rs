@@ -7228,7 +7228,7 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
         source_tree,
     ] {
         if candidate.join("stdlib.stasis").is_file()
-            && candidate.join("internal/host_frame.stasis").is_file()
+            && candidate.join("internal/host_frame_raw.stasis").is_file()
             && candidate.join("internal/gfx_cmd.stasis").is_file()
         {
             return Ok(candidate);

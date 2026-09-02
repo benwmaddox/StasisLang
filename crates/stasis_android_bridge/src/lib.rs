@@ -3599,8 +3599,14 @@ mod tests {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("orientation_host_frame");
+        let typed_host_frame = include_str!("../../../src/stdlib/host_frame.stasis").replacen(
+            "import \"internal/host_frame_raw.stasis\";",
+            "",
+            1,
+        );
         let source = format!(
-            "{}\n\
+            "{}\n{}\n\
+             global frame: HostFrame;\n\
              global observed_release_actions: i32;\n\
              global observed_resized: i32;\n\
              global observed_native_w: i32;\n\
@@ -3620,31 +3626,33 @@ mod tests {
              global host_req_window_h_px: i32;\n\
              function main(): void {{ observed_release_actions = 0; host_req_window_w_px = 360; host_req_window_h_px = 720; }}\n\
              function tick(): void {{\n\
-                 observed_native_w = host_native_w_px();\n\
-                 observed_native_h = host_native_h_px();\n\
-                 observed_drawable_w = host_drawable_w_px();\n\
-                 observed_drawable_h = host_drawable_h_px();\n\
-                 observed_display_generation = host_display_generation();\n\
-                 observed_density_generation = host_density_generation();\n\
+                 frame.refresh();\n\
+                 observed_native_w = frame.display.native_width_px;\n\
+                 observed_native_h = frame.display.native_height_px;\n\
+                 observed_drawable_w = frame.display.drawable_width_px;\n\
+                 observed_drawable_h = frame.display.drawable_height_px;\n\
+                 observed_display_generation = frame.display.generation;\n\
+                 observed_density_generation = frame.display.density_generation;\n\
                  observed_resized = 0;\n\
-                 if (host_resized()) {{ observed_resized = 1; }}\n\
-                 observed_pointer_count = host_pointer_count();\n\
-                 observed_pointer_id = host_pointer_id(0);\n\
+                 if (frame.display.resized) {{ observed_resized = 1; }}\n\
+                 observed_pointer_count = frame.pointer_count;\n\
+                 observed_pointer_id = frame.pointers[0].id;\n\
                  observed_is_down = 0;\n\
-                 if (host_pointer_is_down(0)) {{ observed_is_down = 1; }}\n\
+                 if (frame.pointers[0].is_down) {{ observed_is_down = 1; }}\n\
                  observed_went_down = 0;\n\
-                 if (host_pointer_went_down(0)) {{ observed_went_down = 1; }}\n\
+                 if (frame.pointers[0].went_down) {{ observed_went_down = 1; }}\n\
                  observed_went_up = 0;\n\
-                 if (host_pointer_went_up(0)) {{\n\
+                 if (frame.pointers[0].went_up) {{\n\
                      observed_went_up = 1;\n\
                      observed_release_actions += 1;\n\
                  }}\n\
                  observed_logical_ok = 0;\n\
-                 if (host_logical_width() == 360.0 && host_logical_height() == 720.0) {{ observed_logical_ok = 1; }}\n\
+                 if (frame.display.logical_width == 360.0 && frame.display.logical_height == 720.0) {{ observed_logical_ok = 1; }}\n\
                  observed_normalized_ok = 0;\n\
-                 if (host_pointer_x_n(0) == 0.5 && host_pointer_y_n(0) == 0.5) {{ observed_normalized_ok = 1; }}\n\
+                 if (frame.pointers[0].x_normalized == 0.5 && frame.pointers[0].y_normalized == 0.5) {{ observed_normalized_ok = 1; }}\n\
              }}\n",
-            include_str!("../../../src/stdlib/internal/host_frame.stasis")
+            include_str!("../../../src/stdlib/internal/host_frame_raw.stasis"),
+            typed_host_frame
         );
         fs::write(root.join("src/main.stasis"), source).expect("write orientation fixture");
         let entry = Path::new("src/main.stasis");
@@ -4536,8 +4544,12 @@ function tick(): void {}
             ("stdlib.stasis", "stdlib.stasis"),
             ("memory.stasis", "memory.stasis"),
             ("graphics.stasis", "graphics.stasis"),
+            ("host_frame.stasis", "host_frame.stasis"),
             ("asset_tasks.stasis", "asset_tasks.stasis"),
-            ("internal/host_frame.stasis", "internal/host_frame.stasis"),
+            (
+                "internal/host_frame_raw.stasis",
+                "internal/host_frame_raw.stasis",
+            ),
             ("internal/gfx_cmd.stasis", "internal/gfx_cmd.stasis"),
             (
                 "internal/host_window_request.stasis",

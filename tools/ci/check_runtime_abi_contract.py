@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RENDER_HEADER = Path("runtime/stasis_render_contract.h")
-HOST_FRAME = Path("src/stdlib/internal/host_frame.stasis")
+HOST_FRAME = Path("src/stdlib/internal/host_frame_raw.stasis")
 GFX_CMD = Path("src/stdlib/internal/gfx_cmd.stasis")
 DYNLOAD = Path("crates/stasis_dynload/src/lib.rs")
 DESKTOP = Path("apps/stasis/src/lib.rs")
@@ -838,7 +838,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         VSCODE_RENDER_FIXTURE: ("begin_frame();", "draw_line("),
         WINDOWS_LAUNCH_FIXTURE: (
             "begin_frame();",
-            "input_pointer_count() > 0 && input_pointer_is_down(0)",
+            "windows_smoke_host_frame.pointer_count > 0 && windows_smoke_host_frame.pointers[0].is_down",
             "smoke_writer.reserve(2,",
             "smoke_writer.finalize(2);",
             "smoke_label.draw(",
@@ -900,10 +900,10 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
     exploration_host = sources[EXPLORATION_HOST]
     checks += 1
     if not all(marker in exploration_host for marker in (
-        "if (input_pointer_count() > 0)",
-        "input_pointer_x_logical(0)",
-        "input_pointer_y_logical(0)",
-        "if (input_pointer_is_down(0))",
+        "if (exploration_host_frame.pointer_count > 0)",
+        "exploration_host_frame.pointers[0].x_logical",
+        "exploration_host_frame.pointers[0].y_logical",
+        "if (exploration_host_frame.pointers[0].is_down)",
     )):
         failures.append(Mismatch(
             label(HOST_FRAME), label(EXPLORATION_HOST), "pointer_presence_and_down_state",
@@ -911,17 +911,19 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         ))
     checks += 1
     pointer_block = re.search(
-        r"if\s*\(input_pointer_count\(\)\s*>\s*0\)\s*\{(?P<body>.*?)\n\s*\}",
+        r"if\s*\(exploration_host_frame\.pointer_count\s*>\s*0\)\s*\{(?P<body>.*?)\n\s*\}",
         exploration_host,
         re.DOTALL,
     )
     if pointer_block is None or re.search(
         r"Input\.touch_active\s*=\s*1\s*;",
-        pointer_block.group("body").split("if (input_pointer_is_down(0))", 1)[0],
+        pointer_block.group("body").split(
+            "if (exploration_host_frame.pointers[0].is_down)", 1
+        )[0],
     ):
         failures.append(Mismatch(
             label(HOST_FRAME), label(EXPLORATION_HOST), "pointer_active_semantics",
-            "touch_active assignment guarded by input_pointer_is_down", "presence implies active",
+            "touch_active assignment guarded by pointer is_down", "presence implies active",
         ))
 
     parity_manifest_text = sources[RENDER_PARITY_MANIFEST]

@@ -197,7 +197,7 @@ already complete.
 `play` and the native runner use HostFrame bulk snapshots for per-tick input/state now.
 Application code should read keyboard/pointer/quit state through the public wrappers in
 `src/stdlib/graphics.stasis`. The fixed HostFrame layout is
-private to `src/stdlib/internal/host_frame.stasis`; integration tests may import it directly,
+private to `src/stdlib/internal/host_frame_raw.stasis`; integration tests may import it directly,
 while ordinary tests should use `src/stdlib/testing/input_testkit.stasis`.
 
 ## SDL Scancodes

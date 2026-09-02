@@ -33,7 +33,7 @@ class HostRuntimeContractTests(unittest.TestCase):
         overlays = {contract.abi.HOST_FRAME: source.replace("const HOST_I_TICK_INDEX: i32 = 10;", "const HOST_I_TICK_INDEX: i32 = 11;", 1)}
         failures, _ = contract.check(registry=copy.deepcopy(self.registry), overlays=overlays)
         failure = next(item for item in failures if item.field == "host_frame.constants.HOST_I_TICK_INDEX")
-        self.assertEqual("src/stdlib/internal/host_frame.stasis", failure.source)
+        self.assertEqual("src/stdlib/internal/host_frame_raw.stasis", failure.source)
 
     def test_contract_envelope_fixtures_lock_version_behavior(self):
         fixture_root = contract.ROOT / "contracts/v1/fixtures"

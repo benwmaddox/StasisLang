@@ -69,6 +69,7 @@ struct GameState {
 }
 
 global state: GameState;
+global host_frame: HostFrame;
 
 function main(): i32 {
     init_window(800, 600, "Stasis Game");
@@ -78,12 +79,13 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (should_quit()) { return 1; }
+    host_frame.refresh();
+    if (host_frame.quit_requested) { return 1; }
 
-    if (is_key_down(Scancode.Left)) {
+    if (host_frame.keys[Scancode.Left] != 0) {
         state.x -= state.speed;
     }
-    if (is_key_down(Scancode.Right)) {
+    if (host_frame.keys[Scancode.Right] != 0) {
         state.x += state.speed;
     }
 
@@ -109,7 +111,7 @@ The division of responsibility is deliberate:
 
 - `global state` describes the persistent simulation.
 - `main()` establishes its initial invariants and requests host resources.
-- `tick()` reads input snapshots and advances the model.
+- `tick()` refreshes one caller-owned `HostFrame`, reads that snapshot, and advances the model.
 - `render()` turns the current model into drawing commands.
 - `on_code_swap()` handles the exceptional transition between code versions.
 

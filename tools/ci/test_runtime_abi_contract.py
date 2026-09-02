@@ -122,8 +122,8 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_grouped_sprite_runs_and_exploration_pointer_semantics_are_guarded(self):
         failures, _ = self.run_with(
             contract.WINDOWS_LAUNCH_FIXTURE,
-            "input_pointer_count() > 0 && input_pointer_is_down(0)",
-            "input_pointer_count() > 0",
+            "windows_smoke_host_frame.pointer_count > 0 && windows_smoke_host_frame.pointers[0].is_down",
+            "windows_smoke_host_frame.pointer_count > 0",
         )
         self.assertTrue(any(failure.field == "public_graphics_path" for failure in failures))
 
@@ -136,13 +136,13 @@ class RuntimeAbiContractTests(unittest.TestCase):
 
         failures, _ = self.run_with(
             contract.EXPLORATION_HOST,
-            "if (input_pointer_is_down(0)) {",
-            "Input.touch_active = 1;\n        if (input_pointer_is_down(0)) {",
+            "if (exploration_host_frame.pointers[0].is_down) {",
+            "Input.touch_active = 1;\n        if (exploration_host_frame.pointers[0].is_down) {",
         )
         failure = next(
             failure for failure in failures if failure.field == "pointer_active_semantics"
         )
-        self.assertEqual("src/stdlib/internal/host_frame.stasis", failure.producer)
+        self.assertEqual("src/stdlib/internal/host_frame_raw.stasis", failure.producer)
         self.assertEqual(contract.EXPLORATION_HOST.as_posix(), failure.consumer)
 
     def test_hot_swap_fixtures_require_public_graphics_path(self):
@@ -277,7 +277,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
         canonical = 'import "../../../src/stdlib/internal/gfx_cmd.stasis";'
         mutations = (
             "",
-            'import "../../../src/stdlib/internal/host_frame.stasis";',
+            'import "../../../src/stdlib/internal/host_frame_raw.stasis";',
         )
         for replacement in mutations:
             with self.subTest(replacement=replacement):
