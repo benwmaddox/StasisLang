@@ -2166,9 +2166,6 @@ fn receiver_array_binding<'a>(
     collection_path: &str,
     suffix: &str,
 ) -> Result<Option<ReceiverArrayBinding<'a>>, String> {
-    if !suffix.is_empty() {
-        return Ok(None);
-    }
     let Some((receiver_name, field_name)) = collection_path.split_once('.') else {
         return Ok(None);
     };
@@ -2190,7 +2187,7 @@ fn receiver_array_binding<'a>(
                 receiver.type_id
             )
         })?;
-    let element_type = context
+    let collection_element_type = context
         .types
         .indexed_element_type_id(field_type)
         .ok_or_else(|| {
@@ -2199,13 +2196,31 @@ fn receiver_array_binding<'a>(
                 receiver.type_id
             )
         })?;
+    let element_type = if suffix.is_empty() {
+        collection_element_type
+    } else {
+        context
+            .named_structs
+            .get(&collection_element_type)
+            .and_then(|fields| fields.get(suffix))
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "unknown web receiver array element field '{collection_element_type}.{suffix}'"
+                )
+            })?
+    };
 
     let mut candidates = Vec::new();
     for (instance_path, instance_type) in context.global_types {
         if *instance_type != receiver.type_id {
             continue;
         }
-        let memory_path = format!("{instance_path}.{field_name}");
+        let memory_path = if suffix.is_empty() {
+            format!("{instance_path}.{field_name}")
+        } else {
+            format!("{instance_path}.{field_name}.{suffix}")
+        };
         let Some(memory) = context.memory.get(&memory_path) else {
             continue;
         };
@@ -4259,6 +4274,88 @@ function render(): i32 { return 0; }
             process.memory_layout()["first.values"].offset,
             process.memory_layout()["second.values"].offset
         );
+    }
+
+    #[test]
+    fn reads_and_writes_receiver_struct_array_fields_across_instances() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "receiver_struct_arrays.stasis",
+            r#"
+struct Pointer {
+    id: i32;
+    active: bool;
+    x: f32;
+}
+
+struct Frame {
+    pointers: Pointer[2];
+}
+
+global first: Frame;
+global second: Frame;
+
+function write(self: Frame, index: i32, id: i32, active: bool, x: f32): void {
+    self.pointers[index].id = id;
+    self.pointers[index].active = active;
+    self.pointers[index].x = x;
+}
+
+function score(self: Frame, index: i32): i32 {
+    let result: i32 = self.pointers[index].id + f32_to_i32(self.pointers[index].x * 2.0);
+    if (self.pointers[index].active) {
+        result += 100;
+    }
+    return result;
+}
+
+function main(): i32 {
+    first.write(1, 11, true, 1.5);
+    second.write(1, 22, false, 4.5);
+    return first.score(1) + second.score(1);
+}
+
+function tick(): i32 { return 0; }
+function render(): i32 { return 0; }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile receiver struct array field reads and writes for web");
+        for field in ["id", "active", "x"] {
+            let first = &process.memory_layout()[&format!("first.pointers.{field}")];
+            let second = &process.memory_layout()[&format!("second.pointers.{field}")];
+            assert_eq!(first.length, 2);
+            assert_eq!(second.length, 2);
+            assert_ne!(first.offset, second.offset);
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_receiver_struct_array_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write receiver struct array wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for receiver struct array wasm");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "145");
     }
 
     #[test]
