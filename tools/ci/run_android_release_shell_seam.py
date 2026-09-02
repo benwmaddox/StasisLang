@@ -1512,9 +1512,10 @@ def dismiss_system_dialog_action(adb: Path, serial: str | None) -> bool:
     hierarchy = _run(
         adb,
         serial,
-        "shell",
+        "exec-out",
         "uiautomator",
         "dump",
+        "--compressed",
         "/dev/tty",
         required=False,
     )
@@ -1592,16 +1593,10 @@ def ensure_test_activity_foreground(
         if current_focus or system_dialog_present
         else False
     )
-    if (current_focus or system_dialog_present) and not dismissed:
-        _run(
-            adb,
-            serial,
-            "shell",
-            "input",
-            "keyevent",
-            "KEYCODE_BACK",
-            required=False,
-        )
+    # Fail closed for product and unrecognized ANRs: keep the dialog visible so
+    # the bounded capture oracle reports the failure instead of masking it.
+    if system_dialog_present and not dismissed:
+        return False
     _run(
         adb,
         serial,
