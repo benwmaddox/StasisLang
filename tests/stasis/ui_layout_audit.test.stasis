@@ -1,4 +1,4 @@
-import "../../src/stdlib/ui_layout_audit.stasis";
+import "../../src/stdlib/testing/ui_layout_audit.stasis";
 
 test `ui audit reports exact center deltas and padding`(): bool {
     if (ui_audit_center_delta_x(10.0, 100.0, 35.0, 50.0) != 0.0) {

@@ -1,5 +1,5 @@
 import "layout.stasis";
-import "../../src/stdlib/ui_layout_audit.stasis";
+import "../../src/stdlib/testing/ui_layout_audit.stasis";
 
 function main(): i32 {
     menu_layout(0.0, 0.0, 360.0, 720.0, 180.0, 64.0);

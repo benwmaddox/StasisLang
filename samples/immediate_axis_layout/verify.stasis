@@ -1,5 +1,5 @@
 import "placement.stasis";
-import "../../src/stdlib/ui_layout_audit.stasis";
+import "../../src/stdlib/testing/ui_layout_audit.stasis";
 
 function main(): i32 {
     let title_x: f32 = menu_title_x_for(0.0, 360.0, 180.0);
