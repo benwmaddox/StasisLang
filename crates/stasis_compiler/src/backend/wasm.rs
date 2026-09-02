@@ -367,7 +367,7 @@ fn build_struct_scalars(
         let Some(field_types) = analysis.named_struct_field_types.get(type_id) else {
             continue;
         };
-        let fields = field_types
+        let scalar_fields = field_types
             .iter()
             .filter_map(|(suffix, field_type)| {
                 memory
@@ -377,16 +377,14 @@ fn build_struct_scalars(
                     .map(|binding| (suffix.clone(), binding))
             })
             .collect::<BTreeMap<_, _>>();
-        if !fields.is_empty() {
-            out.insert(
-                path.clone(),
-                StructScalarBinding {
-                    base: hash_global_path(path),
-                    type_id: *type_id,
-                    fields,
-                },
-            );
-        }
+        out.insert(
+            path.clone(),
+            StructScalarBinding {
+                base: hash_global_path(path),
+                type_id: *type_id,
+                fields: scalar_fields,
+            },
+        );
     }
     out
 }
@@ -1365,12 +1363,13 @@ fn encode_function(
         }
     }
     let scratch_index = physical_cursor;
-    let scratch_i32 = scratch_index + 1;
-    let scratch_i32_b = scratch_index + 2;
-    let scratch_i32_c = scratch_index + 3;
-    let scratch_f32 = scratch_index + 4;
-    let scratch_f64 = scratch_index + 5;
-    local_types.extend([I32, I32, I32, I32, F32, F64]);
+    let scratch_address = scratch_index + 1;
+    let scratch_i32 = scratch_index + 2;
+    let scratch_i32_b = scratch_index + 3;
+    let scratch_i32_c = scratch_index + 4;
+    let scratch_f32 = scratch_index + 5;
+    let scratch_f64 = scratch_index + 6;
+    local_types.extend([I32, I32, I32, I32, I32, F32, F64]);
     let mut body = Vec::new();
     encode_local_declarations(&local_types, &mut body);
     let context = EncodeContext {
@@ -1389,6 +1388,7 @@ fn encode_function(
         internal_overloads,
         signatures,
         scratch_index,
+        scratch_address,
         return_type: function.return_type,
         scratch_i32,
         scratch_i32_b,
@@ -1516,6 +1516,7 @@ struct EncodeContext<'a> {
     internal_overloads: &'a BTreeMap<String, Vec<u32>>,
     signatures: &'a [Signature],
     scratch_index: u32,
+    scratch_address: u32,
     return_type: TypeId,
     scratch_i32: u32,
     scratch_i32_b: u32,
@@ -1635,6 +1636,13 @@ fn encode_statements(
                             continue;
                         }
                     }
+                }
+                if *op != AssignOp::Set
+                    && encode_receiver_array_compound_assignment(
+                        target, *op, expression, context, out,
+                    )?
+                {
+                    continue;
                 }
                 let target_type = target_type(target, context)?;
                 if *op == AssignOp::Set && is_struct_view_type(target_type, context.named_structs) {
@@ -1757,6 +1765,46 @@ fn encode_statements(
     Ok(())
 }
 
+fn encode_receiver_array_compound_assignment(
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<bool, String> {
+    let AssignTarget::IndexedPath {
+        collection_path,
+        index,
+        suffix,
+    } = target
+    else {
+        return Ok(false);
+    };
+    let Some(binding) = receiver_array_binding(context, collection_path, suffix)? else {
+        return Ok(false);
+    };
+
+    encode_receiver_array_address(&binding, index, context, out)?;
+    out.push(0x21);
+    uleb(context.scratch_address, out);
+    out.push(0x20);
+    uleb(context.scratch_address, out);
+    encode_memory_load(binding.element_type, out)?;
+    let value_type = encode_expr_as(expression, Some(binding.element_type), context, out)?;
+    require_same_type(binding.element_type, value_type, "assignment")?;
+    out.push(arithmetic_opcode(op, binding.element_type)?);
+
+    let value_local = scratch_local(context, binding.element_type)?;
+    out.push(0x21);
+    uleb(value_local, out);
+    out.push(0x20);
+    uleb(context.scratch_address, out);
+    out.push(0x20);
+    uleb(value_local, out);
+    encode_memory_store(binding.element_type, out)?;
+    Ok(true)
+}
+
 fn encode_conversion(from: TypeId, to: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
     let from = wasm_value_type(from)?;
     let to = wasm_value_type(to)?;
@@ -1864,6 +1912,11 @@ fn encode_target_get(
                     return encode_local_collection_load(local, index, context, out);
                 }
             }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                encode_receiver_array_address(&binding, index, context, out)?;
+                encode_memory_load(binding.element_type, out)?;
+                return Ok(binding.element_type);
+            }
             let binding = memory_binding(context, collection_path, suffix)?;
             encode_memory_address(binding, index, context, out)?;
             encode_memory_load(binding.type_id, out)?;
@@ -1952,6 +2005,15 @@ fn encode_target_set(
                     uleb(temp, out);
                     return encode_local_collection_store(local, index, temp, context, out);
                 }
+            }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                let temp = scratch_local(context, binding.element_type)?;
+                out.push(0x21);
+                uleb(temp, out);
+                encode_receiver_array_address(&binding, index, context, out)?;
+                out.push(0x20);
+                uleb(temp, out);
+                return encode_memory_store(binding.element_type, out);
             }
             let binding = memory_binding(context, collection_path, suffix)?;
             let temp_index = scratch_local(context, binding.type_id)?;
@@ -2080,9 +2142,152 @@ fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<Typ
                         });
                 }
             }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                return Ok(binding.element_type);
+            }
             Ok(memory_binding(context, collection_path, suffix)?.type_id)
         }
     }
+}
+
+struct ReceiverArrayCandidate<'a> {
+    base: i32,
+    memory: &'a MemoryBinding,
+}
+
+struct ReceiverArrayBinding<'a> {
+    receiver: &'a LocalBinding,
+    element_type: TypeId,
+    candidates: Vec<ReceiverArrayCandidate<'a>>,
+}
+
+fn receiver_array_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    collection_path: &str,
+    suffix: &str,
+) -> Result<Option<ReceiverArrayBinding<'a>>, String> {
+    if !suffix.is_empty() {
+        return Ok(None);
+    }
+    let Some((receiver_name, field_name)) = collection_path.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(receiver) = context
+        .locals
+        .get(receiver_name)
+        .filter(|binding| binding.struct_view.is_some())
+    else {
+        return Ok(None);
+    };
+    let field_type = context
+        .named_structs
+        .get(&receiver.type_id)
+        .and_then(|fields| fields.get(field_name))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "unknown web struct array field '{}.{field_name}'",
+                receiver.type_id
+            )
+        })?;
+    let element_type = context
+        .types
+        .indexed_element_type_id(field_type)
+        .ok_or_else(|| {
+            format!(
+                "web struct field '{}.{field_name}' is not indexable",
+                receiver.type_id
+            )
+        })?;
+
+    let mut candidates = Vec::new();
+    for (instance_path, instance_type) in context.global_types {
+        if *instance_type != receiver.type_id {
+            continue;
+        }
+        let memory_path = format!("{instance_path}.{field_name}");
+        let Some(memory) = context.memory.get(&memory_path) else {
+            continue;
+        };
+        if memory.scalar || memory.type_id != element_type {
+            return Err(format!(
+                "web struct array storage '{memory_path}' does not match field type {field_type}"
+            ));
+        }
+        let base = hash_global_path(instance_path);
+        if candidates
+            .iter()
+            .any(|candidate: &ReceiverArrayCandidate<'_>| candidate.base == base)
+        {
+            return Err(format!(
+                "web struct array field '{}.{field_name}' has ambiguous caller identity {base}",
+                receiver.type_id
+            ));
+        }
+        candidates.push(ReceiverArrayCandidate { base, memory });
+    }
+    if candidates.is_empty() {
+        return Err(format!(
+            "web struct array field '{}.{field_name}' has no caller-owned storage",
+            receiver.type_id
+        ));
+    }
+    Ok(Some(ReceiverArrayBinding {
+        receiver,
+        element_type,
+        candidates,
+    }))
+}
+
+fn encode_receiver_array_address(
+    binding: &ReceiverArrayBinding<'_>,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err(format!(
+            "web collection index must be i32-compatible, found type {index_type}"
+        ));
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+
+    fn select(
+        receiver_base: u32,
+        index_local: u32,
+        candidates: &[ReceiverArrayCandidate<'_>],
+        out: &mut Vec<u8>,
+    ) {
+        let Some((candidate, rest)) = candidates.split_first() else {
+            out.push(0x00);
+            return;
+        };
+        out.push(0x20);
+        uleb(receiver_base, out);
+        out.push(0x41);
+        sleb(candidate.base, out);
+        out.extend([0x46, 0x04, I32]);
+        emit_index_bounds_check(index_local, candidate.memory.len, out);
+        out.push(0x41);
+        sleb(candidate.memory.offset as i32, out);
+        out.push(0x20);
+        uleb(index_local, out);
+        out.push(0x41);
+        sleb(candidate.memory.width as i32, out);
+        out.extend([0x6c, 0x6a, 0x05]);
+        select(receiver_base, index_local, rest, out);
+        out.push(0x0b);
+    }
+
+    select(
+        binding.receiver.index,
+        context.scratch_index,
+        &binding.candidates,
+        out,
+    );
+    Ok(())
 }
 
 fn memory_binding<'a>(
@@ -3417,6 +3622,11 @@ fn encode_expr_as(
                     return encode_local_collection_load(local, index, context, out);
                 }
             }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                encode_receiver_array_address(&binding, index, context, out)?;
+                encode_memory_load(binding.element_type, out)?;
+                return Ok(binding.element_type);
+            }
             let binding = memory_binding(context, collection_path, suffix)?;
             encode_memory_address(binding, index, context, out)?;
             encode_memory_load(binding.type_id, out)?;
@@ -3746,6 +3956,9 @@ fn collect_string_literals(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn read_test_uleb(bytes: &[u8], cursor: &mut usize) -> u32 {
         let mut value = 0;
@@ -4000,6 +4213,115 @@ function render(): i32 { return 0; }
         process.compile().expect("compile web struct views");
         assert_eq!(process.memory_layout()["items.value"].length, 4);
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn reads_and_writes_receiver_array_fields_across_struct_instances() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "receiver_arrays.stasis",
+            r#"
+const CAP: i32 = 4;
+
+struct Batch {
+    values: f32[CAP];
+}
+
+global first: Batch;
+global second: Batch;
+
+function write(self: Batch, index: i32, value: f32): void {
+    self.values[index] = value;
+    self.values[index] += 0.5;
+}
+
+function read(self: Batch, index: i32): f32 {
+    return self.values[index];
+}
+
+function main(): i32 {
+    first.write(1, 2.0);
+    second.write(2, 4.0);
+    return f32_to_i32(first.read(1) + second.read(2));
+}
+
+function tick(): i32 { return 0; }
+function render(): i32 { return 0; }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile receiver array field reads and writes for web");
+        assert_eq!(process.memory_layout()["first.values"].length, 4);
+        assert_eq!(process.memory_layout()["second.values"].length, 4);
+        assert_ne!(
+            process.memory_layout()["first.values"].offset,
+            process.memory_layout()["second.values"].offset
+        );
+    }
+
+    #[test]
+    fn evaluates_receiver_array_compound_index_once() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "receiver_array_index.stasis",
+            r#"
+const CAP: i32 = 4;
+struct Batch { values: f32[CAP]; }
+global batch: Batch;
+global calls: i32;
+
+function next_index(): i32 {
+    calls += 1;
+    return 1;
+}
+
+function update(self: Batch): void {
+    self.values[next_index()] += self.values[0];
+}
+
+function main(): i32 {
+    batch.values[0] = 0.5;
+    batch.values[1] = 2.0;
+    batch.update();
+    return calls * 10 + f32_to_i32(batch.values[1] * 2.0);
+}
+
+function tick(): i32 { return 0; }
+function render(): i32 { return 0; }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile single-evaluation receiver compound assignment");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_receiver_compound_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write receiver compound wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for receiver compound wasm");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "15");
     }
 
     #[test]

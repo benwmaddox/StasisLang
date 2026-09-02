@@ -112,6 +112,9 @@ function Assert-SmokeFrame {
     }
 }
 
+Invoke-Bounded -Description 'prepare toolchain stdlib' -FilePath $Toolchain `
+    -Arguments @('--workspace', $PSScriptRoot, 'prepare')
+
 $captures = @{}
 $captures.play = Join-Path $ArtifactRoot 'play.png'
 Invoke-Bounded -Description 'play' -FilePath $Toolchain -Arguments @(

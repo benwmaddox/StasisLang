@@ -100,45 +100,16 @@ class RuntimeAbiContractTests(unittest.TestCase):
         )
         self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
 
-    def test_vscode_render_fixture_rejects_legacy_version_and_capacity(self):
-        mutations = (
-            ("gfx_cmd_i32[1] = 7;", "gfx_cmd_i32[1] = 6;", "STASIS_RENDER_VERSION"),
-            (
-                "global gfx_cmd_f32: f32[146564];",
-                "global gfx_cmd_f32: f32[125060];",
-                "gfx_cmd_f32.length",
-            ),
-        )
-        for current, stale, field in mutations:
-            with self.subTest(field=field):
-                failures, _ = self.run_with(
-                    contract.VSCODE_RENDER_FIXTURE, current, stale
-                )
-                failure = next(failure for failure in failures if failure.field == field)
-                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
-                self.assertEqual(
-                    "vscode-stasis/test/fixture/src/main.stasis", failure.consumer
-                )
-
-    def test_manual_sprite_fixtures_reject_legacy_version_and_stride(self):
+    def test_public_render_fixtures_require_canonical_calls(self):
         mutations = (
             (
-                contract.WINDOWS_LAUNCH_FIXTURE,
-                "gfx_cmd_f32[80017] = 204.0;",
-                "gfx_cmd_f32[80012] = 204.0;",
-                "sprite_f32_stride",
+                contract.VSCODE_RENDER_FIXTURE, "draw_line(", "legacy_line(", "public_graphics_path",
             ),
             (
-                contract.WORKSHOP_PREVIEW_ADAPTER,
-                "let f_base: i32 = 80004 + index * 13;",
-                "let f_base: i32 = 80004 + index * 8;",
-                "sprite_f32_stride",
+                contract.WINDOWS_LAUNCH_FIXTURE, "smoke_writer.reserve(2,", "legacy_sprite(", "public_graphics_path",
             ),
             (
-                contract.WORKSHOP_PREVIEW_ADAPTER,
-                "gfx_cmd_i32[1] = 7;",
-                "gfx_cmd_i32[1] = 6;",
-                "STASIS_RENDER_VERSION",
+                contract.WORKSHOP_PREVIEW_ADAPTER, "begin_frame();", "legacy_begin();", "public_graphics_path",
             ),
         )
         for path, current, stale, field in mutations:
@@ -148,16 +119,79 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
 
-    def test_hot_swap_fixtures_require_complete_current_v7_header(self):
-        mutations = (
-            (contract.HOT_SWAP_V1_FIXTURE, "gfx_cmd_i32[1] = 7;", "gfx_cmd_i32[1] = 6;", "STASIS_RENDER_VERSION"),
-            (contract.HOT_SWAP_V2_FIXTURE, "gfx_cmd_i32[24] = 0;", "gfx_cmd_i32[24] = 1;", "current_v7_header[24]"),
-            (contract.HOT_SWAP_REJECT_FIXTURE, "gfx_cmd_i32[28] = 0;", "", "current_v7_header[28]"),
+    def test_grouped_sprite_runs_and_exploration_pointer_semantics_are_guarded(self):
+        failures, _ = self.run_with(
+            contract.WINDOWS_LAUNCH_FIXTURE,
+            "input_pointer_count() > 0 && input_pointer_is_down(0)",
+            "input_pointer_count() > 0",
         )
-        for path, current, stale, field in mutations:
-            with self.subTest(path=path, field=field):
+        self.assertTrue(any(failure.field == "public_graphics_path" for failure in failures))
+
+        failures, _ = self.run_with(
+            contract.WINDOWS_LAUNCH_FIXTURE,
+            "smoke_writer.finalize(2);",
+            "smoke_writer.finalize(1);",
+        )
+        self.assertTrue(any(failure.field == "public_sprite_run_count" for failure in failures))
+
+        failures, _ = self.run_with(
+            contract.EXPLORATION_HOST,
+            "if (input_pointer_is_down(0)) {",
+            "Input.touch_active = 1;\n        if (input_pointer_is_down(0)) {",
+        )
+        failure = next(
+            failure for failure in failures if failure.field == "pointer_active_semantics"
+        )
+        self.assertEqual("src/stdlib/internal/host_frame.stasis", failure.producer)
+        self.assertEqual(contract.EXPLORATION_HOST.as_posix(), failure.consumer)
+
+    def test_hot_swap_fixtures_require_public_graphics_path(self):
+        mutations = (
+            (
+                contract.HOT_SWAP_V1_FIXTURE,
+                'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
+                '// import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
+            ),
+            (contract.HOT_SWAP_V2_FIXTURE, "begin_frame();", "legacy_begin();"),
+            (contract.HOT_SWAP_INVALID_FIXTURE, "end_frame();", "legacy_end();"),
+            (contract.HOT_SWAP_REJECT_FIXTURE, "end_frame();", "legacy_end();"),
+        )
+        for path, current, stale in mutations:
+            with self.subTest(path=path):
                 failures, _ = self.run_with(path, current, stale)
-                failure = next(failure for failure in failures if failure.field == field)
+                failure = next(
+                    failure for failure in failures
+                    if failure.field == "hot_swap.public_graphics_path"
+                )
+                self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                self.assertEqual(path.as_posix(), failure.consumer)
+
+        overlays = copy.deepcopy(self.sources)
+        source = overlays[contract.HOT_SWAP_INVALID_FIXTURE]
+        self.assertIn("clear(", source)
+        overlays[contract.HOT_SWAP_INVALID_FIXTURE] = source.replace(
+            "clear(", "legacy_clear("
+        )
+        failures, _ = contract.check(overlays=overlays)
+        self.assertTrue(any(
+            failure.field == "hot_swap.public_graphics_path"
+            and failure.consumer == contract.HOT_SWAP_INVALID_FIXTURE.as_posix()
+            for failure in failures
+        ))
+
+    def test_hot_swap_fixtures_reject_private_graphics_storage(self):
+        for path in contract.HOT_SWAP_FIXTURES:
+            with self.subTest(path=path):
+                failures, _ = self.run_with(
+                    path,
+                    "global tick_generation: i32;",
+                    "global gfx_cmd_i32: i32[67888];\n"
+                    "global tick_generation: i32;",
+                )
+                failure = next(
+                    failure for failure in failures
+                    if failure.field == "hot_swap.private_storage"
+                )
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
 

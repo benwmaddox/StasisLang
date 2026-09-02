@@ -56,12 +56,17 @@ WINDOWS_LAUNCH_FIXTURE = Path("samples/windows_launch_smoke/main.stasis")
 WORKSHOP_PREVIEW_ADAPTER = Path(
     "mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis"
 )
+EXPLORATION_HOST = Path(
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_runtime.stasis"
+)
 HOT_SWAP_V1_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_v1.stasis")
 HOT_SWAP_V2_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_v2.stasis")
 HOT_SWAP_REJECT_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_reject.stasis")
+HOT_SWAP_INVALID_FIXTURE = Path("tests/stasis/seams/desktop_hot_swap_generation_invalid.stasis")
 HOT_SWAP_FIXTURES = (
     HOT_SWAP_V1_FIXTURE,
     HOT_SWAP_V2_FIXTURE,
+    HOT_SWAP_INVALID_FIXTURE,
     HOT_SWAP_REJECT_FIXTURE,
 )
 RENDER_PARITY_MANIFEST = Path("samples/render_parity/capture_manifest.json")
@@ -77,7 +82,7 @@ RENDER_DOWNSTREAM = (
     PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
-    WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
+    WORKSHOP_PREVIEW_ADAPTER, EXPLORATION_HOST, *HOT_SWAP_FIXTURES,
 )
 REQUIRED = (
     RENDER_HEADER, HOST_FRAME, GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN,
@@ -90,7 +95,7 @@ REQUIRED = (
     MOBILE_PACKAGED_ASSETS_NATIVE, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
-    WORKSHOP_PREVIEW_ADAPTER, *HOT_SWAP_FIXTURES,
+    WORKSHOP_PREVIEW_ADAPTER, EXPLORATION_HOST, *HOT_SWAP_FIXTURES,
     RENDER_PARITY_MANIFEST, COMPILER_AOT,
 )
 IGNORED_SOURCE_DIRS = {
@@ -802,111 +807,122 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             "render_trace.current_capacities", "67888/146564/65536", "missing",
         ))
 
-    manual_fixture_texts = {
-        path: without_c_comments(sources[path])
-        for path in (
-            VSCODE_RENDER_FIXTURE,
-            WINDOWS_LAUNCH_FIXTURE,
-            WORKSHOP_PREVIEW_ADAPTER,
-            *HOT_SWAP_FIXTURES,
-        )
-    }
-    for fixture, fixture_text in manual_fixture_texts.items():
-        for lane, render_name in (
-            ("gfx_cmd_i32", "STASIS_RENDER_I32_COUNT"),
-            ("gfx_cmd_f32", "STASIS_RENDER_F32_COUNT"),
-            ("gfx_cmd_u8", "STASIS_RENDER_U8_COUNT"),
-        ):
-            actual = literal_array(fixture_text, lane)
-            expected = render[render_name]
-            checks += 1
-            if not array_matches(actual, expected, lane):
-                failures.append(Mismatch(
-                    label(RENDER_HEADER), label(fixture),
-                    f"{lane}.length", expected, actual,
-                ))
-        for field, index, render_name in (
-            ("STASIS_RENDER_MAGIC", 0, "STASIS_RENDER_MAGIC"),
-            ("STASIS_RENDER_VERSION", 1, "STASIS_RENDER_VERSION"),
-        ):
-            actual = literal_index_write(fixture_text, "gfx_cmd_i32", index)
-            expected = render[render_name]
-            checks += 1
-            if actual != expected:
-                failures.append(Mismatch(
-                    label(RENDER_HEADER), label(fixture),
-                    field, expected, actual,
-                ))
-
-    hot_swap_header = {
-        2: 3, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0,
-        10: 640, 11: 360, 12: 640, 13: 360, 14: 640, 15: 360,
-        16: 0, 17: 0, 18: 640, 19: 360, 20: 1, 21: 1,
-        22: 0, 23: 0, 24: 0, 25: 0, 26: 1, 27: 0, 28: 0,
-        29: 0, 30: 0,
-    }
+    hot_swap_public_import = (
+        'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";'
+    )
     for fixture in HOT_SWAP_FIXTURES:
-        fixture_text = manual_fixture_texts[fixture]
-        for index, expected in hot_swap_header.items():
-            actual = literal_index_write(fixture_text, "gfx_cmd_i32", index)
-            checks += 1
-            if actual != expected:
-                failures.append(Mismatch(
-                    label(RENDER_HEADER), label(fixture),
-                    f"current_v7_header[{index}]", expected, actual,
-                ))
+        fixture_text = without_c_comments(sources[fixture])
+        checks += 1
+        if hot_swap_public_import not in fixture_text or any(
+            not re.search(pattern, fixture_text)
+            for pattern in (
+                r"\bbegin_frame\(\)\s*;",
+                r"\bclear\(",
+                r"\bend_frame\(\)\s*;",
+            )
+        ):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture),
+                "hot_swap.public_graphics_path",
+                "rooted graphics import and begin/clear/end calls", "missing",
+            ))
+        checks += 1
+        if re.search(r"\b(?:gfx_cmd_|gfx_sprite_writer_|GFX_)", fixture_text):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture),
+                "hot_swap.private_storage",
+                "no private graphics identifiers", "internal identifier present",
+            ))
 
-    manual_sprite_layouts = {
+    public_render_fixtures = {
+        VSCODE_RENDER_FIXTURE: ("begin_frame();", "draw_line("),
         WINDOWS_LAUNCH_FIXTURE: (
-            (
-                r"gfx_cmd_i32\s*\[\s*32\s*\]\s*=\s*png_sprite\s*;",
-                r"gfx_cmd_i32\s*\[\s*35\s*\]\s*=\s*svg_sprite\s*;",
-                r"gfx_cmd_f32\s*\[\s*80004\s*\]\s*=\s*52\.0\s*;",
-            ),
-            r"gfx_cmd_f32\s*\[\s*80017\s*\]\s*=\s*204\.0\s*;",
-            tuple(
-                rf"gfx_cmd_f32\s*\[\s*{index}\s*\]\s*=\s*{value}\s*;"
-                for index, value in (
-                    (80008, "0\\.0"), (80009, "0\\.0"),
-                    (80010, "0\\.0"), (80011, "0\\.0"),
-                    (80014, "1\\.0"), (80015, "1\\.0"),
-                    (80021, "0\\.0"), (80022, "0\\.0"),
-                    (80023, "0\\.0"), (80024, "0\\.0"),
-                    (80027, "1\\.0"), (80028, "1\\.0"),
-                )
-            ),
+            "begin_frame();",
+            "input_pointer_count() > 0 && input_pointer_is_down(0)",
+            "smoke_writer.reserve(2,",
+            "smoke_writer.finalize(2);",
+            "smoke_label.draw(",
         ),
         WORKSHOP_PREVIEW_ADAPTER: (
+            "begin_frame();",
+            "PongHost.writer.reserve(4,",
+            "PongHost.writer.finalize(4);",
+        ),
+    }
+    for fixture, required_calls in public_render_fixtures.items():
+        text = sources[fixture]
+        checks += 1
+        if "stdlib/graphics.stasis\";" not in text or any(call not in text for call in required_calls):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture), "public_graphics_path",
+                "graphics import and canonical public calls", "missing",
+            ))
+        checks += 1
+        if re.search(r"\b(?:gfx_cmd_|gfx_sprite_writer_|GFX_)", text):
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture), "public_graphics_boundary",
+                "no command-storage identifiers", "internal identifier present",
+            ))
+
+    grouped_sprite_fixtures = {
+        WINDOWS_LAUNCH_FIXTURE: (
+            "smoke_writer.reserve(2,",
+            "smoke_writer.finalize(2);",
+            ("smoke_write_sprite(png_sprite", "smoke_write_sprite(svg_sprite", "smoke_label.draw("),
+        ),
+        WORKSHOP_PREVIEW_ADAPTER: (
+            "PongHost.writer.reserve(4,",
+            "PongHost.writer.finalize(4);",
             (
-                r"let\s+i_base\s*:\s*i32\s*=\s*32\s*\+\s*index\s*\*\s*3\s*;",
-                r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*13\s*;",
-            ),
-            r"let\s+f_base\s*:\s*i32\s*=\s*80004\s*\+\s*index\s*\*\s*13\s*;",
-            tuple(
-                rf"gfx_cmd_f32\s*\[\s*f_base\s*\+\s*{offset}\s*\]\s*=\s*{value}\s*;"
-                for offset, value in ((4, "0\\.0"), (5, "0\\.0"), (6, "0\\.0"), (7, "0\\.0"), (10, "1\\.0"), (11, "1\\.0"), (12, "0\\.0"))
+                "Render.command1_x",
+                "Render.command2_x",
+                "Render.command4_x",
+                "Render.command3_x",
             ),
         ),
     }
-    for fixture, (base_patterns, stride_pattern, uv_patterns) in manual_sprite_layouts.items():
+    for fixture, (reserve, finalize, ordered_markers) in grouped_sprite_fixtures.items():
+        text = sources[fixture]
         checks += 1
-        if not all(re.search(pattern, manual_fixture_texts[fixture]) for pattern in base_patterns):
+        if text.count(reserve) != 1 or text.count(finalize) != 1:
             failures.append(Mismatch(
-                label(RENDER_HEADER), label(fixture), "sprite_lane_bases",
-                "current v7 i32/f32 sprite bases", "missing",
+                label(RENDER_HEADER), label(fixture), "public_sprite_run_count",
+                "one caller-owned grouped run", "missing or duplicated reserve/finalize",
             ))
         checks += 1
-        if re.search(stride_pattern, manual_fixture_texts[fixture]) is None:
+        positions = [text.find(marker) for marker in ordered_markers]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
             failures.append(Mismatch(
-                label(RENDER_HEADER), label(fixture), "sprite_f32_stride",
-                "current v7 stride 13", "missing",
+                label(RENDER_HEADER), label(fixture), "public_sprite_run_order",
+                "legacy sprite painter order", "missing or reordered calls",
             ))
-        checks += 1
-        if not all(re.search(pattern, manual_fixture_texts[fixture]) for pattern in uv_patterns):
-            failures.append(Mismatch(
-                label(RENDER_HEADER), label(fixture), "sprite_source_transform_defaults",
-                "explicit full-source sentinel, unit scale, and zero rotation", "missing",
-            ))
+
+    exploration_host = sources[EXPLORATION_HOST]
+    checks += 1
+    if not all(marker in exploration_host for marker in (
+        "if (input_pointer_count() > 0)",
+        "input_pointer_x_logical(0)",
+        "input_pointer_y_logical(0)",
+        "if (input_pointer_is_down(0))",
+    )):
+        failures.append(Mismatch(
+            label(HOST_FRAME), label(EXPLORATION_HOST), "pointer_presence_and_down_state",
+            "coordinates for present pointer; active only while down", "public input path missing",
+        ))
+    checks += 1
+    pointer_block = re.search(
+        r"if\s*\(input_pointer_count\(\)\s*>\s*0\)\s*\{(?P<body>.*?)\n\s*\}",
+        exploration_host,
+        re.DOTALL,
+    )
+    if pointer_block is None or re.search(
+        r"Input\.touch_active\s*=\s*1\s*;",
+        pointer_block.group("body").split("if (input_pointer_is_down(0))", 1)[0],
+    ):
+        failures.append(Mismatch(
+            label(HOST_FRAME), label(EXPLORATION_HOST), "pointer_active_semantics",
+            "touch_active assignment guarded by input_pointer_is_down", "presence implies active",
+        ))
 
     parity_manifest_text = sources[RENDER_PARITY_MANIFEST]
     checks += 1

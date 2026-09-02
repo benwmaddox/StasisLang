@@ -143,10 +143,13 @@ parses the versioned `stasis.native_diagnostic.v1` envelope in Java. Each case
 records the native and UI objects, stable stage/code, available file/symbol or
 resource context, detail, and outer-to-inner causes. The C JNI shim forwards
 the complete Rust string; it does not replace a detailed payload with
-`native preview frame failed`. The acceptance runner restores the exact
-packaged source in a `finally`-equivalent cleanup and requires a final healthy
-native frame before reporting pass. The bounded verifier requires the IT-031
-marker and rejects evidence that omits any ordered case or cleanup receipt.
+`native preview frame failed`. Render-schema corruption is confined to a
+temporary helper under `tests/stasis`; the packaged source imports and calls
+that explicit test seam without naming private graphics storage. The acceptance
+runner removes the helper, restores the exact packaged source in a
+`finally`-equivalent cleanup, and requires a final healthy native frame before
+reporting pass. The bounded verifier requires the IT-031 marker and rejects
+evidence that omits any ordered case or cleanup receipt.
 
 ## Hosted release-shell emulator
 

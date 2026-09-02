@@ -2795,6 +2795,116 @@ pub(crate) fn emit_simple_statements(
                             )?;
                             continue;
                         }
+                        if let Some((base, field)) = collection_path.split_once('.') {
+                            if let Some(local) = values_by_name.get(base).copied() {
+                                if let Some(collection_type) = named_struct_field_types
+                                    .get(&local.type_id)
+                                    .and_then(|fields| fields.get(field))
+                                    .copied()
+                                {
+                                    if let Some(element_type) =
+                                        type_table.indexed_element_type_id(collection_type)
+                                    {
+                                        if !suffix.is_empty() || element_type != TYPE_ID_F32 {
+                                            return Err(format!(
+                                                "unsupported indexed receiver field '{}[...].{}'",
+                                                collection_path, suffix
+                                            ));
+                                        }
+                                        if !are_assignment_types_compatible(
+                                            element_type,
+                                            rhs.type_id,
+                                            type_table,
+                                        ) {
+                                            return Err(format!(
+                                                "unsupported indexed receiver assignment for '{}'",
+                                                collection_path
+                                            ));
+                                        }
+                                        let index_binding = emit_simple_expression(
+                                            builder,
+                                            index,
+                                            Some(TYPE_ID_I32),
+                                            values_by_name,
+                                            runtime_call_refs,
+                                            internal_calls,
+                                            call_signatures,
+                                            type_table,
+                                            global_path_types,
+                                            constant_values,
+                                            collection_infos,
+                                            named_struct_field_types,
+                                            foreach_bindings,
+                                        )?;
+                                        let index_binding =
+                                            normalize_index_binding(index_binding, type_table)?;
+                                        emit_fixed_collection_bounds_trap(
+                                            builder,
+                                            index_binding.value,
+                                            collection_type,
+                                            collection_path,
+                                            type_table,
+                                        )?;
+                                        let collection_hash = emit_local_struct_field_path_hash(
+                                            builder.use_var(local.var),
+                                            field,
+                                            builder,
+                                        );
+                                        let no_field = builder.ins().iconst(types::I32, 0);
+                                        let lhs = match op {
+                                            AssignOp::Set => None,
+                                            AssignOp::Mod => {
+                                                return Err(format!(
+                                                    "'%=' is unsupported for f32 indexed receiver assignment '{}[...]'",
+                                                    collection_path
+                                                ));
+                                            }
+                                            _ => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f32_array_load,
+                                                    &[
+                                                        collection_hash,
+                                                        no_field,
+                                                        index_binding.value,
+                                                    ],
+                                                );
+                                                Some(builder.inst_results(call)[0])
+                                            }
+                                        };
+                                        let value = match op {
+                                            AssignOp::Set => rhs.value,
+                                            AssignOp::Add => builder.ins().fadd(
+                                                lhs.expect("compound assignment lhs"),
+                                                rhs.value,
+                                            ),
+                                            AssignOp::Sub => builder.ins().fsub(
+                                                lhs.expect("compound assignment lhs"),
+                                                rhs.value,
+                                            ),
+                                            AssignOp::Mul => builder.ins().fmul(
+                                                lhs.expect("compound assignment lhs"),
+                                                rhs.value,
+                                            ),
+                                            AssignOp::Div => builder.ins().fdiv(
+                                                lhs.expect("compound assignment lhs"),
+                                                rhs.value,
+                                            ),
+                                            AssignOp::Mod => unreachable!(),
+                                        };
+                                        builder.ins().call(
+                                            runtime_call_refs.global_f32_array_store,
+                                            &[
+                                                collection_hash,
+                                                no_field,
+                                                index_binding.value,
+                                                value,
+                                            ],
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         let Some(collection_info) = collection_infos.get(collection_path) else {
                             return Err(format!(
                                 "unknown indexed assignment collection '{}' in current jit path",
@@ -4377,6 +4487,57 @@ pub(crate) fn emit_simple_expression(
                     suffix,
                     index_binding,
                 );
+            }
+            if let Some((base, field)) = collection_path.split_once('.') {
+                if let Some(local) = values_by_name.get(base).copied() {
+                    if let Some(collection_type) = named_struct_field_types
+                        .get(&local.type_id)
+                        .and_then(|fields| fields.get(field))
+                        .copied()
+                    {
+                        if type_table.indexed_element_type_id(collection_type) == Some(TYPE_ID_F32)
+                            && suffix.is_empty()
+                        {
+                            let index_binding = emit_simple_expression(
+                                builder,
+                                index,
+                                Some(TYPE_ID_I32),
+                                values_by_name,
+                                runtime_call_refs,
+                                internal_calls,
+                                call_signatures,
+                                type_table,
+                                global_path_types,
+                                constant_values,
+                                collection_infos,
+                                named_struct_field_types,
+                                foreach_bindings,
+                            )?;
+                            let index_binding = normalize_index_binding(index_binding, type_table)?;
+                            emit_fixed_collection_bounds_trap(
+                                builder,
+                                index_binding.value,
+                                collection_type,
+                                collection_path,
+                                type_table,
+                            )?;
+                            let collection_hash = emit_local_struct_field_path_hash(
+                                builder.use_var(local.var),
+                                field,
+                                builder,
+                            );
+                            let no_field = builder.ins().iconst(types::I32, 0);
+                            let call = builder.ins().call(
+                                runtime_call_refs.global_f32_array_load,
+                                &[collection_hash, no_field, index_binding.value],
+                            );
+                            return Ok(ValueBinding {
+                                value: builder.inst_results(call)[0],
+                                type_id: TYPE_ID_F32,
+                            });
+                        }
+                    }
+                }
             }
             let Some(collection_info) = collection_infos.get(collection_path) else {
                 return Err(format!(
@@ -6355,6 +6516,26 @@ fn emit_array_bounds_trap(builder: &mut FunctionBuilder<'_>, index: Value, len: 
     let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
     let valid = builder.ins().band(non_negative, below_len);
     builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
+}
+
+fn emit_fixed_collection_bounds_trap(
+    builder: &mut FunctionBuilder<'_>,
+    index: Value,
+    collection_type: TypeId,
+    collection_path: &str,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let collection_len = type_table
+        .fixed_collection_len(collection_type)
+        .ok_or_else(|| {
+            format!(
+                "indexed receiver field '{}' has no fixed capacity",
+                collection_path
+            )
+        })?;
+    let collection_len = builder.ins().iconst(types::I32, collection_len as i64);
+    emit_array_bounds_trap(builder, index, collection_len);
+    Ok(())
 }
 
 fn static_index_bounds_proven(

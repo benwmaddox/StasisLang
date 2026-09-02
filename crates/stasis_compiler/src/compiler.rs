@@ -2795,7 +2795,7 @@ function @effects(allowed) tick(): void { clear(forbidden); }
         let error = compiler
             .check()
             .expect_err("application globals cannot impersonate command buffers");
-        assert!(compile_error_message(&error).contains("gfx_cmd_i32[*]"));
+        assert!(compile_error_message(&error).contains("graphics internal identifier"));
 
         compiler = Compiler::new();
         compiler.upsert_file(

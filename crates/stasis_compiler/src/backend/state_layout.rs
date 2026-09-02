@@ -694,7 +694,7 @@ mod tests {
                       global gfx_cmd_i32: i32[8];\n\
                       function main(): i32 { return state.score; }\n";
         let mut jit = JitProcess::new();
-        jit.upsert_file("main.stasis", source);
+        jit.upsert_file("tests/stasis/seams/state_layout.stasis", source);
         jit.compile_staged().expect("compile report fixture");
 
         let active_counts = BTreeMap::from([("state.enemies".to_string(), 2)]);

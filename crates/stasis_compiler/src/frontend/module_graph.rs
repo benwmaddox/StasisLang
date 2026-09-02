@@ -68,6 +68,7 @@ impl ModuleGraph {
                 }
             })?;
             let imports = parse_imports(&path, &source)?;
+            validate_graphics_internal_source_policy(&path, &source, &imports)?;
             for import in imports.iter().rev() {
                 if !modules.contains_key(&import.target) {
                     pending.push((
@@ -173,6 +174,83 @@ impl ModuleGraph {
             .iter()
             .find_map(|import| (import.alias == alias).then_some(import.target.as_str()))
     }
+}
+
+fn validate_graphics_internal_source_policy(
+    path: &str,
+    source: &str,
+    imports: &[ModuleImport],
+) -> Result<(), SourceDiagnostic> {
+    let normalized = path.replace('\\', "/");
+    let is_graphics_implementation = is_recognized_graphics_implementation_path(&normalized);
+    let is_explicit_seam = normalized.starts_with("tests/stasis/");
+    if is_graphics_implementation || is_explicit_seam {
+        return Ok(());
+    }
+
+    if let Some(import) = imports
+        .iter()
+        .find(|import| import.target.ends_with("stdlib/internal/gfx_cmd.stasis"))
+    {
+        return Err(diagnostic(
+            path,
+            import.span.clone(),
+            &import.path,
+            "graphics command storage is internal; import stdlib/graphics.stasis and use its public API",
+        ));
+    }
+
+    let tokens = lex_with_diagnostic(source).map_err(|error| {
+        diagnostic(
+            path,
+            error.offset..error.offset,
+            "graphics internal",
+            error.message,
+        )
+    })?;
+    for token in tokens {
+        if token.kind != TokenKind::Identifier {
+            continue;
+        }
+        let identifier = token_text(source, token);
+        if identifier.starts_with("gfx_cmd_")
+            || identifier.starts_with("gfx_sprite_writer_")
+            || identifier.starts_with("GFX_")
+            || identifier.starts_with("graphics_line_batch_")
+        {
+            return Err(diagnostic(
+                path,
+                token.start..token.end,
+                identifier,
+                format!(
+                    "graphics internal identifier '{identifier}' is unavailable here; use stdlib/graphics.stasis"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_recognized_graphics_implementation_path(path: &str) -> bool {
+    let path = path.trim_start_matches("./");
+    let is_graphics_file = |root: &str| {
+        path == format!("{root}/graphics.stasis")
+            || path == format!("{root}/internal/gfx_cmd.stasis")
+    };
+
+    if is_graphics_file("src/stdlib") || is_graphics_file(".stasis_cache/toolchain/src/stdlib") {
+        return true;
+    }
+
+    ["vendor/stasis/stdlib", "vendor/stasis/src/stdlib"]
+        .iter()
+        .any(|root| {
+            is_graphics_file(root)
+                || path
+                    .strip_suffix("/graphics.stasis")
+                    .or_else(|| path.strip_suffix("/internal/gfx_cmd.stasis"))
+                    .is_some_and(|prefix| prefix == *root || prefix.ends_with(&format!("/{root}")))
+        })
 }
 
 pub fn load_project_module_graph(
@@ -809,6 +887,95 @@ mod tests {
             .expect_err("outside entry must be rejected");
         assert!(error.message.contains("outside project root"), "{error:?}");
         std::fs::remove_dir_all(base).expect("temporary project cleanup");
+    }
+
+    #[test]
+    fn graphics_internal_policy_rejects_imports_and_transitive_abi_names() {
+        let import_source = "import \"vendor/stasis/stdlib/internal/gfx_cmd.stasis\";";
+        let import_error = graph(
+            &["main.stasis"],
+            &[
+                ("main.stasis", import_source),
+                ("vendor/stasis/stdlib/internal/gfx_cmd.stasis", ""),
+            ],
+        )
+        .expect_err("application import must be rejected");
+        assert!(import_error
+            .message
+            .contains("graphics command storage is internal"));
+
+        for source in [
+            "function main(): i32 { return gfx_cmd_line_count(); }",
+            "global gfx_cmd_i32: i32[4];",
+            "const GFX_I_FLAGS: i32 = 2;",
+            "function gfx_sprite_writer_redeclare(): void {}",
+        ] {
+            let error = graph(&["main.stasis"], &[("main.stasis", source)])
+                .expect_err("internal name must be rejected");
+            assert!(error.message.contains("graphics internal identifier"));
+        }
+
+        let transitive_error = graph(
+            &["main.stasis"],
+            &[
+                ("main.stasis", "import \"helper.stasis\";"),
+                (
+                    "helper.stasis",
+                    "extern function gfx_cmd_submit(): void; function helper(): void { gfx_cmd_submit(); }",
+                ),
+            ],
+        )
+        .expect_err("transitively imported internals must be rejected");
+        assert_eq!(transitive_error.path, "helper.stasis");
+        assert!(transitive_error
+            .message
+            .contains("graphics internal identifier"));
+
+        for spoof_path in [
+            "src/my/stdlib/graphics.stasis",
+            "src/my/stdlib/internal/gfx_cmd.stasis",
+            "src/tests/stasis/main.stasis",
+        ] {
+            let error = graph(
+                &[spoof_path],
+                &[(spoof_path, "global gfx_cmd_i32: i32[4];")],
+            )
+            .expect_err("a stdlib suffix alone must not grant graphics implementation access");
+            assert!(error.message.contains("graphics internal identifier"));
+        }
+    }
+
+    #[test]
+    fn graphics_internal_policy_allows_implementation_and_explicit_seams() {
+        for implementation_path in [
+            "src/stdlib/graphics.stasis",
+            "src/stdlib/internal/gfx_cmd.stasis",
+            ".stasis_cache/toolchain/src/stdlib/graphics.stasis",
+            ".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis",
+            "vendor/stasis/stdlib/graphics.stasis",
+            "vendor/stasis/stdlib/internal/gfx_cmd.stasis",
+            "vendor/stasis/src/stdlib/graphics.stasis",
+            "vendor/stasis/src/stdlib/internal/gfx_cmd.stasis",
+            "samples/example/vendor/stasis/stdlib/graphics.stasis",
+            "samples/example/vendor/stasis/stdlib/internal/gfx_cmd.stasis",
+        ] {
+            graph(
+                &[implementation_path],
+                &[(
+                    implementation_path,
+                    "function private_probe(): i32 { return gfx_cmd_line_count(); }",
+                )],
+            )
+            .expect("recognized graphics module identity owns the private vocabulary");
+        }
+        graph(
+            &["tests/stasis/seams/gfx_probe.stasis"],
+            &[(
+                "tests/stasis/seams/gfx_probe.stasis",
+                "global gfx_cmd_i32: i32[4]; function main(): i32 { return GFX_I_FLAGS; }",
+            )],
+        )
+        .expect("explicit ABI seams may inspect storage");
     }
 
     #[cfg(unix)]
