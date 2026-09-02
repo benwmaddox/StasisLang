@@ -840,6 +840,13 @@ impl LanguageService {
         let source = document.text.clone();
         let index = self.language_index()?;
         let mut completion_index = index.completion.clone();
+        completion_index.extend(
+            index
+                .workshop_items
+                .iter()
+                .filter(|item| !item.exposure.is_public() && item.file == relative)
+                .map(shared_completion_item),
+        );
         completion_index.extend(live_items);
         let query = completion_index.query_with_context(&source, byte_offset, limit, &context);
         let items = query
@@ -1133,6 +1140,7 @@ impl LanguageService {
             .language_index()?
             .symbols
             .iter()
+            .filter(|symbol| symbol.exposure.is_public())
             .filter(|symbol| {
                 query.is_empty()
                     || symbol.name.to_ascii_lowercase().contains(&query)
@@ -1728,6 +1736,7 @@ impl LanguageService {
                     WarmDefinitionIndex::build(&files, &source_items, &workshop_items)?;
                 let completion_items = workshop_items
                     .iter()
+                    .filter(|item| item.exposure.is_public())
                     .map(shared_completion_item)
                     .collect::<Vec<_>>();
                 let mut completion = CompletionIndex::default();
@@ -3637,6 +3646,58 @@ function main(): i32 {
             .expect("workspace symbols");
         assert_eq!(workspace.len(), 1);
         assert_eq!(workspace[0].name, "spawn_enemy");
+    }
+
+    #[test]
+    fn internal_declarations_are_projected_from_discovery_but_remain_navigable() {
+        let root = std::env::temp_dir().join("stasis-language-service-internal-discovery");
+        let main_path = root.join("src/main.stasis");
+        let api_path = root.join("src/api.stasis");
+        let main_path = main_path.to_string_lossy().replace('\\', "/");
+        let api_path = api_path.to_string_lossy().replace('\\', "/");
+        let main_source = concat!(
+            "import \"api.stasis\";\n",
+            "function main(): i32 { return raw_helper(); }\n",
+        );
+        let api_source = concat!(
+            "function public_wrapper(): i32 { return raw_helper(); }\n",
+            "function @internal raw_helper(): i32 { return 7; }\n",
+        );
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(main_path.clone(), main_source);
+        service.set_disk_document(api_path.clone(), api_source);
+
+        let external_cursor = main_source.find("raw_helper").expect("external call") + 4;
+        let external = service
+            .completion(&main_path, external_cursor, 64)
+            .expect("external completion");
+        assert!(!external.items.iter().any(|item| item.text == "raw_helper"));
+
+        let internal_cursor = api_source.find("raw_helper").expect("internal call") + 4;
+        let internal = service
+            .completion(&api_path, internal_cursor, 64)
+            .expect("internal completion");
+        assert!(internal.items.iter().any(|item| item.text == "raw_helper"));
+
+        assert!(service
+            .workspace_symbols("raw_helper", 64)
+            .expect("workspace symbols")
+            .is_empty());
+        let definitions = service
+            .definition(&main_path, external_cursor)
+            .expect("internal definition");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].path, api_path);
+        let hover = service
+            .hover(&main_path, external_cursor)
+            .expect("internal hover")
+            .expect("internal hover info");
+        assert_eq!(hover.symbol, "raw_helper");
+        assert_eq!(hover.signatures, vec!["raw_helper(): i32"]);
+        let references = service
+            .references(&main_path, external_cursor, true)
+            .expect("internal references");
+        assert!(references.len() >= 3);
     }
 
     #[test]

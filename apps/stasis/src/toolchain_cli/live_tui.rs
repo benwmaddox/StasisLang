@@ -19,8 +19,8 @@ use stasis_compiler::frontend::parser::{
     completion_expected_type, parse_top_level_extern_functions,
 };
 use stasis_compiler::frontend::workshop::{
-    workshop_source_hash, workshop_symbols, WorkshopSourceFile, WorkshopSourceItem,
-    WorkshopSourceItemKind, WorkshopSymbolKind,
+    workshop_declaration_exposure, workshop_source_hash, workshop_symbols, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolKind,
 };
 use stasis_runner::live::{
     CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEdit, LiveEditOperation,
@@ -42,8 +42,6 @@ const TUI_REQUEST_START: u64 = 1u64 << 61;
 const AI_REQUEST_START: u64 = 1u64 << 62;
 const MAX_DECISION_FIELD_CHARS: usize = 2_000;
 const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
-const MAX_STDLIB_API_FILES: usize = 16;
-const MAX_STDLIB_API_ITEMS: usize = 256;
 const MAX_STDLIB_API_FILE_BYTES: u64 = 512 * 1024;
 const DEFAULT_IMAGEGEN_WAIT_SECONDS: u64 = 30 * 60;
 
@@ -368,9 +366,6 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
     let mut modules = Vec::new();
     let mut total = 0_usize;
     for entry in files.into_iter() {
-        if modules.len() >= MAX_STDLIB_API_FILES {
-            break;
-        }
         let file_type = entry
             .file_type()
             .map_err(|error| format!("failed inspecting Stasis stdlib module: {error}"))?;
@@ -400,8 +395,8 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
         };
         let mut items = Vec::new();
         for symbol in workshop_symbols(&[file])? {
-            if total >= MAX_STDLIB_API_ITEMS {
-                break;
+            if !symbol.exposure.is_public() {
+                continue;
             }
             if !matches!(
                 symbol.kind,
@@ -418,8 +413,16 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
             total = total.saturating_add(1);
         }
         for external in extern_functions {
-            if total >= MAX_STDLIB_API_ITEMS {
-                break;
+            if !workshop_declaration_exposure(
+                &relative,
+                external
+                    .annotations
+                    .iter()
+                    .map(|annotation| annotation.name.as_str()),
+            )
+            .is_public()
+            {
+                continue;
             }
             let params = external
                 .params
@@ -449,9 +452,6 @@ fn load_stdlib_api_catalog(project_root: &Path) -> Result<Value, String> {
             "canonical_import": format!("{import_prefix}/{file_name}"),
             "items": items,
         }));
-        if total >= MAX_STDLIB_API_ITEMS {
-            break;
-        }
     }
     Ok(serde_json::json!({
         "available": true,
@@ -4111,6 +4111,8 @@ mod tests {
                 "global private_counter: i32;\n",
                 "extern function load_font(path: string, size: i32): i32;\n",
                 "function @extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\n",
+                "function @internal @extern(\"stasis_jit_sprite_load_raw\") load_sprite_raw(path: string): i32;\n",
+                "function @internal raw_draw(): void { return; }\n",
                 "function draw_line(x: f32, y: f32): void { return; }\n",
             ),
         )
@@ -4135,6 +4137,40 @@ mod tests {
         assert!(rendered.contains("/vendor/stasis/stdlib/graphics.stasis"));
         assert!(!rendered.contains("private_counter"));
         assert!(!rendered.contains("host_private"));
+        assert!(!rendered.contains("load_sprite_raw"));
+        assert!(!rendered.contains("raw_draw"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stdlib_catalog_does_not_truncate_public_modules_at_sixteen() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_stdlib_catalog_many_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let stdlib = root.join("vendor/stasis/stdlib");
+        fs::create_dir_all(&stdlib).expect("stdlib dir");
+        for index in 0..18 {
+            fs::write(
+                stdlib.join(format!("module_{index:02}.stasis")),
+                format!("function public_{index:02}(): i32 {{ return {index}; }}\n"),
+            )
+            .expect("stdlib module");
+        }
+        fs::write(
+            stdlib.join("stdlib.stasis"),
+            "function root_api(): i32 { return 0; }\n",
+        )
+        .expect("stdlib umbrella");
+
+        let catalog = load_stdlib_api_catalog(&root).expect("stdlib catalog");
+        assert_eq!(catalog["modules"].as_array().expect("modules").len(), 19);
+        assert!(serde_json::to_string(&catalog)
+            .expect("catalog JSON")
+            .contains("public_17"));
         fs::remove_dir_all(root).ok();
     }
 

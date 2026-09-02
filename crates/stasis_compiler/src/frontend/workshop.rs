@@ -27,6 +27,56 @@ pub enum WorkshopSymbolKind {
     Test,
 }
 
+/// Discovery exposure for Workshop-facing compiler metadata.
+///
+/// This controls user-facing enumeration, not compilation or symbol access.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkshopExposure {
+    #[default]
+    Public,
+    Internal,
+}
+
+impl WorkshopExposure {
+    pub fn is_public(&self) -> bool {
+        *self == Self::Public
+    }
+}
+
+pub fn workshop_file_exposure(path: &str) -> WorkshopExposure {
+    let normalized = format!("/{}", path.replace('\\', "/").trim_start_matches('/'));
+    if normalized.contains("/stdlib/internal/") || normalized.contains("/stdlib/testing/") {
+        WorkshopExposure::Internal
+    } else {
+        WorkshopExposure::Public
+    }
+}
+
+pub fn workshop_declaration_exposure<'a>(
+    path: &str,
+    annotations: impl IntoIterator<Item = &'a str>,
+) -> WorkshopExposure {
+    if workshop_file_exposure(path) == WorkshopExposure::Internal
+        || annotations.into_iter().any(|name| name == "internal")
+    {
+        WorkshopExposure::Internal
+    } else {
+        WorkshopExposure::Public
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -63,6 +113,8 @@ pub struct WorkshopSymbol {
     pub signature: String,
     pub source_span: WorkshopSourceSpan,
     pub source: String,
+    #[serde(default, skip_serializing_if = "WorkshopExposure::is_public")]
+    pub exposure: WorkshopExposure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -434,11 +486,19 @@ fn index_file_symbols(
                 signature: format!("struct {}", parsed_struct.name),
                 source_span: span_from_range(parsed_struct.definition_range.clone())?,
                 source,
+                exposure: workshop_file_exposure(&file.path),
             },
         });
     }
 
     for function in records.functions {
+        let exposure = workshop_declaration_exposure(
+            &file.path,
+            function
+                .annotations
+                .iter()
+                .map(|annotation| annotation.name.as_str()),
+        );
         let full_range = function.signature_range.start..function.body_range.end;
         let source = source_for_range(&file.source, full_range.clone())?;
         let signature =
@@ -478,6 +538,7 @@ fn index_file_symbols(
                 signature,
                 source_span: span_from_range(full_range)?,
                 source,
+                exposure,
             },
         });
     }
@@ -524,6 +585,7 @@ fn index_file_symbols(
                 signature: parsed.signature,
                 source_span: span_from_range(parsed.range.clone())?,
                 source: source_for_range(&file.source, parsed.range)?,
+                exposure: workshop_file_exposure(&file.path),
             },
         });
     }
@@ -980,6 +1042,8 @@ pub struct WorkshopSourceItem {
     pub source_spans: Vec<WorkshopSourceSpan>,
     pub source: String,
     pub source_hash: String,
+    #[serde(default, skip_serializing_if = "WorkshopExposure::is_public")]
+    pub exposure: WorkshopExposure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1042,6 +1106,8 @@ pub struct WorkshopCompletionItem {
     pub type_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<WorkshopCompletionScope>,
+    #[serde(default, skip_serializing_if = "WorkshopExposure::is_public")]
+    pub exposure: WorkshopExposure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1463,7 +1529,7 @@ pub fn workshop_source_items(
                 WorkshopSymbolKind::Test => WorkshopSourceItemKind::Test,
                 WorkshopSymbolKind::Global | WorkshopSymbolKind::Constant => continue,
             };
-            items.push(source_item_from_ranges(
+            let mut item = source_item_from_ranges(
                 file,
                 kind,
                 &symbol.name,
@@ -1475,7 +1541,9 @@ pub fn workshop_source_items(
                     WorkshopSourceItemKind::Struct | WorkshopSourceItemKind::Function
                 ),
                 Some(symbol.symbol_id.clone()),
-            )?);
+            )?;
+            item.exposure = symbol.exposure;
+            items.push(item);
         }
     }
     items.sort_by_key(|item| {
@@ -2516,7 +2584,7 @@ pub fn workshop_completion_items(
     }
 
     let source_items = workshop_source_items(files)?;
-    let mut methods = BTreeMap::<String, Vec<(String, String, String)>>::new();
+    let mut methods = BTreeMap::<String, Vec<(String, String, String, WorkshopExposure)>>::new();
     for item in source_items.iter().filter(|item| {
         matches!(
             item.kind,
@@ -2534,6 +2602,7 @@ pub fn workshop_completion_items(
             item.owner.clone(),
         );
         completion.signature = Some(item.signature.clone());
+        completion.exposure = item.exposure;
         items.push(completion);
         if item.kind == WorkshopSourceItemKind::Function {
             if let Some(owner) = item
@@ -2545,6 +2614,7 @@ pub fn workshop_completion_items(
                     item.name.clone(),
                     item.signature.clone(),
                     item.file.clone(),
+                    item.exposure,
                 ));
             }
         }
@@ -2825,7 +2895,7 @@ pub fn workshop_completion_items(
             }
         }
         if let Some(owner_methods) = methods.get(&binding.type_name) {
-            for (method, signature, method_file) in owner_methods {
+            for (method, signature, method_file, exposure) in owner_methods {
                 let text = format!("{}.{method}", binding.name);
                 let detail = format!(
                     "{signature} via {} {}: {} [{method_file}]",
@@ -2850,6 +2920,7 @@ pub fn workshop_completion_items(
                     ),
                 };
                 item.signature = Some(signature.clone());
+                item.exposure = *exposure;
                 items.push(item);
             }
         }
@@ -2893,6 +2964,7 @@ fn completion_catalog_item(
         signature: None,
         type_name: None,
         scope: None,
+        exposure: workshop_file_exposure(file),
     }
 }
 
@@ -2975,6 +3047,7 @@ fn source_item_from_ranges(
         source_hash: workshop_source_hash(&source),
         source,
         source_spans,
+        exposure: workshop_file_exposure(&file.path),
     })
 }
 
@@ -4642,6 +4715,56 @@ function player_overlaps_enemy(player: Player, enemy: Enemy): bool { return true
             .iter()
             .all(|symbol| symbol.owner.is_none()));
     }
+
+    #[test]
+    fn classifies_annotated_and_internal_directory_symbols_for_discovery() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/stdlib/example.stasis".to_string(),
+                source: concat!(
+                    "struct Device { id: i32; }\n",
+                    "global device: Device;\n",
+                    "function public_wrapper(): i32 { return raw_helper(); }\n",
+                    "function @internal raw_helper(): i32 { return 1; }\n",
+                    "function @internal raw_method(self: Device): i32 { return self.id; }\n",
+                )
+                .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/stdlib/internal/host_frame.stasis".to_string(),
+                source: "function host_frame_raw(): i32 { return 0; }\n".to_string(),
+            },
+        ];
+        let symbols = workshop_symbols(&files).expect("symbols");
+        let exposure = |name: &str| {
+            symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .expect("symbol")
+                .exposure
+        };
+        assert_eq!(exposure("public_wrapper"), WorkshopExposure::Public);
+        assert_eq!(exposure("raw_helper"), WorkshopExposure::Internal);
+        assert_eq!(exposure("host_frame_raw"), WorkshopExposure::Internal);
+
+        let completions = workshop_completion_items(&files).expect("completions");
+        assert_eq!(
+            completions
+                .iter()
+                .find(|item| item.text == "raw_helper")
+                .expect("raw helper completion")
+                .exposure,
+            WorkshopExposure::Internal
+        );
+        assert_eq!(
+            completions
+                .iter()
+                .find(|item| item.text == "device.raw_method")
+                .expect("raw receiver method completion")
+                .exposure,
+            WorkshopExposure::Internal
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4664,6 +4787,7 @@ mod ai_tests {
             signature: "jump(self: Player): void".to_string(),
             source_span: WorkshopSourceSpan { start: 0, end: 52 },
             source: "function jump(self: Player): void { return; }".to_string(),
+            exposure: WorkshopExposure::Public,
         };
         let request = AiCodeRequest {
             user_prompt: "Make the player jump higher but prevent repeated jumps.".to_string(),
@@ -4735,6 +4859,7 @@ mod ai_tests {
                 end: source.len() as u32,
             },
             source: source.to_string(),
+            exposure: WorkshopExposure::Public,
         };
         let response = AiCodeResponse {
             summary: "bad".to_string(),

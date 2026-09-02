@@ -6,8 +6,18 @@ extern function @effects(storage) storage_save_i32(scope: string, key: string, v
 
 // Bounded durable ASCII values for share codes and other small text payloads.
 // Returns the byte length, or -1 when the value is missing, invalid, or does not fit.
-function @effects(storage)@extern("stasis_jit_storage_load_ascii") storage_load_ascii_raw(scope: string, key: string, out: ascii[], capacity: i32): i32;
-function @effects(storage)@extern("stasis_jit_storage_save_ascii") storage_save_ascii_raw(scope: string, key: string, value: ascii[], length: i32): i32;
+function @internal @effects(storage)@extern("stasis_jit_storage_load_ascii") storage_load_ascii_raw(
+    scope: string,
+    key: string,
+    out: ascii[],
+    capacity: i32
+): i32;
+function @internal @effects(storage)@extern("stasis_jit_storage_save_ascii") storage_save_ascii_raw(
+    scope: string,
+    key: string,
+    value: ascii[],
+    length: i32
+): i32;
 
 function storage_load_ascii(scope: string, key: string, out: ascii[]): i32 {
     out.length = 0;

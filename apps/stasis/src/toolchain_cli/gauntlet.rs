@@ -772,15 +772,6 @@ fn hex_sha256(bytes: &[u8]) -> String {
 
 const GAUNTLET_SEED_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
-import "/vendor/stasis/stdlib/audio.stasis";
-import "/vendor/stasis/stdlib/collision.stasis";
-import "/vendor/stasis/stdlib/frame_timer.stasis";
-import "/vendor/stasis/stdlib/hud_table.stasis";
-import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
-import "/vendor/stasis/stdlib/storage.stasis";
-import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
-import "/vendor/stasis/stdlib/ui_layout_audit.stasis";
-import "/vendor/stasis/stdlib/ui_button_9slice.stasis";
 import "/vendor/stasis/stdlib/ui_single_pass.stasis";
 
 struct Game {
@@ -1132,15 +1123,6 @@ mod tests {
         for required in [
             "/vendor/stasis/stdlib/stdlib.stasis",
             "/vendor/stasis/stdlib/graphics.stasis",
-            "/vendor/stasis/stdlib/audio.stasis",
-            "/vendor/stasis/stdlib/collision.stasis",
-            "/vendor/stasis/stdlib/frame_timer.stasis",
-            "/vendor/stasis/stdlib/hud_table.stasis",
-            "/vendor/stasis/stdlib/sdl_scancodes.stasis",
-            "/vendor/stasis/stdlib/storage.stasis",
-            "/vendor/stasis/stdlib/ui_axis_layout.stasis",
-            "/vendor/stasis/stdlib/ui_layout_audit.stasis",
-            "/vendor/stasis/stdlib/ui_button_9slice.stasis",
             "/vendor/stasis/stdlib/ui_single_pass.stasis",
             "function main(): i32",
             "function tick(): i32",
@@ -1151,6 +1133,7 @@ mod tests {
         ] {
             assert!(GAUNTLET_SEED_SOURCE.contains(required), "{required}");
         }
+        assert_eq!(GAUNTLET_SEED_SOURCE.matches("import \"").count(), 3);
         assert!(!GAUNTLET_SEED_SOURCE.contains("host_req_flags"));
         assert!(!GAUNTLET_SEED_SOURCE.contains("host_req_seq"));
         assert!(GAUNTLET_SEED_TEST.contains("return render() == 0"));

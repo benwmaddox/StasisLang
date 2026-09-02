@@ -4,12 +4,12 @@
 // - explicit capacities for bounds checking
 // - clamped and/or checked variants
 
-extern function @effects(memory) sys_memcpy_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32): void;
-extern function @effects(memory) sys_memcpy_i32(dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32): void;
-extern function @effects(memory) sys_memcpy_f32(dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32): void;
-extern function @effects(memory) sys_memmove_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32): void;
-extern function @effects(memory) sys_memmove_i32(dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32): void;
-extern function @effects(memory) sys_memmove_f32(dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32): void;
+extern function @internal @effects(memory) sys_memcpy_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32): void;
+extern function @internal @effects(memory) sys_memcpy_i32(dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32): void;
+extern function @internal @effects(memory) sys_memcpy_f32(dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32): void;
+extern function @internal @effects(memory) sys_memmove_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32): void;
+extern function @internal @effects(memory) sys_memmove_i32(dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32): void;
+extern function @internal @effects(memory) sys_memmove_f32(dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32): void;
 
 // Copy `count` bytes from src to dst, clamped to both buffers.
 // Returns bytes copied.
