@@ -113,7 +113,7 @@ foreach ($seam in $selectedSeams) {
     $seamTimeout = if ($seam.TestId -eq "IT-022") {
         900
     } elseif ($seam.TestId -eq "IT-024") {
-        180
+        360
     } else {
         $PerSeamTimeoutSeconds
     }

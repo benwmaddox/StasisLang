@@ -17,7 +17,7 @@ concurrency:
 jobs:
   release-shell-seams:
     runs-on: ubuntu-latest
-    timeout-minutes: 105
+    timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "2"

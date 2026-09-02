@@ -225,7 +225,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
                 self.emulator_script,
             )
         self.assertIn("[int]$PerSeamTimeoutSeconds = 660", self.emulator_script)
-        self.assertLess(6 * 660 + 900 + 3 * 180, 105 * 60)
+        self.assertLess(6 * 660 + 900 + 3 * 360, 120 * 60)
 
     def test_gradle_resolvers_only_select_native_application_launchers(self):
         for name, script in (
