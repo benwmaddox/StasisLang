@@ -122,6 +122,13 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_grouped_sprite_runs_and_exploration_pointer_semantics_are_guarded(self):
         failures, _ = self.run_with(
             contract.WINDOWS_LAUNCH_FIXTURE,
+            "input_pointer_count() > 0 && input_pointer_is_down(0)",
+            "input_pointer_count() > 0",
+        )
+        self.assertTrue(any(failure.field == "public_graphics_path" for failure in failures))
+
+        failures, _ = self.run_with(
+            contract.WINDOWS_LAUNCH_FIXTURE,
             "smoke_writer.finalize(2);",
             "smoke_writer.finalize(1);",
         )

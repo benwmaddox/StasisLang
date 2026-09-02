@@ -858,6 +858,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         VSCODE_RENDER_FIXTURE: ("begin_frame();", "draw_line("),
         WINDOWS_LAUNCH_FIXTURE: (
             "begin_frame();",
+            "input_pointer_count() > 0 && input_pointer_is_down(0)",
             "smoke_writer.reserve(2,",
             "smoke_writer.finalize(2);",
             "smoke_label.draw(",
