@@ -967,13 +967,27 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             [("shell", "dumpsys", "window", "windows")],
         )
 
-    def test_foreground_check_dismisses_system_dialog_and_restarts(self):
+    def test_foreground_check_leaves_product_anr_visible(self):
         calls = []
 
         def fake_run(_adb, _serial, *arguments, **_options):
             calls.append(arguments)
             if arguments == ("shell", "dumpsys", "window", "windows"):
                 return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
+            if arguments == (
+                "exec-out",
+                "uiautomator",
+                "dump",
+                "--compressed",
+                "/dev/tty",
+            ):
+                return (
+                    "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
+                    "<node resource-id=\"android:id/alertTitle\" "
+                    "text=\"Stasis Android Seam isn't responding\" />"
+                    "<node text=\"Wait\" bounds=\"[120,720][420,840]\" />"
+                    "</hierarchy>"
+                )
             return ""
 
         with mock.patch.object(seam, "_run", side_effect=fake_run):
@@ -984,10 +998,19 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 "com.example.seam/.MainActivity",
             )
 
-        self.assertTrue(changed)
-        self.assertIn(
-            ("shell", "input", "keyevent", "KEYCODE_BACK"),
+        self.assertFalse(changed)
+        self.assertEqual(
             calls,
+            [
+                ("shell", "dumpsys", "window", "windows"),
+                (
+                    "exec-out",
+                    "uiautomator",
+                    "dump",
+                    "--compressed",
+                    "/dev/tty",
+                ),
+            ],
         )
 
     def test_foreground_check_taps_system_dialog_action_before_restarting(self):
@@ -997,7 +1020,13 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             calls.append(arguments)
             if arguments == ("shell", "dumpsys", "window", "windows"):
                 return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
-            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+            if arguments == (
+                "exec-out",
+                "uiautomator",
+                "dump",
+                "--compressed",
+                "/dev/tty",
+            ):
                 return (
                     "UI hierarchy dumped\n<?xml version='1.0' encoding='UTF-8' "
                     "standalone='yes'?><hierarchy><node "
@@ -1037,7 +1066,13 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             calls.append(arguments)
             if arguments == ("shell", "dumpsys", "window", "windows"):
                 return "mCurrentFocus=Window{456 u0 android/.AppNotRespondingDialog}"
-            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+            if arguments == (
+                "exec-out",
+                "uiautomator",
+                "dump",
+                "--compressed",
+                "/dev/tty",
+            ):
                 return (
                     "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
                     "<node resource-id=\"android:id/alertTitle\" "
@@ -1070,7 +1105,13 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                     "mCurrentFocus=Window{123 u0 com.example.seam/.MainActivity}\n"
                     "Window #2 Window{456 u0 android/.AppNotRespondingDialog}"
                 )
-            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+            if arguments == (
+                "exec-out",
+                "uiautomator",
+                "dump",
+                "--compressed",
+                "/dev/tty",
+            ):
                 return (
                     "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
                     "<node resource-id=\"android:id/alertTitle\" "
@@ -1118,7 +1159,13 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
 
         def fake_run(_adb, _serial, *arguments, **_options):
             calls.append(arguments)
-            if arguments == ("shell", "uiautomator", "dump", "/dev/tty"):
+            if arguments == (
+                "exec-out",
+                "uiautomator",
+                "dump",
+                "--compressed",
+                "/dev/tty",
+            ):
                 return (
                     "<?xml version='1.0' encoding='UTF-8'?><hierarchy>"
                     "<node resource-id=\"android:id/alertTitle\" "
@@ -1128,11 +1175,21 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 )
             return ""
 
-        with mock.patch.object(seam, "_run", side_effect=fake_run):
+        with mock.patch.object(seam, "_run", side_effect=fake_run) as run:
             dismissed = seam.dismiss_system_dialog_action(Path("adb"), "device")
 
         self.assertFalse(dismissed)
         self.assertNotIn(("shell", "input", "tap", "270", "780"), calls)
+        run.assert_called_once_with(
+            Path("adb"),
+            "device",
+            "exec-out",
+            "uiautomator",
+            "dump",
+            "--compressed",
+            "/dev/tty",
+            required=False,
+        )
 
     def test_capture_mismatch_dismisses_undetected_system_dialog(self):
         calls = []
