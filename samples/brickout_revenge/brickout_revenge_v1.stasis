@@ -1,5 +1,5 @@
 import "../../src/stdlib/stdlib.stasis";
-import "../../src/stdlib/frame_timer.stasis";
+import "frame_timer.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
 import "../../src/stdlib/graphics.stasis";
 import "../../src/stdlib/audio.stasis";

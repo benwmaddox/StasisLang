@@ -1,4 +1,4 @@
-// Allocation-free geometry checks and machine-readable UI layout reporting.
+// Testing-only allocation-free geometry checks and machine-readable UI layout reporting.
 // Values are emitted as signed thousandths of one logical layout unit.
 
 function ui_audit_abs(value: f32): f32 {

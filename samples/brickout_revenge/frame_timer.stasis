@@ -1,4 +1,4 @@
-// Frame timing utilities (not loaded by default).
+// Brickout Revenge frame timing utilities.
 //
 // Intended usage:
 // - Store a FrameTimer inside your game state.

@@ -525,7 +525,7 @@ signatures for the entry file and its direct imports. `stdlib_api` contains the
 bounded public API catalog for the project-matched Stasis standard library,
 including canonical import paths and function, struct, and constant signatures.
 The catalog includes top-level public modules such as graphics, audio, collision,
-layout, timing, storage, memory, and HUD helpers; it excludes internal host ABI,
+layout, storage, memory, camera, and realtime controls; it excludes internal host ABI,
 test-only modules, globals, and function bodies. Agents should use this catalog
 directly rather than spending turns rediscovering standard-library implementation
 files.
