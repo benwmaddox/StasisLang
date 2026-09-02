@@ -220,6 +220,18 @@ stasis new my_game
 cd my_game
 ```
 
+Every `stasis new` project includes GitHub Actions for a pull-request check and a Friday/manual
+three-platform nightly compatibility run. The PR job checks the vendored snapshot and runs only
+`stasis check`. Both workflows resolve the newest complete published Stasis nightly at CI runtime;
+the PR job records its selection in the job summary. The `stasis.json` release ID continues to
+describe the checked-in `vendor/stasis` snapshot and does not select the CI toolchain. The weekly
+job updates the vendor snapshot,
+checks formatting and compilation, runs tests, packages desktop builds, and retains temporary
+workflow artifacts. It does not publish, tag, create releases, sign packages, or build mobile or
+web targets. Project generation remains offline, including from development builds. Network access
+occurs only when the generated workflows restore a GitHub release and verify its GitHub-published
+SHA-256 digest and toolchain identity.
+
 `stasis new` initializes Git and activates the generated formatting hook without pinning a
 line-ending style. An attempted commit with noncanonical Stasis source formats the files
 and stops; review and stage those changes, then retry the commit. Git must be installed and `stasis`
