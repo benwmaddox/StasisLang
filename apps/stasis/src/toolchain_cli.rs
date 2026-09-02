@@ -134,7 +134,6 @@ const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.sta
 import "/vendor/stasis/stdlib/graphics.stasis";
 import "/vendor/stasis/stdlib/audio.stasis";
 import "/vendor/stasis/stdlib/collision.stasis";
-import "/vendor/stasis/stdlib/flex_layout.stasis";
 import "/vendor/stasis/stdlib/frame_timer.stasis";
 import "/vendor/stasis/stdlib/hud_table.stasis";
 import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
@@ -142,6 +141,7 @@ import "/vendor/stasis/stdlib/storage.stasis";
 import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
 import "/vendor/stasis/stdlib/ui_layout_audit.stasis";
 import "/vendor/stasis/stdlib/ui_button_9slice.stasis";
+import "/vendor/stasis/stdlib/ui_single_pass.stasis";
 
 struct GameState {
     ticks: i32;
@@ -8373,7 +8373,6 @@ mod tests {
             "graphics",
             "audio",
             "collision",
-            "flex_layout",
             "frame_timer",
             "hud_table",
             "sdl_scancodes",
@@ -8381,6 +8380,7 @@ mod tests {
             "ui_axis_layout",
             "ui_layout_audit",
             "ui_button_9slice",
+            "ui_single_pass",
         ] {
             assert!(
                 source.contains(&format!("/vendor/stasis/stdlib/{module}.stasis")),

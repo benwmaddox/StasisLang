@@ -19,7 +19,7 @@ It returns one `f32` coordinate. The caller uses those returned coordinates for 
 
 This design matches the Stasis language surface implemented today. It uses ordinary scalar locals and scalar returns. It does not require function-local arrays, local struct materialization, array returns, hidden allocation, or a retained UI tree.
 
-`f32` is the canonical type for presentation geometry across the proposed public path. Positions, sizes, padding, pointer coordinates, text measurement, flex results, and sprite geometry remain `f32` until a platform renderer explicitly rasterizes them.
+`f32` is the canonical type for presentation geometry across the proposed public path. Positions, sizes, padding, pointer coordinates, text measurement, single-pass rectangle results, and sprite geometry remain `f32` until a platform renderer explicitly rasterizes them.
 
 Stasis is a pre-1.0 language. This work chooses a clear canonical API and removes superseded compatibility aliases in the same change. It does not preserve ambiguous names, duplicate wrappers, deprecated stubs, or old HostFrame fields solely for source or ABI compatibility.
 
@@ -33,7 +33,7 @@ let label_y: f32 = button_y + (button_h - line_h) * 0.5 + 1.0;
 let icon_x: f32 = panel_x + panel_w - icon_w - 12.0;
 ```
 
-These calculations are individually simple, but repeated versions can diverge between screens, drawing, and hit testing. The existing `flex_layout.stasis` distributes multiple sibling rectangles but does not provide a small typed primitive for positioning one item along one axis.
+These calculations are individually simple, but repeated versions can diverge between screens, drawing, and hit testing. The single-pass rectangle flow distributes sibling rectangles, while typed axis placement provides the small primitive for positioning one item within each resulting rectangle.
 
 The shared system should capture that missing operation without introducing a larger UI framework.
 
@@ -48,7 +48,7 @@ V1 must:
 5. Work entirely with supported scalar parameters, locals, and returns.
 6. Support cached text placement using width measured and stored during resource initialization plus an explicit line height.
 7. Support buttons, icons, HUD labels, menu titles, and similar immediate-mode drawing.
-8. Compose with existing flex rows, columns, and grids without replacing them.
+8. Compose with single-pass horizontal and vertical stacks plus game-owned grid placement.
 9. Perform no allocation and no host-side UI registration.
 10. Produce deterministic JIT and AOT behavior.
 11. Remove avoidable `i32`/`f32` conversions from the public presentation path.
@@ -64,10 +64,10 @@ V1 does not provide:
 - functions that write rectangles through `f32[]` output parameters
 - a retained component or widget tree
 - a general constraint solver
-- CSS-compatible flexbox
+- CSS-compatible multi-pass layout
 - automatic text wrapping, ellipsis, or font scaling
 - clipping or scrolling
-- automatic sibling distribution beyond the existing flex helpers
+- automatic sibling distribution beyond the single-pass stack helpers
 - pointer capture, focus, or click lifecycle ownership
 - automatic portrait/landscape redesign
 - automatic overflow resolution
@@ -75,7 +75,7 @@ V1 does not provide:
 - animation ownership
 - replacing integer handles, counts, indices, enum representations, or physical device metadata with floats
 
-Flat arrays remain valid for existing global-backed bulk layout storage, such as the outputs consumed by `flex_row`. They are not required by the v1 single-item placement API.
+Flat arrays remain valid for game-owned global-backed bulk storage. They are not required by either the v1 single-item placement API or the single-pass current-rectangle flow.
 
 ## 5. Product Principles
 
@@ -509,46 +509,35 @@ if (input_pointer_count() > 0 && input_pointer_went_up(0)) {
 
 This demonstrates geometric reuse, not a final click lifecycle. Pointer capture and stable control IDs remain separate future interaction work.
 
-### 7.7 Using placement with existing flex arrays
+### 7.7 Using placement with the single-pass rectangle flow
 
-Existing flex layout remains array-based because it writes multiple sibling boxes. Storage is global-backed, matching currently demonstrated Stasis behavior:
-
-```stasis
-global footer: f32[4];
-global footer_buttons: f32[8];
-global footer_widths: f32[2];
-global footer_heights: f32[2];
-```
+The single-pass layout owns one ephemeral current rectangle. A horizontal scope advances through sibling boxes without retaining a parallel rectangle array:
 
 ```stasis
 function menu_layout_footer(): void {
-    flex_rect_set(footer, 20.0, 620.0, 320.0, 56.0);
+    let row_w: f32 = 296.0;
+    let row_h: f32 = 52.0;
+    let row_x: f32 = ui_place_x(20.0, 320.0, row_w, UiHorizontal.Center);
+    let row_y: f32 = ui_place_y(620.0, 56.0, row_h, UiVertical.Center);
+    ui_hstack_begin(row_x, row_y, row_w, row_h, 16.0, UiStackDirection.Forward);
 
-    footer_widths[0] = 140.0;
-    footer_widths[1] = 140.0;
-    footer_heights[0] = 52.0;
-    footer_heights[1] = 52.0;
+    ui_hstack_next_fixed(140.0);
+    draw_footer_button(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height());
 
-    flex_row(
-        footer_buttons,
-        footer,
-        footer_widths,
-        footer_heights,
-        2,
-        16.0,
-        FLEX_JUSTIFY_CENTER,
-        FLEX_ALIGN_CENTER
-    );
+    ui_hstack_next_fixed(140.0);
+    draw_footer_button(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height());
+
+    ui_hstack_end();
 }
 ```
 
-Content placement reads scalar values from the flex output and uses the same axis functions:
+Content placement reads the current rectangle immediately and uses the same typed axis functions:
 
 ```stasis
-let button_x: f32 = flex_rect_x(footer_buttons, 1);
-let button_y: f32 = flex_rect_y(footer_buttons, 1);
-let button_w: f32 = flex_rect_w(footer_buttons, 1);
-let button_h: f32 = flex_rect_h(footer_buttons, 1);
+let button_x: f32 = ui_current_x();
+let button_y: f32 = ui_current_y();
+let button_w: f32 = ui_current_width();
+let button_h: f32 = ui_current_height();
 
 let label_x: f32 = ui_place_x(
     button_x,
@@ -566,7 +555,7 @@ let label_y: f32 = ui_place_y(
 label_y += 1.0;
 ```
 
-The new API therefore composes with the existing array-based flex implementation without requiring new rectangle arrays for individual placement.
+Typed axis placement therefore composes directly with the single-pass current-rectangle flow. Callers that need geometry later copy only the scalar values they own; the shared layout layer does not retain per-control rectangles.
 
 ## 8. Text Model
 
@@ -727,7 +716,7 @@ Tests must verify that:
 - logical canvas and safe viewport accessors return `f32`
 - removed compatibility display and input APIs are absent from the stdlib surface
 - canonical logical pointer accessors return `f32` in the same coordinate space as logical and safe layout bounds
-- pointer, text, line, flex, placement, and sprite geometry share the `f32` presentation path
+- pointer, text, line, single-pass layout, placement, and sprite geometry share the `f32` presentation path
 - sprite command encoding and host decoding agree on the new geometry representation
 - fractional sprite positions and sizes survive command submission until renderer rasterization
 - odd and adjacent sprite bounds follow the documented backend snapping policy without gaps introduced by independent truncation
@@ -784,7 +773,7 @@ V1 is complete when:
 6. Realistic examples use supported scalar locals and returns.
 7. No v1 example or API requires function-local fixed arrays or local struct materialization.
 8. Cached text width and explicit line height are sufficient to calculate draw origins.
-9. Existing flex arrays can feed scalar placement without changing their storage model.
+9. Single-pass current rectangles feed scalar placement without retained geometry.
 10. One real menu title, button, and centered button label demonstrate the API.
 11. Drawing and hit testing reuse the same scalar button bounds.
 12. Tests execute the representative path through Cranelift and verify results.
@@ -825,17 +814,17 @@ Text width comes from cached measurement, text height from an explicit line box,
 
 Stasis currently supports scalar locals and returns cleanly, while `Type[]` is a view over existing fixed storage rather than local temporary array construction. A scalar-return API expresses the needed calculation without pretending that local rectangle values are available.
 
-Using `f32` throughout presentation geometry also matches cached text measurement, pointer input, line commands, flex layout, and scaled canvases. Keeping sprite geometry or layout-facing viewport accessors as `i32` would insert conversion and rounding decisions into ordinary UI code without providing a meaningful performance benefit.
+Using `f32` throughout presentation geometry also matches cached text measurement, pointer input, line commands, single-pass layout, and scaled canvases. Keeping sprite geometry or layout-facing viewport accessors as `i32` would insert conversion and rounding decisions into ordinary UI code without providing a meaningful performance benefit.
 
 The nearest tempting alternative is an output `f32[]` rectangle API. Although array views are supported, that design requires pre-existing storage and makes a simple calculation appear to create a local rectangle. It also encourages unnecessary global scratch layout state.
 
 ### Extension point
 
-A future rectangle type can call the same axis functions internally. Existing flex output can already expose scalar x, y, width, and height through its accessors and feed them into the axis functions.
+A future rectangle type can call the same axis functions internally. The single-pass layout already exposes current scalar x, y, width, and height values that feed directly into the axis functions.
 
 ### Prediction
 
-If this model is sufficient, menu titles, button labels, corner icons, HUD counters, and content inside flex-generated boxes will share `ui_place_x` and `ui_place_y` without needing a general rectangle framework. A request for rectangle values should arise only when multiple downstream consumers genuinely need to pass or store the complete box as one value.
+If this model is sufficient, menu titles, button labels, corner icons, HUD counters, and content inside stack-generated boxes will share `ui_place_x` and `ui_place_y` without needing a general rectangle framework. A request for rectangle values should arise only when multiple downstream consumers genuinely need to pass or store the complete box as one value.
 
 Machine-readable review is a separate concern from placement. The debug-facing
 `ui_layout_audit.stasis` module consumes the final scalar rectangles and measured
